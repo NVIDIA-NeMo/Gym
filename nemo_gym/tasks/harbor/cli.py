@@ -352,7 +352,8 @@ class PreparedTaskset:
     output_dir: Path
     skipped: dict[str, str] = field(default_factory=dict)
     # Every distinct image a run of the prepared tasks starts, for pre-pulling (``run_images``): the task images,
-    # the separate verifiers' (declared or built from tests/Dockerfile) and the Compose services' as recorded.
+    # the separate verifiers' (declared or built from tests/Dockerfile, the steps' own included) and the Compose
+    # services' as recorded.
     images: tuple[str, ...] = ()
     # The dataset's identity (``manifest.toml``'s ``[dataset].digest``) and the digest of its
     # ``dataset.toml``, recorded in every row and in the run config.
@@ -952,9 +953,10 @@ def run_images(
     tasks: list[HarborTask], image_configs: Mapping[str, Any], *, overlay: HarborComposeOverlay | None = None
 ) -> tuple[str, ...]:
     """Every distinct image a run of ``tasks`` starts, sorted: each task's image, the image of a separate
-    verifier (``[verifier.environment].docker_image``) and every Compose service image (the job-level
-    ``overlay``'s services included), the last as the recorded configuration pins it (``compose-images.json``,
-    what ``resolve_compose`` hands the sandbox), else as written when it has no record."""
+    verifier (``[verifier.environment].docker_image``), the image of each step's separate verifier
+    (:attr:`HarborTurn.verifier_image`) and every Compose service image (the job-level ``overlay``'s services
+    included), the last as the recorded configuration pins it (``compose-images.json``, what ``resolve_compose``
+    hands the sandbox), else as written when it has no record."""
     images: set[str] = set()
     for task in tasks:
         if task.image:
@@ -964,6 +966,13 @@ def run_images(
             # (recorded under the tests/ digest, never a Compose service, so nothing below would name it) or the
             # declared one, which the check below names too (HarborTask.verifier_image covers both).
             images.add(task.verifier_image)
+        for turn in task.turns:
+            # A step that verifies separately starts its own verifier image (the server runs the turn with it in
+            # place of the task's, `_turn_task`): a declared [steps.verifier.environment].docker_image, the task's
+            # declared one, or the tests/ build the task's own shared verifier never asked for. A shared step, or a
+            # separate one that inherits the task image, has none.
+            if turn.verifier_image:
+                images.add(turn.verifier_image)
         verifier_environment = task.config.verifier.environment
         if (
             not task.config.is_shared_verifier

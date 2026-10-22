@@ -289,3 +289,20 @@ class TestSeparateModeShim:
         shim = uploads[kinds.index("shim")]
         assert shim[".ng/verifier.py"].decode() == VERIFIER
         assert "--verifier /tests/.ng/verifier.py" in shim["test.sh"].decode()
+
+    async def test_a_task_verifier_whose_snapshot_tests_vanished_is_an_infrastructure_failure(
+        self, tmp_path, monkeypatch
+    ):
+        # The separate-mode branch of the same decision: the task's tests/ is required because the task's own
+        # tests/verifier.py is the grader, so its loss under the episode masks the sample instead of uploading the
+        # shim alone into the verifier sandbox and scoring the runner's missing-module exit as a zero.
+        server, task, agent, verifier = self.separate(tmp_path, monkeypatch)
+        lose_snapshot_tests(server, monkeypatch)
+        verifier.verifier_files = {}
+        response = await server.run_request(episode_with(task, {"answer": "hi"}))
+        assert response.failure is None, response.failure
+        result = response.result
+        assert result.mask_sample is True and result.failure_kind == "provider_unavailable", result
+        assert "shim" not in self.kinds(self.uploads_into(verifier))
+        assert not any("test.sh" in c["command"] and "timeout" in c["command"] for c in verifier.execs)
+        assert agent.stopped and verifier.stopped and shim_folders(server) == []

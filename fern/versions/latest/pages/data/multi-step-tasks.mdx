@@ -1,6 +1,6 @@
 ---
 title: "Multi-Step Harbor Tasks"
-description: "How a Harbor [[steps]] task runs as turns on the Harbor path: per-step working directories, setup scripts, healthchecks and artifacts, verification, reward roll-up, early stop, per-step solutions and users, and what is accepted or refused"
+description: "How a Harbor [[steps]] task runs as turns on the Harbor path: per-step working directories, setup scripts, healthchecks and artifacts, shared or separate verification per step, reward roll-up, early stop, per-step solutions and users, and what is accepted or refused"
 position: 6
 ---
 
@@ -49,10 +49,12 @@ hello/
 
 Each step is one turn. A turn:
 
-1. Clears the previous turn's grading files (every turn after the first): `/tests` and `/logs/verifier` are
-   emptied and the server's `/logs/agent/trajectory.json` removed, so the agent does not open beside the previous
-   step's tests, reward or transcript. The agent's own files under `/logs/agent` and everything else it left in the
-   environment stay.
+1. Clears the previous turn's grading files when that turn was verified in the agent's sandbox (a shared turn):
+   `/tests` and `/logs/verifier` are emptied and the server's `/logs/agent/trajectory.json` removed, so the agent
+   does not open beside the previous step's tests, reward or transcript. The first turn, and a turn after one that
+   verified in a sandbox of its own, keep whatever the image shipped in `/tests` (Harbor main resets only after a
+   shared verifier; Harbor 0.22.0's separate mode never touches the agent's `/tests`). The agent's own files under
+   `/logs/agent` and everything else it left in the environment stay.
 2. Switches the sandbox to the step's agent user when it differs (see below), then merges the step's
    `steps/<name>/workdir/` into the working directory, runs its `setup.sh` and polls the step's
    `[steps.healthcheck]` to a pass (see below).
@@ -174,16 +176,18 @@ server does the same for every turn:
   before theirs.
 - Each entry is staged under its own numbered root in **that turn's** verifier logs folder,
   `artifacts/NN/<destination>` (the destination defaults to the source without its leading slash), the same layout
-  a separate verifier's staging uses, with the archive the sandbox packed kept beside it. `exclude` patterns reach
-  the archive command unanchored, as Harbor passes them.
+  a separate verifier's staging uses. The archive the sandbox packed is kept beside it only until a separate
+  verifier restores it; a shared turn removes it as soon as the pass ends. `exclude` patterns reach the archive
+  command unanchored, as Harbor passes them.
 - The pass is recorded in `artifacts/manifest.json`, one entry per declared artifact in staging order: `source`,
   `service`, `origin` (`convention`, `task` or `step`), `destination`, `type` (`directory`, `file` or `null`) and
   `status` (`ok`, `absent` when the sandbox had nothing at the path, `link` for a symbolic link that is never
   restored, `failed` when the agent's tree could not be collected, `skipped` when the entry names a Compose service
   the task has not got). The run summary lists the folder under the turn's `paths.artifacts`.
-- Nothing is stopped: the sandbox and its sidecars keep running for the turns that follow (Harbor stops `main`
-  before the sidecar pass only on the last step of a separate-mode task). The hooks run once per turn, in the pass,
-  and not again inside the shared verifier.
+- Nothing is stopped between turns: the sandbox and its sidecars keep running for the turns that follow. On the
+  last turn of a task whose last step verifies separately, `main` is stopped before the sidecar pass and the whole
+  agent side before the verifier, as Harbor's `_run_step` does on the last step of a separate-mode task. The hooks
+  run once per turn, in the pass, and not again inside the shared verifier.
 - A collection the sandbox cannot serve (a lost connection, a full host disk) masks the turn as an outage; an
   artifact the agent's tree defeats (an unreadable tree, a link escaping it) only warns, as for a single-turn task.
 
@@ -195,15 +199,75 @@ too); that is a follow-up.
 
 After each turn the **shared verifier** runs in the agent's sandbox: the task's `tests/` with
 `steps/<name>/tests/` layered on top (a step's `test.sh` wins where it names the same path), under the step's
-`[steps.verifier]` timeout, user and environment over the task's `[verifier]`. The task's `[[verifier.collect]]`
+`[steps.verifier]` user and environment over the task's `[verifier]`, and the step's own `[steps.verifier].timeout_sec`,
+else **Harbor's step default of 600 s** (times a dataset `timeout_multiplier`, like every budget), never the task's
+`[verifier].timeout_sec`: Harbor's `StepConfig.verifier` is
+a full `VerifierConfig` with that default (0.22.0 and main alike), so a task that sets `[verifier] timeout_sec = 1800`
+and leaves its steps without one grades every step within 600 s under Harbor, and here. The loader warns about such
+a task, naming the steps. The task's `[[verifier.collect]]`
 hooks run for every step, with the step's own `[[steps.verifier.collect]]` hooks after them, as in Harbor. Each
 turn's verifier run reports as a single-turn verification does, with
 its own reward files and its own logs directory.
 
-Multi-step tasks run in Harbor's **shared** verifier mode only; a task that declares a separate verifier (a
-`[verifier.environment]`, `environment_mode = "separate"`, or per-step separate verification) is refused by the
-loader, and `separate_verifier_for_artifacts` cannot force a multi-step task into separate mode (the seed refuses
-it).
+### Per-step separate verification
+
+Each step's verifier mode is its own, resolved as Harbor's `resolve_step_verifier_mode` resolves it: the step's
+explicit `[steps.verifier].environment_mode`, else `separate` when the step declares a
+`[steps.verifier.environment]`, else the task's own mode (`[verifier].environment_mode = "separate"` or a
+`[verifier.environment]`). Steps of one task may mix modes; each turn reports its `verifier_mode`, and the episode's
+`verifier_mode` is the one every turn used, or `mixed`.
+
+```toml
+[verifier]
+environment_mode = "separate"          # every step verifies in a fresh sandbox...
+
+[verifier.environment]
+docker_image = "org/verifier:1"
+
+[[steps]]
+name = "01-plan"
+[steps.verifier]
+environment_mode = "shared"            # ...except this one, graded in the agent's sandbox
+
+[[steps]]
+name = "02-build"
+[steps.verifier.environment]           # this one in an image of its own
+docker_image = "org/build-verifier:1"
+```
+
+A turn that verifies separately runs its `test.sh` in a **verifier sandbox of its own**, created and stopped around
+that turn's verification (the single-step separate machinery applied to a per-turn view of the task):
+
+- The sandbox comes from the step's effective environment, in Harbor's order (`resolve_effective_verifier_env_config`
+  with a step): `[steps.verifier.environment]`, else `[verifier.environment]`, else a copy of `[environment]`. A
+  declared `docker_image` runs as it is; a copy of `[environment]` with a `docker_image` runs the task's own image
+  (its Dockerfile overlay included); without an image, the verifier is the image prepare built from
+  `tests/Dockerfile`. Harbor starts a step's verifier environment from `steps/<name>/tests/` when that folder exists,
+  else from `tests/`; prepare builds `tests/Dockerfile` only, so a step whose verifier would be built from its own
+  folder is refused by the loader, naming the image to declare, and a step built from `tests/` has that build
+  planned whatever the task's own mode.
+- The verifier sandbox receives exactly what Harbor gives it: the turn's collected archives restored at their own
+  paths (`/logs/artifacts`, the task's and the step's artifacts, as collected from the agent's container after the
+  agent), the task's `tests/` with `steps/<name>/tests/` layered over it (unless the image ships `/tests/test.sh`,
+  as a built verifier image usually does) and the turn's transcript. Nothing else reaches it from the agent's
+  sandbox.
+- The agent's sandbox is **not stopped** by a turn's verification, since the next turn's agent session opens on
+  it, except on the last turn when that step verifies separately: then, as Harbor's `_run_step` does on the last
+  step of a separate-mode task, `main` is stopped before the sidecar pass and the whole agent side before the
+  verifier sandbox grades, so nothing the agent left running can touch the evidence. A shared last turn leaves the
+  stop to the final cleanup.
+- The step's `[steps.verifier]` user and env apply over the task's, and its timeout is its own or Harbor's 600 s
+  step default, as in shared mode. The episode budget counts one verifier sandbox start (and the overlay build when
+  the task image is used) per separate turn.
+- `separate_verifier_for_artifacts` applies per turn: a turn whose task or step declares artifacts is forced into a
+  fresh sandbox of the task's own image, the other turns keep their mode.
+- A `[verifier]` network restriction needs **every** step to verify separately (a shared turn's sandbox cannot be
+  restricted after it started); the loader refuses the task otherwise. Per-step `[steps.verifier]` network
+  restrictions stay refused.
+- A verifier sandbox that cannot be created or that fails its image's entrypoint masks that turn (as for a single-step
+  task), and the masked turn ends the episode as any masked turn does. The agent's sandbox is untouched by that
+  failure, except on the last turn, whose agent side was already stopped before the verifier sandbox was attempted
+  (the stop above comes first, as in Harbor's `_run_step`).
 
 ## Reward roll-up
 
@@ -293,7 +357,8 @@ warning naming it, never read as a strategy.
 
 ## What is refused
 
-The loader refuses the per-step feature the server does not run yet, naming the step: per-step separate
-verification (`[steps.verifier].environment` or `environment_mode = "separate"`). A step's `[steps.agent].user` and
-`[steps.verifier].user` are applied per turn, and its `workdir/`, `workdir/setup.sh`, `[steps.healthcheck]` and
-`artifacts` run per turn, as described above.
+The loader refuses, naming the step: a separate step whose verifier Harbor would build from the step's own
+`steps/<name>/tests/Dockerfile` (declare a `docker_image` instead), per-step `[steps.verifier]` network
+restrictions, and a `[verifier]` network restriction on a task with a shared step. A step's `[steps.agent].user` and
+`[steps.verifier].user` are applied per turn, and its `workdir/`, `workdir/setup.sh`, `[steps.healthcheck]`,
+`artifacts` and verifier mode run per turn, as described above.

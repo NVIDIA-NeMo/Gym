@@ -68,11 +68,14 @@ def write_steps(task_dir: Path, steps: dict[str, str]) -> None:
         (task_dir / "steps" / name / "tests" / "test.sh").write_text(step_test_sh(name))
 
 
-def multi_turn_server(tmp_path, monkeypatch, steps_toml: str, steps: dict[str, str], *, head: str = "", **config):
-    """``head`` holds top-level keys, which TOML only reads before the first table."""
+def multi_turn_server(
+    tmp_path, monkeypatch, steps_toml: str, steps: dict[str, str], *, head: str = "", base: str = TASK_TOML, **config
+):
+    """``head`` holds top-level keys, which TOML only reads before the first table; ``base`` is the task's own
+    task.toml the steps are appended to."""
     task_dir = tmp_path / "datasets" / "ds" / "hello"
     write_steps(task_dir, steps)
-    return make_server(tmp_path, monkeypatch, toml=head + TASK_TOML + steps_toml, **config)
+    return make_server(tmp_path, monkeypatch, toml=head + base + steps_toml, **config)
 
 
 def rewards_per_turn(server, sandbox: FakeSandbox, rewards: list[str], *, name: str = "reward.txt") -> None:
@@ -541,8 +544,9 @@ async def test_the_task_deadline_counts_every_turn(tmp_path, monkeypatch):
         verifier_grace_s=5,
     )
 
-    # plan: agent 60 (its own), verifier 120 (the task's); build: 300 and 30; check: 300 and 120.
-    per_turn = (10 + 60 + 120 + 5) + (10 + 300 + 30 + 5) + (10 + 300 + 120 + 5)
+    # plan: agent 60 (its own), verifier 600 (Harbor's step default: the task's 120 never reaches a step); build: 300
+    # and 30 (its own); check: 300 and 600.
+    per_turn = (10 + 60 + 600 + 5) + (10 + 300 + 30 + 5) + (10 + 300 + 600 + 5)
     assert server._post_seed_budget_s(task) == pytest.approx(per_turn)
     assert server._task_budget_s(task) == pytest.approx(server.config.sandbox_ready_timeout_s + per_turn)
 
@@ -1057,18 +1061,22 @@ async def test_a_task_lookup_slower_than_the_default_leaves_the_episode_the_defa
     assert await server.episode_timeout_seconds(request_for(task)) == pytest.approx(server._episode_bound_s(task))
 
 
+SLOW_SEED_STEPS = LONG_STEPS.replace("timeout_sec = 0.3", "timeout_sec = 0.5")
+
+
 async def test_a_seed_slower_than_the_ready_timeout_leaves_the_turns_their_budget(tmp_path, monkeypatch):
     """Round 24 (G11 review): the derived deadline was `sandbox_ready_timeout_s` plus the post-seed budget and
     opens at the request, while the seed's own bounds are larger (the create grace, pull retries, a sidecar's
     start), so a seed longer than one ready timeout ate the final turns' budget and the episode died with the base
-    server's generic timeout, retried and never scored. The bound now covers the seed's own: a seed of 2.5 s on a
-    ready timeout of 1 s leaves two turns of 0.2 s their 1.2 s budget (round 32: the turns take 0.2 s, not 0.5 s,
-    so the verifier runs keep 0.8 s of headroom on a loaded node; the seed is slower instead, so the episode still
-    outlives the former bound by a margin)."""
+    server's generic timeout, retried and never scored. The bound now covers the seed's own: a seed of 3.5 s on a
+    ready timeout of 1 s leaves two turns of 0.2 s their 2 s budget (round 32: the turns take 0.2 s, not 0.5 s;
+    round 36: the steps budget 0.5 s each for the agent and the verifier, not 0.3 s, so the two turns leave the
+    verifier runs and the filesystem work 1.6 s of headroom where 0.8 s expired on a loaded CI node, and the seed
+    is slower still, so the episode outlives the former bound by a margin)."""
     server, task, sandbox, _ = multi_turn_server(
         tmp_path,
         monkeypatch,
-        LONG_STEPS,
+        SLOW_SEED_STEPS,
         {"plan": "P", "build": "B"},
         default_episode_timeout_seconds=0.1,
         harness_setup_allowance_s=0,
@@ -1079,7 +1087,7 @@ async def test_a_seed_slower_than_the_ready_timeout_leaves_the_turns_their_budge
     create = server._create_sandbox
 
     async def slow_create(task, workdir, *, episode_key=None):
-        await asyncio.sleep(2.5)
+        await asyncio.sleep(3.5)
         return await create(task, workdir, episode_key=episode_key)
 
     monkeypatch.setattr(server, "_create_sandbox", slow_create)
@@ -1092,9 +1100,9 @@ async def test_a_seed_slower_than_the_ready_timeout_leaves_the_turns_their_budge
     elapsed = time.monotonic() - started
     assert response.failure is None, response.failure
     assert [turn.name for turn in response.result.turns] == ["plan", "build"] and response.result.reward == 1.0
-    # The episode outlived the former bound (one ready timeout plus the turns, 2.2 s) because the seed alone took
-    # 2.5 s of it; the whole bound (`_episode_bound_s`) still has the turns' 1.2 s after the seed's 76 s.
-    assert elapsed >= 2.9 > server._task_budget_s(task) == pytest.approx(2.2)
+    # The episode outlived the former bound (one ready timeout plus the turns, 3 s) because the seed alone took
+    # 3.5 s of it; the whole bound (`_episode_bound_s`) still has the turns' 2 s after the seed's 76 s.
+    assert elapsed >= 3.9 > server._task_budget_s(task) == pytest.approx(3.0)
 
 
 async def test_without_enforcement_a_multi_step_task_longer_than_the_default_is_refused_naming_the_setting(
@@ -1162,27 +1170,6 @@ async def test_without_enforcement_a_multi_step_task_longer_than_the_default_is_
         response = await server.run_request(request_for(task, rollout="r3"))
     assert response.failure is None and [turn.name for turn in response.result.turns] == ["plan", "build"]
     assert "default_episode_timeout_seconds" not in caplog.text
-
-
-async def test_a_forced_separate_verifier_is_refused_at_seed_for_a_multi_step_task(tmp_path, monkeypatch):
-    """The loader admits multi-step tasks in shared mode only; `separate_verifier_for_artifacts` cannot force
-    them into a mode their turns do not run, and the refusal costs no sandbox."""
-    steps = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n'
-    server, task, _, created = multi_turn_server(
-        tmp_path,
-        monkeypatch,
-        steps,
-        {"plan": "P", "build": "B"},
-        head='artifacts = ["/app/out.txt"]\n',
-        separate_verifier_for_artifacts=True,
-    )
-
-    response = await server.run_request(request_for(task))
-
-    failure = response.failure
-    assert failure.stage == "seed" and failure.terminal
-    assert "multi-step task" in failure.failure_reason and "separate verification" in failure.failure_reason
-    assert not created
 
 
 MCP_TOML = """
@@ -2047,6 +2034,8 @@ async def test_a_steps_artifacts_are_collected_with_the_tasks_after_its_agent_an
     ]
     assert manifest_of(build)[2]["destination"] == "artifacts/02/app"
     assert [e["origin"] for e in manifest_of(plan)] == ["convention", "task"]
+    # A shared turn restores nothing, so the archives are gone once the pass ends; the staged trees stay.
+    assert not list(plan_dir.glob("*.tar.gz")) and not list(build_dir.glob("*.tar.gz"))
     # Order within the build turn: the hook, the probes and the archives sit between the agent's close and test.sh;
     # the hook ran once per turn, in the collection pass, not again inside the shared verifier.
     commands = [e["command"] for e in sandbox.execs]
@@ -2240,3 +2229,566 @@ async def test_a_slopcodebench_task_runs_its_checkpoints_with_their_app_artifact
             if call[1].endswith("/v1/responses")
         ]
     ] == ["7200.0"] * 5
+
+
+# -- per-step separate verification (Harbor's resolve_step_verifier_mode and _run_separate_verifier per step) --------
+
+
+def wire_verifier_sandboxes(server, monkeypatch, make=None) -> tuple[list[FakeSandbox], list]:
+    """Hand out a fresh verifier sandbox per creation (``make`` builds one), one level below the real
+    ``_create_verifier_sandbox``: that method runs as it is on the turn's view (image, environment, working
+    directory and network policy), and the spec it builds is recorded where it reaches the provider, in the
+    ``start`` that ``_start_with_pull_retries`` is handed; returns the sandboxes and the specs."""
+    monkeypatch.setattr(
+        "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+    )
+    verifiers: list[FakeSandbox] = []
+    specs: list = []
+    build = make if make is not None else FakeSandbox
+
+    async def start_with_pull_retries(task, *, key, what, make, start):
+        class Starter:
+            async def start(self, spec):
+                specs.append(spec)
+
+        await start(Starter())
+        verifier = build()
+        verifiers.append(verifier)
+        server._sandboxes[key] = verifier
+        return verifier
+
+    monkeypatch.setattr(server, "_start_with_pull_retries", start_with_pull_retries)
+    return verifiers, specs
+
+
+SEPARATE_STEPS_HEAD = 'artifacts = ["/app/out.txt"]\n'
+SEPARATE_STEPS = """
+[verifier.environment]
+docker_image = "org/verifier:1"
+
+[[steps]]
+name = "plan"
+
+[[steps]]
+name = "build"
+[steps.verifier]
+user = "grader"
+env = { STEP = "build" }
+
+[[steps]]
+name = "check"
+"""
+
+
+async def test_a_separate_mode_task_verifies_each_turn_in_its_own_sandbox_while_the_agents_keeps_running(
+    tmp_path, monkeypatch
+):
+    """A multi-step task whose task-level verifier is separate: every turn's test.sh runs in a verifier sandbox of its
+    own, created and stopped around that verification, fed the turn's collected artifacts and tests; the agent's
+    sandbox is never stopped between turns, and on the last turn it is stopped after its own collection pass and
+    before the verifier grades, as Harbor's `_run_step` stops the agent environment on the last step of a
+    separate-mode task."""
+    agent = ArtifactSandbox(
+        present={"/app/out.txt": "file"}, archives={"/app": archive_of({"out.txt": "v1\n"})}, image_user="agent"
+    )
+    server, task, agent, created = multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        SEPARATE_STEPS,
+        {"plan": "P", "build": "B", "check": "C"},
+        head=SEPARATE_STEPS_HEAD,
+        sandbox=agent,
+        base=TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n'),
+    )
+    (task.path / "tests").mkdir(exist_ok=True)
+    (task.path / "tests" / "helpers.py").write_text("HELPER = 1\n")
+    task = load_task(task.path)
+    server.config.tasksets["ds"].tasks["hello"] = task.digest
+    stopped_before_verify: list[bool] = []
+
+    class Verifier(FakeSandbox):
+        async def exec(self, command, **kwargs):
+            if "timeout -s KILL" in command:
+                stopped_before_verify.append(agent.stopped)
+            return await super().exec(command, **kwargs)
+
+    verifiers, specs = wire_verifier_sandboxes(server, monkeypatch, make=Verifier)
+    agent_stopped_at_each_turn: list[bool] = []
+    server.server_client.turn_hooks.append(lambda: agent_stopped_at_each_turn.append(agent.stopped))
+    probes_before_stop: list[int] = []
+    agent_stop = agent.stop
+
+    async def stop():
+        probes_before_stop.append(len(probes(agent)))
+        await agent_stop()
+
+    agent.stop = stop
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    result = response.result
+    assert [turn.name for turn in result.turns] == ["plan", "build", "check"] and task.turns[
+        1
+    ].verifier_mode == "separate"
+    assert [turn.verifier_mode for turn in result.turns] == ["separate"] * 3 and result.verifier_mode == "separate"
+    assert [turn.reward for turn in result.turns] == [1.0, 1.0, 1.0]
+    # One verifier sandbox per turn, from [verifier.environment], each stopped once its turn was graded; the agent's
+    # sandbox was still running when every turn's agent session opened, and no verifier sandbox is left owned.
+    assert len(verifiers) == 3 and all(verifier.stopped for verifier in verifiers)
+    assert all(spec.image == "org/verifier:1" for spec in specs) and len(created) == 1
+    assert agent_stopped_at_each_turn == [False, False, False]
+    # The agent's sandbox was running for the first two verifications and stopped for the third, after the third
+    # turn's own collection pass (two probes per pass: the convention folder and the task's artifact) and before its
+    # test.sh ran in the verifier sandbox; the final cleanup has nothing left to stop.
+    assert stopped_before_verify == [False, False, True] and probes_before_stop[:1] == [6]
+    assert not any(key.endswith("/verifier") for key in server._sandboxes)
+    # test.sh never ran in the agent's sandbox; each verifier got the task's tests/, the step's over them, the turn's
+    # artifacts (the agent's /app/out.txt as the archive the agent packed) and the transcript.
+    assert not any("timeout -s KILL" in e["command"] for e in agent.execs)
+    # Nothing was graded in the agent's sandbox, so nothing is reset there before a turn: its /tests keeps what the
+    # image shipped, as under Harbor 0.22.0's separate mode (Harbor main resets only after a shared verifier).
+    assert not any(GRADING_RESET in e["command"] for e in agent.execs)
+    for verifier in verifiers:
+        assert len([e for e in verifier.execs if "timeout -s KILL" in e["command"]]) == 1
+        assert uploaded_files(verifier, "helpers.py") == [b"HELPER = 1\n"]
+        assert agent.archives["/app"] in verifier.uploaded_archives
+        assert len(uploaded_files(verifier, "trajectory.json")) == 1
+    tests_uploads = [
+        c["command"] for c in verifiers[1].execs if "tar -xzf" in c["command"] and "-C /tests" in c["command"]
+    ]
+    assert len(tests_uploads) == 2  # the task's tests/, then steps/build/tests/
+    # The build step's verifier settings over the task's: its user and env reach the run in the fresh sandbox.
+    build_run = next(e for e in verifiers[1].execs if "timeout -s KILL" in e["command"])
+    assert build_run["user"] == "grader" and build_run["env"] == {"STEP": "build"}
+    # A step without its own user in another image keeps that image's default, as a single-step task's verifier does.
+    assert next(e for e in verifiers[0].execs if "timeout -s KILL" in e["command"])["user"] is None
+    # The turn's logs folder holds the staged artifacts and the manifest, as the separate path's does.
+    staged = Path(result.turns[0].verifier_logs_dir) / "artifacts"
+    assert (staged / "01" / "app" / "out.txt").read_text() == "v1\n" and (staged / "manifest.json").is_file()
+    assert not list(staged.glob("*.tar.gz"))  # consumed by the restore into the verifier sandbox
+
+
+MIXED_STEPS = """
+[[steps]]
+name = "plan"
+
+[[steps]]
+name = "build"
+[steps.verifier]
+environment_mode = "separate"
+[steps.verifier.environment]
+docker_image = "org/step-verifier:1"
+memory_mb = 4096
+
+[[steps]]
+name = "check"
+"""
+
+
+async def test_steps_may_mix_verifier_modes_and_a_step_may_bring_its_own_verifier_image(tmp_path, monkeypatch):
+    """Harbor's resolve_step_verifier_mode: a step's explicit mode (or its own [steps.verifier.environment]) wins over
+    the task's; here a shared task with one separate step in an image of its own, graded between two shared turns.
+    The last step is shared, so no turn stops the agent's sandbox (Harbor stops it before the verifier only on a
+    separate last step)."""
+    stopped_at_verify: list[bool] = []
+
+    class Agent(FakeSandbox):
+        async def exec(self, command, **kwargs):
+            if "timeout -s KILL" in command:
+                stopped_at_verify.append(self.stopped)
+            return await super().exec(command, **kwargs)
+
+    server, task, agent, _ = multi_turn_server(
+        tmp_path, monkeypatch, MIXED_STEPS, {"plan": "P", "build": "B", "check": "C"}, sandbox=Agent()
+    )
+    verifiers, specs = wire_verifier_sandboxes(server, monkeypatch)
+    resets_at_activation: list[int] = []
+    server.server_client.turn_hooks.append(
+        lambda: resets_at_activation.append(len([e for e in agent.execs if GRADING_RESET in e["command"]]))
+    )
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    result = response.result
+    assert [turn.verifier_mode for turn in task.turns] == ["shared", "separate", "shared"]
+    assert [turn.verifier_mode for turn in result.turns] == ["shared", "separate", "shared"]
+    assert result.verifier_mode == "mixed" and [turn.reward for turn in result.turns] == [1.0, 1.0, 1.0]
+    # Two shared verifications in the agent's sandbox, one in the step's own image, sized by the step's block.
+    assert len([e for e in agent.execs if "timeout -s KILL" in e["command"]]) == 2
+    assert len(verifiers) == 1 and specs[0].image == "org/step-verifier:1" and specs[0].resources.memory_mib == 4096
+    # An explicit step verifier image starts in its own WORKDIR (the step block names none) with no network policy.
+    assert specs[0].workdir is None and "network_policy" not in specs[0].provider_options
+    assert len([e for e in verifiers[0].execs if "timeout -s KILL" in e["command"]]) == 1
+    # The third turn opened on the same, still running, agent sandbox after the separate verification, and its own
+    # shared verification ran there with the sandbox still up.
+    assert len(server.server_client.seed_bodies()) == 3 and verifiers[0].stopped
+    assert stopped_at_verify == [False, False]
+    # The grading files are reset in the agent's sandbox before a turn only when the previous turn was graded there:
+    # before `build` (after `plan`'s shared verification, whose own reset before uploading its tests is the first of
+    # the two counted), not before `check` (after `build`'s separate verification, which left nothing there), as
+    # Harbor main resets only after a shared verifier and 0.22.0's separate mode never touches the agent's /tests.
+    assert resets_at_activation == [0, 2, 2]
+
+
+async def test_a_step_may_opt_out_of_a_separate_mode_task_into_the_agents_sandbox(tmp_path, monkeypatch):
+    steps = (
+        '[verifier.environment]\ndocker_image = "org/verifier:1"\n'
+        '[[steps]]\nname = "plan"\n[steps.verifier]\nenvironment_mode = "shared"\n[[steps]]\nname = "build"\n'
+    )
+    server, task, agent, _ = multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        steps,
+        {"plan": "P", "build": "B"},
+        base=TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n'),
+    )
+    stopped_before_verify: list[bool] = []
+
+    class Verifier(FakeSandbox):
+        async def exec(self, command, **kwargs):
+            if "timeout -s KILL" in command:
+                stopped_before_verify.append(agent.stopped)
+            return await super().exec(command, **kwargs)
+
+    verifiers, _ = wire_verifier_sandboxes(server, monkeypatch, make=Verifier)
+    response = await server.run_request(request_for(task))
+    assert response.failure is None, response.failure
+    assert [turn.verifier_mode for turn in response.result.turns] == ["shared", "separate"]
+    assert len([e for e in agent.execs if "timeout -s KILL" in e["command"]]) == 1 and len(verifiers) == 1
+    # The separate step is the last: the agent's sandbox was stopped before its verifier graded.
+    assert stopped_before_verify == [True]
+
+
+SEPARATE_TASK_WITH_AGENT_USER = TASK_TOML.replace(
+    "[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n'
+).replace("[agent]\ntimeout_sec = 300.0", '[agent]\ntimeout_sec = 300.0\nuser = "agent"')
+OPT_OUT_STEPS = (
+    '[verifier.environment]\ndocker_image = "org/verifier:1"\n'
+    '[[steps]]\nname = "plan"\n[steps.verifier]\nenvironment_mode = "shared"\n{step_user}[[steps]]\nname = "build"\n'
+)
+
+
+@pytest.mark.parametrize(
+    ("task_user", "step_user", "expected"),
+    [("", "", "root"), ('user = "tester"\n', "", "tester"), ('user = "tester"\n', 'user = "grader"\n', "grader")],
+    ids=["shared-fallback", "task-verifier-user", "step-verifier-user"],
+)
+async def test_a_shared_step_of_a_separate_mode_task_grades_as_the_shared_fallback_user_not_the_agent(
+    tmp_path, monkeypatch, task_user, step_user, expected
+):
+    """Round 38 review (P2): a task with its own verifier image and `[agent].user = "agent"` whose step opts out into
+    shared mode ran that step's test.sh as the agent: `_verifier_user` answered `None` for the task-level separate
+    image (its own USER is that sandbox's default), which in the agent's sandbox is the agent. The fallback is the
+    shared rule's now (the task image's USER, else root under an agent override); an explicit `[verifier].user` or
+    `[steps.verifier].user` keeps its precedence."""
+    base = SEPARATE_TASK_WITH_AGENT_USER.replace("[verifier]\n", "[verifier]\n" + task_user)
+    server, task, agent, _ = multi_turn_server(
+        tmp_path, monkeypatch, OPT_OUT_STEPS.format(step_user=step_user), {"plan": "P", "build": "B"}, base=base
+    )
+    assert (task.user, task.entrypoint_user) == ("agent", None) and not task.config.is_shared_verifier
+    wire_verifier_sandboxes(server, monkeypatch)
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    assert [turn.verifier_mode for turn in response.result.turns] == ["shared", "separate"]
+    assert [turn.reward for turn in response.result.turns] == [1.0, 1.0]
+    (run,) = [e for e in agent.execs if "bash /tests/test.sh" in e["command"]]
+    assert agent.default_user == "agent"
+    assert (run["user"], run["ran_as"]) == (expected, expected)
+
+
+@pytest.mark.parametrize("provider", ["docker", "opensandbox"])
+async def test_a_shared_steps_fallback_user_pair_follows_the_provider_at_seed(tmp_path, monkeypatch, provider):
+    """The same rule at the seed-time group check: the shared step's test.sh dispatches as the task image's own
+    `USER app:grp`, a pair only Docker applies, so the step is refused at seed off Docker, named, as a step's own
+    `[steps.verifier].user` pair is; the task-level separate verifier in another image names no user of its own."""
+    server, task, agent, created = multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        OPT_OUT_STEPS.format(step_user=""),
+        {"plan": "P", "build": "B"},
+        base=SEPARATE_TASK_WITH_AGENT_USER,
+        dockerfile="FROM ubuntu:24.04\nWORKDIR /app\nUSER app:grp",
+        image_config={"Env": [f"PATH={IMAGE_PATH}"], "User": "app:grp"},
+    )
+    assert (task.user, task.entrypoint_user, task.config.verifier.user) == ("agent", "app:grp", None)
+    wire_verifier_sandboxes(server, monkeypatch)  # patches the provider to opensandbox itself; the test's own follows
+    monkeypatch.setattr(
+        "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {provider: {}}}
+    )
+
+    response = await server.run_request(request_for(task))
+
+    if provider == "docker":
+        assert response.failure is None, response.failure
+        (run,) = [e for e in agent.execs if "bash /tests/test.sh" in e["command"]]
+        assert run["user"] == "app:grp"
+    else:
+        failure = response.failure
+        assert failure is not None and failure.stage == "seed" and failure.terminal
+        assert "hello step 'plan': user 'app:grp' names group 'grp'" in failure.failure_reason
+        assert "'build'" not in failure.failure_reason
+        assert created == [] and agent.execs == [] and server.server_client.seed_bodies() == []
+
+
+async def test_a_shared_step_forced_separate_for_its_artifacts_grades_in_the_task_image_in_a_separate_mode_task(
+    tmp_path, monkeypatch
+):
+    """Round 38 review (P2): a step opting out into shared mode in a task with its own `[verifier.environment]`, forced
+    into a fresh sandbox by `separate_verifier_for_artifacts`, inherited the task's separate environment with its image
+    replaced by the step's `None` (the loader resolves images for separate steps alone), and the seed refused the task
+    with "has no image for its separate verifier". The forced step's view is a forced shared task's: no verifier
+    environment, the task's own image, as the README documents for forced shared steps."""
+    steps = (
+        '[verifier.environment]\ndocker_image = "org/verifier:1"\n'
+        '[[steps]]\nname = "plan"\nartifacts = ["/app/out.txt"]\n[steps.verifier]\nenvironment_mode = "shared"\n'
+        '[[steps]]\nname = "build"\n'
+    )
+    server, task, agent, created = multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        steps,
+        {"plan": "P", "build": "B"},
+        base=TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n'),
+        separate_verifier_for_artifacts=True,
+    )
+    plan, build = task.turns
+    assert (plan.verifier_mode, plan.verifier_image, build.verifier_image) == ("shared", None, "org/verifier:1")
+    assert (
+        server._turn_separate(task, plan)
+        and server._turn_verifier_view(task, plan).config.verifier.environment is None
+    )
+    verifiers, specs = wire_verifier_sandboxes(server, monkeypatch)
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    assert [turn.verifier_mode for turn in response.result.turns] == ["separate", "separate"]
+    assert [turn.reward for turn in response.result.turns] == [1.0, 1.0]
+    # The forced turn graded in the task's own image, the declared step in the task's verifier image.
+    assert [spec.image for spec in specs] == [task.image, "org/verifier:1"] and len(verifiers) == 2
+    assert not any("timeout -s KILL" in e["command"] for e in agent.execs)
+
+
+async def test_separate_verifier_for_artifacts_forces_the_turns_with_artifacts_into_the_task_image(
+    tmp_path, monkeypatch
+):
+    """`separate_verifier_for_artifacts` applies per turn: a turn whose task or step declares artifacts grades in a
+    fresh sandbox of the task's own image (overlay and all), the others stay in the agent's sandbox; the seed no
+    longer refuses the task."""
+    steps = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\nartifacts = ["/app/out.txt"]\n'
+    server, task, agent, created = multi_turn_server(
+        tmp_path, monkeypatch, steps, {"plan": "P", "build": "B"}, separate_verifier_for_artifacts=True
+    )
+    verifiers, specs = wire_verifier_sandboxes(server, monkeypatch)
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    assert [turn.verifier_mode for turn in response.result.turns] == ["shared", "separate"]
+    assert len(created) == 1 and len(verifiers) == 1 and specs[0].image == task.image
+    # The task image keeps the task's working directory, as the agent's sandbox had it (no overlay here).
+    assert specs[0].workdir == task.workdir == "/app" and "network_policy" not in specs[0].provider_options
+    assert response.result.verifier_mode == "mixed"
+
+
+async def test_a_separate_turn_whose_verifier_sandbox_fails_masks_that_turn_only_and_the_agent_keeps_running(
+    tmp_path, monkeypatch
+):
+    server, task, agent, _ = multi_turn_server(
+        tmp_path, monkeypatch, MIXED_STEPS, {"plan": "P", "build": "B", "check": "C"}
+    )
+
+    async def failing_create(task, *, episode_key=None):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(server, "_create_verifier_sandbox", failing_create)
+    response = await server.run_request(request_for(task))
+    assert response.failure is None, response.failure
+    result = response.result
+    assert [turn.name for turn in result.turns] == ["plan", "build"]
+    assert result.turns[1].mask_sample and result.turns[1].failure_kind == "provider_unavailable"
+    assert "provider down" in result.turns[1].failure_reason and result.mask_sample
+    assert result.turns[1].verifier_mode == "separate"
+
+
+TWO_SEPARATE_STEPS = """
+[verifier.environment]
+docker_image = "org/verifier:1"
+
+[[steps]]
+name = "plan"
+
+[[steps]]
+name = "build"
+"""
+
+
+def separate_two_step_server_with_a_verifier_whose_stop_fails(tmp_path, monkeypatch, failures: int):
+    """A two-step separate-mode task whose verifier sandboxes raise from ``stop`` for the first ``failures`` stops
+    in the episode (counted across the verifiers, with each sandbox's own ``stop_calls``) and stop normally after;
+    returns the server, the task and the verifier sandboxes handed out."""
+    server, task, _, _ = multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        TWO_SEPARATE_STEPS,
+        {"plan": "P", "build": "B"},
+        base=TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n'),
+    )
+
+    stops = 0
+
+    class Verifier(FakeSandbox):
+        stop_calls: int = 0
+
+        async def stop(self):
+            nonlocal stops
+            stops += 1
+            self.stop_calls += 1
+            if stops <= failures:
+                raise RuntimeError(f"stop failed ({stops})")
+            await super().stop()
+
+    verifiers, _ = wire_verifier_sandboxes(server, monkeypatch, make=Verifier)
+    return server, task, verifiers
+
+
+async def test_a_separate_turns_verifier_whose_stop_failed_once_is_stopped_again_before_the_next_turns_starts(
+    tmp_path, monkeypatch
+):
+    """Review (round 36): a non-last turn's verifier stop that fails leaves that sandbox owned under the episode's
+    verifier key; the next separate turn used to start its verifier under the same key, so the first leaked until
+    its `ttl_s`. The stop is retried before the key is reused; one that succeeds lets the next turn grade."""
+    server, task, verifiers = separate_two_step_server_with_a_verifier_whose_stop_fails(tmp_path, monkeypatch, 1)
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    result = response.result
+    assert [turn.name for turn in result.turns] == ["plan", "build"] and result.reward == 1.0
+    assert [turn.mask_sample for turn in result.turns] == [False, False]
+    # The first verifier's stop failed after `plan` and succeeded when retried before `build`; `build` got its own.
+    assert len(verifiers) == 2 and [verifier.stop_calls for verifier in verifiers] == [2, 1]
+    assert all(verifier.stopped for verifier in verifiers) and not server._sandboxes
+
+
+async def test_a_separate_turn_is_masked_when_the_previous_verifier_cannot_be_stopped_and_cleanup_stops_it(
+    tmp_path, monkeypatch
+):
+    """When the retried stop fails too the key is not overwritten: the turn is masked `provider_unavailable` (the
+    rollout is kept; a provider that cannot stop a sandbox is not the policy's fault), no second verifier is started,
+    and the first stays owned under the key for the episode cleanup's `close_sandbox`, which stops it."""
+    server, task, verifiers = separate_two_step_server_with_a_verifier_whose_stop_fails(tmp_path, monkeypatch, 2)
+    owned_at_stop: list = []
+    stop_sandbox = server._stop_sandbox
+
+    async def recording_stop_sandbox(key):
+        if key.endswith("/verifier"):
+            owned_at_stop.append(server._sandboxes.get(key))
+        await stop_sandbox(key)
+
+    monkeypatch.setattr(server, "_stop_sandbox", recording_stop_sandbox)
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    result = response.result
+    assert [turn.name for turn in result.turns] == ["plan", "build"]
+    assert not result.turns[0].mask_sample and result.turns[0].reward == 1.0
+    assert result.turns[1].mask_sample and result.turns[1].failure_kind == "provider_unavailable"
+    assert "stop failed (2)" in result.turns[1].failure_reason and result.mask_sample
+    assert result.turns[1].verifier_mode == "separate"
+    # One verifier only: stopped after `plan` (failed), retried before `build` (failed), stopped at cleanup.
+    (verifier,) = verifiers
+    assert verifier.stop_calls == 3 and verifier.stopped and not server._sandboxes
+    # Every stop of the verifier key found the same sandbox under it: after `plan`, before `build`, at cleanup.
+    assert owned_at_stop == [verifier, verifier, verifier]
+
+
+async def test_a_task_shipping_harbors_seed_trajectory_runs_for_the_oracle_and_is_refused_for_any_other_agent(
+    tmp_path, monkeypatch
+):
+    """Harbor 0.22.0's `_resolve_load_trajectory` loads `steps/<first step>/trajectory.json` into the agent's session for
+    every agent but the oracle and nop ("the oracle runs the task's own solution ... task authors validate with it").
+    No harness here can be seeded with it yet: the oracle runs the task as Harbor's does, and any other agent is
+    refused at seed, terminally, naming the file, before any sandbox is paid for."""
+    steps = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n'
+    seed = '{"schema_version": "ATIF-v1.7", "steps": []}'
+    server, task, _, created = multi_turn_server(tmp_path, monkeypatch, steps, {"plan": "P", "build": "B"})
+    (task.path / "steps" / "plan" / "trajectory.json").write_text(seed)
+    task = load_task(task.path)
+    assert task.seed_trajectory == Path("steps/plan/trajectory.json")
+    server.config.tasksets["ds"].tasks["hello"] = task.digest
+
+    response = await server.run_request(request_for(task))
+
+    failure = response.failure
+    assert failure is not None and failure.stage == "seed" and failure.terminal
+    assert "ships Harbor's seed trajectory steps/plan/trajectory.json" in failure.failure_reason
+    assert (
+        "refused for agent 'agent'" in failure.failure_reason and "The oracle validates it" in failure.failure_reason
+    )
+    assert created == [] and not server.server_client.seed_bodies()
+
+    server, task, _, created = multi_turn_server(
+        tmp_path / "oracle",
+        monkeypatch,
+        steps,
+        {"plan": "P", "build": "B"},
+        agent_implementation="harbor_oracle_agent",
+    )
+    (task.path / "steps" / "plan" / "trajectory.json").write_text(seed)
+    task = load_task(task.path)
+    server.config.tasksets["ds"].tasks["hello"] = task.digest
+    response = await server.run_request(request_for(task))
+    assert response.failure is None, response.failure
+    assert [turn.reward for turn in response.result.turns] == [1.0, 1.0] and len(created) == 1
+
+
+async def test_a_seed_trajectory_is_not_refused_for_an_agent_block_the_server_cannot_read(
+    tmp_path, monkeypatch, caplog
+):
+    """An agent instance with several implementations under it (or a client the merged config does not show) is not
+    known to be any harness: `_seed_solution` places no solution for it and warns, and the seed trajectory check does
+    the same rather than refusing an oracle wired that way as "agent 'agent'"."""
+    steps = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n'
+    server, task, _, created = multi_turn_server(
+        tmp_path, monkeypatch, steps, {"plan": "P", "build": "B"}, agent_implementation="harbor_oracle_agent"
+    )
+    (task.path / "steps" / "plan" / "trajectory.json").write_text('{"schema_version": "ATIF-v1.7", "steps": []}')
+    task = load_task(task.path)
+    server.config.tasksets["ds"].tasks["hello"] = task.digest
+    block = OmegaConf.to_container(server.server_client.global_config_dict)
+    block["agent"]["responses_api_agents"]["other_agent"] = dict(
+        block["agent"]["responses_api_agents"]["harbor_oracle_agent"]
+    )
+    server.server_client.global_config_dict = OmegaConf.create(block)
+    assert server._agent_implementation() is None
+
+    with caplog.at_level("WARNING"):
+        response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    assert [turn.reward for turn in response.result.turns] == [1.0, 1.0] and len(created) == 1
+    assert "ships Harbor's seed trajectory steps/plan/trajectory.json" in caplog.text
+    assert "no single responses_api_agents implementation" in caplog.text
+    assert "the task runs without its prior context" in caplog.text
+
+
+def test_the_budget_counts_a_verifier_sandbox_start_per_separate_turn(tmp_path, monkeypatch):
+    server, task, _, _ = multi_turn_server(
+        tmp_path, monkeypatch, MIXED_STEPS, {"plan": "P", "build": "B", "check": "C"}
+    )
+    shared_only = multi_turn_server(
+        tmp_path / "other",
+        monkeypatch,
+        MIXED_STEPS.replace(
+            'environment_mode = "separate"\n[steps.verifier.environment]\ndocker_image = "org/step-verifier:1"\nmemory_mb = 4096\n',
+            "",
+        ),
+        {"plan": "P", "build": "B", "check": "C"},
+    )
+    assert server._post_seed_budget_s(task) == shared_only[0]._post_seed_budget_s(shared_only[1]) + 900
