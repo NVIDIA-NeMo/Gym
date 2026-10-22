@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from omegaconf import OmegaConf
 
 from environment_servers.harbor.app import (
     NO_TURN_RESULT_KIND,

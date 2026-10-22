@@ -1610,6 +1610,24 @@ class TestMultiStepTasks:
         with pytest.raises(HarborTaskError, match="on every step of a multi-step task too"):
             load_task(root)
 
+    def test_a_multi_step_tasks_seed_trajectory_is_the_first_steps_and_any_other_is_ignored(self, tmp_path, caplog):
+        """Harbor 0.22.0 loads `steps/<first step>/trajectory.json` into the first step's agent session and ignores a
+        top-level one on a multi-step task (`Trial._task_trajectory_path`: one path or the other, never both), as it
+        ignores a later step's. The loader records the first step's file for the server to refuse per agent and says
+        nothing about the others, so a hub task Harbor runs is not dropped at discovery."""
+        root = write_multi_step_task(tmp_path / "t")
+        (root / "trajectory.json").write_text("{}")
+        (root / "steps" / "02_implement" / "trajectory.json").write_text("{}")
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+            task = load_task(root)
+        assert task.seed_trajectory is None and len(task.turns) == 2 and "seed trajectory" not in caplog.text
+        (root / "steps" / "01_plan" / "trajectory.json").write_text("{}")
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+            task = load_task(root)
+        assert task.seed_trajectory == Path("steps/01_plan/trajectory.json")
+        assert "steps/01_plan/trajectory.json is Harbor's seed trajectory" in caplog.text
+        assert "runs the task for the oracle alone" in caplog.text
+
     def test_a_steps_healthcheck_loads_with_harbors_defaults_for_the_server_to_poll_per_turn(self, tmp_path):
         """Harbor 0.22.0 runs `[steps.healthcheck]` after the step's setup and before its agent
         (`_run_step_healthcheck`, Docker's start-period and retries semantics); the loader used to refuse it."""
@@ -4788,3 +4806,30 @@ class TestTrainingMetadata:
         assert "allowed_agents admits terminus_2_sandboxed_agent, hermes_agent, not `--agent codex_agent`" in err
         # No servers were started and nothing was prepared or recorded for the run.
         assert dispatched == [] and not (tmp_path / "results").exists() and not (folder / "manifest.toml").exists()
+
+
+def test_a_task_shipping_harbors_seed_trajectory_loads_for_the_oracle_and_the_file_stays_in_its_digest(
+    tmp_path, caplog
+):
+    """Harbor 0.22.0 loads a task's `trajectory.json` (its `--load-trajectory` seed file) into the agent's session before
+    the first turn, for every agent but the oracle and nop; Gym hands no prior context to a harness yet, so the loader
+    records the file with a warning and the environment server runs the task for the oracle alone, refusing it for
+    any other agent (see the server's tests). The file is still part of the task's identity: the folder digest and
+    the package digest cover it, so a fetched task verifies against its advertised hash and the manifest records the
+    hash with it."""
+    from nemo_gym.tasks.harbor.digest import archive_hash, content_hash, is_covered
+
+    root = write_task(tmp_path / "t")
+    loaded = load_task(root)
+    before = loaded.folder_digest
+    assert loaded.seed_trajectory is None
+    (root / "trajectory.json").write_text('{"schema_version": "ATIF-v1.7", "steps": []}')
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+        task = load_task(root)
+    assert task.seed_trajectory == Path("trajectory.json")
+    message = caplog.text
+    assert "trajectory.json is Harbor's seed trajectory" in message and "not supported yet" in message
+    assert "runs the task for the oracle alone" in message and "Remove the file" in message
+    assert is_covered("trajectory.json") and content_hash(root) != before
+    # The package store's hash (what a fetch verifies) covers the file as the folder digest does.
+    assert archive_hash(root) == content_hash(root)

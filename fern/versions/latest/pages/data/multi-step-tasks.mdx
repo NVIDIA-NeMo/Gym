@@ -359,6 +359,12 @@ warning naming it, never read as a strategy.
 
 The loader refuses, naming the step: a separate step whose verifier Harbor would build from the step's own
 `steps/<name>/tests/Dockerfile` (declare a `docker_image` instead), per-step `[steps.verifier]` network
-restrictions, and a `[verifier]` network restriction on a task with a shared step. A step's `[steps.agent].user` and
+restrictions, and a `[verifier]` network restriction on a task with a shared step. A task that ships Harbor's seed
+trajectory, `steps/<first step>/trajectory.json` (a multi-step task's top-level `trajectory.json` is ignored, as
+Harbor ignores it), loads with a warning and runs for the oracle alone: Harbor 0.22.0 loads the file into the first
+step's agent session as prior context (its `--load-trajectory` seed file) for every agent but the oracle and nop,
+which no harness here can be seeded with yet, so `gym dataset validate` runs the task as Harbor's oracle does and the
+environment server refuses it at seed, terminally, for any other agent, naming the file, rather than grading a model
+without the context the task was written for. A step's `[steps.agent].user` and
 `[steps.verifier].user` are applied per turn, and its `workdir/`, `workdir/setup.sh`, `[steps.healthcheck]`,
 `artifacts` and verifier mode run per turn, as described above.
