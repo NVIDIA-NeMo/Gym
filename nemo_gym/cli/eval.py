@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import gc
 import importlib
 import json
 import logging
@@ -24,7 +25,7 @@ from collections.abc import Sequence
 from copy import deepcopy
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Tuple
 
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import Field
@@ -77,6 +78,9 @@ from nemo_gym.global_config import (
 from nemo_gym.orchestration.jobs import installed_gym_commit
 from nemo_gym.package_info import __version__
 
+
+if TYPE_CHECKING:
+    from nemo_gym.rollout_collection import RolloutCollectionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -531,6 +535,23 @@ def _validate_split_datasets_declared(split: str, server_instance_configs: Seque
     raise ConfigError(message)
 
 
+def _tune_driver_gc(config: "RolloutCollectionConfig") -> None:
+    """Apply the driver garbage-collection settings in ``config`` to the current process.
+
+    Only the ``gym eval run`` entry points call this, because they own the driver process.
+    Library callers of ``RolloutCollectionHelper.run_examples``, such as NeMo RL, own their process and keep its settings.
+    Resources, agent, and model servers run in their own processes and are unaffected.
+    The head server that ``e2e_rollout_collection`` starts shares this process, so it shares these settings.
+    """
+    if config.driver_gc_freeze:
+        # The modules, config, and clients loaded at startup stay alive for the whole run.
+        # Freezing them moves them out of the collected generations, so full collections stop rescanning them.
+        gc.collect()
+        gc.freeze()
+    if config.driver_gc_thresholds is not None:
+        gc.set_threshold(*config.driver_gc_thresholds)
+
+
 def _validate_prepared_split_file_exists(input_jsonl_fpath: Path, split: str, output_dirpath: Path) -> None:
     """Explicit check (not an assert: user-facing, and must survive `python -O`)."""
     if input_jsonl_fpath.exists():
@@ -622,6 +643,7 @@ def e2e_rollout_collection():  # pragma: no cover
 {f"Rollout collection driver: {driver_path}" if driver_path else ""}
 """
     )
+    _tune_driver_gc(rollout_collection_config)
     collection_completed = False
     try:
         if driver_path:
@@ -657,7 +679,7 @@ def e2e_rollout_collection():  # pragma: no cover
 
 
 @exit_cleanly_on_config_error
-def collect_rollouts():  # pragma: no cover
+def collect_rollouts():
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
     from nemo_gym.telemetry.setup import (
         configure_telemetry_env,
@@ -673,6 +695,7 @@ def collect_rollouts():  # pragma: no cover
     # A standalone driver starts no supervisor, so it sets up its own telemetry for the `gym.job` span and driver metrics.
     configure_telemetry_env(telemetry_config_from_global_config(global_config_dict))
     init_telemetry(server_name="driver", server_type="driver")
+    _tune_driver_gc(config)
     try:
         asyncio.run(rch.run_from_config(config))
     finally:
