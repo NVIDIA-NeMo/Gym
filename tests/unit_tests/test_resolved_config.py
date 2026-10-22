@@ -76,3 +76,68 @@ def test_write_resolved_config_overwrites_and_leaves_no_temp_files(tmp_path: Pat
 
     assert yaml.safe_load(path.read_text()) == {"attempt": 2}
     assert [p.name for p in tmp_path.iterdir()] == ["rollouts_resolved_config.yaml"]
+
+
+def test_hide_secrets_in_container_masks_every_header_value_and_keeps_header_names() -> None:
+    original = {
+        "openai_default_headers": {"X-Auth": "credential-canary", "Authorization": "Bearer another-canary"},
+        "token_id_capture": {"enabled": True, "sink": "pkg:Sink"},
+    }
+
+    masked = hide_secrets_in_container(original)
+
+    assert masked["openai_default_headers"] == {"X-Auth": MASKED_VALUE, "Authorization": MASKED_VALUE}
+    assert masked["token_id_capture"] == {"enabled": True, "sink": "pkg:Sink"}
+    assert original["openai_default_headers"]["X-Auth"] == "credential-canary"
+
+
+def test_write_resolved_config_never_writes_header_credentials(tmp_path: Path) -> None:
+    config = OmegaConf.create({"openai_default_headers": {"X-Auth": "credential-canary", "Api-Id": "another-canary"}})
+
+    path = write_resolved_config(config, tmp_path / "rollouts.jsonl")
+
+    text = path.read_text()
+    assert "credential-canary" not in text and "another-canary" not in text
+    assert yaml.safe_load(text) == {"openai_default_headers": {"X-Auth": MASKED_VALUE, "Api-Id": MASKED_VALUE}}
+
+
+def test_no_serve_collection_saves_the_config_before_collecting(tmp_path: Path, monkeypatch) -> None:
+    import nemo_gym.cli.eval as cli_eval
+    import nemo_gym.rollout_collection as rollout_collection
+    import nemo_gym.telemetry.setup as telemetry_setup
+
+    monkeypatch.setenv("NO_SERVE_BASE_FOR_TEST", "base")
+    rollouts = tmp_path / "run.jsonl"
+    attempt = {"n": 1}
+
+    def global_config():
+        return OmegaConf.create(
+            {
+                "input_jsonl_fpath": str(tmp_path / "tasks.jsonl"),
+                "output_jsonl_fpath": str(rollouts),
+                "policy_api_key": "sk-canary",
+                "url": "${oc.env:NO_SERVE_BASE_FOR_TEST}/v1",
+                "attempt": attempt["n"],
+            }
+        )
+
+    seen: dict = {}
+
+    class FakeHelper:
+        async def run_from_config(self, config) -> None:
+            seen["yaml"] = yaml.safe_load((tmp_path / "run_resolved_config.yaml").read_text())
+
+    monkeypatch.setattr(cli_eval, "get_global_config_dict", global_config)
+    monkeypatch.setattr(rollout_collection, "RolloutCollectionHelper", FakeHelper)
+    monkeypatch.setattr(telemetry_setup, "init_telemetry", lambda **kwargs: None)
+    monkeypatch.setattr(telemetry_setup, "shutdown_telemetry", lambda *args, **kwargs: None)
+
+    cli_eval.collect_rollouts()
+    assert seen["yaml"]["policy_api_key"] == MASKED_VALUE
+    assert seen["yaml"]["url"] == "${oc.env:NO_SERVE_BASE_FOR_TEST}/v1"
+    assert seen["yaml"]["attempt"] == 1
+
+    attempt["n"] = 2
+    cli_eval.collect_rollouts()
+    assert seen["yaml"]["attempt"] == 2
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["run_resolved_config.yaml"]
