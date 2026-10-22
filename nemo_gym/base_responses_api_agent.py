@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import contextvars
+import ipaddress
 import logging
 from abc import abstractmethod
 from collections import OrderedDict
@@ -23,10 +24,20 @@ from dataclasses import dataclass, field
 from functools import wraps
 from time import monotonic
 from typing import Any, ClassVar, Optional
+from urllib.parse import urlsplit
 from warnings import warn
 
 from fastapi import Body, FastAPI, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    PrivateAttr,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+)
 
 from nemo_gym._checkpoint.agent import (
     ActivationOutOfOrderError,
@@ -39,6 +50,11 @@ from nemo_gym._checkpoint.control import install_participant
 from nemo_gym._checkpoint.errors import StaleAttemptError
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym._checkpoint.steps import CHECKPOINT_RESTART_HEADER
+from nemo_gym.agent_activation_types import (
+    AgentContinuationCapabilities,
+    AgentContinuationRequirements,
+)
+from nemo_gym.agent_utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -58,7 +74,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -93,8 +109,10 @@ AGENT_SESSIONS = SessionKind(
 # without running it again.
 # An environment server that can invoke an activation again after a restore must send it:
 # its checkpoint may precede the agent's reply while the agent's checkpoint follows it.
-# Without the header, every invocation is a new activation.
+# Multi-turn continuation sessions use this same header without checkpointing.
+# Other adapters may treat requests without the header as new activations.
 AGENT_ACTIVATION_HEADER = "x-ng-agent-activation"
+LOG = logging.getLogger(__name__)
 
 
 class AgentSeedSessionRequest(BaseModel):
@@ -114,6 +132,16 @@ class AgentSeedSessionRequest(BaseModel):
     task_id: TaskId
     tool_accesses: list[ToolAccess] = Field(default_factory=list)
     sandbox_access: SandboxAccess | None = None
+    continuation: AgentContinuationRequirements | None = Field(
+        default=None,
+        description=(
+            "Opt into continuation by resuming the harness's saved session and require these observations at seed time. "
+            "Omitted for ordinary sessions."
+        ),
+    )
+    # The task's own time budget for the harness's work, in seconds (Harbor's ``[agent].timeout_sec``).
+    # The environment server enforces it; a harness that reads it can stop cleanly and return a partial turn.
+    agent_timeout_sec: float | None = Field(default=None, gt=0)
 
     @field_validator("tool_accesses")
     @classmethod
@@ -123,13 +151,40 @@ class AgentSeedSessionRequest(BaseModel):
             raise ValueError("tool access names must be unique within an agent session")
         return tool_accesses
 
+    # Keep the model schema; a serializer return annotation would replace it.
+    @model_serializer(mode="wrap")
+    def _serialize_optional_metadata(self, handler: SerializerFunctionWrapHandler):
+        result = handler(self)
+        if self.continuation is None:
+            result.pop("continuation", None)
+        return result
+
 
 class AgentSeedSessionResponse(BaseModel):
-    """Confirm the caller-assigned agent session identifier."""
+    """Confirm the caller-assigned agent session identifier and declare what the harness can use."""
 
     model_config = ConfigDict(extra="forbid")
 
     agent_session_id: str
+    # Whether the harness drives the task's own tool declarations (Harbor's ``[[environment.mcp_servers]]``
+    # and ``skills_dir``). An environment server refuses such a task to a harness that does not, instead of
+    # running it without its tools.
+    supports_task_tool_context: bool = False
+    capabilities: AgentContinuationCapabilities | None = Field(
+        default=None,
+        description=(
+            "Continuation mode and observations supported by this adapter. "
+            "Returned only when continuation was requested."
+        ),
+    )
+
+    # Keep the model schema; a serializer return annotation would replace it.
+    @model_serializer(mode="wrap")
+    def _serialize_optional_metadata(self, handler: SerializerFunctionWrapHandler):
+        result = handler(self)
+        if self.capabilities is None:
+            result.pop("capabilities", None)
+        return result
 
 
 class AgentCloseSessionRequest(BaseModel):
@@ -148,6 +203,14 @@ class AgentCloseSessionResponse(BaseModel):
 
     agent_session_id: str
     agent_observations: AgentObservationBundle | None = None
+    cleanup_confirmed: bool | None = Field(
+        default=None,
+        description=(
+            "True means no harness was launched, termination was confirmed, or an owned sandbox was stopped. "
+            "False means a final negative termination receipt. None is omitted when the adapter does not report "
+            "confirmation. Connection release can succeed with false; the activation remains ungradable."
+        ),
+    )
     resources_cookies: dict[str, str] | None = Field(
         default=None,
         description=(
@@ -155,6 +218,25 @@ class AgentCloseSessionResponse(BaseModel):
             "None or an empty jar leaves the Environment Server's jar from the Resources seed unchanged."
         ),
     )
+
+    trajectory: TrajectoryRecord | None = Field(
+        default=None,
+        description=(
+            "The harness's own account of the run's decisions: the turns it took and the model calls behind "
+            "each. Without it rollout collection rebuilds turns from every captured model call, so helper calls "
+            "(context recovery, summarization) count as decisions and the step counts are lost. Cumulative "
+            "across a continuation session's activations. Omitted when not reported."
+        ),
+    )
+
+    # Keep the model schema; a serializer return annotation would replace it.
+    @model_serializer(mode="wrap")
+    def _serialize_optional_metadata(self, handler: SerializerFunctionWrapHandler):
+        result = handler(self)
+        for key in ("cleanup_confirmed", "trajectory"):
+            if getattr(self, key) is None:
+                result.pop(key, None)
+        return result
 
 
 @dataclass(frozen=True)
@@ -196,7 +278,17 @@ class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
 
 
 class BaseResponsesAPIAgent(BaseServer):
+    """An agent server: the harness Gym runs against the model for each task.
+
+    ``calls_model_from_sandbox``: declare ``True`` on the class the entrypoint runs when the harness calls the
+    model server from inside the task sandbox, where the loopback address is the container itself. A Harbor run
+    (``gym eval run <target> --agent <name>``) reads that literal from the entrypoint source, as Gym reads
+    ``ray_enabled``, and advertises a reachable host (``use_absolute_ip``) by default for such a harness. It is
+    not read through inheritance: each such class declares it itself.
+    """
+
     config: BaseResponsesAPIAgentConfig
+    calls_model_from_sandbox: ClassVar[bool] = False
 
 
 @dataclass
@@ -223,6 +315,61 @@ class _AgentSessionRecord:
     episode_id: EpisodeId | None = None
     close_response: AgentCloseSessionResponse | None = None
     expires_at: float = float("inf")
+    activations: OrderedOperationLedger[NeMoGymResponse] = field(default_factory=OrderedOperationLedger)
+    close_task: asyncio.Task[AgentCloseSessionResponse] | None = None
+
+
+# Sandbox providers whose processes share the host network namespace, so a loopback model URL still resolves
+# to the host. Docker only does so when the daemon runs on the host and the container uses host networking.
+_HOST_NETWORK_SANDBOX_PROVIDERS = frozenset({"local"})
+_LOCAL_DOCKER_SANDBOX_PROVIDERS = frozenset({"docker"})
+
+
+def is_loopback_host(url: str) -> bool:
+    """Whether ``url`` points at the caller's own loopback interface (127.0.0.0/8, ::1, localhost)."""
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if host.lower() == "localhost" or host.lower().endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def assert_model_url_reachable_from_sandbox(url: str, *, provider_name: str | None) -> None:
+    """Refuse a model URL that a sandboxed agent could not reach.
+
+    Agents that run inside a sandbox (Hermes, mini-SWE) hand the Model Server URL to code in the
+    container. Inside a container on a remote provider (OpenSandbox, E2B, Daytona, ...), a loopback
+    host is the container itself, so every model call fails and the episode silently scores 0.
+
+    Raises:
+        ValueError: when ``url`` is loopback and ``provider_name`` is not a host-network or local
+            Docker provider. Local Docker only logs a warning: loopback works there only when the
+            daemon shares the host network.
+    """
+    if not is_loopback_host(url):
+        return
+    if provider_name in _HOST_NETWORK_SANDBOX_PROVIDERS:
+        return
+    if provider_name in _LOCAL_DOCKER_SANDBOX_PROVIDERS:
+        LOG.warning(
+            "Model Server URL %s is a loopback address; a %s sandbox reaches it only when the container shares "
+            "the host network. Set ++use_absolute_ip=true or configure a reachable model URL otherwise.",
+            url,
+            provider_name,
+        )
+        return
+    raise ValueError(
+        f"Model Server URL {url} is a loopback address, which the {provider_name or 'remote'} sandbox cannot "
+        "reach: inside the container, 127.0.0.1 is the container itself. Set ++use_absolute_ip=true so the "
+        "agent advertises the host's network address, or configure a reachable model URL."
+    )
 
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
@@ -421,7 +568,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             if record.state is None or record.close_response is not None:
                 return
             if type(self)._close_agent_session_state is not SimpleResponsesAPIAgent._close_agent_session_state:
-                await self._close_agent_session_state(record.state)
+                if record.state.request.continuation is not None:
+                    record.closing = True
+                    await self._close_continuation_session(record)
+                else:
+                    await self._close_agent_session_state(record.state)
             record.state = None
 
     def effective_tool_accesses(self, request: AgentSeedSessionRequest) -> list[ToolAccess]:
@@ -477,6 +628,13 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if self._restart_only is not None and response is not None:
             # This agent cannot capture the session, so the episode that seeds it starts over after a crash.
             response.headers[CHECKPOINT_RESTART_HEADER] = "1"
+        capabilities = self._agent_continuation_capabilities() if body.continuation is not None else None
+        if body.continuation is not None:
+            if capabilities is None or capabilities.mode != body.continuation.mode:
+                raise HTTPException(422, "Agent does not support the required multi-turn continuation mode")
+            missing = set(body.continuation.observations) - set(capabilities.observations)
+            if missing:
+                raise HTTPException(422, f"Agent lacks required continuation observations: {sorted(missing)}")
         current = self._agent_session_id_from_request(request)
         if current is not None and current != body.agent_session_id:
             raise HTTPException(409, "agent_session_id does not match the session cookie")
@@ -515,7 +673,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             elif record.state.request != body:
                 raise HTTPException(409, "agent_session_id is already bound to another seed request")
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
-            return AgentSeedSessionResponse(agent_session_id=body.agent_session_id)
+            return AgentSeedSessionResponse(
+                agent_session_id=body.agent_session_id,
+                capabilities=capabilities,
+                supports_task_tool_context=self.supports_task_tool_context(),
+            )
 
     async def close_agent_session(
         self,
@@ -524,7 +686,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     ) -> AgentCloseSessionResponse:
         """Retain successful close responses for a bounded retry window, including observations.
 
-        Failed cleanup keeps state for retry. Closing an unknown ID prevents a delayed seed
+        Failed release keeps state for retry. Closing an unknown ID prevents a delayed seed
         within the same window. No timer cancels active sessions: the episode owner and sandbox
         provider retain responsibility for normal and crash cleanup.
         """
@@ -575,19 +737,33 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if participant is not None and not await participant.close_session(agent_session_id):
             raise StaleAttemptError(f"agent session {agent_session_id!r} was retired while it closed")
         self._require_current_session(agent_session_id, record)
-        result = await self._close_agent_session_state(record.state)
+        if record.state.request.continuation is None:
+            result = await self._close_agent_session_state(record.state)
+        else:
+            result = await self._close_continuation_session(record)
         self._require_current_session(agent_session_id, record)
         if self._restart_only is not None and record.episode_id is not None:
             self._restart_only.close_session(agent_session_id, record.episode_id)
         return result
+
+    async def _close_continuation_session(self, record: _AgentSessionRecord) -> AgentCloseSessionResponse:
+        if record.close_task is None or (
+            record.close_task.done() and (record.close_task.cancelled() or record.close_task.exception() is not None)
+        ):
+            record.close_task = asyncio.create_task(self._close_agent_session_record(record))
+            record.close_task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        return await asyncio.shield(record.close_task)
 
     def _require_current_session(self, agent_session_id: str, record: _AgentSessionRecord) -> None:
         if self._session_records.get(agent_session_id) is not record:
             raise StaleAttemptError(f"agent session {agent_session_id!r} was retired while it closed")
 
     def _activation_index(self, request: Request) -> Optional[int]:
-        """The index the caller sent for this activation, with checkpointing; ``None`` when it sent none."""
-        if self._checkpoint_participant is None:
+        """Read the existing 1-based header for checkpointed or multi-turn continuation sessions."""
+        session_id = self._agent_session_id_from_request(request)
+        state = self._session_state(session_id) if session_id is not None else None
+        continuation = state is not None and state.request.continuation is not None
+        if self._checkpoint_participant is None and not continuation:
             return None
         raw = request.headers.get(AGENT_ACTIVATION_HEADER)
         if raw is None:
@@ -615,6 +791,75 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if record is not None and record.close_response is None:
             self._session_records.pop(agent_session_id, None)
             self._release_agent_session_claim(agent_session_id)
+
+    def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities | None:
+        """Opt into multi-turn continuation; existing one-activation adapters stay unchanged."""
+        return None
+
+    async def activate_agent_session(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> NeMoGymResponse:
+        """Run or replay one header-indexed delta in a seeded harness session."""
+        session_id = self._agent_session_id_from_request(request)
+        if session_id is None:
+            raise HTTPException(409, "Activation requires the seeded agent session cookie")
+        async with self._locked_agent_session(session_id) as record:
+            state = self._require_agent_session(session_id)
+            if state.request.continuation is None:
+                raise HTTPException(422, "Session was not seeded for multi-turn continuation")
+            rollout_id = request.path_params.get("rollout_id")
+            if rollout_id is not None and rollout_id != state.request.episode_id.capture_key:
+                raise HTTPException(409, "Activation rollout does not match the seeded session")
+            try:
+                index = self._activation_index(request)
+            except ActivationOutOfOrderError as error:
+                raise HTTPException(409, str(error)) from error
+            if index is None:
+                raise HTTPException(422, f"Multi-turn continuation requires {AGENT_ACTIVATION_HEADER}")
+            params = body.model_copy(deep=True)
+            # Reject malformed inputs before binding an activation index, including on retries.
+            self._validate_agent_activation(state, params)
+
+        try:
+            return await record.activations.execute(
+                index=index,
+                request=params,
+                operation=lambda: self._activate_agent_session_state(state, params, activation_id=index),
+            )
+        except ActivationConflictError as error:
+            raise HTTPException(409, str(error)) from error
+
+    def _validate_agent_activation(
+        self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> None:
+        """Validate a delta without mutating the session or consuming its index."""
+        raise NotImplementedError("This agent does not implement multi-turn continuation")
+
+    async def _activate_agent_session_state(
+        self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, *, activation_id: int
+    ) -> NeMoGymResponse:
+        """Run one input delta with the retained harness session and sandbox."""
+        raise NotImplementedError("This agent does not implement multi-turn continuation")
+
+    def _continuation_close_timeout(self) -> float:
+        """Return the adapter's configured bound for stopping an active continuation."""
+        raise NotImplementedError("This agent does not implement multi-turn continuation")
+
+    async def _close_agent_session_record(self, record: _AgentSessionRecord) -> AgentCloseSessionResponse:
+        await record.activations.close(timeout=self._continuation_close_timeout())
+        assert record.state is not None
+        # The adapter may release a borrowed connection after a final negative
+        # termination receipt. Preserve that receipt; release errors still raise.
+        return await self._close_agent_session_state(record.state)
+
+    def supports_task_tool_context(self) -> bool:
+        """Whether this harness uses the task's own tool declarations.
+
+        Harbor tasks declare ``[[environment.mcp_servers]]`` and ``skills_dir``. A harness that drives them
+        from inside the sandbox answers True, and the seed response carries the answer to the environment
+        server, which refuses such a task to a harness that would run it without its tools.
+        """
+        return False
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
         """Validate grants and initialize harness state.

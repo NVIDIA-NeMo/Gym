@@ -34,6 +34,8 @@ gym dataset rm                # delete a dataset from GitLab
 gym dataset migrate           # move a dataset from GitLab to HF
 gym dataset render            # generate a dataset preview (materialize prompts)
 gym dataset collate           # validate and collate a dataset
+gym dataset init <name>       # scaffold a Harbor-format dataset (dataset.toml plus one task)
+gym dataset validate <target> # run each Harbor task's reference solution through its verifier
 
 # Environments
 gym env init                  # scaffold a resources server, environment, or benchmark
@@ -61,6 +63,7 @@ gym eval compare              # compare a baseline eval run against a candidate 
 
 # Contributor helpers
 gym dev test                  # run NeMo Gym's unit tests
+gym dev compare OLD NEW       # per-task parity report between two rollout files (migration aid)
 ```
 
 ## Common Options
@@ -335,6 +338,47 @@ Commands for preparing, previewing, and managing datasets. By default dataset tr
 <Note>
 HuggingFace commands require an `HF_TOKEN` environment variable (or `huggingface-cli login`). GitLab commands authenticate via `mlflow_tracking_token` in your YAML config (or the `MLFLOW_TRACKING_TOKEN` environment variable). See [Downloading from HuggingFace](/data/download-huggingface) for HF authentication details.
 </Note>
+
+### `gym dataset init`
+
+Scaffold a dataset in the Harbor task format: `dataset.toml` with a `[gym]` table and one task with an
+instruction, a verifier and a reference solution. Refer to [Harbor Tasks](/main/data/harbor-tasks).
+
+| Option | Description |
+| --- | --- |
+| `NAME` | Dataset name as `org/name`; a bare name is written as `local/<name>`. The folder is the name without the org and must not exist yet. |
+| `--root DIR` | Where to create the folder (default: current directory). |
+| `--image IMAGE` | The task's prebuilt image (default: `python:3.12-slim`). |
+
+```bash
+gym dataset init my-dataset --image ubuntu:24.04   # dataset.toml names it local/my-dataset
+```
+
+### `gym dataset validate`
+
+Run each Harbor task's reference solution (`solution/solve.sh`) through its verifier with the oracle harness
+and print one line per task with its reward, or why there is none. `gym eval run TARGET --agent harbor_oracle`
+is the same run. Results go under `results/harbor/validation/<taskset>/` (`rollouts.jsonl` unless `--output`
+names another file, the generated run config and `skipped.json`), apart from any evaluation of the same target,
+so an evaluation never resumes from the oracle's rewards. The exit code is 0 when every selected solution scored
+1, and 1 when a solution scored below 1, was masked or failed, when a task folder did not load, or when no
+selected task had a solution to run. Refer to [Harbor Tasks](/main/data/harbor-tasks).
+
+| Option | Description |
+| --- | --- |
+| `TARGET` | A task folder, a folder of task folders, or a `harbor:<dataset>[@<version>]` hub reference. |
+| `--sandbox PROVIDER` | Sandbox provider for the task containers (for example `opensandbox`, `docker`). |
+| `--config PATH` | Config file to load. Repeatable. |
+| `--only-tasks PATTERNS` | Comma-separated task names or globs; only matching tasks are validated. |
+| `--exclude-tasks PATTERNS` | Comma-separated task names or globs to leave out. |
+| `--limit` | Maximum number of tasks to validate. |
+| `--concurrency` | Maximum number of concurrent tasks. |
+| `--output`, `-o` | Output rollouts JSONL file. |
+
+```bash
+gym dataset validate my-dataset --sandbox opensandbox
+gym dataset validate harbor:terminal-bench/terminal-bench@4.0.0 --sandbox opensandbox --only-tasks 'hello-*'
+```
 
 ### `gym dataset upload`
 
@@ -755,6 +799,8 @@ gym eval plan --schema
 
 Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers. Pass `--no-serve` to collect against servers you already started with `gym env start`.
 
+In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor task format: a task folder, a folder of task folders, or a `harbor:<dataset>[@<version>]` hub reference. Refer to [Harbor Tasks](/main/data/harbor-tasks) for the layout and the `--sandbox`, `--only-tasks` and `--exclude-tasks` options that apply to such a target.
+
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
@@ -1111,6 +1157,16 @@ Run NeMo Gym's core unit tests with coverage reporting.
 ```bash
 gym dev test
 ```
+
+### `gym dev compare`
+
+Compare two rollout JSONL files task by task. A temporary migration aid: before an old resources server is deleted in favour of its Harbor-path replacement, run both on the same tasks and use this report as the gate.
+
+```bash
+gym dev compare old/rollouts.jsonl new/rollouts.jsonl --logs-root environment_servers/harbor --json compare.json
+```
+
+Rows are joined by task id (`_ng_task_id` on the Harbor path; `task_name` or a `verifier_metadata` id on legacy servers; override with `--key FIELD`). When both sides span several tasksets, tasks are keyed and listed as `taskset/task_id`. When only one side does, the other side keeps its plain task ids and each is matched to the task id that appears in exactly one taskset (or in that side's own taskset); an id that recurs across tasksets is reported as ambiguous and listed as missing. A masked-failures sidecar (`<name>_failures.jsonl`) is folded back in, keeping only the last record per rollout and none for a rollout that was later scored; a record that names no task is listed as masked under `unknown (<side>) #<n>`. Each task is classified as identical, flipped (split into old-win and new-win), masked, or missing (only one side has it). A task is masked when either side has `mask_sample` true, a `reward` that is absent or null, or a NaN or infinite reward (reported with the raw value). A `failure_kind` on a row with `mask_sample` false (such as the Harbor server's scored zero for a verifier timeout) does not mask: the reward counts, and a flip it causes is listed as a flip with the `failure_kind` printed beside the side that carries it. A flip where one side also reports an agent error is listed separately as a rerun candidate. A string or boolean `reward` is an input error that names the file, line and task. When a side has several rows for a task, the mean reward is compared. For every flip the report prints both rewards and the last `--tail` lines (default 15) of the losing side's verifier output, read from `verifier_logs_dir` (resolved against the losing side's own file directory, then the current directory, then `--logs-root`) or from the row's embedded `test_output`; a log that cannot be read is reported as unavailable with the reason. `gym --json dev compare OLD NEW` prints the JSON summary on stdout instead of the report (the same object `--json PATH` writes). The exit code is 0 for a report and 1 when an input cannot be read or the `--json PATH` file cannot be written.
 
 ---
 
