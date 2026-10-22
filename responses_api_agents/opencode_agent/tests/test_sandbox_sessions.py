@@ -1649,7 +1649,7 @@ def test_provider_report_does_not_hide_other_execution_outcomes(change):
     ],
 )
 async def test_statusless_transient_provider_failure_stays_retryable(setup, message, code):
-    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
+    from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
 
     agent, sandbox = setup
     export = json.loads(sandbox.events)
@@ -1682,7 +1682,7 @@ def test_statusless_error_without_native_retry_flag_remains_unknown(setup, retry
 
 @pytest.mark.parametrize("cleanup_error", [None, "cleanup failed"])
 async def test_context_limit_preserves_partial_work_without_hiding_cleanup_failure(setup, tmp_path, cleanup_error):
-    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
+    from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
 
     agent, sandbox = setup
     export = json.loads(sandbox.events)

@@ -37,6 +37,13 @@ its observations and any usable response attached. A task that declares `[[envir
 its seed response: running it without its tools would score a silent zero. Verification never runs before the
 harness has let go.
 
+A failed agent response that carries `ng_agent_outcome` goes through `agent_outcome_policy`, as on
+`single_agent_turn`, before `test.sh` runs: by default an `unknown` or `model_transport_error` cause is a
+retryable `stage: agent` failure, `agent_limit` and `agent_invalid_output` are verified, and malformed metadata
+fails without retry. Responses without that metadata are verified as before. See
+[Add or update a harness](https://docs.nvidia.com/nemo/gym/latest/agent-server/add-or-update-a-harness) for the
+policy table and its overrides.
+
 When `test.sh` ran, the sample counts. A missing or invalid reward file scores 0 with a `failure_kind`.
 Only a required infrastructure failure (sandbox lost, reward transfer failed) sets `mask_sample`.
 Diagnostic logs are best effort: unsafe archive entries are skipped securely, and a diagnostic
