@@ -27,6 +27,11 @@ def comparison_result(score_1=4.0, score_2=2.0, ranking=1.0):
     return (*scores, *scores, -1.0, -1.0, -1.0, 0.0, 0.0)
 
 
+def member_0_wins(*_args, pair_idx, **_kwargs):
+    """Member 0 scores higher in either order, so the members finish with different rewards and a mix-up shows."""
+    return comparison_result(5.0, 1.0) if pair_idx[0] == 0 else comparison_result(1.0, 5.0)
+
+
 def member(index, *, group="group", attempt=0, answer=None):
     return genrm.GenRMCompareVerifyRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "2+2?"}]),
@@ -106,8 +111,9 @@ async def restore(config, records, *, judge=None):
 
 
 async def test_a_member_that_has_not_recorded_its_reward_gets_it_back_after_a_restore(config):
-    server, participant = seeded(config)
+    server, participant = seeded(config, judge=AsyncMock(side_effect=member_0_wins))
     outcomes = await finish_cohort(server)
+    assert outcomes[0].reward != outcomes[1].reward
     records = await participant.export(None)
     assert [record.session_id for record in records] == [SESSIONS[1]]
     await server.aclose()
@@ -121,22 +127,30 @@ async def test_a_member_that_has_not_recorded_its_reward_gets_it_back_after_a_re
     await restored.aclose()
 
 
-async def test_a_restored_cohort_survives_another_checkpoint_before_its_members_replay(config):
-    server, participant = seeded(config)
-    outcomes = await finish_cohort(server)
+@pytest.mark.parametrize("recorded_before_checkpoint", [[0], []], ids=["member_1_open", "both_open"])
+async def test_a_restored_cohort_survives_another_checkpoint_before_its_members_replay(
+    config, recorded_before_checkpoint
+):
+    """Each member gets back its own outcome, not a sibling's, after two checkpoint-crash-restore cycles."""
+    server, participant = seeded(config, judge=AsyncMock(side_effect=member_0_wins))
+    outcomes = await asyncio.gather(*(verify_as(server, SESSIONS[index], member(index)) for index in range(2)))
+    assert outcomes[0].reward != outcomes[1].reward
+    for index in recorded_before_checkpoint:
+        participant.ended(SESSIONS[index])
     checkpoint_a = await participant.export(None)
     await server.aclose()
 
     restored, restored_participant = await restore(config, checkpoint_a)
-    # Checkpoint B lands before member 1 replays its verification.
+    # Checkpoint B lands before the open members replay their verification.
     checkpoint_b = await restored_participant.export(None)
     assert [record.state for record in checkpoint_b] == [record.state for record in checkpoint_a]
     await restored.aclose()
 
     again, _ = await restore(config, checkpoint_b)
-    replayed = await asyncio.wait_for(verify_as(again, SESSIONS[1], member(1)), timeout=0.5)
-
-    assert replayed.reward == outcomes[1].reward
+    open_members = [index for index in range(2) if index not in recorded_before_checkpoint]
+    for index in open_members:
+        replayed = await asyncio.wait_for(verify_as(again, SESSIONS[index], member(index)), timeout=0.5)
+        assert replayed.reward == outcomes[index].reward
     again._run_single_comparison.assert_not_awaited()
     await again.aclose()
 
@@ -338,6 +352,9 @@ async def test_member_records_end_with_their_pruned_cohort(config):
     server, participant = seeded(config)
     await asyncio.gather(*(verify_as(server, SESSIONS[index], member(index)) for index in range(2)))
     assert set(server._session_members) == set(SESSIONS)
+    # Both members recorded their outcomes and closed their sessions, so nothing needs the cohort any more.
+    for session_id in SESSIONS:
+        participant.ended(session_id)
 
     # The next cohort's verification prunes the expired one, and its member records go with it.
     await asyncio.sleep(0.02)
@@ -347,6 +364,61 @@ async def test_member_records_end_with_their_pruned_cohort(config):
     pending.cancel()
     await asyncio.gather(pending, return_exceptions=True)
     await server.aclose()
+
+
+@pytest.mark.parametrize("judge_fails", [False, True], ids=["reward", "judge_failure"])
+@pytest.mark.parametrize("pruned_by", ["count", "age"])
+async def test_pruning_keeps_an_outcome_an_open_session_still_needs(config, pruned_by, judge_fails):
+    """A member that has not recorded its outcome replays after a restore; an evicted cohort would leave it waiting
+    for a sibling that already finished, until the collection timeout."""
+    limit = {"max_terminal_cohorts": 1} if pruned_by == "count" else {"cohort_result_ttl_s": 0.01}
+    config = config.model_copy(update=limit)
+    judge = AsyncMock(side_effect=JudgeError("judge is down") if judge_fails else member_0_wins)
+    groups = ["a", "b"]
+    server, participant = participant_server(config, judge=judge)
+    for group in groups:
+        for index in range(2):
+            participant.seeded(f"{group}{index}", EpisodeId(rollout_id=f"{group}_g{index}"))
+    outcomes = {}
+    for group in groups:
+        results = await asyncio.gather(
+            *(verify_as(server, f"{group}{index}", member(index, group=group)) for index in range(2)),
+            return_exceptions=True,
+        )
+        outcomes[group] = results[1]
+        # Member 0 recorded its outcome; member 1 has not.
+        participant.ended(f"{group}0")
+        if pruned_by == "age":
+            await asyncio.sleep(0.02)
+    records = await participant.export(None)
+    assert sorted(record.session_id for record in records) == ["a1", "b1"]
+    assert all(record.state for record in records)
+    await server.aclose()
+
+    restored, restored_participant = await restore(config, records)
+    if pruned_by == "age":
+        await asyncio.sleep(0.02)
+    for group in groups:
+        # Each replay prunes first; the other group's cohort, and its own, are past the limit.
+        replay = asyncio.wait_for(verify_as(restored, f"{group}1", member(1, group=group)), timeout=0.5)
+        if judge_fails:
+            with pytest.raises(JudgeError, match="judge is down"):
+                await replay
+        else:
+            assert (await replay).reward == outcomes[group].reward
+    restored._run_single_comparison.assert_not_awaited()
+    # A kept cohort keeps its group's attempt watermark, so the group still refuses older attempts.
+    restored._prune_terminal_cohorts()
+    assert set(restored._latest_group_attempts) == set(groups)
+
+    # Once the members close their sessions, the cohorts are ordinary tombstones again.
+    for group in groups:
+        restored_participant.ended(f"{group}1")
+    if pruned_by == "age":
+        await asyncio.sleep(0.02)
+    restored._prune_terminal_cohorts()
+    assert len(restored._verify_cohorts) == (1 if pruned_by == "count" else 0)
+    await restored.aclose()
 
 
 @pytest.mark.parametrize("judge_fails", [False, True], ids=["reward", "judge_failure"])
@@ -386,7 +458,7 @@ def http_server(config, *, judge_fails: bool):
     if judge_fails:
         server._run_single_comparison = AsyncMock(side_effect=JudgeError("judge is down"))
     else:
-        server._run_single_comparison = AsyncMock(return_value=comparison_result())
+        server._run_single_comparison = AsyncMock(side_effect=member_0_wins)
     return server, httpx.ASGITransport(app=server.setup_webserver())
 
 
@@ -445,6 +517,7 @@ async def test_a_replay_through_the_checkpoint_control_plane_gets_the_recorded_o
             ),
         )
         recorded = outcome(replies[1])
+        assert recorded != outcome(replies[0]) or judge_fails
         directory = await commit(clients[2], "save-a")
         cookies = dict(clients[1].cookies)
     await server.aclose()
