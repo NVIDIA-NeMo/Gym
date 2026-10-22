@@ -54,6 +54,7 @@ from nemo_gym.agent_activation_types import (
     AgentContinuationCapabilities,
     AgentContinuationRequirements,
 )
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.agent_utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -1010,4 +1011,22 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             compute_metrics_fn=self.compute_metrics,
             get_key_metrics_fn=self.get_key_metrics,
             compute_repeat_metrics_fn=self.compute_repeat_metrics,
+        )
+
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Override to classify native failures; the environment decides grading and retry eligibility."""
+        return AgentOutcome(failure_kind="unknown")
+
+    def report_outcome(self, response: NeMoGymResponse, native_result: Mapping[str, Any]) -> NeMoGymResponse:
+        """Attach validated evidence through the existing string-valued response metadata."""
+        if response.status != "failed":
+            return response
+        outcome = AgentOutcome.model_validate(self.classify_outcome(native_result))
+        return response.model_copy(
+            update={
+                "metadata": {
+                    **(response.metadata or {}),
+                    AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json(exclude_none=True),
+                }
+            }
         )

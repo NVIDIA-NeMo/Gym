@@ -832,6 +832,7 @@ In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor ta
 | `--no-health-check` | Skip the automatic post-run health check. |
 | `--health-check-workers` | Number of rollout-health worker processes. Defaults to the smaller of the CPU count and 8. |
 | `--health-check-ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
+| `--health-max-not-final-failure-fraction`, `--health-max-final-failure-fraction` | Share of expected rollouts at which non-final or final failures make the run unhealthy. Unset by default: no limit. |
 
 ```bash
 # End-to-end: spin up servers, then collect rollouts for a benchmark
@@ -939,6 +940,7 @@ Merge sharded rollout results into a single rollouts file with aggregate metrics
 | `--no-health-check` | Skip the automatic post-aggregation health check. |
 | `--health-check-workers` | Number of rollout-health worker processes. Defaults to the smaller of the CPU count and 8. |
 | `--health-check-ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
+| `--health-max-not-final-failure-fraction`, `--health-max-final-failure-fraction` | Share of expected rollouts at which non-final or final failures make the run unhealthy. Unset by default: no limit. |
 
 ```bash
 gym eval aggregate \
@@ -990,6 +992,7 @@ Verify rollout quality for an existing run directory. The command reads `<run-di
 | `--rollouts-file PATH` | Rollout JSONL path. Relative paths resolve under `RUN_DIR`; absolute paths are used as written. Defaults to `rollouts.jsonl`. |
 | `--workers` | Number of worker processes. Defaults to the smaller of the CPU count and 8. |
 | `--ignore-checks`, `--ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
+| `--health-max-not-final-failure-fraction`, `--health-max-final-failure-fraction` | Override the run's failure limits. Without either flag, the limits recorded in the run's `quality_summary.json` judge it again, so a recheck of the same artifacts keeps its verdict. Each flag overrides only its own limit, with a fraction in [0, 1] or `none` (any case) to remove it; a limit whose flag is not given keeps its recorded value. The summary records which limits were overridden, and a removed limit stays removed on later rechecks. |
 | `--json` | Output health-check results as JSON. |
 
 ```bash

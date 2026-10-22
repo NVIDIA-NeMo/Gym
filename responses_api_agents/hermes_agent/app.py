@@ -31,6 +31,7 @@ from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 from toolsets import TOOLSETS  # pyright: ignore[reportMissingImports]
 
+from nemo_gym.agent_outcome import AgentOutcome
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -45,6 +46,13 @@ from nemo_gym.base_responses_api_agent import (
     assert_model_url_reachable_from_sandbox,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import (
+    AGENT_INVALID_OUTPUT,
+    AGENT_LIMIT,
+    MODEL_CONTEXT_LIMIT,
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
+)
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -81,12 +89,30 @@ from responses_api_agents.hermes_agent.observability import HermesAgentObserver,
 from responses_api_agents.hermes_agent.sandbox import DEFAULT_UV_CACHE_DIR, HarnessProcessInfo, HermesSandboxSession
 
 
-# HTTP statuses a model endpoint returns for what the request asked, after Hermes's own retries: the
-# conversation was refused (malformed or too long for the model), so the episode is a graded zero, not an
-# infrastructure failure. Auth, routing, rate-limit and server errors stay provider failures and are masked.
+# Legacy /run grades these request rejections and masks other provider failures.
+# Agent sessions report the cause; the Environment Server selects verification, retry or failure.
 MODEL_REJECTION_STATUSES = frozenset({400, 413, 422})
-_HTTP_STATUS = re.compile(r"\bHTTP (\d{3})\b")
+_HTTP_STATUS = re.compile(r"\b(?:HTTP |Error code: )([45]\d{2})\b")
 _TRUNCATION_ERROR = "First response truncated due to output length limit"
+
+
+def _is_limit_result(result: Mapping[str, Any]) -> bool:
+    """Recognize explicit Hermes limit results; tested on Hermes 26bb847a.
+
+    `partial` alone also covers invalid model output, so require a native limit reason.
+    """
+    error = str(result.get("error") or "")
+    return (
+        result.get("stop_reason") in {"wall_time", "max_iterations"}
+        or error == _TRUNCATION_ERROR
+        or (
+            bool(result.get("partial"))
+            and (
+                error == "Response truncated due to output length limit"
+                or error.startswith("Request payload too large")
+            )
+        )
+    )
 
 
 def _model_rejection_status(error: object) -> int | None:
@@ -301,6 +327,24 @@ class HermesAgentVerifyResponse(BaseVerifyResponse):
 
 
 class HermesAgent(SimpleResponsesAPIAgent):
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Read Hermes 26bb847a native result flags and API errors; tested on that pin."""
+        error = str(native_result.get("error") or "")
+        if native_result.get("partial") and error.startswith("Context length exceeded"):
+            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
+        if _is_limit_result(native_result):
+            return AgentOutcome(failure_kind=AGENT_LIMIT)
+        if native_result.get("failed"):
+            match = _HTTP_STATUS.search(error)
+            if match and 400 <= int(match[1]) <= 599:
+                return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
+            if error.startswith(("Connection error", "All connection attempts failed", "Request timed out")):
+                return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+            return AgentOutcome(failure_kind="unknown")
+        if native_result.get("partial"):
+            return AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)
+        return AgentOutcome(failure_kind="unknown")
+
     config: HermesAgentConfig
     # The harness runs inside the task sandbox and calls the model server from there.
     calls_model_from_sandbox: ClassVar[bool] = True
@@ -514,6 +558,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         *,
         runtime_info: HarnessProcessInfo | None,
     ) -> AgentObservationBundle:
+        context_limited = self.classify_outcome(result).failure_kind == MODEL_CONTEXT_LIMIT
         gaps = [] if runtime_info is not None else [ObservationGap(code="runtime_info_unavailable")]
         if isinstance(raw_observations, dict):
             try:
@@ -521,12 +566,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 for raw_invocation in raw_observations.get("invocations") or []:
                     response_ids = raw_invocation.get("model_response_ids") or []
                     invocation_id = str(raw_invocation["invocation_id"])
+                    root_context_limit = context_limited and raw_invocation.get("parent_invocation_id") is None
                     records.append(
                         AgentInvocation(
                             invocation_id=invocation_id,
                             parent_invocation_id=raw_invocation.get("parent_invocation_id"),
-                            status=raw_invocation.get("status", "unknown"),
-                            stop_reason=raw_invocation.get("stop_reason"),
+                            status="incomplete" if root_context_limit else raw_invocation.get("status", "unknown"),
+                            stop_reason="context_limit" if root_context_limit else raw_invocation.get("stop_reason"),
                             # Every call goes to the configured Model Server, so a response ID identifies the call.
                             model_calls=[
                                 ModelCallRef(model_ref=self.config.model_server, response_id=response_id)
@@ -573,8 +619,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         records: list[AgentInvocation | ToolCallObservation] = [
             AgentInvocation(
                 invocation_id="root",
-                status=invocation_status,
-                stop_reason=result.get("stop_reason"),
+                status="incomplete" if context_limited else invocation_status,
+                stop_reason="context_limit" if context_limited else result.get("stop_reason"),
                 conversation=normalize_hermes_messages(messages),
             )
         ]
@@ -674,7 +720,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
             result=result,
             model_name=self._model_name(),
             n_input=len(params["history"]) + 1,
+            retain_provider_failure=True,
         )
+        response = self.report_outcome(response, result)
+        if self.classify_outcome(result).failure_kind == MODEL_CONTEXT_LIMIT:
+            response = response.model_copy(update={"status": "incomplete", "error": None})
         # Verifiers see Gym's MCP naming; the model's own names stay in the captured model calls.
         server_names = [access.name for access in mcp_accesses]
         for item in response.output:

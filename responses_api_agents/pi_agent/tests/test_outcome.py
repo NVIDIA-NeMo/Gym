@@ -60,7 +60,13 @@ assert.equal(records.length, count);
 
 @pytest.mark.parametrize(
     "status,message,context_overflow",
-    [(400, "This model's maximum context length is 262144 tokens.", True), (503, "Service unavailable", False)],
+    [
+        (400, "This model's maximum context length is 262144 tokens.", True),
+        (400, "Rejected request", False),
+        (401, "Invalid key", False),
+        (429, "Rate limit", False),
+        (503, "Service unavailable", False),
+    ],
 )
 @pytest.mark.parametrize("delayed", [False, True])
 def test_pinned_pi_classifies_model_server_http_error(
@@ -123,6 +129,8 @@ const result = await streamSimple(model, {messages: [{role: 'user', content: 'hi
   {apiKey: 'test', maxRetries: 0}).result();
 assert.equal(result.stopReason, 'error');
 assert.ok(result.errorMessage.includes(wire.message), result.errorMessage);
+assert.deepEqual(result.content, []);
+assert.equal(result.usage.input + result.usage.output, 0);
 assert.equal(isContextOverflow(result, model.contextWindow), wire.context_overflow);
 """
     result = subprocess.run(

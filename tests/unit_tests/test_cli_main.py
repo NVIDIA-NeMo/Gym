@@ -169,6 +169,14 @@ class TestEvalRunFlags:
                 ["--health-check-ignore", "model_call_missing_token_counts,model_call_zero_completion_tokens"],
                 '+health_check_ignored_checks=["model_call_missing_token_counts","model_call_zero_completion_tokens"]',
             ),
+            (
+                ["--health-max-not-final-failure-fraction", "0.05"],
+                "+health_check_max_not_final_failure_fraction=0.05",
+            ),
+            (
+                ["--health-max-final-failure-fraction", "0.01"],
+                "+health_check_max_final_failure_fraction=0.01",
+            ),
         ],
     )
     def test_flag_maps_to_single_override(self, monkeypatch: MonkeyPatch, flag_argv, expected_override) -> None:
