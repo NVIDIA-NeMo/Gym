@@ -34,7 +34,7 @@ from nemo_gym.reward_profile import (
     highest_k_metrics,
 )
 from resources_servers.bird_sql.eval_utils import execute_and_compare, execute_and_compare_spark
-from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
+from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql, ensure_bird_train
 
 
 logger = logging.getLogger(__name__)
@@ -86,6 +86,9 @@ class BirdSqlResourcesServerConfig(BaseResourcesServerConfig):
     name: str = "bird_sql"
     bird_sql_dir: str = "resources_servers/bird_sql/.bird_sql"
     dialect: Literal["sqlite", "spark"] = "sqlite"
+    # Which BIRD split's databases to verify against. ``train`` uses a different db_id set than dev, so pair it with
+    # its own ``spark_warehouse_dir`` when ``dialect`` is ``spark``.
+    split: Literal["dev", "train"] = "dev"
     spark_warehouse_dir: str = "resources_servers/bird_sql/.bird_sql/spark_warehouse"
     max_concurrency: int = 32
     sql_execution_timeout_s: float = 30.0
@@ -143,7 +146,11 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        self._dev_databases_dir: Path = ensure_bird_sql(self._resolve_dir(self.config.bird_sql_dir))
+        base_dir = self._resolve_dir(self.config.bird_sql_dir)
+        if self.config.split == "train":
+            self._databases_dir: Path = ensure_bird_train(base_dir) / "train_databases"
+        else:
+            self._databases_dir = ensure_bird_sql(base_dir)
         self._semaphore = asyncio.Semaphore(self.config.max_concurrency)
         self._spark_sessions: Dict[str, Any] = {}
         self._verified_count = 0
@@ -153,7 +160,7 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
             from resources_servers.bird_sql.setup_bird_spark import ensure_bird_spark
 
             self._spark_sessions = ensure_bird_spark(
-                self._dev_databases_dir, self._resolve_dir(self.config.spark_warehouse_dir)
+                self._databases_dir, self._resolve_dir(self.config.spark_warehouse_dir)
             )
 
     @staticmethod
@@ -164,7 +171,7 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
         return p
 
     def _db_path(self, db_id: str) -> Path:
-        return self._dev_databases_dir / db_id / f"{db_id}.sqlite"
+        return self._databases_dir / db_id / f"{db_id}.sqlite"
 
     async def verify(self, body: BirdSqlVerifyRequest) -> BirdSqlVerifyResponse:
         generated = body.response.output_text or ""

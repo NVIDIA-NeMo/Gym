@@ -41,3 +41,18 @@ def test_every_dialect_has_its_own_prompt_and_file_named_by_dialect():
         assert birdbench_prepare.output_fpath_for(dialect).name == f"birdbench_{dialect}_benchmark.jsonl"
         if dialect != "sqlite":
             assert (BENCHMARK_DIR / "prompts" / f"{dialect}.yaml").is_file()
+
+
+def test_default_prepare_script_args_are_dev_sqlite():
+    cfg, _ = _dataset()
+    assert (cfg["prepare_script_args"]["split"], cfg["prepare_script_args"]["dialect"]) == ("dev", "sqlite")
+
+
+def test_every_split_and_dialect_has_a_distinct_prepared_file():
+    paths = {
+        birdbench_prepare.output_fpath_for(dialect, split)
+        for split in birdbench_prepare.SPLITS
+        for dialect in birdbench_prepare.DIALECTS
+    }
+    assert len(paths) == len(birdbench_prepare.SPLITS) * len(birdbench_prepare.DIALECTS)
+    assert birdbench_prepare.output_fpath_for("spark", "train").name == "birdbench_train_spark.jsonl"

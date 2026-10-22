@@ -979,3 +979,22 @@ class TestExecuteAndCompareSpark:
         bad = await server.verify(_make_verify_request("```sql\nSELECT max(x) FROM t\n```", gt_sql=sqlite_gold))
         assert (good.reward, good.failure_reason) == (1.0, FailureCode.NONE)
         assert (bad.reward, bad.execution_match) == (0.0, False)
+
+
+def test_split_train_verifies_against_train_databases_dir(tmp_path, monkeypatch):
+    train_dir = tmp_path / "train"
+    monkeypatch.setattr(
+        "resources_servers.bird_sql.app.ensure_bird_sql",
+        lambda _path: pytest.fail("train split must not touch the dev downloader"),
+    )
+    monkeypatch.setattr("resources_servers.bird_sql.app.ensure_bird_train", lambda _path: train_dir)
+    config = BirdSqlResourcesServerConfig(
+        host="127.0.0.1", port=20099, entrypoint="", bird_sql_dir=str(tmp_path), split="train"
+    )
+    server = BirdSqlResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    assert server._db_path("db1") == train_dir / "train_databases" / "db1" / "db1.sqlite"
+
+
+def test_split_defaults_to_dev(server_with_mocked_dbs, tmp_path):
+    assert server_with_mocked_dbs.config.split == "dev"
+    assert server_with_mocked_dbs._db_path("db1") == tmp_path / "db1" / "db1.sqlite"
