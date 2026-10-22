@@ -276,6 +276,9 @@ when pytest skipped some tests, and a verifier without a usable report gets the 
 reward. `mean/partial_credit` is reported beside `mean/reward` and never replaces it. Partial
 credit is not comparable with leaderboard scores.
 
+A trial whose official evaluation did not complete, such as a verifier timeout, scores 0 for both
+`reward` and `partial_credit`, so the two means always share a denominator.
+
 ## Profile
 
 `terminal_bench_science/miniswe` runs mini-SWE 2.4.6 through

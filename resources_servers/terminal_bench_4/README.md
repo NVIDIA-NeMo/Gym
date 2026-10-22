@@ -120,8 +120,11 @@ and Compose still require OpenSandbox.
 
 `/verify` also reports `partial_credit`: the fraction of reported tests that passed
 (`num_tests_passed / num_tests_total`, so skipped tests count as not passed), never below the
-official reward. Without usable test counts it equals the official reward, and it is null when
-the official evaluation did not complete. `reward` stays the official binary grade.
+official reward. Without usable test counts it equals the official reward. `reward` stays the
+official binary grade. When the official evaluation did not complete, both are 0, so a mean over
+the same rows uses the same denominator for both. `evaluation_completed: false` and
+`infrastructure_error` mark those rows, which are left out of the default aggregates unless
+`count_failure_classes_as_zero` counts them.
 
 ## Non-root Compose services
 

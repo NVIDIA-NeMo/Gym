@@ -119,9 +119,9 @@ def _counts(passed, total, skipped=0):
         ({"rewards": {"reward": 1.0}}, 1.0),
         ({"rewards": {"reward": 0.0}}, 0.0),
         ({"rewards": {"reward": 0.0}, **_counts(0, 0)}, 0.0),
-        # No official reward: the evaluation did not complete.
-        ({"num_tests_passed": 2, "num_tests_total": 2}, None),
-        (None, None),
+        # No official reward: the evaluation did not complete, and like the reward it scores 0.
+        ({"num_tests_passed": 2, "num_tests_total": 2}, 0.0),
+        (None, 0.0),
     ],
 )
 def test_partial_credit_is_the_passed_fraction_floored_at_the_official_reward(

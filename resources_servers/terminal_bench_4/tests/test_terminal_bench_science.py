@@ -560,7 +560,7 @@ def counts(passed, total, skipped=0):
         ({"rewards": {"reward": 1}, **counts(4, 5, skipped=1)}, 1.0, 1.0, True),
         ({"rewards": {"reward": 1}}, 1.0, 1.0, True),
         ({"rewards": {"reward": 0}, **counts(0, 0)}, 0.0, 0.0, True),
-        (None, 0.0, None, False),
+        (None, 0.0, 0.0, False),
     ],
 )
 def test_partial_credit_is_reported_beside_the_binary_reward(

@@ -285,7 +285,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         rewards = verifier_result.get("rewards") or {}
         completed = "reward" in rewards
         counts = VerifierTestCounts.model_validate(verifier_result)
-        partial_credit = None
+        # Like the reward, 0 when the evaluation did not complete, so the two means share a denominator.
+        partial_credit = 0.0
         if completed:
             # Never below the official grade: a passing run with skipped tests keeps full
             # credit, and without usable test counts the official reward is the finest signal.
