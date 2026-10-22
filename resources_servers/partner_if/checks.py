@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Code-owned deterministic verifier registry. No executable dataset expressions.
 
-Generic checkers are built in. Task-specific checkers live in trusted modules that the
-host config names in `task_check_modules`; each exports `CHECKERS`, a mapping from
-verifier ID to `Checker`, which `register_modules` adds before any contract is graded.
+Generic checkers and the fixed output checks in `fixed_checks.py` are built in. Other
+task-specific checkers live in trusted modules that the host config names in
+`task_check_modules`; each exports `CHECKERS`, a mapping from verifier ID to `Checker`,
+which `register_modules` adds before any contract is graded.
 """
 
 import importlib
@@ -14,6 +15,7 @@ from typing import Callable
 
 from pydantic import model_validator
 
+from resources_servers.partner_if import fixed_checks
 from resources_servers.partner_if.evidence import EvidenceBundle
 from resources_servers.partner_if.grading_contract import StrictModel, Text, VerifierSpec
 
@@ -78,6 +80,14 @@ REGISTRY = {
     "llm_judge_v1": Checker(LLMParams, None),
     "text_contains_v1": Checker(TextParams, text_contains),
     "text_no_uuid_v1": fixed(text_no_uuid),
+    "scratchpad_comments_v1": fixed(fixed_checks.scratchpad_comments),
+    "review_sections_v1": fixed(fixed_checks.review_sections),
+    "max_100_words_v1": fixed(fixed_checks.max_100_words),
+    "short_headings_v1": fixed(fixed_checks.short_headings),
+    "headed_section_v1": fixed(fixed_checks.headed_section),
+    "max_five_sections_v1": fixed(fixed_checks.max_five_sections),
+    "no_plan_tool_v1": fixed(fixed_checks.no_plan_tool),
+    "made_project_edits_v1": fixed(fixed_checks.made_project_edits),
 }
 
 

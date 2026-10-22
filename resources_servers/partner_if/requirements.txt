@@ -1,1 +1,2 @@
 -e nemo-gym[dev,sandbox] @ ../../
+markdown-it-py>=3,<4

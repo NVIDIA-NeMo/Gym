@@ -27,6 +27,22 @@ needs; omit it to require all), `text_contains_v1` (`source`: `answer` or
 `artifact:<name>`; `literal`) and `text_no_uuid_v1` (fails if the answer or any assistant
 message contains a UUID; tool calls, tool results and context are not checked).
 
+The fixed output checks in `fixed_checks.py` take no parameters. They parse the answer as
+CommonMark with `markdown-it-py`, so code blocks, code spans and quotes don't count as the
+answer's own structure:
+
+- `scratchpad_comments_v1`: at least one scratchpad wrapped exactly as
+  `<!-- [scratchpad_start] … [scratchpad_end] -->`, paired, not nested and not in code.
+- `review_sections_v1`: the top-level H2 sections "Automated change summary", "Changes to
+  exported or public declarations" and "Dependency manifest review", in that order.
+- `max_100_words_v1`: at most 100 words; citation markers such as `[web:1]` don't count.
+- `short_headings_v1`: every heading has at most 5 words, counted the same way.
+- `headed_section_v1`: at least one H2 or H3 heading with content under it.
+- `max_five_sections_v1`: at most 5 top-level sections, counting an introduction.
+- `no_plan_tool_v1`: no call to the `plan--draft` tool.
+- `made_project_edits_v1`: the environment's `project_edits` artifact lists at least one
+  successful edit.
+
 ## Scoring
 
 - `reward` is 1 when every IF item passes; `if_result` reports `passed` and `total`.
