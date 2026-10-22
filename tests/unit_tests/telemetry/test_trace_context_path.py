@@ -26,6 +26,7 @@ import re
 
 import pytest
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 from fastapi.testclient import TestClient
 
 from nemo_gym.rollout_correlation import RolloutContextMiddleware, current_rollout_id
@@ -135,6 +136,45 @@ class TestMiddlewarePathRewrite:
         assert seen["headers"] == []
 
 
+class TestRedirectLocation:
+    """Where the segment goes back into a redirect target, given what the inner layers left in it."""
+
+    SEGMENT = f"/ng-trace/{TRACEPARENT}"
+    HOST = [(b"host", b"m:8000")]
+
+    def _restored(self, location, status=307):
+        from nemo_gym.server_utils import _restore_trace_segment_on_redirect
+
+        message = {"type": "http.response.start", "status": status, "headers": [(b"location", location.encode())]}
+        return dict(
+            _restore_trace_segment_on_redirect(message, segment=self.SEGMENT, request_headers=self.HOST)["headers"]
+        )[b"location"].decode()
+
+    @pytest.mark.parametrize(
+        "location, expected",
+        [
+            ("/v1/responses", f"/ng-trace/{TRACEPARENT}/v1/responses"),
+            ("/ng-rollout/0-0/v1/responses?x=1", f"/ng-rollout/0-0/ng-trace/{TRACEPARENT}/v1/responses?x=1"),
+            (
+                "http://m:8000/ng-rollout/0-0/training-token-capture/v1/responses",
+                f"http://m:8000/ng-rollout/0-0/training-token-capture/ng-trace/{TRACEPARENT}/v1/responses",
+            ),
+        ],
+    )
+    def test_segment_goes_after_a_restored_prefix_or_at_the_root(self, location, expected):
+        assert self._restored(location) == expected
+
+    @pytest.mark.parametrize(
+        "location",
+        ["https://other.example/v1/responses", f"/ng-rollout/0-0/ng-trace/{TRACEPARENT}/v1/responses", "v1/responses"],
+    )
+    def test_cross_origin_already_tagged_and_relative_targets_are_untouched(self, location):
+        assert self._restored(location) == location
+
+    def test_non_redirect_responses_are_untouched(self):
+        assert self._restored("/v1/responses", status=200) == "/v1/responses"
+
+
 @requires_lens
 class TestServerSpanParent:
     """With Gym's real stack order, the server span is parented to the span named in the URL."""
@@ -151,6 +191,10 @@ class TestServerSpanParent:
             with trace.get_tracer("test").start_as_current_span("handler.work"):
                 pass
             return {"rollout_id": current_rollout_id()}
+
+        @app.get("/elsewhere")
+        async def elsewhere():
+            return RedirectResponse("https://other.example/v1/responses", status_code=307)
 
         app.add_middleware(RolloutContextMiddleware)
         instrument_fastapi(app)
@@ -183,6 +227,33 @@ class TestServerSpanParent:
     def test_without_the_segment_the_server_span_is_a_root(self, app, traces):  # noqa: F811
         assert TestClient(app).post("/ng-rollout/0-0/v1/responses").status_code == 200
         assert _server_span(traces()).parent is None
+
+    @pytest.mark.parametrize("prefix", ["", "/ng-rollout/0-0"])
+    def test_a_followed_redirect_keeps_the_url_parent(self, app, traces, prefix):  # noqa: F811
+        """FastAPI redirects the trailing-slash form; the client only has the URL, so the segment must come back.
+
+        This app has the plain rollout middleware, which does not restore the rollout prefix on a redirect
+        (the model server's capture middleware does; see test_token_id_capture), so here the segment goes
+        back at the root. With the prefix restored it goes right after it: see TestRedirectLocation.
+        """
+        client = TestClient(app, follow_redirects=False)
+        first = client.post(f"{prefix}/ng-trace/{TRACEPARENT}/v1/responses/")
+        assert first.status_code == 307
+        assert first.headers["location"] == f"http://testserver/ng-trace/{TRACEPARENT}/v1/responses"
+        second = client.post(first.headers["location"])
+        assert second.status_code == 200
+
+        servers = [s for s in traces() if s.kind.name == "SERVER"]
+        assert len(servers) == 2
+        for server in servers:
+            assert f"{server.context.trace_id:032x}" == "a" * 32
+            assert f"{server.parent.span_id:016x}" == "b" * 16
+        assert {s.attributes["http.target"] for s in servers} == {f"{prefix}/v1/responses/", "/v1/responses"}
+
+    def test_a_cross_origin_redirect_is_left_alone(self, app, traces):  # noqa: F811
+        response = TestClient(app, follow_redirects=False).get(f"/ng-trace/{TRACEPARENT}/elsewhere")
+        assert response.status_code == 307
+        assert response.headers["location"] == "https://other.example/v1/responses"
 
     def test_install_is_idempotent(self, app):
         install_trace_context_path(app)

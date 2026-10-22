@@ -35,6 +35,7 @@ from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
 from typing import Any, ClassVar, List, Literal, NamedTuple, Optional, TextIO, Tuple, Type, Union, Unpack
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import orjson
@@ -1361,8 +1362,10 @@ def install_request_context_isolation(app: FastAPI) -> None:
 
 # A W3C ``traceparent``, version 00, the only form the propagator writes.
 _TRACEPARENT_PATTERN = r"00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}"
+_ROLLOUT_PREFIX_PATTERN = rf"/{re.escape(ROLLOUT_PATH_PREFIX)}/[^/]+(?:/{re.escape(TOKEN_CAPTURE_PATH_SEGMENT)})?"
+_ROLLOUT_PREFIX_RE = re.compile(rf"^{_ROLLOUT_PREFIX_PATTERN}(?=/|$)")
 _TRACE_CONTEXT_PATH_RE = re.compile(
-    rf"^(?P<head>(?:/{re.escape(ROLLOUT_PATH_PREFIX)}/[^/]+(?:/{re.escape(TOKEN_CAPTURE_PATH_SEGMENT)})?)?)"
+    rf"^(?P<head>(?:{_ROLLOUT_PREFIX_PATTERN})?)"
     rf"/{re.escape(TRACE_CONTEXT_PATH_SEGMENT)}/(?P<traceparent>{_TRACEPARENT_PATTERN})(?P<rest>/.*)$"
 )
 
@@ -1390,7 +1393,45 @@ class TraceContextPathMiddleware:
             headers.append((b"traceparent", match.group("traceparent").encode("ascii")))
         scope = scope_with_routed_path(scope, match.group("head") + match.group("rest"))
         scope["headers"] = headers
-        await self.app(scope, receive, send)
+        segment = f"/{TRACE_CONTEXT_PATH_SEGMENT}/{match.group('traceparent')}"
+
+        async def send_with_segment_on_redirect(message: Message) -> None:
+            # The client only ever had the URL, so a redirect it follows must carry the segment again.
+            if message["type"] == "http.response.start":
+                message = _restore_trace_segment_on_redirect(message, segment=segment, request_headers=headers)
+            await send(message)
+
+        await self.app(scope, receive, send_with_segment_on_redirect)
+
+
+def _restore_trace_segment_on_redirect(
+    message: Message, *, segment: str, request_headers: list[tuple[bytes, bytes]]
+) -> Message:
+    """Put ``/ng-trace/<traceparent>`` back into root-relative and same-origin redirect targets.
+
+    Inserted after a rollout or token-capture prefix (which the capture middleware has already restored)
+    or at the root; cross-origin targets and targets that already carry a segment are left alone.
+    """
+    status = int(message.get("status") or 0)
+    if not 300 <= status < 400:
+        return message
+    request_host = next((value.decode("latin-1") for key, value in request_headers if key.lower() == b"host"), "")
+    headers = list(message.get("headers") or [])
+    changed = False
+    for index, (key, value) in enumerate(headers):
+        if key.lower() != b"location":
+            continue
+        parts = urlsplit(value.decode("latin-1"))
+        if (parts.netloc and parts.netloc != request_host) or not parts.path.startswith("/"):
+            continue
+        if f"/{TRACE_CONTEXT_PATH_SEGMENT}/" in parts.path:
+            continue
+        prefix = _ROLLOUT_PREFIX_RE.match(parts.path)
+        head = prefix.group(0) if prefix else ""
+        path = f"{head}{segment}{parts.path[len(head) :]}"
+        headers[index] = (key, urlunsplit(parts._replace(path=path)).encode("latin-1"))
+        changed = True
+    return {**message, "headers": headers} if changed else message
 
 
 def install_trace_context_path(app: FastAPI) -> None:

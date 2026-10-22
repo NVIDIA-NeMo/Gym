@@ -261,6 +261,38 @@ def _make_setup_agent(tmp_path: Path, model_server_url: str = "", **config_overr
 
 
 class TestSetupParams:
+    SEGMENT = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+
+    def test_model_url_unchanged_without_rollout_id_or_traces(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path, model_server_url="http://model-host:8000")
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        assert agent._setup_params(body).model_server_url == "http://model-host:8000"
+
+    def test_model_url_carries_trace_context_without_rollout_id(self, tmp_path: Path, monkeypatch) -> None:
+        # Capture off, traces on: the harness still gets the current span in the URL.
+        from nemo_gym import server_utils
+
+        monkeypatch.setattr(server_utils, "trace_context_path_segment", lambda: self.SEGMENT)
+        agent = _make_setup_agent(tmp_path, model_server_url="http://model-host:8000")
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        assert agent._setup_params(body).model_server_url == f"http://model-host:8000{self.SEGMENT}"
+        assert agent._setup_params(body, rollout_id="3-1").model_server_url == (
+            f"http://model-host:8000/ng-rollout/3-1{self.SEGMENT}"
+        )
+
+    def test_explicit_sandbox_model_url_is_never_decorated(self, tmp_path: Path, monkeypatch) -> None:
+        from nemo_gym import server_utils
+
+        monkeypatch.setattr(server_utils, "trace_context_path_segment", lambda: self.SEGMENT)
+        agent = _make_setup_agent(
+            tmp_path, model_server_url="http://model-host:8000", sandbox_model_base_url="http://sandbox-host:9000"
+        )
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        assert agent._setup_params(body, rollout_id="3-1").model_server_url == "http://model-host:8000"
+
     def test_uses_per_task_timeout_by_default(self, tmp_path: Path) -> None:
         agent = _make_setup_agent(tmp_path)
         body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path), "agent_timeout_sec": "900"})
