@@ -174,3 +174,46 @@ def test_unknown_modality_is_not_assumed_text_and_single_repeat_has_no_interval(
     assert "domains/modality/vision/mean/reward" not in result
     with pytest.raises(ValueError, match="Inconsistent has_image"):
         compute_domain_metrics([[{**row(0, 0, 1), "has_image": True}, {**row(0, 1, 1), "has_image": False}]])
+
+
+@pytest.mark.parametrize("has_image,modality", [(False, "text"), (True, "vision")])
+def test_domain_metrics_within_modality_reuse_repeat_intervals(has_image, modality):
+    matching = [
+        [{**row(0, repeat, 1, 100), "has_image": has_image} for repeat in (0, 1)],
+        [{**row(1, repeat, 0, 300), "has_image": has_image} for repeat in (0, 1)],
+    ]
+    other = [[{**row(2, repeat, 1, 900), "has_image": not has_image} for repeat in (0, 1)]]
+    result = compute_domain_metrics(matching + other)
+    prefix = f"domains/{modality}/category/Math/"
+    assert result[prefix + "mean/reward"] == 0.5
+    assert result[prefix + "mean/output_tokens"] == 200
+    assert result[prefix + "question_count"] == 2
+    assert result[prefix + "rollout_count"] == 4
+    expected = compute_aggregate_metrics([r for task in matching for r in task]).agent_metrics
+    assert result[prefix + "ci_low_95_across_repeats/reward"] == expected["ci_low_95_across_repeats/mean/reward"]
+    assert (
+        result[prefix + "ci_high_95_across_repeats/output_tokens"]
+        == expected["ci_high_95_across_repeats/mean/output_tokens"]
+    )
+    assert result[f"domains/{modality}/raw_subject/Algebra%2FGeometry/mean/reward"] == 0.5
+    assert result["domains/category/Math/question_count"] == 3
+
+
+def test_scoped_missing_labels_and_unequal_repeat_coverage():
+    result = compute_domain_metrics(
+        [
+            [{**row(0, repeat, 1, None), "has_image": False} for repeat in (0, 1)],
+            [{**row(1, 0, 0, category=None), "has_image": False}],
+            [{**row(2, 0, 1), "has_image": True}],
+            [row(3, 0, 1)],
+        ]
+    )
+    assert result["domains/text/category/missing_label_rollouts"] == 1
+    assert result["domains/vision/category/missing_label_rollouts"] == 0
+    assert result["domains/modality/missing_label_rollouts"] == 1
+    assert result["domains/text/category/Math/missing/output_tokens"] == 2
+    assert result["domains/text/raw_subject/Algebra%2FGeometry/ci_available/reward"] is False
+    assert (
+        result["domains/text/raw_subject/Algebra%2FGeometry/ci_unavailable_reason/reward"]
+        == "Repeat question coverage differs"
+    )

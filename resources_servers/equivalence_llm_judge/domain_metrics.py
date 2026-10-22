@@ -33,8 +33,18 @@ def compute_domain_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
     the same public aggregator without this custom hook, so its means and CIs use
     Gym's normal repeat machinery, without recursive slicing or separate CI math.
     """
+    metrics = _compute_slices(tasks, ("category", "raw_subject", "has_image"))
+    for has_image, modality in ((False, "text"), (True, "vision")):
+        questions = [task for task in tasks if task and task[0].get("has_image") is has_image]
+        scoped = _compute_slices(questions, ("category", "raw_subject"))
+        metrics.update({key.replace("domains/", f"domains/{modality}/", 1): value for key, value in scoped.items()})
+    metrics["domains/ci_method"] = "Gym Student t interval across repeat-level estimates"
+    return metrics
+
+
+def _compute_slices(tasks: list[list[dict[str, Any]]], fields: tuple[str, ...]) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
-    for field in ("category", "raw_subject", "has_image"):
+    for field in fields:
         namespace = "modality" if field == "has_image" else field
         groups: dict[str, list[list[dict[str, Any]]]] = {}
         missing = 0
@@ -91,5 +101,4 @@ def compute_domain_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
                 metrics[prefix + f"ci_low_95_across_repeats/{metric}"] = low
                 metrics[prefix + f"ci_high_95_across_repeats/{metric}"] = high
                 metrics[prefix + f"repeat_count/{metric}"] = aggregate["num_repeats"]
-    metrics["domains/ci_method"] = "Gym Student t interval across repeat-level estimates"
     return metrics
