@@ -69,7 +69,7 @@ def test_request_allowlist_rejects_future_fields_but_accepts_defaults(setup):
         future_control: str | None = None
 
     agent, sandbox = setup
-    assert agent._session_input(ExtendedRequest(input="task", stream=False, background=False)) == ("task", "")
+    assert agent._session_input(ExtendedRequest(input="task", stream=False, background=False)) == ("task", "", [])
     with pytest.raises(HTTPException, match="future_control") as error:
         agent._session_input(ExtendedRequest(input="task", future_control="unsupported"))
     assert error.value.status_code == 422

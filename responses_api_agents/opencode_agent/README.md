@@ -111,9 +111,12 @@ its private HOME. The adapter requires a fresh successful-initialization receipt
 the task environment hook before accepting a gradable result. A missing or invalid
 receipt fails the activation even if the CLI ignored a plugin-loading error.
 
-The session path accepts one text task, optional system/developer text and
-`instructions`. Unsupported controls, images, history replay and required external
-HTTP/MCP tools are rejected. `context_window` and `max_output_tokens` are independent
+The session path accepts one user task, optional system/developer text and
+`instructions`. The user task may include images as base64 data-URI `input_image` parts.
+The adapter uploads them into the session directory and attaches them with `opencode run --file`.
+Sessions always declare image input on the Gym model, so OpenCode also passes on images its
+read tool returns; a text-only deployment rejects such requests. Images outside the user task,
+image URLs, unsupported controls, history replay and required external HTTP/MCP tools are rejected. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Configure
 sampling on the Gym model server. Request-level overrides are not silently ignored.
 Session `opencode_config` permits only `permission` and `tools`, preserving Gym capture.
