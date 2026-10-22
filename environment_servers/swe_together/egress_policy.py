@@ -12,6 +12,9 @@ import tomllib
 from pathlib import Path
 from urllib.parse import unquote
 
+from packaging.utils import InvalidWheelFilename, parse_wheel_filename
+from packaging.version import InvalidVersion, Version
+
 
 POLICY_VERSION = 2
 ALLOW_GROUPS: dict[str, frozenset[str]] = {
@@ -193,7 +196,40 @@ class DenyPackages:
 
 _NPM_TARBALL = re.compile(r"^/(@[^/]+/)?([^/]+)/-/", re.I)
 _PYPI_FILE = re.compile(r"^/packages/[^/]+/[^/]+/[^/]+/([^/]+)$")
-_DIST_NAME = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.]*?)-\d")
+
+
+def _pypi_distribution_projects(filename: str) -> set[str]:
+    """Parse wheel tags and legacy archive name/version boundaries.
+
+    Legacy versions can contain hyphens too. Keep every valid interpretation so
+    an ambiguous source filename cannot hide a denylisted project.
+    """
+    filename = filename.removesuffix(".metadata")
+    if filename.endswith(".whl"):
+        try:
+            name, _, _, _ = parse_wheel_filename(filename)
+            return {norm_pypi(name)}
+        except InvalidWheelFilename:
+            # Preserve the reference policy's short name-version.whl spelling.
+            if filename.count("-") != 1:
+                return set()
+    for suffix in (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.Z", ".tgz", ".tar", ".zip", ".whl"):
+        if filename.endswith(suffix):
+            stem = filename[: -len(suffix)]
+            break
+    else:
+        return set()
+    projects = set()
+    for boundary in re.finditer("-", stem):
+        name, version = stem[: boundary.start()], stem[boundary.end() :]
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?", name):
+            continue
+        try:
+            Version(version)
+        except InvalidVersion:
+            continue
+        projects.add(norm_pypi(name))
+    return projects
 
 
 def registry_decision(host: str, method: str, path: str, deny: DenyPackages) -> str | None:
@@ -232,9 +268,11 @@ def registry_decision(host: str, method: str, path: str, deny: DenyPackages) -> 
     if kind == "pypi_files":
         m = _PYPI_FILE.match(p)
         if m:
-            dm = _DIST_NAME.match(m.group(1))
-            if dm and norm_pypi(dm.group(1)) in deny.pypi:
-                return f"deny:task's own PyPI distribution {norm_pypi(dm.group(1))}"
+            projects = _pypi_distribution_projects(m.group(1))
+            if not projects:
+                return "deny:unrecognized PyPI distribution filename"
+            if denied := projects & deny.pypi:
+                return f"deny:task's own PyPI distribution {min(denied)}"
         return None
     if kind in ("crates", "crates_index", "crates_dl"):
         if kind == "crates" and (

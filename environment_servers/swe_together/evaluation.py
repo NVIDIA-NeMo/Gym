@@ -281,12 +281,7 @@ async def interaction_metrics(
     try:
         intents = json.loads((task_dir / "oracle_intents.json").read_text())["intents"]
         if not intents:
-            result["intent_coverage"] = {
-                "coverage_rate": 1.0,
-                "weighted_coverage": 1.0,
-                "scope_precision": 1.0,
-                "overall_score": 1.0,
-            }
+            result["intent_coverage"] = compute_scores({"per_intent": []}, 0, len(messages))
         else:
             trial = [
                 {

@@ -190,6 +190,31 @@ async def test_invalid_tagger_output_is_missing_measurement(tmp_path, tags):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("has_message", [False, True])
+async def test_empty_oracle_intents_score_only_accepted_feedback(tmp_path, has_message):
+    (tmp_path / "oracle_intents.json").write_text(json.dumps({"intents": []}))
+    (tmp_path / "instruction.md").write_text("This initial instruction is not simulator feedback.")
+    messages = [{"trial_idx": 1, "turn": 1, "text": "fix it", "action": "redirect"}] if has_message else []
+    raw = json.dumps({"results": [{"trial_idx": 1, "tags": ["correction", "nudge"]}]})
+    model = SimpleNamespace(call=AsyncMock(return_value=SimpleNamespace(content=raw)))
+    result = await interaction_metrics(model, task_dir=tmp_path, messages=messages, artifact_dir=tmp_path)
+    assert result["intent_coverage"] == {
+        "coverage_rate": 1.0,
+        "weighted_coverage": 1.0,
+        "scope_precision": 0.0 if has_message else 1.0,
+        "overall_score": 0.7 if has_message else 1.0,
+    }
+    assert result["n_simulator_messages"] == len(messages)
+    assert model.call.await_count == int(has_message)
+    assert result["user_correction"] == (1.2 if has_message else None)
+    if has_message:
+        assert result["message_tags"] == [
+            {"trial_idx": 1, "tags": ["correction", "nudge", "request"], "frustration": 0}
+        ]
+    assert json.loads((tmp_path / "interaction.json").read_text()) == result
+
+
+@pytest.mark.asyncio
 async def test_duplicate_tagger_rows_do_not_overwrite_each_other(tmp_path):
     (tmp_path / "oracle_intents.json").write_text(json.dumps({"intents": []}))
     raw = json.dumps({"results": [{"trial_idx": 1, "tags": ["correction"]}, {"trial_idx": 1, "tags": ["request"]}]})

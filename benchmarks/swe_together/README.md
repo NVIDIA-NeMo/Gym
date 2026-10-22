@@ -38,7 +38,8 @@ fix their model and reject provider-side tools and arbitrary extensions. Preserv
 `X-Session-Id`, `X-Session-Affinity`, and `X-OpenCode-Assistant-Message-Id` for capture.
 
 Start the benchmark's dependency proxy on a dedicated trusted host/interface
-reachable from the task sandboxes. It needs Python 3.11+ and OpenSSL. Use the same
+reachable from the task sandboxes. It needs Python 3.11+, OpenSSL and `packaging>=24.2`
+(included with Gym; install it separately on a standalone proxy host). Use the same
 random `SWE_TOGETHER_DEPENDENCY_ADMIN_KEY` (at least 32 characters) in that service
 and the trusted Gym environment; keep it out of task environments. Configure
 `SWE_TOGETHER_DEPENDENCY_PROXY_URL=http://<dependency-host>:3128` on the Gym host.
@@ -50,6 +51,7 @@ traffic belong on a trusted private network.
 ```bash
 # Additional shell on the dependency host, from this checkout.
 # Set SWE_TOGETHER_DEPENDENCY_ADMIN_KEY from your secret environment first.
+python -m pip install 'packaging>=24.2'
 python -m environment_servers.swe_together.egress_proxy \
   --state-dir /private/path/swet-dependency-ca
 ```
@@ -59,7 +61,11 @@ and reuses it for judging. Sandboxes receive only a scoped lease token and publi
 CA trust. The proxy permits the pinned reference's Python, Node, Rust and apt
 registries and model catalogs, while blocking registry searches and the task's
 own packages. Direct registry access stays denied; HTTPS certificate validation
-remains enabled. Leases are revoked after cleanup and expire if the controller
+remains enabled. Python artifact checks support wheels, including the reference's
+short `name-version.whl` spelling, and source archives (`.tar.gz`, `.tar.bz2`,
+`.tar.xz`, `.tar.Z`, `.tgz`, `.tar`, `.zip`), plus their `.metadata` sidecars.
+Unrecognized artifact names are denied.
+Leases are revoked after cleanup and expire if the controller
 is lost. A proxy restart invalidates its leases; restart affected episodes rather
 than silently opening access. Stop the service when the campaign is finished.
 

@@ -55,6 +55,40 @@ def test_reference_package_boundaries(host, path, allowed):
 
 
 @pytest.mark.parametrize(
+    ("filename", "project", "allowed"),
+    [
+        ("own-package-1.0.tar.gz", "own-package", False),
+        ("own_package-1.0.zip", "own-package", False),
+        ("Own.Package-1.0.tar.bz2", "own-package", False),
+        ("own-package-1.0.tar.xz", "own-package", False),
+        ("own-package-1.0.tgz", "own-package", False),
+        ("own_package-1.0.whl", "own-package", False),
+        ("own_package-1.0-py3-none-any.whl", "own-package", False),
+        ("own_package-1.0-1-py3-none-any.whl", "own-package", False),
+        ("own_package-1.0-py3-none-any.whl.metadata", "own-package", False),
+        ("own-package-1.0.tar.gz.metadata", "own-package", False),
+        ("own-2-package-1.0.tar.gz", "own-2-package", False),
+        ("own-2-package-1.0.tar.gz", "own", True),
+        ("own-package-1.0-1.tar.gz", "own-package", False),
+        ("own-package-1.0-rc1.tar.gz", "own-package", False),
+        ("%6fwn%2dpackage-1.0.tar.gz", "own-package", False),
+        ("pytest-8.0.whl", "own-package", True),
+        ("pytest-8.0-py3-none-any.whl", "own-package", True),
+        ("pytest-8.0-py3-none-any.whl.metadata", "own-package", True),
+        ("pytest-8.0.tar.gz", "own-package", True),
+        ("pytest-8.0.tar.gz.metadata", "own-package", True),
+        ("own-package.tar.gz", "own-package", False),
+        ("own_package-1.0-invalid.whl", "own-package", False),
+    ],
+)
+def test_pypi_distribution_package_boundaries(filename, project, allowed):
+    reason = registry_decision(
+        "files.pythonhosted.org", "GET", "/packages/aa/bb/cc/" + filename, DenyPackages(pypi=[project])
+    )
+    assert (reason is None) == allowed
+
+
+@pytest.mark.parametrize(
     "host",
     [
         "github.com",
@@ -179,6 +213,17 @@ def test_tls_allows_dependencies_and_denies_search_and_own_package(proxy):
     assert fetch(proxy, "/own-package/-/own-package-2.tgz")[0] == 403
     assert fetch(proxy, "/%6fwn-package")[0] == 403
     assert proxy[1] == ["/vitest", "/@biomejs%2fbiome"]
+
+
+def test_tls_denies_hyphenated_pypi_source_before_forwarding(proxy):
+    policy = {"packages": {"npm": [], "pypi": ["own-package"], "crates": []}, "task_allow": [], "ttl_seconds": 600}
+    assert control(proxy[0], policy=policy) == 204
+    path = "/packages/aa/bb/cc/own-package-1.0.tar.gz"
+    assert fetch(proxy, path, host="files.pythonhosted.org")[0] == 403
+    assert not proxy[1]
+    external = "/packages/aa/bb/cc/pytest-8.0.tar.gz"
+    assert fetch(proxy, external, host="files.pythonhosted.org") == (200, b"package bytes")
+    assert proxy[1] == [external]
 
 
 def test_streamed_registry_manifest_has_explicit_framing(proxy):
