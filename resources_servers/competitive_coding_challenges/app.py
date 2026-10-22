@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import FastAPI
 from pydantic import ConfigDict, Field, PrivateAttr
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -58,6 +59,18 @@ class CompetitiveCodingChallengesVerifyResponse(BaseVerifyResponse):
     num_tests_run: int = 0
     total_test_execution_time_s: float = 0.0
     mean_test_execution_time_s: float = 0.0
+
+
+def _resolve_test_file(test_file: str) -> str:
+    """Return ``test_file``, resolved against the Gym root when it is relative and absent from the cwd.
+
+    The server runs in its own directory, so a benchmark's Gym-root-relative path, such as
+    ``benchmarks/ioi26/data/ioi26_metadata.json``, would not otherwise resolve.
+    """
+    if os.path.isabs(test_file) or os.path.exists(test_file):
+        return test_file
+    from_root = PARENT_DIR / test_file
+    return str(from_root) if from_root.exists() else test_file
 
 
 def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
@@ -295,7 +308,7 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
 
         self._evaluator = CCCEvaluator(
             config={
-                "test_file": self.config.test_file,
+                "test_file": _resolve_test_file(self.config.test_file),
                 "test_batch_size": self.config.test_batch_size,
                 "time_scale": self.config.time_scale,
                 "shared_dir": self.config.shared_dir,
