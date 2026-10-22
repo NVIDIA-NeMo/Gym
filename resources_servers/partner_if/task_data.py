@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Dependency-light task contract shared by Gym data tooling and the IF verifier."""
 
+from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictBool, StringConstraints, model_validator
@@ -9,6 +10,10 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictBool, String
 
 Text = Annotated[str, StringConstraints(min_length=1, pattern=r"\S")]
 Dimension = Literal["if", "completion"]
+# An exact `name==version` pin, with optional extras.
+PinnedRequirement = Annotated[
+    str, StringConstraints(pattern=r"^[A-Za-z0-9]([\w.-]*[A-Za-z0-9])?(\[[\w.,-]+\])?==[A-Za-z0-9][\w.+!-]*$")
+]
 
 
 class StrictModel(BaseModel):
@@ -99,15 +104,46 @@ class VerifierMetadata(StrictModel):
     curation: dict[str, JsonValue] | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
+class ToolBackendBundle(StrictModel):
+    """A task's own `ToolBackend` (tool_backend.py) and its fixture, which a sandboxed mock-tool server runs in a
+    fresh sandbox for each rollout. The actor never sees it, and the sandbox gets these files and the row's
+    `responses_create_params`, never its contract."""
+
+    # The backend class, as module:Class; the module is one of `files`.
+    entrypoint: str = Field(pattern=r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*:[A-Za-z_]\w*$")
+    # Text files by path relative to the bundle's root, which is first on the backend's import path.
+    files: dict[str, str] = Field(min_length=1)
+    # The file in `files` that the backend class is constructed with.
+    fixture: str
+    # Packages the backend needs beyond the standard library, installed beside it.
+    requirements: list[PinnedRequirement] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_layout(self):
+        for path in self.files:
+            parts = PurePosixPath(path).parts
+            if str(PurePosixPath(path)) != path or path.startswith("/") or {".", ".."} & set(parts) or "\\" in path:
+                raise ValueError(f"Bundle file paths must be normalized relative paths, not {path!r}")
+        if self.fixture not in self.files:
+            raise ValueError(f"The fixture {self.fixture!r} is not one of the bundle's files")
+        module = self.entrypoint.partition(":")[0].replace(".", "/")
+        if f"{module}.py" not in self.files and f"{module}/__init__.py" not in self.files:
+            raise ValueError(f"The entrypoint module {module!r} is not one of the bundle's files")
+        return self
+
+
 class TaskData(VerifierMetadata):
     """A row's task-owned fields, flat, as Gym's data tooling validates them.
 
     Native rows add the top-level fields their harness reads: the Harbor agent's `task_name` (`HarborRunRequest`)
     and, on SWE rows, a Scale-SWE instance (`SWEIFVerifyRequest`), which that wire requires to have `instance_id`,
-    `workdir` and `image_url`. Other rows omit them, so they are optional here.
+    `workdir` and `image_url`. Rows for a sandboxed mock-tool server add their `tool_backend`. Other rows omit
+    them, so they are optional here.
     """
 
     task_name: str | None = Field(default=None, json_schema_extra={"consumed_by": ["run", "provenance"]})
+    # The task's own tool backend, for a sandboxed mock-tool server.
+    tool_backend: ToolBackendBundle | None = Field(default=None, json_schema_extra={"consumed_by": ["run"]})
     # The fields of a Scale-SWE instance (resources_servers/scale_swe/task_data.py).
     instance_id: str | None = Field(default=None, json_schema_extra={"consumed_by": ["verify", "provenance"]})
     repo: str | None = Field(default=None, json_schema_extra={"consumed_by": ["provenance"]})

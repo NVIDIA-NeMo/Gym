@@ -4,11 +4,17 @@
 
 Gym runs mock_tools_app.py as `__main__`, so a backend imports these from here: importing them from
 mock_tools_app would load a second copy of that module, whose ToolCallError the server never catches.
+A sandboxed server's runner (tool_runner.py) imports this module beside a task's own backend, in an image that
+may have nothing but Python, so at runtime it needs only the standard library.
 """
 
-from typing import Any, Protocol
+from __future__ import annotations
 
-from pydantic import JsonValue
+from typing import TYPE_CHECKING, Any, Protocol
+
+
+if TYPE_CHECKING:
+    from pydantic import JsonValue
 
 
 class ToolCallError(Exception):
@@ -16,8 +22,9 @@ class ToolCallError(Exception):
 
 
 class ToolBackend(Protocol):
-    """A task's simulated tools. The server holds one state per episode and calls these methods synchronously
-    on its event loop, so each must return quickly and must not block on I/O."""
+    """A task's simulated tools. The server holds one state per episode. An in-process server calls these methods
+    synchronously on its event loop, so each must return quickly and must not block on I/O; a sandboxed server's
+    runner calls them one at a time in the episode's sandbox."""
 
     # Whether an episode must end with a text answer; one that does not scores 0 without the judge.
     requires_final_answer: bool
