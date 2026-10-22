@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
-from typing import List
+from typing import Any, List
 
 from omegaconf import DictConfig, ListConfig, open_dict
 
@@ -95,3 +95,26 @@ def recursively_hide_secrets(dict_config: DictConfig) -> None:
 
     with open_dict(dict_config):
         hide(dict_config)
+
+
+def hide_secrets_in_container(data: Any) -> Any:
+    """Copy of a plain dict/list tree with every secret-shaped leaf masked.
+
+    Unlike `recursively_hide_secrets` this never touches OmegaConf, so an unresolved `${...}`
+    interpolation (e.g. `${oc.env:API_KEY}`) is neither evaluated nor required to be resolvable.
+    """
+    if isinstance(data, dict):
+        masked = {}
+        for key, value in data.items():
+            if isinstance(value, dict):
+                masked[key] = hide_secrets_in_container(value)
+            elif isinstance(value, list):
+                masked[key] = (
+                    [MASKED_VALUE] * len(value) if looks_like_secret_key(key) else hide_secrets_in_container(value)
+                )
+            else:
+                masked[key] = MASKED_VALUE if looks_like_secret_key(key) else value
+        return masked
+    if isinstance(data, list):
+        return [hide_secrets_in_container(item) for item in data]
+    return data
