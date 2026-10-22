@@ -61,6 +61,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
+from nemo_gym.health.types import RunHealthLimits
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.path_utils import materialized_path_for
 from nemo_gym.reward_profile import compute_aggregate_metrics, compute_subset_metrics
@@ -75,6 +76,7 @@ from nemo_gym.rollout_collection import (
     NG_ENVIRONMENT_SERVER_KEY,
     NG_FAILURE_CLASS_KEY,
     NG_FAILURE_JUDGE_ERROR_KEY,
+    NG_FAILURE_MAX_ATTEMPTS_KEY,
     NG_NO_PERSIST_KEY,
     NG_PERF_KEY,
     NG_TERMINAL_KEY,
@@ -90,6 +92,7 @@ from nemo_gym.rollout_collection import (
     _build_ng_perf,
     _build_trajectory_record,
     _CompletedRollout,
+    _counted_failure_row,
     _drop_truncated_tail,
     _expand_input_glob,
     _failure_export_metrics,
@@ -4859,7 +4862,12 @@ class TestRolloutCollection:
         assert returned == []
         assert [result["case"] for result in aggregated["results"]] == ["success"]
         assert aggregated["rows"] == aggregated["results"]
-        run_health_checks.assert_called_once_with(output_fpath, workers=None, ignored_checks=[])
+        run_health_checks.assert_called_once_with(
+            output_fpath,
+            workers=None,
+            ignored_checks=[],
+            limits=RunHealthLimits(),
+        )
         format_health_report.assert_called_once_with(health_result)
 
     async def test_run_from_config_non_retaining_reads_artifacts_off_the_event_loop(
@@ -8320,6 +8328,26 @@ class TestRolloutAggregationHelper:
         )
         await RolloutAggregationHelper().run_from_config(config)
 
+    async def test_the_health_summary_counts_the_failures_the_shards_recorded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """The merged file has no sidecar or inventory of its own; the shards' are next to the shards."""
+        shard = tmp_path / "shards" / "rollouts.jsonl"
+        self._write_rows(materialized_path_for(shard), self._rollout(0, "agent_a"), self._rollout(1, "agent_a"))
+        self._write_rows(shard, self._rollout(1, "agent_a", reward=1.0))
+        self._write_rows(
+            _failures_path_for(shard), self._rollout(0, "agent_a", **{NG_FAILURE_CLASS_KEY: "agent_run_error"})
+        )
+        self._serve(monkeypatch, {}, {"env_a": "agent_a"})
+        config = RolloutAggregationConfig(
+            input_glob=str(shard), output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"), merge_shards=True
+        )
+
+        await RolloutAggregationHelper().run_from_config(config)
+
+        artifacts = orjson.loads((tmp_path / "quality_summary.json").read_bytes())["run"]["artifacts"]
+        assert (artifacts["expected"], artifacts["failed"]["total"], artifacts["healthy"]) == (2, 1, True)
+
     @pytest.mark.parametrize("run1_has", ["a row", "a failure"])
     async def test_runs_that_reuse_task_indices_do_not_hide_each_others_lost_rollouts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock, run1_has: str
@@ -10806,6 +10834,52 @@ class TestFailureExportMetrics:
 
     def test_no_sidecar_rows_export_no_class(self, tmp_path: Path) -> None:
         assert self._counts(tmp_path, [], set()) == {}
+
+
+class TestRecordedAttemptCap:
+    """Review finding 4338960587 (follow-up to #4852): at_cap uses the cap the run collected with."""
+
+    @staticmethod
+    def _retries(tmp_path: Path, rows: list[dict]) -> dict:
+        sidecar = tmp_path / "rollouts_failures.jsonl"
+        sidecar.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+        identity = lambda row: (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+        metrics = _failure_export_metrics([sidecar], identity, set())
+        return {k: v for k, v in metrics.items() if k.startswith("retries/")}
+
+    @staticmethod
+    def _failure(task: int, cap: int | None) -> dict:
+        row = {TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "agent_run_error"}
+        return row if cap is None else {**row, NG_FAILURE_MAX_ATTEMPTS_KEY: cap}
+
+    def test_a_recorded_cap_of_one_is_reached_whatever_the_aggregating_environment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", raising=False)
+        retries = self._retries(tmp_path, [self._failure(0, 1)])
+        assert (retries["retries/max_attempts"], retries["retries/at_cap"]) == (1, 1)
+
+    def test_three_attempts_under_a_recorded_cap_of_five_are_not_at_cap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+        retries = self._retries(tmp_path, [self._failure(0, 5)] * 3)
+        assert (retries["retries/max_attempts"], retries["retries/at_cap"]) == (5, 0)
+
+    def test_shards_with_different_caps_report_no_single_cap(self, tmp_path: Path) -> None:
+        retries = self._retries(tmp_path, [self._failure(0, 1), self._failure(1, 5)])
+        assert "retries/max_attempts" not in retries
+        assert retries["retries/at_cap"] == 1
+
+    def test_a_row_without_a_recorded_cap_uses_the_current_cap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
+        retries = self._retries(tmp_path, [self._failure(0, None)] * 2)
+        assert (retries["retries/max_attempts"], retries["retries/at_cap"]) == (2, 1)
+
+    def test_the_recorded_cap_is_not_a_metric_of_a_counted_failure(self) -> None:
+        assert NG_FAILURE_MAX_ATTEMPTS_KEY not in _counted_failure_row(self._failure(0, 3))
 
 
 @pytest.mark.parametrize(
