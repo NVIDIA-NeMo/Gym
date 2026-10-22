@@ -126,8 +126,6 @@ def test_unknown_split_fails_before_download(monkeypatch):
     loader.assert_not_called()
 
 
-
-
 @pytest.mark.parametrize("splits", [(split,) for split in SPLITS] + [SPLITS])
 @pytest.mark.parametrize("model_type", ["local_vllm_model", "vllm_model"])
 def test_every_split_resolves_and_manifest_matches(tmp_path, splits, model_type):
