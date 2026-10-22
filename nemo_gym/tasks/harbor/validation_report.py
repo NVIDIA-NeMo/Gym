@@ -17,6 +17,7 @@ from typing import Any
 
 from nemo_gym.config_types import ConfigError
 from nemo_gym.path_utils import failures_path_for
+from nemo_gym.tasks.harbor.digest import DIGEST_KEY
 
 
 @dataclass(frozen=True)
@@ -146,3 +147,8 @@ def summarize_validation(
         ok = False
         lines.append(f"{task_id}\tskipped: {reason}\t-")
     return ValidationReport(text="\n".join(lines), ok=ok)
+
+
+def _task_digests(rows: list[dict[str, object]], key: Any) -> dict[Any, object]:
+    """``key(row) -> task digest`` for materialized rows; shared by the eval and validation resume checks."""
+    return {key(row): _dig(row, "task_input", "task_data", DIGEST_KEY) for row in rows}

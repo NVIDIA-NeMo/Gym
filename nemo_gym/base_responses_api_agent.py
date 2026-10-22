@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import contextvars
+import ipaddress
 import logging
 from abc import abstractmethod
 from collections import OrderedDict
@@ -23,6 +24,7 @@ from dataclasses import dataclass, field
 from functools import wraps
 from time import monotonic
 from typing import Any, ClassVar, Optional
+from urllib.parse import urlsplit
 from warnings import warn
 
 from fastapi import Body, FastAPI, HTTPException, Request, Response
@@ -52,6 +54,7 @@ from nemo_gym.agent_activation_types import (
     AgentContinuationCapabilities,
     AgentContinuationRequirements,
 )
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.agent_utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -110,6 +113,7 @@ AGENT_SESSIONS = SessionKind(
 # Multi-turn continuation sessions use this same header without checkpointing.
 # Other adapters may treat requests without the header as new activations.
 AGENT_ACTIVATION_HEADER = "x-ng-agent-activation"
+LOG = logging.getLogger(__name__)
 
 
 class AgentSeedSessionRequest(BaseModel):
@@ -158,11 +162,15 @@ class AgentSeedSessionRequest(BaseModel):
 
 
 class AgentSeedSessionResponse(BaseModel):
-    """Confirm the caller-assigned agent session identifier."""
+    """Confirm the caller-assigned agent session identifier and declare what the harness can use."""
 
     model_config = ConfigDict(extra="forbid")
 
     agent_session_id: str
+    # Whether the harness drives the task's own tool declarations (Harbor's ``[[environment.mcp_servers]]``
+    # and ``skills_dir``). An environment server refuses such a task to a harness that does not, instead of
+    # running it without its tools.
+    supports_task_tool_context: bool = False
     capabilities: AgentContinuationCapabilities | None = Field(
         default=None,
         description=(
@@ -215,7 +223,10 @@ class AgentCloseSessionResponse(BaseModel):
     trajectory: TrajectoryRecord | None = Field(
         default=None,
         description=(
-            "Cumulative trajectory across this continuation session's activations. Omitted when not reported."
+            "The harness's own account of the run's decisions: the turns it took and the model calls behind "
+            "each. Without it rollout collection rebuilds turns from every captured model call, so helper calls "
+            "(context recovery, summarization) count as decisions and the step counts are lost. Cumulative "
+            "across a continuation session's activations. Omitted when not reported."
         ),
     )
 
@@ -268,7 +279,17 @@ class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
 
 
 class BaseResponsesAPIAgent(BaseServer):
+    """An agent server: the harness Gym runs against the model for each task.
+
+    ``calls_model_from_sandbox``: declare ``True`` on the class the entrypoint runs when the harness calls the
+    model server from inside the task sandbox, where the loopback address is the container itself. A Harbor run
+    (``gym eval run <target> --agent <name>``) reads that literal from the entrypoint source, as Gym reads
+    ``ray_enabled``, and advertises a reachable host (``use_absolute_ip``) by default for such a harness. It is
+    not read through inheritance: each such class declares it itself.
+    """
+
     config: BaseResponsesAPIAgentConfig
+    calls_model_from_sandbox: ClassVar[bool] = False
 
 
 @dataclass
@@ -297,6 +318,59 @@ class _AgentSessionRecord:
     expires_at: float = float("inf")
     activations: OrderedOperationLedger[NeMoGymResponse] = field(default_factory=OrderedOperationLedger)
     close_task: asyncio.Task[AgentCloseSessionResponse] | None = None
+
+
+# Sandbox providers whose processes share the host network namespace, so a loopback model URL still resolves
+# to the host. Docker only does so when the daemon runs on the host and the container uses host networking.
+_HOST_NETWORK_SANDBOX_PROVIDERS = frozenset({"local"})
+_LOCAL_DOCKER_SANDBOX_PROVIDERS = frozenset({"docker"})
+
+
+def is_loopback_host(url: str) -> bool:
+    """Whether ``url`` points at the caller's own loopback interface (127.0.0.0/8, ::1, localhost)."""
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if host.lower() == "localhost" or host.lower().endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def assert_model_url_reachable_from_sandbox(url: str, *, provider_name: str | None) -> None:
+    """Refuse a model URL that a sandboxed agent could not reach.
+
+    Agents that run inside a sandbox (Hermes, mini-SWE) hand the Model Server URL to code in the
+    container. Inside a container on a remote provider (OpenSandbox, E2B, Daytona, ...), a loopback
+    host is the container itself, so every model call fails and the episode silently scores 0.
+
+    Raises:
+        ValueError: when ``url`` is loopback and ``provider_name`` is not a host-network or local
+            Docker provider. Local Docker only logs a warning: loopback works there only when the
+            daemon shares the host network.
+    """
+    if not is_loopback_host(url):
+        return
+    if provider_name in _HOST_NETWORK_SANDBOX_PROVIDERS:
+        return
+    if provider_name in _LOCAL_DOCKER_SANDBOX_PROVIDERS:
+        LOG.warning(
+            "Model Server URL %s is a loopback address; a %s sandbox reaches it only when the container shares "
+            "the host network. Set ++use_absolute_ip=true or configure a reachable model URL otherwise.",
+            url,
+            provider_name,
+        )
+        return
+    raise ValueError(
+        f"Model Server URL {url} is a loopback address, which the {provider_name or 'remote'} sandbox cannot "
+        "reach: inside the container, 127.0.0.1 is the container itself. Set ++use_absolute_ip=true so the "
+        "agent advertises the host's network address, or configure a reachable model URL."
+    )
 
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
@@ -600,7 +674,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             elif record.state.request != body:
                 raise HTTPException(409, "agent_session_id is already bound to another seed request")
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
-            return AgentSeedSessionResponse(agent_session_id=body.agent_session_id, capabilities=capabilities)
+            return AgentSeedSessionResponse(
+                agent_session_id=body.agent_session_id,
+                capabilities=capabilities,
+                supports_task_tool_context=self.supports_task_tool_context(),
+            )
 
     async def close_agent_session(
         self,
@@ -775,6 +853,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         # termination receipt. Preserve that receipt; release errors still raise.
         return await self._close_agent_session_state(record.state)
 
+    def supports_task_tool_context(self) -> bool:
+        """Whether this harness uses the task's own tool declarations.
+
+        Harbor tasks declare ``[[environment.mcp_servers]]`` and ``skills_dir``. A harness that drives them
+        from inside the sandbox answers True, and the seed response carries the answer to the environment
+        server, which refuses such a task to a harness that would run it without its tools.
+        """
+        return False
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
         """Validate grants and initialize harness state.
 
@@ -924,4 +1011,22 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             compute_metrics_fn=self.compute_metrics,
             get_key_metrics_fn=self.get_key_metrics,
             compute_repeat_metrics_fn=self.compute_repeat_metrics,
+        )
+
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Override to classify native failures; the environment decides grading and retry eligibility."""
+        return AgentOutcome(failure_kind="unknown")
+
+    def report_outcome(self, response: NeMoGymResponse, native_result: Mapping[str, Any]) -> NeMoGymResponse:
+        """Attach validated evidence through the existing string-valued response metadata."""
+        if response.status != "failed":
+            return response
+        outcome = AgentOutcome.model_validate(self.classify_outcome(native_result))
+        return response.model_copy(
+            update={
+                "metadata": {
+                    **(response.metadata or {}),
+                    AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json(exclude_none=True),
+                }
+            }
         )

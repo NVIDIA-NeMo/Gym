@@ -1848,6 +1848,16 @@ def maybe_get_global_config_dict() -> Optional[DictConfig]:
     return None
 
 
+def reset_global_config_dict() -> None:
+    """Forget the cached global config dict, so the next `get_global_config_dict` resolves the command line again.
+
+    For a command that builds the configuration it dispatches (a run config written on the way), whatever this
+    process resolved before, for other tokens, must not stand in for it.
+    """
+    global _GLOBAL_CONFIG_DICT
+    _GLOBAL_CONFIG_DICT = None
+
+
 def get_global_config_dict(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
