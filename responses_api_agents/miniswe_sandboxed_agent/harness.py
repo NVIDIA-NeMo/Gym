@@ -8,6 +8,7 @@ import base64
 import binascii
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from shlex import quote
 from time import monotonic, time
@@ -134,6 +135,7 @@ class HarnessContext(BaseModel):
     setup_timeout_sec: float = Field(default=360, gt=0)
     mcp_servers: list[dict[str, Any]] = Field(default_factory=list)
     skills_dir: str | None = None
+    durable_agent_logs: bool = False
 
 
 class MiniSWEHarness:
@@ -150,6 +152,7 @@ class MiniSWEHarness:
         model_name: str,
         directory: Path,
         observability_enabled: bool = False,
+        recover_artifacts: Callable[[Path], Awaitable[bool]] | None = None,
     ) -> None:
         self.sandbox = sandbox
         self.context = context
@@ -159,13 +162,27 @@ class MiniSWEHarness:
         self.model_name = model_name
         self.directory = directory
         self.observability_enabled = observability_enabled
+        self.recover_artifacts = recover_artifacts
         self.extra_instruction = ""
         self.result = None
         self.remote_directory = f"/tmp/nemo-gym-miniswe-{uuid4().hex}"
+        self.evidence_directory = "/logs/agent/miniswe" if context.durable_agent_logs else self.remote_directory
 
     async def setup(self) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         await self._install_miniswe()
+        if self.context.durable_agent_logs:
+            if self.recover_artifacts is None:
+                raise ValueError("Durable mini-SWE logs require a resource-owned recovery operation")
+            await self.sandbox.upload(
+                Path(__file__).with_name("runtime") / "checkpoint_agent.py",
+                self.remote_directory + "/checkpoint_agent.py",
+            )
+            result = await self.sandbox.exec(
+                f"mkdir -p {quote(self.evidence_directory)}", user=self.context.user, cwd=self.context.workdir
+            )
+            if result.error_type or result.return_code:
+                raise RuntimeError(f"Unable to prepare durable mini-SWE logs: {result.error_type or result.stderr}")
         result = await self.sandbox.exec("command -v setsid", user=self.context.user, cwd=self.context.workdir)
         if result.return_code:
             raise RuntimeError("mini-SWE requires setsid for process cleanup")
@@ -301,7 +318,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
 
     async def _download_artifact(self, name: str) -> dict:
         local = self.directory / name
-        await self.sandbox.download(f"{self.remote_directory}/{name}", local)
+        await self.sandbox.download(f"{self.evidence_directory}/{name}", local)
         return json.loads(local.read_text())
 
     async def execute(self, budget: float) -> tuple[NeMoGymResponse, HarnessOutcome, dict]:
@@ -325,7 +342,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
         payload = {
             "run": {"task": self.context.instruction + self.extra_instruction},
             "agent": {
-                "agent_class": "default",
+                "agent_class": "checkpoint_agent.CheckpointAgent" if self.context.durable_agent_logs else "default",
                 "step_limit": self.config.step_limit,
                 "cost_limit": 0,
             },
@@ -349,9 +366,10 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             "export MSWEA_CONFIGURED=true MSWEA_SILENT_STARTUP=true LITELLM_LOCAL_MODEL_COST_MAP=true "
             "MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT=1; "
             f"export MSWEA_GLOBAL_CONFIG_DIR={quote(remote + '/config')}; "
-            f"exec {quote(remote + '/venv/bin/python')} -m minisweagent.run.mini "
-            f"-c mini.yaml -c {quote(remote + '/config.yaml')} -o {quote(remote + '/trajectory.json')} "
-            f"> {quote(remote + '/agent.log')} 2>&1"
+            + (f"export PYTHONPATH={quote(remote)}; " if self.context.durable_agent_logs else "")
+            + f"exec {quote(remote + '/venv/bin/python')} -m minisweagent.run.mini "
+            f"-c mini.yaml -c {quote(remote + '/config.yaml')} -o {quote(self.evidence_directory + '/trajectory.json')} "
+            f"> {quote(self.evidence_directory + '/agent.log')} 2>&1"
         )
         termination = HarnessOutcome(reason="completed")
         started = monotonic()
@@ -388,17 +406,34 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                 LOGGER.exception("Failed to stop mini-SWE processes; resources must quiesce the sandbox")
                 termination = HarnessOutcome(reason="infrastructure_error", detail=f"Process cleanup failed: {error}")
 
+        download_failed = False
+        recovered = False
+        recovery_error = None
         try:
-            await self.sandbox.download(f"{remote}/agent.log", self.directory / "agent.log")
+            await self.sandbox.download(f"{self.evidence_directory}/agent.log", self.directory / "agent.log")
         except Exception:
+            download_failed = True
             LOGGER.warning("Unable to retrieve mini-SWE stdout/stderr", exc_info=True)
         try:
             native_trajectory = await self._download_artifact("trajectory.json")
         except Exception:
             native_trajectory = None
+            download_failed = True
+        if download_failed and self.recover_artifacts is not None:
+            try:
+                recovered = await self.recover_artifacts(self.directory)
+                if recovered and (self.directory / "trajectory.json").is_file():
+                    native_trajectory = json.loads((self.directory / "trajectory.json").read_text())
+            except Exception as error:
+                recovery_error = f"{type(error).__name__}: {error}"
+                LOGGER.exception("Unable to recover mini-SWE artifacts from the resource-owned logs helper")
         result = native_trajectory or {}
         info = result.get("info", {})
-        if termination.reason == "completed" or (termination.detail or "").startswith("mini-SWE command exited"):
+        interpret_exit = termination.reason == "completed" or (
+            (termination.detail or "").startswith("mini-SWE command exited")
+            and not (self.context.durable_agent_logs and (recovered or not info.get("exit_status")))
+        )
+        if interpret_exit:
             status = info.get("exit_status")
             last_extra = (result.get("messages") or [{}])[-1].get("extra", {})
             error = last_extra.get("exception_str", "")
@@ -451,6 +486,8 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             else None,
         )
         extra = {"harness_version": info.get("mini_version")}
+        if download_failed and self.recover_artifacts is not None:
+            extra["mini_swe_artifact_recovery"] = {"recovered": recovered, "error": recovery_error}
         if native_trajectory is not None:
             extra["mini_swe_trajectory"] = native_trajectory
             termination.artifacts = [str(self.directory / "trajectory.json")]
@@ -463,7 +500,10 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                 task_id=self.context.task_id or self.context.session_id,
                 rollout_id=self.context.rollout_id or self.context.session_id,
             )
-            if native_trajectory is None or termination.reason in {"cancelled", "timeout"}:
+            interrupted_checkpoint = self.context.durable_agent_logs and (
+                recovered or termination.reason in {"infrastructure_error", "cancelled", "timeout"}
+            )
+            if native_trajectory is None or termination.reason in {"cancelled", "timeout"} or interrupted_checkpoint:
                 trajectory.gaps.append(
                     ObservationGap(
                         code="native_trajectory_unavailable"
@@ -471,6 +511,14 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                         else "native_trajectory_partial",
                         invocation_id=invocation.invocation_id,
                         detail="Native mini-SWE saves after each step; an interrupted active step may be absent.",
+                    )
+                )
+            if interrupted_checkpoint:
+                trajectory.gaps.append(
+                    ObservationGap(
+                        code="turn_model_call_scope_incomplete",
+                        invocation_id=invocation.invocation_id,
+                        detail="An interrupted checkpoint cannot establish that every captured call was persisted.",
                     )
                 )
             adapter = TypeAdapter(list[NeMoGymResponseInputItem])

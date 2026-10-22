@@ -71,7 +71,8 @@ async def test_real_runner_preserves_model_history_and_tool_observations(
         observability_enabled=observability_enabled,
     )
     Path(harness.context.workdir, "large.txt").write_text(full_output)
-    response, termination, extra = await harness.execute(30)
+    # Cold native CLI imports can take over 25 seconds before the first tool runs.
+    response, termination, extra = await harness.execute(60)
     assert termination.reason == "completed", termination
     assert extra["harness_version"] == "2.4.6"
     assert len(response.output) == 8

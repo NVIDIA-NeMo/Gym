@@ -6,6 +6,7 @@ import os
 import shlex
 import shutil
 import sys
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -37,7 +38,12 @@ class LocalHelper:
             sys.executable, *args[1:], stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await process.communicate()
-        return SimpleNamespace(return_code=process.returncode, stdout=stdout.decode(), stderr=stderr.decode())
+        return SimpleNamespace(
+            return_code=process.returncode, error_type=None, stdout=stdout.decode(), stderr=stderr.decode()
+        )
+
+    async def download(self, remote, local):
+        shutil.copyfile(remote, local)
 
 
 def shared(tmp_path, monkeypatch):
@@ -324,3 +330,68 @@ def test_logs_helper_uses_task_deployment_and_independent_role_mounts(
     assert env.provider_config["opensandbox"]["connection"]["domain"] == pool + ".invalid"
     env.shared_logs = logs
     assert env.build_spec().provider_options["volumes"] == [logs.volume("verifier" if verifier else "agent")]
+
+
+async def test_agent_checkpoint_and_log_survive_workload_deletion(tmp_path, monkeypatch):
+    logs, _, _ = shared(tmp_path, monkeypatch)
+    await logs.start()
+    cfg = TaskSettings.model_validate(
+        {"environment": {"docker_image": "agent"}, "verifier": {"environment_mode": "separate"}}
+    )
+    agent, box, _ = environment(tmp_path / "workload", cfg)
+    mount_role(agent, logs, "agent")
+    durable = box.path("/logs/agent/miniswe")
+    durable.mkdir()
+    checkpoint = b'{"messages":[{"role":"user","content":"observed"}],"info":{"exit_status":""}}'
+    stdout = b"last complete log line\npartial stdout\xff"
+    (durable / "trajectory.json").write_bytes(checkpoint)
+    (durable / "agent.log").write_bytes(stdout)
+    (durable / "trajectory.json.tmp").write_text("interrupted write")
+    (Path(logs.root) / "verifier" / "reward.txt").write_text("not agent evidence")
+    shutil.rmtree(box.root)
+    archive = await logs.snapshot_agent_artifacts(tmp_path / "retained.tar", max_bytes=1024)
+    await logs.stop()
+    with tarfile.open(archive) as tar:
+        assert tar.getnames() == ["trajectory.json", "agent.log"]
+        assert tar.extractfile("trajectory.json").read() == checkpoint
+        assert tar.extractfile("agent.log").read() == stdout
+    assert not Path(logs.root).exists()
+
+
+@pytest.mark.parametrize("replacement", ["file_link", "directory_link", "fifo", "wrong_owner", "over_limit"])
+async def test_agent_evidence_rejects_unsafe_or_oversized_source(tmp_path, monkeypatch, replacement):
+    logs, _, _ = shared(tmp_path, monkeypatch)
+    other, _, _ = shared(tmp_path, monkeypatch)
+    await logs.start()
+    await other.start()
+    directory = Path(logs.root) / "agent" / "agent" / "miniswe"
+    directory.mkdir(parents=True)
+    foreign = Path(other.root) / "verifier" / "secret"
+    foreign.write_text("another episode's verifier")
+    source = directory / "trajectory.json"
+    if replacement == "file_link":
+        source.symlink_to(foreign)
+    elif replacement == "directory_link":
+        directory.rmdir()
+        directory.symlink_to(foreign.parent, target_is_directory=True)
+    elif replacement == "fifo":
+        os.mkfifo(source)
+    elif replacement == "wrong_owner":
+        (Path(logs.root) / ".owner").write_text("unrelated owner")
+    else:
+        source.write_bytes(b"x" * 1025)
+    with pytest.raises(RuntimeError, match="EFS logs operation failed"):
+        await asyncio.wait_for(logs.snapshot_agent_artifacts(tmp_path / "unsafe.tar", max_bytes=1024), 5)
+    assert not (tmp_path / "unsafe.tar").exists()
+    assert foreign.read_text() == "another episode's verifier"
+    if replacement == "wrong_owner":
+        (Path(logs.root) / ".owner").write_text(logs.owner_token)
+    await logs.stop()
+    await other.stop()
+
+
+async def test_helper_exec_transport_failure_cannot_look_successful(tmp_path, monkeypatch):
+    logs, helper, _ = shared(tmp_path, monkeypatch)
+    helper.exec = AsyncMock(return_value=SimpleNamespace(return_code=None, error_type="provider_timeout", stderr=""))
+    with pytest.raises(RuntimeError, match="provider_timeout"):
+        await logs.python("raise AssertionError('not executed')")
