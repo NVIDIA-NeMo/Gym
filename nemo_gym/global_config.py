@@ -391,6 +391,8 @@ class GlobalConfigDictParserConfig(BaseModel):
     # Static inspection avoids network and process side effects. Assigned ports are placeholders,
     # not evidence that a runtime is ready.
     offline: bool = False
+    # Leave live exporters unopened. A command that exports a finished run opens its own backend session.
+    skip_exporters: bool = False
 
     # This is a shorthand we use for config resolution use cases that shouldn't require a model
     # e.g. data loading, etc
@@ -1739,7 +1741,7 @@ Set the keys individually, in a config or as overrides, e.g.:
             recursively_hide_secrets(global_config_dict)
 
         # Set up exporters and log config. This must happen at the very last step.
-        if not parse_config.offline:  # pragma: no cover
+        if not parse_config.offline and not parse_config.skip_exporters:  # pragma: no cover
             setup_exporters(global_config_dict)
 
         return global_config_dict

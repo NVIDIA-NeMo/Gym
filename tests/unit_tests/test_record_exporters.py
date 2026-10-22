@@ -1,0 +1,341 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import os
+from pathlib import Path
+from typing import Any, ClassVar, Optional
+from unittest.mock import MagicMock
+
+import orjson
+import pytest
+import yaml
+from omegaconf import DictConfig, OmegaConf
+from pytest import MonkeyPatch
+
+import nemo_gym.exporters as exporters_module
+import nemo_gym.exporters.mlflow as mlflow_module
+import nemo_gym.exporters.wandb as wandb_module
+from nemo_gym.config_types import ConfigError
+from nemo_gym.exporters import load_run_exporter_class
+from nemo_gym.exporters.base import BaseExporter, ExportState
+from nemo_gym.exporters.metrics import flatten_aggregate_metrics
+from nemo_gym.exporters.mlflow import MLflowExporter
+from nemo_gym.exporters.wandb import WandbExporter
+from nemo_gym.run_artifacts import RunArtifacts
+
+
+AGGREGATE_ENTRIES = [
+    {
+        "agent_ref": {"name": "simple_agent"},
+        "agent_metrics": {"mean/reward": 0.5, "note": "ok", "nested": {"skipped": 1}},
+        "key_metrics": {"pass@1": 0.25},
+    },
+    {"agent_ref": {"name": "other_agent"}, "agent_metrics": {"mean/reward": 1.0}, "key_metrics": {}},
+]
+
+
+class RecordingBackend(BaseExporter):
+    name: ClassVar[str] = "recording"
+    fail_logging: ClassVar[bool] = False
+
+    def __init__(self, global_config_dict: DictConfig) -> None:
+        super().__init__(global_config_dict)
+        self.events: list[str] = []
+        self.configs: list[DictConfig] = []
+        self.metrics: list[dict[str, Any]] = []
+        self.rollouts: list[list[dict[str, Any]]] = []
+        self.marker_during_logging: Optional[bool] = None
+
+    def setup(self) -> None:
+        self.events.append("setup")
+        self._record_run_id("backend-run-7")
+
+    def teardown(self) -> None:
+        self.events.append("teardown")
+
+    def _log_config(self, config_dict: DictConfig) -> None:
+        self.marker_during_logging = self._run_id_fpath().exists()
+        self.configs.append(config_dict)
+
+    def _log_metrics(self, metrics: dict[str, Any], step: Optional[int] = None) -> None:
+        if self.fail_logging:
+            raise RuntimeError("backend rejected the metrics")
+        self.metrics.append(metrics)
+
+    def _log_rollouts(self, rollouts: list[dict[str, Any]]) -> None:
+        self.rollouts.append(rollouts)
+
+
+def _make_run(tmp_path: Path, *, saved_config: Optional[dict] = None) -> RunArtifacts:
+    rollouts = tmp_path / "run.jsonl"
+    rows = [
+        {"_ng_task_index": 0, "reward": 1.0, "ng_trajectory": {"big": "x"}, "ng_model_call_capture": {"calls": []}},
+        {"_ng_task_index": 1, "reward": 0.0},
+        {"_ng_task_index": 2, "_ng_dispatch_drained": True},
+    ]
+    rollouts.write_bytes(b"\n".join(orjson.dumps(row) for row in rows) + b"\n")
+    artifacts = RunArtifacts(rollouts)
+    artifacts.aggregate_metrics_json_fpath.write_bytes(orjson.dumps(AGGREGATE_ENTRIES))
+    artifacts.resolved_config_yaml_fpath.write_text(
+        yaml.safe_dump(saved_config if saved_config is not None else {"policy_api_key": "****", "model": "m"})
+    )
+    stamp = rollouts.stat().st_mtime + 10
+    os.utime(artifacts.aggregate_metrics_json_fpath, (stamp, stamp))
+    return artifacts
+
+
+def _backend(artifacts: RunArtifacts, **overrides: Any) -> RecordingBackend:
+    return RecordingBackend(
+        OmegaConf.create({"rollouts_jsonl_fpath": str(artifacts.rollouts_jsonl_fpath), **overrides})
+    )
+
+
+def test_flatten_aggregate_metrics_keeps_primitives_under_agent_prefixes() -> None:
+    assert flatten_aggregate_metrics(AGGREGATE_ENTRIES) == {
+        "simple_agent/mean/reward": 0.5,
+        "simple_agent/note": "ok",
+        "key_metrics/simple_agent/pass@1": 0.25,
+        "other_agent/mean/reward": 1.0,
+    }
+
+
+class TestExport:
+    def test_sends_the_saved_config_flattened_metrics_and_sanitized_rollouts(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+        backend = _backend(artifacts)
+
+        result = backend.export(artifacts)
+
+        assert result.state is ExportState.SUCCEEDED
+        assert result.detail == {"run_id": "backend-run-7", "uploaded_rollouts": True}
+        assert OmegaConf.to_container(backend.configs[0]) == {"policy_api_key": "****", "model": "m"}
+        assert backend.metrics == [flatten_aggregate_metrics(AGGREGATE_ENTRIES)]
+        assert backend.rollouts == [
+            [
+                {"_ng_task_index": 0, "reward": 1.0, "ng_model_call_capture": {"calls": []}},
+                {"_ng_task_index": 1, "reward": 0.0},
+            ]
+        ]
+        assert backend.events == ["setup", "teardown"]
+
+    def test_marker_is_written_after_the_run_is_sent_not_when_the_backend_opens(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+        backend = _backend(artifacts)
+
+        backend.export(artifacts)
+
+        assert backend.marker_during_logging is False
+        assert artifacts.exporter_run_id_fpath("recording").read_text() == "backend-run-7"
+
+    def test_an_already_exported_run_is_skipped_without_opening_the_backend(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+        artifacts.exporter_run_id_fpath("recording").write_text("earlier-run")
+        backend = _backend(artifacts)
+
+        result = backend.export(artifacts)
+
+        assert result.state is ExportState.SKIPPED
+        assert result.detail == {"reason": "already exported", "run_id": "earlier-run"}
+        assert backend.events == []
+
+    def test_a_backend_failure_is_reported_leaves_no_marker_and_still_closes_the_backend(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        artifacts = _make_run(tmp_path)
+        monkeypatch.setattr(RecordingBackend, "fail_logging", True)
+        backend = _backend(artifacts)
+
+        result = backend.export(artifacts)
+
+        assert result.state is ExportState.FAILED
+        assert result.exit_code == 1
+        assert "backend rejected the metrics" in result.error
+        assert not artifacts.exporter_run_id_fpath("recording").exists()
+        assert backend.events == ["setup", "teardown"]
+
+    def test_a_retry_after_failure_starts_a_fresh_backend_run(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        artifacts = _make_run(tmp_path)
+        monkeypatch.setattr(RecordingBackend, "fail_logging", True)
+        _backend(artifacts).export(artifacts)
+        monkeypatch.setattr(RecordingBackend, "fail_logging", False)
+
+        retry = _backend(artifacts)
+
+        assert retry.export(artifacts).state is ExportState.SUCCEEDED
+
+    def test_live_runs_still_record_the_run_id_when_the_backend_opens(self, tmp_path: Path) -> None:
+        output = tmp_path / "live.jsonl"
+        backend = RecordingBackend(OmegaConf.create({"output_jsonl_fpath": str(output)}))
+
+        backend.setup()
+
+        assert (tmp_path / "live_recording_run_id").read_text() == "backend-run-7"
+        assert backend._recorded_run_id() == "backend-run-7"
+
+
+class TestRunMustBeExportable:
+    def test_missing_aggregate_metrics(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+        artifacts.aggregate_metrics_json_fpath.unlink()
+
+        result = _backend(artifacts).export(artifacts)
+
+        assert result.state is ExportState.FAILED
+        assert "Aggregate metrics not found" in result.error
+
+    def test_aggregate_metrics_older_than_the_rollouts(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+        stamp = artifacts.rollouts_jsonl_fpath.stat().st_mtime - 100
+        os.utime(artifacts.aggregate_metrics_json_fpath, (stamp, stamp))
+
+        result = _backend(artifacts).export(artifacts)
+
+        assert result.state is ExportState.FAILED
+        assert "older than" in result.error
+
+    def test_missing_saved_config(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+        artifacts.resolved_config_yaml_fpath.unlink()
+
+        result = _backend(artifacts).export(artifacts)
+
+        assert result.state is ExportState.FAILED
+        assert "Saved run config not found" in result.error
+
+    def test_missing_rollouts(self, tmp_path: Path) -> None:
+        result = _backend(RunArtifacts(tmp_path / "none.jsonl")).export(RunArtifacts(tmp_path / "none.jsonl"))
+
+        assert result.state is ExportState.FAILED
+        assert "Rollouts file not found" in result.error
+
+    def test_a_run_that_cannot_be_exported_does_not_open_the_backend(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+        artifacts.resolved_config_yaml_fpath.unlink()
+        backend = _backend(artifacts)
+
+        backend.export(artifacts)
+
+        assert backend.events == []
+
+
+class TestUploadIntent:
+    def test_the_runs_saved_setting_decides_by_default(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path, saved_config={"upload_rollouts": False})
+        backend = _backend(artifacts)
+
+        result = backend.export(artifacts)
+
+        assert result.detail["uploaded_rollouts"] is False
+        assert backend.rollouts == []
+
+    def test_an_explicit_override_on_the_export_command_wins_over_the_saved_setting(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path, saved_config={"upload_rollouts": False})
+        backend = _backend(artifacts, upload_rollouts=True)
+
+        assert backend.export(artifacts).detail["uploaded_rollouts"] is True
+        assert len(backend.rollouts[0]) == 2
+
+    def test_an_explicit_false_skips_the_upload_of_a_run_that_would_upload(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+        backend = _backend(artifacts, upload_rollouts=False)
+
+        assert backend.export(artifacts).detail["uploaded_rollouts"] is False
+
+
+class TestRegisteredBackends:
+    def test_mlflow_and_wandb_are_post_run_exporters(self) -> None:
+        assert load_run_exporter_class("mlflow") is MLflowExporter
+        assert load_run_exporter_class("wandb") is WandbExporter
+
+    def test_a_missing_sdk_names_the_extra_to_install(self, monkeypatch: MonkeyPatch) -> None:
+        def missing(name: str):
+            raise ImportError("No module named 'mlflow'")
+
+        monkeypatch.setattr(exporters_module, "import_module", missing)
+
+        with pytest.raises(ConfigError, match=r"pip install nemo-gym\[mlflow\]"):
+            load_run_exporter_class("mlflow")
+
+    def test_the_rollouts_path_is_required(self) -> None:
+        with pytest.raises(Exception, match="rollouts_jsonl_fpath"):
+            MLflowExporter.from_global_config(OmegaConf.create({"mlflow_tracking_uri": "http://x"}))
+
+    def test_mlflow_export_creates_one_run_with_the_saved_config_and_records_its_id(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        artifacts = _make_run(tmp_path)
+        client = MagicMock()
+        client.get_experiment_by_name.return_value = MagicMock(experiment_id="exp-1")
+        client.create_run.return_value = MagicMock(info=MagicMock(run_id="mlflow-run-1"))
+        monkeypatch.setattr(mlflow_module, "MlflowClient", MagicMock(return_value=client))
+        config = OmegaConf.create(
+            {
+                "rollouts_jsonl_fpath": str(artifacts.rollouts_jsonl_fpath),
+                "mlflow_tracking_uri": "https://tracking.example",
+                "mlflow_experiment_name": "gym",
+                "mlflow_run_name": "nightly",
+            }
+        )
+
+        result = MLflowExporter.from_global_config(config).export(artifacts)
+
+        assert result.state is ExportState.SUCCEEDED
+        client.create_run.assert_called_once()
+        client.log_dict.assert_called_once()
+        assert client.log_dict.call_args.args[1] == {"policy_api_key": "****", "model": "m"}
+        client.set_terminated.assert_called_once_with("mlflow-run-1", status="FINISHED")
+        assert artifacts.exporter_run_id_fpath("mlflow").read_text() == "mlflow-run-1"
+        assert MLflowExporter.from_global_config(config).export(artifacts).state is ExportState.SKIPPED
+        assert client.create_run.call_count == 1
+
+    def test_wandb_export_logs_to_one_run_and_records_its_id(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        artifacts = _make_run(tmp_path)
+        run = MagicMock(id="wandb-run-1")
+        init = MagicMock(return_value=run)
+        monkeypatch.setattr(wandb_module.wandb, "init", init)
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+        config = OmegaConf.create(
+            {
+                "rollouts_jsonl_fpath": str(artifacts.rollouts_jsonl_fpath),
+                "results_dir": str(tmp_path / "results"),
+                "wandb_project": "proj",
+                "wandb_name": "nightly",
+                "wandb_api_key": "key",  # pragma: allowlist secret
+            }
+        )
+
+        result = WandbExporter.from_global_config(config).export(artifacts)
+
+        assert result.state is ExportState.SUCCEEDED
+        assert "id" not in init.call_args.kwargs
+        run.config.update.assert_called_once_with({"policy_api_key": "****", "model": "m"})
+        run.finish.assert_called_once()
+        assert artifacts.exporter_run_id_fpath("wandb").read_text() == "wandb-run-1"
+
+
+def test_skip_exporters_leaves_live_exporters_unopened(monkeypatch: MonkeyPatch) -> None:
+    import nemo_gym.global_config as global_config
+
+    opened = MagicMock()
+    monkeypatch.setattr(global_config, "setup_exporters", opened)
+
+    for skip in (True, False):
+        opened.reset_mock()
+        config = global_config.GlobalConfigDictParserConfig(
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            skip_exporters=skip,
+        )
+        global_config.GlobalConfigDictParser().parse(config)
+        assert opened.called is (not skip)
