@@ -225,8 +225,16 @@ class Deployment:
 
     def resources_workers(self) -> list[psutil.Process]:
         # uvicorn's workers, not the multiprocessing helper it may also start.
-        children = psutil.Process(self.procs["resources"].pid).children()
-        return [child for child in children if "resource_tracker" not in " ".join(child.cmdline())]
+        workers = []
+        for child in psutil.Process(self.procs["resources"].pid).children():
+            try:
+                if "resource_tracker" in " ".join(child.cmdline()):
+                    continue
+            except psutil.NoSuchProcess:
+                # A worker that exited, possibly a zombie uvicorn has not reaped yet, is not a live worker.
+                continue
+            workers.append(child)
+        return workers
 
     def claimant(self, session_id: str) -> str:
         """The worker that claims a resources session: the routing ID in its claim file."""
@@ -422,6 +430,24 @@ def test_every_request_is_access_logged_once_with_several_workers(deployment: De
     assert len(logged) == EPISODES and all('HTTP/1.1" 200' in line for line in logged), logged[:5]
 
 
+def _wait_until_dead(process: psutil.Process, timeout: float = 60) -> None:
+    """Wait until a killed worker has exited, whether or not uvicorn has reaped it yet.
+
+    The worker is uvicorn's child, not this process's, so psutil cannot collect its exit status.
+    psutil sees it gone only once uvicorn reaps it, which happens when uvicorn's health checks reach it.
+    Each check of a live worker may wait several seconds, so a dead worker can stay a zombie for a while.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if process.status() == psutil.STATUS_ZOMBIE:
+                return
+        except psutil.NoSuchProcess:
+            return
+        time.sleep(0.1)
+    raise TimeoutError(f"worker {process.pid} did not exit")
+
+
 def test_session_of_an_exited_worker_gets_an_explicit_error(deployment: Deployment) -> None:
     url = deployment.url("resources")
 
@@ -446,7 +472,7 @@ def test_session_of_an_exited_worker_gets_an_explicit_error(deployment: Deployme
     # uvicorn replaces the worker; the replacement does not hold the killed worker's sessions.
     victim = deployment.resources_worker_of(owners.most_common(1)[0][0])
     victim.send_signal(signal.SIGKILL)
-    victim.wait(timeout=10)
+    _wait_until_dead(victim)
     deployment._wait_for_workers(exclude=victim.pid)
     responses, rewards = asyncio.run(verify_all(sessions))
     lost_owners = {owner_of[_session_id(cookies)] for cookies, r in zip(sessions, responses) if r.status == 410}
