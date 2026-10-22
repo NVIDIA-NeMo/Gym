@@ -525,6 +525,7 @@ serve_prefill() {
     VLLM_WORKER_MULTIPROC_METHOD=spawn nsys profile \
         --trace=cuda,nvtx,osrt,nccl,cublas,cublas-verbose \
         --nccl-trace=all --pytorch=functions-trace-shapes \
+        --gpu-metrics-devices=all \
         --sample=process-tree --cpuctxsw=none \
         --cudabacktrace=all --python-backtrace=cuda --python-sampling=true \
         --trace-fork-before-exec=true --cuda-graph-trace=node \
