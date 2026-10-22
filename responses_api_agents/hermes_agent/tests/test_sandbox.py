@@ -284,6 +284,10 @@ async def test_activation_replay_survives_disconnected_waiter(agent, state):
             for prefix in ("HTTP ", "Error code: ")
         ],
         ("Request timed out.", {"failure_kind": "model_transport_error"}, True),
+        ("Request timed out: upstream read", {"failure_kind": "model_transport_error"}, True),
+        ("Connection error: reset by peer", {"failure_kind": "model_transport_error"}, True),
+        ("All connection attempts failed: refused", {"failure_kind": "model_transport_error"}, True),
+        ("Provider said Connection error", {"failure_kind": "unknown"}, True),
     ],
 )
 def test_provider_failure_is_reported_and_replays_without_rerunning(agent, state, error_message, outcome, retryable):

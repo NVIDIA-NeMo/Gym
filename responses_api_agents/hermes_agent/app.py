@@ -89,9 +89,8 @@ from responses_api_agents.hermes_agent.observability import HermesAgentObserver,
 from responses_api_agents.hermes_agent.sandbox import DEFAULT_UV_CACHE_DIR, HarnessProcessInfo, HermesSandboxSession
 
 
-# HTTP statuses a model endpoint returns for what the request asked, after Hermes's own retries: the
-# conversation was refused (malformed or too long for the model), so the episode is a graded zero, not an
-# infrastructure failure. Auth, routing, rate-limit and server errors stay provider failures and are masked.
+# Legacy /run grades these request rejections and masks other provider failures.
+# Agent sessions report the cause; the Environment Server selects verification, retry or failure.
 MODEL_REJECTION_STATUSES = frozenset({400, 413, 422})
 _HTTP_STATUS = re.compile(r"\b(?:HTTP |Error code: )([45]\d{2})\b")
 _TRUNCATION_ERROR = "First response truncated due to output length limit"
@@ -339,12 +338,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             match = _HTTP_STATUS.search(error)
             if match and 400 <= int(match[1]) <= 599:
                 return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
-            if error in {
-                "Connection error.",
-                "Connection error",
-                "All connection attempts failed",
-                "Request timed out.",
-            }:
+            if error.startswith(("Connection error", "All connection attempts failed", "Request timed out")):
                 return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
             return AgentOutcome(failure_kind="unknown")
         if native_result.get("partial"):
