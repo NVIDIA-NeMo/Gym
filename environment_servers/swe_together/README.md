@@ -13,6 +13,15 @@ continuation receives only each new user message. The simulator cannot end an
 episode: the environment stops on the interaction budget, 15 resumes, or four
 consecutive no-ops.
 
+At the interaction deadline, the environment cancels its HTTP wait and closes the
+candidate session before grading. Confirmed native close evidence represents an
+interrupted final activation explicitly; unavailable output and usage remain
+unknown. Cleanup time never grants another execution budget. Per-turn execution
+budgets start when the adapter accepts an activation: preceding transport delay
+consumes the interaction budget but can extend that turn's wall-clock duration.
+The merged relative-budget API cannot enforce an earlier transport-inclusive turn
+deadline while preserving native continuation.
+
 Grading begins after confirmed candidate shutdown. The environment restores the
 complete initial task working directory and every repository discovered during
 setup into a fresh sandbox running the same pinned image. This includes ignored

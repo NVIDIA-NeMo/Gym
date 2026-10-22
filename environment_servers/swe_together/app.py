@@ -208,6 +208,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 "/v1/agent_sessions/close",
                 json=AgentCloseSessionRequest(agent_session_id=agent_id, episode_id=request.episode_id),
                 cookies=cookies,
+                _control=True,
             )
             await raise_for_status(response)
             agent_close = AgentCloseSessionResponse.model_validate(await get_response_json(response))
@@ -276,25 +277,44 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 turn_deadline = min(monotonic() + self.config.activation_timeout_seconds, state.interaction_deadline)
                 activation_attempted = True
                 started = monotonic()
-                async with asyncio.timeout(max(0, turn_deadline - monotonic()) + self.config.cleanup_timeout_seconds):
-                    response = await self.server_client.post(
-                        self.config.agent_server.name,
-                        self._activation_path(request),
-                        json=next_input.model_copy(
-                            update={
-                                "metadata": {"agent_timeout_sec": str(max(0.001, turn_deadline - monotonic()))},
-                            }
-                        ),
-                        headers={AGENT_ACTIVATION_HEADER: str(activation_id)},
-                        cookies=cookies,
+                collection_deadline = min(
+                    turn_deadline + self.config.cleanup_timeout_seconds, state.interaction_deadline
+                )
+                try:
+                    async with asyncio.timeout_at(collection_deadline) as timer:
+                        response = await self.server_client.post(
+                            self.config.agent_server.name,
+                            self._activation_path(request),
+                            json=next_input.model_copy(
+                                update={
+                                    "metadata": {"agent_timeout_sec": str(max(0.001, turn_deadline - monotonic()))},
+                                }
+                            ),
+                            headers={AGENT_ACTIVATION_HEADER: str(activation_id)},
+                            cookies=cookies,
+                        )
+                        await raise_for_status(response)
+                        cookies.update({k: v.value for k, v in response.cookies.items()})
+                        activation = CandidateTurn(
+                            activation_id=activation_id,
+                            response=NeMoGymResponse.model_validate(await get_response_json(response)),
+                            duration_seconds=monotonic() - started,
+                        )
+                except TimeoutError:
+                    if not timer.expired() or self._remaining_interaction_seconds(state) > 0:
+                        raise
+                    # Canceling an HTTP waiter does not stop a retained activation.
+                    # Close fences delayed retries, terminates native work, and
+                    # returns evidence before any filesystem can enter grading.
+                    stage = "cleanup"
+                    await agent_cleanup.close()
+                    activations.append(
+                        CandidateTurn.from_deadline_close(agent_close, activation_id, monotonic() - started)
                     )
-                    await raise_for_status(response)
-                    cookies.update({k: v.value for k, v in response.cookies.items()})
-                    activation = CandidateTurn(
-                        activation_id=activation_id,
-                        response=NeMoGymResponse.model_validate(await get_response_json(response)),
-                        duration_seconds=monotonic() - started,
+                    steps.append(
+                        UserTurn(activation_id=activation_id, kind="stop", stop_reason="session_budget_exhausted")
                     )
+                    break
                 if activation.activation_id != activation_id:
                     raise ValueError("Candidate returned an unexpected activation ID")
                 activations.append(activation)

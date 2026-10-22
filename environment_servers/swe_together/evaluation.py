@@ -194,6 +194,7 @@ async def run_judge(
                     "/v1/agent_sessions/close",
                     json=AgentCloseSessionRequest(agent_session_id=session_id, episode_id=judge_episode),
                     cookies=judge_cookies,
+                    _control=True,
                 )
                 await raise_for_status(response)
                 close = AgentCloseSessionResponse.model_validate(await get_response_json(response))

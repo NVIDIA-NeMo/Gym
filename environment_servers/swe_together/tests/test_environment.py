@@ -264,9 +264,7 @@ async def test_saved_judge_verdict_survives_lost_response(tmp_path, monkeypatch,
 
     monkeypatch.setattr(evaluation, "read_text", read)
     monkeypatch.setattr(evaluation, "read_test_reward", AsyncMock(return_value={"test_reward_raw": None}))
-    (tmp_path / "canonical_goals.json").write_text(
-        json.dumps({"completeness_goals": [{"id": "goal", "weight": 1}]})
-    )
+    (tmp_path / "canonical_goals.json").write_text(json.dumps({"completeness_goals": [{"id": "goal", "weight": 1}]}))
     req = request()
     evidence = {}
     verdict = await evaluation.run_judge(
@@ -331,7 +329,7 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
             "task_id": "task",
         }
 
-    async def post(name, path, *, json, cookies, headers=None):
+    async def post(name, path, *, json, cookies, headers=None, _control=False):
         if path == "/v1/agent_sessions":
             order.append("seed")
             data = {
@@ -339,6 +337,7 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
                 "capabilities": {"mode": "resume_harness_session", "observations": ["trajectory", "timing"]},
             }
         elif path == "/v1/agent_sessions/close":
+            assert _control
             order.append("agent close")
             data = {
                 "agent_session_id": json.agent_session_id,
@@ -395,6 +394,107 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
         "candidate sandbox close",
     ]
     assert result.result.cleanup_receipts["candidate_sandbox"]["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize(
+    "native_outcome,confirmed",
+    [("interrupted", True), ("not_started", True), ("failed", True), ("interrupted", False)],
+)
+async def test_interaction_deadline_closes_remote_work_before_grading(
+    tmp_path, monkeypatch, native_outcome, confirmed
+):
+    environment = server(tmp_path, interaction_timeout_seconds=0.03, cleanup_timeout_seconds=1)
+    remote = None
+    close_count = 0
+    verified = False
+    late_work = False
+
+    async def work():
+        nonlocal late_work
+        await asyncio.sleep(0.1)
+        late_work = True
+
+    async def prepare(self, value):
+        value.sandbox = SimpleNamespace(serialize=AsyncMock(return_value={}))
+        value.prompt = "instruction"
+
+    async def stop(self, value, role):
+        value.cleanup_receipts[role + "_sandbox"] = {"cleanup_confirmed": True}
+
+    async def verify(self, value, initial, activations):
+        nonlocal verified
+        verified = True
+        assert close_count == 1 and remote.cancelled()
+        turn = activations[-1]
+        assert turn.response_source == "session_close"
+        assert turn.response.status == "incomplete"
+        assert turn.response.output == [] and turn.response.usage is None
+        assert turn.response.metadata["harness_session_id"] == "native-one"
+        return {
+            "responses_create_params": initial,
+            "response": turn.response,
+            "reward": 0,
+            "judge_score": 0,
+            "task_id": "task",
+        }
+
+    async def post(name, path, *, json, cookies, **kwargs):
+        nonlocal remote, close_count
+        if path == "/v1/agent_sessions":
+            data = {
+                "agent_session_id": json.agent_session_id,
+                "capabilities": {"mode": "resume_harness_session", "observations": ["trajectory", "timing"]},
+            }
+        elif path == "/v1/agent_sessions/close":
+            assert kwargs["_control"] is True
+            close_count += 1
+            remote.cancel()
+            await asyncio.gather(remote, return_exceptions=True)
+            records = (
+                [
+                    {
+                        "kind": "agent_invocation",
+                        "invocation_id": "native-one:1",
+                        "activation_id": 1,
+                        "harness_session_id": "native-one",
+                        "status": "failed" if native_outcome == "failed" else "incomplete",
+                        "error_type": "server_error" if native_outcome == "failed" else "cancelled",
+                    }
+                ]
+                if native_outcome != "not_started"
+                else []
+            )
+            data = {
+                "agent_session_id": json.agent_session_id,
+                "cleanup_confirmed": confirmed,
+                "agent_observations": {"source": "opencode", "records": records},
+            }
+        else:
+            # The real operation ledger keeps execution alive after an HTTP
+            # waiter disconnects. Only explicit session close cancels that work.
+            remote = asyncio.create_task(work())
+            await asyncio.shield(remote)
+            pytest.fail("A reply after the interaction deadline must not enter grading")
+        return SimpleNamespace(cookies={"agent_session_id": SimpleNamespace(value="cookie")}, payload=data)
+
+    monkeypatch.setattr(SWETEnvironmentServer, "_prepare", prepare)
+    monkeypatch.setattr(SWETEnvironmentServer, "_stop_owned_sandbox", stop)
+    monkeypatch.setattr(SWETEnvironmentServer, "_verify", verify)
+    monkeypatch.setattr(SWETEnvironmentServer, "_activation_path", lambda self, req: "/v1/responses")
+    simulator = AsyncMock()
+    monkeypatch.setattr(SWETEnvironmentServer, "_next_user_turn", simulator)
+    monkeypatch.setattr(app, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app, "get_response_json", AsyncMock(side_effect=lambda response: response.payload))
+    environment.server_client = SimpleNamespace(post=post)
+    result = await environment.run_request(request())
+    assert remote.cancelled() and not late_work
+    simulator.assert_not_awaited()
+    if native_outcome == "interrupted" and confirmed:
+        assert verified and result.result.reward == 0
+        assert result.result.ng_steps[-1].stop_reason == "session_budget_exhausted"
+        assert close_count == 1
+    else:
+        assert not verified and result.failure.terminal and result.result is None
 
 
 @pytest.mark.parametrize("transient", [True, False])
