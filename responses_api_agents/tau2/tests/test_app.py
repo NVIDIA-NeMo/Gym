@@ -341,6 +341,12 @@ class TestApp:
 
         assert result[NG_FAILURE_CLASS_KEY] == expected_failure_class
         assert is_terminal_failure(result) is not retried
+        if result.get("failure_kind") == "provider_unavailable":
+            # A provider mask retries only with an explicit infra cause.
+            from nemo_gym.rollout_collection import _masked_result_names_infra
+
+            assert result["_ng_failure_cause"] == "infra"
+            assert _masked_result_names_infra(result)
 
     @pytest.mark.parametrize(
         ("error", "expected_failure_class"),

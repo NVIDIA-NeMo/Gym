@@ -21,6 +21,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.failure_kinds import INFRA, failure_cause_of_text
 from nemo_gym.global_config import is_eval_mode
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import (
@@ -249,7 +250,12 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             session.termination = session.termination or body.termination
             session.result.update(body.agent_timings)
             if body.termination.reason == "infrastructure_error":
-                lifecycle.exception(session, body.termination.detail, "AgentInfrastructureError")
+                # Before the agent ran, the harness failed to set up (retried); during its run, the model can cause it.
+                failure_type = "AgentInfrastructureError" if body.agent_started else "AgentSetupError"
+                if body.agent_started and failure_cause_of_text(body.termination.detail or "") == INFRA:
+                    # The harness relayed platform evidence (a deleted or evicted sandbox): not the model's.
+                    failure_type = "SandboxPlatformEvictionError"
+                lifecycle.exception(session, body.termination.detail, failure_type)
             elif not body.agent_started and body.termination.reason == "timeout":
                 lifecycle.exception(session, body.termination.detail, "AgentSetupTimeoutError")
             try:
@@ -276,9 +282,10 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             failure_type = failure
         elif session.termination.reason == "infrastructure_error" and not result.get("sandbox_resource_limit"):
             failure = session.termination.detail or "Agent infrastructure failure"
-            if is_eval_mode():
-                # Named, so evaluation's retry rule sees the agent harness failure (a run with no trajectory).
-                failure = f"AgentInfrastructureError: {failure}"
+            if is_eval_mode() and failure_cause_of_text(failure) != INFRA:
+                # The verifier graded the sandbox the agent left. The model can end mini-SWE itself (kill -9 -1, a
+                # memory bomb, a full disk), so without platform evidence the grade stands, as in Terminal-Bench.
+                failure = None
         return SandboxedVerifyResponse(
             **(
                 session.verify_body.model_dump(

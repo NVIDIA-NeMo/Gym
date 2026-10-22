@@ -57,7 +57,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.failure_kinds import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE
+from nemo_gym.failure_kinds import INFRA, PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE
 from nemo_gym.global_config import (
     CACHE_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
@@ -71,6 +71,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.profiling import Profiler
+from nemo_gym.rollout_collection import NG_FAILURE_CAUSE_KEY
 from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_dict
 from responses_api_agents.swe_agents.opencode_replay import (
@@ -345,6 +346,8 @@ class SWEBenchMetrics(BaseModel):
 
 
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
+    # Extra keys carry rollout_collection's own labels, such as the failure cause, as the verifiers agent's do.
+    model_config = ConfigDict(extra="allow")
     instance_config: SWEBenchWrapperInstanceConfig
     subagent_trajectories: Optional[List[Dict[str, Any]]] = None
     terminal_response_id: Optional[str] = None
@@ -4095,6 +4098,18 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             terminal_response_id = metadata.get("terminal_response_id")
 
             instance_config = SWEBenchWrapperInstanceConfig.model_validate_json(metadata["instance_config"])
+            # An evaluator that never launched ran none of the model's patch: evaluation names the cause, so the
+            # retry rule retries it. An OOM kill, of the agent or of the evaluator running the patch, can be the
+            # model's doing and names none. Training gets neither, as before.
+            infra_cause = (
+                {NG_FAILURE_CAUSE_KEY: INFRA}
+                if instance_config.mask_sample
+                and instance_config.mask_reason is None
+                and metrics.eval_launch_failed
+                and not (metrics.oom_killed or metrics.eval_oom_killed)
+                and is_eval_mode()
+                else {}
+            )
 
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
@@ -4114,6 +4129,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 instance_config=instance_config.model_dump(),
                 subagent_trajectories=subagent_trajectories,
                 terminal_response_id=terminal_response_id,
+                **infra_cause,
             )
 
 

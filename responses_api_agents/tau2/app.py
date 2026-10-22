@@ -42,14 +42,19 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE
+from nemo_gym.failure_kinds import INFRA, PROVIDER_UNAVAILABLE
 from nemo_gym.global_config import is_eval_mode
 from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
+from nemo_gym.rollout_collection import (
+    NG_FAILURE_CAUSE_KEY,
+    NG_FAILURE_CLASS_KEY,
+    NG_NO_PERSIST_KEY,
+    NG_TERMINAL_KEY,
+)
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import get_server_url, is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.tau2.observability import build_tool_observations
@@ -326,6 +331,8 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             if infra:
                 response.failure_kind = PROVIDER_UNAVAILABLE
                 response.failure_reason = response.error
+                # Named, since a provider mask alone no longer retries: this one failed before the model's turn.
+                response = response.model_copy(update={NG_FAILURE_CAUSE_KEY: INFRA})
             return response
 
     async def _run(self, body: Tau2RunRequest) -> Tau2VerifyResponse:

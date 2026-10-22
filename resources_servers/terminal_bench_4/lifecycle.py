@@ -154,6 +154,11 @@ async def prepare_session(session, loader):
     except TimeoutError as exc:
         exception(session, exc, "EnvironmentStartTimeoutError")
         raise
+    except Exception as exc:
+        if is_eval_mode():
+            # Before the agent's first command: the sandbox could not be created or started, which evaluation retries.
+            exception(session, exc, "SandboxCreateError")
+        raise
     finally:
         session.result["environment_setup"]["finished_at"] = now()
     await session.environment.healthcheck()
@@ -234,6 +239,11 @@ async def finalize_session(session, *, grade):
                 # names it for the retry rule. Outside evaluation the recorded type stays TimeoutError.
                 if is_eval_mode():
                     exception(session, exc, "VerifierStartTimeoutError")
+                raise
+            except Exception as exc:
+                # The verifier sandbox could not be created, so it ran none of the model's work: evaluation retries.
+                if is_eval_mode():
+                    exception(session, exc, "SandboxCreateError")
                 raise
             if getattr(session.verifier_environment, "efs_logs_fallback", None):
                 session.diagnostics.append(

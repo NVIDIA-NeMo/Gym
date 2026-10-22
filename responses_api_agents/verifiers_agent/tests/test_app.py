@@ -642,6 +642,8 @@ class TestPolicyOutage:
         assert body["reward"] == 0.0
         assert body["mask_sample"] is eval_mode
         assert body.get("failure_kind") == ("provider_unavailable" if eval_mode else None)
+        # A provider mask retries only with an explicit infra cause.
+        assert body.get("_ng_failure_cause") == ("infra" if eval_mode else None)
 
     def test_a_model_side_error_is_not_recorded(self) -> None:
         bad_output = ValueError("could not parse tool arguments")

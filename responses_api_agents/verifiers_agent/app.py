@@ -49,6 +49,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
+from nemo_gym.rollout_collection import NG_FAILURE_CAUSE_KEY
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
@@ -675,6 +676,8 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 "mask_sample": True,
                 "failure_kind": PROVIDER_UNAVAILABLE,
                 "failure_reason": resp.policy_infra_error,
+                # The policy endpoint failed, not the model: named so the retry rule retries it.
+                NG_FAILURE_CAUSE_KEY: INFRA,
             }
         return VerifiersAgentVerifyResponse(
             ng_trajectory=resp.ng_trajectory,

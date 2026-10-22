@@ -28,6 +28,8 @@ from typing import Any, TypeVar
 from nemo_gym.sandbox.observability import span_attributes as default_span_attributes
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
+    SandboxCreateError,
+    SandboxCreateTimeoutError,
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
@@ -122,6 +124,19 @@ async def _run_in_pty_session(session: SandboxPtySession, command: str) -> Sandb
         return_code=int(exit_text) if parsed else SANDBOX_PTY_RUNTIME_RETURN_CODE,
         error_type=None if parsed else "pty",
     )
+
+
+def as_create_error(error: Exception) -> SandboxCreateError:
+    """The ``SandboxCreateError`` for a failure while creating or starting a sandbox, before it ran any command.
+
+    A provider's own create error is returned as it is; a timeout becomes a ``SandboxCreateTimeoutError``, which is
+    still a ``TimeoutError``; anything else is wrapped, so the failure rule retries it whatever the provider raised.
+    """
+    if isinstance(error, SandboxCreateError):
+        return error
+    if isinstance(error, TimeoutError):
+        return SandboxCreateTimeoutError(f"{type(error).__name__}: {error}")
+    return SandboxCreateError(f"{type(error).__name__}: {error}")
 
 
 class SandboxPty:
@@ -444,36 +459,42 @@ class AsyncSandbox:
             provider_name = getattr(self._provider, "name", type(self._provider).__name__)
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")
 
-        if is_span_group_enabled(GymSpanGroup.SANDBOX):
-            provider_name = self._telemetry_provider_name()
-            started = time.perf_counter()
-            with managed_span(
-                GymSpanGroup.SANDBOX,
-                "gym.sandbox.start",
-                **{"nemo.gym.sandbox.provider": provider_name, **default_span_attributes(span_attributes)},
-            ) as span:
-                handle = await self._provider.create(requested_spec)
-                if span is not None:
-                    safe_set_span_attributes(span, {"nemo.gym.sandbox.id": _sandbox_id(handle)})
-            record_sandbox_startup((time.perf_counter() - started) * 1000.0, provider=provider_name)
-            record_sandbox_active(1, provider=provider_name)
-            self._counted_active = True
-        else:
-            handle = await self._provider.create(requested_spec)
-        self._handle = handle
-        self._spec = requested_spec
-        self._stopped = False
         try:
-            if requested_spec.files:
-                with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
-                    tmp_path = Path(tmp_dir)
-                    for index, (target_path, contents) in enumerate(requested_spec.files.items()):
-                        source_path = tmp_path / f"file-{index}"
-                        source_path.write_text(contents, encoding="utf-8")
-                        await self._provider.upload_file(handle, source_path, target_path)
-        except BaseException:
-            await self.stop()
-            raise
+            if is_span_group_enabled(GymSpanGroup.SANDBOX):
+                provider_name = self._telemetry_provider_name()
+                started = time.perf_counter()
+                with managed_span(
+                    GymSpanGroup.SANDBOX,
+                    "gym.sandbox.start",
+                    **{"nemo.gym.sandbox.provider": provider_name, **default_span_attributes(span_attributes)},
+                ) as span:
+                    handle = await self._provider.create(requested_spec)
+                    if span is not None:
+                        safe_set_span_attributes(span, {"nemo.gym.sandbox.id": _sandbox_id(handle)})
+                record_sandbox_startup((time.perf_counter() - started) * 1000.0, provider=provider_name)
+                record_sandbox_active(1, provider=provider_name)
+                self._counted_active = True
+            else:
+                handle = await self._provider.create(requested_spec)
+            self._handle = handle
+            self._spec = requested_spec
+            self._stopped = False
+            try:
+                if requested_spec.files:
+                    with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
+                        tmp_path = Path(tmp_dir)
+                        for index, (target_path, contents) in enumerate(requested_spec.files.items()):
+                            source_path = tmp_path / f"file-{index}"
+                            source_path.write_text(contents, encoding="utf-8")
+                            await self._provider.upload_file(handle, source_path, target_path)
+            except BaseException:
+                await self.stop()
+                raise
+        # Nothing in here ran a command in the sandbox, so whatever the provider raised (an SDK error, a ready
+        # timeout after its create retries) is a create failure, before the model's first command: the failure rule
+        # retries it. A provider's own create error passes through; a timeout stays a TimeoutError for its callers.
+        except Exception as error:
+            raise as_create_error(error) from error
 
         return self
 

@@ -46,12 +46,13 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE
+from nemo_gym.failure_kinds import INFRA, PROVIDER_UNAVAILABLE
 from nemo_gym.global_config import is_eval_mode
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.rollout_collection import NG_FAILURE_CAUSE_KEY
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import (
     get_first_server_config_dict,
@@ -527,6 +528,14 @@ class OSWorldAgentResponse(NeMoGymResponse):
     agent_contract: Optional[Dict[str, Any]] = None
 
 
+# adapter_agents.MODEL_FAILURE_OUTCOMES["context_overflow"]: the agent stopped because its prompt no longer fit.
+CONTEXT_OVERFLOW_STOP_REASON = "model_context_overflow"
+# Masks that ran none of the model's work: the environment or the proxy failed before the agent's first action, or
+# the policy endpoint failed (a failed or timed-out model call that was not a context overflow).
+_PRE_AGENT_REASONS = frozenset({"proxy_setup_error", "proxy_configuration_error", "proxy_required_but_disabled"})
+_POLICY_TRANSPORT_REASONS = frozenset({"model_call_failed", "model_timeout"})
+
+
 class OSWorldVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     response: OSWorldAgentResponse
@@ -538,6 +547,10 @@ class OSWorldVerifyResponse(BaseVerifyResponse):
     # Backward-compatible mirror of runtime admission. Exact-trace and loss
     # admission remain the training consumer's responsibility.
     mask_sample: bool = False
+    # The agent's own reason for stopping, when it stopped the rollout itself.
+    policy_stop_reason: Optional[str] = None
+    # Whether the agent took any step; a mask before its first action ran none of the model's work.
+    agent_acted: bool = True
 
     @model_validator(mode="after")
     def validate_runtime_admission(self) -> "OSWorldVerifyResponse":
@@ -555,6 +568,14 @@ class OSWorldVerifyResponse(BaseVerifyResponse):
         if self.mask_sample and self.failure_kind is None and is_eval_mode():
             self.failure_kind = PROVIDER_UNAVAILABLE
             self.failure_reason = self.failure_reason or self.runtime_admission_reason
+            # A provider mask retries only with an explicit infra cause. It is named for a mask that ran none of the
+            # model's work; a mask after the agent acted (the evaluator, the task timeout, a failed action) names
+            # none, since the model's own actions can cause it.
+            reason = self.runtime_admission_reason
+            pre_agent = reason in _PRE_AGENT_REASONS or (reason == "rollout_error" and not self.agent_acted)
+            transport = reason in _POLICY_TRANSPORT_REASONS and self.policy_stop_reason != CONTEXT_OVERFLOW_STOP_REASON
+            if pre_agent or transport:
+                self.__pydantic_extra__[NG_FAILURE_CAUSE_KEY] = INFRA
         return self
 
 
@@ -1150,6 +1171,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         "mask_sample": result.mask_sample,
         "artifact_dir": result.artifact_dir,
         "termination_reason": result.termination_reason,
+        "policy_stop_reason": result.policy_stop_reason,
         "agent_contract": result.agent_contract,
         "steps": [
             {
@@ -1814,6 +1836,8 @@ def _build_response(
         "reward": float(result.get("reward", 0.0)),
         "response": response_dict,
         "verifier_metadata": metadata,
+        "policy_stop_reason": result.get("policy_stop_reason"),
+        "agent_acted": bool(result.get("steps")),
         **runtime_admission,
     }
     return OSWorldVerifyResponse(**response_fields)
@@ -1870,6 +1894,8 @@ def _empty_response(
         "runtime_admission_reason": outcome.runtime_admission_reason,
         "runtime_admission_policy_id": outcome.runtime_admission_policy_id,
         "mask_sample": outcome.mask_sample,
+        # No rollout ran, so the agent took no step.
+        "agent_acted": False,
     }
     return OSWorldVerifyResponse(**response_fields)
 

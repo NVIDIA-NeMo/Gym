@@ -38,7 +38,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE
+from nemo_gym.failure_kinds import AGENT_RUN_ERROR, INFRA, MODEL, PROVIDER_UNAVAILABLE
 from nemo_gym.global_config import is_eval_mode
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -54,7 +54,12 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
+from nemo_gym.rollout_collection import (
+    NG_FAILURE_CAUSE_KEY,
+    NG_FAILURE_CLASS_KEY,
+    NG_NO_PERSIST_KEY,
+    NG_TERMINAL_KEY,
+)
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError, SandboxResources, SandboxSpec, get_provider_class
 from responses_api_agents.openclaw_agent.app import openclaw_session_conversation
@@ -154,15 +159,23 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
 _AGENT_ID_PREFIX = "bench-"
 
 
-class SandboxKilledError(RuntimeError):
+class _SandboxRunError(RuntimeError):
+    """A direct-exec sandbox failure. ``run_started`` says whether the agent's run had begun when it failed."""
+
+    def __init__(self, message: str, *, run_started: bool = False) -> None:
+        super().__init__(message)
+        self.run_started = run_started
+
+
+class SandboxKilledError(_SandboxRunError):
     """Sandbox process died by signal (walltime SIGTERM / preemption / OOM kill)."""
 
 
-class SandboxNoOutputError(RuntimeError):
+class SandboxNoOutputError(_SandboxRunError):
     """The sandbox exited cleanly but wrote no result archive: the harness, not the task, failed."""
 
 
-class SandboxExecError(RuntimeError):
+class SandboxExecError(_SandboxRunError):
     """The sandbox exec exited non-zero and wrote no result archive: the container or the harness failed.
 
     The task's grader writes the archive inside the sandbox, so a deliverable the model did not write is
@@ -179,8 +192,13 @@ def _classify_task_failure(exc: BaseException) -> str:
     graded inside the sandbox. ``legitimate`` stays for a failure of the task's own run. The
     ``provider_unavailable`` routing applies only in evaluation; outside it these stay ``legitimate``, as before.
     """
+    if is_eval_mode() and getattr(exc, "run_started", False):
+        # The agent's run had begun: a kill (137 is an OOM kill), a failed exec or a missing archive is what the
+        # model's own commands can cause (a memory bomb, kill -9 -1, a deleted /sandbox/out). It is the model's 0.
+        return AGENT_RUN_ERROR
     if isinstance(exc, SandboxKilledError):
-        return "kill_shaped"
+        # kill_shaped writes no sidecar row, so it is re-dispatched with no attempt cap; evaluation caps it.
+        return PROVIDER_UNAVAILABLE if is_eval_mode() else "kill_shaped"
     if isinstance(exc, TimeoutError):
         return "timeout_exceeded"
     if is_eval_mode() and isinstance(
@@ -432,6 +450,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             PYSCRIPT
 
             set +e
+            touch "$BASE/.agent_started"
             bash "$PATCHED_RUN_TASK"
             RC=$?
             set -e
@@ -490,6 +509,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
 
         stdout = stdout_path.read_text(errors="replace")[-4000:] if stdout_path.exists() else ""
         stderr = stderr_path.read_text(errors="replace")[-4000:] if stderr_path.exists() else ""
+        # The wrapper marks the start of the agent's run; the run's own log is a second sign it began.
+        run_started = (staging_dir / ".agent_started").exists() or (staging_dir / "out" / "run.log").exists()
         if proc.returncode != 0 and not archive.exists():
             run_log = staging_dir / "out" / "run.log"
             run_tail = run_log.read_text(errors="replace")[-4000:] if run_log.exists() else ""
@@ -497,11 +518,16 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             # rc<0 or 137/143 = killed by signal (walltime/preemption), not a task failure.
             if proc.returncode is not None and (proc.returncode < 0 or proc.returncode in (137, 143)):
                 raise SandboxKilledError(
-                    f"direct apptainer exec killed (rc={proc.returncode}) for task {task_id}: {detail[:1000]}"
+                    f"direct apptainer exec killed (rc={proc.returncode}) for task {task_id}: {detail[:1000]}",
+                    run_started=run_started,
                 )
-            raise SandboxExecError(f"direct apptainer exec failed for task {task_id}: {detail[:4000]}")
+            raise SandboxExecError(
+                f"direct apptainer exec failed for task {task_id}: {detail[:4000]}", run_started=run_started
+            )
         if not archive.exists():
-            raise SandboxNoOutputError(f"direct apptainer exec did not produce {archive} for task {task_id}")
+            raise SandboxNoOutputError(
+                f"direct apptainer exec did not produce {archive} for task {task_id}", run_started=run_started
+            )
 
         if proc.returncode != 0:
             print(
@@ -906,6 +932,12 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 routing[NG_NO_PERSIST_KEY] = True
             elif failure_class == "timeout_exceeded":
                 routing[NG_TERMINAL_KEY] = True
+            elif failure_class == AGENT_RUN_ERROR:
+                routing[NG_TERMINAL_KEY] = True
+                routing[NG_FAILURE_CAUSE_KEY] = MODEL
+            elif failure_class == PROVIDER_UNAVAILABLE:
+                # Before the agent's run began: the sandbox, not the model, failed. Named, so the retry rule keeps it.
+                routing[NG_FAILURE_CAUSE_KEY] = INFRA
         finally:
             if observe:
                 observations = self._build_observations(

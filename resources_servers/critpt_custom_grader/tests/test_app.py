@@ -893,6 +893,13 @@ async def test_nonterminal_execution_category_is_preserved_without_fault(make_se
     assert result["category"] == result["_ng_failure_subcategory"] == category
     assert result["cleanup_status"] == "resolved"
     assert result["response"] == saved_response()
+    # Only a category that ran none of the candidate's code names infra and is retried; the candidate's own code
+    # can cause a failed exec, a missing or an invalid result.
+    from nemo_gym.rollout_collection import _masked_result_names_infra
+
+    candidate_caused = category in ("provider_exec", "candidate_no_result", "result_invalid")
+    assert result.get("_ng_failure_cause") == (None if candidate_caused else "infra")
+    assert _masked_result_names_infra(result) is not candidate_caused
     fake.grade.assert_awaited_once()
     assert not server.server_client.mock_calls
 

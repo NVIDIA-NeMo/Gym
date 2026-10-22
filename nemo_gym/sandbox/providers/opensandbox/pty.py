@@ -106,7 +106,7 @@ class OpenSandboxPtySession:
         request_timeout_s: float | None,
         owned: bool = True,
         takeover: bool = False,
-        diagnose: Callable[[], Awaitable[str | None]] | None = None,
+        diagnose: Callable[[], Awaitable[str | SandboxPtyError | None]] | None = None,
     ) -> None:
         self._client = client
         self._ws = ws
@@ -271,7 +271,9 @@ class OpenSandboxPtySession:
                         notice = await asyncio.wait_for(self._diagnose(), timeout=8.0)
                     except Exception:
                         notice = None
-                    if notice is not None:
+                    if isinstance(notice, SandboxPtyError):
+                        self._error = notice
+                    elif notice is not None:
                         self._error = SandboxPtyError(notice)
                 if not self._exit.done():
                     self._exit.set_exception(self._close_error())
@@ -511,7 +513,7 @@ async def open_pty_session(
     headers: dict[str, str],
     spec: SandboxPtySpec,
     request_timeout_s: float | None,
-    diagnose: Callable[[], Awaitable[str | None]] | None = None,
+    diagnose: Callable[[], Awaitable[str | SandboxPtyError | None]] | None = None,
 ) -> OpenSandboxPtySession:
     """Create an execd PTY session and attach its WebSocket.
 
@@ -602,7 +604,7 @@ async def attach_pty_session(
     takeover: bool = True,
     since: int | None = None,
     request_timeout_s: float | None,
-    diagnose: Callable[[], Awaitable[str | None]] | None = None,
+    diagnose: Callable[[], Awaitable[str | SandboxPtyError | None]] | None = None,
 ) -> OpenSandboxPtySession:
     """Attach to an existing execd PTY session. Owns ``client`` as above."""
     query: dict[str, str] = {}
@@ -688,7 +690,7 @@ async def _start_session(
     request_timeout_s: float | None,
     owned: bool = True,
     takeover: bool = False,
-    diagnose: Callable[[], Awaitable[str | None]] | None = None,
+    diagnose: Callable[[], Awaitable[str | SandboxPtyError | None]] | None = None,
 ) -> OpenSandboxPtySession:
     session = OpenSandboxPtySession(
         client=client,

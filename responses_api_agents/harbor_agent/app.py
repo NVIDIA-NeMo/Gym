@@ -35,14 +35,17 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_kinds import INFRA
 from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
+    is_eval_mode,
 )
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.rollout_collection import NG_FAILURE_CAUSE_KEY, NG_FAILURE_CLASS_KEY
 from responses_api_agents.harbor_agent.utils import HarborAgentUtils
 
 
@@ -123,6 +126,27 @@ class HarborRunRequest(BaseRunRequest):
 
 class HarborVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+
+# Harbor exceptions raised while the trial's sandbox or agent was being created or started.
+_SANDBOX_START_EXCEPTION_TYPES = frozenset(
+    {"SandboxApiException", "SandboxCreateError", "AgentSetupError", "AgentSetupTimeoutError"}
+)
+
+
+def _sandbox_never_started(trial_result: Optional[dict[str, Any]]) -> Optional[str]:
+    """The failure message when the trial's sandbox could not be created or started before the agent ran.
+
+    Harbor stamps agent_execution when the agent starts, so without it the failure came before the model's first
+    command. None for any other trial, including a create-time exception type raised after the agent ran.
+    """
+    info = (trial_result or {}).get("exception_info") or {}
+    exception_type = info.get("exception_type")
+    if (trial_result or {}).get("agent_execution") is not None or not isinstance(exception_type, str):
+        return None
+    if exception_type in _SANDBOX_START_EXCEPTION_TYPES or exception_type.endswith("CreateError"):
+        return f"{exception_type}: {info.get('exception_message', '')}"
+    return None
 
 
 def _find_trial_dir_with_result(job_dir: Path) -> Optional[Path]:
@@ -341,6 +365,17 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 memory_limit_exceeded_error=int(agent_error_flags.get("memory_limit_exceeded", False)),
                 agent_timeout_error=int(
                     ((trial_result or {}).get("exception_info") or {}).get("exception_type") == "AgentTimeoutError"
+                ),
+                # Evaluation only: a sandbox that never started ran none of the model's work, so the row is a
+                # retried infra failure, not the model's 0. Training keeps the reward of 0 as before.
+                **(
+                    {
+                        NG_FAILURE_CLASS_KEY: "harbor_failed",
+                        NG_FAILURE_CAUSE_KEY: INFRA,
+                        "_ng_failure_message": never_started,
+                    }
+                    if is_eval_mode() and (never_started := _sandbox_never_started(trial_result))
+                    else {}
                 ),
             )
 

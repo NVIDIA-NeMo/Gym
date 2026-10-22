@@ -566,3 +566,20 @@ def test_gym_source_prebuilt_path_and_url():
         assert remote._gym_tar is None
         assert remote._gym_source_url == "https://example.com/gym.tar.gz"
         build.assert_not_called()
+
+
+async def test_a_sandbox_that_never_started_is_a_retried_create_error():
+    """The harness creates its box with the provider itself; a raw SDK error there is before the agent's first command."""
+    from opensandbox.exceptions import SandboxApiException
+
+    from nemo_gym.failure_kinds import INFRA, failure_cause_of
+    from nemo_gym.sandbox.providers.base import SandboxCreateError
+
+    agent = _make_agent()
+    agent._provider = MagicMock()
+    agent._provider.create = AsyncMock(side_effect=SandboxApiException("Sandbox ready timeout", status_code=504))
+
+    with pytest.raises(SandboxCreateError) as raised:
+        await agent._provision_box("image", {}, "https://model.example")
+
+    assert failure_cause_of(raised.value) == INFRA

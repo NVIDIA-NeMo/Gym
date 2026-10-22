@@ -32,6 +32,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.rollout_collection import NG_FAILURE_CAUSE_KEY
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.swe_agents.app import (
@@ -3639,6 +3640,10 @@ class TestEvaluatorLaunchFailure:
         assert result.mask_reason is None
         # The mask is the same in both modes; only evaluation names the infra failure for the retry rule.
         assert result.failure_kind == ("provider_unavailable" if expected_mask and eval_mode else None)
+        # An evaluator that never launched ran none of the model's patch, so evaluation names an infra cause and
+        # the sandbox rule retries it; training's row is unchanged.
+        cause = result.model_dump().get(NG_FAILURE_CAUSE_KEY)
+        assert cause == ("infra" if outcome == "launch_failure" and eval_mode else None)
         assert result.response.output[-1].generation_token_ids == [3, 4]
         if outcome == "failed_tests":
             # A completed negative verifier result is a valid policy outcome.
@@ -3678,6 +3683,34 @@ class TestEvaluatorLaunchFailure:
 
         # mask_sample is set by the same conditions as before the label was added.
         assert (params.mask_sample, params.mask_reason) == ((False, None) if reason == "unmasked" else (True, reason))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("eval_mode", [False, True], ids=["training", "evaluation"])
+    @pytest.mark.parametrize(
+        ("seeded", "infra"),
+        [({"eval_launch_failed": True}, True), ({"oom_killed": True}, False), ({"eval_oom_killed": True}, False)],
+        ids=["evaluator-never-launched", "agent-oom", "eval-oom-running-the-patch"],
+    )
+    async def test_only_a_never_launched_evaluator_names_an_infra_cause(
+        self, tmp_path: Path, monkeypatch, seeded: dict, infra: bool, eval_mode: bool
+    ) -> None:
+        """An OOM, of the agent or of the evaluator running the model's patch, can be the model's: no cause."""
+        monkeypatch.setattr(swe_app, "is_eval_mode", lambda: eval_mode)
+        params = _make_instance_config(str(tmp_path), debug=False)
+        params.problem_info["dataset_name"] = "nv-internal-1"
+        params.metrics_fpath.write_text(json.dumps(seeded))
+        (params.trajectories_root / "llm_completions" / params.instance_id).mkdir(parents=True)
+        wrapper = _create_wrapper(monkeypatch)
+        wrapper._sem = asyncio.Semaphore(1)
+        wrapper._vllm_converter = swe_app.VLLMConverter(return_token_id_information=True)
+        processor = NVInternalDatasetProcessor(config=params)
+        with patch.object(swe_app.runner_ray_remote, "remote", new_callable=AsyncMock, return_value=None):
+            response = await wrapper._inner_responses(params, processor)
+        with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=response):
+            result = await wrapper.run(swe_app.BaseRunRequest(responses_create_params=params.body))
+
+        assert result.mask_sample is True  # The mask itself is the same in both modes.
+        assert result.model_dump().get(NG_FAILURE_CAUSE_KEY) == ("infra" if infra and eval_mode else None)
 
     def test_legacy_metrics_do_not_imply_launch_failure(self) -> None:
         metrics = SWEBenchMetrics.model_validate({"patch_exists": True, "eval_timed_out": False})

@@ -80,7 +80,24 @@ _FRAMEWORK_ROW_KEYS = frozenset(
 _NG_FAILURE_CLASS_RESPONSE_INCOMPLETE = "critpt_custom_grader:response_incomplete"
 _NEEDS_REGENERATION_CATEGORIES = frozenset({"response_incomplete"})
 # Verify-response fields written only when they carry a value.
-_OMITTED_WHEN_UNSET = ("failure_class", "failure_subcategory", "failure_terminal")
+_OMITTED_WHEN_UNSET = ("failure_class", "failure_subcategory", "failure_terminal", "failure_cause")
+# Unscorable categories that ran none of the candidate's code: the grader's sandbox, reference or deadline
+# failed. The others (provider_exec, candidate_no_result, result_invalid) can come from the candidate's
+# own code, so they carry no infra cause and are not retried.
+_INFRA_CATEGORIES = frozenset(
+    {
+        "exec_user_unsupported",
+        "reference_error",
+        "reference_timeout",
+        "reference_no_result",
+        "comparator_uncertain",
+        "comparator_no_result",
+        "provider_create",
+        "transfer_limit",
+        "job_deadline",
+        "server_draining",
+    }
+)
 
 
 def _error(category: str, status: int) -> JSONResponse:
@@ -222,6 +239,7 @@ class CritPtVerifyResponse(BaseVerifyResponse):
     failure_class: str | None = Field(default=None, alias="_ng_failure_class")
     failure_subcategory: str | None = Field(default=None, alias="_ng_failure_subcategory")
     failure_terminal: bool | None = Field(default=None, alias="_ng_failure_terminal")
+    failure_cause: str | None = Field(default=None, alias="_ng_failure_cause")
 
     @model_serializer(mode="wrap")
     def _omit_unset_failure_keys(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
@@ -472,6 +490,7 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
             failure_reason=None if scored else category,
             failure_subcategory=None if scored else category,
             failure_terminal=True if terminal else None,
+            failure_cause=failure_kinds.INFRA if not scored and category in _INFRA_CATEGORIES else None,
         )
 
     def _project(self, body: CritPtVerifyRequest, task: TaskData, result: GradeResult) -> CritPtVerifyResponse:

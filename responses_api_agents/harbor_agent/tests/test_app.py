@@ -860,3 +860,74 @@ class TestLLMClientTeardown:
         # Idempotent: a second close is a no-op (no underlying client to touch).
         await llm.aclose()
         client.aclose.assert_awaited_once()
+
+
+def _trial_with_exception(exception_type: str, message: str, *, agent_ran: bool) -> Dict[str, Any]:
+    """A Harbor trial result as Harbor writes it when the trial raised (TrialResult, ExceptionInfo)."""
+    return {
+        "task_name": "test_task_123",
+        "trial_name": "test_task_123__abc",
+        "agent_result": None,
+        "verifier_result": None,
+        "environment_setup": {"started_at": "2026-10-21T10:00:00Z", "finished_at": None},
+        "agent_setup": None,
+        "agent_execution": (
+            {"started_at": "2026-10-21T10:01:00Z", "finished_at": "2026-10-21T10:05:00Z"} if agent_ran else None
+        ),
+        "exception_info": {
+            "exception_type": exception_type,
+            "exception_message": message,
+            "exception_traceback": f"Traceback (most recent call last):\n  ...\n{exception_type}: {message}\n",
+            "occurred_at": "2026-10-21T10:00:30Z",
+        },
+    }
+
+
+class TestASandboxThatNeverStarted:
+    """A trial whose sandbox could not be created or started ran none of the model's work: evaluation retries it."""
+
+    @pytest.mark.parametrize("eval_mode", [False, True], ids=["training", "evaluation"])
+    @pytest.mark.parametrize(
+        ("exception_type", "message"),
+        [
+            ("SandboxApiException", "Create sandbox failed: HTTP 501"),
+            ("SandboxCreateError", "OpenSandbox create failed after 3 attempts"),
+            ("AgentSetupError", "agent setup failed: sandbox unreachable"),
+        ],
+        ids=["create-http-501", "create-error", "agent-setup"],
+    )
+    async def test_a_create_or_start_failure_before_the_agent_ran_is_retried_in_evaluation(
+        self, monkeypatch: pytest.MonkeyPatch, exception_type: str, message: str, eval_mode: bool
+    ) -> None:
+        monkeypatch.setattr("responses_api_agents.harbor_agent.app.is_eval_mode", lambda: eval_mode)
+        server = _make_server()
+        with _harbor_run_mocks(trial_result=_trial_with_exception(exception_type, message, agent_ran=False)):
+            response = (await server.run(_make_run_request())).model_dump()
+
+        assert response["reward"] == 0.0
+        if eval_mode:
+            assert (response["_ng_failure_class"], response["_ng_failure_cause"]) == ("harbor_failed", "infra")
+            assert message in response["_ng_failure_message"]
+            from nemo_gym.rollout_collection import is_terminal_failure
+
+            assert not is_terminal_failure(response)
+        else:
+            # Training is unchanged: a reward of 0 with no failure row.
+            assert "_ng_failure_class" not in response and "_ng_failure_cause" not in response
+
+    @pytest.mark.parametrize(
+        ("exception_type", "agent_ran"),
+        [("SandboxApiException", True), ("AgentTimeoutError", True), ("NonZeroAgentExitCodeError", True)],
+        ids=["sandbox-error-after-the-agent-ran", "agent-timeout", "agent-exit"],
+    )
+    async def test_a_failure_after_the_agent_ran_stays_the_models_zero(
+        self, monkeypatch: pytest.MonkeyPatch, exception_type: str, agent_ran: bool
+    ) -> None:
+        monkeypatch.setattr("responses_api_agents.harbor_agent.app.is_eval_mode", lambda: True)
+        server = _make_server()
+        trial = _trial_with_exception(exception_type, "it failed", agent_ran=agent_ran)
+        with _harbor_run_mocks(trial_result=trial):
+            response = (await server.run(_make_run_request())).model_dump()
+
+        assert response["reward"] == 0.0
+        assert "_ng_failure_class" not in response and "_ng_failure_cause" not in response

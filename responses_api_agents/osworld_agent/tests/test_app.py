@@ -2234,3 +2234,72 @@ class TestApp:
         assert response.reward == 0.0
         assert response.verifier_metadata["osworld_score"] == 0.4
         assert response.verifier_metadata["osworld_finished"] is False
+
+
+@pytest.mark.parametrize("eval_mode", [False, True], ids=["training", "evaluation"])
+@pytest.mark.parametrize(
+    ("admission_reason", "steps", "policy_stop_reason", "infra"),
+    [
+        ("rollout_error", [], None, True),  # the VM or the environment never came up
+        ("proxy_setup_error", [], None, True),
+        ("model_call_failed", DEFAULT_RUN_RESULT["steps"], "model_call_failed", True),  # policy transport
+        ("model_timeout", DEFAULT_RUN_RESULT["steps"], None, True),
+        ("model_call_failed", DEFAULT_RUN_RESULT["steps"], "model_context_overflow", False),  # the model's budget
+        ("rollout_error", DEFAULT_RUN_RESULT["steps"], None, False),  # after the agent acted
+        ("evaluator_error", DEFAULT_RUN_RESULT["steps"], None, False),
+        ("timeout", DEFAULT_RUN_RESULT["steps"], None, False),
+        ("action_timeout", DEFAULT_RUN_RESULT["steps"], None, False),
+    ],
+    ids=[
+        "vm-never-started",
+        "proxy-setup",
+        "policy-transport",
+        "policy-timeout",
+        "context-overflow",
+        "error-after-acting",
+        "evaluator",
+        "task-timeout",
+        "action-timeout",
+    ],
+)
+def test_only_a_mask_before_the_model_acted_or_on_the_policy_transport_names_infra(
+    monkeypatch: pytest.MonkeyPatch,
+    admission_reason: str,
+    steps: list,
+    policy_stop_reason: Optional[str],
+    infra: bool,
+    eval_mode: bool,
+) -> None:
+    """A provider mask retries only with an explicit infra cause, so the ones that ran none of the model's work
+    name it; training's masks are unchanged."""
+    monkeypatch.setattr("responses_api_agents.osworld_agent.app.is_eval_mode", lambda: eval_mode)
+    result = {
+        **DEFAULT_RUN_RESULT,
+        "reward": 0.0,
+        "score": 0.0,
+        "finished": False,
+        "evaluation_completed": admission_reason not in ("evaluator_error", "rollout_error", "proxy_setup_error"),
+        "runtime_eligible": False,
+        "runtime_admission_reason": admission_reason,
+        "mask_sample": True,
+        "termination_reason": admission_reason,
+        "policy_stop_reason": policy_stop_reason,
+        "steps": steps,
+    }
+
+    response = _build_response(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), result, "test-policy", 1.0, 0.9)
+
+    assert response.mask_sample is True
+    assert response.failure_kind == ("provider_unavailable" if eval_mode else None)
+    assert response.model_dump().get("_ng_failure_cause") == ("infra" if infra and eval_mode else None)
+
+
+@pytest.mark.parametrize("eval_mode", [False, True], ids=["training", "evaluation"])
+def test_a_rollout_that_never_ran_names_infra_in_evaluation(monkeypatch: pytest.MonkeyPatch, eval_mode: bool) -> None:
+    monkeypatch.setattr("responses_api_agents.osworld_agent.app.is_eval_mode", lambda: eval_mode)
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+
+    response = _empty_response(request, error="desktop environment failed to start")
+
+    assert response.mask_sample is True
+    assert response.model_dump().get("_ng_failure_cause") == ("infra" if eval_mode else None)

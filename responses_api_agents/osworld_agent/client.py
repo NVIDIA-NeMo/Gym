@@ -154,6 +154,9 @@ class RolloutResult:
     # OSWORLD_TASK_ARTIFACT_ROOT is configured.
     artifact_dir: Optional[str] = None
     termination_reason: Optional[str] = None
+    # The adapter's own stop reason (agent_outcome), kept when an infrastructure reason names the mask: a
+    # context overflow and a transport failure both mask as model_call_failed, but only one is infra.
+    policy_stop_reason: Optional[str] = None
     # Resolved Gym-owned model/history behavior. It is deliberately distinct
     # from request-owned sampling parameters and infrastructure provenance.
     agent_contract: Optional[Dict[str, Any]] = None
@@ -2645,6 +2648,7 @@ def run_osworld_task(
         mask_sample=outcome.mask_sample,
         artifact_dir=task_artifacts.directory if task_artifacts is not None else None,
         termination_reason=outcome.termination_reason,
+        policy_stop_reason=agent_stop_reason,
         agent_contract=effective_agent_contract,
     )
     _finalize_task_artifacts(

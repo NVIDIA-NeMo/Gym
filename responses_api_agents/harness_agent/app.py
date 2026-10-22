@@ -42,6 +42,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.sandbox.api import as_create_error
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxSpec
 from nemo_gym.sandbox.providers.registry import create_provider
@@ -309,11 +310,19 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         if descriptor:
             if not isinstance(self._provider, ConnectableProvider):
                 raise TypeError("sandbox provider cannot connect to a resource-owned sandbox")
-            handle = await self._provider.connect(descriptor)
+            try:
+                handle = await self._provider.connect(descriptor)
+            except Exception as error:
+                # Reaching the resource-owned sandbox comes before the agent's first command: a create failure.
+                raise as_create_error(error) from error
         else:
             spec_config = dict(self.config.sandbox_spec)
             metadata = self._sandbox_metadata | dict(spec_config.pop("metadata", {}))
-            handle = await self._provider.create(SandboxSpec(image=image, metadata=metadata, **spec_config))
+            try:
+                handle = await self._provider.create(SandboxSpec(image=image, metadata=metadata, **spec_config))
+            except Exception as error:
+                # The provider's own SDK error, or a ready timeout after its retries: before the agent's first command.
+                raise as_create_error(error) from error
         try:
             work_dir = self._box_path(handle, "/work")
             await self._provider.exec(handle, f"mkdir -p {shlex.quote(work_dir)}", timeout_s=60)

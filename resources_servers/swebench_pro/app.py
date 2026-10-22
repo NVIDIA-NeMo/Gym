@@ -45,7 +45,9 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.failure_kinds import INFRA
 from nemo_gym.global_config import get_global_config_dict, is_eval_mode
+from nemo_gym.rollout_collection import NG_FAILURE_CAUSE_KEY
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
@@ -54,6 +56,7 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swebench_pro.image_cache import digest_hex, verify_local_image
 from resources_servers.swebench_pro.verification import (
     DEFAULT_ENVIRONMENT_REPAIRS,
+    DEPENDENCY_NETWORK_FAILURE_REASON,
     VerificationInputs,
     VerificationResult,
     assemble_workspace_files,
@@ -190,6 +193,9 @@ class SWEBenchProVerifyRequest(SWEBenchProInstanceRequest, BaseVerifyRequest):
 
 
 class SWEBenchProVerifyResponse(BaseVerifyResponse):
+    # Keeps ``_ng_failure_cause``, which names an infra mask for the retry rule.
+    model_config = ConfigDict(extra="allow")
+
     image_provenance: dict[str, Any] = Field(default_factory=dict)
     evaluation_completed: bool
     eval_timed_out: bool = False
@@ -203,6 +209,17 @@ class SWEBenchProVerifyResponse(BaseVerifyResponse):
     test_output: str
     error: str | None
     log_dir: str
+
+
+def _models_unresolved(reason: str, result: VerificationResult, eval_sandbox_started: bool) -> bool:
+    """Whether a verification with no verdict is the model's unresolved 0 rather than an infra failure to retry.
+
+    Once the eval sandbox started, it ran the model's patch, and that patch's tests can time out, crash or bring the
+    sandbox down. A dependency-network failure before any test ran is the platform's, whatever the sandbox state.
+    """
+    if reason == DEPENDENCY_NETWORK_FAILURE_REASON:
+        return False
+    return result.timed_out or eval_sandbox_started
 
 
 class SWEBenchProResourcesServer(SimpleResourcesServer):
@@ -515,7 +532,6 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         ):
             raise ValueError("SWE-bench Pro task sandbox is no longer available")
         extraction_error = None
-        extraction_failed_in_sandbox = False
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
@@ -523,9 +539,9 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 model_patch = await self._extract_model_patch(session_id, body.base_commit)
             except Exception as exc:
                 model_patch = ""
+                # The agent already ran in this sandbox, and its commands can break it (an OOM, a killed exec
+                # daemon): with no patch read, the instance is unresolved, as the SWE-bench Pro harness scores it.
                 extraction_error = f"Failed to extract model patch: {exc}"
-                # The sandbox call itself failed, so the patch was never read: an infra failure, not a 0.
-                extraction_failed_in_sandbox = isinstance(exc, SandboxPatchExtractionError)
 
         inputs = self._verification_inputs(body, model_patch)
         workspace_files, _ = assemble_workspace_files(body.instance_id, None, model_patch, asdict(inputs))
@@ -538,12 +554,15 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         patch_verification_time_taken = 0.0
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
         deadline = _verification_deadline(self.config.verification_total_timeout)
+        eval_sandbox_started = False
         for attempt in range(1, attempts + 1):
             eval_sandbox: AsyncSandbox | None = None
+            eval_sandbox_started = False
             start_time = time()
             try:
                 async with asyncio.timeout(_attempt_budget(self.config.verification_attempt_timeout, deadline)):
                     eval_sandbox = await self._create_sandbox(body, files=sandbox_files)
+                    eval_sandbox_started = True
                     eval_sandbox_start_time_taken = time() - start_time
                     verification_start = time()
                     result = await run_verification(
@@ -572,9 +591,9 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                         print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
 
             reason = inconclusive_reason(result)
-            if reason is not None and result.timed_out and is_eval_mode():
-                # The tests ran and outlived their limit: the SWE-bench harness reports such an instance as
-                # unresolved, so it is the model's 0, not a verification to retry.
+            if reason is not None and is_eval_mode() and _models_unresolved(reason, result, eval_sandbox_started):
+                # The model's patch ran in the eval sandbox and its tests timed out, crashed or lost the sandbox:
+                # the SWE-bench harness reports such an instance as unresolved, so it is the model's 0, not a retry.
                 break
             if reason is not None and _budget_spent(deadline):
                 print(
@@ -614,14 +633,14 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "log_dir": str(run_log_dir),
         }
         # Evaluation only: training keeps the sample unmasked, as it always was.
-        if is_eval_mode() and ((reason is not None and not result.timed_out) or extraction_failed_in_sandbox):
-            # No verdict, or no patch read from the task sandbox: the sandbox failed, not the model, so the row is
-            # retried instead of scored 0. Tests that timed out are the model's unresolved 0, scored as they stand.
-            failure_reason = extraction_error if extraction_failed_in_sandbox else reason
+        if is_eval_mode() and reason is not None and not _models_unresolved(reason, result, eval_sandbox_started):
+            # The eval sandbox never ran the model's patch (it could not be created or started), or the network
+            # failed before any test ran: infra, named so the retry rule retries it.
             response_data |= {
                 "mask_sample": True,
                 "failure_kind": "provider_unavailable",
-                "failure_reason": failure_reason,
+                "failure_reason": reason,
+                NG_FAILURE_CAUSE_KEY: INFRA,
             }
         return SWEBenchProVerifyResponse.model_validate(response_data)
 

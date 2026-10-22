@@ -36,6 +36,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
     SandboxOperationTimeoutError,
+    SandboxPlatformEvictionError,
     SandboxPtyError,
     SandboxPtySession,
     SandboxPtySpec,
@@ -79,6 +80,38 @@ class OpenSandboxCreateTimeoutError(OpenSandboxCreateError):
 
 class OpenSandboxCreateVerificationError(SandboxCreateVerificationError):
     """Raised when a newly-created sandbox cannot execute a probe command."""
+
+
+# Control-plane status text that names a cause outside the sandbox's own processes: an eviction, node loss or
+# preemption. An OOM kill within the sandbox's own memory limit is not listed: the model's commands can cause it.
+_PLATFORM_EVICTION_PATTERN = re.compile(
+    r"\bevict(?:ed|ion)\b|\bnode[\s_-]*lost\b|\bnode\b[^;]{0,40}\b(?:not ready|drain(?:ed|ing)?|shut ?down|"
+    r"terminated|unreachable)\b|\bpreempt(?:ed|ion)\b",
+    re.IGNORECASE,
+)
+
+
+# What the provider reads as a platform loss of a sandbox it created and still holds a handle to: the control plane
+# answers "not found" for it (the model has no OpenSandbox API key, so it cannot delete its own sandbox), reports it
+# as deleted, or names an eviction, node loss or preemption as the reason.
+_PLATFORM_LOSS_PREFIXES = ("Sandbox not found", "Sandbox was deleted")
+
+
+# The kubelet also "evicts" a pod that exceeds its own ephemeral-storage limit: the sandbox's own processes filled
+# the disk, so that eviction is the model's (Terminal-Bench grades it 0), not the platform's.
+_OWN_LIMIT_EVICTION_PATTERN = re.compile(
+    r"\bexceeds the total limit of containers\b|\bexceeded its local ephemeral storage limit\b", re.IGNORECASE
+)
+
+
+def _is_platform_loss(notice: str | None) -> bool:
+    if notice is None or _OWN_LIMIT_EVICTION_PATTERN.search(notice):
+        return False
+    return notice.startswith(_PLATFORM_LOSS_PREFIXES) or bool(_PLATFORM_EVICTION_PATTERN.search(notice))
+
+
+class SandboxPtyPlatformEvictionError(SandboxPtyError, SandboxPlatformEvictionError):
+    """A PTY session ended because the platform ended its sandbox (deleted, evicted, node lost)."""
 
 
 class SandboxBackendUnreachableError(RuntimeError):
@@ -1749,10 +1782,17 @@ class OpenSandboxProvider:
                     f"(sandbox_id={handle.sandbox_id!r})"
                 ) from e
         except Exception as error:
-            if not isinstance(error, SandboxBackendUnreachableError) and _exception_status_code(error) != 502:
+            if (
+                not isinstance(error, SandboxBackendUnreachableError)
+                and _exception_status_code(error) != 502
+                and not _is_missing_sandbox_delete_error(error)
+            ):
                 raise
-            notice = await self._oom_death_notice(handle)
-            if notice is not None:
+            notice = await self._oom_death_notice(handle, any_death=True)
+            if _is_platform_loss(notice):
+                # The control plane deleted the sandbox or names a cause outside it: the platform ended it.
+                raise SandboxPlatformEvictionError(notice) from error
+            if notice is not None and notice.startswith("Sandbox was OOM-killed"):
                 raise SandboxBackendUnreachableError(notice) from error
             raise
 
@@ -1776,7 +1816,9 @@ class OpenSandboxProvider:
                     sandbox_id=handle.sandbox_id,
                     timeout_s=min(2.0, remaining_s),
                 )
-            except Exception:
+            except Exception as error:
+                if _is_missing_sandbox_delete_error(error):
+                    return f"Sandbox not found: the control plane no longer knows it ({error}); sandbox_id={handle.sandbox_id!r}"
                 return None
             raw_status = getattr(info, "status", None)
             state = getattr(raw_status, "state", None)
@@ -1788,10 +1830,19 @@ class OpenSandboxProvider:
             )
             if re.search(r"\boom[\s_-]*killed\b|\bout of memory\b", f"{reason} {message}", re.IGNORECASE):
                 return f"Sandbox was OOM-killed. {status_text}"
+            if str(state or "").lower() == "deleted":
+                return f"Sandbox was deleted. {status_text}"
             if message and _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
                 return f"Sandbox is dead. {status_text}" if any_death else None
             await asyncio.sleep(min(0.5, max(0.0, deadline - asyncio.get_running_loop().time())))
         return None
+
+    async def _pty_death(self, handle: SandboxHandle) -> SandboxPtyError | None:
+        """Why a PTY socket died: a platform loss of its sandbox, another death of it, or None if it lives."""
+        notice = await self._oom_death_notice(handle, any_death=True)
+        if notice is None:
+            return None
+        return SandboxPtyPlatformEvictionError(notice) if _is_platform_loss(notice) else SandboxPtyError(notice)
 
     async def _exec_background(
         self,
@@ -2050,7 +2101,7 @@ class OpenSandboxProvider:
             headers=headers,
             spec=spec,
             request_timeout_s=request_timeout_s,
-            diagnose=lambda: self._oom_death_notice(handle, any_death=True),
+            diagnose=lambda: self._pty_death(handle),
         )
         session._sandbox_id = handle.sandbox_id
         await self._retire_closed_pty_sessions()
@@ -2098,7 +2149,7 @@ class OpenSandboxProvider:
                     takeover=takeover,
                     since=since,
                     request_timeout_s=request_timeout_s,
-                    diagnose=lambda: self._oom_death_notice(handle, any_death=True),
+                    diagnose=lambda: self._pty_death(handle),
                 )
                 break
             except SandboxPtyError as e:
@@ -2111,6 +2162,10 @@ class OpenSandboxProvider:
                     # takeover is refused forever — report the sandbox's death
                     # instead of the refusal.
                     notice = await self._oom_death_notice(handle, any_death=True)
+                    if _is_platform_loss(notice):
+                        raise SandboxPtyPlatformEvictionError(
+                            f"PTY attach takeover kept being refused: {notice}"
+                        ) from e
                     if notice is not None:
                         raise SandboxPtyError(f"PTY attach takeover kept being refused: {notice}") from e
                     raise

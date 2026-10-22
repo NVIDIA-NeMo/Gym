@@ -1223,10 +1223,93 @@ async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.
     assert isinstance(exc_info.value.__cause__, Backend502Error)
     assert raw.info_calls == 2
 
-    raw.statuses = [SimpleNamespace(state="Failed", reason="FAILED", message="sandbox node was drained")]
+    raw.statuses = [SimpleNamespace(state="Failed", reason="FAILED", message="sandbox exited with code 1")]
     raw.info_calls = 0
     with pytest.raises(Backend502Error, match="Get command status failed"):
         await provider.exec(handle, "retry after non-OOM failure", timeout_s=30)
+
+
+@pytest.mark.parametrize(
+    ("reason", "message"),
+    [
+        ("Evicted", "The node was low on resource: memory."),
+        ("NodeLost", "node nvl72-T01 is not ready"),
+        ("FAILED", "sandbox node was drained"),
+        ("Preempted", "pod preempted by a higher-priority pod"),
+    ],
+)
+async def test_exec_raises_platform_eviction_only_on_platform_evidence(
+    monkeypatch: pytest.MonkeyPatch, reason: str, message: str
+) -> None:
+    # The platform, not the sandbox's own processes, ended the sandbox: the one sandbox loss that stays infra.
+    class Backend502Error(Exception):
+        status_code = 502
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: Any) -> Any:
+            return SimpleNamespace(id="exec-evicted")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            raise Backend502Error("Get command status failed: HTTP 502")
+
+    class FakeRaw:
+        commands = FakeCommands()
+
+        async def get_info(self) -> Any:
+            return SimpleNamespace(status=SimpleNamespace(state="Failed", reason=reason, message=message))
+
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "retries": 0},
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-ev", provider_name="opensandbox", raw=FakeRaw())
+
+    with pytest.raises(opensandbox_provider.SandboxPlatformEvictionError) as exc_info:
+        await provider.exec(handle, "work", timeout_s=30)
+    assert isinstance(exc_info.value.__cause__, Backend502Error)
+    assert "sandbox_id='sandbox-ev'" in str(exc_info.value)
+
+
+async def test_an_oom_kill_of_the_sandboxs_own_processes_is_not_platform_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Backend502Error(Exception):
+        status_code = 502
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: Any) -> Any:
+            return SimpleNamespace(id="exec-oom")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            raise Backend502Error("Get command status failed: HTTP 502")
+
+    class FakeRaw:
+        commands = FakeCommands()
+
+        async def get_info(self) -> Any:
+            status = SimpleNamespace(state="Failed", reason="OOMKilled", message="container terminated (exit 137)")
+            return SimpleNamespace(status=status)
+
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "retries": 0},
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-oom", provider_name="opensandbox", raw=FakeRaw())
+
+    with pytest.raises(opensandbox_provider.SandboxBackendUnreachableError) as exc_info:
+        await provider.exec(handle, "allocate memory", timeout_s=30)
+    assert not isinstance(exc_info.value, opensandbox_provider.SandboxPlatformEvictionError)
+    assert "OOM-killed" in str(exc_info.value)
 
 
 @pytest.mark.parametrize(
@@ -2550,3 +2633,147 @@ async def test_shared_memory_metadata_reaches_create_api(fake_opensandbox_sdk, s
     provider = OpenSandboxProvider(attribution={"enabled": False}, probe={"command": None})
     await provider.create(SandboxSpec(image="image:tag", metadata={"nemo.nvidia.com/shm": size}))
     assert FakeSandbox.created_kwargs["metadata"]["nemo.nvidia.com/shm"] == size
+
+
+class _NotFoundError(Exception):
+    status_code = 404
+
+
+class _Backend502Error(Exception):
+    status_code = 502
+
+
+def _lost_sandbox_provider(monkeypatch: pytest.MonkeyPatch) -> Any:
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    return opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "retries": 0},
+    )
+
+
+def _lost_sandbox(exec_error: Exception, get_info: Any) -> Any:
+    class FakeCommands:
+        async def run(self, command: str, *, opts: Any) -> Any:
+            return SimpleNamespace(id="exec-lost")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            raise exec_error
+
+    raw = SimpleNamespace(commands=FakeCommands(), get_info=get_info)
+    return opensandbox_provider.SandboxHandle(sandbox_id="sandbox-del", provider_name="opensandbox", raw=raw)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exec_error",
+    [_Backend502Error("Get command status failed: HTTP 502"), _NotFoundError("[KUBERNETES::SANDBOX_NOT_FOUND]")],
+    ids=["exec-502", "exec-404"],
+)
+@pytest.mark.parametrize(
+    "info_error",
+    [
+        _NotFoundError("Get sandbox failed: HTTP 404"),
+        RuntimeError("[KUBERNETES::SANDBOX_NOT_FOUND] sandbox sandbox-del not found"),
+    ],
+    ids=["status-404", "sandbox-not-found-code"],
+)
+async def test_a_running_sandbox_the_control_plane_no_longer_knows_is_a_platform_loss(
+    monkeypatch: pytest.MonkeyPatch, exec_error: Exception, info_error: Exception
+) -> None:
+    # Deleted through the OpenSandbox API, or reaped by the platform, while a command ran. The model has no
+    # OpenSandbox API key, so it cannot delete its own sandbox: this is the platform's, never the model's 0.
+    from nemo_gym.failure_kinds import INFRA, failure_cause_of, failure_cause_of_text
+
+    async def get_info() -> Any:
+        raise info_error
+
+    provider = _lost_sandbox_provider(monkeypatch)
+    with pytest.raises(opensandbox_provider.SandboxPlatformEvictionError) as exc_info:
+        await provider.exec(_lost_sandbox(exec_error, get_info), "work", timeout_s=30)
+    assert str(exc_info.value).startswith("Sandbox not found")
+    assert "sandbox_id='sandbox-del'" in str(exc_info.value)
+    assert failure_cause_of(exc_info.value) == INFRA
+    assert failure_cause_of_text(f"{type(exc_info.value).__name__}: {exc_info.value}") == INFRA
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_the_control_plane_reports_deleted_is_a_platform_loss(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def get_info() -> Any:
+        return SimpleNamespace(status=SimpleNamespace(state="Deleted", reason=None, message=None))
+
+    provider = _lost_sandbox_provider(monkeypatch)
+    with pytest.raises(opensandbox_provider.SandboxPlatformEvictionError) as exc_info:
+        await provider.exec(_lost_sandbox(_Backend502Error("HTTP 502"), get_info), "work", timeout_s=30)
+    assert str(exc_info.value).startswith("Sandbox was deleted")
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_that_still_runs_is_not_a_platform_loss(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The exec daemon died (the model can kill it) but the control plane still reports the sandbox running.
+    async def get_info() -> Any:
+        return SimpleNamespace(status=SimpleNamespace(state="Running", reason=None, message=None))
+
+    provider = _lost_sandbox_provider(monkeypatch)
+    with pytest.raises(Exception) as exc_info:
+        await provider.exec(_lost_sandbox(_Backend502Error("HTTP 502"), get_info), "pkill execd", timeout_s=30)
+    assert not isinstance(exc_info.value, opensandbox_provider.SandboxPlatformEvictionError)
+
+
+@pytest.mark.asyncio
+async def test_a_not_found_exec_for_a_sandbox_that_still_runs_is_not_a_platform_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A 404 for a missing file or command, while the sandbox is alive, is not a deletion.
+    async def get_info() -> Any:
+        return SimpleNamespace(status=SimpleNamespace(state="Running", reason=None, message=None))
+
+    provider = _lost_sandbox_provider(monkeypatch)
+    with pytest.raises(_NotFoundError):
+        await provider.exec(_lost_sandbox(_NotFoundError("execution not found"), get_info), "work", timeout_s=30)
+
+
+@pytest.mark.asyncio
+async def test_a_pty_whose_sandbox_was_deleted_reports_a_platform_loss(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nemo_gym.failure_kinds import INFRA, failure_cause_of
+
+    async def get_info() -> Any:
+        raise _NotFoundError("Get sandbox failed: HTTP 404")
+
+    provider = _lost_sandbox_provider(monkeypatch)
+    handle = _lost_sandbox(_Backend502Error("HTTP 502"), get_info)
+    error = await provider._pty_death(handle)
+    assert isinstance(error, opensandbox_provider.SandboxPtyPlatformEvictionError)
+    assert isinstance(error, opensandbox_provider.SandboxPtyError)
+    assert failure_cause_of(error) == INFRA
+
+
+@pytest.mark.asyncio
+async def test_a_pty_whose_sandbox_was_oom_killed_stays_the_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nemo_gym.failure_kinds import MODEL, failure_cause_of
+
+    async def get_info() -> Any:
+        return SimpleNamespace(status=SimpleNamespace(state="Failed", reason="OOMKilled", message="exit 137"))
+
+    provider = _lost_sandbox_provider(monkeypatch)
+    error = await provider._pty_death(_lost_sandbox(_Backend502Error("HTTP 502"), get_info))
+    assert type(error) is opensandbox_provider.SandboxPtyError
+    assert failure_cause_of(error) == MODEL
+
+
+@pytest.mark.asyncio
+async def test_an_eviction_for_the_sandboxs_own_storage_limit_is_not_a_platform_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The kubelet evicts a pod whose own processes filled its ephemeral storage: the model's, not the platform's.
+    async def get_info() -> Any:
+        message = "Pod ephemeral local storage usage exceeds the total limit of containers 1Gi."
+        return SimpleNamespace(status=SimpleNamespace(state="Failed", reason="Evicted", message=message))
+
+    provider = _lost_sandbox_provider(monkeypatch)
+    with pytest.raises(Exception) as exc_info:
+        await provider.exec(_lost_sandbox(_Backend502Error("HTTP 502"), get_info), "fill the disk", timeout_s=30)
+    assert not isinstance(exc_info.value, opensandbox_provider.SandboxPlatformEvictionError)

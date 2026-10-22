@@ -255,13 +255,15 @@ _INFRA_EXCEPTION_NAMES = frozenset(
         "AuthenticationError",
         "PermissionDeniedError",
         "MemoryError",
+        # A sandbox that could not be created or started: that happens before the model's first command. A sandbox
+        # that fails while the model's commands run (SandboxApiException, SandboxTimeoutException,
+        # SandboxOperationTimeoutError, SandboxPtyError, a lost exec daemon, an OOM kill) is not listed: the model can
+        # cause those, so they are the model's unless the platform names its own cause.
         "SandboxCreateError",
-        "SandboxPtyError",
-        "SandboxOperationTimeoutError",
-        # The raw SDK errors of sandbox providers, which reach a row without Gym's own wrapper.
+        "SandboxCreateTimeoutError",
         "OpenSandboxCreateError",
-        "SandboxApiException",
-        "SandboxTimeoutException",
+        "SandboxPlatformEvictionError",
+        "SandboxPtyPlatformEvictionError",
         # Ray lost the worker, the node or the object, not the task's own code.
         "OutOfMemoryError",
         "WorkerCrashedError",
@@ -272,8 +274,9 @@ _INFRA_EXCEPTION_NAMES = frozenset(
         "ObjectLostError",
     }
 )
-# A bare TimeoutError raised inside one of these packages is an HTTP or sandbox call that timed out.
-_INFRA_TIMEOUT_MODULES = ("aiohttp.", "nemo_gym.sandbox.")
+# A bare TimeoutError raised inside one of these packages is an HTTP call that timed out. A sandbox exec that outlives
+# its deadline is not listed: the model's own command can outlive it.
+_INFRA_TIMEOUT_MODULES = ("aiohttp.",)
 # What an error looks like once it is only text: "ClientConnectorError: ..." or repr "ClientConnectorError(...)".
 _EXCEPTION_NAME_PATTERN = re.compile(r"\b([A-Z]\w*(?:Error|Exception|Failure|Expired))\b")
 # aiohttp's ClientResponseError as text: "503, message='Service Unavailable', url=...".
@@ -291,14 +294,14 @@ _INFRA_SUBCLASS_NAMES = frozenset(
         "BrokenPipeError",
         "ConnectionTimeoutError",
         "SocketTimeoutError",
-        # Sandboxed harnesses (Terminal-Bench): the environment or the harness itself failed before or
-        # around the agent's run, or the verifier sandbox missed its start deadline; Terminal-Bench retries
-        # these. The agent's own exits (AgentTimeoutError, NonZeroAgentExitCodeError) and a run that leaves no
-        # reward file (RewardFileNotFoundError) are the model's.
+        # Sandboxed harnesses (Terminal-Bench): the environment or the harness failed before the agent's run, or the
+        # verifier sandbox missed its start deadline; Terminal-Bench retries these. A harness that died during the
+        # agent's run (AgentInfrastructureError), the agent's own exits (AgentTimeoutError, NonZeroAgentExitCodeError)
+        # and a run that leaves no reward file (RewardFileNotFoundError) are the model's.
         "EnvironmentStartTimeoutError",
         "HealthcheckError",
         "AgentSetupTimeoutError",
-        "AgentInfrastructureError",
+        "AgentSetupError",
         "AgentRecordError",
         "SeededSessionExpired",
         "VerifierStartTimeoutError",

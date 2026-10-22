@@ -367,7 +367,8 @@ class TestHarnessFailurePaths:
             ("EnvironmentStartTimeoutError", False),
             ("HealthcheckError", False),
             ("AgentSetupTimeoutError", False),
-            ("AgentInfrastructureError", False),
+            # A harness that died during the agent's run (mini-SWE left no trajectory) is the model's: final, 0.
+            ("AgentInfrastructureError", True),
             ("SeededSessionExpired", False),
         ],
     )

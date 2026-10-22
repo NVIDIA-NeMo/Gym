@@ -186,10 +186,11 @@ def test_verify_reports_sandbox_failure(monkeypatch: MonkeyPatch, eval_mode: boo
     assert "sandbox unavailable" in response.json()["error"]
 
 
-def test_a_patch_the_task_sandbox_could_not_return_is_masked_as_infra(
+def test_a_patch_the_task_sandbox_could_not_return_is_the_models_zero(
     monkeypatch: MonkeyPatch, eval_mode: bool
 ) -> None:
-    # A real failure: the task sandbox was OOM-killed, so the patch command never ran.
+    # A real failure: the task sandbox was OOM-killed while the agent's commands ran, so the patch command never ran.
+    # The agent already ran in that sandbox, and its commands can cause the OOM: the model's unresolved 0.
     server = make_server(golden=False, inconclusive_verification_retries=0)
     monkeypatch.setattr(
         server,
@@ -212,12 +213,9 @@ def test_a_patch_the_task_sandbox_could_not_return_is_masked_as_infra(
 
     result = TestClient(server.setup_webserver()).post("/verify", json=request_body()).json()
 
-    assert result["mask_sample"] is eval_mode
-    if eval_mode:
-        assert result["failure_kind"] == "provider_unavailable"
-        assert result["failure_reason"].startswith("Failed to extract model patch: Failed to run command failed")
-    else:
-        assert result["failure_kind"] is None
+    assert (result["reward"], result["mask_sample"], result["failure_kind"]) == (0.0, False, None)
+    assert "_ng_failure_cause" not in result
+    assert result["error"].startswith("Failed to extract model patch: Failed to run command failed")
 
 
 async def test_extract_model_patch_names_a_failed_sandbox_call() -> None:
@@ -315,8 +313,11 @@ def test_a_test_run_that_timed_out_is_the_models_unresolved_zero(monkeypatch: Mo
     assert verify.await_count == create.await_count == expected_attempts
 
 
-def test_a_verification_sandbox_that_failed_stays_retryable(monkeypatch: MonkeyPatch, eval_mode: bool) -> None:
-    # The sandbox, not the tests, broke: no timed_out flag, so it stays an infra mask.
+def test_a_verification_sandbox_lost_while_the_tests_ran_is_the_models_zero(
+    monkeypatch: MonkeyPatch, eval_mode: bool
+) -> None:
+    # The eval sandbox started and ran the model's patch, then lost its connection: the patch's tests can cause that
+    # (a memory or fork bomb), so it is the model's unresolved 0, not a retry.
     server = make_server(golden=False, inconclusive_verification_retries=0)
     monkeypatch.setattr(server, "_extract_model_patch", AsyncMock(return_value="agent patch"))
     monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
@@ -335,8 +336,28 @@ def test_a_verification_sandbox_that_failed_stays_retryable(monkeypatch: MonkeyP
 
     result = TestClient(server.setup_webserver()).post("/verify", json=request_body()).json()
 
-    expected = (True, "provider_unavailable") if eval_mode else (False, None)
-    assert (result["mask_sample"], result["failure_kind"]) == expected
+    assert (result["reward"], result["mask_sample"], result["failure_kind"]) == (0.0, False, None)
+
+
+def test_an_eval_sandbox_that_never_started_is_retried_with_an_infra_cause(
+    monkeypatch: MonkeyPatch, eval_mode: bool
+) -> None:
+    # The eval sandbox could not be created: it ran none of the model's work, so evaluation retries it.
+    from nemo_gym.rollout_collection import _masked_result_names_infra
+
+    server = make_server(golden=False, inconclusive_verification_retries=0)
+    monkeypatch.setattr(server, "_extract_model_patch", AsyncMock(return_value="agent patch"))
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(side_effect=RuntimeError("create rejected: quota")))
+
+    result = TestClient(server.setup_webserver()).post("/verify", json=request_body()).json()
+
+    if eval_mode:
+        assert (result["mask_sample"], result["failure_kind"]) == (True, "provider_unavailable")
+        assert result["_ng_failure_cause"] == "infra"
+        assert _masked_result_names_infra(result)
+    else:
+        assert (result["mask_sample"], result["failure_kind"]) == (False, None)
+        assert "_ng_failure_cause" not in result
 
 
 def test_schema_rejects_missing_evaluator_asset() -> None:
@@ -672,9 +693,9 @@ def test_environment_server_episode_http_lifecycle_preserves_verdict_and_private
         assert response.status_code == 200
         result = response.json()
         assert result["reward"] == float(resolved)
-        # In evaluation a verification that gave no verdict is an infra failure: masked, so Gym retries it instead
-        # of scoring 0. Training keeps the unmasked 0.
-        assert result["mask_sample"] is (eval_mode and not completed)
+        # The verifier sandbox started and ran the agent's patch before it was lost: the model's unresolved 0, unmasked
+        # in evaluation and in training.
+        assert result["mask_sample"] is False
         assert result["evaluation_completed"] is completed
         assert result["resolved"] is resolved
         assert result["model_patch"] == "agent patch"

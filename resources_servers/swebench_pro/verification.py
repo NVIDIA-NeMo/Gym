@@ -46,6 +46,10 @@ from typing import Any
 from nemo_gym.sandbox import AsyncSandbox
 
 
+# The tests could not install their dependencies: the network failed before any test ran, which is the platform's.
+DEPENDENCY_NETWORK_FAILURE_REASON = "dependency network failure before any test results"
+
+
 WORKSPACE_DIR = "/workspace"
 REPOSITORY_DIR = "/app"
 PATCH_PATH = f"{WORKSPACE_DIR}/patch.diff"
@@ -293,7 +297,7 @@ def inconclusive_reason(result: VerificationResult) -> str | None:
         result.test_output,
         re.IGNORECASE,
     ):
-        return "dependency network failure before any test results"
+        return DEPENDENCY_NETWORK_FAILURE_REASON
 
     # Some upstream parsers report only passing tests, and a broken model patch
     # can prevent test collection entirely. Completed, valid parser output is

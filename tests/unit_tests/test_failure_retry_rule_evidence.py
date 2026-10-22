@@ -66,9 +66,19 @@ class TestMaskedRows:
         assert (counted["reward"], counted["mask_sample"]) == (0.0, False)
 
     def test_an_osworld_infra_mask_is_retried(self) -> None:
-        # An OSWorld evaluator browser timeout, as OSWorld now names it.
-        result = {"mask_sample": True, "failure_kind": "provider_unavailable", "failure_reason": "evaluator_error"}
+        # An OSWorld provider failure, named with the infra cause OSWorld sets on platform evidence.
+        result = {
+            "mask_sample": True,
+            "failure_kind": "provider_unavailable",
+            "failure_reason": "environment_start_failed",
+            "_ng_failure_cause": "infra",
+        }
         assert _masked_result_names_infra(result)
+
+    def test_an_osworld_provider_mask_without_a_cause_is_not_retried(self) -> None:
+        # An evaluator that broke on the VM the model left behind: the producer's provider claim is no evidence.
+        result = {"mask_sample": True, "failure_kind": "provider_unavailable", "failure_reason": "evaluator_error"}
+        assert not _masked_result_names_infra(result)
 
 
 class TestCheckCompletion:
@@ -105,14 +115,11 @@ class TestTerminalBench4Rows:
     @pytest.mark.parametrize(
         "name",
         [
-            "AgentInfrastructureError",
-            "AgentInfrastructureError: mini-SWE produced no trajectory",  # how evaluation names it now
-            "SandboxApiException",
+            "SandboxCreateError",  # sandbox creation, before the agent's first command
             "VerifierStartTimeoutError",
             "ClientPayloadError",
             "APIConnectionError",  # model server down mid-run
             "OpenSandboxCreateError",  # sandbox provisioning
-            "SandboxTimeoutException",  # sandbox provisioning
         ],
     )
     def test_a_tb4_infra_row_is_retried(self, name: str) -> None:
@@ -124,6 +131,19 @@ class TestTerminalBench4Rows:
             "reward": 0.0,
         }
         assert not is_terminal_failure(row)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "AgentInfrastructureError",
+            "AgentInfrastructureError: mini-SWE produced no trajectory",
+            "SandboxApiException",  # the sandbox failed while the agent's commands ran
+            "SandboxTimeoutException",
+        ],
+    )
+    def test_a_tb4_sandbox_lost_during_the_agents_run_is_a_final_zero(self, name: str) -> None:
+        row = {NG_FAILURE_CLASS_KEY: "infrastructure_error", "failure_reason": name, "infrastructure_error": name}
+        assert is_terminal_failure(row)
 
     def test_a_tb4_missing_reward_file_is_a_final_zero(self) -> None:
         # Terminal-Bench scores a trial that leaves no reward file as 0; it is not retried.
@@ -163,21 +183,22 @@ class TestTimeouts:
         except TimeoutError as error:
             assert failure_cause_of(error) == MODEL
 
-    def test_a_named_sandbox_timeout_is_infra(self) -> None:
-        assert failure_cause_of(SandboxOperationTimeoutError("write_file")) == INFRA
+    def test_a_named_sandbox_timeout_is_the_models(self) -> None:
+        # The model's own command can outlive a sandbox call's deadline; only platform evidence makes it infra.
+        assert failure_cause_of(SandboxOperationTimeoutError("write_file")) == MODEL
 
     def test_a_task_that_ran_out_of_its_own_time_budget_is_a_final_zero(self) -> None:
         row = {NG_FAILURE_CLASS_KEY: "timeout_exceeded", "_ng_failure_message": "per-task timeout exceeded"}
         assert failure_cause_of_row(row) == MODEL
         assert is_terminal_failure(row)
 
-    def test_the_opensandbox_write_file_timeout_as_relayed_text_is_infra(self) -> None:
+    def test_the_opensandbox_write_file_timeout_as_relayed_text_is_the_models(self) -> None:
         # The body a legacy_agent relay carried, before the error had a name.
         body = (
             '"SandboxOperationTimeoutError(\\"Timed out during OpenSandbox write_file(<path>) after 300s; '
             "sandbox_id='<uuid>'\\\")\""
         )
-        assert failure_cause_of_text(body) == INFRA
+        assert failure_cause_of_text(body) == MODEL
 
     async def test_an_aiohttp_total_timeout_is_infra(self) -> None:
         aiohttp = pytest.importorskip("aiohttp")
