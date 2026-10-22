@@ -15,18 +15,70 @@
 import logging
 from abc import ABC, abstractmethod
 from copy import deepcopy
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
 from omegaconf import DictConfig
 from pydantic import TypeAdapter, ValidationError
 
+from nemo_gym.config_types import RunExportConfig
+from nemo_gym.run_artifacts import RunArtifacts
 from nemo_gym.secret_utils import recursively_hide_secrets
 
 
 logger = logging.getLogger(__name__)
 # Pydantic's boolean parsing, which the run configs that read these flags use.
 _BOOL = TypeAdapter(bool)
+
+
+class ExportState(str, Enum):
+    SUCCEEDED = "succeeded"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class ExportResult:
+    """What one exporter did with one finished run."""
+
+    state: ExportState
+    exit_code: int = 0
+    error: Optional[str] = None
+    detail: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def succeeded(cls, **detail: Any) -> "ExportResult":
+        return cls(ExportState.SUCCEEDED, detail=detail)
+
+    @classmethod
+    def skipped(cls, **detail: Any) -> "ExportResult":
+        return cls(ExportState.SKIPPED, detail=detail)
+
+    @classmethod
+    def failed(cls, error: str, *, exit_code: int = 1, **detail: Any) -> "ExportResult":
+        return cls(ExportState.FAILED, exit_code=exit_code, error=error, detail=detail)
+
+
+class Exporter(ABC):
+    """Sends a finished run to a destination, or converts it to another format.
+
+    An exporter receives the run's `RunArtifacts` and decides which of those files it reads. Its settings
+    come from `config_model`, validated from the export command's own config before `export` is called.
+    Importing a backend's SDK belongs inside `export`, so listing exporters never loads one.
+    """
+
+    # Identifier used on the command line and in logs, e.g. "atif".
+    name: ClassVar[str]
+    config_model: ClassVar[type[RunExportConfig]]
+
+    def __init__(self, config: RunExportConfig) -> None:
+        self.config = config
+
+    @abstractmethod
+    def export(self, artifacts: RunArtifacts) -> ExportResult:
+        """Export the run. Report an expected failure in the result; raise only for a bug."""
 
 
 class BaseExporter(ABC):
