@@ -1033,8 +1033,6 @@ class TestMultiStepTasks:
     @pytest.mark.parametrize(
         ("change", "message"),
         [
-            (lambda root: (root / "steps" / "01_plan" / "setup.sh").write_text("true\n"), "setup.sh"),
-            (lambda root: (root / "steps" / "01_plan" / "workdir").mkdir(), "workdir"),
             (lambda root: (root / "steps" / "02_implement" / "instruction.md").unlink(), "instruction.md"),
         ],
     )
@@ -1043,6 +1041,77 @@ class TestMultiStepTasks:
         change(root)
         with pytest.raises(HarborTaskError, match=message):
             load_task(root)
+
+    def test_a_steps_workdir_and_setup_script_load_for_the_server_to_apply_per_turn(self, tmp_path, caplog):
+        """Harbor 0.22.0 uploads `steps/<name>/workdir/` into the working directory and runs
+        `steps/<name>/workdir/setup.sh` before the step's agent (`_prepare_step`); the loader used to refuse both.
+        They load now, named per turn for the server, and a `setup.sh` beside instruction.md (not a Harbor file:
+        Harbor never runs it) only warns, naming the path Harbor would run."""
+        root = write_multi_step_task(tmp_path / "t")
+        workdir = root / "steps" / "01_plan" / "workdir"
+        workdir.mkdir()
+        (workdir / "setup.sh").write_text("#!/bin/bash\nmake fixtures\n")
+        (workdir / "fixture.txt").write_text("x\n")
+        (root / "steps" / "02_implement" / "setup.sh").write_text("true\n")
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+            task = load_task(root)
+        plan, implement = task.turns
+        assert plan.workdir_dir == Path("steps/01_plan/workdir") and plan.setup_script == plan.workdir_dir / "setup.sh"
+        assert (root / plan.setup_script).is_file() and not (root / implement.workdir_dir).exists()
+        assert "steps/02_implement/setup.sh is not run; Harbor runs steps/<name>/workdir/setup.sh" in caplog.text
+        assert "01_plan" not in caplog.text
+        # The step's files are part of the task's identity, as everything under steps/ is.
+        before = task.folder_digest
+        (workdir / "fixture.txt").write_text("y\n")
+        assert load_task(root).folder_digest != before
+
+    def test_a_setup_script_run_as_root_after_a_less_privileged_step_is_warned_about(self, tmp_path, caplog):
+        """`steps/<name>/workdir/setup.sh` runs as the step's agent user in the working directory an earlier step's
+        agent owned, and nothing stops what that agent left running: a step that takes root (an explicit root, or
+        the image's own user) after a step that had less is where a lingering process can replace the script before
+        it runs. The loader warns, naming both steps; a task whose later step keeps the same user, or whose root
+        step ships no setup.sh, is not warned about."""
+        root = write_multi_step_task(tmp_path / "t")
+        (root / "task.toml").write_text(
+            MULTI_STEP_TOML.replace("timeout_sec = 2400.0\n", 'timeout_sec = 2400.0\nuser = "tester"\n')
+        )
+        workdir = root / "steps" / "02_implement" / "workdir"
+        workdir.mkdir()
+        (workdir / "setup.sh").write_text("#!/bin/bash\nrm -rf /app/cheats\n")
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+            load_task(root)
+        assert (
+            "steps/02_implement/workdir/setup.sh runs as the image's own user (root unless the image sets USER) after "
+            "step '01_plan' ran as 'tester'"
+        ) in caplog.text
+
+        caplog.clear()
+        (root / "task.toml").write_text(
+            MULTI_STEP_TOML.replace("timeout_sec = 2400.0\n", 'timeout_sec = 2400.0\nuser = "tester"\n').replace(
+                'name = "02_implement"\n', 'name = "02_implement"\n[steps.agent]\nuser = "0"\n'
+            )
+        )
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+            load_task(root)
+        assert "steps/02_implement/workdir/setup.sh runs as root after step '01_plan' ran as 'tester'" in caplog.text
+
+        caplog.clear()
+        (root / "task.toml").write_text(
+            MULTI_STEP_TOML.replace(
+                "[agent]\ntimeout_sec = 120.0\n", '[agent]\ntimeout_sec = 120.0\nuser = "tester"\n'
+            )
+        )
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+            load_task(root)
+        assert "setup.sh runs as" not in caplog.text
+        # A root step without the script has no window to warn about.
+        (root / "task.toml").write_text(
+            MULTI_STEP_TOML.replace("timeout_sec = 2400.0\n", 'timeout_sec = 2400.0\nuser = "tester"\n')
+        )
+        shutil.rmtree(workdir)
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+            load_task(root)
+        assert "setup.sh runs as" not in caplog.text
 
     def test_a_step_agent_user_loads_as_written_for_the_server_to_apply_per_turn(self, tmp_path):
         """Harbor runs each step as its own `[steps.agent].user` (else the task's); the loader used to refuse a step
