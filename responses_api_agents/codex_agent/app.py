@@ -70,6 +70,7 @@ from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
 from responses_api_agents.codex_agent.observability import (
+    TESTED_CODEX_VERSION,
     parse_codex_observations,
     parse_codex_usage,
     read_codex_observations,
@@ -81,6 +82,9 @@ from responses_api_agents.codex_agent.transport import rate_limit_proxy
 
 LOG = logging.getLogger(__name__)
 _SANDBOX_SESSION_KEY = "nemo_gym_codex_sandbox_session"
+_MODEL_CALL_JOIN_GAP = "model_call_join_key_unavailable"
+_PROVIDER_ERROR = "provider_error"
+_OUTPUT_LIMIT_ERROR = "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
 _COMPACTION_ADVISORY = (
     "Heads up: Long threads and multiple compactions can cause the model to be less accurate. "
     "Start a new thread when possible to keep threads small and targeted."
@@ -581,6 +585,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, "Codex in the task sandbox requires a sandbox-reachable Gym model_server")
         if not self.config.codex_version or not re.fullmatch(r"\d+\.\d+\.\d+", self.config.codex_version):
             raise HTTPException(422, "Codex in the task sandbox requires an exact codex_version, for example 0.144.4")
+        if self.config.codex_version != TESTED_CODEX_VERSION:
+            LOG.warning(
+                "Codex %s is untested: error classification and transcript parsing are validated on %s",
+                self.config.codex_version,
+                TESTED_CODEX_VERSION,
+            )
         if self.config.cwd is not None or self.config.extra_config or self.config.openai_base_url is not None:
             raise HTTPException(
                 422,
@@ -846,11 +856,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         errors = usage.get("errors") or []
         output_limited = (
             bool(errors)
-            and all(
-                message
-                == "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
-                for message in errors
-            )
+            and all(message == _OUTPUT_LIMIT_ERROR for message in errors)
             and cleanup is not None
             and not cleanup["error"]
             and failure is None
@@ -893,7 +899,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if system:
             conversation.insert(0, NeMoGymEasyInputMessage(role="system", content=system))
         gaps = [
-            ObservationGap(code="model_call_join_key_unavailable", detail="CLI events omit model response IDs"),
             ObservationGap(code="subagent_hierarchy_unavailable"),
             ObservationGap(code="compaction_observations_unavailable"),
             *(ObservationGap(code="model_metadata_fallback", detail=warning) for warning in startup_warnings),
@@ -931,75 +936,77 @@ class CodexAgent(SimpleResponsesAPIAgent):
             gaps.append(ObservationGap(code="agent_activation_interrupted", detail=type(failure).__name__))
         if not events:
             gaps.append(ObservationGap(code="agent_transcript_unavailable"))
-        tools = []
-        starts = {}
-        for observed_at, event in events:
-            item = event.get("item") or {}
-            if item.get("type") not in (
-                "command_execution",
-                "mcp_tool_call",
-                "file_change",
-                "web_search",
-                "todo_list",
-            ):
-                continue
-            item_id = item.get("id")
-            if not item_id:
-                continue
-            if event.get("type") == "item.started":
-                starts[item_id] = observed_at
-            if event.get("type") == "item.completed":
-                start = starts.pop(item_id, None)
-                tools.append(
-                    ToolCallObservation(
-                        invocation_id=state.request.episode_id.capture_key,
-                        tool_call_id=item_id,
-                        tool_name={"command_execution": "exec_command", "file_change": "apply_patch"}.get(
-                            item["type"], item["type"]
-                        ),
-                        started_at=start,
-                        completed_at=observed_at,
-                        status="failed" if item.get("status") == "failed" else "completed",
-                        timing_source="artifact",
-                    )
-                )
-                if start is None:
-                    gaps.append(ObservationGap(code="tool_start_unavailable", detail=item_id))
-        for item_id, start in starts.items():
-            tools.append(
-                ToolCallObservation(
-                    invocation_id=state.request.episode_id.capture_key,
-                    tool_call_id=item_id,
-                    started_at=start,
-                    status="incomplete",
-                    timing_source="artifact",
-                )
-            )
-        state.observations = AgentObservationBundle(
-            source="codex",
-            records=[
-                AgentInvocation(
-                    invocation_id=state.request.episode_id.capture_key,
-                    status="incomplete" if failure else status,
-                    error_type="provider_error" if reported_model_error else None,
-                    conversation=[*conversation, *output],
-                ),
-                *tools,
-            ],
-            gaps=gaps,
-        )
+        invocation_status = "incomplete" if failure else status
+        invocation_error = _PROVIDER_ERROR if reported_model_error else None
         if state.native_transcript is not None:
-            native = parse_codex_observations(
+            state.observations = parse_codex_observations(
                 state.native_transcript,
                 invocation_id,
                 returncode=cleanup["return_code"] if cleanup else None,
                 timed_out=bool(cleanup and cleanup["timed_out"]),
+                status=invocation_status,
+                error_type=invocation_error,
+                gaps=gaps,
             )
-            native.records[0].status = "incomplete" if failure else status
-            if reported_model_error:
-                native.records[0].error_type = "provider_error"
-            native.gaps.extend(gap for gap in gaps if gap.code != "model_call_join_key_unavailable")
-            state.observations = native
+        else:
+            gaps.append(ObservationGap(code=_MODEL_CALL_JOIN_GAP, detail="CLI events omit model response IDs"))
+            tools = []
+            starts = {}
+            for observed_at, event in events:
+                item = event.get("item") or {}
+                if item.get("type") not in (
+                    "command_execution",
+                    "mcp_tool_call",
+                    "file_change",
+                    "web_search",
+                    "todo_list",
+                ):
+                    continue
+                item_id = item.get("id")
+                if not item_id:
+                    continue
+                if event.get("type") == "item.started":
+                    starts[item_id] = observed_at
+                if event.get("type") == "item.completed":
+                    start = starts.pop(item_id, None)
+                    tools.append(
+                        ToolCallObservation(
+                            invocation_id=state.request.episode_id.capture_key,
+                            tool_call_id=item_id,
+                            tool_name={"command_execution": "exec_command", "file_change": "apply_patch"}.get(
+                                item["type"], item["type"]
+                            ),
+                            started_at=start,
+                            completed_at=observed_at,
+                            status="failed" if item.get("status") == "failed" else "completed",
+                            timing_source="artifact",
+                        )
+                    )
+                    if start is None:
+                        gaps.append(ObservationGap(code="tool_start_unavailable", detail=item_id))
+            for item_id, start in starts.items():
+                tools.append(
+                    ToolCallObservation(
+                        invocation_id=state.request.episode_id.capture_key,
+                        tool_call_id=item_id,
+                        started_at=start,
+                        status="incomplete",
+                        timing_source="artifact",
+                    )
+                )
+            state.observations = AgentObservationBundle(
+                source="codex",
+                records=[
+                    AgentInvocation(
+                        invocation_id=state.request.episode_id.capture_key,
+                        status=invocation_status,
+                        error_type=invocation_error,
+                        conversation=[*conversation, *output],
+                    ),
+                    *tools,
+                ],
+                gaps=gaps,
+            )
         if failure is not None:
             raise failure
         if error and not reported_model_error:

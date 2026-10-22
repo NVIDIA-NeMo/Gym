@@ -123,6 +123,29 @@ def test_missing_or_invalid_native_usage_is_unknown(usage: object) -> None:
     assert parse_codex_usage(json.dumps(record)) is None
 
 
+@pytest.mark.parametrize("info", [{"renamed_totals": {}}, {"total_token_usage": {"input_tokens": "7"}}])
+def test_changed_usage_schema_does_not_fall_back_to_stale_totals(info, caplog) -> None:
+    previous = {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}
+    transcript = "\n".join(
+        json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": snapshot}})
+        for snapshot in ({"total_token_usage": previous}, info)
+    )
+    assert parse_codex_usage(transcript) is None
+    assert "unsupported token_count record" in caplog.text
+    bundle = parse_codex_observations(transcript, "invocation", returncode=1, timed_out=False)
+    assert [gap.code for gap in bundle.gaps] == ["agent_artifact_record_unparseable"]
+
+
+def test_unrecognized_transcript_record_reports_gap() -> None:
+    bundle = parse_codex_observations(
+        json.dumps({"type": "renamed_response_item", "payload": {}}),
+        "invocation",
+        returncode=1,
+        timed_out=False,
+    )
+    assert [gap.code for gap in bundle.gaps] == ["agent_artifact_record_unparseable"]
+
+
 @pytest.mark.parametrize("success", [True, False, None])
 def test_native_patch_retains_call_and_output_with_execution_outcome(success: bool | None) -> None:
     items = [

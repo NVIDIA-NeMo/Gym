@@ -46,6 +46,17 @@ def seed() -> AgentSeedSessionRequest:
     )
 
 
+@pytest.mark.parametrize("version,warn", [("0.144.4", False), ("0.145.0", True)])
+def test_session_warns_about_untested_codex_version(setup, caplog, version, warn):
+    agent, sandbox = setup
+    agent.config.codex_version = version
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+    assert ("error classification and transcript parsing are validated on 0.144.4" in caplog.text) == warn
+
+
 def events(*, stop_reason="stop") -> str:
     items = [
         {"type": "item.completed", "item": {"id": "think-1", "type": "reasoning", "text": "Inspect the repository"}},

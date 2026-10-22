@@ -19,6 +19,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
+MAX_RATE_LIMIT_RETRIES = 2
+
+
 @contextmanager
 def rate_limit_proxy(base_url: str, invocation_id: str, attempts_path: Path, *, timeout: float) -> Iterator[str]:
     """Apply the local adapter's two-retry policy inside the task sandbox."""
@@ -35,7 +38,7 @@ def rate_limit_proxy(base_url: str, invocation_id: str, attempts_path: Path, *, 
                 if key.lower() not in {"host", "content-length", "connection", "x-session-id"}
             }
             headers["x-session-id"] = invocation_id
-            for attempt in range(3):
+            for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
                 try:
                     upstream = urlopen(Request(f"{base_url}/responses", data=body, headers=headers), timeout=timeout)
                 except HTTPError as error:
@@ -48,7 +51,7 @@ def rate_limit_proxy(base_url: str, invocation_id: str, attempts_path: Path, *, 
                 with upstream:
                     record = {"status": upstream.status}
                     try:
-                        if upstream.status == 429 and attempt < 2:
+                        if upstream.status == 429 and attempt < MAX_RATE_LIMIT_RETRIES:
                             upstream.read()
                             try:
                                 delay = float(upstream.headers.get("Retry-After", 2**attempt))
