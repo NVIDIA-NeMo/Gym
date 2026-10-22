@@ -748,3 +748,39 @@ def test_submit_without_otel_neither_stages_nor_exports(tmp_path, monkeypatch):
 
     assert not (Path(record.run_dir) / "scicode" / "otel").exists()
     assert not conn.commands[0][0].startswith("export ")
+
+
+def _engine_rollout_id_statements(doc):
+    copy, trim = doc["processors"]["transform/engine_rollout_id"]["trace_statements"][0]["statements"]
+    pattern = re.search(r'replace_pattern\(attributes\["nemo.gym.rollout.id"\], "([^"]+)", "([^"]+)"\)', trim)
+    # The collector expands `${...}` itself, so OTTL regex syntax is written with `$$`; Go's `${1}` is
+    # Python's `\g<1>`.
+    regex = pattern.group(1).replace("$$", "$")
+    replacement = pattern.group(2).replace("$$", "$").replace("${1}", "\\g<1>")
+    return copy, trim, regex, replacement
+
+
+def test_collector_copies_the_rollout_id_out_of_the_engine_request_id_when_vllm_traces_are_on():
+    doc = _rendered(_config(otel={"vllm_traces": True}))
+    copy, trim, regex, replacement = _engine_rollout_id_statements(doc)
+    assert copy.startswith('set(attributes["nemo.gym.rollout.id"], attributes["gen_ai.request.id"])')
+    assert 'where name == "llm_request"' in copy and 'where name == "llm_request"' in trim
+    assert 'attributes["nemo.gym.rollout.id"] == nil' in copy, "never overwrite an id the engine already carries"
+    assert "IsMatch(" in copy, "only Gym's own request ids are copied"
+    assert 'attributes["nemo.gym.rollout.id"] == attributes["gen_ai.request.id"]' in trim, "trim only what was copied"
+    for pipeline in ("traces", "traces/local"):
+        processors = doc["service"]["pipelines"][pipeline]["processors"]
+        assert processors.index("transform/engine_rollout_id") < processors.index(processors[-2]), pipeline
+    # Same semantics in Python's engine as in Go's for these inputs.
+    assert re.sub(regex, replacement, "chatcmpl-0-0-5bf494fb") == "0-0"
+    assert re.sub(regex, replacement, "chatcmpl-3-0-a2-deadbeef") == "3-0-a2"
+    assert re.sub(regex, replacement, "custom.id_7-00c0ffee") == "custom.id_7"
+    plain_uuid = "chatcmpl-0123456789abcdef0123456789abcdef"
+    assert re.search(regex, plain_uuid) is None, "a request id that is not Gym's is not copied"
+
+
+def test_collector_leaves_engine_spans_alone_when_vllm_traces_are_off():
+    doc = _rendered()
+    assert "transform/engine_rollout_id" not in doc["processors"]
+    for pipeline in ("traces", "traces/local"):
+        assert "transform/engine_rollout_id" not in doc["service"]["pipelines"][pipeline]["processors"]
