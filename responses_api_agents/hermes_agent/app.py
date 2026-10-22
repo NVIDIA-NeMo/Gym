@@ -558,6 +558,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         *,
         runtime_info: HarnessProcessInfo | None,
     ) -> AgentObservationBundle:
+        context_limited = self.classify_outcome(result).failure_kind == MODEL_CONTEXT_LIMIT
         gaps = [] if runtime_info is not None else [ObservationGap(code="runtime_info_unavailable")]
         if isinstance(raw_observations, dict):
             try:
@@ -565,12 +566,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 for raw_invocation in raw_observations.get("invocations") or []:
                     response_ids = raw_invocation.get("model_response_ids") or []
                     invocation_id = str(raw_invocation["invocation_id"])
+                    root_context_limit = context_limited and raw_invocation.get("parent_invocation_id") is None
                     records.append(
                         AgentInvocation(
                             invocation_id=invocation_id,
                             parent_invocation_id=raw_invocation.get("parent_invocation_id"),
-                            status=raw_invocation.get("status", "unknown"),
-                            stop_reason=raw_invocation.get("stop_reason"),
+                            status="incomplete" if root_context_limit else raw_invocation.get("status", "unknown"),
+                            stop_reason="context_limit" if root_context_limit else raw_invocation.get("stop_reason"),
                             # Every call goes to the configured Model Server, so a response ID identifies the call.
                             model_calls=[
                                 ModelCallRef(model_ref=self.config.model_server, response_id=response_id)
@@ -617,8 +619,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         records: list[AgentInvocation | ToolCallObservation] = [
             AgentInvocation(
                 invocation_id="root",
-                status=invocation_status,
-                stop_reason=result.get("stop_reason"),
+                status="incomplete" if context_limited else invocation_status,
+                stop_reason="context_limit" if context_limited else result.get("stop_reason"),
                 conversation=normalize_hermes_messages(messages),
             )
         ]
@@ -721,6 +723,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
             retain_provider_failure=True,
         )
         response = self.report_outcome(response, result)
+        if self.classify_outcome(result).failure_kind == MODEL_CONTEXT_LIMIT:
+            response = response.model_copy(update={"status": "incomplete", "error": None})
         # Verifiers see Gym's MCP naming; the model's own names stay in the captured model calls.
         server_names = [access.name for access in mcp_accesses]
         for item in response.output:

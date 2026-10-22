@@ -1209,6 +1209,35 @@ async def test_task_timeout_reaches_the_sandbox_supervisor(agent, state, tmp_pat
     )
 
 
+@pytest.mark.parametrize("captured", [False, True])
+async def test_context_limit_keeps_partial_work_verifiable(agent, state, captured):
+    messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "Partial answer"}]
+    output = {
+        "result": {
+            "completed": False,
+            "partial": True,
+            "error": "Context length exceeded: max compression attempts (3) reached.",
+            "messages": messages,
+        }
+    }
+    if captured:
+        output["observations"] = {"invocations": [{"invocation_id": "root", "status": "failed", "messages": messages}]}
+    state.execute = AsyncMock(return_value=output)
+
+    episode = await agent._run_sandbox_episode(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
+    )
+
+    assert episode.response.status == "incomplete"
+    assert episode.response.error is None
+    assert episode.response.output[-1].content[0].text == "Partial answer"
+    assert json.loads(episode.response.metadata["ng_agent_outcome"])["failure_kind"] == "model_context_limit"
+    assert agent_outcome_policy(episode.response) == OutcomeAction.VERIFY
+    root = episode.observations.records[0]
+    assert root.status == "incomplete"
+    assert root.stop_reason == "context_limit"
+
+
 async def test_runner_stopped_at_the_deadline_is_a_partial_response(agent, state):
     """The runner's interrupted transcript is graded as an incomplete response that records the timeout."""
     state.execute = AsyncMock(
