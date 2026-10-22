@@ -50,6 +50,8 @@ def test_pinned_hermes_summary_passes_gym_schema_and_retains_call_ownership(
     requests = []
 
     def complete(**kwargs):
+        # OpenAI consumes client options before validating the model request body.
+        assert kwargs.pop("extra_headers", {}) == ({"x-session-id": "root"} if sandbox else {})
         requests.append(NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(kwargs))
         content = "" if retry and len(requests) == 1 else "Applied a partial patch."
         return SimpleNamespace(
@@ -127,6 +129,9 @@ def test_delegated_child_limit_summary_uses_gym_and_belongs_to_child(
     requests = []
 
     def complete(**kwargs):
+        assert kwargs.pop("extra_headers", {}) == (
+            {"x-session-id": "root.child-1"} if observer_kind == "sandbox" else {}
+        )
         requests.append(NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(kwargs))
         return SimpleNamespace(
             id="child-summary", choices=[SimpleNamespace(message=SimpleNamespace(content="Partial findings."))]

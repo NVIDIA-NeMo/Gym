@@ -18,6 +18,7 @@ import logging
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from openai import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, AsyncOpenAI, Timeout
 
@@ -153,6 +154,91 @@ class TestApp:
         assert output[1]["output"] == "4"
         assert output[2]["content"][0]["text"] == "answer"
         assert output[2]["prompt_token_ids"] == [3]
+
+    def test_eval_rollout_without_token_ids_is_not_reported_as_empty(self, caplog) -> None:
+        """Eval mode (`return_token_id_information: false`) returns no token ids, but the trajectory is complete."""
+        tool_call = {"id": "call_1", "name": "python", "arguments": json.dumps({"expr": "2+2"})}
+        completion = [
+            {"role": "assistant", "content": "", "tool_calls": [json.dumps(tool_call)]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "4"},
+            {"role": "assistant", "content": "answer"},
+        ]
+        rollout_output = {
+            "completion": completion,
+            "trajectory": [
+                {"completion": [{"role": "assistant", "content": "", "tool_calls": [tool_call]}]},
+                {"completion": [{"role": "assistant", "content": "answer"}]},
+            ],
+        }
+
+        with caplog.at_level(logging.DEBUG, logger=agent_app_logger.name):
+            output = self._agent()._convert_trajectory_to_output(rollout_output)
+
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert "token ids were likely not requested" in caplog.text
+        assert [item["type"] for item in output] == ["function_call", "function_call_output", "message", "message"]
+        assert output[-1]["id"] == "msg_empty"
+        assert output[-1]["generation_token_ids"] == [0]
+
+    @pytest.mark.parametrize(
+        ("completion", "expect_warning"),
+        [
+            # Stopped by max_turns right after a tool call: only function_call items, no assistant message.
+            (
+                [
+                    {"role": "assistant", "content": "", "tool_calls": [json.dumps({"id": "c1", "name": "f"})]},
+                    {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+                ],
+                False,
+            ),
+            # Only non-assistant messages: a user or tool message must not count as an assistant turn.
+            ([{"role": "user", "content": "q"}, {"role": "tool", "tool_call_id": "c1", "content": "ok"}], True),
+        ],
+    )
+    def test_each_kind_of_assistant_turn_decides_the_warning(self, caplog, completion, expect_warning) -> None:
+        with caplog.at_level(logging.WARNING, logger=agent_app_logger.name):
+            self._agent()._convert_trajectory_to_output({"completion": completion, "trajectory": []})
+
+        assert ("Returning empty trajectory" in caplog.text) is expect_warning
+
+    def test_rollout_without_completion_items_still_warns_empty_trajectory(self, caplog) -> None:
+        rollout_output = {"completion": [], "trajectory": [], "error": {"error": "sandbox quota exceeded"}}
+
+        with caplog.at_level(logging.WARNING, logger=agent_app_logger.name):
+            output = self._agent()._convert_trajectory_to_output(rollout_output)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "Returning empty trajectory" in warnings[0].getMessage()
+        assert "sandbox quota exceeded" in warnings[0].getMessage()
+        assert [item["id"] for item in output] == ["msg_empty"]
+
+    def test_rollout_error_after_assistant_turns_is_still_logged(self, caplog) -> None:
+        rollout_output = {
+            "completion": [{"role": "assistant", "content": "partial answer"}],
+            "trajectory": [{"completion": [{"role": "assistant", "content": "partial answer"}]}],
+            "error": {"error": "ToolError", "error_chain_repr": "ToolError('sandbox died')"},
+        }
+
+        with caplog.at_level(logging.WARNING, logger=agent_app_logger.name):
+            output = self._agent()._convert_trajectory_to_output(rollout_output)
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "ToolError" in warnings[0]
+        assert "Returning empty trajectory" not in warnings[0]
+        assert output[-1]["id"] == "msg_empty"
+
+    @staticmethod
+    def _agent() -> VerifiersAgent:
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name=""),
+        )
+        return VerifiersAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
 
 class TestPolicyClient:
