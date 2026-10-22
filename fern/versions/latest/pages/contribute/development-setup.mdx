@@ -62,6 +62,10 @@ All contributions must pass these automated checks:
 - Tests must run using `gym env test --resources-server your_server`
 - Use pytest for async testing patterns
 
+### CI Not Starting (`/ok to test`)
+
+The mirrored Gym CICD and Fern workflows run automatically for verified commits from NVIDIA-NeMo members. If your commits are unverified, or you are an external contributor, a qualified NVIDIA-NeMo member must comment `/ok to test <full commit SHA>` on the PR before these workflows start. Use the full 40-character SHA (`git rev-parse HEAD`), not an abbreviation. After the head commit changes, the new full SHA needs a new comment. See [Continuous Integration](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md#continuous-integration-ci) in `CONTRIBUTING.md`.
+
 ### Build Docs CI Failures
 
 If the build-docs check fails:

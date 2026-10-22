@@ -51,6 +51,7 @@ def _load_skills_resolver():
     candidates = [
         Path("/nemo_run/code/nemo_skills/dataset/speed-bench/prepare.py"),
         Path(__file__).resolve().parents[3] / "nemo-skills" / "nemo_skills" / "dataset" / "speed-bench" / "prepare.py",
+        Path(__file__).resolve().parents[3] / "Skills" / "nemo_skills" / "dataset" / "speed-bench" / "prepare.py",
     ]
     for p in candidates:
         if p.exists():
@@ -59,7 +60,8 @@ def _load_skills_resolver():
             spec.loader.exec_module(mod)
             return mod._resolve_external_data
     raise RuntimeError(
-        f"Could not find Skills' speed-bench prepare.py to import _resolve_external_data. Tried: {candidates}"
+        f"Could not find Skills' speed-bench prepare.py to import _resolve_external_data. Tried: {candidates}. \
+        Please clone the Skills repository from https://github.com/NVIDIA-NeMo/Skills under the same directory as the Gym repo."
     )
 
 

@@ -250,6 +250,11 @@ def _is_missing_container(stderr: str) -> bool:
     return any(marker in low for marker in DOCKER_MISSING_CONTAINER_MARKERS)
 
 
+def _user_flag(user: str | int) -> str:
+    """``--user`` value: root/0 becomes 0, anything else is passed as written (``name``, ``uid``, ``uid:gid``)."""
+    return "0" if user == "root" or user == 0 else str(user)
+
+
 class DockerProvider:
     """Sandbox provider backed by the local Docker CLI / daemon."""
 
@@ -313,6 +318,8 @@ class DockerProvider:
             argv.append("--init")
         if spec.workdir:
             argv += ["-w", spec.workdir]
+        # spec.user is not passed to `docker run`: in overlay mode the user may not exist in the base image
+        # yet. The sandbox facade applies it to every exec instead (see AsyncSandbox.default_user).
         for key, value in spec.env.items():
             argv += ["--env", f"{key}={value}"]
         if cfg.apply_resource_limits:
@@ -495,7 +502,7 @@ class DockerProvider:
         for key, value in merged_env.items():
             flags += ["--env", f"{key}={value}"]
         if user is not None:
-            flags += ["--user", "0" if user == "root" or user == 0 else str(user)]
+            flags += ["--user", _user_flag(user)]
         flags += list(self._exec_config.extra_exec_args)
 
         argv = [self._binary, "exec", *flags, inst.name, inst.shell, "-c", command]

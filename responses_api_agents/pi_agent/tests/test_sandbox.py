@@ -412,6 +412,16 @@ def test_required_grants_pi_cannot_use_are_refused_at_seed(setup, tool_accesses,
     sandbox.exec.assert_not_awaited()
 
 
+def test_several_workers_seed_sessions(setup):
+    """Session routing sends a session's later requests to the worker that seeded it."""
+    agent, sandbox = setup
+    agent.config.num_workers = 2
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        assert created.json()["agent_session_id"] in agent._session_records
+
+
 def test_cookie_identity_and_single_activation(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:
@@ -1874,7 +1884,7 @@ async def test_provider_failure_is_not_gradable_but_context_limit_preserves_patc
 
 
 @pytest.mark.parametrize("owned", [False, True])
-def test_sandbox_source_controls_ownership_and_native_routing(setup, owned):
+def test_sandbox_source_controls_ownership_and_session_routing(setup, owned):
     agent, sandbox = setup
     agent.config.sandbox_provider = "agent-provider"
     agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}

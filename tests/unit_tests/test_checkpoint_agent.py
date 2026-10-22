@@ -425,7 +425,7 @@ async def test_restored_sessions_not_yet_claimed_survive_the_next_checkpoint(tmp
     episode_id = EpisodeId(rollout_id="r")
     restored_records = [
         AgentSessionRecord(
-            session_key="native", episode_id=episode_id, session={"k": 1}, boundary={"step": 3}, episode=None
+            session_key="agent-session", episode_id=episode_id, session={"k": 1}, boundary={"step": 3}, episode=None
         ),
         AgentSessionRecord(
             session_key="run:r2",
@@ -457,7 +457,7 @@ async def test_restored_sessions_not_yet_claimed_survive_the_next_checkpoint(tmp
     await again_controller.resume(CheckpointRequest(**control("r2")))
 
     assert committed["episode_ids"] == ["r-a1", "r2-a1"]
-    async with again.activation("native", EpisodeId(rollout_id="r", attempt=2)) as activation:
+    async with again.activation("agent-session", EpisodeId(rollout_id="r", attempt=2)) as activation:
         assert activation.continuation == {"step": 3}
     async with again.legacy_run("run:r2", EpisodeId(rollout_id="r2", attempt=2)) as legacy_run:
         assert legacy_run.continuation == {"next": "verify"}

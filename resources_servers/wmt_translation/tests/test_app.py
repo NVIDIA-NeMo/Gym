@@ -485,7 +485,7 @@ class TestScoreMissingComet:
         saved = [json.loads(line) for line in jsonl.read_text().splitlines()]
         assert all(row["comet_score"] == 0.91 for row in saved)
 
-    def test_skips_already_scored_and_empty_generation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_skips_already_scored_and_scores_empty_generation(self, monkeypatch: pytest.MonkeyPatch) -> None:
         server = _make_server(compute_comet=True, comet_num_shards=1, comet_batch_size=8)
         calls = self._stub_pool(server, n_actors=1)
         de_ref = "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten."
@@ -513,13 +513,12 @@ class TestScoreMissingComet:
         ]
         import app as app_module
 
-        def _boom(_refs):
-            raise AssertionError("ray.get should not be called")
-
-        monkeypatch.setattr(app_module.ray, "get", _boom)
+        monkeypatch.setattr(app_module.ray, "get", lambda refs: [[0.1] * len(ref[2]) for ref in refs])
         m = server.compute_metrics(tasks)
-        assert calls == []
-        assert m["en->de_DE/comet"] == pytest.approx(50.0)
+        # Only the empty row goes to COMET; it stays in the mean: (0.5 + 0.1) / 2.
+        assert [triples for _, triples, _ in calls] == [[("T1", "", de_ref)]]
+        assert tasks[1][0]["comet_score"] == pytest.approx(0.1)
+        assert m["en->de_DE/comet"] == pytest.approx(30.0)
 
     def test_length_mismatch_fails_early(self, monkeypatch: pytest.MonkeyPatch) -> None:
         server = _make_server(compute_comet=True, comet_num_shards=1, comet_batch_size=8)
@@ -899,27 +898,6 @@ class TestComputeMetrics:
             server.compute_metrics(tasks)
 
         assert not any(message.startswith("Warning - the following language pairs") for message in caplog.messages)
-
-    def test_no_comet_rows_emits_local_metrics_only(self) -> None:
-        """Rollouts without comet_score (compute_comet disabled mid-run, or
-        actor pool unavailable) yield spBLEU/chrF metrics with no /comet keys."""
-        server = _make_server(compute_comet=True)
-        tasks = [
-            [
-                {
-                    "text": "The quick brown fox jumps over the lazy dog in the beautiful garden.",
-                    "translation": "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten.",
-                    "generation": "",
-                    "source_language": "en",
-                    "target_language": "de_DE",
-                }
-            ]
-        ]
-        m = server.compute_metrics(tasks)
-        assert "en->de_DE/chrF" in m
-        assert "en->de_DE/spBLEU" in m
-        assert not any(k.endswith("/comet") for k in m)
-        assert server._comet_init_attempted is False
 
 
 class TestBuildCometActorClass:
