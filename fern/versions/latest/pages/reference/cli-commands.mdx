@@ -962,7 +962,7 @@ gym eval aggregate \
 
 ### `gym eval export`
 
-Export a finished run with an exporter, chosen by the optional `EXPORTER` argument. `atif` is the default and, for now, the only exporter. Exporter settings are Hydra-style `key=value` arguments; the option flags below are equivalent forms for `atif`.
+Export a finished run with an exporter, chosen by the optional `EXPORTER` argument. `atif` is the default; `mlflow` and `wandb` send a finished run to those tracking backends. Exporter settings are Hydra-style `key=value` arguments; the option flags below are equivalent forms for `atif`.
 
 `atif` exports supported `ng_trajectory` attachments from a Gym rollouts JSONL file as ATIF v1.7. The command writes one ATIF
 trajectory per rollout plus a manifest that preserves Gym's task and rollout identity. It is a strict offline conversion:
@@ -976,7 +976,7 @@ row's `agent_ref.name`; `--agent-version` records the version of that agent impl
 
 | Option | Description |
 | --- | --- |
-| `EXPORTER` | Exporter to run. Defaults to `atif`. |
+| `EXPORTER` | Exporter to run: `atif`, `mlflow` or `wandb`. Defaults to `atif`. |
 | `--format atif` | Deprecated. Pass the exporter name instead. |
 | `--rollouts PATH` | Gym rollouts JSONL containing `ng_trajectory` version `1.0` attachments. |
 | `--output-dir DIR` | New directory for the ATIF files and manifest. |
@@ -989,6 +989,27 @@ gym eval export atif \
     output_dirpath=results/atif \
     session_id=eval-2026-08-25 \
     agent_version=1.2.3
+```
+
+#### Exporting to MLflow or W&B
+
+`mlflow` and `wandb` log what a live run would have logged: the run's saved config (`<stem>_resolved_config.yaml`),
+its aggregate metrics, and its rollouts. They need `<stem>_aggregate_metrics.json` (newer than the rollouts file) and the
+saved config next to the rollouts, so they cannot export a run that predates the saved config. Backend settings and
+credentials (`mlflow_tracking_uri`, `wandb_api_key`, ...) come from the export command itself (arguments, `.env.yaml` or
+environment), never from the run's saved config, which masks them. Rollouts are uploaded unless the run's saved
+`upload_rollouts` is false; pass `upload_rollouts=true|false` to override.
+
+Once a run is exported, `<stem>_<exporter>_run_id` is written next to the rollouts and later exports of the same run
+are skipped without contacting the backend. Delete that file to export again. A failed export leaves no marker, so it can
+be retried.
+
+```bash
+gym eval export mlflow \
+    rollouts_jsonl_fpath=results/rollouts.jsonl \
+    mlflow_tracking_uri=https://mlflow.example \
+    mlflow_experiment_name=gym \
+    mlflow_run_name=nightly
 ```
 
 See the [trajectory capability matrix](/reference/trajectory-capabilities#atif-export) for the initial conversion boundary.

@@ -59,6 +59,7 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
+from nemo_gym.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.failure_kinds import AGENT_TIMEOUT, CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -4013,24 +4014,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         all_agent_metrics.sort(key=lambda entry: entry[AGENT_REF_KEY_NAME]["name"])
 
-        primitive_types = (bool, int, float, str, type(None))
-        metrics_to_log = dict()
-        for agent_entry in all_agent_metrics:
-            agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
-            metrics_to_log.update(
-                {
-                    f"{agent_name}/{k}": v
-                    for k, v in agent_entry["agent_metrics"].items()
-                    if isinstance(v, primitive_types)
-                }
-            )
-            metrics_to_log.update(
-                {
-                    f"key_metrics/{agent_name}/{k}": v
-                    for k, v in agent_entry["key_metrics"].items()
-                    if isinstance(v, primitive_types)
-                }
-            )
+        metrics_to_log = flatten_aggregate_metrics(all_agent_metrics)
 
         export_metrics(metrics_to_log)
 
