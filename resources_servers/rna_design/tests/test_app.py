@@ -229,7 +229,11 @@ def test_reading_the_campaign_state_is_free(tmp_path: Path) -> None:
         result = _verify(client)
     assert "campaign_state" in names
     assert state["objective"]["target"] == TARGET["name"]
-    assert state["budget"] == again["budget"]
+    # wall_seconds is a clock reading, not a charge: it advances between any two snapshots. Every axis
+    # a call could spend must be unchanged.
+    free = lambda b: {k: v for k, v in b["spend"].items() if k != "wall_seconds"}  # noqa: E731
+    assert free(state["budget"]) == free(again["budget"])
+    assert state["budget"]["limits"] == again["budget"]["limits"]
     assert result["tool_calls"] == 0 and result["rounds"] == 0
 
 

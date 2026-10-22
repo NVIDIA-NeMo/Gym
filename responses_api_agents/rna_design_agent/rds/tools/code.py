@@ -354,8 +354,8 @@ class CallCodeIn:
     model=CallCodeIn,
 )
 def code_call(inp: CallCodeIn) -> dict:
-    path = _toolbox() / f"{inp.name}.py"
-    if not path.is_file():
+    saved = _toolbox() / f"{inp.name}.py"
+    if not saved.is_file():
         have = sorted(p.stem for p in _toolbox().glob("*.py"))
         raise FileNotFoundError(
             f"no saved tool named {inp.name!r}"
@@ -365,9 +365,15 @@ def code_call(inp: CallCodeIn) -> dict:
                 else "; nothing has been saved yet — use code.run with save_as"
             )
         )
-    return _execute(
-        path, inp.timeout_s, argument=inp.arguments, tool="code.call", purpose=path.read_text().splitlines()[0][2:]
-    )
+    # Staged into a work directory of its own, the way code.run does: the toolbox is not necessarily a
+    # path the sandbox can mount -- a harness inside a container bind-mounts its own path and finds
+    # nothing -- and a script has no business reading the other tools in the box.
+    work = Path(tempfile.mkdtemp(prefix="agent_code_"))
+    script = work / saved.name
+    body = saved.read_text()
+    script.write_text(body)
+    _write_target(work)
+    return _execute(script, inp.timeout_s, argument=inp.arguments, tool="code.call", purpose=body.splitlines()[0][2:])
 
 
 @dataclass

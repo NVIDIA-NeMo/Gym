@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import os
 import typing
 from collections.abc import Callable
 from typing import Any
@@ -172,10 +173,23 @@ class ToolSpec:
             k: _coerce(self.model, k, v) for k, v in kwargs.items() if not (k in optional and v in ("", None, []))
         }
         known = {f.name for f in dataclasses.fields(self.model)}
+        # Omitting `target` used to fall back to one fixed campaign and score against its structure. The
+        # campaign in progress is the default, and naming it on a tool without the field is redundant.
+        if "target" in known:
+            if not cleaned.get("target") and os.environ.get("RDS_TARGET"):
+                cleaned["target"] = os.environ["RDS_TARGET"]
+        else:
+            cleaned.pop("target", None)
         unknown = sorted(set(cleaned) - known)
         if unknown:
             # Name every unknown argument and what the tool takes, not just the first offender.
             raise TypeError(
                 f"{self.name}: unknown argument(s) {', '.join(unknown)}; this tool takes: {', '.join(sorted(known))}"
             )
+        missing = sorted(
+            f.name for f in dataclasses.fields(self.model) if f.name not in cleaned and f.name not in optional
+        )
+        if missing:
+            # The dataclass's own TypeError names a class the model has never heard of.
+            raise TypeError(f"{self.name}: missing required argument(s) {', '.join(missing)}")
         return self.fn(self.model(**cleaned))

@@ -591,3 +591,104 @@ class TestUpstreamFixes:
         script.write_text("print(1)\n")
         command, mode = _sandbox_command(script, "", tmp_path)
         assert mode == "subprocess" and str(script) in command
+
+
+class TestToolArguments:
+    """Arguments a model gets slightly wrong cost it a round, so the ones that cannot mean anything else
+    are honoured rather than refused."""
+
+    def _register(self) -> None:
+        from responses_api_agents.rna_design_agent.rds.targets import from_dict, register
+
+        register(from_dict({"name": "running", "length": 12, "target_structure": "((((....))))"}))
+
+    def test_an_omitted_target_is_the_campaign_in_progress(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from responses_api_agents.rna_design_agent.rds.registry import get
+
+        self._register()
+        monkeypatch.setenv("RDS_TARGET", "running")
+        assert get("score.constraints").call(sequences=["GGGGAAAACCCC"])["target"] == "running"
+
+    def test_a_target_passed_to_a_tool_without_one_is_ignored(self, tmp_path: Path) -> None:
+        from responses_api_agents.rna_design_agent.rds.registry import get
+
+        rules = [{"statement": "stems want GC", "context": "stem", "quantity": "gc_fraction", "minimum": 0.6}]
+        out = get("report.rules").call(rules=rules, target="running", out_dir=str(tmp_path))
+        assert out["n_rules"] == 1
+
+    def test_a_missing_required_argument_names_the_tool(self) -> None:
+        from responses_api_agents.rna_design_agent.rds.registry import get
+
+        with pytest.raises(TypeError, match=r"code\.run: missing required argument\(s\) code"):
+            get("code.run").call(purpose="no code at all")
+
+    def test_the_engine_is_named_not_spelled(self) -> None:
+        from responses_api_agents.rna_design_agent.rds.registry import dispatch
+
+        self._register()
+        for spelling in ("eternafold", "EternaFold", " EternaFold "):
+            result = dispatch(
+                "score.fold_match", {"sequences": ["GGGGAAAACCCC"], "target": "running", "engine": spelling}
+            )
+            assert result["results"][0]["match"]["f1"] == 1.0
+
+
+class TestSavedTools:
+    """A tool the model saved has to be callable from wherever the run lives."""
+
+    def test_a_saved_tool_runs_from_a_copy_not_from_the_toolbox(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from responses_api_agents.rna_design_agent.rds.registry import get
+
+        monkeypatch.setenv("RDS_TOOLBOX", str(tmp_path / "box"))
+        monkeypatch.setenv("RDS_SANDBOX", "subprocess")
+        box = tmp_path / "box"
+        box.mkdir()
+        (box / "make_one.py").write_text('# makes one sequence\nprint(\'{"sequences": ["GGGGAAAACCCC"]}\')\n')
+
+        out = get("code.call").call(name="make_one")
+        assert [row["sequence"] for row in out["results"]] == ["GGGGAAAACCCC"]
+        assert out["purpose"] == "makes one sequence"
+
+
+class TestGatewayRetries:
+    """A shared gateway answers its own database trouble with 401, and a run is a long sequence of calls."""
+
+    def _raising(self, body: bytes, tries: list[int]):
+        import io
+        import urllib.error
+
+        def open_url(request, timeout=None):
+            tries.append(1)
+            raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, io.BytesIO(body))
+
+        return open_url
+
+    def test_the_gateways_own_401_is_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from responses_api_agents.rna_design_agent.rds.llm import GatewayProvider
+
+        body = b'{"error":{"message":"Error in connector: FATAL: sorry, too many clients already"}}'
+        tries: list[int] = []
+        monkeypatch.setattr("responses_api_agents.rna_design_agent.rds.llm.time.sleep", lambda s: None)
+        monkeypatch.setattr(
+            "responses_api_agents.rna_design_agent.rds.llm.urllib.request.urlopen", self._raising(body, tries)
+        )
+        provider = GatewayProvider(model="m", base_url="http://gateway/v1", api_key="k", max_retries=4)
+        with pytest.raises(RuntimeError, match="too many clients"):
+            provider.chat([{"role": "user", "content": "hi"}])
+        assert len(tries) == 4
+
+    def test_a_wrong_key_still_fails_at_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from responses_api_agents.rna_design_agent.rds.llm import GatewayProvider
+
+        tries: list[int] = []
+        monkeypatch.setattr("responses_api_agents.rna_design_agent.rds.llm.time.sleep", lambda s: None)
+        monkeypatch.setattr(
+            "responses_api_agents.rna_design_agent.rds.llm.urllib.request.urlopen",
+            self._raising(b'{"error":{"message":"Invalid API key"}}', tries),
+        )
+        provider = GatewayProvider(model="m", base_url="http://gateway/v1", api_key="k", max_retries=4)
+        with pytest.raises(RuntimeError, match="Invalid API key"):
+            provider.chat([{"role": "user", "content": "hi"}])
+        assert len(tries) == 1

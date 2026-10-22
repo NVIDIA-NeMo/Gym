@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import time
 import urllib.error
@@ -92,6 +93,10 @@ def find_api_key(search_dir: str | Path = ".") -> str | None:
     return None
 
 
+#: Words a gateway uses when a 401 is its own trouble, not the key.
+TRANSIENT_AUTH = ("connector", "too many clients", "database", "timeout")
+
+
 def _as_openai_tools(tools: list[dict]) -> list[dict]:
     """The registry's tool dicts in the chat API's shape."""
     return [
@@ -114,13 +119,15 @@ class GatewayProvider:
         base_url: str | None = None,
         api_key: str | None = None,
         timeout_s: float = 300.0,
-        max_retries: int = 3,
+        max_retries: int = 0,
     ) -> None:
         self.model = model or os.environ.get("RDS_LLM_MODEL", DEFAULT_MODEL)
         self.base_url = (base_url or os.environ.get("RDS_LLM_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
         self.api_key = api_key or find_api_key()
         self.timeout_s = timeout_s
-        self.max_retries = max_retries
+        # A gateway can be away for minutes, and a run is a long sequence of calls, so one unlucky
+        # minute would end hours of work. Eight attempts with the backoff below span about three minutes.
+        self.max_retries = max_retries or int(os.environ.get("RDS_LLM_MAX_RETRIES", "8"))
         if not self.base_url:
             raise ValueError("no endpoint: set RDS_LLM_BASE_URL or pass base_url (any OpenAI-compatible /v1 URL)")
         if not self.model:
@@ -156,13 +163,23 @@ class GatewayProvider:
                     return json.loads(response.read())
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode(errors="replace")[:400]
-                # 4xx other than rate-limiting will not get better by waiting.
-                if exc.code != 429 and exc.code < 500:
+                # 4xx other than rate-limiting will not get better by waiting, with one exception: a
+                # gateway that answers its own database trouble with 401. A wrong key reads differently,
+                # and treating the transient one as fatal ends a session that was only unlucky in time.
+                lowered = detail.lower()
+                transient = exc.code in (401, 429) and (
+                    exc.code == 429 or any(mark in lowered for mark in TRANSIENT_AUTH)
+                )
+                if not transient and exc.code < 500:
                     raise RuntimeError(f"gateway HTTP {exc.code}: {detail}") from exc
                 last = RuntimeError(f"gateway HTTP {exc.code}: {detail}")
             except (urllib.error.URLError, TimeoutError) as exc:
                 last = RuntimeError(f"gateway unreachable: {exc}")
-            time.sleep(2**attempt)
+            if attempt == self.max_retries - 1:
+                break
+            # Jittered because sessions run in parallel: without it they all come back at the same
+            # instant and hand the gateway the same crowd it just turned away.
+            time.sleep(min(2**attempt, 60.0) * (0.5 + random.random()))
         raise last or RuntimeError("gateway call failed")
 
     @staticmethod

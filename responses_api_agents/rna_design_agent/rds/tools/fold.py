@@ -127,7 +127,8 @@ def score_fold_match(inp: FoldMatchIn) -> dict:
     if inp.target not in TARGETS:
         raise ValueError(f"unknown target {inp.target!r} (have: {', '.join(sorted(TARGETS))})")
     reference = TARGETS[inp.target].target_structure
-    if inp.engine != "eternafold":
+    # The engine is named, not spelled: refusing "EternaFold" costs a round and teaches nothing.
+    if inp.engine.strip().lower() != "eternafold":
         raise ValueError(
             f"unknown engine {inp.engine!r}; this harness folds with EternaFold only, because ViennaRNA's "
             "licence restricts redistributing the package and one engine everywhere keeps the arms comparable"
