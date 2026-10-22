@@ -294,10 +294,11 @@ class TestCli:
 
     def test_collect_defaults_and_choices(self):
         args = collect._build_argparser().parse_args(["collect"])
-        assert (args.split, args.dialect, args.num_repeats, args.sql_concurrency) == ("dev", "sqlite", 8, 16)
+        assert (args.split, args.dialect, args.num_repeats, args.sql_concurrency) == ("train", "sqlite", 8, 16)
         with pytest.raises(SystemExit):
             collect._build_argparser().parse_args(["collect", "--split", "val"])
 
-    def test_default_output_dir_is_named_by_split_dialect_and_sanitized_model(self):
-        args = collect._build_argparser().parse_args(["collect", "--split", "train", "--dialect", "spark"])
-        assert collect._output_dir(args, "nvidia/zai-org/glm 5").name == "collect_train_spark_nvidia_zai-org_glm_5"
+    def test_default_output_dir_is_train_data_split_dialect_then_sanitized_model(self):
+        args = collect._build_argparser().parse_args(["collect", "--dialect", "spark"])
+        out = collect._output_dir(args, "nvidia/zai-org/glm 5")
+        assert out == collect.BENCHMARK_DIR / "train_data" / "train_spark" / "nvidia_zai-org_glm_5"

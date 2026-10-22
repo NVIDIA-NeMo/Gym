@@ -30,8 +30,8 @@ birdbench_bird_sql_simple_agent:
       datasets:
         - name: birdbench
           type: benchmark
-          jsonl_fpath: benchmarks/birdbench/data/birdbench_sqlite_benchmark.jsonl
-          prompt_config: benchmarks/birdbench/prompts/default.yaml
+          jsonl_fpath: benchmarks/birdbench/data/birdbench_sqlite_dev.jsonl
+          prompt_config: benchmarks/birdbench/prompts/default_sqlite.yaml
           prepare_script: benchmarks/birdbench/prepare.py
           # Never repeat the dataset: `gym eval run` multiplies this by `--num-repeats`, so any value above 1 makes
           # the prepared files 1534 x N rows. Take several rollouts per task with `--num-repeats` only.

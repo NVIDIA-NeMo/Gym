@@ -19,12 +19,12 @@ With ``dialect="spark"`` the schema is rendered for Spark SQL instead (``schema.
 identifiers, Spark column types); ``gt_sql`` is still the original SQLite gold, which the ``bird_sql`` server
 runs on SQLite and compares against the model's Spark SQL result.
 
-Each dialect writes its own file, ``data/birdbench_<dialect>_benchmark.jsonl`` (one row per task, 1534 rows; the
+Each (dialect, split) pair writes its own file, ``data/birdbench_<dialect>_<split>.jsonl`` (dev: one row per task, 1534 rows; the
 dataset is never repeated -- see ``num_repeats`` in config.yaml).
 
 ``split="train"`` prepares BIRD's train split instead (for training data, not evaluation): the "uberset" of BIRD's
 ``train.json`` with every row ReViSQL re-verified (``bird-verified-train.json``) swapped for its verified version, run
-against ``train_databases``. It writes ``data/birdbench_train_<dialect>.jsonl`` and has no ``difficulty`` labels.
+against ``train_databases``. It has no ``difficulty`` labels.
 The train databases are downloaded on first use (~9 GB, shared cache with the ``bird_sql`` server dir), or point
 ``train_dir`` at an already-extracted BIRD ``train/`` directory.
 
@@ -58,10 +58,8 @@ TRAIN_CORPUS_LIMIT_PER_COLUMN = 2000
 
 
 def output_fpath_for(dialect: str, split: str = "dev") -> Path:
-    """``data/birdbench_<dialect>_benchmark.jsonl`` for dev, ``data/birdbench_train_<dialect>.jsonl`` for train."""
-    if split == "dev":
-        return DATA_DIR / f"birdbench_{dialect}_benchmark.jsonl"
-    return DATA_DIR / f"birdbench_{split}_{dialect}.jsonl"
+    """``data/birdbench_<dialect>_<split>.jsonl``."""
+    return DATA_DIR / f"birdbench_{dialect}_{split}.jsonl"
 
 
 def build_uberset(train_entries: List[Dict[str, Any]], verified_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -106,8 +104,8 @@ def databases_dir_for(split: str, train_dir: Optional[str] = None) -> Path:
 
 
 def prompt_config_fpath_for(dialect: str) -> Path:
-    """``prompts/default.yaml`` for sqlite, ``prompts/<dialect>.yaml`` otherwise (as ``eval.sh`` picks it)."""
-    return BENCHMARK_DIR / "prompts" / ("default.yaml" if dialect == "sqlite" else f"{dialect}.yaml")
+    """``prompts/default_<dialect>.yaml``."""
+    return BENCHMARK_DIR / "prompts" / f"default_{dialect}.yaml"
 
 
 def load_entries(split: str, databases_dir: Path) -> List[Dict[str, Any]]:

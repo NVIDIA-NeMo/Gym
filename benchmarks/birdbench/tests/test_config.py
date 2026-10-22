@@ -29,18 +29,22 @@ def test_dataset_is_never_repeated():
 def test_default_dataset_is_the_sqlite_one_and_prepare_writes_exactly_that_path():
     # `gym eval prepare` raises ConfigError unless prepare()'s output path equals the dataset's jsonl_fpath.
     cfg, dataset = _dataset()
-    assert dataset["jsonl_fpath"] == "benchmarks/birdbench/data/birdbench_sqlite_benchmark.jsonl"
+    assert dataset["jsonl_fpath"] == "benchmarks/birdbench/data/birdbench_sqlite_dev.jsonl"
     assert cfg["prepare_script_args"]["dialect"] == "sqlite"
-    assert birdbench_prepare.output_fpath_for("sqlite") == REPO_ROOT / dataset["jsonl_fpath"]
+    assert birdbench_prepare.output_fpath_for("sqlite", "dev") == REPO_ROOT / dataset["jsonl_fpath"]
 
 
-def test_every_dialect_has_its_own_prompt_and_file_named_by_dialect():
-    # eval.sh builds `prompts/<dialect>.yaml` for non-default dialects; sqlite keeps prompts/default.yaml.
-    assert (REPO_ROOT / _dataset()[1]["prompt_config"]).is_file()
+def test_every_dialect_has_its_own_prompt_named_by_dialect():
+    # eval.sh builds `prompts/default_<dialect>.yaml`; the default dataset uses the sqlite one.
+    assert (REPO_ROOT / _dataset()[1]["prompt_config"]) == birdbench_prepare.prompt_config_fpath_for("sqlite")
+    assert (
+        REPO_ROOT / yaml.safe_load((BENCHMARK_DIR / "manifest.yaml").read_text())["standard_prompt_config"]
+    ).is_file()
     for dialect in birdbench_prepare.DIALECTS:
-        assert birdbench_prepare.output_fpath_for(dialect).name == f"birdbench_{dialect}_benchmark.jsonl"
-        if dialect != "sqlite":
-            assert (BENCHMARK_DIR / "prompts" / f"{dialect}.yaml").is_file()
+        assert (
+            birdbench_prepare.prompt_config_fpath_for(dialect) == BENCHMARK_DIR / "prompts" / f"default_{dialect}.yaml"
+        )
+        assert birdbench_prepare.prompt_config_fpath_for(dialect).is_file()
 
 
 def test_default_prepare_script_args_are_dev_sqlite():
@@ -55,4 +59,4 @@ def test_every_split_and_dialect_has_a_distinct_prepared_file():
         for dialect in birdbench_prepare.DIALECTS
     }
     assert len(paths) == len(birdbench_prepare.SPLITS) * len(birdbench_prepare.DIALECTS)
-    assert birdbench_prepare.output_fpath_for("spark", "train").name == "birdbench_train_spark.jsonl"
+    assert birdbench_prepare.output_fpath_for("spark", "train").name == "birdbench_spark_train.jsonl"

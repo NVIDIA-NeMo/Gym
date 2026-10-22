@@ -18,7 +18,7 @@ logprob logic can be re-applied offline for free with ``reprocess``.
 Subcommands (``python -m benchmarks.birdbench.collect <subcommand> --help``):
 
 - ``collect``: prepare the data if missing, then collect rollouts. Writes ``raw_choices.jsonl`` and ``grouped.jsonl``
-  into the output dir (default ``results/collect_<split>_<dialect>_<model>/``).
+  into the output dir (default ``train_data/<split>_<dialect>/<model>/``).
 - ``reprocess``: rebuild ``grouped.jsonl`` from ``raw_choices.jsonl``, with no API calls.
 - ``group``: convert the rollouts of a ``gym eval run`` (e.g. from ``eval.sh``) into the same grouped format.
 - ``select-hard``: keep the tasks that no collected rollout solved, for a follow-up ``collect --input-jsonl``.
@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 BENCHMARK_DIR = Path(__file__).parent
 REPO_ROOT = BENCHMARK_DIR.parent.parent
-RESULTS_DIR = BENCHMARK_DIR / "results"
+TRAIN_DATA_DIR = BENCHMARK_DIR / "train_data"
 
 # Must match the `spark_warehouse_dir` that `eval.sh` gives the server for each split (train has its own db_ids).
 SPARK_WAREHOUSE_DIRS = {
@@ -531,7 +531,7 @@ def select_hard_examples(
 
 
 def _add_data_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--split", choices=SPLITS, default="dev")
+    parser.add_argument("--split", choices=SPLITS, default="train")
     parser.add_argument("--dialect", choices=DIALECTS, default="sqlite")
     parser.add_argument(
         "--train-dir",
@@ -551,7 +551,7 @@ def _output_dir(args: argparse.Namespace, model_name: Optional[str] = None) -> P
     if args.output_dir:
         return Path(args.output_dir)
     safe_model = re.sub(r"[/: ]", "_", model_name or "model")
-    return RESULTS_DIR / f"collect_{args.split}_{args.dialect}_{safe_model}"
+    return TRAIN_DATA_DIR / f"{args.split}_{args.dialect}" / safe_model
 
 
 def _build_argparser() -> argparse.ArgumentParser:

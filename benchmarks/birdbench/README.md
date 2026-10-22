@@ -22,7 +22,8 @@ plus per-difficulty (simple / moderate / challenging; `train` has no difficulty 
 - **eval** measures a model, through Gym's servers. **collect** generates training data, calling your endpoint directly
   because the `vllm_model` server pins `top_logprobs=0`, which hosted endpoints may reject. Both score every answer with
   the same `bird_sql` reward.
-- All three take the same `--dialect` and `--split` (the choices above).
+- All three take the same `--dialect` and `--split` (the choices above). `prepare` and `eval` default to `dev`;
+  `collect` defaults to `train`.
 
 ## Installation
 
@@ -50,7 +51,7 @@ rebuilds the server venv.
 
 | | sqlite | spark |
 |---|---|---|
-| Prompt | `prompts/default.yaml` | `prompts/spark.yaml` |
+| Prompt | `prompts/default_sqlite.yaml` | `prompts/default_spark.yaml` |
 | `sql_context` rendered as | SQLite schema | Spark schema: `` `db_id`.`table` `` names, backtick-quoted identifiers, Spark column types |
 | Model's SQL runs on | the SQLite databases | a local PySpark copy (Parquet under `resources_servers/bird_sql/.bird_sql/spark_warehouse[_train]/`, built on first start) |
 
@@ -74,7 +75,8 @@ rebuilds the server venv.
 
 ## Preparing data
 
-`prepare` writes one jsonl per (split, dialect) pair, downloading the databases first if needed:
+`prepare` writes `data/birdbench_<dialect>_<split>.jsonl` (e.g. `birdbench_sqlite_dev.jsonl`), downloading the
+databases first if needed:
 
 ```bash
 python -m benchmarks.birdbench.prepare                                    # dev,   sqlite (the defaults)
@@ -105,24 +107,22 @@ two, so the prepared files would grow to 1534 x `num_repeats` rows.
 
 | File | Rows | Written by |
 |---|---|---|
-| `data/birdbench_<dialect>_benchmark.jsonl` (dev), `data/birdbench_train_<dialect>.jsonl` (train) | 1 per task | prepare |
+| `data/birdbench_<dialect>_<split>.jsonl` | 1 per task | prepare |
 | `data/bird_verified_train.json` | cached download | prepare, train split |
 | `data/..._prepare.jsonl`, `<output>/rollouts/preprocessed_datasets/benchmark.jsonl` | 1 per task | `gym eval run` (applies the prompt) |
-| `<output>/rollouts.jsonl`, `rollouts_aggregate_metrics.json` | 1 per task x `--num-repeats` | eval |
-| `results/collect_<split>_<dialect>_<model>/{raw_choices,grouped}.jsonl` | 1 per rollout, 1 per task | collect |
-
-### Prompts
-
-`prompts/default.yaml` has the model reason step by step and return the final SQL in a ` ```sql ``` ` block. It
-explains the `sql_context` format (`#### Tables` / `#### Foreign key`, per-column `data_type`/`description`/`values`,
-the `TYPE (primary key)` marker) before the schema. `prompts/spark.yaml` is the same prompt naming Spark SQL as the
-engine, with no Spark-specific hints: the point is to test the model's own Spark SQL knowledge.
+| `results/<split>_<dialect>/<model>/rollouts.jsonl`, `rollouts_aggregate_metrics.json` | 1 per task x `--num-repeats` | eval |
+| `train_data/<split>_<dialect>/<model>/{raw_choices,grouped}.jsonl` | 1 per rollout, 1 per task | collect |
 
 ## Evaluating a model
 
 `eval.sh` runs one model end to end: it prepares the data if missing, runs `gym eval run`, prints a failure
-breakdown, and kills leftover server processes on exit. Set the endpoint in `env.yaml` (`policy_base_url` /
-`policy_api_key` / `policy_model_name`) or pass `--model-url` / `--model-api-key`.
+breakdown, and kills leftover server processes on exit.
+
+**The model** is an OpenAI-compatible endpoint that you already serve, e.g. a vLLM server you started (local or on a
+cluster node), or a hosted API. Gym does not download or launch it. `--model` is the name that endpoint uses for the
+model, `--model-url` its base URL (e.g. `http://localhost:8000/v1`) and `--model-api-key` its key. Instead of flags, set
+`policy_model_name`, `policy_base_url` and `policy_api_key` in `env.yaml`; flags override it. `collect` uses the same
+`env.yaml` values (or `--policy-model-name`, `--policy-base-url`, `--policy-api-key`).
 
 ```bash
 ./benchmarks/birdbench/eval.sh --model <name>                                 # dev,   sqlite (the defaults)
@@ -132,44 +132,11 @@ breakdown, and kills leftover server processes on exit. Set the endpoint in `env
 ```
 
 `--limit 5` gives a smoke test and `--num-repeats N` N rollouts per task. Results go to
-`results/<model>[_<dialect>][_<split>]/` (override with `--output_dir`). The script header documents every option;
+`benchmarks/birdbench/results/<split>_<dialect>/<model>/` (override with `--output_dir`). The script header documents every option;
 other flags pass through to `gym eval run`.
 
 `rollouts.jsonl` has one row per rollout (prompt, response, reward, verifier fields like `extracted_sql` and
 `failure_reason`) and no grouped file; `collect.py group` makes one.
-
-### Driving gym directly
-
-Everything `eval.sh` sets up is a Hydra override, needed for any combination other than dev + sqlite:
-
-```bash
-DIALECT=spark SPLIT=train
-PREPARED=benchmarks/birdbench/data/birdbench_${SPLIT}_${DIALECT}.jsonl   # dev: birdbench_${DIALECT}_benchmark.jsonl
-PROMPT=benchmarks/birdbench/prompts/${DIALECT}.yaml                      # sqlite: default.yaml
-BIRD=birdbench_bird_sql_resources_server.resources_servers.bird_sql
-OVERRIDES=(
-    "+prepare_script_args.dialect=${DIALECT}" "+prepare_script_args.split=${SPLIT}"
-    "+${BIRD}.dialect=${DIALECT}" "+${BIRD}.split=${SPLIT}"
-    "+${BIRD}.spark_warehouse_dir=resources_servers/bird_sql/.bird_sql/spark_warehouse_train"   # train + spark only
-    "++birdbench_bird_sql_simple_agent.responses_api_agents.simple_agent.datasets=[{name:birdbench,type:benchmark,jsonl_fpath:${PREPARED},prompt_config:${PROMPT},prepare_script:benchmarks/birdbench/prepare.py,num_repeats:1}]"
-)
-
-gym eval prepare --benchmark birdbench "${OVERRIDES[@]}"
-gym eval run --benchmark birdbench --model-type vllm_model --split benchmark \
-    --output results/birdbench_rollouts.jsonl --temperature 1 --num-repeats 1 "${OVERRIDES[@]}"
-```
-
-Hydra cannot override one list item, so the whole `datasets` list is replaced; `gym eval prepare` fails with a
-`ConfigError` unless `prepare` writes exactly the dataset's `jsonl_fpath`. To start the servers yourself, use
-`gym env start --model-type vllm_model --benchmark birdbench "${OVERRIDES[@]}"`, then `gym eval run --no-serve
---agent birdbench_bird_sql_simple_agent --input ${PREPARED} --prompt-config ${PROMPT} --output ... --num-repeats 1`.
-`--no-serve` skips the step that applies the prompt, so `--prompt-config` is required, otherwise rows lack
-`responses_create_params` and collection fails with `KeyError: 'responses_create_params'`.
-
-`gym eval run` stops each server by killing only its launcher shell, which leaves the real server (and, for Spark, its
-~2 GB JVM) running as an orphan. `eval.sh` reaps those on exit; if you call `gym` directly, look for entries with parent
-PID 1 (`ps -axo pid,ppid,command | grep "\.venv/bin/python app.py"`) and `kill` them. For a 5-example smoke test against
-the server's own `example.jsonl`, see `resources_servers/bird_sql/README.md`.
 
 ## Collecting training data
 
@@ -177,16 +144,18 @@ the server's own `example.jsonl`, see `resources_servers/bird_sql/README.md`.
 reference_logprob}]}`, where `reference_logprob` is the summed per-token logprob of the generation.
 
 ```bash
-python -m benchmarks.birdbench.collect collect --split train --dialect sqlite --num-repeats 32 --limit 20   # drop --limit for all
-python -m benchmarks.birdbench.collect reprocess --split train --output-dir <collect run dir>
+python -m benchmarks.birdbench.collect collect --num-repeats 32 --limit 20      # train, sqlite (the defaults); drop --limit for all
+python -m benchmarks.birdbench.collect collect --dialect spark --num-repeats 32  # train, spark
+python -m benchmarks.birdbench.collect collect --split dev --num-repeats 8       # dev,   sqlite
+python -m benchmarks.birdbench.collect reprocess --output-dir <collect run dir>
 python -m benchmarks.birdbench.collect group --rollouts <eval.sh output>/rollouts.jsonl --output grouped.jsonl
-python -m benchmarks.birdbench.collect select-hard --prepared-jsonl data/birdbench_train_sqlite.jsonl \
-    --grouped-jsonl <run dir>/grouped.jsonl --output-jsonl data/birdbench_train_sqlite_hard.jsonl
-python -m benchmarks.birdbench.collect collect --split train --input-jsonl data/birdbench_train_sqlite_hard.jsonl \
+python -m benchmarks.birdbench.collect select-hard --prepared-jsonl data/birdbench_sqlite_train.jsonl \
+    --grouped-jsonl <run dir>/grouped.jsonl --output-jsonl data/birdbench_sqlite_train_hard.jsonl
+python -m benchmarks.birdbench.collect collect --input-jsonl data/birdbench_sqlite_train_hard.jsonl \
     --num-repeats 128                  # second pass on the tasks nobody solved
 ```
 
-- **`collect`** writes `results/collect_<split>_<dialect>_<model>/` (`--output-dir` overrides) with `raw_choices.jsonl`
+- **`collect`** writes `benchmarks/birdbench/train_data/<split>_<dialect>/<model>/` (`--output-dir` overrides) with `raw_choices.jsonl`
   (the raw API response per rollout, saved before any processing) and `grouped.jsonl` (per task). A repeat that fails
   after 5 retries is dropped with a warning, so a task can have fewer than `--num-repeats` completions.
 - **`reprocess`** rebuilds `grouped.jsonl` from `raw_choices.jsonl` with no API calls, for after a fix to the text
