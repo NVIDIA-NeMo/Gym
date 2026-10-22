@@ -67,6 +67,7 @@ gym env start \
 gym eval run --no-serve \
   --agent ioi26_simple_agent \
   --input benchmarks/ioi26/data/ioi26_benchmark.jsonl \
+  --prompt-config benchmarks/prompts/generic/default.yaml \
   --output results/ioi_rollouts.jsonl \
   --num-repeats 50 \
   --temperature 1.0 \
