@@ -908,8 +908,9 @@ class HarborEnvironmentServer(
 
         Each turn opens a fresh agent session (Harbor's default, ``resume_trajectory = false``), sends the
         step's instruction, closes the session and runs the step's verifier: the task's ``tests/`` with
-        ``steps/<name>/tests/`` on top. Before a turn the sandbox takes the step's ``[steps.agent].user`` when
-        it has one and the oracle gets the step's own solution (:meth:`_prepare_turn`). The episode stops
+        ``steps/<name>/tests/`` on top. Before a turn the previous turn's grading files are cleared, the sandbox
+        takes the step's ``[steps.agent].user`` when it has one and the oracle gets the step's own solution
+        (:meth:`_prepare_turn`). The episode stops
         after a turn that is masked, produces no verifier result, or misses its ``min_reward``; the remaining
         turns do not run.
         """
@@ -936,7 +937,10 @@ class HarborEnvironmentServer(
                     terminal=error.status_code < 500,
                 ) from error
             except Exception as error:
-                # The sandbox could not take the turn's user or solution: a provider-side failure, retried elsewhere.
+                # The sandbox could not clear the previous turn's grading files or take the turn's user or solution:
+                # a provider-side failure, retried elsewhere; a task-caused non-zero exit (turn 1 replaced /tests
+                # with a file) takes the same retryable path. The next agent never opens with those files at their
+                # paths.
                 raise self._failure(
                     stage="agent",
                     failure_reason=f"turn {turn.name!r}: {type(error).__name__}: {error}",
@@ -998,15 +1002,28 @@ class HarborEnvironmentServer(
         return HarborEpisodeResponse(episode_id=request.episode_id, task_id=request.task.task_id, result=episode)
 
     async def _prepare_turn(self, session: HarborSession, turn: HarborTurn, access: SandboxAccess) -> SandboxAccess:
-        """What a turn needs in place before its agent session opens: the step's user and the step's solution.
+        """What a turn needs in place before its agent session opens: no grading files from the previous turn, the
+        step's user and the step's solution.
 
-        Harbor runs each step as its own ``[steps.agent].user`` (else the task's ``[agent].user``), so when the
-        turn's user differs from the one the sandbox runs as, the sandbox's default user, the working directory's
-        owner and the user the harness is handed switch to it (:meth:`_apply_turn_user`), and the access the
-        harness gets is rebuilt for it; the verifier keeps its own user and fallback. The oracle alone then gets
-        the step's ``solution/`` at ``/solution`` (:meth:`_place_turn_solution`).
+        Every turn after the first follows a shared verification in this sandbox (a multi-step task verifies in
+        the agent's sandbox), which left its tests, its reward and the previous agent's transcript there, so they
+        are removed first (:meth:`_reset_shared_verifier_dirs`); the first turn keeps whatever the image put in
+        ``/tests``. Harbor 0.22.0 empties ``/tests`` and ``/logs/verifier`` only right before each step's shared
+        verifier, so its next step's agent still sees the previous step's tests; Harbor main moved that reset into
+        its step preparation, and this follows main. Harbor also empties the whole ``/logs/agent`` before a step
+        that does not resume (or moves the bind-mounted contents away); here only the server's
+        ``trajectory.json`` goes and the agent's own files under ``/logs/agent`` stay. The reset removes files at
+        those paths: a process the previous agent left running, or a copy it took during its verification, is out
+        of scope, as under Harbor's shared mode. Harbor runs each step as its own ``[steps.agent].user``
+        (else the task's ``[agent].user``), so when the turn's user differs from the one the sandbox runs as, the
+        sandbox's default user, the working directory's owner and the user the harness is handed switch to it
+        (:meth:`_apply_turn_user`), and the access the harness gets is rebuilt for it; the verifier keeps its own
+        user and fallback. The oracle alone then gets the step's ``solution/`` at ``/solution``
+        (:meth:`_place_turn_solution`).
         """
         task = session.task
+        if turn is not task.turns[0]:
+            await self._reset_shared_verifier_dirs(session.sandbox)
         user = str(turn.config.agent.user) if turn.config.agent.user is not None else task.user
         # Compared as written (the seed's or the previous turn's), not with the form the sandbox installed.
         if user != session.requested_user:

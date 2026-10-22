@@ -97,7 +97,13 @@ without `resume_trajectory`: a fresh agent session per turn, with the step's
 `steps/<name>/instruction.md` as its only input and the step's `[steps.agent].timeout_sec` (else the task's)
 as its budget. The task's top-level `instruction.md` is never sent; a multi-step task may keep material there
 the agent must not see. After each turn the shared verifier runs the task's `tests/` with
-`steps/<name>/tests/` on top, under the step's verifier timeout, user and environment over the task's. A step's
+`steps/<name>/tests/` on top, under the step's verifier timeout, user and environment over the task's. Before
+every turn after the first, `/tests` and `/logs/verifier` are emptied and the server's `/logs/agent/trajectory.json`
+removed, so the next agent does not open beside the previous turn's tests, reward or transcript; a failure to clear
+them fails the episode before the next agent session opens. Harbor 0.22.0 clears them only before each step's
+verifier (Harbor main clears them before the step, which this follows); Harbor also empties (or, for a bind-mounted
+`/logs/agent`, moves away) the whole `/logs/agent` before each non-resumed step, here the agent's own files there
+stay. A step's
 `[steps.verifier].user` or `[steps.agent].user` that names a group (`name:group`, `uid:gid`) is refused at seed
 on every provider but Docker, as the task's own users are, naming the step, before any sandbox exists. Each turn's
 agent runs as the step's `[steps.agent].user` (else the task's `[agent].user`, else the image's `USER`), as Harbor

@@ -648,6 +648,42 @@ class HarborVerificationMixin:
             task, settings, result, logs_dir, started, timed_out=timed_out, rewards=rewards, problem=problem
         )
 
+    async def _reset_shared_verifier_dirs(self, sandbox: AsyncSandbox) -> None:
+        """Empty ``/tests`` and ``/logs/verifier`` and remove the server's ``/logs/agent/trajectory.json`` in the
+        agent's own sandbox, as root. Raises :class:`RuntimeError` when the sandbox could not.
+
+        The shared verifier does this before it uploads its tests, as Harbor 0.22.0's
+        ``_reset_shared_step_verifier_dirs`` does, and a multi-step episode again before every turn after the
+        first, as Harbor main's ``_prepare_step`` does (0.22.0 does not, so its next step's agent sees the previous
+        step's tests): the previous turn's verifier left its tests (hidden ones included), its reward and the
+        agent's transcript where the next turn's fresh agent would read them. Agent-planted directory links at the
+        roots go first:
+        find does not follow its starting symlink, while tar does. /logs is unlinked without touching its former
+        target. The reserved trajectory.json destination goes too (`rm -rf` removes a link itself, or a planted
+        directory), so the agent cannot plant an entry the upload would follow or fail on; the rest of
+        /logs/agent is the agent's and is kept.
+        """
+        roots = (str(Path(VERIFIER_LOGS_DIR).parent), TESTS_DIR, VERIFIER_LOGS_DIR, AGENT_LOGS_DIR)
+        unlink_roots = [f"if test -L {shlex.quote(path)}; then rm -- {shlex.quote(path)}; fi" for path in roots]
+        result = await exec_as_root(
+            sandbox,
+            " && ".join(
+                unlink_roots
+                + [
+                    f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
+                    f"rm -rf -- {AGENT_LOGS_DIR}/{TRAJECTORY_FILE_NAME}",
+                    f"find {TESTS_DIR} {VERIFIER_LOGS_DIR} -mindepth 1 -delete",
+                    f"chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
+                ]
+            ),
+            timeout_s=60,
+        )
+        if result.return_code != 0:
+            raise RuntimeError(
+                f"Could not clear /tests, /logs/verifier and the transcript in the agent's sandbox: "
+                f"{result.stderr or result.stdout}"
+            )
+
     async def _run_collect_hooks(self, session: HarborSession, hooks: list[Any]) -> None:
         """Run ``[[verifier.collect]]`` hooks in their services, before anything is collected from them.
 
@@ -789,28 +825,7 @@ class HarborVerificationMixin:
                     await self._collect_entrypoint_log(sandbox, task, logs_dir / ENTRYPOINT_LOG_NAME)
                     return self._masked(ENTRYPOINT_FAILED_KIND, died) | {"verifier_logs_dir": str(logs_dir.resolve())}
             await self._run_collect_hooks(session, settings.collect)
-            # Replace agent-planted directory links before cleanup: find does not follow its starting
-            # symlink, while tar does. Unlink /logs first without touching its former target. The reserved
-            # trajectory.json destination goes too (`rm -rf` removes a link itself, or a planted directory),
-            # so the agent cannot plant an entry the upload would follow or fail on; the rest of /logs/agent
-            # is kept.
-            roots = (str(Path(VERIFIER_LOGS_DIR).parent), TESTS_DIR, VERIFIER_LOGS_DIR, AGENT_LOGS_DIR)
-            unlink_roots = [f"if test -L {shlex.quote(path)}; then rm -- {shlex.quote(path)}; fi" for path in roots]
-            prepare = await exec_as_root(
-                sandbox,
-                " && ".join(
-                    unlink_roots
-                    + [
-                        f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
-                        f"rm -rf -- {AGENT_LOGS_DIR}/{TRAJECTORY_FILE_NAME}",
-                        f"find {TESTS_DIR} {VERIFIER_LOGS_DIR} -mindepth 1 -delete",
-                        f"chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
-                    ]
-                ),
-                timeout_s=60,
-            )
-            if prepare.return_code != 0:
-                raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
+            await self._reset_shared_verifier_dirs(sandbox)
             for tests in test_dirs:
                 if optional_tests and not tests.is_dir():
                     continue
