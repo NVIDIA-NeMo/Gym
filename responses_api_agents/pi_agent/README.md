@@ -227,7 +227,7 @@ detail, not a separate endpoint or a setup step users must run.
 
 Responses retain thinking text, tool calls/results, and Pi-reported usage, including cached
 input tokens. Model limits and timeouts preserve gradable partial work after successful agent close.
-Provider/API and runtime failures propagate as execution failures and do not enter verification;
+Reported provider errors retain partial output and a classified cause for the Environment Server to decide grading and episode retries; independent runtime failures remain execution errors;
 they must not be reported as incorrect solutions. Close still returns captured observations.
 Pi does not set reward or masking policy.
 
