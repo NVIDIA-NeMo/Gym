@@ -250,13 +250,16 @@ class HarborStepAgent(HarborPhaseSettings):
 
 
 class HarborStepVerifier(HarborPhaseSettings):
-    """``[steps.verifier]``: unset values fall back to the task's ``[verifier]``, as in Harbor."""
+    """``[steps.verifier]``: unset values fall back to the task's ``[verifier]``, as in Harbor. ``collect`` is the
+    step's own ``[[steps.verifier.collect]]`` hooks, run after the task's in the step's collection pass (Harbor's
+    ``_collect_hooks_for``: the task's hooks, then the step's)."""
 
     timeout_sec: float | None = Field(default=None, gt=0)
     user: str | int | None = None
     env: dict[str, str] = Field(default_factory=dict)
     environment_mode: Literal["separate", "shared"] | None = None
     environment: HarborEnvironment | None = None
+    collect: list[HarborCollectHook] = Field(default_factory=list)
 
 
 class HarborStep(HarborSettings):

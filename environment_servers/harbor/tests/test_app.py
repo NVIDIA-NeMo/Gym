@@ -1436,7 +1436,13 @@ class TestVerify:
         # After the roots exist as directories (a linked /logs/agent was unlinked and remade just before), and
         # before the wipe of the verifier's folders; nothing else under /logs/agent is deleted.
         assert steps[clear - 1] == "mkdir -p /tests /logs/verifier /logs/agent"
-        assert steps[clear + 1] == "find /tests /logs/verifier -mindepth 1 -delete"
+        # Only the grader's own files go from /logs/verifier before test.sh (M22 review): a sidecar's input there
+        # (kumo's actions.jsonl) stays, as under Harbor's single-step shared mode.
+        assert steps[clear + 1] == "find /tests -mindepth 1 -delete"
+        assert steps[clear + 2] == (
+            "rm -rf -- /logs/verifier/reward.json /logs/verifier/reward.txt /logs/verifier/.ng-exit "
+            "/logs/verifier/test-stdout.txt"
+        )
         assert not any("/logs/agent" in step and "delete" in step for step in steps)
         trajectory_upload = next(i for i, c in enumerate(commands) if "tar -xzf" in c and "-C /logs/agent" in c)
         assert commands.index(prepare) < trajectory_upload
@@ -1449,9 +1455,11 @@ class TestVerify:
         root = tmp_path / "fs"
         agent_logs = root / "logs" / "agent"
         agent_logs.mkdir(parents=True)
-        for folder in ("tests", "logs/verifier"):
-            (root / folder).mkdir(parents=True)
-            (root / folder / "stale").write_text("old")
+        (root / "tests").mkdir(parents=True)
+        (root / "tests" / "stale").write_text("old")
+        (root / "logs" / "verifier").mkdir(parents=True)
+        (root / "logs" / "verifier" / "reward.json").write_text('{"reward": 1}')
+        (root / "logs" / "verifier" / "actions.jsonl").write_text("{}\n")  # a sidecar's input: kept
         (agent_logs / "agent.log").write_text("kept")
         if planted == "dangling_symlink":
             (agent_logs / "trajectory.json").symlink_to(root / "nowhere")
@@ -1464,7 +1472,8 @@ class TestVerify:
         planted_path = agent_logs / "trajectory.json"
         assert not planted_path.exists() and not planted_path.is_symlink()
         assert (agent_logs / "agent.log").read_text() == "kept"
-        assert list((root / "tests").iterdir()) == [] and list((root / "logs" / "verifier").iterdir()) == []
+        assert list((root / "tests").iterdir()) == []
+        assert [path.name for path in (root / "logs" / "verifier").iterdir()] == ["actions.jsonl"]
 
     async def test_prepare_runs_as_root_on_a_non_root_image(self, tmp_path, monkeypatch):
         class NonRootSandbox(FakeSandbox):
@@ -1747,7 +1756,15 @@ class TestSeparateVerification:
         # diagnostics and the archives are gone once restored.
         assert agent.archives["/logs/artifacts"] in verifier.uploaded_archives
         assert agent.archives["/app/output"] in verifier.uploaded_archives
-        assert sorted(p.name for p in artifacts.iterdir()) == ["00", "01"]
+        assert sorted(p.name for p in artifacts.iterdir()) == ["00", "01", "manifest.json"]
+        # The pass is recorded as Harbor's artifact handler records its own: every declared entry, in staging order.
+        manifest = json.loads((artifacts / "manifest.json").read_text())
+        assert [(e["index"], e["source"], e["origin"], e["status"], e["type"]) for e in manifest] == [
+            (0, "/logs/artifacts", "convention", "ok", "directory"),
+            (1, "/app/output/report.json", "task", "ok", "file"),
+            (2, "/var/log/api", "task", "skipped", None),
+        ]
+        assert manifest[1]["destination"] == "artifacts/01/app/output/report.json" and manifest[2]["service"] == "api"
         # A restored directory replaces what the image ships there and is world-writable, as Harbor leaves
         # it, so a verifier that drops privileges can still write scratch files next to the agent's output.
         assert any(

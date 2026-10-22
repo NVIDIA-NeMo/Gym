@@ -253,8 +253,8 @@ raises, asks for an argument the runner does not know, or returns something else
 the usual missing-reward outcome with the runner's stderr in the verifier log. The shim removes any `reward.json` or
 `reward.txt` already in `/logs/verifier` before the runner starts (and the runner again before `verify` runs): Harbor
 shares that folder with the agent's container for the whole run and reads `reward.json` first, so a file planted there
-would otherwise be the verdict of a published task; Gym's server empties the folder before every upload, Harbor does
-not. The image needs a Python 3.8 or newer (the runner and the vendored helpers keep to it); the examples
+would otherwise be the verdict of a published task; Gym's server removes the reward files before every upload, Harbor
+does not. The image needs a Python 3.8 or newer (the runner and the vendored helpers keep to it); the examples
 use `ghcr.io/astral-sh/uv:python3.13-bookworm-slim`.
 
 ## `solution/answer.md`

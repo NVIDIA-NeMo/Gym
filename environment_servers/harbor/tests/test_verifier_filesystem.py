@@ -105,6 +105,45 @@ async def test_linked_verifier_roots_cannot_preserve_planted_success(tmp_path, m
     await server.shutdown()
 
 
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
+@pytest.mark.parametrize("left_behind", ["sidecar_input", "planted_reward"])
+async def test_the_shared_verifier_keeps_a_sidecars_input_and_removes_a_planted_reward(
+    tmp_path, monkeypatch, verifier_tree, left_behind
+):
+    """Review (M22): kumo's ``verifier`` sidecar appends ``/logs/verifier/actions.jsonl`` during the agent's run,
+    shared with ``main`` by the planner, and ``main``'s ``tests/score.py`` reads it; emptying the whole folder before
+    ``test.sh`` deleted that input, so a test that needs it measured 0 for 1. Only the grader's own files go now, as
+    under Harbor's single-step shared mode, which never empties the folder; a ``reward.json`` planted there still
+    cannot outrank the ``reward.txt`` the trusted ``test.sh`` writes."""
+    root, logs, tests = verifier_tree
+    verifier_dir = logs / "verifier"
+    verifier_dir.mkdir(parents=True)
+    reward = shlex.quote(str(verifier_dir / "reward.txt"))
+    server, task, _, _ = make_server(tmp_path, monkeypatch)
+    if left_behind == "sidecar_input":
+        (verifier_dir / "actions.jsonl").write_text('{"action": "click"}\n')
+        actions = shlex.quote(str(verifier_dir / "actions.jsonl"))
+        (task.path / "tests" / "test.sh").write_text(
+            f"#!/bin/bash\nif test -s {actions}; then echo 1; else echo 0; fi > {reward}\n"
+        )
+    else:
+        (verifier_dir / "reward.json").write_text('{"reward": 1}')
+        (task.path / "tests" / "test.sh").write_text(f"#!/bin/bash\necho 0 > {reward}\n")
+
+    outcome = await server._run_verifier(
+        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None), TRAJECTORY
+    )
+
+    assert not outcome.get("mask_sample", False), outcome
+    if left_behind == "sidecar_input":
+        assert outcome["reward"] == 1, outcome
+        assert (verifier_dir / "actions.jsonl").read_text() == '{"action": "click"}\n'
+    else:
+        assert outcome["reward"] == 0, outcome
+        assert not (verifier_dir / "reward.json").exists()
+    await server.shutdown()
+
+
 async def separate_verification(tmp_path, monkeypatch, verifier_tree, artifacts: list[str]) -> dict:
     """One separate-mode verification on the pytest-owned tree, with real shell and tar on both sides.
 
