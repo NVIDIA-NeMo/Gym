@@ -14,6 +14,7 @@
 # limitations under the License.
 """Whole-turn fallback preserves durable token custody and rejects unrecorded output."""
 
+import json
 from copy import deepcopy
 
 import pytest
@@ -290,3 +291,27 @@ async def test_unversioned_custody_row_cannot_use_persisted_fallback_key(tmp_pat
     result = await FileLineageStore(tmp_path).resolve("r", _request())
     assert result.status == ParentResolutionStatus.UNRESOLVED
     assert result.match is None
+
+
+@pytest.mark.asyncio
+async def test_opencode_unavailable_tool_rewrite_resolves_through_every_store(stores) -> None:
+    served = [
+        {"role": "assistant", "content": "I will look for globals."},
+        {"type": "function_call", "call_id": "call_0", "name": "globals", "arguments": '{"pattern":"x"}'},
+    ]
+    await _publish(stores, output=served)
+    error = "Model tried to call unavailable tool 'globals'. Available tools: bash, edit, read, write."
+    request = deepcopy(CONTEXT) + [
+        {"role": "assistant", "content": "I will look for globals."},
+        {
+            "type": "function_call",
+            "call_id": "call_0",
+            "name": "invalid",
+            "arguments": json.dumps({"tool": "globals", "error": error}),
+        },
+        {"type": "function_call_output", "call_id": "call_0", "output": f"The arguments are invalid: {error}"},
+    ]
+    result = await stores[2].resolve("r", request)
+    assert result.status == ParentResolutionStatus.RESOLVED
+    assert result.match.model_call_id == "a"
+    assert result.reason == "tool_call_turn"
