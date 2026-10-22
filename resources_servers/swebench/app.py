@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import sys
+from dataclasses import replace
 from glob import glob
 from pathlib import Path
 from shutil import rmtree
@@ -297,13 +298,27 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         return eval_sandbox
 
     def _make_test_spec(self, body: SWEBenchVerifyRequest) -> TestSpec:
-        return make_test_spec(
+        test_spec = make_test_spec(
             # This accepts a SWEbenchInstance which is identically our body.
             body.model_dump(),
             namespace="swebench",  # Dockerhub namespace
             instance_image_tag=LATEST,
             env_image_tag=LATEST,
         )
+
+        if test_spec.repo == "sphinx-doc/sphinx":
+            # Tox's -v does not reach pytest. Request named results even when pytest
+            # uses dot progress, so SWE-bench can grade every required passing test.
+            test_spec = replace(
+                test_spec,
+                eval_script_list=[
+                    command.replace(" -- ", " -- -rA ", 1)
+                    if command.startswith("tox ") and " -- " in command
+                    else command
+                    for command in test_spec.eval_script_list
+                ],
+            )
+        return test_spec
 
     async def seed_session(self, request: Request, body: SWEBenchSeedSessionRequest) -> SWEBenchSeedSessionResponse:
         test_spec = self._make_test_spec(body)
