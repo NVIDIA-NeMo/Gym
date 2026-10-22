@@ -1,0 +1,68 @@
+beam:
+  resources_servers:
+    beam:
+      entrypoint: app.py
+      domain: long_context
+      verified: false
+      description: BEAM (Beyond a Million Tokens) long-term-memory probing questions over long multi-session chats, scored by an LLM judge with the upstream per-question rubrics.
+      value: Improve long-term conversational memory across ten abilities (abstention, contradiction resolution, event ordering, information extraction, instruction following, knowledge update, multi-session reasoning, preference following, summarization, temporal reasoning).
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        # Upstream judges with gpt-4.1-mini at temperature 0. The judge returns a
+        # short JSON object ({"score", "reason"}); 2048 leaves headroom for a
+        # reasoning-capable judge.
+        max_output_tokens: 2048
+        temperature: 0.0
+      judge_endpoint_max_concurrency: 64
+      # Bounded exponential backoff on judge 429/5xx. Rows whose judge calls
+      # still fail are excluded and counted in n_judge_call_failed.
+      judge_max_retries: 6
+      judge_retry_base_delay: 2.0
+      # binary: pass / fail per rubric item (default); partial: upstream 0 / 0.5 / 1.
+      judge_scale: binary
+      # Reward per question: mean over rubric items (upstream; event ordering
+      # uses tau_norm) or all_pass (1 only if every item scores 1). Both are
+      # always reported as mean/overall and all_pass/overall.
+      question_scoring: mean
+
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${judge_model_name}
+
+beam_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: beam
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/beam/data/example.jsonl
+        license: Creative Commons Attribution-ShareAlike 4.0 International
+
+# Null defaults so OmegaConf resolves ${judge_*} without CLI overrides.
+# Recommended judge: gpt-4.1-mini (upstream default). Must stay at end of file
+# for update_env_list.py. policy_* are intentionally NOT defaulted here.
+judge_base_url: null
+judge_api_key: null
+judge_model_name: null
+
+beam_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: beam_simple_agent
