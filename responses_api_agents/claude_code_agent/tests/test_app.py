@@ -326,6 +326,81 @@ class TestRunForwardsSkillsPath:
         assert result.finished_naturally is True
 
 
+@pytest.mark.parametrize(
+    "subtype,is_error,status,error_type",
+    [
+        ("success", False, "completed", None),
+        ("error_max_turns", True, "incomplete", "error_max_turns"),
+        ("error_during_execution", True, "failed", "error_during_execution"),
+        (None, None, "incomplete", "result_missing"),
+    ],
+)
+async def test_response_preserves_native_completion_metadata_and_message(
+    tmp_path: Path, subtype, is_error, status, error_type
+) -> None:
+    agent = _make_agent()
+    text = "API Error: unchanged native assistant text"
+    events = [_event("assistant", message={"content": [{"type": "text", "text": text}]})]
+    if subtype is not None:
+        events.append(_event("result", subtype=subtype, is_error=is_error, duration_ms=1234, num_turns=2))
+    process = MagicMock(returncode=0)
+    process.communicate = AsyncMock(return_value=("\n".join(events).encode(), b""))
+    with (
+        patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+        patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", return_value=process),
+    ):
+        response = await agent.responses(
+            MagicMock(path_params={}), NeMoGymResponseCreateParamsNonStreaming(input="task")
+        )
+    assert response.status == status
+    assert response.output[0].content[0].text == text
+    if subtype is None:
+        assert "claude_code_subtype" not in response.metadata
+        assert "claude_code_is_error" not in response.metadata
+        assert "claude_code_num_turns" not in response.metadata
+    else:
+        assert response.metadata["claude_code_subtype"] == subtype
+        assert response.metadata["claude_code_is_error"] == json.dumps(is_error)
+        assert float(response.metadata["claude_code_duration_ms"]) == 1234
+        assert response.metadata["claude_code_num_turns"] == "2"
+    if error_type:
+        assert response.metadata["claude_code_error_type"] == error_type
+    else:
+        assert "claude_code_error_type" not in response.metadata
+    assert set(response.metadata) <= {
+        "claude_code_subtype",
+        "claude_code_is_error",
+        "claude_code_duration_ms",
+        "claude_code_num_turns",
+        "claude_code_error_type",
+    }
+
+
+async def test_native_error_response_still_reaches_verifier_without_masking() -> None:
+    agent = _make_agent()
+    agent.server_client.post = _seed_and_verify_post()
+    items, metadata = parse_stream_json(
+        _event("assistant", message={"content": [{"type": "text", "text": "Native refusal text"}]})
+        + "\n"
+        + _event("result", subtype="error_during_execution", is_error=True)
+    )
+    metadata.update(status="failed", error_type="error_during_execution", raw_stdout="not exported")
+    with patch.object(agent, "_run_claude_code", AsyncMock(return_value=(items, "model", metadata))):
+        await agent.run(MagicMock(cookies={}), ClaudeCodeAgentRunRequest(responses_create_params={"input": "task"}))
+    assert agent.server_client.post.await_count == 2
+    verify = agent.server_client.post.await_args.kwargs
+    assert verify["url_path"] == "/verify"
+    response = verify["json"]["response"]
+    assert response["status"] == "failed"
+    assert response["output"][0]["content"][0]["text"] == "Native refusal text"
+    assert response["metadata"] == {
+        "claude_code_subtype": "error_during_execution",
+        "claude_code_is_error": "true",
+        "claude_code_error_type": "error_during_execution",
+    }
+    assert "mask_sample" not in verify["json"]
+
+
 class TestObservability:
     def test_run_returns_observations_when_enabled(self, tmp_path: Path) -> None:
         agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy"))

@@ -1,5 +1,8 @@
 # OpenCode Agent
 
+Local CLI/model errors or missing assistant results return HTTP 502. Local
+timeouts return HTTP 504 after stopping the CLI. Errors include bounded CLI output.
+
 `configs/opencode_agent.yaml` uses a Gym model server and supports sandbox
 EnvironmentServer sessions and local CLI calls. An agent session selects the
 sandbox; without one, requests run locally. Invalid or closed sessions fail.
@@ -125,7 +128,9 @@ training token-ID/logprob support or benchmark accuracy.
 
 For local calls, OpenCode is installed on first use in a shared background-thread
 task, without blocking the event loop. Failed installs can be retried. A configured `repo_dir` is
-preserved; otherwise the temporary workspace is removed after the call. A local
+preserved; otherwise the temporary workspace is removed after the call. The native
+data directory lives in system temporary storage and is cleaned separately, so
+snapshots do not capture their own database, logs or snapshot repository. A local
 working directory is not filesystem isolation. Existing sandboxed benchmarks keep
 using `opencode_sandboxed_agent` directly; there is no bridge or execution-mode flag.
 

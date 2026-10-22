@@ -27,7 +27,7 @@ from time import time
 from typing import Any, Optional
 from uuid import uuid4
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -168,7 +168,7 @@ def parse_kilo_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
                 )
 
         elif etype == "error":
-            LOG.warning("kilo run reported error event: %s", str(event.get("error"))[:500])
+            raise HTTPException(502, f"Kilo model error: {str(event.get('error'))[:4000]}")
 
     # A run that ends on reasoning (some vLLM reasoning parsers route the final answer through the
     # reasoning channel) is surfaced as a think-tagged message rather than dropped.
@@ -452,11 +452,15 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             except asyncio.TimeoutError:
                 self._kill_process_group(proc)
                 await proc.communicate()
-                LOG.warning("kilo timed out after %ds", self.config.timeout)
-                return [], {"input_tokens": 0, "output_tokens": 0}, self.config.model
+                raise HTTPException(504, f"Kilo timed out after {self.config.timeout}s") from None
 
             if proc.returncode not in (0, None):
-                LOG.warning("kilo exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
+                raise HTTPException(
+                    502,
+                    f"Kilo exited with code {proc.returncode}"
+                    f"\nstdout: {stdout.decode(errors='replace')[-4000:]}"
+                    f"\nstderr: {stderr.decode(errors='replace')[-4000:]}",
+                )
 
             output_items, usage = parse_kilo_events(stdout.decode(errors="replace"))
             return output_items, usage, self.config.model
@@ -485,16 +489,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
             for item in output_items
         ):
-            LOG.warning("Kilo produced no assistant message. Padding empty output")
-            output_items.append(
-                NeMoGymResponseOutputMessage(
-                    id=f"msg_{uuid4().hex}",
-                    content=[NeMoGymResponseOutputText(text="", annotations=[])],
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                )
-            )
+            raise HTTPException(502, "Kilo produced no assistant result")
 
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)

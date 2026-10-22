@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import orjson
 import pytest
 import yaml
-from fastapi import Request
+from fastapi import HTTPException, Request
 from pydantic import ValidationError
 
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME
@@ -341,7 +341,7 @@ class TestRunForwardsSkillsPath:
 
     def test_skills_ref_path_forwarded(self) -> None:
         agent = _make_agent()
-        run_codex = AsyncMock(return_value=("", "codex-default", None, False))
+        run_codex = AsyncMock(return_value=(_event("turn.completed"), "codex-default", None, False))
         body = CodexAgentRunRequest.model_validate(
             {
                 "responses_create_params": {"input": []},
@@ -355,7 +355,7 @@ class TestRunForwardsSkillsPath:
 
     def test_no_skills_ref_forwards_none(self) -> None:
         agent = _make_agent()
-        run_codex = AsyncMock(return_value=("", "codex-default", None, False))
+        run_codex = AsyncMock(return_value=(_event("turn.completed"), "codex-default", None, False))
         body = CodexAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
 
         self._run(agent, body, run_codex)
@@ -398,13 +398,13 @@ class TestRunTimeout:
 
     def test_observations_reach_rollout_without_stdout_events(self) -> None:
         observations = AgentObservationBundle(source="codex")
-        result, verify_body = self._run("", observations=observations)
+        result, verify_body = self._run("", observations=observations, timed_out=True)
 
         assert result.ng_agent_observations == observations
         assert "_ng_agent_observations" not in verify_body["response"]
 
     def test_completed_run_is_finished_naturally(self) -> None:
-        result, _ = self._run("")
+        result, _ = self._run(_event("turn.completed"))
 
         assert result.finished_naturally is True
         assert result.agent_timed_out is False
@@ -602,7 +602,9 @@ class TestRolloutMCPServers:
             return (
                 _item_completed(
                     {"id": "item_1", "type": "agent_message", "text": "The weather in Paris is sunny and 72 F."}
-                ),
+                )
+                + "\n"
+                + _event("turn.completed"),
                 "codex-default",
                 None,
                 False,
@@ -651,7 +653,9 @@ class TestRolloutMCPServers:
         async def fake_run_codex(instruction, system_prompt=None, mcp_servers=None, **kwargs):
             captured["mcp_servers"] = mcp_servers
             return (
-                _item_completed({"id": "item_1", "type": "agent_message", "text": "ok"}),
+                _item_completed({"id": "item_1", "type": "agent_message", "text": "ok"})
+                + "\n"
+                + _event("turn.completed"),
                 "codex-default",
                 None,
                 False,
@@ -977,7 +981,7 @@ async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget
         input="task", metadata=None if budget is None else {"agent_timeout_sec": budget}
     )
     process = MagicMock(returncode=0)
-    process.communicate = AsyncMock(return_value=(b"", b""))
+    process.communicate = AsyncMock(return_value=(b'{"type":"turn.completed"}\n', b""))
     module = "responses_api_agents.codex_agent.app"
     with (
         patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)),
@@ -989,3 +993,58 @@ async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget
     assert wait.await_args.kwargs["timeout"] == expected
     assert response.metadata == {"agent_timeout_sec": str(float(expected))}
     assert agent.config.timeout == 1800
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [
+        None,
+        {"type": "turn.failed", "error": {"message": "stream disconnected"}},
+        {"type": "error", "message": "endpoint unavailable"},
+    ],
+)
+async def test_local_response_rejects_unfinished_or_failed_cli_turn(terminal) -> None:
+    agent = _make_agent()
+    events = [{"type": "item.completed", "item": {"type": "agent_message", "text": "Writing the answer now."}}]
+    if terminal is not None:
+        events.append(terminal)
+    stdout = "\n".join(json.dumps(event) for event in events)
+    with patch.object(CodexAgent, "_run_codex", AsyncMock(return_value=(stdout, "model", None, False))):
+        with pytest.raises(HTTPException) as error:
+            await agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert error.value.status_code == 502
+
+
+async def test_local_cli_nonzero_exit_is_not_a_completed_response(tmp_path: Path) -> None:
+    agent = _make_agent(cwd=str(tmp_path))
+    process = MagicMock(returncode=1)
+    process.communicate = AsyncMock(
+        return_value=(b'{"type":"item.completed","item":{"type":"agent_message","text":"partial"}}', b"CLI failed")
+    )
+    with patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", AsyncMock(return_value=process)):
+        with pytest.raises(HTTPException) as error:
+            await agent._run_codex("task")
+    assert error.value.status_code == 502
+
+
+async def test_local_response_accepts_recovered_stream_with_terminal_completion() -> None:
+    agent = _make_agent()
+    stdout = "\n".join(
+        [
+            _event("error", message="transient stream failure"),
+            _item_completed({"type": "agent_message", "text": "Done."}),
+            _event("turn.completed", usage={"input_tokens": 4, "output_tokens": 2}),
+        ]
+    )
+    with patch.object(CodexAgent, "_run_codex", AsyncMock(return_value=(stdout, "model", None, False))):
+        response = await agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert response.output[0].content[0].text == "Done."
+    assert response.usage.total_tokens == 6
+
+
+async def test_previous_completed_turn_cannot_hide_an_interrupted_new_turn() -> None:
+    agent = _make_agent()
+    stdout = _event("turn.completed") + "\n" + _event("turn.started")
+    with patch.object(CodexAgent, "_run_codex", AsyncMock(return_value=(stdout, "model", None, False))):
+        with pytest.raises(HTTPException, match="turn.completed"):
+            await agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="task"))

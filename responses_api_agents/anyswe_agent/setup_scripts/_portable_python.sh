@@ -43,6 +43,7 @@ install_python_packages() {
     command -v uv >/dev/null || { echo "uv is required to prepare a cross-platform runtime" >&2; return 1; }
     uv pip install \
         --prefix "$DEPS_DIR" \
+        --python "$PYTHON_VERSION" \
         --python-version "$PYTHON_VERSION" \
         --python-platform "$ARCH" \
         "$@"

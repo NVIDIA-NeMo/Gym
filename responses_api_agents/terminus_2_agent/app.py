@@ -31,6 +31,7 @@ from time import time
 from typing import Any, Literal, Optional
 from uuid import uuid4
 
+import httpx
 from fastapi import Request
 from harbor.agents.terminus_2.terminus_2 import Terminus2
 from harbor.agents.terminus_2.tmux_session import TmuxSession
@@ -198,6 +199,32 @@ class StandaloneTerminus2(Terminus2):
         try:
             await super().run(instruction, environment, context)
         except Exception as exc:
+            error: dict[str, str | int] = {"type": type(exc).__name__, "message": str(exc)}
+            response = getattr(exc, "response", None)
+            if response is not None:
+                error["http_status_code"] = response.status_code
+                error["http_response_body"] = response.text
+            context.metadata = (context.metadata or {}) | {"agent_error": error}
+            llm = getattr(self, "_llm", None)
+            if (
+                isinstance(llm, NemoGymLLM)
+                and isinstance(exc, (httpx.HTTPStatusError, httpx.RequestError))
+                and exc.request.method == "POST"
+                and exc.request.url == httpx.URL(llm._chat_completions_endpoint())
+                and (
+                    response is None
+                    or response.status_code not in {400, 413, 422}
+                    or any(
+                        marker in response.text
+                        for marker in (
+                            "Extra inputs are not permitted",
+                            "extra_forbidden",
+                            "`temperature` is deprecated for this model.",
+                        )
+                    )
+                )
+            ):
+                context.metadata["provider_failed"] = True
             self.logger.info("Agent error: %s: %s. Returning completed turns.", type(exc).__name__, exc)
         finally:
             self._attach_routed_experts_to_trajectory()
@@ -271,7 +298,7 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     system_prompt: Optional[str] = None
     max_turns: Optional[int] = None
     parser_name: Literal["json", "xml"] = "json"
-    temperature: float = 0.7
+    temperature: float | None = 0.7
     reasoning_effort: Optional[Literal["none", "minimal", "low", "medium", "high", "default"]] = None
     collect_rollout_details: bool = False
     enable_summarize: bool = True
@@ -487,6 +514,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 total_tokens=input_tokens + output_tokens,
             ),
             metadata={
+                **({"provider_failed": "true"} if (context.metadata or {}).get("provider_failed") is True else {}),
                 "terminus_2": json.dumps(
                     {
                         "context": context.model_dump(mode="json"),
@@ -494,7 +522,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                         "timed_out": timed_out,
                         "finished_naturally": finished_naturally,
                     }
-                )
+                ),
             },
         )
 
@@ -518,6 +546,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         await raise_for_status(agent_response)
         cookies = agent_response.cookies
         response_json = await get_response_json(agent_response)
+        if (response_json.get("metadata") or {}).get("provider_failed") == "true":
+            raise RuntimeError("Terminus-2 provider failed")
 
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,

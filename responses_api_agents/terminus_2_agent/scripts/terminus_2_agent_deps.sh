@@ -17,8 +17,10 @@ install_portable_python
 install_nemo_gym_deps
 
 echo "Installing Harbor Terminus-2 ($HARBOR_SPEC)"
-"$DEPS_DIR/bin/python3" -m pip install "$HARBOR_SPEC"
-"$DEPS_DIR/bin/python3" -c \
-    "from harbor.agents.terminus_2.terminus_2 import Terminus2; print(Terminus2.name())"
+install_python_packages "$HARBOR_SPEC"
+if portable_python_can_run; then
+    "$DEPS_DIR/bin/python3" -c \
+        "from harbor.agents.terminus_2.terminus_2 import Terminus2; print(Terminus2.name())"
+fi
 
 echo "terminus_2_agent deps ready at $DEPS_DIR"

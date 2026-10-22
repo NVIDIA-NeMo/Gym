@@ -688,6 +688,15 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             created_at=int(time()),
             model=model_name,
             object="response",
+            status=run_metadata.get("status"),
+            metadata={
+                f"claude_code_{key}": str(run_metadata[key]).lower()
+                if isinstance(run_metadata[key], bool)
+                else str(run_metadata[key])
+                for key in ("subtype", "is_error", "duration_ms", "num_turns", "error_type")
+                if run_metadata.get(key) is not None
+            }
+            or None,
             output=output_items,
             tool_choice=body.tool_choice,
             tools=body.tools,

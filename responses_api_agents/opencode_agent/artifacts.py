@@ -409,10 +409,13 @@ def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) ->
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
-        roles = {
-            row["id"]: _load_json(row["data"]).get("role")
-            for row in con.execute(f"select id, data from message{scope}")
-        }
+        root_sessions = {row[0] for row in con.execute("select id from session where parent_id is null")}
+        roles = {}
+        for row in con.execute(f"select id, session_id, data from message{scope}"):
+            message = _load_json(row["data"])
+            if row["session_id"] in root_sessions and message.get("role") == "assistant" and message.get("error"):
+                raise RuntimeError(f"OpenCode model error: {json.dumps(message['error'])}")
+            roles[row["id"]] = message.get("role")
         rows = con.execute(f"select message_id, data from part{scope} order by time_created, id").fetchall()
     finally:
         con.close()

@@ -13,6 +13,7 @@ import pytest
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
 )
 from nemo_gym.server_utils import ServerClient
@@ -146,7 +147,7 @@ async def test_run_ssa_raises_on_failure(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
     agent = SimpleNamespace(config=SimpleNamespace(timeout=1))
     with pytest.raises(RuntimeError, match="SSA failed: failed"):
-        await SimpleStrandsAgent._run_ssa(agent, {"work_dir": str(tmp_path)})
+        await SimpleStrandsAgent._run_ssa(agent, {"output_dir": str(tmp_path / "output")})
 
 
 @pytest.mark.asyncio
@@ -164,7 +165,7 @@ async def test_run_ssa_raises_on_missing_result(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
     agent = SimpleNamespace(config=SimpleNamespace(timeout=1))
     with pytest.raises(RuntimeError, match="SSA did not produce a result"):
-        await SimpleStrandsAgent._run_ssa(agent, {"work_dir": str(tmp_path)})
+        await SimpleStrandsAgent._run_ssa(agent, {"output_dir": str(tmp_path / "output")})
 
 
 @pytest.mark.asyncio
@@ -197,9 +198,55 @@ async def test_run_ssa_terminates_on_cancellation(monkeypatch: pytest.MonkeyPatc
         config=SimpleNamespace(timeout=60),
         _terminate_process=SimpleStrandsAgent._terminate_process,
     )
-    task = asyncio.create_task(SimpleStrandsAgent._run_ssa(agent, {"work_dir": str(tmp_path)}))
+    task = asyncio.create_task(SimpleStrandsAgent._run_ssa(agent, {"output_dir": str(tmp_path / "output")}))
     await process.started.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert process.returncode == -signal.SIGTERM
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [False, True])
+async def test_existing_repository_is_used_and_survives_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: bool
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tracked = repo / "tracked.txt"
+    tracked.write_text("original")
+    monkeypatch.chdir(repo)
+    config = SimpleStrandsAgentConfig(
+        host="",
+        port=0,
+        entrypoint="",
+        name="agent",
+        resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+        model_server=ModelServerRef(type="responses_api_models", name="policy"),
+        repo_dir=".",
+        workspace_root=str(tmp_path / "runs"),
+    )
+    agent = SimpleStrandsAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(SimpleStrandsAgent, "resolve_model_base_url", lambda *args: "http://policy/v1")
+
+    async def create_subprocess_exec(*args, **kwargs):
+        request_path, result_path = map(Path, args[-2:])
+        assert request_path.parent == result_path.parent != repo
+        payload = json.loads(request_path.read_text())
+        assert Path(payload["work_dir"]) == repo
+        assert Path(payload["output_dir"]).parent != repo
+        tracked.write_text("edited")
+        if failure:
+            raise RuntimeError("runner failed")
+        result_path.write_text(json.dumps({"messages": [], "usage": {}}))
+        return SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(b"", b"")))
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
+    body = NeMoGymResponseCreateParamsNonStreaming(input="solve")
+    if failure:
+        with pytest.raises(RuntimeError, match="runner failed"):
+            await agent.responses(None, body)
+    else:
+        await agent.responses(None, body)
+    assert tracked.read_text() == "edited"
+    assert list((tmp_path / "runs").iterdir()) == []

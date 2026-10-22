@@ -1326,27 +1326,32 @@ NeMoGymChatCompletionMessageToolCallUnionParam = Annotated[
 ]
 
 
-def _strip_outer_tool_call_names(value: Any) -> Any:
-    """Copy tool calls carrying a redundant outer name and remove only that field."""
+def _strip_client_tool_call_fields(value: Any) -> Any:
+    """Remove response-only transport metadata and cache hints without mutating history."""
     if not isinstance(value, list):
         return value
 
-    normalized = None
-    for index, tool_call in enumerate(value):
-        if not isinstance(tool_call, dict) or "name" not in tool_call:
+    normalized = []
+    for tool_call in value:
+        if not isinstance(tool_call, dict):
+            normalized.append(tool_call)
             continue
-        if normalized is None:
-            normalized = list(value)
-        normalized_tool_call = dict(tool_call)
-        del normalized_tool_call["name"]
-        normalized[index] = normalized_tool_call
+        normalized_tool_call = {
+            key: item for key, item in tool_call.items() if key not in {"name", "cache_control", "index", "caller"}
+        }
+        # LiteLLM can move the response's index/caller fields inside function on replay.
+        if isinstance(tool_call.get("function"), dict):
+            normalized_tool_call["function"] = {
+                key: item for key, item in tool_call["function"].items() if key not in {"index", "caller"}
+            }
+        normalized.append(normalized_tool_call)
 
-    return value if normalized is None else normalized
+    return normalized
 
 
 NeMoGymChatCompletionMessageToolCallsParam: TypeAlias = Annotated[
     List[NeMoGymChatCompletionMessageToolCallUnionParam],
-    BeforeValidator(_strip_outer_tool_call_names),
+    BeforeValidator(_strip_client_tool_call_fields),
 ]
 
 
@@ -1356,6 +1361,8 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     tool_calls: Optional[NeMoGymChatCompletionMessageToolCallsParam] = None
     # Some harnesses replay reasoning on assistant history in Chat Completions.
     reasoning_content: str | None
+    # Preserve native thinking text and opaque signatures when harnesses replay provider responses.
+    thinking_blocks: NotRequired[list[dict[str, Any]]]
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
@@ -1438,23 +1445,24 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def drop_litellm_provider_specific_fields(cls, value: Any) -> Any:
-        """Drop ``provider_specific_fields`` from replayed assistant history.
-
-        litellm's ``Message.model_dump()`` emits that key on every assistant turn
-        (holding response fields it does not model, such as ``refusal``), and
-        harnesses built on litellm replay the dump verbatim. It carries nothing
-        a model server needs, and the strict message schema would reject it.
-        """
+    def drop_client_message_fields(cls, value: Any) -> Any:
+        """Drop LiteLLM bookkeeping and client cache hints from replayed messages."""
         if not isinstance(value, dict) or not isinstance(value.get("messages"), list):
             return value
         value = value.copy()
-        value["messages"] = [
-            {k: v for k, v in message.items() if k != "provider_specific_fields"}
-            if isinstance(message, dict)
-            else message
-            for message in value["messages"]
-        ]
+        messages = []
+        for message in value["messages"]:
+            if not isinstance(message, dict):
+                messages.append(message)
+                continue
+            message = {k: v for k, v in message.items() if k not in {"provider_specific_fields", "cache_control"}}
+            if isinstance(message.get("content"), list):
+                message["content"] = [
+                    {k: v for k, v in part.items() if k != "cache_control"} if isinstance(part, dict) else part
+                    for part in message["content"]
+                ]
+            messages.append(message)
+        value["messages"] = messages
         return value
 
     messages: List[NeMoGymChatCompletionMessageParam]
@@ -1704,7 +1712,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 content = await response.content.read()
                 if _error_body_is_permanent_auth(content):
                     self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
-                return response
+                await raise_for_status(response, content)
 
             if response.status not in RETRY_ERROR_CODES:
                 return response

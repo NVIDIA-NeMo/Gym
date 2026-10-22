@@ -20,13 +20,16 @@ from functools import partial
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 import yaml
+from fastapi import HTTPException
 from omegaconf import OmegaConf
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
@@ -100,6 +103,54 @@ def _step_finish_event(tokens: dict, pid: str = "prt_step") -> dict:
     return {"type": "step_finish", "sessionID": "s", "part": {"id": pid, "type": "step-finish", "tokens": tokens}}
 
 
+@pytest.mark.parametrize("failure", ["exit", "model_error", "empty", "tool_only", "timeout"])
+async def test_cli_failure_is_not_an_empty_success(tmp_path: Path, failure: str) -> None:
+    agent = _make_agent(workspace_root=str(tmp_path))
+    stream = ""
+    if failure == "model_error":
+        stream = _events(_text_event("starting"), {"type": "error", "error": {"message": "HTTP 422 cache_control"}})
+    elif failure == "tool_only":
+        stream = _events(_tool_event("bash", "c1", {"status": "completed", "output": "result"}))
+    elif failure == "exit":
+        stream = _events(_text_event("partial answer"))
+    process = MagicMock(returncode=7 if failure == "exit" else 0)
+    process.communicate = AsyncMock(return_value=(stream.encode(), b"CLI diagnostic \xff"))
+    if failure == "timeout":
+        process.communicate.side_effect = [asyncio.TimeoutError, (b"", b"CLI diagnostic")]
+    with (
+        patch("responses_api_agents.kilocode_agent.app.asyncio.create_subprocess_exec", return_value=process),
+        patch.object(agent, "_kill_process_group") as kill,
+    ):
+        with pytest.raises(HTTPException) as error:
+            await agent.responses(MagicMock(path_params={}), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert error.value.status_code == (504 if failure == "timeout" else 502)
+    if failure == "model_error":
+        assert "HTTP 422 cache_control" in error.value.detail
+    if failure == "exit":
+        assert "7" in error.value.detail and "CLI diagnostic" in error.value.detail
+    if failure == "timeout":
+        kill.assert_called_once_with(process)
+    assert not any(path.name.startswith("kilo_") for path in tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("stderr", [b"", b"CLI stderr diagnostic \xff"])
+async def test_nonzero_exit_preserves_bounded_stdout(tmp_path: Path, stderr: bytes) -> None:
+    agent = _make_agent(workspace_root=str(tmp_path))
+    stdout = b"x" * 20000 + b'\n{"type":"error","error":{"message":"transport failed \xff"}}'
+    process = MagicMock(returncode=1)
+    process.communicate = AsyncMock(return_value=(stdout, stderr))
+    with patch("responses_api_agents.kilocode_agent.app.asyncio.create_subprocess_exec", return_value=process):
+        with pytest.raises(HTTPException) as error:
+            await agent.responses(MagicMock(path_params={}), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert error.value.status_code == 502
+    assert "Kilo exited with code 1" in error.value.detail
+    assert "transport failed \ufffd" in error.value.detail
+    if stderr:
+        assert "CLI stderr diagnostic \ufffd" in error.value.detail
+    assert len(error.value.detail) < 8200
+    assert not list(tmp_path.iterdir())
+
+
 class TestSanity:
     def test_config_defaults(self) -> None:
         cfg = _config()
@@ -135,6 +186,15 @@ class TestExtractInstruction:
 
 
 class TestParseKiloEvents:
+    def test_model_error_after_tool_is_not_swallowed(self) -> None:
+        stream = _events(
+            _tool_event("bash", "c1", {"status": "completed", "output": "result"}),
+            {"type": "error", "error": {"name": "APIError", "data": {"message": "HTTP 422 cache_control"}}},
+        )
+        with pytest.raises(HTTPException, match="HTTP 422 cache_control") as error:
+            parse_kilo_events(stream)
+        assert error.value.status_code == 502
+
     def test_empty_stream(self) -> None:
         items, usage = parse_kilo_events("")
         assert items == []
@@ -385,10 +445,10 @@ class TestModelServer:
     def test_run_kilo_threads_resolved_url_into_config_and_env(self, tmp_path) -> None:
         # The seam _run_kilo owns: resolve once, then hand the same URL to kilo.json and the env.
         # repo_dir is the project dir, and unlike the workspace it survives the run's cleanup.
-        agent = _make_model_server_agent(model="m", repo_dir=str(tmp_path))
+        agent = _make_model_server_agent(model="m", repo_dir=str(tmp_path), workspace_root=str(tmp_path / "work"))
         proc = MagicMock()
         proc.returncode = 0
-        proc.communicate = AsyncMock(return_value=(b"", b""))
+        proc.communicate = AsyncMock(return_value=(_events(_text_event("done")).encode(), b""))
         with patch("responses_api_agents.kilocode_agent.app.asyncio.create_subprocess_exec") as spawn:
             spawn.return_value = proc
             asyncio.run(agent._run_kilo("hi", None, "task0-rollout1"))

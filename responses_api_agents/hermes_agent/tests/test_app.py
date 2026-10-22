@@ -92,6 +92,80 @@ def _mcp_access(name: str, *, required: bool = True) -> MCPToolAccess:
     )
 
 
+def test_task_runtime_metadata_is_accepted_without_forwarding_it_to_model() -> None:
+    agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input="task", metadata={"docker_image": "task-image", "workdir": "/app", "agent_timeout_sec": "900"}
+    )
+    validated = agent._validate_request(body)
+    assert validated.metadata == body.metadata
+    assert "metadata" not in agent._conversation_params(validated)
+    assert agent._agent_timeout_sec(validated) == 900
+    with pytest.raises(HTTPException, match="metadata"):
+        agent._validate_request(body.model_copy(update={"metadata": body.metadata | {"unknown_control": "value"}}))
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "HTTP 400: chat_template_kwargs: Extra inputs are not permitted",
+        'HTTP 422: {"type":"extra_forbidden","loc":["metadata","unsupported"]}',
+        "HTTP 400: `temperature` is deprecated for this model.",
+    ],
+)
+def test_unsupported_endpoint_fields_are_provider_failures_not_model_zeros(error) -> None:
+    agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task")
+    result = {"failed": True, "error": error, "messages": []}
+    with pytest.raises(RuntimeError, match="Hermes agent failed"):
+        agent._response_from_result(body=body, result=result, model_name="model")
+    response = agent._response_from_result(body=body, result=result, model_name="model", retain_provider_failure=True)
+    assert response.status == "failed"
+    assert response.metadata["provider_failed"] == "true"
+    assert "model_rejected" not in response.metadata
+
+
+@pytest.mark.parametrize("rollout_id", [None, "episode"])
+@pytest.mark.parametrize(
+    "error,provider_failed",
+    [
+        ("HTTP 400: chat_template_kwargs: Extra inputs are not permitted", True),
+        ("HTTP 400: `temperature` is deprecated for this model.", True),
+        ("HTTP 400: controlled model failure", False),
+        ("HTTP 400: request refused by the model safety policy", False),
+    ],
+)
+async def test_responses_retains_provider_failure_and_genuine_model_rejection(
+    monkeypatch, rollout_id, error, provider_failed
+):
+    agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task")
+    response = agent._response_from_result(
+        body=body,
+        result={"failed": True, "error": error, "messages": []},
+        model_name="model",
+        retain_provider_failure=True,
+    )
+    monkeypatch.setattr(HermesAgent, "_agent_session_id_from_request", lambda *_: None)
+    monkeypatch.setattr(HermesAgent, "_create_response", AsyncMock(return_value=response))
+    monkeypatch.setattr(
+        HermesAgent,
+        "_create_episode",
+        AsyncMock(return_value=AgentEpisode(response=response, observations=AgentObservationBundle(source="hermes"))),
+    )
+    request = MagicMock(path_params={} if rollout_id is None else {"rollout_id": rollout_id})
+    result = await agent.responses(request, body)
+    assert result.status == "failed"
+    if provider_failed:
+        assert result.error.message == error
+        assert result.metadata["provider_failed"] == "true"
+        assert "model_rejected" not in result.metadata
+    else:
+        assert result.metadata["model_rejected"] == "400"
+        assert "provider_failed" not in result.metadata
+        assert result.output[0].content[0].text == error
+
+
 def test_gym_mcp_tool_name_maps_hermes_names_of_granted_servers() -> None:
     assert _gym_mcp_tool_name("mcp_weather_get_weather", ["weather"]) == "mcp__weather__get_weather"
     # Hermes replaced "-" and "." in the server name; the granted name is restored.

@@ -27,7 +27,7 @@ from typing import (
     get_origin,
     get_type_hints,
 )
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock, Mock, call
 
 import openai
 import orjson
@@ -465,19 +465,36 @@ class TestOpenAIUtils:
         request.side_effect = [later]
         assert await client._request_with_retry(url="https://example.com/v1/responses") is later
 
-    async def test_auth_without_key_marker_is_returned_once(self, monkeypatch):
-        response = SimpleNamespace(
-            status=401,
-            content=SimpleNamespace(read=AsyncMock(return_value=b'{"error":"unauthorized"}')),
+    @pytest.mark.parametrize("status", [401, 403])
+    async def test_auth_without_key_marker_preserves_body_without_tripping(self, monkeypatch, status):
+        body = b'{"error":"model access denied"}'
+        info = SimpleNamespace(
+            url="https://example.com/v1/responses",
+            real_url="https://example.com/v1/responses",
+            method="POST",
+            headers={},
         )
-        request = AsyncMock(return_value=response)
+        error = ClientResponseError(request_info=info, history=(), status=status, message="Access denied")
+        response = SimpleNamespace(
+            status=status,
+            ok=False,
+            request_info=info,
+            content=SimpleNamespace(read=AsyncMock(side_effect=[body, b""])),
+            raise_for_status=Mock(side_effect=error),
+        )
+        success = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[response, success])
         sleep = AsyncMock()
         monkeypatch.setattr("nemo_gym.openai_utils.request", request)
         monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
 
-        assert await client._request_with_retry() is response
-        assert await client._request_with_retry() is response
+        with pytest.raises(ClientResponseError) as exc_info:
+            await client.create_chat_completion(model="test", messages=[])
+        assert exc_info.value.status == status
+        assert exc_info.value.response_content == body
+        response.content.read.assert_awaited_once()
+        assert await client._request_with_retry() is success
         assert request.await_count == 2
         sleep.assert_not_awaited()
 

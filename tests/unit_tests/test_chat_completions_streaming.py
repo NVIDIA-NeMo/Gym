@@ -23,6 +23,7 @@ requests keep the historical strict-validation behavior.
 
 import asyncio
 import json
+from copy import deepcopy
 from time import time
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -484,6 +485,111 @@ class TestChatDispatchRoute:
         forwarded = server.last_params.model_dump(exclude_unset=True)["messages"][0]["tool_calls"][0]
         assert "name" not in forwarded
         assert forwarded["function"]["name"] == "get_weather"
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_replayed_tool_cache_hints_preserve_chat_and_strict_validation(self, stream) -> None:
+        client, server = _client(_EchoChatModel)
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Inspect the repository", "cache_control": {"type": "ephemeral"}}
+                ],
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+        assert client.post("/v1/chat/completions", json={"stream": stream, "messages": messages}).status_code == 200
+        assert "cache_control" not in server.last_params.model_dump(exclude_unset=True)["messages"][0]
+        assert "cache_control" in messages[0]
+        assert server.last_params.model_dump(exclude_unset=True)["messages"][0]["content"] == [
+            {"type": "text", "text": "Inspect the repository"}
+        ]
+        assert "cache_control" in messages[0]["content"][0]
+        for index in range(2):
+            tool_call = {
+                "id": f"call-{index}",
+                "type": "function",
+                "function": {"name": "shell", "arguments": '{"command":"pwd"}'},
+                "cache_control": {"type": "ephemeral"},
+            }
+            messages.extend(
+                [
+                    {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+                    {"role": "tool", "tool_call_id": tool_call["id"], "content": "/app"},
+                ]
+            )
+            response = client.post("/v1/chat/completions", json={"stream": stream, "messages": messages})
+            assert response.status_code == 200
+            forwarded = server.last_params.model_dump(exclude_unset=True)["messages"][-2]["tool_calls"][0]
+            assert forwarded == {key: value for key, value in tool_call.items() if key != "cache_control"}
+            assert "cache_control" in tool_call
+        previous = server.last_params
+        messages[-2]["tool_calls"][0]["unknown_client_field"] = True
+        rejected = client.post("/v1/chat/completions", json={"stream": stream, "messages": messages})
+        assert rejected.status_code == 422
+        assert server.last_params is previous
+
+    @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize("metadata_location", ["tool", "function", "both"])
+    def test_replayed_native_tool_metadata_preserves_reasoning_and_strictness(self, stream, metadata_location) -> None:
+        client, server = _client(_EchoChatModel)
+        messages = [{"role": "user", "content": "Inspect the workspace"}]
+        for turn in range(3):
+            assert (
+                client.post("/v1/chat/completions", json={"stream": stream, "messages": messages}).status_code == 200
+            )
+            calls = []
+            for index in range(2):
+                call = {
+                    "id": f"call-{turn}-{index}",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"command":"printf example"}'},
+                }
+                fields = {"index": index, "caller": {"type": "direct"}}
+                if metadata_location in {"tool", "both"}:
+                    call.update(deepcopy(fields))
+                if metadata_location in {"function", "both"}:
+                    call["function"].update(deepcopy(fields))
+                calls.append(call)
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": "Inspecting the workspace",
+                    "tool_calls": calls,
+                    "reasoning_content": "Recorded reasoning",
+                    "thinking_blocks": [
+                        {
+                            "type": "thinking",
+                            "thinking": "" if turn == 0 else "Recorded thinking",
+                            "signature": "opaque-provider-signature",
+                        }
+                    ],
+                }
+            )
+            messages.extend({"role": "tool", "tool_call_id": call["id"], "content": "example"} for call in calls)
+        original = deepcopy(messages)
+        params = NeMoGymChatCompletionCreateParamsNonStreaming(messages=messages)
+        assert messages == original
+        expected = deepcopy(messages)
+        for message in expected:
+            for call in message.get("tool_calls", []):
+                for key in ("index", "caller"):
+                    call.pop(key, None)
+                    call["function"].pop(key, None)
+        assert params.model_dump(exclude_unset=True)["messages"] == expected
+        assert client.post("/v1/chat/completions", json={"stream": stream, "messages": messages}).status_code == 200
+        assert server.last_params.model_dump(exclude_unset=True)["messages"] == expected
+        previous = server.last_params
+        for location in ("message", "tool", "function"):
+            invalid = deepcopy(messages)
+            target = invalid[-3]
+            if location != "message":
+                target = target["tool_calls"][0]
+            if location == "function":
+                target = target["function"]
+            target["unknown_client_field"] = True
+            assert client.post("/v1/chat/completions", json={"stream": stream, "messages": invalid}).status_code == 422
+            assert server.last_params is previous
 
     def test_streaming_request_returns_synthesized_sse(self) -> None:
         client, server = _client(_EchoChatModel)

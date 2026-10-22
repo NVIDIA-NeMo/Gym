@@ -2,9 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Building and packing the ``auto`` agent runtime bundle."""
 
+import os
+import shutil
+import subprocess
+import sys
 import tarfile
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from responses_api_agents.anyswe_agent import app as anyswe_app
 from responses_api_agents.anyswe_agent.app import GymAgentHarnessProcessor, _pack_runtime
@@ -12,6 +19,45 @@ from responses_api_agents.anyswe_agent.tests.test_app import _config
 
 
 class TestRuntimeBundle:
+    @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required to prepare a cross-platform runtime")
+    @pytest.mark.parametrize("agent", ["anyswe_agent", "anyterminal_agent"])
+    def test_cross_platform_install_uses_target_python_layout(self, tmp_path: Path, agent: str) -> None:
+        wheel = tmp_path / "runtime_probe-1.0-py3-none-any.whl"
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr("runtime_probe.py", "INSTALLED = True\n")
+            archive.writestr(
+                "runtime_probe-1.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: runtime-probe\nVersion: 1.0\n"
+            )
+            archive.writestr(
+                "runtime_probe-1.0.dist-info/WHEEL", "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+            )
+            archive.writestr("runtime_probe-1.0.dist-info/RECORD", "")
+        deps = tmp_path / "runtime"
+        helper = Path(__file__).parents[2] / agent / "setup_scripts/_portable_python.sh"
+        subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; install_python_packages --offline --no-deps "$2"',
+                "_",
+                str(helper),
+                str(wheel),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "DEPS_DIR": str(deps),
+                "PYTHON_VERSION": ".".join(map(str, sys.version_info[:3])),
+                "ARCH": "x86_64-unknown-linux-gnu",
+                "UV_PYTHON": str(tmp_path / "unrelated-default-python"),
+            },
+        )
+        target = deps / f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages/runtime_probe.py"
+        assert list(deps.glob("lib/python*/site-packages/runtime_probe.py")) == [target]
+        assert target.read_text() == "INSTALLED = True\n"
+
     def test_recipe_changes_when_nemo_gym_changes(self, tmp_path: Path) -> None:
         (tmp_path / "nemo_gym" / "token_id_capture").mkdir(parents=True)
         library_file = tmp_path / "nemo_gym" / "token_id_capture" / "lineage.py"

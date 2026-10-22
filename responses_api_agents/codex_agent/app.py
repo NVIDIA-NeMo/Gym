@@ -236,6 +236,7 @@ def parse_exec_jsonl(
         etype = event.get("type")
 
         if etype == "turn.completed":
+            metadata["turn_completed"] = True
             usage = event.get("usage") or {}
             metadata["input_tokens"] += int(usage.get("input_tokens") or 0)
             metadata["output_tokens"] += int(usage.get("output_tokens") or 0)
@@ -255,7 +256,11 @@ def parse_exec_jsonl(
             usage_seen = True
             continue
 
+        if etype in ("turn.started", "error"):
+            metadata["turn_completed"] = False
+            continue
         if etype == "turn.failed":
+            metadata["turn_completed"] = False
             message = (event.get("error") or {}).get("message") or "turn failed"
             errors.append(message)
             continue
@@ -1114,6 +1119,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
             if proc.returncode not in (0, None):
                 LOG.warning("codex exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
+                if not timed_out:
+                    raise HTTPException(502, f"Codex CLI exited with code {proc.returncode}")
 
             LOG.debug("codex stdout (%d chars): %s", len(stdout), stdout[:2000].decode(errors="replace"))
             observations = None
@@ -1190,6 +1197,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
         if usage.get("errors"):
             LOG.warning("codex reported errors: %s", usage["errors"])
+        if not timed_out and not usage.get("turn_completed"):
+            raise HTTPException(502, "Codex ended without a successful turn.completed event")
 
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"

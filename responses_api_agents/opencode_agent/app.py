@@ -25,6 +25,7 @@ from asyncio import Semaphore
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from shlex import quote
+from tempfile import TemporaryDirectory
 from time import time
 from typing import Any, Optional
 from uuid import uuid4
@@ -53,8 +54,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
@@ -336,19 +335,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
         work_dir = self._workspace_root()
         project_dir = self._repo_dir(work_dir)
-        data_home = work_dir / ".opencode-data"
-        data_home.mkdir(parents=True, exist_ok=True)
-        self._write_opencode_config(project_dir, rollout_id)
-        env = self._env(str(data_home), rollout_id)
-
-        cmd = [*self.config.command_parts, "run", "-m", self._effective_model(), "--dir", str(project_dir)]
-        if self.config.thinking:
-            cmd.append("--thinking")
-        cmd.extend(self.config.extra_args)
-        cmd.append(prompt)
-
+        # Native snapshots must not capture their own database, logs or snapshot repository.
+        data_home = TemporaryDirectory(prefix="nemo-opencode-", ignore_cleanup_errors=True)
         try:
-            timed_out = False
+            self._write_opencode_config(project_dir, rollout_id)
+            env = self._env(data_home.name, rollout_id)
+            cmd = [*self.config.command_parts, "run", "-m", self._effective_model(), "--dir", str(project_dir)]
+            if self.config.thinking:
+                cmd.append("--thinking")
+            cmd.extend(self.config.extra_args)
+            cmd.append(prompt)
+
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(project_dir),
@@ -357,21 +354,53 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 env=env,
             )
             try:
-                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
                 proc.kill()
-                _, stderr = await proc.communicate()
-                timed_out = True
-                LOG.warning("opencode timed out after %ss", timeout)
+                stdout, stderr = await proc.communicate()
+                raise HTTPException(
+                    504,
+                    format_sandbox_error(
+                        f"OpenCode timed out after {timeout}s",
+                        output=stdout.decode(errors="replace"),
+                        stderr=stderr.decode(errors="replace"),
+                    ),
+                ) from None
 
             if proc.returncode not in (0, None):
-                LOG.warning("opencode exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
+                raise HTTPException(
+                    502,
+                    format_sandbox_error(
+                        f"OpenCode exited with code {proc.returncode}",
+                        output=stdout.decode(errors="replace"),
+                        stderr=stderr.decode(errors="replace"),
+                    ),
+                )
 
-            db_path = data_home / "opencode" / "opencode.db"
+            db_path = Path(data_home.name) / "opencode" / "opencode.db"
             invocation_id = rollout_id or f"opencode-{uuid4().hex}"
-            output_items, usage = (
-                ([], {"input_tokens": 0, "output_tokens": 0}) if timed_out else parse_opencode_session(db_path)
-            )
+            try:
+                output_items, usage = parse_opencode_session(db_path)
+            except RuntimeError as error:
+                raise HTTPException(
+                    502,
+                    format_sandbox_error(
+                        str(error), output=stdout.decode(errors="replace"), stderr=stderr.decode(errors="replace")
+                    ),
+                ) from error
+            if not any(
+                getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
+                for item in output_items
+            ):
+                raise HTTPException(
+                    502,
+                    format_sandbox_error(
+                        "OpenCode produced no assistant result"
+                        f" (session database present: {db_path.is_file()}, parsed items: {len(output_items)})",
+                        output=stdout.decode(errors="replace"),
+                        stderr=stderr.decode(errors="replace"),
+                    ),
+                )
             observations = AgentObservationBundle(source="opencode")
             if collect_observations:
                 try:
@@ -391,16 +420,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                             ObservationGap(code="model_call_ownership_unavailable"),
                         ],
                     )
-            run_status = "incomplete" if timed_out else "completed" if proc.returncode == 0 else "failed"
             for invocation in observations.records:
                 if not isinstance(invocation, AgentInvocation):
                     continue
                 if invocation.parent_invocation_id is None:
-                    invocation.status = run_status
-            if timed_out:
-                observations.gaps.append(ObservationGap(code="agent_run_timeout"))
+                    invocation.status = "completed"
             return output_items, usage, self.config.model, observations
         finally:
+            data_home.cleanup()
             shutil.rmtree(work_dir, ignore_errors=True)
 
     async def _create_episode(
@@ -447,21 +474,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 getattr(item, "role", None) in {"user", "system", "developer"} for item in root.conversation
             ):
                 root.conversation = [NeMoGymEasyInputMessage(role="user", content=prompt), *root.conversation]
-
-        if not any(
-            getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
-            for item in output_items
-        ):
-            LOG.warning("OpenCode produced no assistant message. Padding empty output")
-            output_items.append(
-                NeMoGymResponseOutputMessage(
-                    id=f"msg_{uuid4().hex}",
-                    content=[NeMoGymResponseOutputText(text="", annotations=[])],
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                )
-            )
 
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)

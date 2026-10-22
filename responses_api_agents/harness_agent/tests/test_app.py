@@ -272,6 +272,64 @@ async def test_verify_failure_closes_resource_sandbox():
     agent._provider.close.assert_awaited_once_with(handle)
 
 
+@pytest.mark.parametrize("provider_failed", [True, False])
+async def test_provider_failure_blocks_grading_but_model_refusal_survives(provider_failed):
+    agent = _make_agent()
+    handle = MagicMock(provider_name="opensandbox")
+    agent._provision_box = AsyncMock(return_value=handle)
+    agent._provider.connect = AsyncMock(return_value=handle)
+    agent._provider.close = AsyncMock()
+    agent._provider.exec = AsyncMock(
+        side_effect=[SandboxExecResult("", "", 0), SandboxExecResult("RUNNER_DONE", "", 0)]
+    )
+    response = _response() | {
+        "status": "failed",
+        "metadata": {"provider_failed": "true"} if provider_failed else {"model_rejected": "400"},
+        "output": [
+            {
+                "id": "refusal-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "I cannot assist with that request.", "annotations": []}],
+            }
+        ],
+    }
+    agent._provider.download_file = AsyncMock(side_effect=lambda _, __, path: path.write_text(json.dumps(response)))
+    agent.server_client.post = AsyncMock(return_value=MagicMock(cookies={}))
+    body = HarnessAgentRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+            input="hello",
+            metadata={"sandbox_eval": json.dumps({"command": "grade"}), "workdir": "/testbed"},
+        ),
+    )
+    with (
+        patch.object(agent, "_sandbox_model_url", return_value="https://model.example"),
+        patch.object(agent, "_grade_in_box", new=AsyncMock(return_value=0)) as grade,
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch(
+            "responses_api_agents.harness_agent.app.get_response_json",
+            new=AsyncMock(
+                side_effect=[
+                    {"sandbox_handle": "box-1"},
+                    body.model_dump() | {"response": response, "reward": 0},
+                ]
+            ),
+        ),
+    ):
+        if provider_failed:
+            with pytest.raises(RuntimeError, match="agent provider failed"):
+                await agent.run(MagicMock(cookies={}), body)
+            grade.assert_not_awaited()
+            assert agent.server_client.post.await_count == 1
+            agent._provider.close.assert_awaited_once_with(handle)
+        else:
+            result = await agent.run(MagicMock(cookies={}), body)
+            assert result.response.output[0].content[0].text == "I cannot assist with that request."
+            grade.assert_awaited_once()
+            assert agent.server_client.post.await_count == 2
+
+
 @pytest.mark.parametrize("exception_type", [RuntimeError, asyncio.CancelledError])
 async def test_pre_provision_failure_closes_resource_sandbox(exception_type):
     agent = _make_agent()

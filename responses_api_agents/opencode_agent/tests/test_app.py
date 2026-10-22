@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 from omegaconf import OmegaConf
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -60,6 +61,64 @@ def _config(**kwargs) -> OpenCodeAgentConfig:
         resources_server=ResourcesServerRef(type="resources_servers", name=""),
         **kwargs,
     )
+
+
+@pytest.mark.parametrize("failure", ["exit", "model_error", "empty", "tool_only", "timeout"])
+async def test_local_cli_failure_is_not_an_empty_success(tmp_path: Path, failure: str) -> None:
+    agent = _make_agent(workspace_root=str(tmp_path))
+    data_homes = []
+    process = MagicMock(returncode=7 if failure == "exit" else 0)
+    process.communicate = AsyncMock(return_value=(b"CLI stdout diagnostic \xff", b"CLI diagnostic \xff"))
+    if failure == "timeout":
+        process.communicate.side_effect = [
+            asyncio.TimeoutError,
+            (b"CLI stdout diagnostic \xff", b"CLI diagnostic"),
+        ]
+
+    async def spawn(*args, **kwargs):
+        data_home = Path(kwargs["env"]["XDG_DATA_HOME"])
+        assert data_home.is_dir()
+        data_homes.append(data_home)
+        if failure in {"model_error", "tool_only"}:
+            directory = Path(kwargs["env"]["XDG_DATA_HOME"]) / "opencode"
+            directory.mkdir()
+            info = {"role": "assistant", "time": {"created": 1, "completed": 2}}
+            if failure == "model_error":
+                info["error"] = {"name": "APIError", "data": {"message": "HTTP 422 cache_control"}}
+            parts = (
+                [{"type": "text", "text": "starting"}]
+                if failure == "model_error"
+                else [
+                    {
+                        "type": "tool",
+                        "callID": "c1",
+                        "tool": "bash",
+                        "state": {"status": "completed", "input": {}, "output": "result"},
+                    }
+                ]
+            )
+            messages = [("assistant", parts)]
+            if failure == "model_error":
+                messages.append((info, []))
+            _session_db(directory, messages)
+        return process
+
+    with patch("responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", side_effect=spawn):
+        with pytest.raises(HTTPException) as error:
+            await agent._create_episode(NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert error.value.status_code == (504 if failure == "timeout" else 502)
+    assert "CLI stdout diagnostic \ufffd" in error.value.detail
+    assert "CLI diagnostic" in error.value.detail
+    if failure == "model_error":
+        assert "HTTP 422 cache_control" in error.value.detail
+    if failure == "exit":
+        assert "7" in error.value.detail and "CLI diagnostic" in error.value.detail
+    if failure in {"empty", "tool_only"}:
+        assert f"session database present: {failure == 'tool_only'}" in error.value.detail
+    if failure == "timeout":
+        process.kill.assert_called_once()
+    assert not list(tmp_path.iterdir())
+    assert data_homes and all(not path.exists() for path in data_homes)
 
 
 def _invocations(bundle: AgentObservationBundle) -> list[AgentInvocation]:
@@ -150,6 +209,54 @@ class TestExtractInstruction:
 
 
 class TestParseOpencodeSession:
+    async def test_valid_root_refusal_preserves_failed_child_trace(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        directory = workspace / ".opencode-data" / "opencode"
+        directory.mkdir(parents=True)
+        refusal = "I cannot complete this request."
+        _session_db(
+            directory,
+            [
+                (
+                    "child",
+                    {
+                        "role": "assistant",
+                        "error": {"name": "APIError", "data": {"message": "child provider failed"}},
+                        "time": {"created": 1, "completed": 2},
+                    },
+                    [{"type": "text", "text": "partial child trace"}],
+                ),
+                (
+                    "root",
+                    {"role": "assistant", "finish": "stop", "time": {"created": 3, "completed": 4}},
+                    [{"type": "text", "text": refusal}],
+                ),
+            ],
+            sessions=[("root", None), ("child", "root")],
+        )
+        agent = _make_agent()
+        process = MagicMock(returncode=0)
+        process.communicate = AsyncMock(return_value=(b"", b""))
+
+        async def spawn(*args, **kwargs):
+            target = Path(kwargs["env"]["XDG_DATA_HOME"]) / "opencode"
+            target.mkdir(exist_ok=True)
+            (target / "opencode.db").write_bytes((directory / "opencode.db").read_bytes())
+            return process
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=workspace),
+            patch("responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", side_effect=spawn),
+        ):
+            episode = await agent._create_episode(NeMoGymResponseCreateParamsNonStreaming(input="task"))
+
+        assert [item.content[0].text for item in episode.response.output] == ["partial child trace", refusal]
+        root, child = _invocations(episode.observations)
+        assert root.status == "completed"
+        assert child.status == "failed"
+        assert child.parent_invocation_id == root.invocation_id
+        assert child.conversation[0].content[0].text == "partial child trace"
+
     def test_missing_db(self, tmp_path) -> None:
         items, usage = parse_opencode_session(tmp_path / "nope.db")
         assert items == []
@@ -586,11 +693,10 @@ class TestRolloutObservability:
         assert env["OPENAI_API_KEY"] == "EMPTY"  # pragma: allowlist secret
         assert agent.config.opencode_config == opencode_config
 
-    def test_padding_is_not_reported_as_artifact_evidence(self, tmp_path: Path) -> None:
-        _, usage = parse_opencode_session(tmp_path / "missing.db")
-        observations = _parse_opencode_session(tmp_path / "missing.db", "1-2")
-        agent = _make_agent(system_prompt="configured system")
-        agent._run_opencode = AsyncMock(return_value=([], usage, "model", observations))
+    async def test_missing_artifact_is_not_padded_into_success(self, tmp_path: Path) -> None:
+        agent = _make_agent(system_prompt="configured system", workspace_root=str(tmp_path))
+        process = MagicMock(returncode=0)
+        process.communicate = AsyncMock(return_value=(b"", b"CLI diagnostic"))
         body = NeMoGymResponseCreateParamsNonStreaming(
             input=[
                 NeMoGymEasyInputMessage(role="system", content="request system"),
@@ -600,15 +706,15 @@ class TestRolloutObservability:
             ]
         )
 
-        episode = asyncio.run(agent._create_episode(body, rollout_id="1-2"))
-
-        assert episode.response.output
-        assert agent._run_opencode.await_args.args == ("solve", "configured system\n\nrequest system")
-        assert _invocations(episode.observations)[0].conversation == [
-            NeMoGymEasyInputMessage(role="user", content="configured system\n\nrequest system\n\nsolve")
-        ]
-        assert "agent_transcript_unavailable" in {gap.code for gap in episode.observations.gaps}
-        assert "model_call_ownership_unavailable" in {gap.code for gap in episode.observations.gaps}
+        with patch(
+            "responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", return_value=process
+        ) as spawn:
+            with pytest.raises(HTTPException, match="no assistant result") as error:
+                await agent._create_episode(body, rollout_id="1-2")
+        assert error.value.status_code == 502
+        assert "session database present: False" in error.value.detail
+        assert "CLI diagnostic" in error.value.detail
+        assert spawn.await_args.args[-1] == "configured system\n\nrequest system\n\nsolve"
 
     def test_run_attaches_artifact_observations_when_enabled(self, tmp_path: Path) -> None:
         db = _session_db(
@@ -674,16 +780,15 @@ class TestRepoDir:
         assert repo_dir.is_dir()
 
     async def test_preserves_configured_repo_and_cleans_workspace(self, tmp_path: Path) -> None:
-        workspace = tmp_path / "workspace"
         repo_dir = tmp_path / "repo"
+        workspace_root = repo_dir / "outputs" / "workspaces"
         process = MagicMock(returncode=0)
         process.communicate = AsyncMock(return_value=(b"", b""))
-        agent = _make_agent(repo_dir=str(repo_dir))
+        agent = _make_agent(repo_dir=str(repo_dir), workspace_root=str(workspace_root))
         scored = [NeMoGymResponseOutputMessage(id="scored", content=[])]
         create_process = AsyncMock(return_value=process)
 
         with (
-            patch.object(agent, "_workspace_root", return_value=workspace),
             patch(
                 "responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec",
                 create_process,
@@ -711,7 +816,10 @@ class TestRepoDir:
         assert "agent_artifact_unavailable" in {gap.code for gap in observations.gaps}
         assert "turns_unavailable" in {gap.code for gap in trajectory.gaps}
         assert repo_dir.is_dir()
-        assert not workspace.exists()
+        assert not list(workspace_root.iterdir())
+        data_home = Path(create_process.await_args.kwargs["env"]["XDG_DATA_HOME"])
+        assert not data_home.is_relative_to(repo_dir)
+        assert not data_home.exists()
 
 
 class TestConfigYaml:
@@ -817,6 +925,13 @@ async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget
     with (
         patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)),
         patch(f"{module}.asyncio.wait_for", wraps=asyncio.wait_for) as wait,
+        patch(
+            f"{module}.parse_opencode_session",
+            return_value=(
+                [NeMoGymResponseOutputMessage(id="done", content=[])],
+                {"input_tokens": 1, "output_tokens": 1},
+            ),
+        ),
     ):
         episode = await agent._create_episode(body, collect_observations=False)
     wait.assert_awaited_once()

@@ -453,6 +453,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             resp = NeMoGymResponse.model_validate(
                 await self._download_json(handle, self._box_path(handle, "/work/response.json"))
             )
+            if (resp.metadata or {}).get("provider_failed") == "true":
+                raise RuntimeError("agent provider failed")
 
             grade_raw = meta.get("sandbox_eval")
             grade_spec = json.loads(grade_raw) if isinstance(grade_raw, str) else grade_raw

@@ -155,6 +155,7 @@ class SimpleStrandsAgentConfig(BaseResponsesAPIAgentConfig):
     native_user_prompt: bool = False
     system_prompt: Optional[str] = None
     workspace_root: str = "outputs/simple_strands_agent/workspaces"
+    repo_dir: Optional[str] = None
     keep_workspaces: bool = False
 
 
@@ -185,7 +186,7 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
         return work_dir
 
     async def _run_ssa(self, payload: dict[str, Any]) -> dict[str, Any]:
-        work_dir = Path(payload["work_dir"])
+        work_dir = Path(payload["output_dir"]).parent
         request_path = work_dir / "request.json"
         result_path = work_dir / "result.json"
         request_path.write_text(json.dumps(payload))
@@ -260,7 +261,9 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
             "system_prompt": system_prompt,
             "model": model_name,
             "model_base_url": self.resolve_model_base_url(self.config.model_server.name, rollout_id),
-            "work_dir": str(work_dir),
+            "work_dir": str(Path(self.config.repo_dir).expanduser().resolve())
+            if self.config.repo_dir
+            else str(work_dir),
             "output_dir": str(work_dir / "output"),
             "rollout_id": rollout_id or uuid4().hex,
             "max_turns": self.config.max_turns,

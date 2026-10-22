@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import logging
 from unittest.mock import AsyncMock, patch
 
@@ -287,6 +288,25 @@ async def test_extra_chat_params_forwarded():
     payload = mock_post.call_args[0][0]
     assert payload["temperature"] == 0.5
     assert payload["top_p"] == 0.9
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("temperature", [None, 0.0, 0.7])
+async def test_temperature_omission_on_http_wire(temperature: float | None) -> None:
+    llm = _make_llm(responses_create_params={"temperature": temperature, "input": []})
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        if temperature is None:
+            assert "temperature" not in payload
+        else:
+            assert payload["temperature"] == temperature
+        return httpx.Response(200, json=_mock_response())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        llm._http_client = client
+        response = await llm.call(prompt="hello")
+    assert response.content == "ok"
 
 
 def test_context_limit_from_max_input_tokens():

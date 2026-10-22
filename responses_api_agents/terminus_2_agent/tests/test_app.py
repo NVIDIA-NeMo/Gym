@@ -2,13 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import os
+import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 import yaml
 from harbor.agents.terminus_2.terminus_2 import Terminus2
 from harbor.models.agent.context import AgentContext
+from tenacity import wait_none
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
@@ -19,8 +23,10 @@ from responses_api_agents.terminus_2_agent.app import (
     StandaloneTerminus2,
     Terminus2Agent,
     Terminus2AgentConfig,
+    Terminus2AgentRunRequest,
     _extract_instruction,
 )
+from responses_api_agents.terminus_2_agent.llm import NemoGymLLM
 from responses_api_agents.terminus_2_agent.output import trajectory_to_responses
 
 
@@ -41,6 +47,41 @@ def _make_agent(**kwargs) -> Terminus2Agent:
         agent = Terminus2Agent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
     agent.sem = asyncio.Semaphore(agent.config.concurrency)
     return agent
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_portable_dependency_installation(tmp_path: Path, native: bool) -> None:
+    helper = tmp_path / "portable.sh"
+    helper.write_text(
+        "install_portable_python() { :; }\n"
+        "install_nemo_gym_deps() { :; }\n"
+        'install_python_packages() { printf "%s\\n" "$@" > "$INSTALL_LOG"; }\n'
+        f"portable_python_can_run() {{ {'true' if native else 'false'}; }}\n"
+    )
+    binary = tmp_path / "bin/python3"
+    binary.parent.mkdir()
+    binary.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$PROBE_LOG"\n' + ("" if native else "exit 126\n"))
+    binary.chmod(0o755)
+    script = Path(__file__).parents[1] / "scripts/terminus_2_agent_deps.sh"
+    subprocess.run(
+        ["bash", str(script)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PORTABLE_PYTHON_SH": str(helper),
+            "DEPS_DIR": str(tmp_path),
+            "NEMO_GYM_ROOT": str(script.parents[3]),
+            "INSTALL_LOG": str(tmp_path / "install.log"),
+            "PROBE_LOG": str(tmp_path / "probe.log"),
+        },
+    )
+    requirement = (script.parents[1] / "requirements.txt").read_text().split("harbor @ ")[1].splitlines()[0]
+    assert (tmp_path / "install.log").read_text().splitlines() == [requirement]
+    assert (tmp_path / "probe.log").exists() == native
+    if native:
+        assert "from harbor.agents.terminus_2.terminus_2 import Terminus2" in (tmp_path / "probe.log").read_text()
 
 
 class TestInstructionExtraction:
@@ -112,6 +153,43 @@ class TestLocalTmuxSession:
 
 class TestStandaloneTerminus2:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("http_error", [False, True])
+    @pytest.mark.parametrize("existing_metadata", [None, {"existing": "retained"}])
+    async def test_run_preserves_error_and_partial_turns(
+        self, http_error: bool, existing_metadata: dict | None
+    ) -> None:
+        agent = object.__new__(StandaloneTerminus2)
+        agent.logger = MagicMock()
+        partial = {"steps": [{"source": "agent", "message": "completed turn"}]}
+        agent._trajectory = partial
+        context = AgentContext(metadata=existing_metadata)
+        if http_error:
+            response = httpx.Response(
+                400,
+                text='{"error":"invalid model parameters"}',
+                request=httpx.Request("POST", "http://model/v1/chat/completions"),
+            )
+            error = httpx.HTTPStatusError("model request failed", request=response.request, response=response)
+        else:
+            error = RuntimeError("agent loop failed")
+
+        with patch.object(Terminus2, "run", new=AsyncMock(side_effect=error)) as parent_run:
+            await agent.run("task", MagicMock(), context)
+
+        parent_run.assert_awaited_once()
+        assert agent._trajectory is partial
+        assert context.metadata["agent_error"]["type"] == type(error).__name__
+        assert context.metadata["agent_error"]["message"] == str(error)
+        if existing_metadata:
+            assert context.metadata["existing"] == "retained"
+        if http_error:
+            assert context.metadata["agent_error"]["http_status_code"] == 400
+            assert context.metadata["agent_error"]["http_response_body"] == response.text
+        else:
+            assert "http_response_body" not in context.metadata["agent_error"]
+        assert agent.finished_naturally is False
+
+    @pytest.mark.asyncio
     async def test_tracks_two_consecutive_completion_claims(self) -> None:
         agent = object.__new__(StandaloneTerminus2)
         agent._consecutive_completion_claims = 0
@@ -158,6 +236,118 @@ class TestTrajectoryOutput:
 
 
 class TestResponses:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            "http400",
+            "schema400",
+            "schema422",
+            "auth401",
+            "auth403",
+            "routing404",
+            "rate429",
+            "server503",
+            "guard400",
+            "filter400",
+            "reject413",
+            "reject422",
+            "transport",
+            "context",
+            "length",
+            "budget",
+            "other_http",
+            "refusal",
+            "recovered",
+        ],
+    )
+    async def test_only_backend_failure_blocks_grading(self, failure: str) -> None:
+        agent = _make_agent()
+        native = object.__new__(StandaloneTerminus2)
+        native.logger = MagicMock()
+        native._llm = llm = NemoGymLLM(model_name="test", api_base="http://model/v1")
+        context = AgentContext()
+        trajectory = {"steps": [{"source": "agent", "message": "completed turn"}]}
+        attempts = 0
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if failure == "transport":
+                raise httpx.ConnectError("connection failed", request=request)
+            if failure == "http400" or (failure == "recovered" and attempts == 1):
+                return httpx.Response(400, text='{"error":"`temperature` is deprecated for this model."}')
+            if failure == "context":
+                return httpx.Response(400, text="maximum context length exceeded")
+            errors = {
+                "schema400": (400, "Extra inputs are not permitted"),
+                "schema422": (422, '{"type":"extra_forbidden"}'),
+                "auth401": (401, "Unauthorized"),
+                "auth403": (403, "Forbidden"),
+                "routing404": (404, "Model not found"),
+                "rate429": (429, "Too many requests"),
+                "server503": (503, "Service unavailable"),
+                "guard400": (400, '{"error":{"code":"guard","message":"Blocked by policy guard"}}'),
+                "filter400": (400, '{"error":{"code":"content_filter","message":"Request blocked"}}'),
+                "reject413": (413, "Payload too large"),
+                "reject422": (422, "Model rejected prompt"),
+            }
+            if failure in errors:
+                status, text = errors[failure]
+                return httpx.Response(status, text=text)
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {"content": "I cannot assist with that request."},
+                            "finish_reason": "length" if failure == "length" else "stop",
+                        }
+                    ]
+                },
+            )
+
+        async def parent_run(*_args) -> None:
+            if failure == "budget":
+                raise RuntimeError("policy budget exceeded")
+            if failure == "other_http":
+                httpx.Response(400, request=httpx.Request("POST", "http://tool/execute")).raise_for_status()
+            await llm.call.retry_with(wait=wait_none())(llm, prompt="task")
+
+        async def run_partial(*_args):
+            await native.run("task", MagicMock(), context)
+            return trajectory, context, {}, False, native.finished_naturally
+
+        agent._run_terminus = AsyncMock(side_effect=run_partial)
+        llm._http_client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        with (
+            patch.object(Terminus2, "run", new=AsyncMock(side_effect=parent_run)),
+            patch.object(Terminus2Agent, "resolve_model_base_url", return_value="http://model/v1"),
+        ):
+            response = await agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="task"))
+
+        failed = failure in {
+            "http400",
+            "schema400",
+            "schema422",
+            "auth401",
+            "auth403",
+            "routing404",
+            "rate429",
+            "server503",
+            "transport",
+        }
+        assert response.metadata.get("provider_failed") == ("true" if failed else None)
+        assert native.context_length_exceeded is (failure == "context")
+        assert response.output[0].content[0].text == "completed turn"
+        assert response.status == "completed"
+        if failure == "http400":
+            assert attempts == 3
+            assert context.metadata["agent_error"]["http_status_code"] == 400
+            assert "temperature" in context.metadata["agent_error"]["http_response_body"]
+        if failure in {"refusal", "recovered"}:
+            assert context.metadata is None
+
     @pytest.mark.asyncio
     async def test_default_workspace_is_temporary_and_removed(self) -> None:
         agent = _make_agent()
@@ -253,12 +443,48 @@ class TestResponses:
         agent._run_terminus.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_run_provider_failure_never_reaches_verifier() -> None:
+    agent = Terminus2Agent(config=_config(), server_client=MagicMock(spec=ServerClient))
+    agent.server_client.post = AsyncMock(
+        side_effect=[MagicMock(cookies={}), MagicMock(cookies={}), AssertionError("provider failure reached verifier")]
+    )
+    body = Terminus2AgentRunRequest(responses_create_params={"input": "task"})
+    with (
+        patch("responses_api_agents.terminus_2_agent.app.raise_for_status", new=AsyncMock()),
+        patch(
+            "responses_api_agents.terminus_2_agent.app.get_response_json",
+            new=AsyncMock(return_value={"status": "completed", "metadata": {"provider_failed": "true"}}),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="Terminus-2 provider failed"):
+            await agent.run(MagicMock(cookies={}), body)
+    assert [call.kwargs["url_path"] for call in agent.server_client.post.await_args_list] == [
+        "/seed_session",
+        "/v1/responses",
+    ]
+
+
 class TestConfig:
+    @pytest.mark.parametrize("request_temperature", [None, 0.25])
+    def test_disabled_default_reaches_native_agent(self, tmp_path: Path, request_temperature: float | None) -> None:
+        agent = _make_agent(temperature=None, model="test-model")
+        assert agent.config.temperature is None
+        body = NeMoGymResponseCreateParamsNonStreaming(input="task", temperature=request_temperature)
+        native = agent._build_agent(body, tmp_path, "http://model/v1")
+
+        assert native._temperature == request_temperature
+        if request_temperature is None:
+            assert "temperature" not in native._llm._extra_chat_params
+        else:
+            assert native._llm._extra_chat_params["temperature"] == request_temperature
+
     def test_webserver_routes_build(self) -> None:
         _make_agent().setup_webserver()
 
     def test_defaults(self) -> None:
         config = _config()
+        assert config.temperature == 0.7
         assert config.parser_name == "json"
         assert config.concurrency == 1
         assert config.record_terminal_session is False

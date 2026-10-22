@@ -23,4 +23,5 @@ simple_strands_agent:
       native_user_prompt: false
       system_prompt: null
       workspace_root: outputs/simple_strands_agent/workspaces
+      repo_dir: null
       keep_workspaces: false

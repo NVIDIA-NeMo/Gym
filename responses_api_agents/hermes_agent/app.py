@@ -93,6 +93,15 @@ def _model_rejection_status(error: object) -> int | None:
     match = _HTTP_STATUS.search(str(error or ""))
     if match is None:
         return None
+    if any(
+        marker in str(error)
+        for marker in (
+            "Extra inputs are not permitted",
+            "extra_forbidden",
+            "`temperature` is deprecated for this model.",
+        )
+    ):
+        return None
     status = int(match.group(1))
     return status if status in MODEL_REJECTION_STATUSES else None
 
@@ -710,8 +719,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
             value = getattr(body, name)
             if name in ("stream", "background") and value is False:
                 continue  # Explicit synchronous, non-streaming execution is supported.
-            if name == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
-                continue  # Task rows carry the agent's wall-clock budget; the activation honours it.
+            if name == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY, "docker_image", "workdir"}:
+                continue  # Resource/harness routing metadata is not a model-endpoint request control.
             if value != field.get_default(call_default_factory=True):
                 raise HTTPException(422, f"Hermes does not support request field {name}")
         body = body.model_copy(deep=True)

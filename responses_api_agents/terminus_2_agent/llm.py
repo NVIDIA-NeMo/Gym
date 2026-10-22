@@ -300,6 +300,8 @@ class NemoGymLLM(BaseLLM):
         )
 
         chat_params.pop("messages", None)
+        if chat_params.get("temperature") is None:
+            chat_params.pop("temperature", None)
         return chat_params
 
     def _extract_logprobs(self, response: dict[str, Any]) -> list[float] | None:

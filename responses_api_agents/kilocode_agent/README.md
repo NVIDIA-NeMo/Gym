@@ -6,6 +6,9 @@ agent mirrors the `opencode_agent`: Kilo runs its own tools internally, and its 
 
 Minimal, meant to be extended, and currently eval-only: token IDs and logprobs are not wired up.
 
+CLI/model errors and missing assistant results return HTTP 502. Timeouts return HTTP 504 after
+stopping the process group. Nonzero exits include bounded stdout and stderr tails.
+
 ## Quick start
 
 Kilo must be on PATH (auto-installed on first start, or `npm install -g @kilocode/cli`). Set
