@@ -293,7 +293,7 @@ def test_compile_in_an_unshared_work_dir_is_a_sandbox_infra_error(monkeypatch, t
     )
 
     assert ccc_eval._test_result_from_compile(result)["compile_success"] is False
-    assert "cannot see" in ccc_eval.sandbox_infra_error(result)
+    assert "cannot see" in ccc_eval.compile_infra_error(result)
 
 
 def test_a_real_compile_failure_is_not_an_infra_error_even_when_it_echoes_the_marker(monkeypatch, tmp_path):
@@ -309,20 +309,32 @@ def test_a_real_compile_failure_is_not_an_infra_error_even_when_it_echoes_the_ma
     result = ccc_eval._compile_in_sandbox(ccc_eval._test_loop_tls, None, str(work_dir), None)
 
     assert ccc_eval._test_result_from_compile(result)["compile_success"] is False
-    assert ccc_eval.sandbox_infra_error(result) is None
+    assert ccc_eval.compile_infra_error(result) is None
 
 
-def test_run_in_an_unshared_dir_is_a_sandbox_infra_error(monkeypatch, tmp_path):
-    shared_dir = tmp_path / "shared"
-    compiled_dir = shared_dir / "ccc_solution"
-    compiled_dir.mkdir(parents=True)
-    _write_run_script(compiled_dir)
-    monkeypatch.setattr(ccc_eval, "_exec_sync", _sandbox_that_cannot_see(shared_dir))
+def test_a_run_sh_that_prints_the_marker_stays_a_scored_failure(monkeypatch, tmp_path):
+    # run.sh executes the solution, so nothing it prints or returns can mark the sample as infra (review on #4770).
+    compiled_dir = tmp_path / "ccc_solution"
+    compiled_dir.mkdir()
+    script = compiled_dir / "run.sh"
+    script.write_text(f"#!/bin/bash\necho {ccc_eval.WORK_DIR_NOT_VISIBLE}\nexit 3\n", encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setattr(ccc_eval, "_exec_sync", _execute_shell)
 
-    result = ccc_eval.run_test_case(_run_task(compiled_dir, shared_dir), worker_id=0)
+    result = ccc_eval.run_test_case(_run_task(compiled_dir, tmp_path), worker_id=0)
 
     assert result["score"] == 0.0
-    assert "cannot see" in result["infra_error"]
+    assert "infra_error" not in result
+    assert result["run_time_s"] >= 0.0
+
+
+def test_generated_code_that_cannot_be_written_as_utf8_fails_before_the_sandbox(monkeypatch, tmp_path):
+    monkeypatch.setattr(ccc_eval, "_exec_sync", lambda *_args, **_kwargs: pytest.fail("sandbox must not be called"))
+
+    with pytest.raises(UnicodeEncodeError):
+        ccc_eval._compile_solution_once("toy", "Batch", "int main() { return 0; } // \ud800", "", str(tmp_path), None)
+
+    assert list(tmp_path.glob("ccc_solution_*")) == []
 
 
 def test_run_against_an_unreachable_sandbox_is_an_infra_error(monkeypatch, tmp_path):

@@ -353,6 +353,22 @@ async def test_verify_returns_error_details_when_evaluator_fails(
 
 
 @pytest.mark.asyncio
+async def test_verify_scores_generated_text_that_cannot_be_encoded() -> None:
+    # A lone surrogate in the model's code comes from the model, so masking it would remove its penalty.
+    server = _make_server()
+    evaluator = MagicMock()
+    evaluator.eval_single = AsyncMock(side_effect=lambda _entry: "\ud800".encode("utf-8"))
+    server._evaluator = evaluator
+
+    response = await server.verify(_make_verify_request())
+
+    assert response.reward == 0.0
+    assert response.mask_sample is False
+    assert response.failure_kind is None
+    assert "surrogates not allowed" in response.details["error"]
+
+
+@pytest.mark.asyncio
 async def test_verify_masks_a_sandbox_infra_error() -> None:
     server = _make_server()
     evaluator = MagicMock()

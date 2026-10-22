@@ -188,7 +188,7 @@ def _exec_sync(tls: threading.local, sandbox: LocalSandbox, cmd: str, *, languag
     return loop.run_until_complete(sandbox.execute_code(cmd, language=language, timeout=timeout))[0]
 
 
-# Printed, as the whole stdout, by a guard that runs before any solution code is compiled or run.
+# Printed, as the whole stdout, by a guard that runs before compile.sh.
 WORK_DIR_NOT_VISIBLE = "CCC_WORK_DIR_NOT_VISIBLE_TO_SANDBOX"
 
 
@@ -197,16 +197,27 @@ def _require_visible(work_dir: str, script: str) -> str:
     return f"[ -f {shlex.quote(os.path.join(work_dir, script))} ] || {{ echo {WORK_DIR_NOT_VISIBLE}; exit 3; }}"
 
 
-def sandbox_infra_error(result: dict) -> str | None:
-    """Why one sandbox call failed for a reason outside the solution, or None.
-
-    Only two signals count, and neither depends on what that call ran: the request never reached the sandbox, or
-    the sandbox could not see the work dir before the script started. A sandbox that dies while a solution runs
-    stays a scored failure, since the solution may have caused it.
-    """
+def sandbox_unreachable_error(result: dict) -> str | None:
+    """Why a sandbox call never reached the sandbox, or None. No code ran, so the solution cannot have caused it."""
     if result.get("sandbox_unreachable"):
         return f"NeMo Skills sandbox unreachable: {result.get('stderr', '').strip()}"
-    if result.get("process_status") != "completed" and result.get("stdout", "").strip() == WORK_DIR_NOT_VISIBLE:
+    return None
+
+
+def compile_infra_error(compile_result: dict) -> str | None:
+    """Why a compile failed for a reason outside the solution, or None.
+
+    The marker counts only here: compile.sh comes from the problem metadata and compiles without running the
+    solution, and compilers print diagnostics to stderr, so the solution cannot make it the whole stdout. run.sh
+    runs the solution, so nothing it prints or returns is trusted.
+    """
+    unreachable = sandbox_unreachable_error(compile_result)
+    if unreachable:
+        return unreachable
+    if (
+        compile_result.get("process_status") != "completed"
+        and compile_result.get("stdout", "").strip() == WORK_DIR_NOT_VISIBLE
+    ):
         return (
             "NeMo Skills sandbox cannot see the shared work directory; mount shared_dir into the sandbox at the "
             "same path (see 'Sandbox prerequisite' in resources_servers/competitive_coding_challenges/README.md)"
@@ -559,14 +570,13 @@ def run_test_case(task_args: dict, worker_id: int) -> dict:
         run_result = _exec_sync(
             _test_loop_tls,
             sandbox,
-            f"{_require_visible(unique_dir, 'run.sh')}\n"
             f"cd {unique_dir} && export TMPDIR={unique_dir}/tmp && TIME_LIMIT_SCALE={task_args.get('time_scale', 1.0)} ./run.sh",
             language="shell",
             timeout=run_timeout,
         )
         result["run_stdout"] = run_result.get("stdout", "")
         result["run_stderr"] = run_result.get("stderr", "")
-        infra_error = sandbox_infra_error(run_result)
+        infra_error = sandbox_unreachable_error(run_result)
         if infra_error:
             result["infra_error"] = infra_error
             return result
@@ -828,7 +838,7 @@ class CCCEvaluator(BaseEvaluator):
         # concurrently, so one test's solution could crash the sandbox for the others: a run-stage infra error
         # counts only when no test of this solution was measured. Count from all results, not `outputs`, which
         # `min` aggregation trims after the first failure.
-        infra_error = sandbox_infra_error(compile_result)
+        infra_error = compile_infra_error(compile_result)
         if not infra_error and num_tests_run == 0 and run_infra_errors:
             infra_error = run_infra_errors[0]
         if infra_error:

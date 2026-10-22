@@ -43,9 +43,10 @@ git clone --depth 1 https://github.com/NVIDIA-NeMo/Skills.git /tmp/NeMo-Skills \
   Google Drive. CCC does not use that file, and the download fails when the
   file's Drive quota is used up.
 - `-v /tmp:/tmp` lets the sandbox see the solutions CCC writes to `shared_dir`
-  (default `/tmp`). Without it every compile fails with `cp: cannot stat` and
-  scores 0. If you set `CCC_SHARED_TEMP_DIR`, mount that directory at the same
-  path instead.
+  (default `/tmp`). Without it nothing compiles: each compile stops with
+  `CCC_WORK_DIR_NOT_VISIBLE_TO_SANDBOX`, and `/verify` excludes the sample from
+  scoring (`mask_sample: true`, `failure_kind: provider_unavailable`). If you
+  set `CCC_SHARED_TEMP_DIR`, mount that directory at the same path instead.
 
 CCC defaults to `http://127.0.0.1:6000/execute`; override with
 `NEMO_SKILLS_SANDBOX_HOST` / `NEMO_SKILLS_SANDBOX_PORT` if the sandbox is

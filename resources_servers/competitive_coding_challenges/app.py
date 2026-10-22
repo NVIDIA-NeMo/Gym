@@ -355,6 +355,9 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
             reward = self._compute_reward(body, details)
             if details.get("infra_error"):
                 failure_kind, failure_reason = PROVIDER_UNAVAILABLE, details["infra_error"]
+        except UnicodeEncodeError as e:
+            # The generated code cannot be written as UTF-8 (a lone surrogate): the model's output, so it stays scored.
+            details = {"error": str(e)}
         except Exception as e:
             details = {"error": str(e)}
             failure_kind, failure_reason = VERIFIER_ERROR, str(e)
