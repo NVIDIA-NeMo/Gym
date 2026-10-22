@@ -133,7 +133,16 @@ if TYPE_CHECKING:
         upload_dir,
         upload_path,
     )
-    from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS, cpu_cap_env, read_text, upload_text
+    from nemo_gym.sandbox.utils import (
+        CPU_CAP_ENV_VARS,
+        cpu_cap_env,
+        download_bytes,
+        download_media,
+        read_text,
+        upload_bytes,
+        upload_media,
+        upload_text,
+    )
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
@@ -158,7 +167,9 @@ _PUBLIC_API = {
     "cpu_cap_env": "utils",
     "deployment_platform": "compose_config",
     "document_volume_sources": "compose_config",
+    "download_bytes": "utils",
     "download_dir": "transfer",
+    "download_media": "utils",
     "download_path": "transfer",
     "exec_as_root": "transfer",
     "opensandbox_shm_labels": "compose_config",
@@ -170,7 +181,9 @@ _PUBLIC_API = {
     "service_gpus": "compose_fields",
     "service_resources": "compose_fields",
     "upload_archive": "transfer",
+    "upload_bytes": "utils",
     "upload_dir": "transfer",
+    "upload_media": "utils",
     "upload_path": "transfer",
     "upload_text": "utils",
 }
