@@ -231,6 +231,31 @@ class TestExaProvider:
         app_module.os._exit.assert_called_once_with(1)
         fake_request.assert_awaited_once()
 
+    async def test_exa_content_refusal_fails_only_the_call(self, monkeypatch) -> None:
+        # Exa answers some queries with a 403 content-safety refusal; that is not a bad key.
+        client = ExaAIOHTTPClient(headers={}, base_url="https://api.exa.ai", debug=False)
+        body = {"requestId": "r", "error": "Sorry, we've detected unsafe content and can't process this request."}
+        fake_request = AsyncMock(return_value=self._http_response(403, body))
+        monkeypatch.setattr(app_module, "request", fake_request)
+        monkeypatch.setattr(app_module.os, "_exit", MagicMock(side_effect=SystemExit(1)))
+
+        with pytest.raises(app_module.SearchProviderRefusal, match="unsafe content"):
+            await client.search("q", num_results=5)
+        app_module.os._exit.assert_not_called()
+        fake_request.assert_awaited_once()
+
+    async def test_refused_search_reaches_the_agent_as_a_failed_search(
+        self, server: TavilySearchResourcesServer, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(app_module.os, "_exit", MagicMock(side_effect=SystemExit(1)))
+        refused = app_module.SearchProviderRefusal("exa refused this request: unsafe content")
+        server._select_exa_client = MagicMock(return_value=MagicMock(search=AsyncMock(side_effect=refused)))
+
+        result = await server.search(self._req(), TavilySearchRequest(queries=["q"]))
+
+        assert "Search failed: exa refused this request" in result.results_string
+        app_module.os._exit.assert_not_called()
+
     # ---- dispatch ----
 
     async def test_dispatch_routes_to_exa_not_tavily(self, server: TavilySearchResourcesServer) -> None:

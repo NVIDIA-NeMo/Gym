@@ -448,6 +448,23 @@ def _log_call(message: str) -> None:
         print(message, flush=True)
 
 
+# A 403 whose body is a content-safety refusal of one request (Exa: "Sorry, we've detected unsafe content and
+# can't ..."), not a rejected key. Such a refusal must fail only that tool call.
+_CONTENT_REFUSAL = re.compile(r"unsafe content|content (policy|filter|moderation)", re.IGNORECASE)
+
+
+class SearchProviderRefusal(Exception):
+    """The search provider refused one request; the API key is fine."""
+
+
+def _check_auth_failure(provider: str, status: int, body: str) -> None:
+    """A 401/403: raise SearchProviderRefusal for a content refusal, otherwise abort as a bad key."""
+    if status == 403 and _CONTENT_REFUSAL.search(body):
+        print(f"[browsecomp][tool_fail][{provider}_refused] HTTP {status}: {body[:300]}", flush=True)
+        raise SearchProviderRefusal(f"{provider} refused this request: {body[:200]}")
+    _abort_on_invalid_api_key(provider, status, body)
+
+
 def _abort_on_invalid_api_key(provider: str, status: int, body: str) -> None:
     """A 401/403 from the search provider means the API key is bad — every search in the
     run would silently degrade, so kill the benchmark instead of producing a garbage score."""
@@ -493,7 +510,7 @@ class TavilySearchAIOHTTPClient(BaseModel):
             response = await request(**request_kwargs)
 
             if response.status in (401, 403):
-                _abort_on_invalid_api_key("tavily", response.status, (await response.content.read()).decode())
+                _check_auth_failure("tavily", response.status, (await response.content.read()).decode())
 
             if response.status in RETRY_ERROR_CODES:
                 # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
@@ -561,7 +578,7 @@ class ExaAIOHTTPClient(BaseModel):
             response = await request(**request_kwargs)
 
             if response.status in (401, 403):
-                _abort_on_invalid_api_key("exa", response.status, (await response.content.read()).decode())
+                _check_auth_failure("exa", response.status, (await response.content.read()).decode())
 
             if response.status in RETRY_ERROR_CODES:
                 rate_limited = response.status in RATE_LIMIT_ERROR_CODES
