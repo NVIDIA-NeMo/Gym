@@ -163,7 +163,6 @@ echo "vLLM   ${VLLM_BRANCH} @ ${VLLM_HEAD_SHA}"
 echo "Output ${OUT_SQSH}"
 
 if ! srun \
-    --exclusive \
     --account="${SLURM_ACCOUNT}" \
     --partition="${SLURM_PARTITION:-batch}" \
     --job-name=super-vl-evals-v0271 \
