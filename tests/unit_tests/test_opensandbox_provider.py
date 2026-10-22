@@ -279,6 +279,52 @@ async def test_create_deletes_the_sandbox_of_an_abandoned_request(
     assert provider._abandoned_creates == set()
 
 
+@pytest.mark.parametrize("abandon", ["timeout", "cancel"])
+async def test_create_stops_waiting_once_the_sweep_deleted_its_sandbox(
+    monkeypatch: pytest.MonkeyPatch, abandon: str
+) -> None:
+    """The server never answers a create whose Pending sandbox was deleted, so its request is cancelled."""
+    request_cancelled = asyncio.Event()
+
+    class HungSandbox(FakeSandbox):
+        @classmethod
+        async def create(cls, **_kwargs: Any) -> "FakeSandbox":
+            try:
+                await asyncio.get_running_loop().create_future()
+            except asyncio.CancelledError:
+                request_cancelled.set()
+                raise
+            return cls()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (HungSandbox, FakeConnectionConfig, object, FakePlatformSpec, object),
+    )
+    create = {"retries": 0}
+    if abandon == "timeout":
+        create["timeout_s"] = 0.01
+    provider = opensandbox_provider.OpenSandboxProvider(create=create, probe={"command": None})
+
+    async def sweep_deletes_it(_metadata: dict[str, str], _attempt_key: str) -> list[dict[str, Any]]:
+        return [{"id": "pending-sandbox", "state": "Pending", "reason": "CREATING", "message": None}]
+
+    monkeypatch.setattr(provider, "_reap_orphaned_create", sweep_deletes_it)
+
+    if abandon == "timeout":
+        with pytest.raises(opensandbox_provider.OpenSandboxCreatePendingError):
+            await provider.create(SandboxSpec(image="image:tag"))
+    else:
+        task = asyncio.create_task(provider.create(SandboxSpec(image="image:tag")))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    await asyncio.wait_for(request_cancelled.wait(), timeout=1)
+    await asyncio.wait_for(asyncio.gather(*provider._abandoned_creates), timeout=1)
+    assert provider._abandoned_creates == set()
+
+
 async def test_aclose_cancels_abandoned_creates_the_server_never_answers(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
