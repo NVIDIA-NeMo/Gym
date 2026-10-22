@@ -49,7 +49,7 @@ from nemo_gym.config_types import (
     ModelServerRef,
     ResourcesServerRef,
 )
-from nemo_gym.failure_kinds import FailureStage
+from nemo_gym.failure_kinds import FailureStage, episode_failure_cause
 from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -607,12 +607,14 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         *,
         terminal: bool | None = None,
     ) -> HandledEpisodeError:
+        terminal = not _is_retryable_dependency_error(error) if terminal is None else terminal
         return HandledEpisodeError(
             UserSimEpisodeFailure(
                 stage=stage,
                 failure_reason=f"{type(error).__name__}: {error}"[:2000],
-                terminal=not _is_retryable_dependency_error(error) if terminal is None else terminal,
-            )
+                terminal=terminal,
+            ),
+            cause=episode_failure_cause(error, terminal=terminal),
         )
 
 

@@ -59,7 +59,17 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.failure_kinds import AGENT_TIMEOUT, CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
+from nemo_gym.failure_kinds import (
+    AGENT_TIMEOUT,
+    CANCELLED,
+    FAILURE_CAUSE_HEADER,
+    INFRA,
+    JUDGE_FAILED,
+    MODEL,
+    failure_cause_of_text,
+    is_namespaced,
+    is_registered,
+)
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
@@ -232,6 +242,8 @@ NG_NO_PERSIST_KEY = "_ng_no_persist"
 # Set only by Gym, on the result it builds for a row the dispatch budget never started.
 NG_DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
+# "infra" or "model": where a failure happened, stamped by the collector on every failures-sidecar row.
+NG_FAILURE_CAUSE_KEY = "_ng_failure_cause"
 # The attempt cap the collecting process ran with, stamped on each sidecar row: offline aggregation reads it
 # instead of its own environment. The `_ng_failure_` prefix keeps it out of the metrics of a counted row.
 NG_FAILURE_MAX_ATTEMPTS_KEY = "_ng_failure_max_attempts"
@@ -413,10 +425,23 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError(
                 f"environment server reply for task {task_id!r} carries a non-object failure: {failure!r}"
             )
+        terminal = bool(failure.get("terminal", False))
+        # The server's own cause, read from the live error and sent in the response header, wins. Admission,
+        # seeding and cleanup happen around the model's turn, so a failure there is never the model's. Otherwise
+        # infra text decides, and with no evidence either way the server's own terminal=False is a retry.
+        cause = response.get(NG_FAILURE_CAUSE_KEY)
+        if cause not in (INFRA, MODEL):
+            if failure.get("stage") in ("admission", "seed", "cleanup"):
+                cause = INFRA
+            elif failure_cause_of_text(failure.get("failure_reason") or "") == INFRA:
+                cause = INFRA
+            else:
+                cause = MODEL if terminal else INFRA
         record: Dict[str, Any] = {
             NG_TASK_ID_KEY: task_id,
             NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS,
-            NG_TERMINAL_KEY: bool(failure.get("terminal", False)),
+            NG_TERMINAL_KEY: terminal,
+            NG_FAILURE_CAUSE_KEY: cause,
             "_ng_failure_message": failure.get("failure_reason"),
         }
         if failure.get("stage") is not None:
@@ -1652,6 +1677,33 @@ def observed_elapsed(record: Dict[str, Any]) -> Optional[float]:
     return None
 
 
+# Where a row keeps the error text: the collector's own keys, an agent's ``error``, and a verifier's
+# ``failure_reason`` and ``infrastructure_error`` (Terminal-Bench puts its exception name only there).
+_FAILURE_TEXT_KEYS = (
+    "_ng_failure_type",
+    "_ng_failure_response_body",
+    "_ng_failure_message",
+    "error",
+    "failure_reason",
+    "infrastructure_error",
+)
+
+
+def _failure_text(record: Mapping[str, Any]) -> str:
+    return " ".join(str(record.get(key) or "") for key in _FAILURE_TEXT_KEYS)
+
+
+def failure_cause_of_row(record: Mapping[str, Any]) -> str:
+    """Where a failures-sidecar row's failure happened, from what the row recorded about it."""
+    cause = record.get(NG_FAILURE_CAUSE_KEY)
+    if cause in (INFRA, MODEL):
+        return cause
+    # No reply, or a gateway status: something in front of the rollout failed before it ran.
+    if record.get(NG_FAILURE_CLASS_KEY) == AGENT_REQUEST_FAILED_FAILURE_CLASS:
+        return INFRA
+    return failure_cause_of_text(_failure_text(record))
+
+
 def is_terminal_failure(record: Mapping[str, Any], *, retry_terminal_timeouts: bool = False) -> bool:
     """Whether a persisted failure must be gated on resume.
 
@@ -2093,12 +2145,20 @@ def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dic
     """
     rollout_ran = status is not None and status not in _SERVER_DID_NOT_RUN_STATUSES
     body = getattr(exc, "response_content", None)
+    response_body = _truncated_body(body)
+    # A Gym server names the cause of its own 500 in a header that legacy_agent relays unchanged. Without
+    # it, a status the rollout's own server answered with says nothing, so only the error text is evidence.
+    headers = getattr(exc, "headers", None)
+    cause = headers.get(FAILURE_CAUSE_HEADER) if hasattr(headers, "get") else None
+    if cause not in (INFRA, MODEL):
+        cause = failure_cause_of_text(response_body or str(exc)) if rollout_ran else INFRA
     return {
         NG_FAILURE_CLASS_KEY: (AGENT_RUN_ERROR_FAILURE_CLASS if rollout_ran else AGENT_REQUEST_FAILED_FAILURE_CLASS),
+        NG_FAILURE_CAUSE_KEY: cause,
         "_ng_failure_type": type(exc).__name__,
         "_ng_failure_message": str(exc) or repr(exc),
         "_ng_failure_http_status": status,
-        "_ng_failure_response_body": _truncated_body(body),
+        "_ng_failure_response_body": response_body,
     }
 
 
@@ -3584,6 +3644,9 @@ class RolloutCollectionHelper(BaseModel):
                             )
 
                 completed_count += 1
+                # Failure rows an agent wrote itself get the cause the rule reads, so the sidecar shows the decision.
+                if failure_class is not None and not no_persist:
+                    result[NG_FAILURE_CAUSE_KEY] = failure_cause_of_row(result)
                 if config.retain_results_in_memory:
                     rows.append(row)
                     results.append(result)
@@ -4461,6 +4524,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
                     await raise_for_status(res)
                     result = await get_response_json(res)
+                    headers = getattr(res, "headers", None)
+                    cause = headers.get(FAILURE_CAUSE_HEADER) if hasattr(headers, "get") else None
+                    if _materialized_taskset(row) and isinstance(result, dict) and cause in (INFRA, MODEL):
+                        # An environment server's handled failure carries its cause in the header, not the body.
+                        result[NG_FAILURE_CAUSE_KEY] = cause
                     if run_timing is not None and isinstance(result, Mapping):
                         run_timing.record_result(result, time.monotonic() - started)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived

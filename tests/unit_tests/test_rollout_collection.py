@@ -74,6 +74,7 @@ from nemo_gym.rollout_collection import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_DISPATCH_DRAINED_KEY,
     NG_ENVIRONMENT_SERVER_KEY,
+    NG_FAILURE_CAUSE_KEY,
     NG_FAILURE_CLASS_KEY,
     NG_FAILURE_JUDGE_ERROR_KEY,
     NG_FAILURE_MAX_ATTEMPTS_KEY,
@@ -1673,6 +1674,22 @@ class TestRolloutCollection:
         assert result["_ng_failure_http_status"] == status
         assert "reward" not in result
         assert post.await_count == 1
+
+    async def test_run_examples_adds_only_the_cause_to_a_failure_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The only key a failure row gained is the cause label; nothing else a library caller reads changes."""
+        post = AsyncMock(return_value=FakeResponse(500))
+        install_fake_server_client(monkeypatch, post)
+
+        _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
+
+        assert set(result) == {
+            NG_FAILURE_CLASS_KEY,
+            NG_FAILURE_CAUSE_KEY,
+            "_ng_failure_type",
+            "_ng_failure_message",
+            "_ng_failure_http_status",
+            "_ng_failure_response_body",
+        }
 
     async def test_run_examples_raises_for_direct_callers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Library callers (NeMo-RL) keep the exception contract they have today."""

@@ -73,6 +73,7 @@ from nemo_gym.config_types import (
     BaseServerConfig,
     HeadServerUnreachableError,
 )
+from nemo_gym.failure_kinds import FAILURE_CAUSE_HEADER, INFRA, failure_cause_of
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
@@ -1672,16 +1673,24 @@ class SimpleServer(BaseServer):
                 response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
                 print(_format_upstream_error_log(self.get_session_middleware_key(), e), flush=True)
 
-                return JSONResponse(content=response_content, status_code=500)
+                return JSONResponse(
+                    content=response_content,
+                    status_code=500,
+                    headers={FAILURE_CAUSE_HEADER: failure_cause_of(e)},
+                )
             except CancelledError:
-                return JSONResponse(content="Request was cancelled", status_code=500)
+                return JSONResponse(
+                    content="Request was cancelled", status_code=500, headers={FAILURE_CAUSE_HEADER: INFRA}
+                )
             except Exception as e:
                 print(
                     f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
 Formatted exception: {format_exc()}
 repr(e): {repr(e)}"""
                 )
-                return JSONResponse(content=repr(e), status_code=500)
+                return JSONResponse(
+                    content=repr(e), status_code=500, headers={FAILURE_CAUSE_HEADER: failure_cause_of(e)}
+                )
             except:
                 print_exc()
                 print(

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterator
 from typing import Literal
 
 
@@ -177,3 +178,172 @@ def validate_failure_kind(name: str | None) -> str | None:
             name,
         )
     return name
+
+
+FailureCause = Literal["infra", "model"]
+INFRA: FailureCause = "infra"
+MODEL: FailureCause = "model"
+
+# Gym's exception middleware names the cause of every 500 it returns in this header, so a relay such
+# as legacy_agent carries it to rollout collection unchanged.
+FAILURE_CAUSE_HEADER = "X-NeMo-Gym-Failure-Cause"
+
+
+# 401/403: a key or route the model does not control; 408/425/429 and 5xx: an overloaded or broken service.
+# Any other 4xx answers a request the model shaped, such as output that overflows the context window.
+_INFRA_HTTP_STATUSES = frozenset({401, 403, 408, 425, 429})
+
+# Matched against every class in an exception's MRO, so subclasses (aiohttp's ClientConnectorError,
+# LiteLLM's wrappers of the OpenAI SDK errors) count too. A bare TimeoutError is not listed: it is the
+# model's own time budget, unless it was raised by an HTTP or sandbox call (see ``_INFRA_TIMEOUT_MODULES``).
+# CancelledError is not listed either: every ``asyncio.timeout`` expiry chains from one.
+_INFRA_EXCEPTION_NAMES = frozenset(
+    {
+        "ClientConnectionError",
+        "ClientPayloadError",
+        "ConnectionError",
+        "ServerTimeoutError",
+        "APIConnectionError",
+        "APITimeoutError",
+        "InternalServerError",
+        "RateLimitError",
+        "ServiceUnavailableError",
+        "AuthenticationError",
+        "PermissionDeniedError",
+        "MemoryError",
+        "SandboxCreateError",
+        "SandboxPtyError",
+        "SandboxOperationTimeoutError",
+        # The raw SDK errors of sandbox providers, which reach a row without Gym's own wrapper.
+        "OpenSandboxCreateError",
+        "SandboxApiException",
+        "SandboxTimeoutException",
+        # Ray lost the worker, the node or the object, not the task's own code.
+        "OutOfMemoryError",
+        "WorkerCrashedError",
+        "NodeDiedError",
+        "ActorDiedError",
+        "RaySystemError",
+        "UnserializableException",
+        "ObjectLostError",
+    }
+)
+# A bare TimeoutError raised inside one of these packages is an HTTP or sandbox call that timed out.
+_INFRA_TIMEOUT_MODULES = ("aiohttp.", "nemo_gym.sandbox.")
+# What an error looks like once it is only text: "ClientConnectorError: ..." or repr "ClientConnectorError(...)".
+_EXCEPTION_NAME_PATTERN = re.compile(r"\b([A-Z]\w*(?:Error|Exception|Failure|Expired))\b")
+# aiohttp's ClientResponseError as text: "503, message='Service Unavailable', url=...".
+_RESPONSE_STATUS_PATTERN = re.compile(r"\b(\d{3}), message=")
+# The infra exception classes by their subclass names, which appear in text where the MRO does not.
+_INFRA_SUBCLASS_NAMES = frozenset(
+    {
+        "ClientConnectorError",
+        "ClientOSError",
+        "ServerDisconnectedError",
+        "ServerConnectionError",
+        "ClientConnectorDNSError",
+        "ConnectionRefusedError",
+        "ConnectionResetError",
+        "BrokenPipeError",
+        "ConnectionTimeoutError",
+        "SocketTimeoutError",
+        # Sandboxed harnesses (Terminal-Bench): the environment or the harness itself failed before or
+        # around the agent's run, or the verifier sandbox missed its start deadline; Terminal-Bench retries
+        # these. The agent's own exits (AgentTimeoutError, NonZeroAgentExitCodeError) and a run that leaves no
+        # reward file (RewardFileNotFoundError) are the model's.
+        "EnvironmentStartTimeoutError",
+        "HealthcheckError",
+        "AgentSetupTimeoutError",
+        "AgentInfrastructureError",
+        "AgentRecordError",
+        "SeededSessionExpired",
+    }
+)
+# Ray's wrapper of a task's own exception: "RayTaskError(ImportError): ...". The wrapped name decides.
+_RAY_TASK_ERROR_PATTERN = re.compile(r"\bRayTaskError\((\w+)\)")
+# aiohttp's own messages for a peer that is down, for text that kept the message and lost the class name.
+_INFRA_MESSAGE_PATTERN = re.compile(
+    r"Cannot connect to host|Server disconnected|Connection reset by peer|Connection refused"
+)
+
+
+def _is_infra_status(status: int) -> bool:
+    return status in _INFRA_HTTP_STATUSES or status >= 500
+
+
+def _exception_chain(error: BaseException) -> Iterator[BaseException]:
+    seen: set[int] = set()
+    pending = [error]
+    while pending:
+        current = pending.pop(0)
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        pending.extend(getattr(current, "exceptions", ()))
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        # ``raise ... from None`` hides the context on purpose, so it is no evidence.
+        if current.__context__ is not None and not current.__suppress_context__:
+            pending.append(current.__context__)
+
+
+def _raised_in_infra_module(error: BaseException) -> bool:
+    traceback = error.__traceback__
+    while traceback is not None:
+        if traceback.tb_frame.f_globals.get("__name__", "").startswith(_INFRA_TIMEOUT_MODULES):
+            return True
+        traceback = traceback.tb_next
+    return False
+
+
+def failure_cause_of(error: BaseException) -> FailureCause:
+    """Where a raised failure happened: in a service the model does not control, or in what the model produced.
+
+    The chain is read (``raise ... from``, an unsuppressed ``__context__``, exception groups), so a model-server
+    connection error wrapped in an agent's own error is still infra. A cause that an inner Gym server named in
+    ``FAILURE_CAUSE_HEADER`` wins over that response's status. A timeout is infra only when an HTTP or sandbox
+    call raised it; the agent's own time budget is the model's. Without infra evidence the failure is the model's.
+    """
+    for current in _exception_chain(error):
+        headers = getattr(current, "headers", None)
+        upstream = headers.get(FAILURE_CAUSE_HEADER) if hasattr(headers, "get") else None
+        if upstream in (INFRA, MODEL):
+            return upstream
+        status = getattr(current, "status", None)
+        if isinstance(status, int) and _is_infra_status(status):
+            return INFRA
+        if any(cls.__name__ in _INFRA_EXCEPTION_NAMES for cls in type(current).__mro__):
+            return INFRA
+        if isinstance(current, TimeoutError) and _raised_in_infra_module(current):
+            return INFRA
+    return MODEL
+
+
+def failure_cause_of_text(text: str) -> FailureCause:
+    """``failure_cause_of`` for a failure that is only known as text, such as a relayed error body.
+
+    A ``RayTaskError(X)`` takes the cause of ``X``, the task's own exception, not of the wrapper.
+    """
+    text = _RAY_TASK_ERROR_PATTERN.sub(r"\1", text)
+    names = set(_EXCEPTION_NAME_PATTERN.findall(text))
+    if names & (_INFRA_EXCEPTION_NAMES | _INFRA_SUBCLASS_NAMES) or _INFRA_MESSAGE_PATTERN.search(text):
+        return INFRA
+    if any(_is_infra_status(int(status)) for status in _RESPONSE_STATUS_PATTERN.findall(text)):
+        return INFRA
+    return MODEL
+
+
+def episode_failure_cause(error: BaseException, *, terminal: bool) -> FailureCause:
+    """The cause an environment server records on an episode failure it builds from ``error``.
+
+    Infra evidence in the error wins, and so does a ``model`` cause an inner Gym server named. Without either,
+    the server's own ``terminal`` decides: a failure it would let collection try again is a retry.
+    """
+    for current in _exception_chain(error):
+        headers = getattr(current, "headers", None)
+        if hasattr(headers, "get") and headers.get(FAILURE_CAUSE_HEADER) == MODEL:
+            return MODEL
+    if failure_cause_of(error) == INFRA:
+        return INFRA
+    return MODEL if terminal else INFRA

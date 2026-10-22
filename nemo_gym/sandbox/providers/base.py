@@ -262,6 +262,10 @@ class SandboxPtyError(RuntimeError):
     """Raised when a PTY session fails outside normal process exit."""
 
 
+class SandboxOperationTimeoutError(TimeoutError):
+    """Raised when a sandbox provider call times out: the sandbox, not the model, ran out of time."""
+
+
 class SandboxCreateError(RuntimeError):
     """Raised when a provider cannot create a sandbox."""
 

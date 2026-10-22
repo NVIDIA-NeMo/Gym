@@ -4,6 +4,7 @@
 """Shared lifecycle for environment servers."""
 
 import asyncio
+import contextvars
 import logging
 from abc import abstractmethod
 from collections.abc import Awaitable, Callable
@@ -12,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Generic, TypeVar
 
 from anyio import CancelScope
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, Response
 from pydantic import ConfigDict, Field, JsonValue, PositiveFloat, PositiveInt, model_validator
 from typing_extensions import Self
 
@@ -23,6 +24,7 @@ from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym._checkpoint.steps import StepMode
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure, EpisodeId
+from nemo_gym.failure_kinds import FAILURE_CAUSE_HEADER, FailureCause
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SimpleServer
 
@@ -123,11 +125,20 @@ class CleanupContext:
 
 
 class HandledEpisodeError(Exception):
-    """Carry a failure that belongs in the episode response."""
+    """Carry a failure that belongs in the episode response.
 
-    def __init__(self, failure: EpisodeFailure) -> None:
+    ``cause`` (``infra`` or ``model``), read from the live error, travels in the ``FAILURE_CAUSE_HEADER``
+    response header, so the versioned failure record is unchanged.
+    """
+
+    def __init__(self, failure: EpisodeFailure, *, cause: FailureCause | None = None) -> None:
         super().__init__(failure.failure_reason)
         self.failure = failure
+        self.cause = cause
+
+
+# The cause of the handled failure the current /run request returns, for its response header.
+_failure_cause: contextvars.ContextVar[FailureCause | None] = contextvars.ContextVar("failure_cause", default=None)
 
 
 class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeResponseT]):
@@ -155,8 +166,12 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         app = FastAPI()
         self.setup_environment_checkpoint(app)
 
-        async def run_endpoint(body: Any) -> Any:
-            return await self.run_request(body)
+        async def run_endpoint(body: Any, http_response: Response) -> Any:
+            _failure_cause.set(None)
+            response = await self.run_request(body)
+            if (cause := _failure_cause.get()) is not None:
+                http_response.headers[FAILURE_CAUSE_HEADER] = cause
+            return response
 
         run_endpoint.__annotations__["body"] = self.request_model
         run_endpoint.__annotations__["return"] = self.response_model
@@ -230,6 +245,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                     # A checkpoint refused this episode before it started; the caller retries it later.
                     raise
                 except HandledEpisodeError as error:
+                    _failure_cause.set(error.cause)
                     response = self.failure_response(request, error.failure)
                 except asyncio.CancelledError as error:
                     cancelled = error
