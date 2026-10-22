@@ -505,6 +505,30 @@ def test_script_skips_the_sdk_of_a_partly_configured_exporter():
     assert "uv sync --locked --extra telemetry" in _script(_config(driver=driver))
 
 
+@pytest.mark.parametrize("section", ["prepare", "run"])
+def test_script_installs_mlflow_for_gitlab_dataset_storage(section):
+    # A tracking URI and token without an experiment open no exporter, but a GitLab download needs mlflow.
+    creds = {"mlflow_tracking_uri": "https://gitlab.example", "mlflow_tracking_token": "token"}
+    driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {section: creds}}}
+    script = _script(_config(driver=driver))
+    assert 'UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --locked --extra telemetry --extra mlflow' in script
+    assert "uv pip install" not in script
+
+
+def test_script_installs_mlflow_once_for_an_exporter_and_gitlab_storage():
+    run = {
+        "mlflow_tracking_uri": "https://tracking.example",
+        "mlflow_tracking_token": "token",
+        "mlflow_experiment_name": "gym",
+        "mlflow_run_name": "run",
+    }
+    driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {"prepare": run, "run": run}}}
+    script = _script(_config(driver=driver))
+    assert 'UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --locked --extra telemetry --extra mlflow' in script
+    assert script.count("--extra mlflow") == 1
+    assert "uv pip install" not in script
+
+
 def test_script_lets_an_explicit_driver_env_win_over_telemetry_defaults():
     driver = {**_DRIVER_WITH_INSTALL, "env": {"OTEL_EXPORTER_OTLP_ENDPOINT": "lit:http://elsewhere:4318"}}
     line = _driver_line(_script(_config(driver=driver)))

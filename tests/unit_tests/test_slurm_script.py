@@ -551,6 +551,14 @@ def test_build_vllm_ray_serve_command_multi_node_raises_queue_length_response_de
     assert cmd.index("export RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S=") < cmd.index("ray symmetric-run")
 
 
+def test_build_vllm_ray_serve_command_multi_node_spreads_requests_over_all_replicas(vllm_service):
+    # The head node's proxy would otherwise keep every request on its local replica, which never
+    # fills, so it must be switched off before `ray start`/`ray symmetric-run` starts the proxy.
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2, gpus_per_node_values=[8])
+    assert "export RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING=0" in cmd
+    assert cmd.index("export RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING=0") < cmd.index("ray symmetric-run")
+
+
 def test_build_vllm_ray_serve_command_multi_node_chain_survives_symmetric_run_entrypoint(vllm_service):
     # Regression test: the whole write-then-install-then-launch chain must reach `ray symmetric-run`
     # as one opaque token, not get split by the outer bash -lc live-parsing its own && operators.

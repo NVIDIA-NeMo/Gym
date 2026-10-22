@@ -37,6 +37,10 @@ RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S = 600
 # Default replica queue-length RPC deadline (0.1s) is too tight for cross-node hops.
 RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S = 1.0
 
+# The head node's proxy prefers its local replica until that replica is full, and a gateway replica
+# never fills (MAX_ONGOING_REQUESTS_PER_INSTANCE), so every other instance would sit idle.
+RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING = 0
+
 
 _VLLM_RAY_SYMMETRIC_RUN = (
     """\
@@ -46,6 +50,9 @@ bash -lc '
     + """
     export RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S="""
     + str(RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S)
+    + """
+    export RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING="""
+    + str(RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING)
     + """
     """
     + ENSURE_RAY_INSTALLED
