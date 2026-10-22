@@ -66,6 +66,10 @@ PREFILL_DERIVED_METRICS = (
         "prefill_underfill_reason_fraction",
         "prefill_kv_lookup_latency_ms",
         "prefill_kv_lookup_pending_latency_ms",
+        "prefill_kv_lookup_queue_latency_ms",
+        "prefill_kv_lookup_execution_latency_ms",
+        "prefill_kv_lookup_observation_latency_ms",
+        "prefill_kv_lookup_client_latency_ms",
         "prefill_delayed_requests_per_step",
         "prefill_blocked_requests_per_step",
     }
@@ -307,6 +311,21 @@ class InferenceMetricsCollector:
             completed = metrics.get(f"{prefix}prefill_{kind}_completed_per_second")
             if duration is not None and completed is not None and completed > 0:
                 metrics[f"{prefix}prefill_{kind}_latency_ms"] = duration / completed / 1e6
+        # Instrumented client attempts share a denominator, unlike the generic
+        # scheduler metric (which also includes immediate skips/other connectors).
+        completed = metrics.get(f"{prefix}prefill_kv_lookup_timed_completed_per_second")
+        if completed is not None and completed > 0:
+            durations = [
+                metrics.get(f"{prefix}prefill_kv_lookup_{phase}_duration_ns_per_second")
+                for phase in ("queue", "execution", "observation")
+            ]
+            for phase, duration in zip(("queue", "execution", "observation"), durations):
+                if duration is not None:
+                    metrics[f"{prefix}prefill_kv_lookup_{phase}_latency_ms"] = duration / completed / 1e6
+            if all(duration is not None for duration in durations):
+                metrics[f"{prefix}prefill_kv_lookup_client_latency_ms"] = (
+                    sum(duration for duration in durations if duration is not None) / completed / 1e6
+                )
         steps = metrics.get(f"{prefix}prefill_delay_steps_per_second")
         if steps is not None and steps > 0:
             for field in ("delayed_requests", "blocked_requests"):

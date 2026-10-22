@@ -983,6 +983,11 @@ async def test_prefill_global_average_pools_counts_instead_of_averaging_engine_m
             f"vllm/{replica}/prefill_ready_requests_per_step/engine/0": tokens / batches,
             f"vllm/{replica}/prefill_ready_requests_per_step": tokens / batches,
         }
+        result[f"vllm/{replica}/prefill_kv_lookup_timed_completed_per_second"] = batches
+        for phase, multiplier in (("queue", 1), ("execution", 2), ("observation", 3)):
+            result[f"vllm/{replica}/prefill_kv_lookup_{phase}_duration_ns_per_second"] = tokens * multiplier * 1e6
+            result[f"vllm/{replica}/prefill_kv_lookup_{phase}_latency_ms"] = tokens * multiplier / batches
+        result[f"vllm/{replica}/prefill_kv_lookup_client_latency_ms"] = tokens * 6 / batches
         for name, (numerator, denominator, label) in metrics_module.PREFILL_OUTCOME_METRICS.items():
             result.update(
                 {
@@ -1004,6 +1009,9 @@ async def test_prefill_global_average_pools_counts_instead_of_averaging_engine_m
     assert published["vllm/total/prefill_tokens_per_forward"] == 190
     assert "vllm/mean/prefill_tokens_per_forward" not in published
     assert published["vllm/total/prefill_kv_lookup_latency_ms"] == 190
+    for phase, multiplier in (("queue", 1), ("execution", 2), ("observation", 3), ("client", 6)):
+        assert published[f"vllm/total/prefill_kv_lookup_{phase}_latency_ms"] == 190 * multiplier
+        assert f"vllm/mean/prefill_kv_lookup_{phase}_latency_ms" not in published
     assert published["vllm/total/prefill_blocked_requests_per_step/reason/kv_lookup_pending"] == 190
     assert "vllm/mean/prefill_kv_lookup_latency_ms" not in published
     assert "vllm/mean/prefill_blocked_requests_per_step/reason/kv_lookup_pending" not in published
@@ -1134,3 +1142,43 @@ def test_prefill_outcome_averages_preserve_labels_engines_and_reset_handling(met
     reset = parse([(0, 0), (10, 22)], 40)
     assert f"{prefix}/engine/0/{label}/mamba_alignment" not in reset
     assert reset[f"{prefix}/{label}/mamba_alignment"] == pytest.approx(3)
+
+
+def test_prefill_lookup_phases_share_completed_attempts_and_use_interval_deltas():
+    collector = InferenceMetricsCollector(config())
+    values = {
+        "kv_lookup_completed": 20,
+        "kv_lookup_duration_ns": 200_000_000,
+        "kv_lookup_timed_completed": 2,
+        "kv_lookup_timed_failed": 1,
+        "kv_lookup_queue_duration_ns": 4_000_000,
+        "kv_lookup_execution_duration_ns": 6_000_000,
+        "kv_lookup_observation_duration_ns": 10_000_000,
+    }
+
+    def payload(counts):
+        registry = CollectorRegistry()
+        for name, value in counts.items():
+            Counter(f"vllm:prefill_{name}_total", "Lookup timing", registry=registry).inc(value)
+        return generate_latest(registry).decode()
+
+    prefix = "vllm/replica0/prefill_kv_lookup_"
+    derived = {
+        prefix + phase + "_latency_ms": value
+        for phase, value in (("queue", 2), ("execution", 3), ("observation", 5), ("client", 10))
+    }
+    initial = collector.parse("replica0", payload(dict.fromkeys(values, 0)), 10)
+    assert not derived.keys() & initial.keys()
+    result = collector.parse("replica0", payload(values), 20)
+    for key, value in derived.items():
+        assert result[key] == value
+    assert result[prefix + "timed_failed_per_second"] == 0.1
+    idle = collector.parse("replica0", payload(values), 30)
+    assert not derived.keys() & idle.keys()
+    reset = collector.parse("replica0", payload(dict.fromkeys(values, 0)), 40)
+    assert not derived.keys() & reset.keys()
+    # An older/partial exporter must not produce a misleading summed latency.
+    values.pop("kv_lookup_observation_duration_ns")
+    partial = collector.parse("replica0", payload(values), 50)
+    assert partial[prefix + "queue_latency_ms"] == 2
+    assert prefix + "client_latency_ms" not in partial
