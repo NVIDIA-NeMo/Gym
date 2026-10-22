@@ -140,34 +140,45 @@ other flags pass through to `gym eval run`.
 
 ## Collecting training data
 
-`collect.py` writes one training record per task: `{id, db_id, context, completions: [{completion, reward,
-reference_logprob}]}`, where `reference_logprob` is the summed per-token logprob of the generation.
+`collect` runs the model on every task `--num-repeats` times and writes one training record per task:
+`{id, db_id, context, completions: [{completion, reward, reference_logprob}]}`, where `reference_logprob` is the
+summed per-token logprob of the generation.
 
 ```bash
-python -m benchmarks.birdbench.collect collect --num-repeats 32 --limit 20      # train, sqlite (the defaults); drop --limit for all
-python -m benchmarks.birdbench.collect collect --dialect spark --num-repeats 32  # train, spark
-python -m benchmarks.birdbench.collect collect --split dev --num-repeats 8       # dev,   sqlite
-python -m benchmarks.birdbench.collect reprocess --output-dir <collect run dir>
-python -m benchmarks.birdbench.collect group --rollouts <eval.sh output>/rollouts.jsonl --output grouped.jsonl
-python -m benchmarks.birdbench.collect select-hard --prepared-jsonl data/birdbench_sqlite_train.jsonl \
-    --grouped-jsonl <run dir>/grouped.jsonl --output-jsonl data/birdbench_sqlite_train_hard.jsonl
-python -m benchmarks.birdbench.collect collect --input-jsonl data/birdbench_sqlite_train_hard.jsonl \
-    --num-repeats 128                  # second pass on the tasks nobody solved
+python -m benchmarks.birdbench.collect collect --num-repeats 8                    # train, sqlite (the defaults)
+python -m benchmarks.birdbench.collect collect --num-repeats 32                   # more rollouts per task
+python -m benchmarks.birdbench.collect collect --num-repeats 8 --dialect spark    # train, spark
+python -m benchmarks.birdbench.collect collect --num-repeats 8 --split dev        # dev,   sqlite
+python -m benchmarks.birdbench.collect collect --num-repeats 4 --limit 20         # smoke test on 20 tasks
 ```
 
-- **`collect`** writes `benchmarks/birdbench/train_data/<split>_<dialect>/<model>/` (`--output-dir` overrides) with `raw_choices.jsonl`
-  (the raw API response per rollout, saved before any processing) and `grouped.jsonl` (per task). A repeat that fails
-  after 5 retries is dropped with a warning, so a task can have fewer than `--num-repeats` completions.
-- **`reprocess`** rebuilds `grouped.jsonl` from `raw_choices.jsonl` with no API calls, for after a fix to the text
-  reconstruction, reward or logprob logic.
-- **`group`** converts an `eval.sh` / `gym eval run` rollouts file; `reference_logprob` is set only if
-  `return_token_id_information` reached the policy model.
-- **`select-hard`** keeps the prepared rows that no collected rollout solved, pooled over any number of grouped files,
-  matched by `id`.
-- **Saved completions** are `<think>reasoning</think>answer<stop token>`. `<think>` is added to the saved text only
-  (it is never generated, so it has no logprob); the stop token is absent if `--max-tokens` cut the model off.
-- **Concurrency.** `--sql-concurrency` defaults to 16: at 32, threads contending on SQLite's progress handler starved
-  the GIL and rewards collapsed (0/32 correct vs 31/32 at 16, same data). Use about 4 for Spark.
-- **Spark** needs a JDK and pyspark: run with `resources_servers/bird_sql/.venv`'s python.
+Output goes to `benchmarks/birdbench/train_data/<split>_<dialect>/<model>/` (`--output-dir` overrides):
+- `raw_choices.jsonl`: one row per rollout, the raw API response, saved before any processing.
+- `grouped.jsonl`: one record per task, with all its completions.
 
-`collect` writes no aggregate metrics; use `eval.sh` for those.
+Notes:
+- A repeat that fails after 5 retries is dropped with a warning, so a task can have fewer than `--num-repeats`
+  completions.
+- Saved completions are `<think>reasoning</think>answer<stop token>`. `<think>` is added to the saved text only (it is
+  never generated, so it has no logprob); the stop token is absent if `--max-tokens` cut the model off.
+- `--sql-concurrency` defaults to 16. At 32, threads contending on SQLite's progress handler starved the GIL and rewards
+  collapsed (0/32 correct vs 31/32 at 16, same data). Use about 4 for Spark.
+- `--dialect spark` needs a JDK and pyspark: run with `resources_servers/bird_sql/.venv`'s python.
+- `collect` writes no aggregate metrics; use `eval.sh` for those.
+
+### Rarely needed
+
+```bash
+# Re-score saved raw responses, with no API calls (after a fix to the text reconstruction, reward or logprob logic)
+python -m benchmarks.birdbench.collect reprocess --output-dir <collect run dir>
+
+# Convert an eval.sh / `gym eval run` rollouts file to the grouped format
+# (reference_logprob is set only if return_token_id_information reached the policy model)
+python -m benchmarks.birdbench.collect group --rollouts <eval output>/rollouts.jsonl --output grouped.jsonl
+
+# Second pass on the tasks no rollout solved: select them (pooled over any number of grouped files, matched by id),
+# then collect again on just those
+python -m benchmarks.birdbench.collect select-hard --prepared-jsonl data/birdbench_sqlite_train.jsonl \
+    --grouped-jsonl <run dir>/grouped.jsonl --output-jsonl data/birdbench_sqlite_train_hard.jsonl
+python -m benchmarks.birdbench.collect collect --input-jsonl data/birdbench_sqlite_train_hard.jsonl --num-repeats 128
+```
