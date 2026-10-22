@@ -172,7 +172,6 @@ def _resolve_task(body: DeepSWEInstanceRequest, task_store: DeepSWETaskStore) ->
 
 
 class DeepSWEResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: DeepSWEResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -319,6 +318,10 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         await sandbox.download(remote_path, local_path)
         return True
 
+    def _verifier_workdir(self, task: Task) -> str:
+        """Directory test.sh runs from. DeepSWE tasks live at /app; subclasses may read it from the row."""
+        return "/app"
+
     async def _run_verifier(
         self,
         sandbox: AsyncSandbox,
@@ -330,7 +333,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         try:
             command_result = await sandbox.exec(
                 "bash /tests/test.sh",
-                cwd="/app",
+                cwd=self._verifier_workdir(task),
                 timeout_s=task.config.verifier.timeout_sec,
             )
         except TimeoutError:

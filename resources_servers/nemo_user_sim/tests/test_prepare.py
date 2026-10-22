@@ -4,6 +4,8 @@
 import json
 import re
 import subprocess
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -13,7 +15,7 @@ from environments.nemo_user_sim import prepare as prepare_module
 from nemo_gym.config_types import DatasetConfig
 from nemo_gym.task_materialization import materialize_task
 from resources_servers.nemo_user_sim.app import UserSimResourcesServerConfig
-from resources_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest
+from resources_servers.nemo_user_sim.task_data import TaskData
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -108,6 +110,102 @@ def test_validate_persona_asset_requires_pinned_file(tmp_path: Path, monkeypatch
     assert prepare_module._validate_persona_asset("en_US") == managed_assets_path
 
 
+def test_download_persona_asset_installs_verified_ngc_resource(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    managed_assets_path = tmp_path / "managed-assets"
+    expected_asset = b"pinned asset"
+    monkeypatch.setattr(
+        prepare_module,
+        "NEMOTRON_PERSONAS_SHA256",
+        prepare_module.hashlib.sha256(expected_asset).hexdigest(),
+    )
+    calls: list[list[str]] = []
+
+    def fake_download(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        calls.append(command)
+        download_dir = Path(command[command.index("--dest") + 1])
+        resource_dir = download_dir / "nemotron-personas-dataset-en_us_v0.0.2"
+        resource_dir.mkdir()
+        (resource_dir / "en_US.parquet").write_bytes(expected_asset)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(prepare_module.subprocess, "run", fake_download)
+
+    result = prepare_module._download_persona_asset(
+        ngc_executable=Path("/opt/ngc"),
+        locale="en_US",
+        managed_assets_path=managed_assets_path,
+    )
+
+    assert calls[0][:5] == [
+        "/opt/ngc",
+        "registry",
+        "resource",
+        "download-version",
+        prepare_module.NEMOTRON_PERSONAS_RESOURCE,
+    ]
+    assert result == managed_assets_path / "datasets" / "en_US.parquet"
+    assert result.read_bytes() == expected_asset
+    assert list(result.parent.glob(".*.tmp")) == []
+
+
+def test_materialization_bootstraps_missing_persona_asset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    managed_assets_path = tmp_path / "managed-assets"
+    models_path = tmp_path / "models.toml"
+    destination = tmp_path / "resolved.jsonl"
+    models_path.write_text("")
+    download_calls: list[tuple[Path, str, Path]] = []
+
+    def fake_download(*, ngc_executable: Path, locale: str, managed_assets_path: Path) -> Path:
+        download_calls.append((ngc_executable, locale, managed_assets_path))
+        asset_path = managed_assets_path / "datasets" / f"{locale}.parquet"
+        asset_path.parent.mkdir(parents=True)
+        asset_path.write_bytes(b"pinned asset")
+        return asset_path
+
+    def fake_materialize_episode_inputs(**kwargs: object) -> list[dict[str, object]]:
+        assert (managed_assets_path / "datasets" / "en_US.parquet").is_file()
+        return [{"trajectory_id": f"usersim-{kwargs['random_seed']}"}]
+
+    monkeypatch.setattr(prepare_module, "_download_persona_asset", fake_download)
+    package_names = ("usersim", "usersim.cli", "usersim.engine", "usersim.engine.core")
+    for name in package_names:
+        package = types.ModuleType(name)
+        package.__path__ = []
+        monkeypatch.setitem(sys.modules, name, package)
+    ngc_module = types.ModuleType("usersim.cli._ngc")
+    ngc_module.ensure_ngc_cli = lambda: Path("/opt/ngc")
+    ngc_module.ensure_ngc_org = lambda: "test-org"
+    ngc_module.has_ngc_key = lambda: True
+    monkeypatch.setitem(sys.modules, "usersim.cli._ngc", ngc_module)
+    probes_module = types.ModuleType("usersim.engine.core.probes")
+    probes_module.known_probes = lambda: ("general_open_ended",)
+    monkeypatch.setitem(sys.modules, "usersim.engine.core.probes", probes_module)
+    external_module = types.ModuleType("usersim.engine.external")
+    external_module.materialize_episode_inputs = fake_materialize_episode_inputs
+    monkeypatch.setitem(sys.modules, "usersim.engine.external", external_module)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "-c",
+            str(REPOSITORY_ROOT),
+            "en_US",
+            "1042",
+            str(managed_assets_path),
+            str(models_path),
+            str(destination),
+        ],
+    )
+
+    exec(compile(prepare_module._MATERIALIZE_SCRIPT, "<materialize-script>", "exec"), {})
+
+    assert download_calls == [(Path("/opt/ngc"), "en_US", managed_assets_path)]
+    expected_seed = prepare_module._probe_seed(1042, "general_open_ended")
+    assert json.loads(destination.read_text())["trajectory_id"] == f"usersim-{expected_seed}"
+
+
 def test_managed_assets_path_matches_data_designer_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATA_DESIGNER_HOME", str(tmp_path / "home"))
     assert prepare_module._managed_assets_path() == tmp_path / "home" / "managed-assets"
@@ -198,12 +296,8 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
     assert all("assets_dir" not in row["resolved_row"]["usersim_config"] for row in rows)
     for index, row in enumerate(rows):
         task = materialize_task(row, taskset="nemo_user_sim:validation", task_index=index)
-        request = UserSimEpisodeRequest.model_validate(
-            {"episode_id": {"rollout_id": f"rollout-{index}", "attempt": 0}, "task": task}
-        )
-        assert request.task.task_id.taskset == "nemo_user_sim:validation"
-        assert request.task.task_id.task_id == row["task_id"]
-        assert request.task.task_input.resolved_row == row["resolved_row"]
+        assert task["task_id"] == {"taskset": "nemo_user_sim:validation", "task_id": row["task_id"]}
+        assert TaskData.model_validate(task["task_input"]).resolved_row == row["resolved_row"]
     assert len(calls) == 1
     command, kwargs = calls[0]
     assert command[:9] == [

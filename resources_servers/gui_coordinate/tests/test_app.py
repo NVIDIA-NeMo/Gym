@@ -18,11 +18,18 @@ import pytest
 from app import (
     GuiCoordinateResourcesServer,
     GuiCoordinateResourcesServerConfig,
+    GuiCoordinateVerifyRequest,
     _compute_reward,
     _parse_gt,
     _parse_prediction,
 )
 
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+)
 from nemo_gym.server_utils import ServerClient
 
 
@@ -69,3 +76,42 @@ class TestApp:
         reward, dist = _compute_reward((0.5, 0.25), pred, 0.1)
         assert reward == pytest.approx(expected_reward)
         assert dist >= 0.0
+
+    async def test_verify_passes_metadata_through(self) -> None:
+        # The README promises per-row metadata is passed through; the simple agent saves the
+        # /verify JSON as the rollout row, so it must be in the serialized response.
+        config = GuiCoordinateResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
+        server = GuiCoordinateResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        metadata = {"target_color": "yellow", "source": "fixture-1"}
+        request = GuiCoordinateVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=NeMoGymResponse(
+                id="response",
+                created_at=0,
+                model="model",
+                object="response",
+                output=[
+                    NeMoGymResponseOutputMessage(
+                        id="message",
+                        content=[
+                            NeMoGymResponseOutputText(
+                                annotations=[], text="<point>(500, 250)</point>", type="output_text"
+                            )
+                        ],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                ],
+                parallel_tool_calls=False,
+                tool_choice="none",
+                tools=[],
+            ),
+            expected_answer="0.5,0.25",
+            metadata=metadata,
+        )
+
+        result = (await server.verify(request)).model_dump(mode="json")
+
+        assert result["reward"] == pytest.approx(1.0)
+        assert result["metadata"] == metadata

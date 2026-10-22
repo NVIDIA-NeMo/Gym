@@ -99,7 +99,7 @@ def test_otel_has_no_destination_by_default():
         {
             "services": {},
             "compute": {"c": {"type": "slurm", "account": "a"}},
-            "driver": {"container": "gym:latest", "benchmarks": {}},
+            "driver": {"container": "gym:latest", "benchmarks": {"b": {}}},
             "job": {"output_path": "/remote"},
         }
     )
@@ -489,6 +489,22 @@ def test_script_switches_on_gym_lens_telemetry_toward_the_collector():
     assert 'uv pip install -e ".[telemetry]"' in script
 
 
+def test_script_installs_the_sdk_of_a_configured_exporter():
+    run = {
+        "mlflow_tracking_uri": "https://tracking.example",
+        "mlflow_experiment_name": "gym",
+        "mlflow_run_name": "run",
+    }
+    driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {"run": run}}}
+    assert 'uv pip install -e ".[telemetry,mlflow]"' in _script(_config(driver=driver))
+
+
+def test_script_skips_the_sdk_of_a_partly_configured_exporter():
+    # A tracking URI alone (a registry lookup) opens no exporter, so needs no SDK.
+    driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {"run": {"mlflow_tracking_uri": "https://x"}}}}
+    assert 'uv pip install -e ".[telemetry]"' in _script(_config(driver=driver))
+
+
 def test_script_lets_an_explicit_driver_env_win_over_telemetry_defaults():
     driver = {**_DRIVER_WITH_INSTALL, "env": {"OTEL_EXPORTER_OTLP_ENDPOINT": "lit:http://elsewhere:4318"}}
     line = _driver_line(_script(_config(driver=driver)))
@@ -500,11 +516,12 @@ def test_script_lets_an_explicit_driver_env_win_over_telemetry_defaults():
 def test_script_ships_gym_logs_by_default_and_can_switch_them_off():
     line = _driver_line(_script(_config(driver=_DRIVER_WITH_INSTALL)))
     assert "NEMO_GYM_OTEL_LOGS_ENABLED=1" in line
-    # No per-signal logs endpoint: logs follow OTEL_EXPORTER_OTLP_PROTOCOL to the collector's
-    # HTTP port. Gym never installs the gRPC exporter, so pinning logs to the gRPC port made
-    # every batch time out.
+    # No per-signal logs endpoint: the pinned nemo-lens builds the log exporter from
+    # OTEL_EXPORTER_OTLP_PROTOCOL like the span and metric exporters, so logs follow the shared
+    # endpoint and protocol in every environment.
     assert "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT" not in line
     assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" in line
+    assert "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf" in line
     off = _config(driver=_DRIVER_WITH_INSTALL, otel={"gym_logs": False})
     assert "NEMO_GYM_OTEL_LOGS_ENABLED=0" in _driver_line(_script(off))
 
@@ -512,6 +529,74 @@ def test_script_ships_gym_logs_by_default_and_can_switch_them_off():
 def test_script_honours_configured_gym_span_groups():
     config = _config(driver=_DRIVER_WITH_INSTALL, otel={"gym_span_groups": "per_rollout,sandbox"})
     assert "NEMO_GYM_OTEL_SPAN_GROUPS=per_rollout,sandbox" in _driver_line(_script(config))
+
+
+def _policy_line(script):
+    return next(line for line in script.splitlines() if "--output=logs/policy-$SLURM_JOB_ID.log" in line)
+
+
+def test_vllm_traces_are_off_by_default():
+    assert "--otlp-traces-endpoint" not in _script(_config())
+
+
+def test_vllm_traces_point_the_engine_at_the_collector_over_http():
+    line = _policy_line(_script(_config(otel={"vllm_traces": True})))
+    assert f"--otlp-traces-endpoint http://localhost:{OTLP_HTTP_PORT}/v1/traces" in line
+    assert "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf" in line
+    assert "OTEL_SERVICE_NAME=gym-vllm/policy" in line
+
+
+def test_vllm_traces_keep_the_services_own_flags_and_let_its_env_win():
+    config = _config(
+        services={
+            "policy": {
+                "type": "vllm",
+                "container": "vllm:latest",
+                "model": "/checkpoint",
+                "port": 8000,
+                "extra_args": "--max-model-len 8192",
+                "env": {"OTEL_SERVICE_NAME": "lit:mine"},
+            }
+        },
+        otel={"vllm_traces": True, "component": "engine"},
+    )
+    line = _policy_line(_script(config))
+    assert "--max-model-len 8192 --otlp-traces-endpoint" in line
+    assert "OTEL_SERVICE_NAME=mine" in line
+    assert "OTEL_SERVICE_NAME=engine/policy" not in line
+    assert "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf" in line
+
+
+def test_vllm_traces_need_the_collector():
+    assert "--otlp-traces-endpoint" not in _script(_config(otel={"enabled": False, "vllm_traces": True}))
+
+
+def test_vllm_traces_skip_a_tier_whose_api_server_is_on_another_node():
+    config = _config(
+        services={
+            "policy": {
+                "type": "vllm_pd",
+                "container": "vllm:latest",
+                "model": "/checkpoint",
+                "port": 8000,
+                "prefill": {"node_pool": "prefill"},
+                "decode": {"node_pool": "decode"},
+            }
+        },
+        compute={
+            "cluster-a": {
+                "type": "slurm",
+                "account": "acct",
+                "hostname": None,
+                "node_pools": {"prefill": {"partition": "batch"}, "decode": {"partition": "batch"}},
+            }
+        },
+        otel={"vllm_traces": True},
+    )
+    script = _script(config)
+    traced = [line for line in script.splitlines() if "--otlp-traces-endpoint" in line]
+    assert len(traced) == 1
+    assert "--port 8001" in traced[0]  # the prefill tier, on the collector's node
 
 
 def test_script_leaves_the_driver_alone_when_disabled():
