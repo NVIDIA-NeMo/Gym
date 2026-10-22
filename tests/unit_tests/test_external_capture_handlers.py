@@ -133,6 +133,20 @@ def test_handler_prepares_worker_staged_request(
         assert "return_tokenized_data" not in payload
 
 
+@pytest.mark.parametrize("top_logprobs", [None, 0, 1, 32, 128])
+def test_vllm_handler_preserves_requested_top_logprobs(top_logprobs: int | None) -> None:
+    context = _root_context(InMemoryLineageStore())
+    token = set_token_sink(context)
+    try:
+        payload = VLLMWorkerCaptureHandler().prepare_request({"top_logprobs": top_logprobs})
+    finally:
+        reset_token_sink(token)
+
+    assert payload["logprobs"] is True
+    assert payload["top_logprobs"] == (0 if top_logprobs is None else top_logprobs)
+    assert payload["return_tokens_as_token_ids"] is True
+
+
 @pytest.mark.parametrize(
     ("request_payload", "error"),
     [
