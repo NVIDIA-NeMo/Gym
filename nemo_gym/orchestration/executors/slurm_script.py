@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from nemo_gym.exporters import exporter_extras
+from nemo_gym.gitlab_utils import gitlab_storage_extras
 from nemo_gym.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.orchestration.api import (
     RUNTIME_ENV_PREFIX,
@@ -29,6 +30,7 @@ from nemo_gym.orchestration.api import (
     ServiceConfig,
     SlurmComputeConfig,
     SubmitConfig,
+    VllmNodeServiceConfig,
     VllmPDServiceConfig,
     VllmPDTierConfig,
     VllmServiceConfig,  # used in _BUILDERS dispatch table
@@ -47,7 +49,7 @@ from nemo_gym.orchestration.executors.otel import (
     vllm_traces_env,
     vllm_traces_flag,
 )
-from nemo_gym.orchestration.executors.resume_script import render_resume_prologue
+from nemo_gym.orchestration.executors.resume_script import RESUBMIT_ENV, render_resume_prologue
 from nemo_gym.orchestration.executors.script_templates import (
     ENSURE_RAY_INSTALLED,
     bash_var,
@@ -180,6 +182,7 @@ def _render_service_command(
     workdir: str | None = None,
     single_node: bool = False,
     nodelist: str | None = None,
+    end_step_on_task_exit: bool = True,
 ) -> str:
     var = bash_var(name)
     env_prefix = _resolve_env(env) if env else ""
@@ -210,9 +213,14 @@ def _render_service_command(
         if container is not None
         else ""
     )
+    # --kill-on-bad-exit and --wait end the whole step within a second when any one of its tasks exits, whatever the
+    # cluster's KillOnBadExit and WaitTime defaults, so a multi-task service (vllm_pd tiers, Ray workers) cannot
+    # lose a task while its srun stays alive and the driver's watch sees nothing.
+    step_flags = " --kill-on-bad-exit=1 --wait=1" if end_step_on_task_exit else ""
     return (
         f"# service: {name}\n"
-        f"{env_prefix}srun --overlap{node_flags}{container_flags} --output=logs/{name}-$SLURM_JOB_ID.log {command} &\n"
+        f"{env_prefix}srun --overlap{node_flags}{container_flags}{step_flags}"
+        f" --output=logs/{name}-$SLURM_JOB_ID.log {command} &\n"
         f"{var}_PID=$!"
     )
 
@@ -495,9 +503,14 @@ def _render_pool_nodes(config: SubmitConfig, compute: SlurmComputeConfig, is_mul
     if not _places_services(config, is_multi_node):
         return ""
     lines = [_NODE_ARRAY]
-    for name, (start, count) in _pool_offsets(compute).items():
+    offsets = _pool_offsets(compute)
+    for name, (start, count) in offsets.items():
         if count:
             lines.append(f'export {pool_nodes_var(name)}="$(IFS=,; echo "${{gym_nodes[*]:{start}:{count}}}")"')
+    for service in config.deployed_services.values():
+        if isinstance(service, VllmNodeServiceConfig) and service.server_per_node:
+            start, count = offsets[service.node_pool]
+            lines.extend(f'export {service.node_host_var(i)}="${{gym_nodes[{start + i}]}}"' for i in range(count))
     return "\n".join(lines)
 
 
@@ -555,6 +568,12 @@ def _pool_of(compute: SlurmComputeConfig, node: int) -> str | None:
     return None
 
 
+def _ray_steps(name: str, service: RayServiceConfig, config: SubmitConfig, compute: SlurmComputeConfig) -> list[str]:
+    """The srun step names of a ray service, as _render_ray_service names them."""
+    head_node = _driver_node(config, compute)
+    return [name] + [f"{name}_{pool}_workers" for pool in _ray_worker_ranges(service, compute, head_node)]
+
+
 def _render_ray_service(
     name: str,
     service: RayServiceConfig,
@@ -606,6 +625,7 @@ def _render_ray_service(
 
 _BUILDERS = {
     VllmServiceConfig: _build_vllm_command,
+    VllmNodeServiceConfig: _build_vllm_command,
     VllmPDTierConfig: _build_vllm_command,
     RayServiceConfig: _build_ray_command,
 }
@@ -719,6 +739,8 @@ def _render_collector_service(
         nodelist=f"gym_nodes[{driver_node}]" if driver_node is not None else None,
         nodes=1 if driver_node is not None else None,
         ntasks=1 if driver_node is not None else None,
+        # Not watched: losing the collector costs telemetry, not the run, so its step keeps Slurm's defaults.
+        end_step_on_task_exit=False,
         **container_kwargs,
     )
 
@@ -755,6 +777,49 @@ def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path) -> 
         f"kill -TERM {pid} 2>/dev/null || true\n"
         "exit $DRIVER_RC"
     )
+
+
+_WATCHED_DRIVER_TEMPLATE = """\
+{driver} &
+_gym_driver_pid=$!
+_gym_service_exited() {{
+    # A successful run tears its services down as the driver ends: if the driver is already gone, its status stands.
+    if ! kill -0 "$_gym_driver_pid" 2>/dev/null; then
+        wait "$_gym_driver_pid"
+        return
+    fi
+    wait "$2"
+    local status=$?
+    echo "ERROR: service $1 exited (status $status) while the driver was running; stopping the driver."
+    kill -TERM "$_gym_driver_pid" 2>/dev/null
+    wait "$_gym_driver_pid"
+    return 1
+}}
+_gym_run_driver() {{
+    while kill -0 "$_gym_driver_pid" 2>/dev/null; do
+{checks}
+        sleep 5
+    done
+    wait "$_gym_driver_pid"
+}}
+_gym_run_driver"""
+
+
+def _render_watched_driver(driver: str, services: list[str]) -> str:
+    """The driver step, ended with TERM if a service it depends on exits first.
+
+    A dead service would otherwise leave the driver retrying it until the walltime. The job exits
+    non-zero instead, so the auto-resume chain reruns it with fresh services; TERM is what the
+    driver gets at the time limit, so its in-flight rollouts leave no row and run again on resume.
+    The driver's PID is kept in a lowercase variable, which no service's uppercase <NAME>_PID can overwrite.
+    """
+    if not services:
+        return driver
+    checks = "\n".join(
+        f"        kill -0 ${bash_var(name)}_PID 2>/dev/null || {{ _gym_service_exited {name} ${bash_var(name)}_PID; return; }}"
+        for name in services
+    )
+    return _WATCHED_DRIVER_TEMPLATE.format(driver=driver, checks=checks)
 
 
 def _pool_offsets(compute: SlurmComputeConfig) -> dict[str, tuple[int, int]]:
@@ -812,7 +877,7 @@ def _service_nodelist(service: ServiceConfig, driver_node: int | None, total_nod
 
 def _build_nodes(service: ServiceConfig, compute: SlurmComputeConfig, total_nodes: int) -> int:
     """Nodes the service command is written for; a per-node server is a single-node command."""
-    if isinstance(service, VllmPDTierConfig) and service.server_per_node:
+    if isinstance(service, (VllmPDTierConfig, VllmNodeServiceConfig)) and service.server_per_node:
         return 1
     return _service_nodes(service, compute, total_nodes)
 
@@ -1013,6 +1078,19 @@ def build_sbatch_script(
             for name, service in config.deployed_services.items()
             if service.health_check
         ]
+        + [
+            render_health_check(
+                f"{name}-node{i}",
+                service.health_check.port,
+                service.health_check.path,
+                service.health_check.timeout_seconds,
+                _probe_host(start + i),
+            )
+            for name, service in config.deployed_services.items()
+            if isinstance(service, VllmNodeServiceConfig) and service.server_per_node and service.health_check
+            for start, count in [offsets[service.node_pool]]
+            for i in range(1, count)
+        ]
     )
 
     gi = config.driver.gym_install
@@ -1043,6 +1121,10 @@ def build_sbatch_script(
         run_args.setdefault("require_complete", True)
         run_args = _with_resume_flag(run_args, resume is not None)
         gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
+        # A job queued by `gym eval resubmit` tells rollout collection, which resets the attempt budget and
+        # resumes whatever the config says: a fresh start would delete the run's rollouts.
+        # The auto-resume prologue, when there is one, has moved the variable into `_gym_resubmit`.
+        gym_cmd += f'\nif [ "${{_gym_resubmit:-${{{RESUBMIT_ENV}:-}}}}" = 1 ]; then GYM_CMD+=(++resubmit=True); fi'
     else:
         # A command replaces `gym eval run`, so the run args it would have carried
         # have nowhere to go. What the script still needs is where to write and how
@@ -1055,7 +1137,14 @@ def build_sbatch_script(
         ref=gi.ref if gi else None,
         prepare_cmd=prepare_cmd,
         command=benchmark.command,
-        extras=((GYM_TELEMETRY_EXTRA,) if instrumented else ()) + exporter_extras(benchmark.run),
+        extras=tuple(
+            dict.fromkeys(
+                ((GYM_TELEMETRY_EXTRA,) if instrumented else ())
+                + exporter_extras(benchmark.run)
+                + gitlab_storage_extras(benchmark.prepare)
+                + gitlab_storage_extras(benchmark.run)
+            )
+        ),
     )
     prepare_command = ""
     driver_env_prefix = _resolve_env(driver_env) if driver_env else ""
@@ -1073,11 +1162,18 @@ def build_sbatch_script(
     # the host, which is what makes the loss so easy to miss.
     driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
     driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
-    driver_command = (f"{gym_cmd}\n" if gym_cmd else "") + (
+    driver_srun = (
         f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
         f" --container-image={shlex.quote(config.driver.container)} "
         f"--output=logs/driver-$SLURM_JOB_ID.log {entrypoint}"
     )
+    # Every service step but the collector, whose loss costs telemetry, not the run.
+    watched = [
+        step
+        for name, service in config.deployed_services.items()
+        for step in (_ray_steps(name, service, config, compute) if isinstance(service, RayServiceConfig) else [name])
+    ]
+    driver_command = (f"{gym_cmd}\n" if gym_cmd else "") + _render_watched_driver(driver_srun, watched)
     if observed:
         driver_command += "\n" + _render_collector_shutdown(config, remote_bench_dir)
 

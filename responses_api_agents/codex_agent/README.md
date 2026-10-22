@@ -73,10 +73,11 @@ A new pairing does not need another combined preset.
 
 ## Runtime and model requirements
 
-Use one agent worker, a pinned `codex_version` (default **0.144.4**), direct `SandboxAccess`,
+Use a pinned `codex_version` (default **0.144.4**), direct `SandboxAccess`,
 and an absolute task workdir disjoint from the adapter directories. Required Resources HTTP/MCP
 tools are rejected; Codex supplies its own tools. The task sandbox supplies isolation, so
 `sandbox_mode` must be `danger-full-access`. No Codex CLI is required on the agent-server host.
+With several agent workers, session routing sends each session's requests to the worker that seeded it.
 
 The installer accepts Linux x86_64/aarch64 glibc and x86_64 musl/Alpine with Python 3.8+.
 POSIX sh installs missing Python and Bash using apt-get or apk when running as root,
@@ -156,11 +157,9 @@ Cleanup coordinates lifecycle; it is not a security boundary against hostile tas
 
 Responses and close observations preserve text, reasoning, tool events, partial output,
 CLI aggregate usage, and sandbox hostname/PID/version. Wall-time and the pinned CLI's explicit
-model-output-limit event yield incomplete, potentially gradable work. Provider/API/runtime
-failures raise execution errors and bypass verification. Only Resources determines reward.
+model-output-limit event yield incomplete, potentially gradable work. Reported provider failures retain partial output and classified cause; the Environment Server decides grading and episode retries. Worker and cleanup failures remain execution errors. Only Resources determines reward.
 
-CLI events omit exact model-call join IDs and can omit failed-call usage even after a recovered
-retry. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
+Native session transcripts supply tool-call IDs and outcomes. The sandbox forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.
 Known model-metadata/compaction warnings remain visible as gaps after clean completion or a gradable model/wall-time limit.
 

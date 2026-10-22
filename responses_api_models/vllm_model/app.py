@@ -154,6 +154,12 @@ def _mark_propagated_overflow(error: ClientResponseError) -> None:
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "run_id": "x-nemo-gym-log-run-id",
     "adapter": "x-nemo-gym-log-adapter",
+    "sampling_event_id": "x-nemo-gym-log-sampling-event-id",
+    "source_group_id": "x-nemo-gym-log-source-group-id",
+    "rollout_id": "x-nemo-gym-log-rollout-id",
+    "group_id": "x-nemo-gym-log-group-id",
+    "rollout_index": "x-nemo-gym-log-rollout-index",
+    "attempt_index": "x-nemo-gym-log-attempt-index",
     "task_id": "x-nemo-gym-log-task-id",
     "domain": "x-nemo-gym-log-domain",
     "task_attempt": "x-nemo-gym-log-task-attempt",
@@ -170,7 +176,13 @@ def _transport_log_context(request: Request) -> Dict[str, Any]:
         value = request.headers.get(header)
         if not value:
             continue
-        if field in {"task_attempt", "step", "parse_attempt"}:
+        if field in {
+            "rollout_index",
+            "attempt_index",
+            "task_attempt",
+            "step",
+            "parse_attempt",
+        }:
             try:
                 context[field] = int(value)
             except ValueError:
@@ -563,6 +575,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                     if (self.config.endpoint_file or self.config.route_around_failing_endpoints)
                     else None
                 ),
+                # The wait budget is for outside providers; a job must notice a down model server quickly.
+                max_rate_limit_wait_seconds=0,
             )
             for base_url in self.config.base_url
         ]
@@ -1841,6 +1855,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if completion_dict.get("usage") is not None:
             chat_completion_dict["usage"] = completion_dict["usage"]
+        if completion_dict.get("metrics") is not None:
+            chat_completion_dict["metrics"] = completion_dict["metrics"]
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
@@ -1918,6 +1934,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 api_key=self.config.api_key,
                 default_headers=self.config.default_headers,
                 max_connection_retries=self.config.endpoint_connection_retries,
+                max_rate_limit_wait_seconds=0,
             )
         ]
         # Every session re-resolves onto the new host.

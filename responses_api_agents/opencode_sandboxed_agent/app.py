@@ -27,7 +27,7 @@ from shlex import quote
 from tempfile import TemporaryDirectory
 from time import time
 from traceback import format_exc
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 from uuid import uuid4
 
 from anyio import CancelScope
@@ -623,6 +623,8 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
 
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     config: OpenCodeSandboxedAgentConfig
+    # The harness runs inside the task sandbox and calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
