@@ -582,15 +582,72 @@ Preserve the model's HTTP status and error bodies, so that context-limit handlin
 | Outcome | Handling |
 | --- | --- |
 | Model or configured execution limit reached | Keep partial work and mark it incomplete. It may still be gradable. |
-| Setup, provider, API, or runtime failure | Keep the failure evidence. Agent sessions propagate the error without running benchmark verification. |
+| Provider or runtime failure | Keep failure evidence. The Environment Server decides whether to verify or make the episode retryable from the reported cause. |
 | Harness termination not confirmed | Fail the activation and skip verification. The sandbox owner tears the sandbox down. |
 | Verification completed | Report the score, including valid zeros. |
 | Verification missing or inconclusive | Report the missing measurement separately from scored attempts. |
 | Verification infrastructure failure | Raise, or mask the sample with `mask_sample: true`. Do not report it as a reward of 0, and do not cache it as the session's verification result. Terminal Bench 2.1 and SWE-bench Pro do not follow this yet. When verification cannot run, both return a reward of 0 with `evaluation_completed: false`, and Terminal Bench 2.1 caches that result. When SWE-bench Pro cannot extract the patch from the task sandbox, it grades an empty patch and returns a reward of 0 with `evaluation_completed: true` and the extraction failure in `error`. Do not copy that behavior into a new Resources Server. |
 
-Local compatibility paths can have a different evidence contract. For example, [Hermes's local `/run`](https://github.com/NVIDIA-NeMo/Gym/blob/77509af61efe53e6bb01244209e2a6e9c9e8a403/responses_api_agents/hermes_agent/README.md#local-compatibility) keeps terminal provider failures through verification. It then returns `mask_sample: true` and `failure_kind: agent_request_failed`, even if the verifier awards a positive reward. These failed rollouts are excluded from scores. Hermes agent sessions keep their retryable failure path.
+Local compatibility paths can have a different evidence contract. For example, [Hermes's local `/run`](https://github.com/NVIDIA-NeMo/Gym/blob/77509af61efe53e6bb01244209e2a6e9c9e8a403/responses_api_agents/hermes_agent/README.md#local-compatibility) keeps terminal provider failures through verification. It then returns `mask_sample: true` and `failure_kind: agent_request_failed`, even if the verifier awards a positive reward. These failed rollouts are excluded from scores. Hermes agent sessions use the Environment Server policy below.
 
 A reward of `1` or an HTTP `200` response alone does not prove that an episode was healthy.
+
+#### Report a cause; let the environment decide
+
+`SimpleResponsesAPIAgent` provides `classify_outcome(native_result) -> AgentOutcome`
+and `report_outcome(response, native_result)`. The default classifier returns
+`unknown`; override it using native evidence when available. Call `report_outcome`
+before returning a failed response; inheritance alone does not attach metadata.
+Keep text parsing in the classifier and document the tested runtime version.
+Pi, Codex, OpenCode and Hermes override it in their agent-session paths.
+
+`AgentOutcome.failure_kind` accepts names registered in `nemo_gym/failure_kinds.py`
+or `unknown`; unregistered names are rejected. The shared names describe causes,
+not retry or grading policy.
+
+Use `model_context_limit` only when a provider or harness explicitly reports that the
+model's context window was exceeded. HTTP 400 or 413 alone does not establish that
+cause. Report a context-limit stop as `status="incomplete"` with this reason: the
+partial work proceeds to verification without an automatic episode retry.
+
+The helper writes JSON to `response.metadata.ng_agent_outcome`; `status_code` is the
+upstream model request's status, not the agent endpoint's HTTP status. The
+`single_agent_turn` Environment Server applies this default policy to classified
+failed responses after closing the agent:
+
+| Reported cause | Verify | Eligible for episode retry |
+| --- | --- | --- |
+| `agent_invalid_output`, `agent_limit`, or model request rejection 400/413/422 | Yes | No |
+| Model request errors 408/425/429/5xx, `model_transport_error`, or `unknown` | No | Yes |
+| Other failures, including 401/403/404 or malformed metadata | No | No |
+
+Excluded attempts retain their partial response and observations in the existing
+failure flow. Retry eligibility does not force a retry; the collector's retry budget
+still applies. Responses without this metadata keep the existing grading behavior,
+and completed or incomplete responses remain gradable. These decisions do not change
+native harness retries or model-adapter retries.
+
+For Pi, Codex, OpenCode and Hermes agent sessions, this changes some provider failures
+that previously surfaced as retryable agent HTTP 500/502 errors: reported 401/403/404
+errors, other unmatched failure kinds and malformed metadata now fail without
+verification or episode retry by default. Unclassified failures reported as `unknown`
+remain retryable.
+
+Configure `agent_outcome_policy` inside the `single_agent_turn` Environment Server's
+config to choose `verify`, `retry`, or `fail` (ungraded and nonretryable) for classified
+failed responses. These overrides do not apply to completed or incomplete responses.
+HTTP status rules take precedence over failure-kind rules; unmatched failures use `default_action`
+(default: `fail`). Supplied entries override matching defaults; omitted entries retain
+their defaults. Failure names must be registered or `unknown`, and
+HTTP status keys must be 400–599. Malformed outcome metadata always fails without retry.
+
+For example, `by_failure_kind: {model_request_error: fail}` applies only when no HTTP
+status rule matches; it does not override the default 400/408/413/422/425/429/5xx rules.
+Use `by_status_code: {503: fail}` to change 503 handling. Adding
+`by_status_code: {404: retry}` keeps the other default status rules, including 429 and 5xx.
+
+It applies to `single_agent_turn` and its legacy-response wrapper, not other
+Environment Server implementations or agents' own legacy `/run` methods.
 
 ## Make retries and close safe
 

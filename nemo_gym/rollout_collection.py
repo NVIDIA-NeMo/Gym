@@ -41,7 +41,7 @@ import aiohttp
 import orjson
 from aiohttp import ClientError
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
@@ -82,6 +82,7 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
+from nemo_gym.health.types import RunHealthConfig
 from nemo_gym.observability.model_calls import (
     await_model_call_capture_quiescence,
     clear_model_call_captures_for_rollouts,
@@ -231,6 +232,9 @@ NG_NO_PERSIST_KEY = "_ng_no_persist"
 # Set only by Gym, on the result it builds for a row the dispatch budget never started.
 NG_DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
+# The attempt cap the collecting process ran with, stamped on each sidecar row: offline aggregation reads it
+# instead of its own environment. The `_ng_failure_` prefix keeps it out of the metrics of a counted row.
+NG_FAILURE_MAX_ATTEMPTS_KEY = "_ng_failure_max_attempts"
 NG_FAILURE_JUDGE_ERROR_KEY = "_ng_failure_judge_error"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
@@ -1071,7 +1075,9 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
     return list(normalize_ignored_checks(value))
 
 
-class SharedRolloutCollectionConfig(RemovedRolloutOptionsMixin, UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
+class SharedRolloutCollectionConfig(
+    RemovedRolloutOptionsMixin, UploadRolloutsConfigMixin, RunHealthConfig, BaseNeMoGymCLIConfig
+):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     batch_manifest_fpath: Optional[str] = Field(
         default=None,
@@ -2354,6 +2360,50 @@ async def _read_jsonl(path: Path) -> List[Dict]:
     return rows
 
 
+def _failure_export_metrics(
+    failures_fpaths: List[Path], identity: Callable[[Mapping[str, Any]], Any], landed: set
+) -> Dict[str, int]:
+    """Failure and retry counts for exporters, read from the failures sidecars.
+
+    The sidecars hold every failed attempt of the run, across resumes, so these are run totals rather
+    than one job's. ``identity`` keys a sidecar row the way ``landed`` keys the rollouts that have a row.
+    ``coverage/failed/<class>`` counts the rollouts with no row, by the class of their last attempt.
+    ``retries/attempts`` counts failed attempts, ``retries/rollouts_retried`` the rollouts dispatched
+    more than once, and ``retries/at_cap`` the rollouts with no row that used all their attempts. Each rollout
+    is held to the cap its collection recorded on its last attempt (``_ng_failure_max_attempts``), or the
+    current cap for a row written before the cap was recorded. ``retries/max_attempts`` is that cap, and is
+    left out when the rollouts were collected with different caps.
+    """
+    attempts: Counter = Counter()
+    latest: Dict[Any, Dict[str, Any]] = {}
+    # Every class the sidecars name starts at 0: a reopened tracking run keeps a class's last value until it is sent.
+    failed: Counter = Counter()
+    for fpath in failures_fpaths:
+        if not fpath.exists():
+            continue
+        with fpath.open("rb") as f:
+            for line_no, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                row = loads_jsonl_line(line, fpath, line_no)
+                failed.setdefault(row.get(NG_FAILURE_CLASS_KEY) or "unknown", 0)
+                attempts[identity(row)] += 1
+                latest[identity(row)] = row
+    current_cap = get_max_rollout_attempts()
+    caps = {key: row.get(NG_FAILURE_MAX_ATTEMPTS_KEY) or current_cap for key, row in latest.items()}
+    failed.update(row.get(NG_FAILURE_CLASS_KEY) or "unknown" for key, row in latest.items() if key not in landed)
+    recorded_caps = set(caps.values()) or {current_cap}
+    return {
+        "retries/attempts": sum(attempts.values()),
+        # A rollout that landed after n failed attempts was dispatched n + 1 times.
+        "retries/rollouts_retried": sum(1 for key, n in attempts.items() if n + (key in landed) > 1),
+        "retries/at_cap": sum(1 for key, n in attempts.items() if key not in landed and n >= caps[key]),
+        **({"retries/max_attempts": recorded_caps.pop()} if len(recorded_caps) == 1 else {}),
+        **{f"coverage/failed/{name}": count for name, count in sorted(failed.items())},
+    }
+
+
 def _count_lines(path: Path) -> int:
     with path.open("rb") as f:
         return sum(1 for _ in f)
@@ -2670,6 +2720,10 @@ class _BoundedCompletionIterator:
 
 
 class RolloutCollectionHelper(BaseModel):
+    # (task index, rollout index) of every record persisted to the rollouts jsonl, kept current as rows land,
+    # so a run stopped by SIGTERM can be accounted for without re-reading that file.
+    _landed_keys: set = PrivateAttr(default_factory=set)
+
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
         if config.limit:
@@ -3137,7 +3191,8 @@ class RolloutCollectionHelper(BaseModel):
         # outside a git clone.
         output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
-        persisted_success_keys: set = set()
+        persisted_success_keys = self._landed_keys
+        persisted_success_keys.clear()
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
             should_clear_outputs = False
             _drop_truncated_tail(output_fpath)
@@ -3558,6 +3613,8 @@ class RolloutCollectionHelper(BaseModel):
                         f"class={failure_class} error={detail}"
                     )
                     write_started = perf_counter()
+                    # The cap this attempt ran under travels with it, for offline aggregation.
+                    serialized = orjson.dumps({**result, NG_FAILURE_MAX_ATTEMPTS_KEY: get_max_rollout_attempts()})
                     failures_file.write(serialized + b"\n")
                     failures_file.flush()
                     _record_rollout_outcome(result, "failed", dispatch_name)
@@ -3827,13 +3884,20 @@ class RolloutCollectionHelper(BaseModel):
         coverage = _coverage_report(
             expected_rollouts, scored_rollouts, failure_counts, failures_fpath, imputed=len(imputed)
         )
-        if get_exporters():  # pragma: no cover
+        if get_exporters():
+            failure_metrics = await asyncio.to_thread(
+                _failure_export_metrics,
+                [failures_fpath],
+                lambda row: (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)),
+                persisted_success_keys,
+            )
             export_metrics(
                 {
                     "coverage/expected": expected_rollouts,
                     "coverage/scored": scored_rollouts,
                     "coverage/missing": expected_rollouts - scored_rollouts,
                     **({"coverage/imputed": len(imputed)} if config.count_missing_rollouts_as_zero else {}),
+                    **failure_metrics,
                 }
             )
 
@@ -3851,6 +3915,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     output_fpath,
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
+                    limits=config.run_health_limits,
                 )
             except Exception:
                 logger.exception(
@@ -4543,7 +4608,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         return setup_server_client_utils(head_server_config)
 
 
-class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
+class RolloutAggregationConfig(RunHealthConfig, BaseNeMoGymCLIConfig):
     """
     Aggregate metrics across rollout shards produced by `gym eval run --no-serve +disable_aggregation=true`.
 
@@ -4808,13 +4873,20 @@ class RolloutAggregationHelper(BaseModel):
             "the shards' _failures.jsonl sidecars",
             imputed=len(missing),
         )
-        if get_exporters():  # pragma: no cover
+        if get_exporters():
+            failure_metrics = await asyncio.to_thread(
+                _failure_export_metrics,
+                failures_fpaths,
+                lambda row: _identity_key(row, group),
+                {_identity_key(r, group) for r in results},
+            )
             export_metrics(
                 {
                     "coverage/expected": scored_rollouts + sum(dropped.values()),
                     "coverage/scored": scored_rollouts,
                     "coverage/missing": sum(dropped.values()),
                     **({"coverage/imputed": len(missing)} if config.count_missing_rollouts_as_zero else {}),
+                    **failure_metrics,
                 }
             )
 
@@ -4828,10 +4900,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             try:
                 health_result = await asyncio.to_thread(
                     run_health_checks,
-                    output_fpath if config.merge_shards else [Path(path) for path in input_paths],
+                    # The shards, not the merged file: their sidecars and inventories sit next to them.
+                    [Path(path) for path in input_paths],
                     output_dir=output_fpath.parent,
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
+                    limits=config.run_health_limits,
                 )
             except Exception:
                 logger.exception(

@@ -1434,3 +1434,23 @@ class TestSandboxUv:
         uploaded = sandbox.upload.await_args_list[0].args[0]
         # An aarch64 host driving an x86_64 glibc pod uploads the static musl build for x86_64.
         assert uploaded == tmp_path / "0.12.3" / "x86_64-unknown-linux-musl" / "uv"
+
+
+@pytest.mark.parametrize("status", [400, 401, 429, 503])
+def test_native_model_error_is_reported_with_classification(status):
+    import json
+
+    agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+    native = {"failed": True, "error": f"HTTP {status} provider error", "messages": []}
+    response = agent._response_from_result(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        result=native,
+        model_name="model",
+        retain_provider_failure=True,
+    )
+    response = agent.report_outcome(response, native)
+    assert response.status == "failed"
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {
+        "failure_kind": "model_request_error",
+        "status_code": status,
+    }

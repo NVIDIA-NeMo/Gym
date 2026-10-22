@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
-from responses_api_agents.opencode_agent.sandbox import format_sandbox_error
+from responses_api_agents.opencode_agent.sandbox import format_error_message
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
     active_sessions,
     capture_observations,
@@ -210,7 +210,7 @@ def test_malformed_capture_never_replaces_provider_failure(setup, artifact):
 def test_combined_diagnostics_are_bounded_and_stderr_is_not_duplicated(stderr_already_in_error):
     stderr = "e" * 16000 + "STDERR TAIL"
     message = "OpenCode failed" + (f": {stderr}" if stderr_already_in_error else "")
-    result = format_sandbox_error(message, output="o" * 16000 + "OUTPUT TAIL", stderr=stderr)
+    result = format_error_message(message, output="o" * 16000 + "OUTPUT TAIL", stderr=stderr)
     assert len(result) <= 16000
     assert result.startswith("OpenCode failed")
     assert "OUTPUT TAIL" in result

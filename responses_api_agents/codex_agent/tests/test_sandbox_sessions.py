@@ -1979,3 +1979,51 @@ def test_task_timeout_metadata_reaches_sandbox_supervisor(
         assert response.json()["metadata"]["agent_timeout_sec"] == str(float(expected))
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
+
+
+@pytest.mark.parametrize("status", [400, 401, 429, 503])
+async def test_native_model_error_is_reported_with_classification(setup, status):
+    agent, sandbox = setup
+    message = f"unexpected status {status}: provider error"
+    sandbox.events = "\n".join(
+        json.dumps([float(i), event])
+        for i, event in enumerate(
+            [
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "error",
+                        "message": "Model metadata for `test-model` not found. Defaulting to fallback metadata; "
+                        "this can degrade performance and cause issues.",
+                    },
+                },
+                {"type": "turn.started"},
+                {"type": "error", "message": f"Reconnecting... 1/5 ({message})"},
+                {"type": "turn.failed", "error": {"message": message}},
+            ]
+        )
+    )
+    sandbox.result["return_code"] = 1
+    request, session_id, task = await activate(agent, sandbox)
+    response = await task
+    assert response.status == "failed"
+    assert response.error.message.endswith(message)
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {
+        "failure_kind": "model_request_error",
+        "status_code": status,
+    }
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert closed.agent_observations.records[0].status == "failed"
+
+
+async def test_native_failure_without_http_status_reports_unknown(setup):
+    agent, sandbox = setup
+    message = json.dumps({"error": {"message": "rejected", "code": "400"}})
+    sandbox.events = json.dumps([1.0, {"type": "turn.failed", "error": {"message": message}}])
+    sandbox.result["return_code"] = 1
+    request, session_id, task = await activate(agent, sandbox)
+    response = await task
+    assert response.status == "failed"
+    assert response.error.message == message
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))

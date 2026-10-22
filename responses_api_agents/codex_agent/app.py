@@ -23,6 +23,7 @@ import shutil
 import signal
 import tempfile
 from asyncio import Semaphore
+from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
@@ -33,6 +34,7 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
+from nemo_gym.agent_outcome import AgentOutcome
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
@@ -46,6 +48,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -454,6 +457,22 @@ class CodexAgentVerifyResponse(BaseVerifyResponse):
 
 
 class CodexAgent(SimpleResponsesAPIAgent):
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Read Codex 0.144.4's turn.failed error; tested on that pinned version.
+
+        Some errors retain only the provider body, without an HTTP status. Those
+        remain unknown; a provider's arbitrary error.code is not an HTTP status.
+        """
+        if native_result.get("type") != "turn.failed":
+            return AgentOutcome(failure_kind="unknown")
+        message = str((native_result.get("error") or {}).get("message") or "")
+        match = re.search(r"\bunexpected status ([45]\d{2})\b", message)
+        if match:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
+        if message.startswith("stream disconnected before completion: error sending request for url"):
+            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        return AgentOutcome(failure_kind="unknown")
+
     config: CodexAgentConfig
     # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
     calls_model_from_sandbox: ClassVar[bool] = True
@@ -895,9 +914,21 @@ class CodexAgent(SimpleResponsesAPIAgent):
         )
         if failure is not None:
             raise failure
-        if error:
+        terminal = next(
+            (event for _, event in reversed(events) if event.get("type") in {"turn.completed", "turn.failed"}), {}
+        )
+        reported_error = (
+            cleanup is not None
+            and cleanup["return_code"] == 1
+            and not cleanup["timed_out"]
+            and not cleanup["error"]
+            and terminal.get("type") == "turn.failed"
+            # Ignore already-recognized advisories when checking for unrelated execution errors.
+            and all(message == (terminal.get("error") or {}).get("message") for message in usage.get("errors") or [])
+        )
+        if error and not reported_error:
             raise HTTPException(502, f"Codex execution failed: {error}")
-        return NeMoGymResponse(
+        response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=self._effective_model(),
@@ -905,7 +936,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             output=output,
             status=status,
             incomplete_details={"reason": "max_output_tokens"} if output_limited else None,
-            error=None,
+            error={"code": "server_error", "message": error} if error else None,
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
@@ -923,6 +954,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 AGENT_TIMEOUT_METADATA_KEY: str(timeout),
             },
         )
+
+        return self.report_outcome(response, terminal)
 
     def _resolve_call_base_url(self, rollout_id: Optional[str]) -> str:
         """Provider base_url for the CLI's model calls (Codex appends ``/responses`` to it).

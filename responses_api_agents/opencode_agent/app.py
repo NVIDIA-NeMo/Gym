@@ -36,6 +36,7 @@ from pydantic import ConfigDict, Field, PrivateAttr
 from nemo_gym.agent_activation_types import (
     AgentContinuationCapabilities,
 )
+from nemo_gym.agent_outcome import AgentOutcome
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -49,6 +50,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -90,7 +92,7 @@ from responses_api_agents.opencode_agent.runtime import (
     OPENCODE_VERSION,
     apply_observability_patch,
 )
-from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, format_sandbox_error
+from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, format_error_message
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
 
 
@@ -214,6 +216,16 @@ class OpenCodeAgentVerifyResponse(BaseVerifyResponse):
 
 class OpenCodeAgent(SimpleResponsesAPIAgent):
     """Run OpenCode locally or in a borrowed or agent-owned sandbox session."""
+
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Read OpenCode 1.17.11's native assistant APIError; tested on that version."""
+        error = native_result.get("error") or {}
+        if error.get("name") != "APIError":
+            return AgentOutcome(failure_kind="unknown")
+        status = (error.get("data") or {}).get("statusCode")
+        if type(status) is int and 400 <= status <= 599:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        return AgentOutcome(failure_kind="unknown")
 
     config: OpenCodeAgentConfig
     # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
@@ -970,6 +982,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         outcome: OpenCodeRunOutcome,
         output: list[NeMoGymResponseOutputItem] | None = None,
         usage: NeMoGymResponseUsage | None = None,
+        error_message: str | None = None,
     ) -> NeMoGymResponse:
         runtime = state.runtime_info
         response = NeMoGymResponse(
@@ -980,6 +993,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             output=output or [],
             usage=usage,
             status=outcome.status,
+            error={"code": "server_error", "message": error_message} if error_message is not None else None,
             incomplete_details=IncompleteDetails(reason=outcome.incomplete_reason)
             if state.is_continuation and outcome.incomplete_reason
             else None,
@@ -1146,6 +1160,19 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             except Exception as exc:
                 error = error or f"OpenCode output parse failed: {exc}"
         result = state.session.cleanup
+        assistants = [m["info"] for m in export.get("messages", []) if m["info"].get("role") == "assistant"]
+        native_result = assistants[-1] if assistants else {}
+        reported_error = (
+            error is None
+            and failure is None
+            and result is not None
+            and result["return_code"] == 1
+            and not result["timed_out"]
+            and not result["error"]
+            and (native_result.get("error") or {}).get("name") == "APIError"
+            and native_result.get("finish") is None
+            and bool(native_result.get("time", {}).get("completed"))
+        )
         runtime = state.runtime_info
         if runtime is None:
             observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
@@ -1201,9 +1228,28 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
         if failure is not None:
             raise failure
-        if error:
-            raise HTTPException(502, format_sandbox_error(error, stderr=state.stderr))
-        return self._make_session_response(state, body, timeout=timeout, outcome=outcome, output=output, usage=usage)
+        if error and not reported_error:
+            raise HTTPException(502, format_error_message(error, stderr=state.stderr))
+        reported_message = None
+        if reported_error:
+            error_data = native_result["error"].get("data") or {}
+            reported_message = error_data.get("message")
+            if not isinstance(reported_message, str) or not reported_message:
+                reported_message = "OpenCode provider request failed"
+            upstream_status = error_data.get("statusCode")
+            if type(upstream_status) is int and 400 <= upstream_status <= 599:
+                reported_message = f"HTTP {upstream_status}: {reported_message}"
+            reported_message = format_error_message(reported_message)
+        response = self._make_session_response(
+            state,
+            body,
+            timeout=timeout,
+            outcome=outcome,
+            output=output,
+            usage=usage,
+            error_message=reported_message,
+        )
+        return self.report_outcome(response, native_result)
 
 
 if __name__ == "__main__":
