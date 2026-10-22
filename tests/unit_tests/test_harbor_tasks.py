@@ -55,6 +55,7 @@ from nemo_gym.tasks.harbor.hub import (
     validate_task_name,
 )
 from nemo_gym.tasks.harbor.materialize import TASK_SOURCE_KEY, dataset_entry, materialize_task, run_config, write_rows
+from nemo_gym.tasks.harbor.models import HarborTaskConfig
 from nemo_gym.tasks.harbor.package_store import PackageStoreError
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
 from nemo_gym.tasks.harbor.task import task_digest
@@ -163,7 +164,10 @@ class TestTaskConfig:
         )
         plan, build = config.steps
         assert config.is_multi_turn and config.multi_step_reward_strategy == "final"
-        assert (config.step_agent_timeout_sec(plan), config.step_verifier_timeout_sec(plan)) == (30, 120)
+        # The agent's timeout falls back to the task's (Harbor's AgentConfig.timeout_sec is None by default); the
+        # verifier's does not: Harbor's step verifier is a VerifierConfig with its own 600 s default, so the task's
+        # 120 s never reaches `plan`.
+        assert (config.step_agent_timeout_sec(plan), config.step_verifier_timeout_sec(plan)) == (30, 600)
         assert (config.step_agent_timeout_sec(build), config.step_verifier_timeout_sec(build)) == (600, 900)
         assert plan.min_reward == 0.5 and build.verifier.env == {"K": "v"}
         assert HarborTaskConfig.model_validate({}).multi_step_reward_strategy == "mean"
@@ -1061,7 +1065,7 @@ class TestMultiStepTasks:
         assert plan.workdir_dir == Path("steps/01_plan/workdir") and plan.setup_script == plan.workdir_dir / "setup.sh"
         assert (root / plan.setup_script).is_file() and not (root / implement.workdir_dir).exists()
         assert "steps/02_implement/setup.sh is not run; Harbor runs steps/<name>/workdir/setup.sh" in caplog.text
-        assert "01_plan" not in caplog.text
+        assert "01_plan/setup.sh" not in caplog.text and "01_plan/workdir" not in caplog.text
         # The step's files are part of the task's identity, as everything under steps/ is.
         before = task.folder_digest
         (workdir / "fixture.txt").write_text("y\n")
@@ -1180,6 +1184,140 @@ class TestMultiStepTasks:
             assert turn.config.min_reward == {"core_pass_rate": 0.0, "strict_pass_rate": 0.0}
             assert task.config.step_agent_timeout_sec(turn.config) == 7200.0
         assert task.workdir == "/app" and task.overlay == () and task.image == built == task.built_image
+
+    def test_a_step_without_its_own_verifier_timeout_gets_harbors_600_s_not_the_tasks(self, tmp_path, caplog):
+        """Harbor 0.22.0 (and main): `StepConfig.verifier` is a full `VerifierConfig`, whose `timeout_sec` defaults
+        to 600.0, so `_step_verifier_timeout_sec`'s fallback to the task's `[verifier].timeout_sec` never runs and a
+        step that names none is graded within 600 s whatever the task says. The loader applies that and warns once,
+        naming the steps the task's figure does not reach; a task whose figure is 600 or whose steps name their own
+        is not warned about."""
+        root = write_multi_step_task(tmp_path / "t")
+        toml = (root / "task.toml").read_text()
+        assert "[verifier]\ntimeout_sec = 120.0\n" in toml  # HELLO_TOML's task-level figure
+        (root / "task.toml").write_text(toml + "[steps.verifier]\ntimeout_sec = 90.0\n")
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+            task = load_task(root)
+        plan, implement = task.turns
+        assert task.config.step_verifier_timeout_sec(plan.config) == 600.0
+        assert task.config.step_verifier_timeout_sec(implement.config) == 90.0
+        assert (
+            "step(s) '01_plan' name no [steps.verifier].timeout_sec and are graded within Harbor's step default of "
+            "600s, not the task's [verifier].timeout_sec = 120s"
+        ) in caplog.text
+        assert "'02_implement'" not in caplog.text
+
+        caplog.clear()
+        (root / "task.toml").write_text(toml.replace("[verifier]\ntimeout_sec = 120.0\n", "[verifier]\n"))
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+            task = load_task(root)
+        assert [task.config.step_verifier_timeout_sec(t.config) for t in task.turns] == [600.0, 600.0]
+        assert "Harbor's step default" not in caplog.text
+
+    def test_a_shared_step_with_its_own_verifier_environment_is_refused_as_harbor_refuses_it(self, tmp_path):
+        """Harbor's `_validate_mode_env_consistency` is on `VerifierConfig`, and a step's verifier is one, so a step
+        that says `environment_mode = "shared"` and declares a `[steps.verifier.environment]` fails Harbor's task.toml
+        load. The loader refuses it the same way instead of running the step shared and ignoring the environment."""
+        root = write_multi_step_task(tmp_path / "t")
+        toml = (root / "task.toml").read_text()
+        (root / "task.toml").write_text(
+            toml
+            + '[steps.verifier]\nenvironment_mode = "shared"\n'
+            + '[steps.verifier.environment]\ndocker_image = "org/step-verifier:1"\n'
+        )
+        with pytest.raises(
+            HarborTaskError,
+            match=r"steps\.1\.verifier(?s:.*)environment_mode='shared' is incompatible with \[steps\.verifier\.environment\]",
+        ):
+            load_task(root)
+        # Alone, either is fine: the mode without the environment is shared, the environment without the mode is separate.
+        (root / "task.toml").write_text(toml + '[steps.verifier]\nenvironment_mode = "shared"\n')
+        assert [turn.verifier_mode for turn in load_task(root).turns] == ["shared", "shared"]
+
+    def test_each_steps_verifier_mode_and_image_resolve_as_harbor_resolves_them(self, tmp_path):
+        """Harbor's resolve_step_verifier_mode: the step's explicit mode, else `separate` when it declares a
+        [steps.verifier.environment], else the task's; the environment is the step's, else the task's
+        [verifier.environment], else a copy of [environment] (resolve_effective_verifier_env_config). The loader used
+        to refuse a separate step and a multi-step task with a separate task-level verifier."""
+        root = write_multi_step_task(tmp_path / "t")
+        toml = (root / "task.toml").read_text()
+        # A shared task with one step in its own image: that step alone is separate, in that image.
+        (root / "task.toml").write_text(toml + '[steps.verifier.environment]\ndocker_image = "org/step-verifier:1"\n')
+        write_image_config(tmp_path, "org/step-verifier:1", Env=["PATH=/bin"], User="grader", WorkingDir="/grade")
+        plan, implement = load_task(root).turns
+        assert (plan.verifier_mode, plan.verifier_image) == ("shared", None)
+        assert (implement.verifier_mode, implement.verifier_image) == ("separate", "org/step-verifier:1")
+        assert implement.verifier_image_config is not None and implement.verifier_image_config.user == "grader"
+        # A separate task (its own [verifier.environment]) whose first step opts back into shared mode.
+        separate = toml.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n').replace(
+            "[agent]\n", '[verifier.environment]\ndocker_image = "org/verifier:1"\n\n[agent]\n'
+        )
+        (root / "task.toml").write_text(
+            separate.replace('name = "01_plan"\n', 'name = "01_plan"\n[steps.verifier]\nenvironment_mode = "shared"\n')
+        )
+        task = load_task(root)
+        plan, implement = task.turns
+        assert not task.config.is_shared_verifier and task.verifier_image == "org/verifier:1"
+        assert (plan.verifier_mode, plan.verifier_image) == ("shared", None)
+        assert (implement.verifier_mode, implement.verifier_image) == ("separate", "org/verifier:1")
+        assert implement.verifier_image_config is None  # nothing recorded for the declared image: nothing starts
+        # A separate task whose effective environment is a copy of [environment] with a declared docker_image: the
+        # turns run the task's own image (no verifier image of their own), as a single-step task does.
+        task_image = toml.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n').replace(
+            "[environment]\n", '[environment]\ndocker_image = "ubuntu:24.04"\n'
+        )
+        (root / "task.toml").write_text(task_image)
+        task = load_task(root)
+        assert task.verifier_image is None and [turn.verifier_image for turn in task.turns] == [None, None]
+        assert [turn.verifier_mode for turn in task.turns] == ["separate", "separate"]
+
+    def test_a_separate_step_without_an_image_follows_harbors_build_context(self, tmp_path):
+        """Harbor builds a step's separate verifier from steps/<name>/tests/Dockerfile when the step has a tests/ folder,
+        else from tests/Dockerfile (_verifier_env_build_context with a step). Prepare builds tests/Dockerfile only, so a
+        step that starts from its own folder is refused naming the image to declare; one that starts from tests/ reads
+        the recorded build, and is planned by prepare whatever the task's own mode."""
+        from nemo_gym.tasks.harbor.verifier_env import verifier_build_context, verifier_build_environment
+
+        root = write_multi_step_task(tmp_path / "t")
+        toml = (root / "task.toml").read_text() + '[steps.verifier]\nenvironment_mode = "separate"\n'
+        (root / "task.toml").write_text(toml)
+        with pytest.raises(HarborTaskError, match="steps/02_implement/tests/Dockerfile.*builds tests/Dockerfile only"):
+            load_task(root)
+        # Without a tests/ folder of its own the step starts from the task's tests/: a Dockerfile is required there...
+        shutil.rmtree(root / "steps" / "02_implement" / "tests")
+        with pytest.raises(HarborTaskError, match="tests/ has no Dockerfile"):
+            load_task(root)
+        # ...and then its recorded build, which prepare plans for the step (the task itself is shared).
+        (root / "tests" / "Dockerfile").write_text("FROM python:3.12\nCOPY . /tests/\n")
+        config = HarborTaskConfig.model_validate(tomllib.loads(toml))
+        assert verifier_build_context(root, config) == root / "tests"
+        assert verifier_build_environment(root, config) is not None and config.is_shared_verifier
+        with pytest.raises(HarborTaskError, match="no built image is recorded"):
+            load_task(root)
+        built = "registry.example/t-verifier:abc"
+        (tmp_path / BUILT_IMAGES_FILE).write_text(
+            json.dumps({context_digest(root / "tests"): {"services": {"verifier": {"image": built}}}})
+        )
+        write_image_config(tmp_path, built, Env=["PATH=/bin"], WorkingDir="/tests")
+        plan, implement = load_task(root).turns
+        assert (plan.verifier_mode, plan.verifier_image) == ("shared", None)
+        assert (implement.verifier_mode, implement.verifier_image) == ("separate", built)
+        assert implement.verifier_image_config is not None and implement.verifier_image_config.workdir == "/tests"
+
+    def test_a_verifier_network_restriction_needs_every_step_separate(self, tmp_path):
+        root = write_multi_step_task(tmp_path / "t")
+        toml = (root / "task.toml").read_text()
+        restricted = toml.replace(
+            "[verifier]\n", '[verifier]\nenvironment_mode = "separate"\nnetwork_mode = "no-network"\n'
+        ).replace("[agent]\n", '[verifier.environment]\ndocker_image = "org/verifier:1"\n\n[agent]\n')
+        (root / "task.toml").write_text(restricted)
+        assert [turn.verifier_mode for turn in load_task(root).turns] == ["separate", "separate"]
+        (root / "task.toml").write_text(
+            restricted.replace(
+                'name = "01_plan"\n', 'name = "01_plan"\n[steps.verifier]\nenvironment_mode = "shared"\n'
+            )
+        )
+        with pytest.raises(HarborTaskError, match="on every step of a multi-step task too"):
+            load_task(root)
 
     def test_a_steps_healthcheck_loads_with_harbors_defaults_for_the_server_to_poll_per_turn(self, tmp_path):
         """Harbor 0.22.0 runs `[steps.healthcheck]` after the step's setup and before its agent

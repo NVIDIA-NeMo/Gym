@@ -64,7 +64,7 @@ from nemo_gym.sandbox.transfer import (
 )
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.digest import is_ignored
-from nemo_gym.tasks.harbor.models import HarborArtifact, HarborStep
+from nemo_gym.tasks.harbor.models import HarborArtifact, HarborStep, HarborVerifier
 from nemo_gym.tasks.harbor.python_verifier import VerifierShim, write_shim
 from nemo_gym.tasks.harbor.task import HarborTurn
 
@@ -580,8 +580,6 @@ class HarborVerificationMixin:
                 f"Could not create verifier logs under {self._artifacts_dir}: {type(exc).__name__}: {exc}",
             )
         artifacts_dir = logs_dir / "artifacts"
-        verifier: AsyncSandbox | None = None
-        verifier_entrypoint: EntrypointLaunch | None = None
         try:
             main_hooks = [hook for hook in settings.collect if _is_main_service(hook.service)]
             sidecar_hooks = [hook for hook in settings.collect if not _is_main_service(hook.service)]
@@ -608,7 +606,42 @@ class HarborVerificationMixin:
             await session.stop_agent_side()
             if died is not None:
                 return self._masked(ENTRYPOINT_FAILED_KIND, died) | {"verifier_logs_dir": str(logs_dir.resolve())}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            LOGGER.exception(f"Separate verification infrastructure failed for {task.task_id}")
+            return self._masked(failure_kinds.PROVIDER_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
+        return await self._verify_separately(
+            session, task, settings, trajectory, logs_dir, restored, started=started, response=response
+        )
 
+    async def _verify_separately(
+        self,
+        session: HarborSession,
+        task: HarborTask,
+        settings: Any,
+        trajectory: bytes,
+        logs_dir: Path,
+        restored: list[tuple[Path, str, str]],
+        *,
+        started: float,
+        test_dirs: tuple[Path, ...] | None = None,
+        response: NeMoGymResponse | None = None,
+    ) -> dict[str, Any]:
+        """Grade in a fresh sandbox what was collected from the agent's: the second half of Harbor's separate mode.
+
+        ``task`` is the task whose verifier settings and image apply: the session's own for a single-step task, or
+        a turn's view of it (:meth:`_turn_verifier_view`) for a step of a multi-step task that verifies separately;
+        ``settings`` is its ``[verifier]`` table or the turn's :class:`VerifierSettings`. The verifier sandbox is
+        created from that, receives the ``restored`` archives at their own paths, the tests (``test_dirs`` in order,
+        a step's over the task's, when given; the task's ``tests/`` otherwise, unless the image ships its own) and
+        the transcript, runs ``test.sh`` and is stopped, whatever happened. Nothing else reaches it from the agent's
+        sandbox, which this method never touches: a multi-step task's agent sandbox keeps running across turns, so
+        each turn's verifier sandbox lives only around that turn's verification, under the episode's verifier key.
+        """
+        verifier: AsyncSandbox | None = None
+        verifier_entrypoint: EntrypointLaunch | None = None
+        try:
             verifier = await self._create_verifier_sandbox(task, episode_key=session.session_id)
             names: dict[str, str] = {}
             if _verifier_gets_overlay(task, True):
@@ -657,7 +690,12 @@ class HarborVerificationMixin:
                         task.verifier_image,
                         TESTS_DIR,
                     )
-                if task.python_verifier is None or (task.path / "tests").is_dir():
+                if test_dirs is not None:
+                    # A turn's layers: the task's tests/ then the step's, each over the last, absent ones skipped.
+                    for tests in test_dirs:
+                        if tests.is_dir():
+                            await upload_dir(verifier, tests, TESTS_DIR, ignore=is_ignored)
+                elif task.python_verifier is None or (task.path / "tests").is_dir():
                     await upload_dir(verifier, task.path / "tests", TESTS_DIR, ignore=is_ignored)
             await self._upload_verifier_shim(verifier, session, response)
             for archive, kind, source in restored:
@@ -889,7 +927,7 @@ class HarborVerificationMixin:
         return restored
 
     async def _collect_turn_artifacts(
-        self, session: HarborSession, turn: HarborTurn, artifacts_dir: Path
+        self, session: HarborSession, turn: HarborTurn, artifacts_dir: Path, *, stop_main: bool = False
     ) -> list[tuple[Path, str, str]]:
         """Harbor's per-step collection pass (``_collect_step_artifacts`` of its multi-step trial, 0.22.0), after the
         turn's agent and before its verifier, in shared mode too: the task's ``[[verifier.collect]]`` hooks and then
@@ -897,9 +935,11 @@ class HarborVerificationMixin:
         then the step's) and the ``main`` entries of ``/logs/artifacts``, the task's ``artifacts`` and the step's own
         (:func:`_collected_artifacts`), then the sidecars' hooks and entries, each staged under its numbered root in
         ``artifacts_dir`` with the pass recorded in its manifest (:meth:`_download_artifacts`,
-        :meth:`_write_artifact_manifest`). Nothing is stopped: the agent's sandbox and its sidecars keep running for
-        the turns that follow, as Harbor stops ``main`` before the sidecar pass only on the last step of a
-        separate-mode task. Returns the archives a separate verifier of this turn restores.
+        :meth:`_write_artifact_manifest`). Nothing is stopped unless ``stop_main`` says so: the agent's sandbox and its
+        sidecars keep running for the turns that follow. With ``stop_main`` (the last turn of a task whose last step
+        verifies separately, Harbor's ``stop_main_before_sidecars``) the agent's own container is stopped between the
+        main pass and the sidecars' hooks, so nothing it left running can change a sidecar's state while it is read,
+        as the single-step separate path does. Returns the archives a separate verifier of this turn restores.
         """
         task = session.task
         hooks = [*task.config.verifier.collect, *turn.config.verifier.collect]
@@ -908,6 +948,8 @@ class HarborVerificationMixin:
         await self._run_collect_hooks(session, [hook for hook in hooks if _is_main_service(hook.service)])
         main = [entry for entry in artifacts if _is_main_service(entry[1].service)]
         restored = await self._download_artifacts(session, main, artifacts_dir, manifest)
+        if stop_main:
+            await session.stop_main()
         await self._run_collect_hooks(session, [hook for hook in hooks if not _is_main_service(hook.service)])
         sidecars = [entry for entry in artifacts if not _is_main_service(entry[1].service)]
         restored += await self._download_artifacts(session, sidecars, artifacts_dir, manifest)
@@ -1097,7 +1139,11 @@ class HarborVerificationMixin:
             self._refuse_unsupported_group(task, task.entrypoint_user)
         self._refuse_unsupported_group(task, _verifier_user(task))
         for turn in task.turns:
-            self._refuse_unsupported_group(task, turn.config.verifier.user, where=f" step {turn.name!r}")
+            where = f" step {turn.name!r}"
+            self._refuse_unsupported_group(task, turn.config.verifier.user, where=where)
+            if self._turn_separate(task, turn) and _verifier_runs_task_image(self._turn_verifier_view(task, turn)):
+                # The turn's own verifier sandbox in the task image installs the image's USER as its default.
+                self._refuse_unsupported_group(task, task.entrypoint_user, where=where)
 
     @staticmethod
     def _measured(reward: float, kind: str, reason: str) -> dict[str, Any]:
@@ -1108,9 +1154,51 @@ class HarborVerificationMixin:
         return {"reward": 0.0, "mask_sample": True, "failure_kind": kind, "failure_reason": reason[:2000]}
 
     def _separate_verifier(self, task: HarborTask) -> bool:
-        """Whether this episode verifies in a fresh sandbox: the task's mode, or forced for tasks with artifacts."""
+        """Whether this episode verifies in a fresh sandbox: the task's mode, or forced for tasks with artifacts.
+
+        For a multi-step task the question is per turn (:meth:`_turn_separate`); this is whether any turn does.
+        """
+        if task.turns:
+            return any(self._turn_separate(task, turn) for turn in task.turns)
         return not task.config.is_shared_verifier or (
             self.config.separate_verifier_for_artifacts and bool(task.config.artifacts)
+        )
+
+    def _turn_separate(self, task: HarborTask, turn: HarborTurn) -> bool:
+        """Whether a turn verifies in a fresh sandbox: the step's own mode as Harbor resolves it
+        (:attr:`HarborTurn.verifier_mode`: the step's explicit mode, else ``separate`` with a
+        ``[steps.verifier.environment]``, else the task's), or forced by ``separate_verifier_for_artifacts`` when the
+        task or the step declares artifacts, as a single-step task with artifacts is forced."""
+        if turn.verifier_mode == "separate":
+            return True
+        return self.config.separate_verifier_for_artifacts and bool(task.config.artifacts or turn.config.artifacts)
+
+    @staticmethod
+    def _turn_verifier_view(task: HarborTask, turn: HarborTurn) -> HarborTask:
+        """``task`` as a turn's separate verifier sees it: the step's ``[steps.verifier]`` over the task's
+        ``[verifier]`` (user, env and environment, Harbor's step-over-task resolution; the timeout is the step's own
+        or Harbor's 600 s step default, never the task's), in separate mode,
+        with the turn's verifier image and its recorded configuration in place of the task's. Everything the
+        separate-mode machinery reads off a task (:func:`_verifier_image`, :func:`_verifier_runs_task_image`,
+        :func:`_verifier_user`, the sandbox spec, the network policy) then answers for the turn, and a step without
+        its own ``[steps.verifier.environment]`` inherits the task's or runs the task image, as in Harbor."""
+        step = turn.config.verifier
+        base = task.config.verifier
+        verifier = HarborVerifier(
+            timeout_sec=task.config.step_verifier_timeout_sec(turn.config),
+            user=step.user if step.user is not None else base.user,
+            env=base.env | step.env,
+            environment_mode="separate",
+            environment=step.environment if step.environment is not None else base.environment,
+            collect=[*base.collect, *step.collect],
+            network_mode=step.network_mode if step.network_mode is not None else base.network_mode,
+            allowed_hosts=step.allowed_hosts if step.allowed_hosts is not None else base.allowed_hosts,
+        )
+        return replace(
+            task,
+            config=task.config.model_copy(update={"verifier": verifier}),
+            verifier_image=turn.verifier_image,
+            verifier_image_config=turn.verifier_image_config,
         )
 
     def _verifier_env(self, settings: Any) -> dict[str, str]:
@@ -1174,7 +1262,8 @@ class HarborVerificationMixin:
 
     @staticmethod
     def _turn_verifier_settings(task: HarborTask, turn: HarborTurn) -> VerifierSettings:
-        """A step's verifier settings over the task's, as Harbor resolves them (its hooks after the task's)."""
+        """A step's verifier settings over the task's, as Harbor resolves them (its hooks after the task's; the
+        timeout is the step's own or Harbor's 600 s step default, :meth:`HarborTaskConfig.step_verifier_timeout_sec`)."""
         step = turn.config.verifier
         return VerifierSettings(
             timeout_sec=task.config.step_verifier_timeout_sec(turn.config),
