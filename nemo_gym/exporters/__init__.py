@@ -29,8 +29,9 @@ from typing import Any, Optional
 
 from omegaconf import DictConfig
 
-from nemo_gym.config_types import ExporterConfig, MLFlowConfig, WANDBConfig
-from nemo_gym.exporters.base import BaseExporter
+from nemo_gym.config_types import ConfigError, ExporterConfig, MLFlowConfig, WANDBConfig
+from nemo_gym.exporters.base import BaseExporter, Exporter
+from nemo_gym.run_exporter_registry import RUN_EXPORTERS
 
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,14 @@ EXPORTER_REGISTRY: dict[str, tuple[type[ExporterConfig], str, str]] = {
 }
 
 _EXPORTERS: list[BaseExporter] = []
+
+
+def load_run_exporter_class(name: str) -> type[Exporter]:
+    """The post-run exporter class registered as `name`; raises `ConfigError` naming the valid choices."""
+    if name not in RUN_EXPORTERS:
+        raise ConfigError(f"Unknown exporter {name!r}. Available exporters: {', '.join(RUN_EXPORTERS)}.")
+    module_name, class_name = RUN_EXPORTERS[name].split(":")
+    return getattr(import_module(module_name), class_name)
 
 
 def exporter_extras(config: Any) -> tuple[str, ...]:
