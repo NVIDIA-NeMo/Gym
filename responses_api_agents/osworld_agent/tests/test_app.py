@@ -2230,7 +2230,7 @@ class TestApp:
         assert response.verifier_metadata["osworld_finished"] is False
 
 
-def _policy_completion(content: str, finish_reason: str, usage: Dict[str, Any]) -> Any:
+def _policy_completion(content: str, finish_reason: str, usage: Optional[Dict[str, Any]]) -> Any:
     from openai.types.chat import ChatCompletion
 
     return ChatCompletion.model_validate(
@@ -2337,7 +2337,25 @@ def test_policy_usage_treats_a_malformed_usage_block_as_unknown() -> None:
     # The SDK builds responses without validating them, so a provider's partial usage block arrives as-is.
     partial = CompletionUsage.model_construct(prompt_tokens=None, completion_tokens=5, total_tokens=None)
     policy_usage.add(SimpleNamespace(usage=partial))
-    assert policy_usage.total is None
+    assert policy_usage.reported() is None
 
+    # A later known call does not turn the lost usage into a complete total.
     policy_usage.add(_policy_completion("```DONE```", "stop", _chat_usage(1500, 768, 60, 12)))
-    assert policy_usage.total.total_tokens == 1560
+    assert policy_usage.reported() is None
+
+
+@pytest.mark.parametrize("unknown_first", [True, False])
+def test_child_result_usage_is_unknown_when_a_finished_response_lost_its_usage(unknown_first: bool) -> None:
+    def fake_run_osworld_task(task_config, *, model_fn, messages_model_fn, **kwargs):
+        model_fn("system", "Open the browser.", [{"screenshot_b64": ""}])
+        model_fn("system", "Open the browser.", [{"screenshot_b64": ""}])
+        return _child_result()
+
+    known = _policy_completion("```python\npyautogui.click(1, 2)\n```", "stop", _chat_usage(1000, 256, 50, 10))
+    unknown = _policy_completion("```DONE```", "stop", None)
+    result = _run_child(fake_run_osworld_task, [unknown, known] if unknown_first else [known, unknown])
+
+    # Rollout usage is the sum over finished responses; one whose usage was lost makes it unknown, not a subtotal.
+    assert result["usage"] is None
+    response = _build_response(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), result, "test-policy", 1.0, 0.9)
+    assert response.response.usage is None

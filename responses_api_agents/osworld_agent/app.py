@@ -571,10 +571,15 @@ def _build_policy_openai_client(*, base_url: str, api_key: str):
 
 
 class _PolicyUsage:
-    """Sum of the usage on the policy-model responses that Gym's own model callers receive."""
+    """Sum of the usage on the policy-model responses that Gym's own model callers receive.
+
+    A finished response whose usage is missing or malformed makes the sum unknown: a subtotal of the other calls must
+    not read as the rollout's total (rollout-evidence.mdx).
+    """
 
     def __init__(self) -> None:
         self.total: Optional[NeMoGymResponseUsage] = None
+        self.complete = True
 
     def add(self, response: Any) -> None:
         try:
@@ -582,7 +587,13 @@ class _PolicyUsage:
         except ValidationError:
             # A malformed usage block is unknown usage, not a reason to fail the policy call.
             usage = None
+        if usage is None:
+            self.complete = False
         self.total = accumulate_response_usage(self.total, usage)
+
+    def reported(self) -> Optional[NeMoGymResponseUsage]:
+        """The summed usage, or ``None`` when any finished response's usage was lost or no call was seen."""
+        return self.total if self.complete else None
 
 
 # Imported lazily by ``_run_osworld_task_remote`` so this module imports
@@ -1171,9 +1182,9 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         "artifact_dir": result.artifact_dir,
         "termination_reason": result.termination_reason,
         "agent_contract": result.agent_contract,
-        # Only Gym's model callers see usage; native runners (m3_agent, pointer_agent) call models themselves,
-        # so theirs stays unknown (None).
-        "usage": policy_usage.total.model_dump(mode="json") if policy_usage.total is not None else None,
+        # Only Gym's model callers see usage. m3_agent and pointer_agent call models through their own clients, so
+        # their usage stays unknown (None).
+        "usage": usage.model_dump(mode="json") if (usage := policy_usage.reported()) is not None else None,
         "steps": [
             {
                 "step": s.step,
@@ -1605,6 +1616,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                         LOG.exception("Failed to cancel timed-out OSWorld Ray task")
                 error = f"task_timeout exceeded ({self.config.task_timeout}s) during end-to-end rollout"
                 LOG.error("OSWorld rollout timed out: %s", error)
+                # The child's usage never comes back, so the row's usage stays unknown (None), not zero.
                 return _empty_response(
                     body,
                     error=error,
@@ -1615,6 +1627,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 )
             except Exception as exc:  # noqa: BLE001
                 LOG.exception("OSWorld rollout failed")
+                # As for a timeout: the failed worker's usage is lost, so the row's usage stays unknown (None).
                 return _empty_response(body, error=f"{type(exc).__name__}: {exc}")
 
             # These values are owned by the current request, not the Ray

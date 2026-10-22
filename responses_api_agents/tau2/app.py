@@ -48,7 +48,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
-    accumulate_response_usage,
 )
 from nemo_gym.responses_converter import chat_completion_usage_to_response_usage
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
@@ -301,9 +300,15 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         finally:
             _POLICY_CALL_USAGES.reset(usages_token)
 
-        # A failed rollout still spent the tokens of the policy calls that finished.
-        for usage in policy_call_usages:
-            result.response.usage = accumulate_response_usage(result.response.usage, usage)
+        # A failed rollout still spent the tokens of the policy calls that finished. A finished call whose usage was
+        # lost makes the total unknown rather than a partial sum (rollout-evidence.mdx). No recorded call also stays
+        # unknown: the recorder sees only calls made through `Tau2ToolValidatingAsyncOpenAI`, so an empty record does
+        # not prove that no policy call finished.
+        result.response.usage = (
+            NeMoGymResponseUsage.sum_from_list(policy_call_usages)
+            if policy_call_usages and all(usage is not None for usage in policy_call_usages)
+            else None
+        )
         return result
 
     async def _run(self, body: Tau2RunRequest) -> Tau2VerifyResponse:
