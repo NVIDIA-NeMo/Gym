@@ -416,7 +416,8 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         cache_key = self.config.model_server.name
         if cache_key not in self.client_cache:
             openai_client = AsyncOpenAI(
-                base_url=self.resolve_model_base_url(self.config.model_server.name),
+                # Shared across rollouts, so it must not name the span that happens to be current now.
+                base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
                 api_key="EMPTY",  # pragma: allowlist secret
                 # DefaultAsyncHttpxClient keeps the SDK's pool limits and redirect
                 # policy. Pass the bare CookieJar: httpx.Cookies adopts a CookieJar

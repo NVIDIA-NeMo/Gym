@@ -111,6 +111,13 @@ tracing are unchanged. Gym's own clients send the header and use `url_path_for_r
 adds it. A harness that parses the model URL should treat `/ng-trace/<traceparent>` as optional and
 leave it in place.
 
+The span named is the one current when the URL is built. A harness configured once per session
+therefore parents all of its model calls to the span that seeded the session, not to the activation
+that made each call; still one tree per rollout, just coarser than an instrumented client gives. A
+URL that is built once and reused across rollouts, such as the base URL of a cached client, must be
+built with `trace_context=False`, or every later rollout's calls would be parented to the first
+rollout's span.
+
 ## Span Kinds
 
 Span kind is what tells a backend that a call left one service and arrived at another.

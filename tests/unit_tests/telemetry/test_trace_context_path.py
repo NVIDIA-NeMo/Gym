@@ -69,12 +69,16 @@ class TestProducer:
             url = apply_rollout_prefix("http://m:8000/", "0-0")
             capture = apply_rollout_prefix("http://m:8000", "0-0", token_capture=True)
             no_rollout = apply_rollout_prefix("http://m:8000", None)
+            shared = apply_rollout_prefix("http://m:8000", None, trace_context=False)
+            shared_with_rollout = apply_rollout_prefix("http://m:8000", "0-0", trace_context=False)
         context = span.get_span_context()
         traceparent = f"00-{context.trace_id:032x}-{context.span_id:016x}-{int(context.trace_flags):02x}"
         assert segment == f"/ng-trace/{traceparent}"
         assert url == f"http://m:8000/ng-rollout/0-0/ng-trace/{traceparent}"
         assert capture == f"http://m:8000/ng-rollout/0-0/training-token-capture/ng-trace/{traceparent}"
         assert no_rollout == f"http://m:8000/ng-trace/{traceparent}"
+        assert shared == "http://m:8000", "a URL reused across rollouts must not pin them to this span"
+        assert shared_with_rollout == "http://m:8000/ng-rollout/0-0"
         assert re.fullmatch(_TRACEPARENT_PATTERN, traceparent)
 
 
@@ -254,6 +258,20 @@ class TestServerSpanParent:
         response = TestClient(app, follow_redirects=False).get(f"/ng-trace/{TRACEPARENT}/elsewhere")
         assert response.status_code == 307
         assert response.headers["location"] == "https://other.example/v1/responses"
+
+    def test_a_url_built_without_trace_context_does_not_pin_later_calls(self, app, traces):  # noqa: F811
+        """What a client cached across rollouts sends: each call starts its own trace, none joins a stale span."""
+        from opentelemetry import trace
+
+        client = TestClient(app)
+        with trace.get_tracer("test").start_as_current_span("first.rollout"):
+            shared_url = apply_rollout_prefix("http://testserver", None, trace_context=False) + "/v1/responses"
+        assert client.post(shared_url).status_code == 200
+        assert client.post(shared_url).status_code == 200
+        servers = [s for s in traces() if s.kind.name == "SERVER"]
+        assert len(servers) == 2
+        assert all(s.parent is None for s in servers)
+        assert len({s.context.trace_id for s in servers}) == 2
 
     def test_install_is_idempotent(self, app):
         install_trace_context_path(app)

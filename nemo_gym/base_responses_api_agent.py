@@ -958,11 +958,19 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         token_capture = f"/{TOKEN_CAPTURE_PATH_SEGMENT}/" in request_path
         return f"{rollout_path_prefix(rollout_id, token_capture=token_capture)}{url_path}"
 
-    def resolve_model_base_url(self, model_server_name: str, rollout_id: Optional[str] = None) -> str:
-        """Resolve a model-server URL with an optional rollout prefix (and trace context, as ``base_url_for_run``)."""
+    def resolve_model_base_url(
+        self, model_server_name: str, rollout_id: Optional[str] = None, *, trace_context: bool = True
+    ) -> str:
+        """Resolve a model-server URL with an optional rollout prefix (and trace context, as ``base_url_for_run``).
+
+        Pass ``trace_context=False`` for a URL that a client cached across rollouts will keep using.
+        """
         server_config = get_first_server_config_dict(self.server_client.global_config_dict, model_server_name)
         base_url = self.server_client._build_server_base_url(server_config)
-        return f"{apply_rollout_prefix(base_url, rollout_id, token_capture=self._token_id_capture_enabled())}/v1"
+        prefixed = apply_rollout_prefix(
+            base_url, rollout_id, token_capture=self._token_id_capture_enabled(), trace_context=trace_context
+        )
+        return f"{prefixed}/v1"
 
     def model_endpoint(
         self,

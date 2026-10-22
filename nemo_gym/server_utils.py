@@ -2161,15 +2161,22 @@ def trace_context_path_segment() -> str:
     return f"/{TRACE_CONTEXT_PATH_SEGMENT}/{traceparent}"
 
 
-def apply_rollout_prefix(base_url: str, rollout_id: Optional[str], *, token_capture: bool = False) -> str:
+def apply_rollout_prefix(
+    base_url: str, rollout_id: Optional[str], *, token_capture: bool = False, trace_context: bool = True
+) -> str:
     """Append the rollout prefix and, while traces export, the current span's trace context to a model-server root URL.
 
     Every caller hands the result to a client Gym does not instrument (a harness in a sandbox, a
     third-party client library), which is why the trace context travels in the URL here; Gym's own
     clients send the ``traceparent`` header instead and use ``url_path_for_run``.
+
+    The span named is the one current when the URL is built, so pass ``trace_context=False`` for a
+    URL that is built once and reused across rollouts (a cached client): otherwise every later
+    rollout's calls would be parented to the first one's span.
     """
     prefix = rollout_path_prefix(rollout_id, token_capture=token_capture) if rollout_id else ""
-    prefix += trace_context_path_segment()
+    if trace_context:
+        prefix += trace_context_path_segment()
     if not prefix:
         return base_url
     return base_url.rstrip("/") + prefix
