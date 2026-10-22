@@ -98,7 +98,8 @@ class VLLMModelWithCompaction(VLLMModel):
         body_dict = chat_params.model_dump(exclude_unset=True)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
         tokenize_body = self._get_context_guard_tokenize_body(body_dict)
-        result = await self._resolve_client(request).create_tokenize(**tokenize_body)
+        client = await self._resolve_client_for_call(request)
+        result = await client.create_tokenize(**tokenize_body)
         return {
             "tokens": self._require_token_id_list(
                 result.get("tokens"),
