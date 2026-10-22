@@ -761,6 +761,8 @@ class PiAgent(SimpleResponsesAPIAgent):
         if body.model is not None and body.model != self.config.model:
             raise HTTPException(422, "Pi model must match the configured model")
         ModelCallSampling.from_request(body)
+        if body.max_output_tokens is not None and body.max_output_tokens > self.config.context_window:
+            raise HTTPException(422, "Pi request max_output_tokens must not exceed context_window")
         supported = {"input", "instructions", "temperature", "top_p", "max_output_tokens", "model"}
         for name, field in type(body).model_fields.items():
             if name in supported:

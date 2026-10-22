@@ -41,7 +41,7 @@ The agent's YAML default, the limit a harness sends on an individual model call,
 
 For example, agent config `1024` plus request `2048` gives the harness a default of `2048`. If the harness then requests `512` for one model call, Gym keeps `512`. A Model Server token-limit override can still replace that value. The limit is per model call, not an episode-wide budget; model context restrictions still apply.
 
-The current Hermes integration does not automatically route context-compression calls through Gym: those calls use a separate auxiliary-provider resolver. The request controls described here do not cover that separate route. This differs from the final summary at the turn limit, which uses the normal Gym model route.
+In both host and sandbox execution, the current Hermes integration does not automatically route context-compression calls through Gym. Those calls use a separate auxiliary-provider resolver that ignores `OPENAI_BASE_URL` in the pinned Hermes version, including the value set by the sandbox runner. The request controls described here do not cover that separate route. The final summary at the turn limit uses the normal Gym model route and receives the controls.
 
 The pinned Codex 0.144.4 treats an incomplete response caused by `max_output_tokens` as a retryable stream error. Its default policy allows five retries, for up to six model requests total. The output-token cap applies separately to each request, not to the combined output across retries.
 </Note>

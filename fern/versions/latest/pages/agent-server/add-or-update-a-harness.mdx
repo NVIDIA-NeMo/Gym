@@ -547,11 +547,13 @@ Run the harness in `SandboxAccess.workdir`. Route model calls through a Gym endp
 
 For Hermes, the adapter uploads the episode input to `input.json` and passes an argv with its private Python interpreter, `sandbox_runner.py`, and the input and output paths. The supervisor starts that command without reading the input. The shim reads the adapter-specific JSON, invokes Hermes, and writes `output.json`. This is a file exchange, not another Responses API call.
 
-The Hermes shim creates the harness with `model_base_url` and points its auxiliary clients at the same Model Server. The adapter converts the harness output back into a `NeMoGymResponse`. This model traffic is independent of the supervisor's cleanup files.
+The Hermes shim creates the harness with `model_base_url`. The adapter converts the harness output back into a `NeMoGymResponse`. This model traffic is independent of the supervisor's cleanup files.
 
 ### Route every model call through the Model Server
 
-Point every model client in the harness at the rollout-prefixed Gym Model Server URL, built with `base_url_for_run()` or `resolve_model_base_url()`. This includes auxiliary calls that the harness or framework makes on its own, such as summarization, context compaction, title generation, and subagents. Hermes, for example, points its auxiliary clients at the same Model Server as its main loop.
+Point every model client in the harness at the rollout-prefixed Gym Model Server URL, built with `base_url_for_run()` or `resolve_model_base_url()`. This includes auxiliary calls that the harness or framework makes on its own, such as summarization, context compaction, title generation, and subagents.
+
+The current Hermes integration routes its main loop, final summary at the turn limit, and delegated children through Gym. Context compression uses a separate provider resolver and is not automatically routed through Gym in either host or sandbox execution; see [Integrate Existing Agents](/main/agent-server/integrate-existing-agents) for this limitation.
 
 A call sent directly to an external provider is not captured. For training, Gym does not guess at missing calls: if a call's output reaches a later prompt but its chain cannot be proven, Gym sets `mask_sample: true` on the rollout. With `token_id_capture.max_mask_fraction` set, collection stops when too many rollouts are masked.
 

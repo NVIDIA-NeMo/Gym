@@ -508,6 +508,7 @@ class VLLMModel(SimpleResponsesAPIModel):
     )
     _external_capture_handler: ExternalCaptureHandler | None = PrivateAttr(default=None)
     _warned_request_chat_template_kwargs_dropped: bool = PrivateAttr(default=False)
+    _warned_sampling_override_conflict: bool = PrivateAttr(default=False)
     _tar_audio_reader: TarAudioReader = PrivateAttr(default_factory=TarAudioReader)
     _generation_cut_control_urls: Dict[str, str] = PrivateAttr(default_factory=dict)
 
@@ -682,7 +683,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         )
 
     def _warn_sampling_override_conflicts(self, request_values: Dict[str, Any]) -> None:
-        """Compare request fields before configured defaults are merged in."""
+        """Compare request fields before defaults; warn once per worker, then log at debug."""
         overrides = self.config.sampling_overrides or {}
         conflicts = {}
         for name, value in overrides.items():
@@ -700,8 +701,12 @@ class VLLMModel(SimpleResponsesAPIModel):
             if requested is not None and requested != value:
                 conflicts[name] = {"requested": requested, "effective": value}
         if conflicts:
-            LOG.warning(
-                "Model Server `%s`: sampling_overrides replaces request sampling values: %s",
+            level = logging.DEBUG if self._warned_sampling_override_conflict else logging.WARNING
+            self._warned_sampling_override_conflict = True
+            LOG.log(
+                level,
+                "Model Server `%s`: sampling_overrides replaces request sampling values: %s. "
+                "Logged at WARNING once per worker; subsequent conflicts at DEBUG.",
                 self.config.name,
                 conflicts,
             )
@@ -1810,6 +1815,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         # request-level fields.
         if self.config.extra_body:
             extra_body = deepcopy(self.config.extra_body)
+            # Normalize the default's alias before merging so request limits win
+            # regardless of which token-limit field the default used.
+            if (limit := extra_body.pop("max_completion_tokens", None)) is not None:
+                extra_body["max_tokens"] = limit
             out = extra_body | out
 
         if self.config.return_token_id_information:

@@ -20,13 +20,14 @@ from nemo_gym.model_sampling import ModelCallSampling, ModelSamplingMiddleware, 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 
 
-def test_request_controls_preserve_zero_and_leave_omitted_controls_unset():
-    request = NeMoGymResponseCreateParamsNonStreaming(input="task", temperature=0.0, top_p=1.0)
+@pytest.mark.parametrize("top_p", [1e-12, 1.0])
+def test_request_controls_preserve_zero_temperature_and_leave_omitted_controls_unset(top_p):
+    request = NeMoGymResponseCreateParamsNonStreaming(input="task", temperature=0.0, top_p=top_p)
     original = request.model_dump()
 
     sampling = ModelCallSampling.from_request(request)
 
-    assert sampling.model_dump(exclude_none=True) == {"temperature": 0.0, "top_p": 1.0}
+    assert sampling.model_dump(exclude_none=True) == {"temperature": 0.0, "top_p": top_p}
     assert request.model_dump() == original
     empty = ModelCallSampling.from_request(NeMoGymResponseCreateParamsNonStreaming(input="task"))
     assert model_sampling_base_url("http://model/ng-rollout/task-a2/v1", empty) == (
@@ -44,6 +45,7 @@ def test_request_controls_preserve_zero_and_leave_omitted_controls_unset():
         {"temperature": float("nan")},
         {"top_p": float("inf")},
         {"top_p": -0.1},
+        {"top_p": 0.0},
         {"top_p": 1.1},
         {"max_output_tokens": True},
         {"max_output_tokens": 1.5},
@@ -217,7 +219,9 @@ def test_non_generating_routes_keep_their_request_body(method, path):
     assert response.json() == {"path": path, "body": "not-json", "query": "key=value"}
 
 
-@pytest.mark.parametrize("payload", [{"temperature": True}, {"unknown": 1}, [], {"max_output_tokens": -1}])
+@pytest.mark.parametrize(
+    "payload", [{"temperature": True}, {"top_p": 0.0}, {"unknown": 1}, [], {"max_output_tokens": -1}]
+)
 def test_invalid_url_controls_never_reach_generation(payload):
     app = FastAPI()
 

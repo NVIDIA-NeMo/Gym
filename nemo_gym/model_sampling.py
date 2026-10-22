@@ -42,7 +42,7 @@ class ModelCallSampling(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     temperature: float | None = Field(default=None, ge=0, le=2, allow_inf_nan=False)
-    top_p: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    top_p: float | None = Field(default=None, gt=0, le=1, allow_inf_nan=False)
     max_output_tokens: int | None = Field(default=None, gt=0, le=2**53 - 1)
 
     @classmethod

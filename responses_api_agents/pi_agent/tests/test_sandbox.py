@@ -335,6 +335,27 @@ def test_invalid_output_limit_does_not_consume_activation(setup, limit):
         assert response.status_code == 200
 
 
+def test_request_output_limit_must_fit_context_window_before_activation(setup):
+    agent, sandbox = setup
+    agent.config.context_window = 4096
+    agent.config.max_output_tokens = 1024
+    path = "/ng-rollout/pi-smoke-a2/v1/responses"
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
+        response = client.post(path, json={"input": "Fix the code", "max_output_tokens": 4097})
+        assert response.status_code == 422
+        assert "must not exceed context_window" in response.json()["detail"]
+        assert next(iter(agent._session_records.values())).state.task is None
+        sandbox.launch.assert_not_awaited()
+
+        response = client.post(path, json={"input": "Fix the code", "max_output_tokens": 4096})
+        assert response.status_code == 200, response.text
+        models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
+        model = models["providers"]["nemo"]["models"][0]
+        assert model["maxTokens"] == model["contextWindow"] == 4096
+    sandbox.launch.assert_awaited_once()
+
+
 def test_session_output_limit_uses_config_default(setup):
     agent, sandbox = setup
     agent.config.max_output_tokens = 4096

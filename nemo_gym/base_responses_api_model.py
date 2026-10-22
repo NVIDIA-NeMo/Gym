@@ -460,7 +460,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
             app.router.lifespan_context = lifespan_with_coordinator
             gate = link.gate
-        # Outermost of this app's middleware: a refused call must not register capture intent.
+        # Runs before capture: a refused call must not register capture intent.
         app.add_middleware(PolicyAdmissionMiddleware, gate=gate)
         app.state.nemo_gym_policy_gate = gate
 
