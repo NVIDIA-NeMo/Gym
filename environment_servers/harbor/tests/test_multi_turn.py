@@ -23,6 +23,7 @@ from environment_servers.harbor.app import (
 )
 from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S
 from environment_servers.harbor.tests.conftest import TASK_TOML, FakeSandbox, agent_response, make_server
+from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.tasks.harbor import load_task
 from nemo_gym.tasks.harbor.materialize import STEP_METADATA_KEY, materialize_task
 
@@ -240,6 +241,61 @@ async def test_a_turn_without_a_reward_file_ends_the_episode_measured(tmp_path, 
     assert [turn.verifier_rewards for turn in result.turns] == [None]
     assert (result.reward, result.mask_sample, result.turns_without_verifier_result) == (0.0, False, 1)
     assert result.failure_kind == "harbor:missing_reward"
+
+
+# The command that empties /tests and /logs/verifier (and removes the server's transcript) in the agent's sandbox.
+GRADING_RESET = "find /tests /logs/verifier -mindepth 1 -delete"
+
+
+async def test_the_previous_turns_grading_files_are_gone_before_the_next_agent_starts(tmp_path, monkeypatch):
+    steps = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n'
+    server, task, sandbox, _ = multi_turn_server(tmp_path, monkeypatch, steps, {"plan": "P", "build": "B"})
+    # What had run in the sandbox when each agent turn started.
+    at_activation: list[list[dict]] = []
+    server.server_client.turn_hooks.append(lambda: at_activation.append(list(sandbox.execs)))
+
+    result = (await server.run_request(request_for(task))).result
+
+    assert [turn.reward for turn in result.turns] == [1.0, 1.0]
+    first, second = at_activation
+    # The first turn keeps whatever the image put in /tests: nothing is reset before it.
+    assert not any(GRADING_RESET in record["command"] for record in first)
+    # Before the second agent starts, the first turn's tests, reward and transcript are removed, as root, after
+    # the first turn's test.sh ran.
+    ran_tests = max(i for i, record in enumerate(second) if "bash /tests/test.sh" in record["command"])
+    reset = max(i for i, record in enumerate(second) if GRADING_RESET in record["command"])
+    assert reset > ran_tests
+    assert second[reset]["user"] == "root"
+    assert "rm -rf -- /logs/agent/trajectory.json" in second[reset]["command"]
+
+
+async def test_a_sandbox_that_cannot_clear_the_grading_files_ends_the_episode_before_the_next_agent(
+    tmp_path, monkeypatch
+):
+    class KeepsGradingFiles(FakeSandbox):
+        resets = 0
+
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+            if GRADING_RESET in command:
+                self.resets += 1
+                if self.resets == 2:  # the first is the first turn's own verification; the second is the handover
+                    return SandboxExecResult(stdout="", stderr="find: Permission denied", return_code=1)
+            return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+    task_dir = tmp_path / "datasets" / "ds" / "hello"
+    write_steps(task_dir, {"plan": "P", "build": "B"})
+    steps = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n'
+    server, task, sandbox, _ = make_server(tmp_path, monkeypatch, KeepsGradingFiles(), toml=TASK_TOML + steps)
+
+    response = await server.run_request(request_for(task))
+
+    # Not scored and retried elsewhere: a provider that cannot clean is not the task's fault.
+    assert response.result is None and response.failure.stage == "agent" and not response.failure.terminal
+    assert "turn 'build'" in response.failure.failure_reason
+    assert "Could not clear /tests, /logs/verifier and the transcript" in response.failure.failure_reason
+    # The second agent session was never opened beside the first turn's grading files.
+    assert len(server.server_client.seed_bodies()) == 1
+    assert sandbox.stopped
 
 
 async def test_rows_whose_turns_differ_from_the_task_fail_terminally(tmp_path, monkeypatch):
