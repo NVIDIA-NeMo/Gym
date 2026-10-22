@@ -42,8 +42,10 @@ def healthy(tmp_path):
     }
 
 
-def test_measured_zero_is_healthy_and_duplicates_are_not(tmp_path):
+@pytest.mark.parametrize("judge_source", ["claude_code", "other_judge"])
+def test_measured_zero_is_healthy_and_duplicates_are_not(tmp_path, judge_source):
     row = healthy(tmp_path)
+    row["judge_close"]["agent_observations"]["source"] = judge_source
     assert inspect_row(row, asset_root=tmp_path) == []
     output = tmp_path / "rows.jsonl"
     output.write_text(json.dumps(row) + "\n")

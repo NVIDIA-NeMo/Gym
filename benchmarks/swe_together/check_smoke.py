@@ -55,7 +55,7 @@ def inspect_row(row: dict, *, asset_root: Path) -> list[str]:
     judge_close = row.get("judge_close") or {}
     if (
         not judge_close.get("agent_session_id")
-        or (judge_close.get("agent_observations") or {}).get("source") != "claude_code"
+        or not (judge_close.get("agent_observations") or {}).get("source")
         or judge_close.get("cleanup_confirmed") is not True
         or row.get("judge_close_error")
     ):

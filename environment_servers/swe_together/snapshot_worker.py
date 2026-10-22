@@ -89,6 +89,7 @@ def snapshot_store(repo, namespace):
         object_format = git(repo, "rev-parse", "--show-object-format").strip()
         git(repo, "init", "--bare", "--quiet", "--object-format=" + object_format, str(store))
     exclude = Path(git(repo, "rev-parse", "--absolute-git-dir").strip()) / "info" / "exclude"
+    (store / "info").mkdir(exist_ok=True)
     (store / "info" / "exclude").write_bytes(exclude.read_bytes() if exclude.is_file() else b"")
     return store
 

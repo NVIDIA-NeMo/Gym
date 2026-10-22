@@ -59,6 +59,8 @@ def change_archive_owner(chunks: Path, path: Path, field: str) -> None:
             for item in source.getmembers():
                 if item.name == str(path).lstrip("/"):
                     setattr(item, field, getattr(item, field) + 1)
+                    # Large IDs use PAX fields, which otherwise override this edit.
+                    item.pax_headers.pop(field, None)
                 target.addfile(item, source.extractfile(item) if item.isfile() else None)
     raw = output.getvalue()
     checksum = hashlib.sha256(raw).hexdigest()

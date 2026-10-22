@@ -27,6 +27,7 @@ def test_unborn_parent_preserves_prepared_files_and_nested_repository(tmp_path, 
         subprocess.run(["git", "init", str(directory)], check=True, capture_output=True)
     (repo / "prepared.txt").write_text("untracked prepared baseline\n")
     (repo / "ignored.txt").write_text("prepared ignored file\n")
+    (repo / ".git/info").mkdir(exist_ok=True)
     (repo / ".git/info/exclude").write_text("ignored.txt\n")
     (nested / "source.txt").write_text("nested baseline\n")
     snapshot_worker.git(str(nested), "add", "-A")
