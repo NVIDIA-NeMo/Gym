@@ -612,7 +612,7 @@ partial work proceeds to verification without an automatic episode retry.
 
 The helper writes JSON to `response.metadata.ng_agent_outcome`; `status_code` is the
 upstream model request's status, not the agent endpoint's HTTP status. The
-`single_agent_turn` Environment Server applies this default policy to classified
+`single_agent_turn` and `harbor` Environment Servers apply this default policy to classified
 failed responses after closing the agent:
 
 | Reported cause | Verify | Eligible for episode retry |
@@ -633,7 +633,7 @@ errors, other unmatched failure kinds and malformed metadata now fail without
 verification or episode retry by default. Unclassified failures reported as `unknown`
 remain retryable.
 
-Configure `agent_outcome_policy` inside the `single_agent_turn` Environment Server's
+Configure `agent_outcome_policy` inside the `single_agent_turn` or `harbor` Environment Server's
 config to choose `verify`, `retry`, or `fail` (ungraded and nonretryable) for classified
 failed responses. These overrides do not apply to completed or incomplete responses.
 HTTP status rules take precedence over failure-kind rules; unmatched failures use `default_action`
@@ -646,7 +646,7 @@ status rule matches; it does not override the default 400/408/413/422/425/429/5x
 Use `by_status_code: {503: fail}` to change 503 handling. Adding
 `by_status_code: {404: retry}` keeps the other default status rules, including 429 and 5xx.
 
-It applies to `single_agent_turn` and its legacy-response wrapper, not other
+It applies to `single_agent_turn`, its legacy-response wrapper and `harbor`, not other
 Environment Server implementations or agents' own legacy `/run` methods.
 
 ## Make retries and close safe

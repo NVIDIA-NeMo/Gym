@@ -22,6 +22,7 @@ from environment_servers.harbor.app import (
 )
 from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S
 from environment_servers.harbor.tests.conftest import TASK_TOML, FakeSandbox, agent_response, make_server
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.tasks.harbor import load_task
 from nemo_gym.tasks.harbor.materialize import STEP_METADATA_KEY, materialize_task
@@ -128,6 +129,40 @@ async def test_each_step_is_a_turn_in_a_fresh_session_on_one_sandbox(tmp_path, m
     # The chmod of test.sh before each run is its own exec; the verifier's run is the one under `timeout`.
     build_verify = [e for e in sandbox.execs if "test.sh" in e["command"] and "timeout" in e["command"]][1]
     assert "timeout -s KILL 30 " in build_verify["command"] and build_verify["env"] == {"STEP": "build"}
+
+
+async def test_a_turn_whose_failure_the_harness_classified_ends_the_episode_ungraded(tmp_path, monkeypatch):
+    """The deployment's ``agent_outcome_policy`` applies to every turn: a transport or unknown cause on the second
+    step is a retryable agent-stage failure of the episode, so the step's test.sh never runs on the half-finished
+    sandbox and the first step's grading does not stand in for the task."""
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path, monkeypatch, THREE_STEPS, {"plan": "Agree on a plan.", "build": "Build it.", "check": "Hand off."}
+    )
+    rewards_per_turn(server, sandbox, ["1", "1", "1"])
+    failed = agent_response().model_dump(mode="json")
+    failed.update(
+        status="failed",
+        error={"code": "server_error", "message": "stream disconnected before completion"},
+        metadata={AGENT_OUTCOME_METADATA_KEY: '{"failure_kind":"unknown"}'},
+    )
+    activations = iter([None, failed, None])
+
+    def fail_the_second_turn():
+        server.server_client.turn_response = next(activations)
+
+    server.server_client.turn_hooks.append(fail_the_second_turn)
+
+    response = await server.run_request(request_for(task))
+
+    assert response.result is None
+    failure = response.failure
+    assert (failure.stage, failure.terminal) == ("agent", False)
+    assert failure.failure_reason == "stream disconnected before completion"
+    assert failure.partial_response.status == "failed"
+    # Only the first turn was graded; the failed turn's verifier never ran and the third turn never started.
+    assert len([e for e in sandbox.execs if "test.sh" in e["command"] and "timeout" in e["command"]]) == 1
+    assert len(server.server_client.seed_bodies()) == 2
+    assert sandbox.stopped
 
 
 async def test_mean_averages_the_turns_that_produced_a_result(tmp_path, monkeypatch):
