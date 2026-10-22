@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from http.cookies import SimpleCookie
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+from fastapi import Response
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
@@ -87,6 +90,93 @@ def http_mock(payload) -> MagicMock:
 
 
 class TestTurnLogging:
+    @pytest.mark.parametrize("empty_output", [False, True])
+    def test_stops_without_message_or_tool_calls(self, empty_output: bool, caplog) -> None:
+        config = make_config()
+        config.max_steps = 3
+        server = TurnLoggingAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        client = TestClient(server.setup_webserver())
+        output = [] if empty_output else [{"id": "reasoning-1", "type": "reasoning", "summary": []}]
+        turn = model_response(output, usage(100, 10, cached=20, reasoning=10))
+        turn.update(status="completed", metadata={"existing": "preserved"})
+        server.server_client.post = AsyncMock(return_value=http_mock(turn))
+
+        result = client.post(
+            "/v1/responses",
+            json={"input": "hi", "metadata": {"_turn_log_id": "terminal"}},
+        )
+
+        assert result.status_code == 200, result.text
+        server.server_client.post.assert_awaited_once()
+        body = result.json()
+        assert body["status"] == "incomplete"
+        assert body["incomplete_details"] is None
+        assert body["metadata"]["existing"] == "preserved"
+        assert body["metadata"]["ng_termination_reason"] == (
+            "empty_output" if empty_output else "incomplete_reasoning"
+        )
+        assert body["metadata"]["ng_termination_message"] in caplog.text
+        assert [item["type"] for item in body["output"]] == [item["type"] for item in output]
+        assert body["usage"] == turn["usage"]
+        telemetry = server.turn_logs["terminal"]
+        assert len(telemetry) == 1
+        assert telemetry[0]["status"] == "incomplete"
+        assert telemetry[0]["cached_input_tokens"] == 20
+        assert telemetry[0]["reasoning_tokens"] == 10
+        assert (telemetry[0]["output_start_index"], telemetry[0]["output_end_index"]) == (0, len(output))
+
+    @pytest.mark.parametrize("rotate_cookie", [False, True])
+    def test_run_preserves_resource_cookies_through_tools_and_verify(self, rotate_cookie: bool) -> None:
+        server = TurnLoggingAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+        client = TestClient(server.setup_webserver())
+        seeded = {"session_id": "seeded", "other_session": "retained"}
+        expected = seeded | ({"session_id": "rotated"} if rotate_cookie else {})
+        model_turns = iter(
+            [
+                model_response([FN_CALL, FN_CALL | {"id": "fc_2", "call_id": "call_2"}], usage(100, 10)),
+                model_response([FINAL_MESSAGE], usage(110, 5)),
+            ]
+        )
+        tool_cookies = []
+        returned_cookies = {}
+
+        async def post(*, server_name, url_path, **kwargs):
+            if url_path == "/seed_session":
+                response = http_mock({})
+                response.cookies = seeded
+                return response
+            if server_name == server.config.name:
+                response = Response()
+                model_result = await server.responses(
+                    MagicMock(cookies=kwargs["cookies"], path_params={}), response, kwargs["json"]
+                )
+                for header in response.headers.getlist("set-cookie"):
+                    returned_cookies.update({key: value.value for key, value in SimpleCookie(header).items()})
+                result = http_mock(model_result.model_dump(mode="json"))
+                result.cookies = returned_cookies
+                return result
+            if server_name == server.config.model_server.name:
+                return http_mock(next(model_turns))
+            if url_path == "/get_weather":
+                tool_cookies.append(dict(kwargs["cookies"]))
+                response = http_mock({"weather": "cold"})
+                if rotate_cookie and len(tool_cookies) == 1:
+                    response.cookies = SimpleCookie("session_id=rotated")
+                return response
+            assert url_path == "/verify"
+            assert kwargs["cookies"] == expected
+            return http_mock(kwargs["json"] | {"reward": 1.0})
+
+        server.server_client.post = AsyncMock(side_effect=post)
+        result = client.post("/run", json={"responses_create_params": {"input": "weather in SF?"}})
+
+        assert result.status_code == 200, result.text
+        assert tool_cookies == [seeded, expected]
+        assert returned_cookies == expected
+        assert result.json()["reward"] == 1.0
+        assert result.json()["num_turns"] == 2
+        assert server.turn_logs == {}
+
     def test_rollout_prefix_carried_onto_model_calls(self) -> None:
         # A /ng-rollout/<id>-prefixed self-call must re-apply the capture-correlation
         # prefix to downstream model calls, mirroring simple_agent's url_path_for_request.

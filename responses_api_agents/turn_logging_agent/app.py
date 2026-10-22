@@ -32,6 +32,7 @@ model call.
 """
 
 import json
+import logging
 from datetime import datetime, timezone
 from time import monotonic
 from typing import Any, Dict, List, Optional
@@ -51,10 +52,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, SimpleAgentRunRequest
+from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, SimpleAgentRunRequest, _cookies
 
 
 TURN_LOG_ID_METADATA_KEY = "_turn_log_id"
+LOG = logging.getLogger(__name__)
 
 
 class TurnLoggingAgentConfig(SimpleAgentConfig):
@@ -70,6 +72,7 @@ class TurnLoggingVerifyResponse(BaseVerifyResponse):
 
 
 class TurnLoggingAgent(SimpleAgent):
+    ray_enabled = False
     config: TurnLoggingAgentConfig
 
     # In-memory turn logs keyed by correlation id; entries are popped by run().
@@ -197,7 +200,30 @@ class TurnLoggingAgent(SimpleAgent):
                 turn_record["output_end_index"] = len(new_outputs)
                 break
 
-            if not all_fn_calls and all_output_messages:
+            if not all_fn_calls:
+                if not all_output_messages:
+                    termination_message = (
+                        "Ending trajectory: model returned no assistant message or tool calls "
+                        "(reasoning-only or empty output) without reported truncation. "
+                        "This is the stop-token case (finish_reason='stop'), not length truncation "
+                        "(finish_reason='length', handled separately via incomplete_details). "
+                        "This indicates either a badly trained model requiring training-level fixes "
+                        "or a bug in the inference engine."
+                    )
+                    model_response.status = "incomplete"
+                    model_response.metadata = {
+                        **(model_response.metadata or {}),
+                        "ng_termination_reason": "incomplete_reasoning" if output else "empty_output",
+                        "ng_termination_message": termination_message,
+                    }
+                    turn_record["status"] = "incomplete"
+                    LOG.warning(
+                        "%s model_server=%s response_id=%s step=%s",
+                        termination_message,
+                        self.config.model_server.name,
+                        model_response.id,
+                        step,
+                    )
                 turn_record["output_end_index"] = len(new_outputs)
                 break
 
@@ -219,7 +245,8 @@ class TurnLoggingAgent(SimpleAgent):
                     json=parsed_arguments,
                     cookies=resources_server_cookies,
                 )
-                resources_server_cookies = api_response.cookies
+                resources_server_cookies = dict(resources_server_cookies or {})
+                resources_server_cookies.update(_cookies(api_response))
 
                 tool_response = NeMoGymFunctionCallOutput(
                     type="function_call_output",
