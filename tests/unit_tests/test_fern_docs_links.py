@@ -362,10 +362,12 @@ class TestFernDocsLinks(unittest.TestCase):
         self.assertIn(expected_redirect, redirects)
 
     def test_latest_bash_blocks_have_no_placeholders_that_bash_splits(self):
-        """`WANDB_API_KEY={your W&B API key}` runs `W&B` as a command; `${Your Username}` is a bad substitution;
-        `ACCOUNT=<ACCOUNT_NAME>` is a syntax error.
+        """Two placeholder shapes that break a pasted block: `{your ...}` (`WANDB_API_KEY={your W&B API key}` runs
+        `W&B` as a command; `${Your Username}` is a bad substitution) and a `VAR=<...>` assignment
+        (`ACCOUNT=<ACCOUNT_NAME>` is a syntax error).
 
-        Runnable blocks export a sample value first and reference the variable instead.
+        Runnable blocks export a sample value first and reference the variable instead. Angle-bracket
+        arguments such as `--model <your-model>` are not covered here.
         """
         pages = REPO_ROOT / "fern/versions/latest/pages"
         bash_block = re.compile(r"^```(?:bash|sh|shell)[^\n]*\n(.*?)^```", re.DOTALL | re.MULTILINE)
