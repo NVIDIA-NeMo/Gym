@@ -19,7 +19,7 @@ One collector per benchmark job, in its own `srun --overlap` step like any other
 scrapes each model service's Prometheus `/metrics` on localhost, accepts OTLP from the job's own
 processes, stamps the resource attributes the shared dashboards filter on (`user`, `run_id`,
 `slurm_job_id`, plus `benchmark`, `cluster`, `model`), and exports to the configured OTLP/HTTP
-endpoint and to `<job dir>/otel/*.jsonl` at the same time.
+endpoint (when remote export is enabled) and to `<job dir>/otel/*.jsonl`.
 
 The ingest token travels twice, as the HTTP `Authorization` header and as an `Authorization`
 resource attribute: a routing proxy in front of the backend resolves the tenant from the
@@ -27,12 +27,16 @@ attribute and silently drops payloads without it while still answering 200.
 """
 
 import getpass
+import logging
 import os
 from pathlib import Path
 
 import yaml
 
 from nemo_gym.orchestration.api import BaseModelServiceConfig, SubmitConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 COLLECTOR_SERVICE_NAME = "otel_collector"
@@ -57,6 +61,28 @@ def driver_telemetry_env(gym_job_id: str, span_groups: str, *, logs: bool = True
         "NEMO_GYM_OTEL_LOGS_ENABLED": "1" if logs else "0",
         "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://localhost:{OTLP_HTTP_PORT}",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+    }
+
+
+VLLM_TRACES_FLAG = "--otlp-traces-endpoint"
+
+
+def vllm_traces_flag(host: str = "localhost") -> str:
+    """The `vllm serve` flag that sends one span per request to the collector's OTLP/HTTP receiver."""
+    return f"{VLLM_TRACES_FLAG} http://{host}:{OTLP_HTTP_PORT}/v1/traces"
+
+
+def vllm_traces_env(component: str, service_name: str) -> dict[str, str]:
+    """Environment for a traced vLLM service.
+
+    vLLM picks the exporter by `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` and defaults to gRPC, so the
+    protocol has to match the HTTP endpoint in the flag. vLLM sets no `service.name` of its own; the
+    collector copies the one given here into `service.name.override`, so the spans carry the same
+    display identity as the service's scraped metrics (`<component>/<service>`).
+    """
+    return {
+        "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
+        "OTEL_SERVICE_NAME": f"{component}/{service_name}",
     }
 
 
@@ -96,25 +122,31 @@ def validate_gym_telemetry(config: SubmitConfig) -> None:
 
 
 def validate_destination(config: SubmitConfig) -> None:
-    """An enabled collector needs somewhere to send to; a bare default config has none."""
+    """Remote export needs a destination; local collection does not."""
+    if not (otel_active(config) and config.otel.remote_export):
+        return
     missing = [k for k in ("endpoint", "service_name") if getattr(config.otel, k) is None]
     if missing:
         raise ValueError(
             f"The OTel collector is enabled but otel.{' and otel.'.join(missing)} is not set. "
-            "Set them for this deployment, or set `otel.enabled: false`."
+            "Set them for this deployment, or set `otel.remote_export: false` for local collection only."
         )
 
 
-def resolve_token(config: SubmitConfig) -> str:
-    """The ingest token from the submitting environment; a missing one fails the submit."""
+def resolve_token(config: SubmitConfig) -> str | None:
+    """Resolve the remote ingest token, switching to local collection with a warning if absent."""
+    if not (otel_active(config) and config.otel.remote_export):
+        return None
     name = config.otel.token_env
     token = os.environ.get(name)
     if not token:
-        raise ValueError(
-            f"The OTel collector is enabled but {name!r} is not set in the submitting shell's environment. "
-            f"Export the ingest token as {name}, or set `otel.enabled: false`."
+        config.otel.remote_export = False
+        logger.warning(
+            "%r is missing or empty in the submitting shell; setting otel.remote_export=false. "
+            "Telemetry will still be written to the job's otel/ directory.",
+            name,
         )
-    return token
+    return token or None
 
 
 def collector_config_path(remote_bench_dir: Path) -> Path:
@@ -186,7 +218,7 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
     }
 
     attributes = [
-        ("service.name", obs.service_name, "upsert"),
+        *([("service.name", obs.service_name, "upsert")] if obs.service_name is not None else []),
         ("user", getpass.getuser(), "upsert"),
         ("run_id", remote_bench_dir.parent.name, "upsert"),
         ("slurm_job_id", "${env:SLURM_JOB_ID}", "upsert"),
@@ -276,4 +308,9 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
             },
         },
     }
+    if not obs.remote_export:
+        del doc["processors"]["resource/managed"]
+        del doc["exporters"]["otlp_http/managed"]
+        for signal in ("metrics", "traces", "logs"):
+            del doc["service"]["pipelines"][signal]
     return yaml.safe_dump(doc, sort_keys=False)

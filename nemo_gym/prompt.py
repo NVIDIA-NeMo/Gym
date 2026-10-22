@@ -25,10 +25,10 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigPathNotFoundError, PromptConfigMalformedError
 
 
 class PromptConfig(BaseModel):
@@ -48,11 +48,32 @@ def load_prompt_config(path: str) -> PromptConfig:
     Returns a ``PromptConfig`` with required ``user`` and optional ``system`` fields.
     Each value is a string template with ``{placeholder}`` syntax.
     Results are cached so the same file is only parsed once.
+
+    Raises ``ConfigPathNotFoundError`` when the file does not exist and ``PromptConfigMalformedError`` when it is not
+    valid YAML or not a valid ``PromptConfig``. Both are ``ConfigError``s, so the CLI prints the message without a
+    traceback, and they keep their ``FileNotFoundError`` / ``ValueError`` bases for callers that catch those.
     """
     resolved = _resolve_under_cwd_or_install(path)
-    with open(resolved) as f:
-        data = yaml.safe_load(f)
-    return PromptConfig.model_validate(data)
+    if not resolved.exists():
+        raise ConfigPathNotFoundError(
+            f"Prompt config '{path}' was not found. Check the path is spelled correctly and is relative to your "
+            "working directory, an extra root (NEMO_GYM_EXTRA_ROOTS / --search-dir), or the Gym install root."
+        )
+    try:
+        with open(resolved) as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        raise PromptConfigMalformedError(f"Prompt config '{resolved}' is not valid YAML: {e}") from e
+    try:
+        return PromptConfig.model_validate(data)
+    except ValidationError as e:
+        problems = "; ".join(
+            f"{'.'.join(map(str, err['loc']))}: {err['msg']}" if err["loc"] else err["msg"] for err in e.errors()
+        )
+        raise PromptConfigMalformedError(
+            f"Prompt config '{resolved}' must be a mapping with a `user` template string and an optional `system` "
+            f"string ({problems})."
+        ) from e
 
 
 def fill_prompt(prompt_config: PromptConfig, row: dict) -> List[Dict[str, str]]:
@@ -118,6 +139,11 @@ def materialize_prompts(input_jsonl: str, prompt_config: str, output_jsonl: str)
     """
     prompt_cfg = load_prompt_config(prompt_config)
     resolved_prompt_path = str(_resolve_under_cwd_or_install(prompt_config))
+    # Checked before the output directory is created, so a mistyped input path leaves nothing behind.
+    if not Path(input_jsonl).exists():
+        raise ConfigPathNotFoundError(
+            f"Input file not found: '{input_jsonl}' (--input). Check the path is spelled correctly."
+        )
     output_path = Path(output_jsonl)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 

@@ -137,6 +137,7 @@ class HarnessAgentConfig(BaseResponsesAPIAgentConfig):
     agent_kwargs: dict[str, Any] = Field(default_factory=dict)
 
     sandbox_provider: str | dict[str, Any]
+    # Only for sandboxes that cannot reach the model server's host:port: a relay or tunnel URL that forwards to it.
     sandbox_model_base_url: str | None = None
     sandbox_image: str = "python:3.12-slim"
     sandbox_spec: dict[str, Any] = Field(default_factory=dict)
@@ -213,10 +214,11 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         return tar_path
 
     def _sandbox_model_url(self, request: Request) -> str:
+        # Default to the Gym model server, so its request handling and capture apply to in-box calls.
         base = self.config.sandbox_model_base_url
         if not base:
             cfg = get_first_server_config_dict(self.server_client.global_config_dict, self.config.model_server.name)
-            base = cfg.get("base_url") or self.server_client._build_server_base_url(cfg)
+            base = self.server_client._build_server_base_url(cfg)
         if isinstance(base, (list, ListConfig)):
             base = base[0]
         base = re.sub(r"/v1/?$", "", str(base))

@@ -14,30 +14,11 @@
 # limitations under the License.
 """SPEED-Bench speculative decoding resources server.
 
-Ported from
-https://github.com/NVIDIA-NeMo/Skills/blob/main/nemo_skills/inference/eval/specdec.py.
-
-Speculative-decoding throughput is **not** a per-task correctness metric. It's a
-property of the model server's Prometheus counters during the benchmark window.
-This server reproduces Skills' approach:
-
-1. Snapshot the vLLM server's `vllm:spec_decode_*` counters at the start of the
-   benchmark window (lazily on the first `verify()` call).
-2. On each `verify()`, snapshot the counters again, compute the running delta
-   vs the start, and stamp the running aggregate (acceptance length, acceptance
-   rate, per-position rates) onto that task's response.
-3. In `compute_metrics()`, take the latest (largest-delta) running aggregate
-   across all tasks as the headline `spec_acceptance_length` /
-   `spec_acceptance_rate`. This matches Skills' final value, since Skills also
-   computes a single before/after delta over the whole run.
-
-SGLang is supported via Prometheus delta on
-`sglang:spec_accept_length` / `sglang:spec_accept_rate` (running-average
-gauges) combined with `sglang:num_requests_total` /
-`sglang:generation_tokens_total` counters; the benchmark-only average is
-recovered with a weighted delta. Skills also supports an SGLang per-request
-metrics-file fallback (`--export-metrics-to-file`) — that path is not
-ported here; the Prometheus delta is sufficient for parity comparisons.
+By default, aggregate vLLM per-request acceptance counters carried by the
+speed_bench_agent. Each row contains only its own generation turns; headline
+metrics give each model request equal weight across all rows. No model URL or metrics
+scraping is needed. The explicit ``prometheus`` mode retains the legacy vLLM
+and SGLang before/after-counter implementation for existing deployments.
 """
 
 from __future__ import annotations
@@ -49,7 +30,9 @@ import math
 import statistics
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
+
+from pydantic import BaseModel, Field, JsonValue, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -61,6 +44,87 @@ from nemo_gym.server_utils import request as global_request
 
 
 LOG = logging.getLogger(__name__)
+
+
+class SpecDecodeRequestMetrics(BaseModel):
+    """vLLM's summary counters, excluding the bonus token from accepted counts."""
+
+    num_spec_steps: int = Field(ge=0, strict=True)
+    num_draft_tokens: int = Field(ge=0, strict=True)
+    num_accepted_draft_tokens: int = Field(ge=0, strict=True)
+    num_spec_tokens: int = Field(ge=0, strict=True)
+    acceptance_histogram: list[Annotated[int, Field(ge=0, strict=True)]]
+
+    @model_validator(mode="after")
+    def validate_counts(self) -> SpecDecodeRequestMetrics:
+        histogram = self.acceptance_histogram
+        if len(histogram) != self.num_spec_tokens + 1 or sum(histogram) != self.num_spec_steps:
+            raise ValueError("Acceptance histogram must match num_spec_tokens and num_spec_steps")
+        if sum(i * count for i, count in enumerate(histogram)) != self.num_accepted_draft_tokens:
+            raise ValueError("Acceptance histogram must match num_accepted_draft_tokens")
+        if not self.num_accepted_draft_tokens <= self.num_draft_tokens <= self.num_spec_steps * self.num_spec_tokens:
+            raise ValueError("Draft token counts are inconsistent with verification steps")
+        return self
+
+
+def _acceptance_metrics(requests: list[SpecDecodeRequestMetrics]) -> dict[str, JsonValue]:
+    """Average request metrics, normalizing each histogram before averaging."""
+    active = [r for r in requests if r.num_spec_steps]
+    drafted = [r for r in requests if r.num_draft_tokens]
+    histogram = (
+        [
+            statistics.mean(
+                r.acceptance_histogram[i] / r.num_spec_steps if i < len(r.acceptance_histogram) else 0.0
+                for r in active
+            )
+            for i in range(max(len(r.acceptance_histogram) for r in active))
+        ]
+        if active
+        else None
+    )
+    return {
+        "num_requests": len(requests),
+        "num_drafts": statistics.mean(r.num_spec_steps for r in requests),
+        "draft_tokens": statistics.mean(r.num_draft_tokens for r in requests),
+        "accepted_tokens": statistics.mean(r.num_accepted_draft_tokens for r in requests),
+        "acceptance_histogram": histogram,
+        "acceptance_length": statistics.mean(1 + r.num_accepted_draft_tokens / r.num_spec_steps for r in active)
+        if active
+        else None,
+        "acceptance_rate": statistics.mean(100 * r.num_accepted_draft_tokens / r.num_draft_tokens for r in drafted)
+        if drafted
+        else None,
+        "per_position_acceptance_rates": [sum(histogram[i:]) for i in range(1, len(histogram))]
+        if histogram is not None
+        else None,
+    }
+
+
+def _parse_request_metrics(metrics: dict[str, JsonValue] | None) -> list[SpecDecodeRequestMetrics] | None:
+    """Require valid provider counters for every model call, including zero-step calls."""
+    if not metrics:
+        return None
+    requests = metrics.get("requests", [metrics])
+    if not isinstance(requests, list) or not requests:
+        return None
+    summaries = []
+    for request in requests:
+        spec = request.get("speculative_decoding") if isinstance(request, dict) else None
+        if spec is None:
+            return None
+        summaries.append(SpecDecodeRequestMetrics.model_validate(spec))
+    return summaries
+
+
+def _request_acceptance_metrics(metrics: dict[str, JsonValue] | None) -> dict[str, JsonValue] | None:
+    summaries = _parse_request_metrics(metrics)
+    return _acceptance_metrics(summaries) if summaries else None
+
+
+def _row_request_metrics(row: Dict[str, Any]) -> list[SpecDecodeRequestMetrics] | None:
+    # Read original provider counters so multi-turn tasks do not become one vote,
+    # and older response-mode rollouts can be reaggregated with the new weighting.
+    return _parse_request_metrics((row.get("response") or {}).get("metrics"))
 
 
 @dataclass
@@ -272,29 +336,14 @@ class SpecDecodeMetricsUnavailable(RuntimeError):
 
 
 class SpeedBenchResourcesServerConfig(BaseResourcesServerConfig):
-    """Config for the SPEED-Bench resources server.
+    """Use response metrics by default, or explicitly select legacy Prometheus scraping.
 
-    Attributes:
-        vllm_metrics_url: Full URL to the model server's Prometheus `/metrics`
-            endpoint (e.g. `http://hostname:8000/metrics`). When set, this
-            takes precedence. Default `None`, in which case the server uses
-            `vllm_base_url` to derive `<base>/metrics`.
-        vllm_base_url: The model server's OpenAI-compatible base URL
-            (e.g. `http://hostname:8000/v1`). The `/v1` suffix is stripped to
-            derive the metrics URL. Defaulted from Hydra's `${policy_base_url}`
-            interpolation in `configs/speed_bench.yaml`.
-        server_type_for_metrics: `vllm` (default) or `sglang`. SGLang scrape is
-            currently a stub and will raise NotImplementedError.
-        metrics_request_timeout_s: Per-request timeout for `/metrics` scrapes.
-        snapshot_at_init: If True, take the "before" snapshot at server init
-            (matches a freshly-started vLLM server with no prior traffic). If
-            False (default), take the snapshot lazily on the first `verify()`
-            call to better isolate the benchmark window when the server has
-            been used for warmup. Skills' approach is closer to the False path
-            (it snapshots in `wait_for_server` after the server is up but
-            before any benchmark traffic).
+    ``vllm_base_url``, ``vllm_metrics_url``, ``server_type_for_metrics``,
+    ``metrics_request_timeout_s`` and ``snapshot_at_init`` apply only in
+    ``prometheus`` mode. That mode requires an explicit backend URL.
     """
 
+    metrics_source: Literal["response", "prometheus"] = "response"
     vllm_metrics_url: Optional[str] = None
     vllm_base_url: Optional[str] = None
     server_type_for_metrics: Literal["vllm", "sglang"] = "vllm"
@@ -319,36 +368,26 @@ class SpeedBenchVerifyRequest(BaseVerifyRequest):
 
 
 class SpeedBenchVerifyResponse(BaseVerifyResponse):
-    """Per-task verify response.
+    """Per-task token counts, generation duration, and request-averaged acceptance metrics.
 
-    Mirrors the per-row payload Skills' `eval_specdec` stamps onto its
-    output JSONL. Spec-decode fields are *running* aggregates — the values at
-    the moment this task's verify() ran, computed against the start-of-window
-    snapshot. Headline aggregate is the max running-delta across all tasks
-    (computed in compute_metrics).
-
-    Attributes:
-        num_generated_tokens: Total tokens emitted by the model for this task
-            (sum across multi-turn replies).
-        gen_seconds: Wall-clock seconds elapsed in the model server between
-            session start and this task's verify(). Skills' equivalent is the
-            generation step's duration; we approximate by recording the
-            elapsed time since the resources server first scraped /metrics.
-        acceptance_length, acceptance_rate, num_drafts, draft_tokens,
-        accepted_tokens, per_position_acceptance_rates: spec-decode running
-            aggregates. None if scrape failed or counters are still zero.
-        spec_decode_unavailable: True if the server reports no spec-decode
-            counters at all (e.g. spec decoding disabled on the server).
+    In response mode these cover all turns of this task. Missing metrics on any
+    turn make acceptance metrics unavailable; a reported zero-step histogram is
+    available but has undefined rates and histogram probabilities. Acceptance rate is a percentage.
+    Legacy Prometheus mode retains cumulative benchmark-window semantics.
     """
 
     num_generated_tokens: int = 0
     gen_seconds: float = 0.0
     acceptance_length: Optional[float] = None
     acceptance_rate: Optional[float] = None
-    num_drafts: Optional[int] = None
-    draft_tokens: Optional[int] = None
-    accepted_tokens: Optional[int] = None
+    num_requests: Optional[int] = None
+    num_drafts: Optional[int | float] = None
+    draft_tokens: Optional[int | float] = None
+    accepted_tokens: Optional[int | float] = None
     per_position_acceptance_rates: Optional[List[float]] = None
+    acceptance_histogram: Optional[List[float]] = None
+    generation_started_at: Optional[float] = None
+    generation_finished_at: Optional[float] = None
     spec_decode_unavailable: bool = False
 
 
@@ -363,14 +402,18 @@ _SPEC_SCORE_KEYS = (
 )
 
 
-def _compute_std_metrics(tasks: List[List[Dict[str, Any]]], score_keys: tuple) -> Dict[str, Any]:
-    """Multi-seed variance metrics — mirrors Skills' `_add_std_metrics`.
+def _compute_std_metrics(
+    tasks: List[List[Dict[str, Any]]], score_keys: tuple, *, request_weighted: bool = False
+) -> Dict[str, Any]:
+    """Multi-seed variance metrics, optionally giving each model request one vote.
 
     For each score key, with `k = max_k` rollouts/task:
 
-    - `spec_<key>_avg` — overall mean across all (task, rollout) pairs.
+    - `spec_<key>_avg` — overall mean across requests in response mode,
+      or (task, rollout) pairs in legacy mode.
     - `spec_<key>_std_dev_across_runs` — std-dev of per-run averages,
-      where run i is "take rollout i from each task and average".
+      where run i uses rollout i from each task, averaging its individual
+      requests in response mode or its row values in legacy mode.
     - `spec_<key>_std_err_across_runs` — `std_dev_across_runs / sqrt(k)`.
     - `spec_<key>_avg_sample_std_dev` — mean of per-task std-devs across
       that task's k rollouts.
@@ -389,27 +432,37 @@ def _compute_std_metrics(tasks: List[List[Dict[str, Any]]], score_keys: tuple) -
 
     out: Dict[str, Any] = {}
     for key in score_keys:
-        # Build a rectangular [num_tasks × max_k] matrix of float values.
+        # Each task/run cell contains its individual request values (one row
+        # value in legacy mode). Preserve these until computing run means.
         # Drop tasks whose rollouts don't all have a numeric value for this
         # score (running aggregates can be None on the very first task).
-        matrix: List[List[float]] = []
+        matrix: List[List[List[float]]] = []
         for task_rollouts in tasks:
             if len(task_rollouts) < max_k:
                 continue
-            row = [task_rollouts[i].get(key) for i in range(max_k)]
-            if any(v is None for v in row):
+            if request_weighted:
+                requests_by_run = [_row_request_metrics(task_rollouts[i]) for i in range(max_k)]
+                if any(requests is None for requests in requests_by_run):
+                    continue
+                row = [
+                    [value for r in requests if (value := _acceptance_metrics([r])[key]) is not None]
+                    for requests in requests_by_run
+                ]
+            else:
+                row = [[task_rollouts[i].get(key)] for i in range(max_k)]
+            if any(not values or any(v is None for v in values) for values in row):
                 continue
-            matrix.append([float(v) for v in row])
+            matrix.append([[float(v) for v in values] for values in row])
 
         if not matrix:
             continue
 
-        # avg across all (task, rollout) pairs.
-        all_values = [v for row in matrix for v in row]
+        # Average all included requests (or rows in legacy mode).
+        all_values = [v for row in matrix for values in row for v in values]
         out[f"spec_{key}_avg"] = sum(all_values) / len(all_values)
 
         # std_dev_across_runs: transpose → run i averages → std-dev.
-        run_averages = [sum(row[i] for row in matrix) / len(matrix) for i in range(max_k)]
+        run_averages = [statistics.mean(v for row in matrix for v in row[i]) for i in range(max_k)]
         if len(run_averages) >= 2 and not all(v == run_averages[0] for v in run_averages):
             std_dev_across_runs = statistics.stdev(run_averages)
         else:
@@ -421,7 +474,8 @@ def _compute_std_metrics(tasks: List[List[Dict[str, Any]]], score_keys: tuple) -
 
         # avg_sample_std_dev: per-task std-dev across rollouts → mean.
         per_sample_std = []
-        for row in matrix:
+        for values_by_run in matrix:
+            row = [statistics.mean(values) for values in values_by_run]
             if len(row) >= 2 and not all(v == row[0] for v in row):
                 per_sample_std.append(statistics.stdev(row))
             else:
@@ -446,7 +500,7 @@ class SpeedBenchResourcesServer(SimpleResourcesServer):
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
         self._init_lock = asyncio.Lock()
-        if self.config.snapshot_at_init:
+        if self.config.metrics_source == "prometheus" and self.config.snapshot_at_init:
             # Best-effort eager snapshot — failure is fine, we'll retry lazily.
             try:
                 asyncio.run(self._take_before_snapshot())
@@ -463,7 +517,7 @@ class SpeedBenchResourcesServer(SimpleResourcesServer):
         if not self.config.vllm_base_url:
             raise RuntimeError(
                 "speed_bench resources server: neither vllm_metrics_url nor vllm_base_url is set. "
-                "Set one in configs/speed_bench.yaml (default: vllm_base_url=${policy_base_url})."
+                "Set one explicitly when using metrics_source=prometheus."
             )
         base = self.config.vllm_base_url.rstrip("/")
         # Drop a trailing /v1 so we land on <base>/metrics, not <base>/v1/metrics.
@@ -515,6 +569,21 @@ class SpeedBenchResourcesServer(SimpleResourcesServer):
     # ──────────────────────────────────────────────────────────
 
     async def verify(self, body: SpeedBenchVerifyRequest) -> SpeedBenchVerifyResponse:
+        if self.config.metrics_source == "response":
+            metrics = body.response.metrics if body.response is not None else None
+            acceptance = _request_acceptance_metrics(metrics)
+            timing = metrics or {}
+            usage = body.response.usage if body.response is not None else None
+            return SpeedBenchVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                num_generated_tokens=usage.output_tokens if usage is not None else 0,
+                gen_seconds=timing.get("generation_duration", 0.0),
+                generation_started_at=timing.get("generation_started_at"),
+                generation_finished_at=timing.get("generation_finished_at"),
+                spec_decode_unavailable=acceptance is None,
+                **(acceptance or {}),
+            )
         await self._ensure_before_snapshot()
 
         # Tokens emitted by the model for this task. The agent's response.usage
@@ -558,7 +627,9 @@ class SpeedBenchResourcesServer(SimpleResourcesServer):
     # ──────────────────────────────────────────────────────────
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Aggregate per-task spec-decode running values into headline metrics.
+        """Average individual request metrics across tasks in response mode.
+
+        The following cumulative behavior applies only to legacy Prometheus mode:
 
         - `num_entries`: total number of tasks (rows) seen.
         - `avg_tokens`: mean num_generated_tokens across tasks.
@@ -589,6 +660,33 @@ class SpeedBenchResourcesServer(SimpleResourcesServer):
 
         out["avg_tokens"] = sum(r.get("num_generated_tokens", 0) for r in flat) / n
         out["gen_seconds"] = max(r.get("gen_seconds", 0.0) for r in flat)
+
+        if self.config.metrics_source == "response":
+            # Requests can overlap. Wall time is the enclosing generation window,
+            # not the sum of request latencies. Agent hosts must have synced clocks.
+            if all(
+                r.get("generation_started_at") is not None and r.get("generation_finished_at") is not None
+                for r in flat
+            ):
+                out["gen_seconds"] = max(r["generation_finished_at"] for r in flat) - min(
+                    r["generation_started_at"] for r in flat
+                )
+            requests_by_row = [_row_request_metrics(row) for row in flat]
+            unavailable = any(requests is None for requests in requests_by_row)
+            if unavailable:
+                out["avg_tokens"] = None
+                # Do not present rates for a subset as complete benchmark metrics.
+                summary = dict.fromkeys(
+                    (*_SPEC_SCORE_KEYS, "num_requests", "per_position_acceptance_rates", "acceptance_histogram")
+                )
+            else:
+                requests = [request for row in requests_by_row for request in row]
+                summary = _acceptance_metrics(requests)
+                out["avg_tokens"] = sum(r.get("num_generated_tokens", 0) for r in flat) / len(requests)
+            out.update({f"spec_{key}": value for key, value in summary.items()})
+            out["spec_decode_unavailable"] = unavailable
+            out.update(_compute_std_metrics(tasks, _SPEC_SCORE_KEYS, request_weighted=True))
+            return out
 
         # Pick the task with the most accumulated draft tokens — that's the
         # one whose running aggregate most closely equals Skills' end-of-run

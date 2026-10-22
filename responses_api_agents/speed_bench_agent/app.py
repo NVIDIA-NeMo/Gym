@@ -44,10 +44,11 @@ model call (same shape as simple_agent).
 
 import json
 import logging
+from time import perf_counter, time
 from typing import List
 
 from fastapi import Request, Response
-from pydantic import ConfigDict, ValidationError
+from pydantic import ConfigDict, JsonValue, ValidationError
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -120,6 +121,9 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        generation_started_at = time()
+        generation_start = perf_counter()
+        request_metrics: list[dict[str, JsonValue] | None] = []
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -174,6 +178,9 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
                 parsed = NeMoGymResponse.model_validate(payload)
             except ValidationError as e:
                 raise RuntimeError(f"Received an invalid response from model server: {json.dumps(payload)}") from e
+            # Retain every turn, including missing metrics, so partial reporting
+            # cannot silently produce an apparently complete acceptance rate.
+            request_metrics.append(parsed.metrics)
             return parsed, model_response.cookies
 
         # First turn (always at least one).
@@ -213,6 +220,13 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
 
         last_response.output = accumulated_outputs
         last_response.usage = usage
+        duration = perf_counter() - generation_start
+        last_response.metrics = {
+            "requests": request_metrics,
+            "generation_started_at": generation_started_at,
+            "generation_finished_at": generation_started_at + duration,
+            "generation_duration": duration,
+        }
         return last_response
 
     async def run(self, request: Request, body: SpeedBenchAgentRunRequest) -> SpeedBenchAgentVerifyResponse:
