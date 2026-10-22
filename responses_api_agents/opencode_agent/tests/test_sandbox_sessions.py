@@ -857,7 +857,7 @@ def test_terminal_model_error_reports_partial_output_and_usage(setup, tmp_path, 
             assert response.json()["usage"]["total_tokens"] == (
                 16 if case in {"later", "auxiliary"} else 1 if case == "usage" else 0
             )
-        assert json.loads(response.json()["error"]["message"])["data"]["message"] == "model rejected request"
+        assert response.json()["error"]["message"] == "HTTP 400: model rejected request"
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
         invocation = next(
@@ -889,7 +889,7 @@ def test_terminal_provider_errors_report_failure_to_environment(setup, tmp_path,
         response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         response.raise_for_status()
         assert response.json()["status"] == "failed"
-        assert json.loads(response.json()["error"]["message"])["data"]["statusCode"] == status_code
+        assert response.json()["error"]["message"] == f"HTTP {status_code}: model rejected request"
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         invocation = next(
             record for record in closed.json()["agent_observations"]["records"] if record["kind"] == "agent_invocation"
