@@ -722,20 +722,17 @@ def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
     from nemo_gym.cli.eval import health_check_rollouts
     from nemo_gym.health.types import RunHealthLimits
 
-    overridden = (args.health_max_not_final_failure_fraction, args.health_max_final_failure_fraction) != (None, None)
     try:
         health_check_rollouts(
             args.run_dir,
             rollout_file=args.rollout_file,
             workers=args.workers,
             ignored_checks=args.ignore_checks or (),
-            # Without a limit flag the run's own persisted limits judge it again.
+            # A limit flag that is not given leaves None, which keeps the run's own persisted limit.
             limits=RunHealthLimits(
                 max_not_final_failure_fraction=args.health_max_not_final_failure_fraction,
                 max_final_failure_fraction=args.health_max_final_failure_fraction,
-            )
-            if overridden
-            else None,
+            ),
             json_output=args.json,
         )
     except (FileNotFoundError, ValueError) as exc:
@@ -1224,7 +1221,7 @@ COMMANDS = {
                     type=float,
                     help=(
                         "Override the run's persisted limit for not final (retryable) failures, as a share of expected "
-                        "rollouts. Either limit flag replaces both persisted limits; an unset one is no limit."
+                        "rollouts. Overrides only this limit; a limit whose flag is not given keeps its persisted value."
                     ),
                 )
             ),
@@ -1234,7 +1231,8 @@ COMMANDS = {
                     type=float,
                     help=(
                         "Override the run's persisted limit for final (not retried) failures, as a share of "
-                        "expected rollouts. Either limit flag replaces both persisted limits."
+                        "expected rollouts. Overrides only this limit; a limit whose flag is not given keeps its "
+                        "persisted value."
                     ),
                 )
             ),

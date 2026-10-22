@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import warnings
 from collections import Counter, defaultdict
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
@@ -483,7 +483,7 @@ def _rollout_accounting(
     paths: Sequence[Path],
     *,
     limits: RunHealthLimits,
-    limits_source: LimitsSource,
+    limits_source: LimitsSource | Mapping[str, LimitsSource],
     duplicated: int,
 ) -> dict[str, Any]:
     """Count the rollouts each input owed against those that landed, failed or left no row, and judge the run.
@@ -640,7 +640,7 @@ def run_health_checks(
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
     limits: RunHealthLimits = RunHealthLimits(),
-    limits_source: LimitsSource = "config",
+    limits_source: LimitsSource | Mapping[str, LimitsSource] = "config",
 ) -> HealthCheckResult:
     """Run the RFC's map/group/reduce pipeline and write both reports."""
     ignored = frozenset(normalize_ignored_checks(ignored_checks))
@@ -801,14 +801,14 @@ def health_check_run_dir(
     limits: RunHealthLimits | None = None,
     json_output: bool = False,
 ) -> HealthCheckResult:
-    """Recheck a run directory. Without ``limits``, the run's own persisted limits judge it, so the verdict of
-    the same artifacts does not change; explicit ``limits`` win and are recorded as an override."""
+    """Recheck a run directory. The run's own persisted limits judge it, so the verdict of the same artifacts
+    does not change. Each limit set in ``limits`` overrides only that persisted limit and is recorded as an
+    override; a limit left as ``None`` keeps its persisted value."""
     path = Path(run_dir)
     rollout_path = _resolve_rollout_path(path, rollout_file)
-    if limits is None:
-        limits, limits_source = _persisted_limits(path), "persisted"
-    else:
-        limits_source = "override"
+    overrides = limits.model_dump(exclude_none=True) if limits is not None else {}
+    limits = _persisted_limits(path).model_copy(update=overrides)
+    limits_source = {name: "override" if name in overrides else "persisted" for name in RunHealthLimits.model_fields}
     result = run_health_checks(
         rollout_path,
         output_dir=path,

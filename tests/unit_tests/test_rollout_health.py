@@ -2098,7 +2098,7 @@ class TestOneSourceOfLimits:
         assert artifacts["limits"] == {
             "max_not_final_failure_fraction": None,
             "max_final_failure_fraction": 0.01,
-            "source": "config",
+            "source": {"max_not_final_failure_fraction": "config", "max_final_failure_fraction": "config"},
         }
         assert artifacts["healthy"] is False
 
@@ -2115,7 +2115,7 @@ class TestOneSourceOfLimits:
         assert artifacts["limits"] == {
             "max_not_final_failure_fraction": None,
             "max_final_failure_fraction": 0.01,
-            "source": "persisted",
+            "source": {"max_not_final_failure_fraction": "persisted", "max_final_failure_fraction": "persisted"},
         }
 
     def test_an_explicit_override_wins_and_is_recorded(self, tmp_path: Path) -> None:
@@ -2131,7 +2131,10 @@ class TestOneSourceOfLimits:
         artifacts = recheck.summary["run"]["artifacts"]
         assert artifacts["healthy"] is True
         assert artifacts["limits"]["max_final_failure_fraction"] == 0.05
-        assert artifacts["limits"]["source"] == "override"
+        assert artifacts["limits"]["source"] == {
+            "max_not_final_failure_fraction": "persisted",
+            "max_final_failure_fraction": "override",
+        }
 
     def test_the_provisional_summary_records_its_limits(self, tmp_path: Path) -> None:
         from nemo_gym.health.types import RunHealthLimits
@@ -2148,7 +2151,7 @@ class TestOneSourceOfLimits:
         assert limits == {
             "max_not_final_failure_fraction": 0.1,
             "max_final_failure_fraction": None,
-            "source": "config",
+            "source": {"max_not_final_failure_fraction": "config", "max_final_failure_fraction": "config"},
         }
 
     @pytest.mark.parametrize("config_name", ["RolloutCollectionConfig", "RolloutAggregationConfig"])
@@ -2183,6 +2186,134 @@ class TestOneSourceOfLimits:
         cli_main.main()
 
         assert received["limits"] == RunHealthLimits(max_final_failure_fraction=0.05)
+
+
+class TestPerFlagLimitOverride:
+    """``gym eval health-check``: each limit flag overrides only its own limit; the other keeps the persisted one."""
+
+    @staticmethod
+    def _judged_run(root: Path) -> None:
+        # 100 tasks: 96 land, 2 fail for good, 2 fail but are retryable. Both 2% shares reach a 1% limit.
+        _write_fixture(root, [(_record(task, 0), [_call()]) for task in range(96)])
+        _inventory(root, 100)
+        (root / "rollouts_failures.jsonl").write_bytes(
+            b"".join(
+                orjson.dumps(
+                    {
+                        "_ng_task_index": task,
+                        "_ng_rollout_index": 0,
+                        "_ng_failure_class": "agent_run_error",
+                        "_ng_failure_terminal": task in (96, 97),
+                    }
+                )
+                + b"\n"
+                for task in (96, 97, 98, 99)
+            )
+        )
+        from nemo_gym.health.types import RunHealthLimits
+
+        run_health_checks(
+            root / "rollouts.jsonl",
+            workers=1,
+            limits=RunHealthLimits(max_not_final_failure_fraction=0.01, max_final_failure_fraction=0.01),
+        )
+
+    @staticmethod
+    def _recheck(root: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str]) -> dict:
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", "health-check", str(root), "--workers", "1", *flags])
+        cli_main.main()
+        return json.loads((root / "quality_summary.json").read_text())["run"]["artifacts"]
+
+    @pytest.mark.parametrize(
+        ("flags", "limits", "unhealthy_groups"),
+        [
+            pytest.param(
+                ["--health-max-final-failure-fraction", "0.05"],
+                {
+                    "max_not_final_failure_fraction": 0.01,
+                    "max_final_failure_fraction": 0.05,
+                    "source": {
+                        "max_not_final_failure_fraction": "persisted",
+                        "max_final_failure_fraction": "override",
+                    },
+                },
+                ["not final"],
+                id="only-final-flag",
+            ),
+            pytest.param(
+                ["--health-max-not-final-failure-fraction", "0.05"],
+                {
+                    "max_not_final_failure_fraction": 0.05,
+                    "max_final_failure_fraction": 0.01,
+                    "source": {
+                        "max_not_final_failure_fraction": "override",
+                        "max_final_failure_fraction": "persisted",
+                    },
+                },
+                ["final"],
+                id="only-not-final-flag",
+            ),
+            pytest.param(
+                ["--health-max-not-final-failure-fraction", "0.05", "--health-max-final-failure-fraction", "0.05"],
+                {
+                    "max_not_final_failure_fraction": 0.05,
+                    "max_final_failure_fraction": 0.05,
+                    "source": {"max_not_final_failure_fraction": "override", "max_final_failure_fraction": "override"},
+                },
+                [],
+                id="both-flags",
+            ),
+            pytest.param(
+                [],
+                {
+                    "max_not_final_failure_fraction": 0.01,
+                    "max_final_failure_fraction": 0.01,
+                    "source": {
+                        "max_not_final_failure_fraction": "persisted",
+                        "max_final_failure_fraction": "persisted",
+                    },
+                },
+                ["not final", "final"],
+                id="neither-flag",
+            ),
+        ],
+    )
+    def test_each_flag_overrides_only_its_own_limit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        flags: list[str],
+        limits: dict,
+        unhealthy_groups: list[str],
+    ) -> None:
+        self._judged_run(tmp_path)
+
+        artifacts = self._recheck(tmp_path, monkeypatch, flags)
+
+        assert artifacts["limits"] == limits
+        assert [reason.split(" failures")[0] for reason in artifacts["unhealthy_reasons"]] == unhealthy_groups
+        assert artifacts["healthy"] is (not unhealthy_groups)
+
+    def test_quality_summary_records_the_source_of_each_limit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._judged_run(tmp_path)
+        first = json.loads((tmp_path / "quality_summary.json").read_text())["run"]["artifacts"]["limits"]
+        assert first["source"] == {"max_not_final_failure_fraction": "config", "max_final_failure_fraction": "config"}
+
+        overridden = self._recheck(tmp_path, monkeypatch, ["--health-max-final-failure-fraction", "0.05"])["limits"]
+        assert overridden["source"] == {
+            "max_not_final_failure_fraction": "persisted",
+            "max_final_failure_fraction": "override",
+        }
+
+        # The override is persisted in turn, so a recheck without flags reproduces the overridden verdict.
+        again = self._recheck(tmp_path, monkeypatch, [])["limits"]
+        assert again == {
+            "max_not_final_failure_fraction": 0.01,
+            "max_final_failure_fraction": 0.05,
+            "source": {"max_not_final_failure_fraction": "persisted", "max_final_failure_fraction": "persisted"},
+        }
 
 
 class TestRunExcessiveFailuresCheck:

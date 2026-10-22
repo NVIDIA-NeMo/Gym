@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -26,7 +27,7 @@ QUALITY_SUMMARY_FILENAME = "quality_summary.json"
 ROLLOUT_VERDICTS_FILENAME = "rollout_verdicts.jsonl"
 
 Verdict = Literal["healthy", "unhealthy", "unobserved"]
-# Where the limits a summary was judged by came from: the run's config, the run's own earlier summary, or an
+# Where each limit a summary was judged by came from: the run's config, the run's own earlier summary, or an
 # explicit override when it was rechecked.
 LimitsSource = Literal["config", "persisted", "override"]
 
@@ -39,9 +40,13 @@ class RunHealthLimits(BaseModel):
     max_not_final_failure_fraction: float | None = Field(default=None, ge=0, le=1)
     max_final_failure_fraction: float | None = Field(default=None, ge=0, le=1)
 
-    def summary(self, source: LimitsSource) -> dict[str, Any]:
-        """The limits as written to ``quality_summary.json``, so the verdict can be reproduced."""
-        return {**self.model_dump(), "source": source}
+    def summary(self, source: LimitsSource | Mapping[str, LimitsSource]) -> dict[str, Any]:
+        """The limits as written to ``quality_summary.json``, so the verdict can be reproduced.
+
+        ``source`` maps each limit to where it came from; a single source applies to every limit.
+        """
+        sources = {name: source if isinstance(source, str) else source[name] for name in type(self).model_fields}
+        return {**self.model_dump(), "source": sources}
 
 
 class RunHealthConfig(BaseModel):
