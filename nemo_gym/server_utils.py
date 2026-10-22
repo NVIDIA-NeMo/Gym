@@ -1359,8 +1359,7 @@ def install_request_context_isolation(app: FastAPI) -> None:
     app.middleware_stack = None
 
 
-# W3C trace-context ``traceparent`` as it appears in a URL path segment: version 00 only, which is
-# all the propagator writes, so the path never carries a value the server would then reject.
+# A W3C ``traceparent``, version 00, the only form the propagator writes.
 _TRACEPARENT_PATTERN = r"00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}"
 _TRACE_CONTEXT_PATH_RE = re.compile(
     rf"^(?P<head>(?:/{re.escape(ROLLOUT_PATH_PREFIX)}/[^/]+(?:/{re.escape(TOKEN_CAPTURE_PATH_SEGMENT)})?)?)"
@@ -1369,25 +1368,20 @@ _TRACE_CONTEXT_PATH_RE = re.compile(
 
 
 class TraceContextPathMiddleware:
-    """Strip ``/ng-trace/<traceparent>`` from the path and offer it as the inbound ``traceparent``.
+    """Strip ``/ng-trace/<traceparent>`` from the path and supply it as the inbound ``traceparent``.
 
-    The producer side is ``apply_rollout_prefix(..., trace_context=True)``, which an agent uses for a
-    model URL it hands to a client it does not control: an agent harness running inside a sandbox, or
-    a third-party client library in the agent's own process. Such a client sends no ``traceparent``
-    header, so without this the model server's SERVER span would start a new trace and the engine
-    spans under it would never join the rollout's trace.
-
-    A ``traceparent`` header the client did send wins; the path only fills in for a missing one.
-    Installed outside the instrumentor (see ``install_trace_context_path``) because the instrumentor
-    reads the headers and the path when it opens the server span, before any ``add_middleware`` layer
-    runs. The segment is stripped whether or not telemetry is on, so a URL built with it always routes.
+    The segment comes from ``apply_rollout_prefix``: a model URL an agent hands to a client that
+    sends no ``traceparent`` header, such as a harness inside a sandbox. A header the client did
+    send wins. The segment is stripped whether or not traces are on, so such a URL always routes.
     """
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        match = _TRACE_CONTEXT_PATH_RE.match(scope.get("path", "")) if scope["type"] == "http" else None
+        path = scope.get("path", "") if scope["type"] == "http" else ""
+        # Substring test first: this runs on every request of every server, almost none of which carry the segment.
+        match = _TRACE_CONTEXT_PATH_RE.match(path) if f"/{TRACE_CONTEXT_PATH_SEGMENT}/" in path else None
         if match is None:
             await self.app(scope, receive, send)
             return
@@ -1400,12 +1394,9 @@ class TraceContextPathMiddleware:
 
 
 def install_trace_context_path(app: FastAPI) -> None:
-    """Install ``TraceContextPathMiddleware`` outside the instrumentor.
-
-    Same mechanism as ``install_request_context_isolation`` and for the same reason: the instrumentor
-    installs itself by overriding ``build_middleware_stack``, so only another override lands outside
-    it. Call it after ``instrument_app_for_telemetry`` and before ``install_request_context_isolation``,
-    which must stay outermost.
+    """Install ``TraceContextPathMiddleware`` outside the instrumentor, which reads headers and path when it
+    opens the server span. Same mechanism as ``install_request_context_isolation``; call it after
+    ``instrument_app_for_telemetry`` and before ``install_request_context_isolation``, which stays outermost.
     """
     if getattr(app.state, "nemo_gym_trace_context_path_installed", False):
         return
@@ -2113,11 +2104,9 @@ def rollout_path_prefix(rollout_id: Optional[str], *, token_capture: bool = Fals
 
 
 def trace_context_path_segment() -> str:
-    """Return ``/ng-trace/<traceparent>`` naming the current span, or ``""`` when there is nothing to carry.
+    """Return ``/ng-trace/<traceparent>`` for the current span, or ``""`` while traces are off or no span is current.
 
-    For a model URL handed to a client that cannot send the ``traceparent`` header itself; the
-    receiving Gym server's ``TraceContextPathMiddleware`` turns the segment back into that header.
-    Empty while traces are off or no span is current, so such URLs stay unchanged in those runs.
+    ``TraceContextPathMiddleware`` on the receiving Gym server turns it back into the header.
     """
     if not is_trace_exporter_active():
         return ""
@@ -2131,18 +2120,15 @@ def trace_context_path_segment() -> str:
     return f"/{TRACE_CONTEXT_PATH_SEGMENT}/{traceparent}"
 
 
-def apply_rollout_prefix(
-    base_url: str, rollout_id: Optional[str], *, token_capture: bool = False, trace_context: bool = False
-) -> str:
-    """Append a rollout prefix to a model-server root URL.
+def apply_rollout_prefix(base_url: str, rollout_id: Optional[str], *, token_capture: bool = False) -> str:
+    """Append the rollout prefix and, while traces export, the current span's trace context to a model-server root URL.
 
-    With ``trace_context`` the URL also names the current span (see ``trace_context_path_segment``),
-    for a client that will not send ``traceparent`` itself. Clients that do send it are unaffected:
-    the header wins on the server.
+    Every caller hands the result to a client Gym does not instrument (a harness in a sandbox, a
+    third-party client library), which is why the trace context travels in the URL here; Gym's own
+    clients send the ``traceparent`` header instead and use ``url_path_for_run``.
     """
     prefix = rollout_path_prefix(rollout_id, token_capture=token_capture) if rollout_id else ""
-    if trace_context:
-        prefix += trace_context_path_segment()
+    prefix += trace_context_path_segment()
     if not prefix:
         return base_url
     return base_url.rstrip("/") + prefix

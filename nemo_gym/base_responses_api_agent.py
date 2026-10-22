@@ -935,17 +935,14 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     def base_url_for_run(self, base_url: str, body: Any) -> str:
         """Apply this run's capture path to a model-server root URL.
 
-        Append the API-version suffix after this method returns.
-
-        The URL is for a client this agent does not instrument (a harness in a sandbox, a
-        third-party client library), so it also names this run's current span; the model server
-        parents those calls to it when they arrive without a ``traceparent`` header.
+        Append the API-version suffix after this method returns. While traces export, the URL also
+        names this run's current span, so the model server parents calls that arrive without a
+        ``traceparent`` header (a harness in a sandbox) to it.
         """
         return apply_rollout_prefix(
             base_url,
             self.rollout_id_from_run(body),
             token_capture=self._token_id_capture_enabled(),
-            trace_context=True,
         )
 
     def url_path_for_request(self, url_path: str, request: Optional[Request]) -> str:
@@ -962,17 +959,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return f"{rollout_path_prefix(rollout_id, token_capture=token_capture)}{url_path}"
 
     def resolve_model_base_url(self, model_server_name: str, rollout_id: Optional[str] = None) -> str:
-        """Resolve a model-server URL with an optional rollout prefix.
-
-        Like ``base_url_for_run``, the URL also names the current span for a client that sends no
-        ``traceparent`` of its own.
-        """
+        """Resolve a model-server URL with an optional rollout prefix (and trace context, as ``base_url_for_run``)."""
         server_config = get_first_server_config_dict(self.server_client.global_config_dict, model_server_name)
         base_url = self.server_client._build_server_base_url(server_config)
-        prefixed = apply_rollout_prefix(
-            base_url, rollout_id, token_capture=self._token_id_capture_enabled(), trace_context=True
-        )
-        return f"{prefixed}/v1"
+        return f"{apply_rollout_prefix(base_url, rollout_id, token_capture=self._token_id_capture_enabled())}/v1"
 
     def model_endpoint(
         self,

@@ -55,7 +55,8 @@ def _server_span(spans):
 class TestProducer:
     def test_segment_is_empty_while_traces_are_off(self):
         assert trace_context_path_segment() == ""
-        assert apply_rollout_prefix("http://m:8000", "0-0", trace_context=True) == "http://m:8000/ng-rollout/0-0"
+        assert apply_rollout_prefix("http://m:8000", "0-0") == "http://m:8000/ng-rollout/0-0"
+        assert apply_rollout_prefix("http://m:8000", None) == "http://m:8000"
 
     @requires_lens
     def test_segment_names_the_current_span(self, traces):  # noqa: F811
@@ -64,15 +65,13 @@ class TestProducer:
         assert trace_context_path_segment() == "", "no span current: nothing to carry"
         with trace.get_tracer("test").start_as_current_span("agent.run") as span:
             segment = trace_context_path_segment()
-            url = apply_rollout_prefix("http://m:8000/", "0-0", trace_context=True)
-            plain = apply_rollout_prefix("http://m:8000/", "0-0")
-            capture = apply_rollout_prefix("http://m:8000", "0-0", token_capture=True, trace_context=True)
-            no_rollout = apply_rollout_prefix("http://m:8000", None, trace_context=True)
+            url = apply_rollout_prefix("http://m:8000/", "0-0")
+            capture = apply_rollout_prefix("http://m:8000", "0-0", token_capture=True)
+            no_rollout = apply_rollout_prefix("http://m:8000", None)
         context = span.get_span_context()
         traceparent = f"00-{context.trace_id:032x}-{context.span_id:016x}-{int(context.trace_flags):02x}"
         assert segment == f"/ng-trace/{traceparent}"
         assert url == f"http://m:8000/ng-rollout/0-0/ng-trace/{traceparent}"
-        assert plain == "http://m:8000/ng-rollout/0-0", "opt-in only: Gym's own clients send the header"
         assert capture == f"http://m:8000/ng-rollout/0-0/training-token-capture/ng-trace/{traceparent}"
         assert no_rollout == f"http://m:8000/ng-trace/{traceparent}"
         assert re.fullmatch(_TRACEPARENT_PATTERN, traceparent)
@@ -189,3 +188,38 @@ class TestServerSpanParent:
         install_trace_context_path(app)
         client = TestClient(app)
         assert client.post(f"/ng-rollout/0-0/ng-trace/{TRACEPARENT}/v1/responses").status_code == 200
+
+
+@requires_lens
+def test_agent_hand_off_urls_carry_the_current_span(traces):  # noqa: F811
+    """`base_url_for_run` and `resolve_model_base_url` are the two URLs an agent gives to clients it does not instrument."""
+    from unittest.mock import MagicMock
+
+    from opentelemetry import trace
+
+    from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+    from nemo_gym.server_utils import ServerClient
+
+    class _Agent(SimpleResponsesAPIAgent):
+        async def responses(self, body=...):
+            raise NotImplementedError
+
+        async def run(self, body=...):
+            raise NotImplementedError
+
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {
+        "observability_enabled": True,
+        "policy": {"responses_api_models": {"policy": {"host": "m", "port": 8000}}},
+    }
+    client._build_server_base_url = lambda cfg: "http://m:8000"
+    agent = _Agent(config=BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name=""), server_client=client)
+    body = {"_ng_task_index": 3, "_ng_rollout_index": 0}
+
+    with trace.get_tracer("test").start_as_current_span("agent.run") as span:
+        for_run = agent.base_url_for_run("http://m:8000", body)
+        resolved = agent.resolve_model_base_url("policy", "3-0")
+    context = span.get_span_context()
+    segment = f"/ng-trace/00-{context.trace_id:032x}-{context.span_id:016x}-{int(context.trace_flags):02x}"
+    assert for_run == f"http://m:8000/ng-rollout/3-0{segment}"
+    assert resolved == f"http://m:8000/ng-rollout/3-0{segment}/v1"

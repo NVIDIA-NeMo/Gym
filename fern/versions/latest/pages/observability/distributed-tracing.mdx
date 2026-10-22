@@ -96,8 +96,9 @@ sandbox, or a third-party client library in the agent's own process. That client
 `traceparent` header, so the model server's SERVER span would start a new trace and the engine
 spans under it would never join the rollout.
 
-For those clients the agent's `base_url_for_run` and `resolve_model_base_url` name the agent's
-current span in the URL itself, right after the rollout prefix:
+For those clients `apply_rollout_prefix`, and so the agent's `base_url_for_run` and
+`resolve_model_base_url`, name the agent's current span in the URL itself, right after the rollout
+prefix:
 
 ```text
 http://<model-server>/ng-rollout/{rollout_id}/ng-trace/{traceparent}/v1
@@ -106,7 +107,9 @@ http://<model-server>/ng-rollout/{rollout_id}/ng-trace/{traceparent}/v1
 Every Gym server strips `/ng-trace/{traceparent}` before routing, whether or not telemetry is on,
 and uses it as the inbound `traceparent` when the request carries none. A header the client did
 send wins. The segment is only added while this process exports traces, so URLs in a run without
-tracing are unchanged. Gym's own clients, which send the header, do not use it.
+tracing are unchanged. Gym's own clients send the header and use `url_path_for_run`, which never
+adds it. A harness that parses the model URL should treat `/ng-trace/<traceparent>` as optional and
+leave it in place.
 
 ## Span Kinds
 
