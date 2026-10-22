@@ -243,6 +243,45 @@ gym eval run --no-serve \
 For a 5-example smoke test against the resource server's `example.jsonl`,
 see `resources_servers/bird_sql/README.md`.
 
+## Collecting training data
+
+`collect.py` turns any split/dialect into training records `{id, db_id, context, completions: [{completion, reward,
+reference_logprob}]}`, one per task. `reference_logprob` is the summed per-token logprob of the generation, which is why
+it calls the model endpoint itself with `logprobs: true, top_logprobs: 1` rather than going through the `vllm_model`
+server (that one hardcodes `top_logprobs=0`, which hosted inference APIs may not support). Rewards are exactly the
+`bird_sql` server's (SQLite, or Spark with `--dialect spark`).
+
+```bash
+# Policy endpoint from env.yaml (policy_base_url / policy_api_key / policy_model_name) or --policy-* flags.
+python -m benchmarks.birdbench.collect collect --split train --dialect sqlite --num-repeats 32 \
+    --reasoning-effort low --limit 20          # drop --limit for the full run
+
+python -m benchmarks.birdbench.collect reprocess --split train --output-dir <collect run dir>
+python -m benchmarks.birdbench.collect group --rollouts <eval.sh output>/rollouts.jsonl --output grouped.jsonl
+python -m benchmarks.birdbench.collect select-hard --prepared-jsonl data/birdbench_train_sqlite.jsonl \
+    --grouped-jsonl <run dir>/grouped.jsonl --output-jsonl data/birdbench_train_sqlite_hard.jsonl
+python -m benchmarks.birdbench.collect collect --split train --input-jsonl data/birdbench_train_sqlite_hard.jsonl \
+    --num-repeats 128                           # second pass on the tasks nobody solved
+```
+
+- **`collect`** prepares the split/dialect's data first if it is missing, then writes `raw_choices.jsonl` (every raw API
+  response, saved before any processing) and `grouped.jsonl` into `results/collect_<split>_<dialect>_<model>/`
+  (`--output-dir` overrides it). A repeat that still fails after 5 retries is dropped with a warning, so a task can end up
+  with fewer than `--num-repeats` completions.
+- **`reprocess`** rebuilds the grouped file from `raw_choices.jsonl` with no API calls, for when the text
+  reconstruction, reward or logprob logic is fixed after an expensive run.
+- **`group`** converts the rollouts of a `gym eval run` (e.g. `eval.sh`) into the same format. `reference_logprob` is
+  only set if `return_token_id_information` reached the policy model.
+- **`select-hard`** keeps the prepared rows (with their `sql_context`) that no collected rollout solved, pooled over
+  any number of grouped files. Records are matched to rows by `id`.
+- **Saved completions** are `<think>reasoning</think>answer<stop token>`. The `<think>` prefix is added for the saved
+  text only; chat templates force it, so it is never generated and has no logprob. The stop token is present only when
+  the model chose to stop (a cut-off by `--max-tokens` has none).
+- **SQL concurrency.** `--sql-concurrency` defaults to 16: with 32 threads contending on SQLite's progress handler the
+  GIL starved and rewards collapsed (0/32 correct at 32 vs 31/32 at 16, same data). Use about 4 for `--dialect spark`.
+- **Spark** needs a JDK and pyspark, so run it with `resources_servers/bird_sql/.venv`'s python. It loads the split's
+  databases into the same Spark warehouse the server uses (`spark_warehouse` for dev, `spark_warehouse_train` for train).
+
 ## Prompt
 
 `prompts/default.yaml`: the model reasons step-by-step and returns the final
