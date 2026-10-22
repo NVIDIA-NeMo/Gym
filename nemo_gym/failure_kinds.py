@@ -73,6 +73,15 @@ AGENT_RUN_ERROR = "agent_run_error"
 AGENT_REQUEST_FAILED = "agent_request_failed"
 AGENT_TIMEOUT = "agent_timeout"
 AGENT_COMMAND_NOT_ALLOWED = "agent_command_not_allowed"
+AGENT_LIMIT = "agent_limit"
+AGENT_INVALID_OUTPUT = "agent_invalid_output"
+
+# --- model: requests made to a model endpoint ---------------------------------------- #
+# Preserve the upstream HTTP status separately; it is not a retry policy.
+MODEL_REQUEST_ERROR = "model_request_error"
+MODEL_TRANSPORT_ERROR = "model_transport_error"
+# Explicit evidence that the model's context window was exceeded, not an HTTP status alone.
+MODEL_CONTEXT_LIMIT = "model_context_limit"
 
 # --- environment: one episode attempt ------------------------------------------------ #
 ENVIRONMENT_SERVER_FAILED = "environment_server_failed"
@@ -118,6 +127,11 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         AGENT_COMMAND_NOT_ALLOWED,
         ENVIRONMENT_SERVER_FAILED,
         ENVIRONMENT_PROTOCOL_VIOLATION,
+        AGENT_LIMIT,
+        AGENT_INVALID_OUTPUT,
+        MODEL_REQUEST_ERROR,
+        MODEL_TRANSPORT_ERROR,
+        MODEL_CONTEXT_LIMIT,
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
         VERIFIER_ERROR,

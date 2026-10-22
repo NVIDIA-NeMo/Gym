@@ -14,7 +14,7 @@
 # limitations under the License.
 from os import environ
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import requests
 
@@ -29,6 +29,18 @@ from nemo_gym.server_utils import get_global_config_dict
 
 if TYPE_CHECKING:
     from mlflow import MlflowClient
+
+
+def has_gitlab_storage_credentials(config: MLFlowConfig) -> bool:
+    return bool(config.mlflow_tracking_uri and config.mlflow_tracking_token)
+
+
+def gitlab_storage_extras(config: Any) -> tuple[str, ...]:
+    """The install extras GitLab dataset storage needs when `config` carries its credentials.
+
+    A driver that installs Gym must add these, or a prepare step that downloads from GitLab fails.
+    """
+    return ("mlflow",) if has_gitlab_storage_credentials(MLFlowConfig.model_validate(config)) else ()
 
 
 def create_mlflow_client() -> "MlflowClient":  # pragma: no cover
@@ -46,7 +58,7 @@ def create_mlflow_client() -> "MlflowClient":  # pragma: no cover
     config = MLFlowConfig.model_validate(global_config)
 
     # Only the registry half of MLFlowConfig is needed here; experiment/run name are exporter-only.
-    if not (config.mlflow_tracking_uri and config.mlflow_tracking_token):
+    if not has_gitlab_storage_credentials(config):
         raise ConfigError(
             "GitLab dataset storage needs MLflow credentials. Add to env.yaml:\n"
             "  mlflow_tracking_uri: <your_gitlab_uri>\n"

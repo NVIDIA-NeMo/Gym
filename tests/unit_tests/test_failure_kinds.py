@@ -39,6 +39,7 @@ class TestNamingConvention:
     def test_every_name_states_the_layer_that_observed_the_failure(self) -> None:
         """`transport_timeout` and `agent_timeout` are different failures, not one."""
         domains = (
+            "model_",
             "transport_",
             "agent_",
             "environment_",
