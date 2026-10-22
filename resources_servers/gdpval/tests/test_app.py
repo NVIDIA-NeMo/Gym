@@ -1806,8 +1806,12 @@ class TestMultiReference:
         assert metrics["comparison/final_stage_fit"] == 0
         assert metrics["comparison/final_stage_degraded"] == 1
 
-    def test_a_lost_session_does_not_complete_the_final_stage(self) -> None:
-        """A masked lost-session row holds no measurement, so it cannot stand in for a judged final-stage row."""
+    @pytest.mark.parametrize("measured_rows", [1, 0], ids=["mixed", "all-lost"])
+    def test_a_lost_session_does_not_complete_the_final_stage(self, measured_rows: int) -> None:
+        """A masked lost-session row holds no measurement, so it cannot stand in for a judged final-stage row.
+
+        It still counts for coverage and keeps the stage's diagnostics, even when every row of the stage is lost.
+        """
         import asyncio as _asyncio
 
         from nemo_gym.base_resources_server import lost_session_verification
@@ -1829,22 +1833,27 @@ class TestMultiReference:
             "total_ties": 0,
             "per_reference": {"low": {"wins": 8, "losses": 2, "ties": 0, "reference_elo": 1000.0}},
         }
-        lost = {
-            **stage,
-            "_ng_task_index": 1,
-            "_ng_rollout_index": 0,
-            "task_id": "t1",
-            **lost_session_verification("server restarted"),
-        }
+        lost = [
+            {
+                **stage,
+                "_ng_task_index": index,
+                "_ng_rollout_index": 0,
+                "task_id": f"t{index}",
+                **lost_session_verification("server restarted"),
+            }
+            for index in range(measured_rows, 2)
+        ]
+        rows = [measured][:measured_rows] + lost
 
-        metrics = _asyncio.run(
-            server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[measured, lost]))
-        ).agent_metrics
+        metrics = _asyncio.run(server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))).agent_metrics
 
-        assert metrics["comparison/observed_final_stage_row_count"] == 1
+        assert metrics["comparison/observed_final_stage_row_count"] == measured_rows
         assert metrics["comparison/final_stage_complete"] == 0
         assert metrics["comparison/final_stage_degraded"] == 1
+        assert metrics["comparison/expected_final_stage_index"] == 1
         assert "comparison/eval_elo" not in metrics
+        assert metrics["coverage/measured_rollouts"] == measured_rows
+        assert metrics["coverage/masked_rollouts"] == len(lost)
 
     def test_expected_final_stage_unfit_does_not_fall_back_to_pooled_fit(self) -> None:
         """A present final stage with no judged games cannot borrow an earlier ELO."""
