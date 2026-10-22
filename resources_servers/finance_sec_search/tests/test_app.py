@@ -22,20 +22,30 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
+from nemo_gym.base_resources_server import (
+    BaseSeedSessionRequest,
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+)
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.finance_sec_search.app import (
     EdgarSearchRequest,
     FinanceAgentResourcesServer,
     FinanceAgentResourcesServerConfig,
     FinanceAgentSearchRequest,
     FinanceAgentVerifyRequest,
+    ParseHtmlPageRequest,
     RateLimiter,
     RetrieveInformationRequest,
     _extract_judge_rating,
@@ -1077,6 +1087,7 @@ class TestRetrieveInformation:
     @pytest.fixture(autouse=True)
     def _configure_retrieval_model(self, server):
         server.config.retrieval_model_server = ModelServerRef(type="responses_api_models", name="test-model")
+        server._data_storage[_TEST_SESSION_ID] = {}
 
     @pytest.mark.asyncio
     async def test_prompt_with_curly_braces_in_content(self, server) -> None:
@@ -1608,3 +1619,118 @@ class TestVerify:
         req = self._make_verify_request(response, '{"net": 1000}')
         res = await server.verify(self._mock_request(), req)
         assert res.reward == 1.0
+
+
+# ============================================================================
+# Test: Resources sessions
+# ============================================================================
+
+
+def _typed_seed(session_id: str = _TEST_SESSION_ID, rollout_id: str = "rollout") -> ResourcesSeedSessionRequest:
+    return ResourcesSeedSessionRequest(
+        resources_session_id=session_id,
+        episode_id=EpisodeId(rollout_id=rollout_id, attempt=0),
+        task_id=TaskId(taskset="example", task_id="0"),
+        task_data={"question": "What was Apple's FY2024 revenue?", "expected_answer": "$391.0 billion"},
+    )
+
+
+def _close(seed: ResourcesSeedSessionRequest) -> ResourcesCloseSessionRequest:
+    return ResourcesCloseSessionRequest(resources_session_id=seed.resources_session_id, episode_id=seed.episode_id)
+
+
+class TestResourcesSessions:
+    def test_session_contract_through_routes(self, server, temp_cache_dir) -> None:
+        """Typed seed, retry, close, retried close and late seeds hold through the real routes."""
+        (Path(temp_cache_dir) / "tickers.json").write_text(json.dumps(TestTickerLoading.MOCK_TICKERS_RAW))
+        check_resources_session_contract(
+            server.setup_webserver(),
+            _typed_seed("contract-session"),
+            keeps_state=True,
+            holds_state=lambda resources_session_id: resources_session_id in server._data_storage,
+        )
+        assert not server._data_storage and not server._typed_seeds
+
+    def test_legacy_seed_route_still_returns_empty_body(self, server, temp_cache_dir) -> None:
+        (Path(temp_cache_dir) / "tickers.json").write_text(json.dumps(TestTickerLoading.MOCK_TICKERS_RAW))
+        response = TestClient(server.setup_webserver()).post("/seed_session", json={})
+        assert response.status_code == 200
+        assert response.json() == {}
+        assert len(server._data_storage) == 1
+
+    @pytest.mark.asyncio
+    async def test_retried_typed_seed_keeps_stored_documents(self, server) -> None:
+        seed = _typed_seed()
+        await server.seed_session(_mock_request(), seed)
+        server._data_storage[_TEST_SESSION_ID]["doc"] = "Annual Report 2024"
+
+        response = await server.seed_session(_mock_request(), seed)
+
+        assert response.resources_session_id == _TEST_SESSION_ID
+        assert server._data_storage[_TEST_SESSION_ID] == {"doc": "Annual Report 2024"}
+
+    @pytest.mark.asyncio
+    async def test_typed_seed_for_another_episode_is_refused_without_its_cookie(self, server) -> None:
+        await server.seed_session(_mock_request(), _typed_seed())
+        refused = _mock_request("caller-session")
+        with pytest.raises(HTTPException) as error:
+            await server.seed_session(refused, _typed_seed(rollout_id="other"))
+        assert error.value.status_code == 409
+        # The refused reply must not name the live session in its cookie.
+        assert refused.session["session_id"] == "caller-session"
+
+    @pytest.mark.asyncio
+    async def test_close_releases_state_and_fences_both_seed_routes(self, server) -> None:
+        seed = _typed_seed()
+        await server.seed_session(_mock_request(), seed)
+        server._data_storage[_TEST_SESSION_ID]["doc"] = "Annual Report 2024"
+
+        await server.close_resources_session(_close(seed))
+
+        assert _TEST_SESSION_ID not in server._data_storage
+        assert _TEST_SESSION_ID not in server._session_start_times
+        assert _TEST_SESSION_ID not in server._typed_seeds
+        # The legacy route must not recreate a closed session either.
+        for late_seed in (seed, BaseSeedSessionRequest()):
+            with pytest.raises(HTTPException) as error:
+                await server.seed_session(_mock_request(), late_seed)
+            assert error.value.status_code == 409
+        assert _TEST_SESSION_ID not in server._data_storage
+
+    @pytest.mark.asyncio
+    async def test_close_for_another_episode_is_refused(self, server) -> None:
+        await server.seed_session(_mock_request(), _typed_seed())
+        with pytest.raises(HTTPException) as error:
+            await server.close_resources_session(_close(_typed_seed(rollout_id="other")))
+        assert error.value.status_code == 409
+        assert _TEST_SESSION_ID in server._data_storage
+
+    @pytest.mark.asyncio
+    async def test_stateful_tools_on_a_closed_session_are_lost_not_recreated(self, server) -> None:
+        server.config.retrieval_model_server = ModelServerRef(type="responses_api_models", name="test-model")
+        seed = _typed_seed()
+        await server.seed_session(_mock_request(), seed)
+        await server.close_resources_session(_close(seed))
+
+        for call in (
+            server.parse_html_page(
+                _mock_request(), ParseHtmlPageRequest(url="https://example.com/report.html", key="doc")
+            ),
+            server.retrieve_information(_mock_request(), RetrieveInformationRequest(prompt="Summarize {{doc}}")),
+        ):
+            with pytest.raises(HTTPException) as error:
+                await call
+            assert error.value.status_code == 404
+            assert error.value.detail["failure_kind"] == "session_lost"
+        assert _TEST_SESSION_ID not in server._data_storage
+
+    @pytest.mark.asyncio
+    async def test_seed_discards_sessions_older_than_ttl(self, server) -> None:
+        await server.seed_session(_mock_request("abandoned"), _typed_seed("abandoned"))
+        server._session_start_times["abandoned"] -= server.config.session_ttl_seconds + 1
+
+        await server.seed_session(_mock_request("fresh"), _typed_seed("fresh"))
+
+        assert "abandoned" not in server._data_storage
+        assert "abandoned" not in server._typed_seeds
+        assert "fresh" in server._data_storage
