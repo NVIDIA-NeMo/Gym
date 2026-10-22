@@ -1,6 +1,6 @@
 #!/bin/bash
 
-NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-5}"
+NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-8}"
 
 # Optional detailed Nsight Systems capture on PD prefill nodes only.
 # PROFILE_PREFILL=1 auto-installs nsys if needed in root Ubuntu containers.
@@ -91,7 +91,7 @@ VLLM_PREFILL_ARGS=(
         }
     }'
     --max-cudagraph-capture-size 1200
-    --max-num-batched-tokens 33920
+    --max-num-batched-tokens 16960
     --max-num-seqs 256
 )
 # @bxyu-nvidia: We set "enable_lookup": false for the Mooncake store connector because the prefill worker handles the prefix cache lookup and decode just needs to receive the transferred kv cache.
