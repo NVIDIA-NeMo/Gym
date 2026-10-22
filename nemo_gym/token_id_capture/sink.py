@@ -374,8 +374,9 @@ async def capture_engine_refusal(code: str | None) -> None:
     uncommitted-call row the custody sweep would otherwise write; the sweep skips a call
     recorded here.
 
-    This never raises. A refusal that cannot be recorded leaves the intent dangling, which
-    masks the rollout: the safe side.
+    This never raises. On the local capture path a refusal that cannot be recorded leaves the
+    intent dangling, which masks the rollout; under worker custody the custody sweep writes the
+    uncommitted-call row for the call instead. Either way the failure lands on the safe side.
     """
     context = _CAPTURE_CONTEXT.get()
     if context is None:
@@ -444,7 +445,7 @@ def _note_missing_refuse_call(context: CaptureContext) -> None:
     if first:
         logger.warning(
             "Sink %s does not implement record_engine_refusal: a call the engine refuses leaves its intent "
-            "dangling, and the rollout is masked (first seen on model call %s of rollout %s).",
+            "dangling, and the rollout is masked by default (first seen on model call %s of rollout %s).",
             type(context.token_sink).__name__,
             context.model_call_id,
             context.rollout_id,

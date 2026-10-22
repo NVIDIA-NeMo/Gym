@@ -71,8 +71,9 @@ UNRESOLVED_PARENT_REASON = "unresolved_parent"
 # Written by the capture middleware.
 UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
 # The engine answered the admitted call with a refusal (a prompt that does not fit the context
-# window), so generation never ran and nothing was staged. Unlike a lost response, this outcome
-# is definite. Written by the model server at the engine call site, under worker custody.
+# window, or an output-token parameter it rejected), so generation never ran and nothing was
+# staged. Unlike a lost response, this outcome is definite. Written by the model server at the
+# engine call site, under worker custody.
 ENGINE_REFUSED_CALL_REASON = "engine_refused_request"
 # Failure reasons of a call that served no completion to the client: the engine refused it, or
 # the request finished before the worker's commit was acknowledged (the ledger commit precedes
@@ -149,8 +150,9 @@ class EngineRefusalRecord(BaseModel):
     # The recorded call the refused request continued, from the request-time lineage resolution
     # that runs before dispatch (the decision a served call's entry carries as ``parent_call_id``).
     # ``None`` for a root request or an unresolved continuation. The builder counts a refusal as
-    # the rollout's ending only when this names the delivered terminal call, or a call whose
-    # token sequence is identical to it and whose entry's ``created_at`` precedes this record's.
+    # the rollout's ending only when this names the delivered terminal call or a token-identical
+    # twin of it, and no other call with that token sequence has an entry ``created_at`` at or
+    # after this record's.
     parent_call_id: str | None = None
     # The status of that lineage decision; ``None`` when none was made.
     parent_resolution: ParentResolutionStatus | None = None

@@ -518,7 +518,13 @@ def test_record_refusal_without_the_extension_warns_once_and_leaves_the_intent_d
 
 def test_the_unserved_call_reasons_are_the_refusal_and_the_uncommitted_call():
     """Pin the set a framework's receipt builder treats as off-chain rather than poisoning."""
+    import nemo_gym.token_id_capture as token_id_capture
+
     assert UNSERVED_CALL_FAILURE_REASONS == frozenset({UNCOMMITTED_CALL_REASON, ENGINE_REFUSED_CALL_REASON})
+    # NeMo RL reads both names from the package root with a getattr fallback, so a dropped export
+    # would silently poison refused calls' receipts rather than fail an import.
+    assert token_id_capture.UNSERVED_CALL_FAILURE_REASONS is UNSERVED_CALL_FAILURE_REASONS
+    assert token_id_capture.ENGINE_REFUSED_CALL_REASON == ENGINE_REFUSED_CALL_REASON
 
 
 def test_record_refusal_never_raises(caplog):

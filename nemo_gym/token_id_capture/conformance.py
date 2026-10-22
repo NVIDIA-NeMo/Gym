@@ -189,14 +189,15 @@ async def run_conformance(
         for closable in closables:
             await closable.close()
     if registers_intents and not records_refusals:
-        # Nothing can resolve the intent of a call the engine refuses, so such a rollout is masked
-        # as if the call were lost. The extension is optional, so the kit reports the gap and passes.
+        # Nothing can resolve the intent of a call the engine refuses, so such a rollout freezes
+        # incomplete as if the call were lost and is masked by default. The extension is optional, so
+        # the kit reports the gap and passes.
         warnings.warn(
             ConformanceWarning(
                 "engine_refusal_resolution",
                 f"{type(probe_sink).__name__} implements begin_call but not record_engine_refusal, so the check "
                 "is skipped; a call the engine refuses leaves its pre-dispatch intent dangling, and the rollout "
-                "is masked",
+                "is masked by default (mask_incomplete_when_attributed: false keeps a delivered chain)",
             )
         )
     return passed

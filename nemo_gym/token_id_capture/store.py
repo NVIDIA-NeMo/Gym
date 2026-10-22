@@ -19,7 +19,8 @@ Each rollout uses one ``<rollout_id>.tokens.jsonl`` file.
 Evaluation records use a separate file.
 Every entry line is ``fsync``ed before ``put`` returns — that is the durability
 guarantee. The state index is written atomically but fsynced only on lifecycle
-transitions (freeze, mark, drop, refusal); it is reconstructible from the JSONL tail.
+transitions (freeze, mark, drop, refusal); it is reconstructible from the JSONL tail
+except for those transitions, which is why they are fsynced.
 A per-rollout file lock serializes writers to the same rollout.
 Different rollouts can write concurrently.
 """

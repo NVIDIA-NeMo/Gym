@@ -708,8 +708,8 @@ def project_main_chain_response(
     the rollout ended at the model's limit although its last served call completed
     (``_engine_refusal_ended_the_chain`` states the two conditions). A refusal the harness recovered
     from, with a call served after it (a token-identical retry of the terminal call that was
-    served after the refusal included), a refusal on another branch of the rollout, a refusal of
-    an output-token parameter, and one whose parent is unknown do not change the verdict. A
+    served at or after the refusal included), a refusal on another branch of the rollout, a refusal
+    of an output-token parameter, and one whose parent is unknown do not change the verdict. A
     refusal and a served ``length`` stop give the same status; the consumer's
     ``metrics["engine_refusals"]`` tells them apart.
     """
