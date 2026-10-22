@@ -16,7 +16,11 @@ import logging
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Optional
+
+
+if TYPE_CHECKING:
+    from nemo_gym.standard_analyses.models import Report
 
 from omegaconf import DictConfig
 
@@ -76,6 +80,13 @@ class BaseExporter(ABC):
 
     def export_rollouts(self, rollouts: list[dict[str, Any]]) -> None:
         self._guard("rollouts", self._log_rollouts, rollouts)
+
+    def export_standard_analyses(self, report: "Report", *, namespace: str = "efficiency") -> None:
+        """Publish derived analysis results when the backend supports them."""
+        self._guard("standard analyses", self._log_standard_analyses, report, namespace)
+
+    def _log_standard_analyses(self, report: "Report", namespace: str) -> None:
+        """Optional backend hook; existing backends remain compatible."""
 
     def _guard(self, what: str, fn, *args) -> None:
         try:

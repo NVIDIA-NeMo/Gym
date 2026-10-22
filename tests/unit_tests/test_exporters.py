@@ -360,7 +360,7 @@ class TestWandbExporter:
         exporter = WandbExporter(wandb_config)
         exporter.setup()
 
-        init.assert_called_once_with(project="proj", name="run", dir=str(Path("/tmp/results") / "wandb"))
+        init.assert_called_once_with(entity=None, project="proj", name="run", dir=str(Path("/tmp/results") / "wandb"))
         assert wandb_module.environ["WANDB_API_KEY"] == "secret-key"  # pragma: allowlist secret
 
     def test_a_resumed_run_resumes_the_wandb_run_recorded_next_to_its_output(

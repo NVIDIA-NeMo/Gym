@@ -1105,6 +1105,10 @@ class SharedRolloutCollectionConfig(
             "When unset, no driver-side task admission limit is applied."
         ),
     )
+    standard_analyses: bool = Field(
+        default=True,
+        description="Compute local standard analysis reports and export derived results after collection.",
+    )
     retain_results_in_memory: bool = Field(
         default=True,
         description=(
@@ -3900,6 +3904,14 @@ class RolloutCollectionHelper(BaseModel):
                     **failure_metrics,
                 }
             )
+
+        if config.standard_analyses and not config.disable_aggregation:
+            from nemo_gym.standard_analyses.integration import analyze_collection
+
+            try:
+                await asyncio.to_thread(analyze_collection, output_fpath)
+            except Exception:
+                logger.exception("Standard analyses failed; collected rollout artifacts are still available.")
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}

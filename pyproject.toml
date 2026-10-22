@@ -301,6 +301,8 @@ wandb = [
     # Updated: Mon Sep 28, 2026 with wandb>=0.30.0 (CVE mitigation: x/crypto, x/net, grpc-go, go-git bundled in wandb-core)
     # License: MIT https://github.com/wandb/wandb/blob/f8acf479342b6aa8217dd0833bb32190b11c14bc/LICENSE
     "wandb>=0.30.0",
+    # Reusable project workspace layouts (MIT).
+    "wandb-workspaces>=0.4.13,<0.5",
 
     # GitPython: Git interaction library (transitive dependency of wandb, pinned for security)
     # Updated: Fri Sep 04, 2026 with GitPython>=3.1.61

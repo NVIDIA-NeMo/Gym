@@ -917,6 +917,7 @@ class UploadRolloutsConfigMixin(BaseModel):
 
 
 class WANDBConfig(ExporterConfig):
+    wandb_entity: Optional[str] = None
     wandb_project: Optional[str] = None
     wandb_name: Optional[str] = None
     wandb_api_key: Optional[str] = None

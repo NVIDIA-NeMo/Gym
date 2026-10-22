@@ -14,7 +14,11 @@
 # limitations under the License.
 from os import environ
 from pathlib import Path
-from typing import Any, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Optional
+
+
+if TYPE_CHECKING:
+    from nemo_gym.standard_analyses.models import Report
 
 import orjson
 import wandb
@@ -53,6 +57,7 @@ class WandbExporter(BaseExporter):
         run_id = self._recorded_run_id()
         resume = {"id": run_id, "resume": "allow"} if run_id is not None else {}
         self.run = wandb.init(
+            entity=self.config.wandb_entity,
             project=self.config.wandb_project,
             name=self.config.wandb_name,
             dir=str(Path(self.global_config_dict[RESULTS_DIR_KEY_NAME]) / "wandb"),
@@ -81,3 +86,8 @@ class WandbExporter(BaseExporter):
         # One JSON blob per row: rollouts have no stable column set across environments.
         rows = [[orjson.dumps(rollout)] for rollout in rollouts]
         self._active_run().log({self.ROLLOUTS_TABLE_KEY: Table(data=rows, columns=["Rollout"])})
+
+    def _log_standard_analyses(self, report: "Report", namespace: str) -> None:
+        from nemo_gym.standard_analyses.export import log_wandb
+
+        log_wandb(report, self._active_run(), namespace=namespace)
