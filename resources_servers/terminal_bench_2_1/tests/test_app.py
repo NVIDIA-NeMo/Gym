@@ -330,6 +330,83 @@ class TestApp:
         assert "task=terminal-bench/background-server rc=1" in line
         assert "No such file or directory" in line
 
+    @pytest.mark.parametrize(
+        "failing_step,score_switch,graded",
+        [
+            ("echo '========== 2 failed, 1 passed in 0.10s =========='; exit 1", True, True),
+            ("echo '========== 2 failed, 1 passed in 0.10s =========='; exit 1", False, False),
+            ("echo 'curl: (6) Could not resolve host: astral.sh' >&2; exit 6", True, False),
+        ],
+        ids=["pytest-failed", "switch-off", "no-pytest-summary"],
+    )
+    async def test_set_e_exit_after_failing_pytest_is_graded_zero(
+        self, monkeypatch, tmp_path: Path, tb_stderr: StringIO, failing_step: str, score_switch: bool, graded: bool
+    ) -> None:
+        """Task scripts run pytest under set -e, so failing tests end them before `echo 0 > reward.txt`."""
+        verifier_dir = tmp_path / "logs" / "verifier"
+        script = tmp_path / "test.sh"
+        script.write_text(
+            "set -euo pipefail\n"
+            f"bash -c {quote(failing_step)}\n"
+            "_EXIT_CODE=$?\n"
+            f"echo $(( _EXIT_CODE == 0 )) > {quote(str(verifier_dir))}/reward.txt\n"
+        )
+
+        async def execute(command, **kwargs):
+            command = command.replace("/logs/verifier", quote(str(verifier_dir)))
+            command = command.replace("/tests/test.sh", quote(str(script)))
+            result = subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=10)
+            return MagicMock(return_code=result.returncode, stdout=result.stdout, stderr=result.stderr)
+
+        async def download(remote_path, local_path):
+            copyfile(verifier_dir / "reward.txt", local_path)
+
+        sandbox = AsyncMock()
+        sandbox.exec.side_effect = execute
+        sandbox.download.side_effect = download
+        server = TerminalBench21ResourcesServer(
+            config=TerminalBench21ResourcesServerConfig(
+                sandbox_provider="test",
+                sandbox_config={},
+                evaluation_timeout=30,
+                score_pytest_failures_without_reward=score_switch,
+                host="",
+                port=0,
+                entrypoint="",
+                name="",
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        server._session_id_to_sandbox["test-session"] = sandbox
+        monkeypatch.setattr(TerminalBench21ResourcesServer, "_upload_folder", AsyncMock())
+
+        result = await server.verify(
+            Request({"type": "http", "session": {SESSION_ID_KEY: "test-session"}}), _verify_request(tmp_path)
+        )
+
+        assert result.reward == 0.0
+        assert result.evaluation_completed is graded
+        assert result.reward_from_pytest_summary is graded
+        assert result.test_return_code != 0
+        line = next(l for l in tb_stderr.getvalue().splitlines() if "[tb_verify][reward_missing]" in l)
+        assert ("graded=0 (pytest failures)" in line) is graded
+
+
+@pytest.mark.parametrize(
+    "output,expected",
+    [
+        ("==== 17 failed, 3 passed in 12.34s ====", True),
+        ("== 1 error in 0.50s (0:00:00) ==", True),
+        ("FAILED t.py::x\n===== 2 failed, 1 passed, 1 warning in 401.22s (0:06:41) =====\n", True),
+        ("=== 5 passed in 1.00s ===", False),
+        ("=== no tests ran in 0.01s ===", False),
+        ("=== 1 failed in 0.1s ===\n=== 4 passed in 1.0s ===", False),
+        ("curl: (6) Could not resolve host: astral.sh", False),
+    ],
+)
+def test_pytest_reported_failure(output: str, expected: bool) -> None:
+    assert terminal_bench_app.pytest_reported_failure(output) is expected
+
 
 @pytest.mark.parametrize("distro", ["debian:bullseye", "debian:bookworm", "ubuntu:noble"])
 def test_security_snapshot_preserves_other_repositories(tmp_path: Path, distro: str) -> None:

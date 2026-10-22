@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import re
 from contextlib import contextmanager
 from copy import deepcopy
 from glob import glob
@@ -55,6 +56,10 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_config: Dict[str, Any]
 
     debug: bool = False
+    # Many task test.sh files run pytest under set -e, so failing tests end the script before it writes
+    # reward.txt. With this on, such a run (non-zero exit, no reward.txt, a pytest summary counting failures
+    # or errors) is graded 0 instead of left ungraded; exits without a pytest summary stay ungraded.
+    score_pytest_failures_without_reward: bool = True
 
 
 class TerminalBench21SeedSessionResponse(BaseSeedSessionResponse):
@@ -81,6 +86,8 @@ class TerminalBench21VerifyResponse(BaseVerifyResponse):
     test_output: str
     # Exit code of tests/test.sh; None when it did not return (timeout or exec error).
     test_return_code: Optional[int] = None
+    # True when the reward came from pytest's summary because test.sh exited before writing reward.txt.
+    reward_from_pytest_summary: bool = False
     golden_patch_output: Optional[str]
 
 
@@ -134,6 +141,16 @@ TEST_SH_PATCHES = {
         ("-w mteb==1.36.8", "-w mteb==1.36.8 --index https://download.pytorch.org/whl/cpu"),
     ],
 }
+
+
+# pytest's closing line, e.g. "==== 17 failed, 3 passed in 12.34s ====" or "== 1 error in 0.50s (0:00:00) ==".
+_PYTEST_SUMMARY = re.compile(r"^=+ (?P<counts>[^=\n]*?) in [\d.]+s(?: \([^)\n]*\))? =+[ \t]*$", re.MULTILINE)
+
+
+def pytest_reported_failure(output: str) -> bool:
+    """Whether the last pytest summary line in ``output`` counts failed tests or errors."""
+    summaries = _PYTEST_SUMMARY.findall(output)
+    return bool(summaries) and re.search(r"\b\d+ (failed|errors?)\b", summaries[-1]) is not None
 
 
 class TerminalBench21ResourcesServer(SimpleResourcesServer):
@@ -321,6 +338,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             print(f"Test output for {body.task_name}: {test_output}", file=stderr)
 
         evaluation_completed = False
+        reward_from_pytest_summary = False
         reward = 0.0
         if eval_result is not None:
             try:
@@ -333,8 +351,16 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             except:
                 # test.sh returned without a readable reward.txt (e.g. it exited under set -e before writing
                 # it). One line per case, so the task and the failing step can be told apart without debug.
+                if (
+                    self.config.score_pytest_failures_without_reward
+                    and eval_result.return_code != 0
+                    and pytest_reported_failure(test_output)
+                ):
+                    evaluation_completed = True
+                    reward_from_pytest_summary = True
                 print(
                     f"[tb_verify][reward_missing] task={body.task_name} rc={eval_result.return_code} "
+                    f"graded={'0 (pytest failures)' if reward_from_pytest_summary else 'no'} "
                     f"verify_s={verification_time_taken:.1f} "
                     f"stderr_tail={(eval_result.stderr or '')[-300:]!r} stdout_tail={(eval_result.stdout or '')[-300:]!r}",
                     file=stderr,
@@ -354,6 +380,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             verification_time_taken=verification_time_taken,
             test_output=test_output,
             test_return_code=None if eval_result is None else eval_result.return_code,
+            reward_from_pytest_summary=reward_from_pytest_summary,
             golden_patch_output=golden_patch_output,
         )
 
