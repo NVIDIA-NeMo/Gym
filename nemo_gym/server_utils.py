@@ -117,6 +117,7 @@ from nemo_gym.telemetry.observer import observe_app_event_loop, request_counts
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
+from nemo_gym.uvicorn_reuse_port import run_with_reuse_port
 
 
 try:
@@ -1136,6 +1137,12 @@ class UvicornLoggingConfig(BaseModel):
     uvicorn_logging_show_200_ok: bool = False
 
 
+class UvicornReusePortConfig(BaseModel):
+    # Multi-worker servers only, Linux only: each worker listens on its own SO_REUSEPORT socket, so the
+    # kernel spreads connections evenly across workers instead of whichever worker accepts first.
+    uvicorn_reuse_port: bool = False
+
+
 # Every IPv4 address as it appears on a dual-stack socket.
 _ALL_V4_MAPPED = ip_network("::ffff:0:0/96")
 
@@ -2044,7 +2051,13 @@ repr(e): {repr(e)}"""
         if is_main_fastapi_proc:
             startup.announce_serve()
             try:
-                uvicorn.run(**uvicorn_kwargs)
+                if (
+                    uvicorn_kwargs.get("workers")
+                    and UvicornReusePortConfig.model_validate(global_config_dict).uvicorn_reuse_port
+                ):
+                    run_with_reuse_port(**uvicorn_kwargs)
+                else:
+                    uvicorn.run(**uvicorn_kwargs)
             finally:
                 # BatchSpanProcessor only exports on a timer, so without an explicit flush
                 # the last seconds of a run — including the spans of whatever was in
