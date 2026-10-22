@@ -13,7 +13,8 @@ set -euo pipefail
 # within the same worker-step window; PREFILL_NCU_LAUNCH_SKIP=0 skips matches.
 # PREFILL_NCU_KERNEL_REGEX='nvjet.*' selects compute kernels (use names from nsys).
 # PREFILL_NCU_SET=basic can be changed to detailed for additional counters.
-# NCU reports go to results/ncu unless PREFILL_PROFILE_DIR is set. Collection
+# NCU report names include a sanitized kernel regex (up to 96 characters).
+# Reports go to results/ncu unless PREFILL_PROFILE_DIR is set. Collection
 # continues serving after the limit; let the job exit orderly to finalize reports.
 # Example in VLLM_CONFIG: export PROFILE_PREFILL=1 PREFILL_PROFILE_TOOL=ncu
 # Do not select NCCL/NVSHMEM or other kernels requiring concurrent execution:
@@ -562,13 +563,16 @@ serve_prefill() {
     fi
     local -a profiler_command
     if [[ "\$profile_tool" == ncu ]]; then
+        # Keep regex syntax out of paths and NCU's percent-based filename macros.
+        local kernel_label="\${ncu_regex//[^a-zA-Z0-9._-]/_}"
+        kernel_label="\${kernel_label:0:96}"
         # Profile individual compute kernels, including CUDA graph nodes. Never
         # replay the whole server: incoming requests and distributed state change.
         profiler_command=(ncu --target-processes all --profile-from-start off
             --replay-mode kernel --graph-profiling node --kernel-name-base demangled
             --kernel-name "regex:\$ncu_regex" --launch-count "\$ncu_count" --launch-skip "\$ncu_skip"
             --set "\$ncu_set" --clock-control none --kill no --forward-signals
-            --export "\$profile_dir/prefill-\$SLURM_JOB_ID-\$this_node_hostname-port\$profile_port-%p")
+            --export "\$profile_dir/prefill-\$SLURM_JOB_ID-\$this_node_hostname-port\$profile_port-kernel-\$kernel_label-%p")
         echo "Prefill NCU: regex=\$ncu_regex set=\$ncu_set count=\$ncu_count skip=\$ncu_skip output=\$profile_dir" >&2
         echo "Prefill NCU: kernel replay can slow serving substantially; use this run for kernel analysis, not throughput." >&2
     else
