@@ -132,9 +132,17 @@ class TestSandboxAPI:
         # Capture off, traces on: the harness still gets the current span in the URL.
         from nemo_gym import server_utils
 
-        monkeypatch.setattr(server_utils, "trace_context_path_segment", lambda: "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01")
-        assert _model_url_for_rollout("http://model-host:8000", None) == "http://model-host:8000/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
-        assert _model_url_for_rollout("http://model-host:8000", "3-1") == "http://model-host:8000/ng-rollout/3-1/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+        monkeypatch.setattr(
+            server_utils, "trace_context_path_segment", lambda: "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+        )
+        assert (
+            _model_url_for_rollout("http://model-host:8000", None)
+            == "http://model-host:8000/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+        )
+        assert (
+            _model_url_for_rollout("http://model-host:8000", "3-1")
+            == "http://model-host:8000/ng-rollout/3-1/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+        )
         assert _model_url_for_rollout("", None) == ""
 
     def test_default_provider_is_named_sandbox(self) -> None:
