@@ -819,6 +819,7 @@ def _build_messages_model_fn(
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
+                _record_served_response_id(normalized, resp)
             return normalized
 
         normalization_error = None
@@ -831,6 +832,7 @@ def _build_messages_model_fn(
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
+                _record_served_response_id(normalized, resp)
         except Exception as exc:  # noqa: BLE001 - log raw output before preserving the original error.
             normalization_exc = exc
             normalization_error = {"type": type(exc).__name__, "message": repr(exc)}
@@ -862,6 +864,19 @@ def _build_messages_model_fn(
         return normalized
 
     return _call
+
+
+def _record_served_response_id(normalized: Dict[str, Any], resp: Any) -> None:
+    """Keep the served Chat envelope id beside one structured model response.
+
+    Token capture keys each captured call by this id. Returning it lets the
+    agent name its scored call (``terminal_response_id``) without inventing
+    an identity the model server never served.
+    """
+
+    response_id = getattr(resp, "id", None)
+    if isinstance(response_id, str) and response_id:
+        normalized["response_id"] = response_id
 
 
 def _recover_first_fenced_action(content: str) -> str | None:
@@ -1646,6 +1661,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 max_trajectory_length=self.config.max_trajectory_length,
                 max_output_tokens=max_tokens,
                 exact_trace_transport_version=self.config.exact_trace_transport_version,
+                served_call_output=self._token_id_capture_enabled(),
             )
 
 
@@ -1713,8 +1729,15 @@ def _build_response(
     max_trajectory_length: Optional[int] = None,
     max_output_tokens: Optional[int] = None,
     exact_trace_transport_version: Literal[2, 3] = 2,
+    served_call_output: bool = False,
 ) -> OSWorldVerifyResponse:
-    """Pack one run without changing its prompt policy for training consumers."""
+    """Pack one run without changing its prompt policy for training consumers.
+
+    ``served_call_output`` is set when training-token capture owns the token
+    evidence. The model server then withholds token arrays from the agent, so
+    exact-trace output is unavailable; the returned history instead carries
+    every captured generation verbatim, one assistant message per model call.
+    """
 
     steps = result.get("steps", [])
     if not isinstance(steps, list):
@@ -1793,6 +1816,11 @@ def _build_response(
             # training evidence. The full projected prompts and their duplicate
             # generation arrays are validation/debug data, not transport data.
             trajectory_fields.pop("trajectory_model_calls", None)
+    terminal_response_id: Optional[str] = None
+    if served_call_output and not capabilities["exact_model_call_evidence"]:
+        served_output, terminal_response_id = _served_model_call_output(model_calls)
+        if served_output:
+            output = served_output
 
     response_dict: Dict[str, Any] = {
         "id": f"osworld-{(body.verifier_metadata or {}).get('task_id', 'unknown')}",
@@ -1853,7 +1881,49 @@ def _build_response(
         "verifier_metadata": metadata,
         **runtime_admission,
     }
+    if terminal_response_id is not None:
+        # Names the scored (last) generation by the id the model server served.
+        response_fields["terminal_response_id"] = terminal_response_id
     return OSWorldVerifyResponse(**response_fields)
+
+
+def _served_model_call_output(
+    model_calls: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], Optional[str]]:
+    """Return each served generation as the client received it, in call order.
+
+    Capture fingerprints the content the model server served, which keeps the
+    reasoning inline as ``<think>...</think>``. Step text strips that reasoning
+    and omits parser-retry calls, so it cannot identify captured calls.
+
+    A call with no response never reached the model. A call whose served
+    content is empty is a local stand-in (for example the model server's
+    context-overflow reply), which generated nothing and was never captured.
+    Both are skipped. The second value is the served id of the last emitted
+    call, which is the scored generation.
+    """
+
+    output: List[Dict[str, Any]] = []
+    terminal_response_id: Optional[str] = None
+    for model_call in model_calls:
+        response = model_call.get("response")
+        if not isinstance(response, Mapping):
+            continue
+        raw_content = response.get("raw_content")
+        if not isinstance(raw_content, str) or not raw_content:
+            continue
+        output.append(
+            {
+                "id": f"msg-call-{model_call['turn_id']}",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "annotations": [], "text": raw_content}],
+            }
+        )
+        response_id = response.get("response_id")
+        terminal_response_id = response_id if isinstance(response_id, str) and response_id else None
+    return output, terminal_response_id
 
 
 def _empty_response(
