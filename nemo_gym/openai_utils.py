@@ -639,7 +639,7 @@ RESPONSES_TO_TRAIN = {
     NeMoGymResponseCustomToolCall: NeMoGymResponseCustomToolCallForTraining,
 }
 
-# The hosted-tool and provider-executed call types have no variant here:
+# The hosted-tool and client-executed call types have no variant here:
 #   web_search_call, file_search_call, code_interpreter_call, image_generation_call,
 #   mcp_call, computer_call, local_shell_call.
 #

@@ -76,6 +76,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.responses_converter import CustomToolStrategy
 from nemo_gym.responses_streaming import (
     NamespaceMap,
     restore_namespace_tool_calls,
@@ -291,7 +292,7 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "so a backend with free-form tool support keeps them."
         ),
     )
-    custom_tool_strategy: Literal["passthrough", "function_bridge"] = Field(
+    custom_tool_strategy: CustomToolStrategy = Field(
         default="passthrough",
         description=(
             "How a Responses ``custom`` (free-form) tool reaches a backend whose chat schema admits "
@@ -301,9 +302,15 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "``custom_tool_call``/``custom_tool_call_output`` history in the lowered form, lifts a "
             "returned call whose name the request declared as custom back into a ``custom_tool_call`` "
             "item, and hoists custom entries from a streaming harness's ``additional_tools`` carrier "
-            "instead of dropping them. The Responses-to-Chat conversion implements it (``vllm_model`` "
-            "and subclasses); a server that passes Responses through natively carries custom tools "
-            "already and never consults this."
+            "instead of dropping them. The Responses-to-Chat conversion implements it, so the setting "
+            "takes effect on the servers that convert: ``vllm_model`` and its subclasses (the compaction "
+            "and GenRM servers included), ``inference_provider``, and ``azure_openai_model``. A native "
+            "Responses path never runs the conversion, so the setting has no effect there; ``vllm_model`` "
+            "rejects ``function_bridge`` together with ``is_responses_native``, whose route renders "
+            "function tools only. The bridged payload's wire form depends on the backend's tool parser: "
+            "an XML-style parser (``qwen3_coder``, ``nemotron_v3``) carries it as raw text, while a "
+            "JSON-format parser (``hermes``, ``llama3_json``, ``mistral``) requires the model to "
+            "JSON-escape it inside the arguments object."
         ),
     )
     # Only the policy instance drains during a partial-rollout checkpoint.
@@ -489,6 +496,20 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
 
+    def _sanitize_streaming_responses_body(self, body: dict) -> tuple[dict, NamespaceMap]:
+        """Apply this server's tool policy while mapping a streaming body to the strict shape.
+
+        Every ``/v1/responses`` dispatch that accepts the streaming wire dialect sanitizes
+        through here, so the config's ``drop_custom_tools``, ``drop_hosted_tools`` and
+        ``custom_tool_strategy`` settings reach the sanitizer on each of them.
+        """
+        return sanitize_streaming_responses_body(
+            body,
+            drop_custom_tools=self.config.drop_custom_tools,
+            drop_hosted_tools=self.config.drop_hosted_tools,
+            hoist_carrier_custom_tools=self.config.custom_tool_strategy == "function_bridge",
+        )
+
     async def responses_dispatch(self, request: Request, body: dict = Body()):
         """Default ``/v1/responses`` entrypoint shared by every Gym model server.
 
@@ -510,12 +531,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             await self._finalize_served_response(response)
             return dispatched
 
-        cleaned, ns_map = sanitize_streaming_responses_body(
-            body,
-            drop_custom_tools=self.config.drop_custom_tools,
-            drop_hosted_tools=self.config.drop_hosted_tools,
-            carry_custom_tools=self.config.custom_tool_strategy == "function_bridge",
-        )
+        cleaned, ns_map = self._sanitize_streaming_responses_body(body)
         try:
             params = validate_streaming_responses_params(cleaned)
         except ValidationError as exc:

@@ -443,6 +443,17 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             raise ValueError("supply_prefix_token_ids is not supported with is_responses_native=true")
         return self
 
+    @model_validator(mode="after")
+    def _validate_custom_tool_strategy(self) -> "VLLMModelConfig":
+        if self.custom_tool_strategy == "function_bridge" and self.is_responses_native:
+            raise ValueError(
+                "custom_tool_strategy=function_bridge is not supported with is_responses_native=true: the "
+                "native Responses route forwards requests without the Responses-to-Chat conversion that "
+                "implements the bridge, and vLLM's native route renders function tools only, so a custom "
+                "tool would be accepted but never shown to the model."
+            )
+        return self
+
     # When True, outbound calls go to vLLM's /v1/completions endpoint instead
     # of /v1/chat/completions. The Gym /v1/responses and /v1/chat/completions
     # external endpoints continue to work; only the upstream call swaps.

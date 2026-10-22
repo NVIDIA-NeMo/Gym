@@ -88,10 +88,11 @@ _CLIENT_EXECUTED_TOOL_TYPES = frozenset({"function", "custom"})
 def _tool_kept(tool: Any, *, drop_custom_tools: bool, drop_hosted_tools: bool) -> bool:
     """Whether a tool spec stays in the request; a dropped one is logged with the reason.
 
-    ``drop_custom_tools`` drops a Responses ``custom`` (free-form) tool. The conversion carries
-    it as a Chat Completions custom tool, which only a backend with free-form tool support
-    accepts; a backend that expresses function tools only would refuse the whole request
-    because of it.
+    ``drop_custom_tools`` drops a Responses ``custom`` (free-form) tool. A kept one reaches the
+    conversion, which under ``custom_tool_strategy=passthrough`` carries it as a Chat Completions
+    custom tool — only a backend with free-form tool support accepts the request, and one that
+    expresses function tools only refuses it whole — and under ``function_bridge`` lowers it to a
+    function tool the backend serves.
 
     ``drop_hosted_tools`` drops every tool type other than ``function`` and ``custom``. A backend
     that serves no hosted tools cannot honor such a spec, and offering it to the model produces
@@ -152,7 +153,7 @@ def sanitize_streaming_responses_body(
     *,
     drop_custom_tools: bool = False,
     drop_hosted_tools: bool = False,
-    carry_custom_tools: bool = False,
+    hoist_carrier_custom_tools: bool = False,
 ) -> tuple[dict[str, Any], NamespaceMap]:
     """Map a streaming-dialect request body onto the strict non-streaming params shape.
 
@@ -162,9 +163,10 @@ def sanitize_streaming_responses_body(
     flattening are dropped with a warning rather than failing the whole request, since a
     harness's exotic tool is better lost than the rollout. ``drop_custom_tools`` and
     ``drop_hosted_tools`` drop valid tool specs the backend cannot honor (see ``_tool_kept``).
-    ``carry_custom_tools`` hoists ``custom`` (free-form) entries from an ``additional_tools``
-    carrier item into ``tools`` instead of dropping them; the serving side enables it when a
-    bridge lowers custom tools for the backend (``custom_tool_strategy=function_bridge``).
+    ``hoist_carrier_custom_tools`` hoists ``custom`` (free-form) entries from an
+    ``additional_tools`` carrier item into ``tools`` instead of dropping them; custom entries
+    already in ``tools`` are kept regardless. The serving side enables it when a bridge lowers
+    custom tools for the backend (``custom_tool_strategy=function_bridge``).
     """
     body = deepcopy(body)
     # The params model only admits `stream: false` (Gym responses are non-streaming internally);
@@ -225,9 +227,10 @@ def sanitize_streaming_responses_body(
             ):
                 item["name"] = f"{item.pop('namespace')}{NAMESPACE_TOOL_DELIMITER}{item.get('name')}"
             # Codex's code mode ships tools inside an `additional_tools` input item instead of the
-            # `tools` param. Hoist what a Gym backend can express (plain and namespaced function
-            # tools) into `tools`; the rest (e.g. the freeform JS `exec` tool) has no function-call
-            # representation and is dropped with a warning.
+            # `tools` param. Hoist what the serving side can express into `tools`: plain and
+            # namespaced function tools always, plus custom (free-form) entries when
+            # `hoist_carrier_custom_tools` says a function bridge lowers them for the backend.
+            # Anything else is dropped with a warning.
             if isinstance(item, dict) and item.get("type") == "additional_tools":
                 carrier_tools.extend(item.get("tools") or [])
                 continue
@@ -247,7 +250,7 @@ def sanitize_streaming_responses_body(
         if carrier_tools:
             flat, carrier_map = flatten_namespace_tools(carrier_tools)
             ns_map.update(carrier_map)
-            carried_types = {"function", "custom"} if carry_custom_tools else {"function"}
+            carried_types = {"function", "custom"} if hoist_carrier_custom_tools else {"function"}
             usable = [
                 t
                 for t in flat

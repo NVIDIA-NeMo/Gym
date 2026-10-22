@@ -207,9 +207,23 @@ def _align_logprobs_to_text(
 
 # The single parameter of a function-bridged custom tool. It is declared
 # exactly `"type": "string"`: schema coercion returns a string-typed value
-# byte-verbatim, and tool-call markup carries it as raw text, so the free-form
-# payload crosses the engine with no JSON-escaping burden on the model.
-CUSTOM_TOOL_BRIDGE_PARAMETER = "input"
+# byte-verbatim. How the payload crosses the engine depends on the backend's
+# tool parser: an XML-style parser (`qwen3_coder`, `nemotron_v3`) carries the
+# string value as raw text in its markup, while a JSON-format parser
+# (`hermes`, `llama3_json`, `mistral`) makes the model emit the whole
+# arguments object as JSON, so the model must JSON-escape the payload and an
+# escaping mistake surfaces as plain text with no tool call.
+_CUSTOM_TOOL_BRIDGE_PARAMETER = "input"
+
+# One strategy type shared by this converter and the model-server config
+# (`BaseResponsesAPIModelConfig.custom_tool_strategy`), so a value added to one
+# cannot be rejected by the other.
+CustomToolStrategy = Literal["passthrough", "function_bridge"]
+
+# Custom tools whose grammar `format` was already reported dropped at the
+# function-bridge lowering. The transcript is reconverted on every model call,
+# so an unguarded warning would repeat each turn.
+_BRIDGE_GRAMMAR_DROP_WARNED: set = set()
 
 
 class ResponsesConverter(BaseModel):
@@ -223,10 +237,10 @@ class ResponsesConverter(BaseModel):
     # Chat custom tool and the backend's own validation decides, while replayed
     # `custom_tool_call` history items refuse the conversion. "function_bridge"
     # lowers each custom tool to a function tool with one required plain-string
-    # parameter (CUSTOM_TOOL_BRIDGE_PARAMETER), replays custom-tool history in
+    # parameter (_CUSTOM_TOOL_BRIDGE_PARAMETER), replays custom-tool history in
     # that lowered form, and the response lift turns a returned call whose name
     # the request declared as custom back into a `custom_tool_call` item.
-    custom_tool_strategy: Literal["passthrough", "function_bridge"] = "passthrough"
+    custom_tool_strategy: CustomToolStrategy = "passthrough"
 
     THINK_TAG_PATTERN: ClassVar = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
@@ -437,6 +451,18 @@ class ResponsesConverter(BaseModel):
 
         tool_choice = self._responses_to_chat_tool_choice(responses_create_params.pop("tool_choice", None))
         tools = responses_create_params.pop("tools", None)
+        if tools and self.custom_tool_strategy == "function_bridge":
+            declared_kinds: Dict[str, set] = {}
+            for tool_dict in tools:
+                if tool_dict.get("type") in {"function", "custom"} and tool_dict.get("name"):
+                    declared_kinds.setdefault(str(tool_dict["name"]), set()).add(tool_dict["type"])
+            collisions = sorted(name for name, kinds in declared_kinds.items() if len(kinds) == 2)
+            if collisions:
+                raise ValueError(
+                    f"Tools {collisions} are declared both as a function tool and as a custom tool. The "
+                    "function bridge lowers each custom tool to a function tool with the same name, so a "
+                    "returned call could not be attributed to one of the two. Rename one of them."
+                )
         if tools:
             responses_create_params["tools"] = []
             for tool_dict in tools:
@@ -462,7 +488,7 @@ class ResponsesConverter(BaseModel):
                 elif self.custom_tool_strategy == "function_bridge":
                     converted_tool = NeMoGymChatCompletionToolParam(
                         type="function",
-                        function=self.bridged_custom_tool_function(tool_dict),
+                        function=self._custom_tool_to_bridged_function(tool_dict),
                     )
                 else:
                     converted_tool = {
@@ -638,7 +664,7 @@ class ResponsesConverter(BaseModel):
                             NeMoGymChatCompletionMessageToolCallParam(
                                 id=tool_call["id"],
                                 function=NeMoGymChatCompletionMessageToolCallFunctionParam(
-                                    arguments=self.bridge_custom_tool_arguments(custom_call.get("input") or ""),
+                                    arguments=self._encode_bridged_input(custom_call.get("input") or ""),
                                     name=custom_call["name"],
                                 ),
                                 type="function",
@@ -743,10 +769,14 @@ class ResponsesConverter(BaseModel):
     ) -> None:
         """Replay a custom tool call in its function-bridged form.
 
-        The bridged arguments re-encode the item's free-form input the same way
-        the engine's tool parser serialized the one-parameter object on the turn
-        that generated the call, so a replayed turn re-renders to the call the
-        model produced.
+        The bridged arguments re-encode the item's free-form input as the
+        one-parameter object rather than echoing the byte string the engine
+        produced. vLLM parses a replayed call's arguments into an object before
+        rendering the chat template, so a well-formed call re-renders to the
+        same parsed object even when the byte encodings differ. A malformed
+        call is the limit: its raw-text lift re-encodes here as
+        ``{"input": "<raw text>"}``, a different object from the one the model
+        generated.
         """
         state.assistant_item_buffered = True
         assert "call_id" in m
@@ -757,7 +787,7 @@ class ResponsesConverter(BaseModel):
         tool_call = NeMoGymChatCompletionMessageToolCallParam(
             id=m["call_id"],
             function=NeMoGymChatCompletionMessageToolCallFunctionParam(
-                arguments=self.bridge_custom_tool_arguments(m.get("input") or ""),
+                arguments=self._encode_bridged_input(m.get("input") or ""),
                 name=m["name"],
             ),
             type="function",
@@ -802,50 +832,85 @@ class ResponsesConverter(BaseModel):
         return converted
 
     @staticmethod
-    def bridged_custom_tool_function(tool_dict: dict) -> NeMoGymFunctionDefinition:
+    def _custom_tool_to_bridged_function(tool_dict: dict) -> NeMoGymFunctionDefinition:
         """The function-tool lowering of a Responses custom tool definition.
 
-        The free-form payload becomes the one required string parameter. A
-        grammar ``format`` is dropped: no vLLM tool parser enforces a grammar
-        through function calling, so the constraint falls back to the model's
-        own behavior, the same as a hosted model that ignores the grammar.
+        The free-form payload becomes the one required string parameter.
+        ``description`` is optional on a custom tool and is carried only when
+        present. A grammar ``format`` is dropped, with a warning once per tool
+        name: no vLLM tool parser enforces a grammar through function calling,
+        so the constraint falls back to the model's own behavior, the same as a
+        hosted model that ignores the grammar.
         """
+        name = tool_dict["name"]
+        if tool_dict.get("format") is not None and name not in _BRIDGE_GRAMMAR_DROP_WARNED:
+            _BRIDGE_GRAMMAR_DROP_WARNED.add(name)
+            logger.warning(
+                "Custom tool %r carries a grammar format; the function-bridge lowering drops it, so the "
+                "grammar no longer constrains the model's payload.",
+                name,
+            )
+        description = tool_dict.get("description")
         return NeMoGymFunctionDefinition(
-            name=tool_dict["name"],
-            description=tool_dict.get("description"),
+            name=name,
+            **({"description": description} if description else {}),
             parameters={
                 "type": "object",
                 "properties": {
-                    CUSTOM_TOOL_BRIDGE_PARAMETER: {
+                    _CUSTOM_TOOL_BRIDGE_PARAMETER: {
                         "type": "string",
                         "description": "The raw text payload of this free-form tool.",
                     }
                 },
-                "required": [CUSTOM_TOOL_BRIDGE_PARAMETER],
+                "required": [_CUSTOM_TOOL_BRIDGE_PARAMETER],
             },
         )
 
     @staticmethod
-    def bridge_custom_tool_arguments(input_value: str) -> str:
+    def _encode_bridged_input(input_value: str) -> str:
         """Encode a custom tool call's free-form input as bridged function arguments."""
-        return json.dumps({CUSTOM_TOOL_BRIDGE_PARAMETER: input_value or ""}, ensure_ascii=False)
+        return json.dumps({_CUSTOM_TOOL_BRIDGE_PARAMETER: input_value or ""}, ensure_ascii=False)
 
     @staticmethod
-    def unbridge_custom_tool_arguments(arguments: Optional[str]) -> str:
+    def _decode_bridged_input(arguments: Optional[str], *, tool_name: str = "", call_id: str = "") -> str:
         """Recover the free-form input from bridged function arguments.
 
-        Malformed arguments, not JSON or missing the bridge parameter, return
-        the raw string: the model's payload is better delivered unwrapped than
-        lost, and the harness then sees exactly what was generated.
+        Malformed arguments, not JSON or not the expected one-parameter object,
+        return the raw string: the model's payload is better delivered unwrapped
+        than lost, and the harness then sees exactly what was generated. Every
+        malformed shape, and any dropped extra key, is logged with the tool name
+        and call id, because the harness then runs something other than a clean
+        bridged payload while the rollout record looks like a normal call.
         """
         if not arguments:
             return ""
         try:
             parsed = json.loads(arguments)
         except (TypeError, ValueError):
+            logger.warning(
+                "Bridged custom tool call %s (tool %r): arguments are not JSON; delivering the raw string.",
+                call_id,
+                tool_name,
+            )
             return arguments
-        if isinstance(parsed, dict) and isinstance(parsed.get(CUSTOM_TOOL_BRIDGE_PARAMETER), str):
-            return parsed[CUSTOM_TOOL_BRIDGE_PARAMETER]
+        if isinstance(parsed, dict) and isinstance(parsed.get(_CUSTOM_TOOL_BRIDGE_PARAMETER), str):
+            extra_keys = sorted(set(parsed) - {_CUSTOM_TOOL_BRIDGE_PARAMETER})
+            if extra_keys:
+                logger.warning(
+                    "Bridged custom tool call %s (tool %r): extra argument keys %s are dropped; only the "
+                    "%r payload is delivered.",
+                    call_id,
+                    tool_name,
+                    extra_keys,
+                    _CUSTOM_TOOL_BRIDGE_PARAMETER,
+                )
+            return parsed[_CUSTOM_TOOL_BRIDGE_PARAMETER]
+        logger.warning(
+            "Bridged custom tool call %s (tool %r): arguments are not the expected one-parameter object; "
+            "delivering the raw string.",
+            call_id,
+            tool_name,
+        )
         return arguments
 
     def _chat_to_responses_tool_choice(self, tool_choice: Any) -> Any:
@@ -864,19 +929,30 @@ class ResponsesConverter(BaseModel):
             }
         raise NotImplementedError(f"Chat tool choice type {tool_type!r} has no Responses representation.")
 
+    def _tool_reference_to_chat_lowered(self, tool: dict) -> dict:
+        """A Responses tool reference in Chat form, following the bridge's lowering.
+
+        Under ``function_bridge`` the request declares a referenced custom tool
+        as a function tool, and vLLM's named tool choice admits ``type:
+        "function"`` only, so the reference is rewritten to the function form.
+        """
+        if self.custom_tool_strategy == "function_bridge" and tool.get("type") == "custom":
+            return {"type": "function", "function": {"name": tool["name"]}}
+        return self._tool_reference_to_chat(tool)
+
     def _responses_to_chat_tool_choice(self, tool_choice: Any) -> Any:
         if tool_choice is None or isinstance(tool_choice, str):
             return tool_choice
 
         tool_type = tool_choice.get("type")
         if tool_type in {"function", "custom"}:
-            return self._tool_reference_to_chat(tool_choice)
+            return self._tool_reference_to_chat_lowered(tool_choice)
         if tool_type == "allowed_tools":
             return {
                 "type": "allowed_tools",
                 "allowed_tools": {
                     "mode": tool_choice["mode"],
-                    "tools": [self._tool_reference_to_chat(tool) for tool in tool_choice["tools"]],
+                    "tools": [self._tool_reference_to_chat_lowered(tool) for tool in tool_choice["tools"]],
                 },
             }
         raise NotImplementedError(f"Responses tool choice type {tool_type!r} has no Chat representation.")
@@ -1024,7 +1100,11 @@ class ResponsesConverter(BaseModel):
                 response_output.append(
                     NeMoGymResponseCustomToolCall(
                         name=tc["function"]["name"],
-                        input=self.unbridge_custom_tool_arguments(tc["function"].get("arguments")),
+                        input=self._decode_bridged_input(
+                            tc["function"].get("arguments"),
+                            tool_name=tc["function"]["name"],
+                            call_id=tc["id"],
+                        ),
                         call_id=tc["id"],
                         type="custom_tool_call",
                         status="completed",
