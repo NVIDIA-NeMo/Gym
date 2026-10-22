@@ -75,6 +75,8 @@ answer's own structure:
   - `partner_if:evidence_too_large`: an artifact over 1,000,000 characters, for the items
     that need it, or a judge input over `judge_max_input_chars` characters: the serialized
     rubrics and evidence of the items the judge grades, with only the artifacts they need;
+  - `partner_if:tool_backend_failed`: a mock-tool backend failed to run a call (a backend error, or a sandbox
+    or runner that stopped answering), so the environment failed rather than the model;
   - `partner_if:unsigned_contract`: a contract with `audit_signoff: false` on a server
     without `allow_provisional_rubrics: true`. With it, the contract is scored and marked
     `provisional`.
@@ -90,18 +92,50 @@ size it to the judge's context window), `allow_provisional_rubrics` (false) and
 `task_check_modules` ([]). The SWE server defaults to 32768 output tokens and a
 concurrency of 2.
 
+The sandboxed mock-tool server's `sandbox_config` takes Gym's `SandboxConfig` settings (`ttl_s`,
+`ready_timeout_s`, `resources`, `env`, `metadata`, `provider_options`) plus `image` (any Python 3 image;
+`python:3.13-slim`), `network`, `package_index_url` (`https://pypi.org/simple`), `package_index_egress`
+(`https://pypi.org`, `https://files.pythonhosted.org`), `install_timeout_s` (300), `runner_timeout_s` (60, until
+the backend has loaded) and `call_timeout_s` (60, each request to the runner). `network` is one of:
+
+- `package_index` (default): egress only to the hosts of `package_index_egress`; the pins are installed with
+  `pip --only-binary=:all:` from `package_index_url`;
+- `none`: no egress; nothing is installed, so the image must already have the pinned versions, which the runner
+  checks;
+- `provider_default`: no policy from this server, for a provider without network policies, such as local Docker.
+
+`package_index` and `none` need OpenSandbox's network policies and fail at startup on any other provider.
+The server reaches each runner through the provider's endpoint with the provider's own TLS setting (OpenSandbox's
+`connection.tls_verify`), so a deployment with a self-signed certificate works as it does for the provider.
+Running the sandboxed mode outside `gym` needs Gym's `sandbox` extra (`uv sync --extra dev --extra sandbox`).
+
 ## Task-specific checks and live agents
 
 - `task_check_modules`: importable modules whose `CHECKERS` dict maps verifier IDs to
   `checks.Checker` objects, usually `checks.fixed(fn)`. They are registered at startup
   and cannot redefine a registered ID.
-- `mock_tools_app.py` serves the `ToolBackend` named by `backend: module:Class` over
-  `fixture_path` and `tasks_path`. It fails at startup when a task advertises a tool the
-  backend does not serve or names a verifier that does not resolve. A backend implements
-  `tool_backend.ToolBackend` and raises `tool_backend.ToolCallError` for the model's
-  mistakes: the model sees `{"error": ...}` and the call is graded; any other exception
-  is an infrastructure error. `configs/mock_tools.yaml`
-  runs the example `example_tools.NotesBackend` on `data/mock_tools_example.jsonl`.
+- `mock_tools_app.py` serves each task's tools from a `ToolBackend` (`tool_backend.py`), in one of two modes:
+  - In-process: `backend: module:Class` serves every task in `tasks_path` over `fixture_path`. The server fails
+    at startup when a task advertises a tool the backend does not serve or names a verifier that does not
+    resolve. `configs/mock_tools.yaml` runs the example `example_tools.NotesBackend` on
+    `data/mock_tools_example.jsonl`.
+  - Sandboxed: with `sandbox_provider` (a Gym sandbox provider config, such as OpenSandbox's), each row brings
+    its own backend, which runs in a fresh sandbox for every rollout, so tasks with different backends share one
+    server. The row's `tool_backend` holds `entrypoint` (`module:Class`), `files` (UTF-8 text by relative path),
+    `fixture` (one of `files`, passed to the class) and `requirements` (exact `name==version` pins). It sits
+    outside `responses_create_params`, so the actor never sees it. The sandbox gets only the bundle, a
+    standard-library runner (`tool_runner.py`) and the row's `responses_create_params`, never its rubrics or
+    contract. Each seed starts a sandbox, installs the pins, starts the runner and checks that the backend serves
+    every tool the task advertises (HTTP 422 if not). Close, retire and shutdown stop the sandbox, and
+    `sandbox_config.ttl_s` is the backstop. `configs/mock_tools_sandboxed.yaml` runs the example backend this
+    way on `data/mock_tools_sandboxed_example.jsonl`.
+
+  In both modes a backend raises `tool_backend.ToolCallError` for the model's mistakes: the model sees
+  `{"error": ...}` and the call is graded. Any other failure is the environment's: the model sees only
+  `Internal Server Error`, the call leaves no receipt, and the rollout is masked as
+  `partner_if:tool_backend_failed`. The verify response adds `tool_calls`, `environment_receipts` (the
+  backend's records) and, in sandboxed mode, `tool_sandbox_id`. Episodes live in the server's memory, so it
+  requires `num_workers: 1`.
 - `swe_app.py` (Scale-SWE with an OpenCode agent) also captures `live_agent` evidence.
   Set `actor_system_prompt` and `tool_description_additions` to what the agent's own
   config gives the actor; the judge reads them. OpenCode reports a status only for a run
