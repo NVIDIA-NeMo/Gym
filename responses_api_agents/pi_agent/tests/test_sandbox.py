@@ -2456,7 +2456,7 @@ def test_native_model_error_is_reported_with_classification(setup, message, stat
     [("Request timed out.", "model_transport_error"), ("Unrecognized failure", "unknown")],
 )
 def test_terminal_provider_failure_uses_default_episode_policy(setup, message, failure_kind):
-    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
+    from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
     from nemo_gym.openai_utils import NeMoGymResponse
 
     agent, sandbox = setup
