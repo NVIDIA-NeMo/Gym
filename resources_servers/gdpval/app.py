@@ -681,7 +681,11 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 raise ResourcesSeedRejectedError(f"task_data is not a GDPVal task: {error}") from error
             if body.task_id.task_id != task.task_id:
                 raise ResourcesSeedRejectedError("TaskId does not match the GDPVal task_id")
-            repeat = persisted_layout.repeat_from_rollout_id(body.episode_id.rollout_id)
+            try:
+                repeat = persisted_layout.repeat_from_rollout_id(body.episode_id.rollout_id)
+            except ValueError as error:
+                # A retry sends the same rollout_id, so no retry can fix it.
+                raise ResourcesSeedRejectedError(str(error)) from error
             directory = (task.task_id, repeat)
             owner = self._claimed_directories.get(directory)
             if owner is not None:
@@ -1825,9 +1829,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
             stage_index = vr.get("stage_index")
             if stage_index is not None:
                 normalized_stage_index = int(stage_index)
-                # A lost session's masked sample holds no measurement, so it is not an observed row of its stage.
-                if vr.get("failure_kind") not in (SESSION_LOST, SESSION_EXPIRED):
-                    staged.setdefault(normalized_stage_index, []).append(vr)
+                staged.setdefault(normalized_stage_index, []).append(vr)
                 expected_stage_row_count = vr.get("expected_stage_row_count")
                 if expected_stage_row_count is not None:
                     expected_stage_row_counts.setdefault(normalized_stage_index, set()).add(
@@ -1941,7 +1943,13 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     extra["comparison/expected_final_stage_index"] = expected_final_stage_index
 
                 final_stage_present = expected_stage_consistent and expected_final_stage_index in staged
-                final_stage_rows = staged.get(expected_final_stage_index, [])
+                # A lost session's masked sample stays in the stage for coverage, but it holds no measurement, so it
+                # is not an observed row when deciding whether the final stage is complete.
+                final_stage_rows = [
+                    vr
+                    for vr in staged.get(expected_final_stage_index, [])
+                    if vr.get("failure_kind") not in (SESSION_LOST, SESSION_EXPIRED)
+                ]
                 observed_final_stage_count = len(
                     {
                         (

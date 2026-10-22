@@ -18,6 +18,7 @@ from nemo_gym.failure_kinds import SESSION_LOST
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.session_routing import install_session_routing
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.gdpval import persisted_layout, task_sandbox
 from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig, GDPValVerifyRequest
@@ -402,8 +403,21 @@ def test_task_data_that_is_not_a_task_is_refused_as_final(server, root, tmp_path
     assert _post_seed(client, _seed(tmp_path)).status_code == 200
 
 
-def test_a_refused_seed_does_not_hand_out_the_cookie_of_the_live_session(server, root, tmp_path):
+def _app(server: GDPValResourcesServer, *, routed: bool):
     app = server.setup_webserver()
+    if routed:
+        # As run_webserver does, even for one worker: the router names a typed seed's session by its
+        # resources_session_id before the handler runs.
+        key = server.get_session_middleware_key()
+        install_session_routing(
+            app, socket_dir=None, session_cookie=key, secret_key=key, **server.claimed_session_routing()
+        )
+    return app
+
+
+@pytest.mark.parametrize("routed", [False, True], ids=["unrouted", "routed"])
+def test_a_refused_seed_does_not_hand_out_the_cookie_of_the_live_session(server, root, tmp_path, routed):
+    app = _app(server, routed=routed)
     seed = _seed(tmp_path)
     assert _post_seed(TestClient(app), seed).status_code == 200
     intruder = TestClient(app)
@@ -420,8 +434,11 @@ def test_a_refused_seed_does_not_hand_out_the_cookie_of_the_live_session(server,
 def test_a_seed_whose_rollout_id_names_no_rollout_index_is_rejected(server, root, tmp_path):
     seed = _seed(tmp_path).model_copy(update={"episode_id": EpisodeId(rollout_id="explicit")})
 
-    with pytest.raises(ValueError, match="is not '<task_index>-<rollout_index>' with two integers"):
-        _post_seed(TestClient(server.setup_webserver()), seed)
+    refused = _post_seed(TestClient(server.setup_webserver()), seed)
+
+    # 422, not a retried 500: a retry sends the same rollout_id.
+    assert refused.status_code == 422
+    assert "is not '<task_index>-<rollout_index>' with two integers" in refused.json()["detail"]
 
     assert not root.exists()
 
