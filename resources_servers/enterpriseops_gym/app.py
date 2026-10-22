@@ -165,6 +165,7 @@ class EnterpriseOpsVerifyResponse(BaseVerifyResponse):
 
 
 class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
+    ray_enabled = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     config: EnterpriseOpsGymResourcesServerConfig

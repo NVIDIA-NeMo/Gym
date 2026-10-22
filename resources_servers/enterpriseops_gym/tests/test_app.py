@@ -25,7 +25,6 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
-from httpx import Cookies
 
 import nemo_gym.server_utils as server_utils
 from nemo_gym.server_utils import ServerClient
@@ -368,38 +367,29 @@ class TestToolProxy:
         server = make_server()
         row = make_row(stub_url, [V_COUNT])
 
-        # One TestClient (one event loop) with cookie auto-persistence defeated, so we can
-        # drive two independent sessions by passing cookies explicitly — the same pattern
-        # as resources_servers/example_session_state_mgmt/tests/test_app.py.
+        # Keep one event loop, but clear the cookie jar before starting session B.
         with TestClient(server.setup_webserver()) as client:
-
-            class StatelessCookies(Cookies):
-                def extract_cookies(self, response):
-                    pass
-
-            client._cookies = StatelessCookies(client._cookies)
-
             response_a = client.post("/seed_session", json=row)
-            cookies_a = response_a.cookies
+            cookie_a = response_a.headers["set-cookie"].split(";", 1)[0]
             db_a = response_a.json()["databases"][GYM_NAME]
 
+            client.cookies.clear()
             response_b = client.post("/seed_session", json=row)
-            cookies_b = response_b.cookies
             db_b = response_b.json()["databases"][GYM_NAME]
             assert db_a != db_b
 
             # Mutate only session A's database.
+            client.cookies.clear()
             client.post(
                 "/update_entitlement",
                 json={"entitlement_id": 73, "coverage_hours": "h24x7"},
-                cookies=cookies_a,
+                headers={"cookie": cookie_a},
             )
 
             a_val = state.dbs[db_a].execute("SELECT coverage_hours FROM entitlement").fetchone()[0]
             b_val = state.dbs[db_b].execute("SELECT coverage_hours FROM entitlement").fetchone()[0]
             assert a_val == "h24x7"
             assert b_val == "h8x5"
-            assert cookies_b is not None  # both sessions were established
 
 
 class TestVerifyLifecycle:
@@ -467,13 +457,8 @@ class TestManagedServices:
         row = make_row("http://dataset-url-must-not-be-used", [V_COUNT])
 
         with TestClient(server.setup_webserver()) as client:
-
-            class StatelessCookies(Cookies):
-                def extract_cookies(self, response):
-                    pass
-
-            client._cookies = StatelessCookies(client._cookies)
             client.post("/seed_session", json=row)
+            client.cookies.clear()
             client.post("/seed_session", json=row)
 
         assert len(state.seed_events) == 2

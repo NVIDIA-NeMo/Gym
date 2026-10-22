@@ -4,10 +4,39 @@
 from pathlib import Path
 
 import pytest
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
+
+from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
 
 CONFIG_DIR = Path(__file__).parents[1] / "configs"
+
+
+@pytest.mark.parametrize("filename", ["enterpriseops_gym.yaml", "enterpriseops_gym_turnlog.yaml"])
+def test_composed_configs_keep_each_agent_explicitly_fronted(filename: str) -> None:
+    config = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.merge(
+                GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                {
+                    "config_paths": [str(CONFIG_DIR / filename)],
+                    "error_on_agent_without_environment_server": True,
+                },
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    bindings = {
+        name: instance.environment_servers.legacy_agent.agent_server.name
+        for name, instance in config.items()
+        if isinstance(instance, DictConfig) and "environment_servers" in instance
+    }
+    expected = {"enterpriseops_gym_environment_server": "enterpriseops_gym_simple_agent"}
+    if filename == "enterpriseops_gym_turnlog.yaml":
+        expected["enterpriseops_gym_turn_logging_environment_server"] = "enterpriseops_gym_turn_logging_agent"
+    assert bindings == expected
 
 
 def test_base_config_composes_enterpriseops_apptainer_profile() -> None:
