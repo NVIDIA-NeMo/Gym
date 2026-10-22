@@ -107,6 +107,7 @@ from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.image_configs import load_compose_document
 from nemo_gym.tasks.harbor.materialize import STEP_METADATA_KEY, HarborTaskInput
+from nemo_gym.tasks.harbor.models import HarborMCPServer
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
 from nemo_gym.tasks.harbor.registry import ImageConfigError
 from nemo_gym.tasks.harbor.task import HarborTurn
@@ -283,7 +284,8 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # mode: the agent cannot tamper with the grader. Tasks without artifacts keep their declared mode.
     separate_verifier_for_artifacts: bool = False
     # Grant the task's `[[environment.mcp_servers]]` URL entries to the agent as MCP tool accesses. "off" keeps
-    # them in /tmp/.nemo-gym/task.json only; "required" makes an agent that cannot connect fail its seed.
+    # them in /tmp/.nemo-gym/task.json only; "required" makes an agent that cannot connect fail its seed or its
+    # first turn, so a harness without supports_task_tool_context can take a task whose MCP servers are all granted.
     task_mcp_grants: Literal["off", "optional", "required"] = "off"
     # Values for the `${NAME}` references a task's Compose file leaves to the deployment, such as a sidecar's
     # model endpoint and key. Resolved at seed; the task and Harbor's own variables take precedence.
@@ -808,7 +810,11 @@ class HarborEnvironmentServer(
         # Register cleanup before seed so cancellation can close a remotely created session even if its response is lost.
         agent_cleanup = cleanup.register_cleanup("agent session", close_agent)
 
+        # One source for the task's MCP declarations: what is granted and what the refusal below checks.
+        mcp_servers = task.config.environment.mcp_servers
         try:
+            # Inside the try: a declaration the grant schema rejects is a staged terminal agent failure, not a 500.
+            tool_accesses = self._task_tool_accesses(task, mcp_servers)
             agent_create_http_response = await self.server_client.post(
                 server_name=self.config.agent_server.name,
                 url_path="/v1/agent_sessions",
@@ -816,7 +822,7 @@ class HarborEnvironmentServer(
                     agent_session_id=agent_session_id,
                     episode_id=request.episode_id,
                     task_id=request.task.task_id,
-                    tool_accesses=self._task_tool_accesses(task),
+                    tool_accesses=tool_accesses,
                     sandbox_access=access,
                     agent_timeout_sec=agent_timeout_sec,
                 ).model_dump(mode="json"),
@@ -828,14 +834,26 @@ class HarborEnvironmentServer(
             if agent_session.agent_session_id != agent_session_id:
                 raise ValueError("Agent seed returned a different agent_session_id")
             agent_cookies = _cookies(agent_create_http_response)
-            environment = task.config.environment
-            if (environment.mcp_servers or environment.skills_dir) and not agent_session.supports_task_tool_context:
+            unreached = self._unreached_task_tools(task, mcp_servers, tool_accesses)
+            if unreached and not agent_session.supports_task_tool_context:
                 # The task's tools would never reach this harness, and the run would score a silent zero.
+                # Advice only when following it would clear the refusal: every unreached entry is a grantable
+                # streamable-http server and grants are not already required.
+                grantable = "skills_dir" not in unreached and all(
+                    server.transport == "streamable-http" and bool(server.url)
+                    for server in mcp_servers
+                    if f"MCP server {server.name!r}" in unreached
+                )
+                hint = (
+                    ", or grant its streamable-http MCP servers with task_mcp_grants: required"
+                    if grantable and self.config.task_mcp_grants != "required"
+                    else ""
+                )
                 raise HTTPException(
                     422,
                     f"Task {task.task_id!r} declares MCP servers or a skills directory, which the agent "
-                    f"{self.config.agent_server.name!r} does not support; run it with a harness that declares "
-                    "supports_task_tool_context in its seed response",
+                    f"{self.config.agent_server.name!r} does not support ({', '.join(unreached)}); run it with a "
+                    f"harness that declares supports_task_tool_context in its seed response{hint}",
                 )
         except HTTPException as error:
             # The configured harness cannot take this task; a retry would be refused the same way.
@@ -1058,8 +1076,26 @@ class HarborEnvironmentServer(
         session.agent_user = resolved
         session.requested_user = user
 
-    def _task_tool_accesses(self, task: HarborTask) -> list[ToolAccess]:
-        """The task's MCP servers as agent tool grants, when ``task_mcp_grants`` asks for them.
+    @staticmethod
+    def _unreached_task_tools(
+        task: HarborTask, mcp_servers: list[HarborMCPServer], tool_accesses: list[ToolAccess]
+    ) -> list[str]:
+        """The task's tool declarations a harness reaches only through ``/tmp/.nemo-gym/task.json``.
+
+        ``mcp_servers`` is the list the grants were built from, so both sides of the check see the same servers.
+        An MCP server granted as required reaches any harness that accepted the grant: by the tool-access contract
+        a harness that cannot establish a required server fails its seed or its first turn (Hermes and Pi connect
+        at the first activation) rather than running without it. Optional grants may be skipped, and a skills
+        directory has no grant at all, so those stay unreached.
+        """
+        granted = {access.name for access in tool_accesses if isinstance(access, MCPToolAccess) and access.required}
+        unreached = [f"MCP server {server.name!r}" for server in mcp_servers if server.name not in granted]
+        if task.config.environment.skills_dir:
+            unreached.append("skills_dir")
+        return unreached
+
+    def _task_tool_accesses(self, task: HarborTask, mcp_servers: list[HarborMCPServer]) -> list[ToolAccess]:
+        """``mcp_servers`` (the task's declarations) as agent tool grants, when ``task_mcp_grants`` asks for them.
 
         Only URL entries reached over streamable HTTP can be granted; a Compose sidecar's URL names its
         service host, which resolves inside the task's sandbox group, where the harness runs.
@@ -1067,7 +1103,7 @@ class HarborEnvironmentServer(
         if self.config.task_mcp_grants == "off":
             return []
         accesses: list[ToolAccess] = []
-        for server in task.config.environment.mcp_servers:
+        for server in mcp_servers:
             if server.transport != "streamable-http" or not server.url:
                 LOGGER.warning(
                     f"{task.task_id}: MCP server {server.name!r} ({server.transport}) cannot be granted; "

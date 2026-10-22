@@ -1041,6 +1041,11 @@ TASK_TOOL_CONTEXT_DECLARATIONS = {
     "mcp_servers": '[[environment.mcp_servers]]\nname = "playwright"\ntransport = "sse"\nurl = "http://api:3080/sse"\n',
     "skills_dir": 'skills_dir = "/app/.skills"\n',
 }
+# A Compose sidecar's MCP server, the kind `task_mcp_grants` can grant (SWE-Interact's simulated user).
+GRANTABLE_MCP_SERVER = (
+    '[[environment.mcp_servers]]\nname = "user-server"\ntransport = "streamable-http"\n'
+    'url = "http://user-server:8000/mcp"\n'
+)
 
 
 def http_error_with_body(status: int, body: bytes) -> ClientResponseError:
@@ -1114,6 +1119,69 @@ class TestAgentStage:
         assert response.failure is None, response.failure
         assert response.result.reward == 1.0
         assert any("test.sh" in call["command"] for call in sandbox.execs)
+
+    async def test_a_task_whose_mcp_servers_are_all_granted_as_required_runs_on_a_harness_without_task_json(
+        self, tmp_path, monkeypatch
+    ):
+        """Hermes or Pi read no task.json, but take required MCP grants, or fail their seed when they cannot."""
+        server, task, sandbox, _ = make_server(
+            tmp_path, monkeypatch, toml=TASK_TOML + GRANTABLE_MCP_SERVER, task_mcp_grants="required"
+        )
+        server.server_client.supports_task_tool_context = False
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0
+        (seed,) = server.server_client.seed_bodies()
+        assert [(access["name"], access["required"]) for access in seed["tool_accesses"]] == [("user-server", True)]
+        assert any("test.sh" in call["command"] for call in sandbox.execs)
+
+    async def test_a_grant_the_tool_access_schema_rejects_is_a_staged_terminal_failure(self, tmp_path, monkeypatch):
+        """The grant lookup runs inside the seed's try: a declaration the grant schema refuses (a name the session
+        contract does not accept) fails the episode at stage agent, terminal, instead of escaping as a 500."""
+        bad = GRANTABLE_MCP_SERVER.replace('name = "user-server"', 'name = "user server"')
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=TASK_TOML + bad, task_mcp_grants="required")
+        server.server_client.supports_task_tool_context = False
+
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert response.result is None and failure.stage == "agent" and failure.terminal
+        assert not server.server_client.seed_bodies()
+        assert not any("test.sh" in call["command"] for call in sandbox.execs)
+
+    @pytest.mark.parametrize(
+        ("grants", "declaration", "unreached"),
+        [
+            ("off", None, "MCP server 'user-server'"),
+            # An optional grant may be skipped by the harness without failing its seed.
+            ("optional", None, "MCP server 'user-server'"),
+            # Only streamable-http entries can be granted; an SSE server still needs task.json.
+            ("required", "mcp_servers", "MCP server 'playwright'"),
+            # A skills directory has no grant at all.
+            ("required", "skills_dir", "skills_dir"),
+        ],
+    )
+    async def test_task_tools_no_required_grant_covers_are_still_refused(
+        self, tmp_path, monkeypatch, grants, declaration, unreached
+    ):
+        extra = TASK_TOOL_CONTEXT_DECLARATIONS[declaration] if declaration else ""
+        # `skills_dir` belongs to the [environment] table, so it goes before the array-of-tables entry.
+        toml = TASK_TOML + extra + GRANTABLE_MCP_SERVER
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml, task_mcp_grants=grants)
+        server.server_client.supports_task_tool_context = False
+
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert response.result is None and failure.stage == "agent" and failure.terminal
+        assert unreached in failure.failure_reason
+        assert ("MCP server 'user-server'" in failure.failure_reason) is (grants != "required")
+        # The grant hint is offered only when it would help: an ungranted streamable-http server and grants not
+        # already required. An SSE server or a skills_dir under required grants gets no such advice.
+        assert ("task_mcp_grants: required" in failure.failure_reason) is (grants != "required")
+        assert not any("test.sh" in call["command"] for call in sandbox.execs)
 
     async def test_a_task_without_tool_declarations_runs_on_any_harness(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch)
