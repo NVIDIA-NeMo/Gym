@@ -151,6 +151,11 @@ class _CohortState:
     unreplayed_sessions: set[str] = field(default_factory=set)
 
 
+# How _response_digest serializes a response before hashing it. A checkpoint saves digests, so a change to that
+# serialization must also change this name; a restore then refuses saved state it cannot compare.
+RESPONSE_DIGEST_SCHEME = "json-ascii-sha256"
+
+
 class _CompletedMemberState(BaseModel):
     """One session's checkpointed share of a finished cohort: the reward or judge failure its member was given."""
 
@@ -162,6 +167,7 @@ class _CompletedMemberState(BaseModel):
     group_attempt: int = Field(ge=0)
     rollout_index: int = Field(ge=0)
     response_digest: str
+    response_digest_scheme: Literal["json-ascii-sha256"]
     # Exactly one of these: a completed cohort's reward, or a judge failure, which the caller records as a masked row.
     result: Optional[Dict[str, Any]] = None
     judge_failure: Optional[str] = None
@@ -714,7 +720,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
     @staticmethod
     def _response_digest(response: Any) -> str:
-        """Hash the exact response payload whose tokens will receive the reward."""
+        """Hash the exact response payload whose tokens will receive the reward; see RESPONSE_DIGEST_SCHEME."""
         payload = response.model_dump(mode="json") if hasattr(response, "model_dump") else response
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -1024,6 +1030,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             group_attempt=cohort.group_attempt,
             rollout_index=rollout_index,
             response_digest=cohort.members[rollout_index].response_digest,
+            response_digest_scheme=RESPONSE_DIGEST_SCHEME,
             **outcome,
         ).model_dump(mode="json", exclude_none=True)
 

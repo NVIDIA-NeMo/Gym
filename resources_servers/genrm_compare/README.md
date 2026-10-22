@@ -475,7 +475,9 @@ reward but before a sibling did. That sibling replays `/verify` after a restore;
 recorded its reward never does. So each resources session still open on a finished explicit-ID group exports
 its member's outcome, the reward or the judge failure that callers record as a masked row, and a restore
 reinstalls that finished group. The replay then gets the recorded outcome without another judge call. A
-group still collecting or evaluating exports nothing, and its members rebuild it by replaying, as before.
+group still collecting or evaluating exports nothing, and its members rebuild it by replaying, as before. Each saved
+response digest names how the response was serialized; a restore refuses digests saved under a scheme it
+does not know rather than refusing every replay.
 
 While a checkpoint is open, a finished evaluation holds its rewards or judge failure until resume, so no
 member records an outcome after this server exported. If a restored member's session is retired before it

@@ -282,6 +282,24 @@ async def test_a_restore_whose_sessions_disagree_on_a_member_installs_nothing(co
     await restored.aclose()
 
 
+async def test_a_restore_refuses_digests_saved_under_another_scheme(config):
+    """A digest from another serialization would refuse every exact replay; refuse the saved state instead."""
+    server, participant = seeded(config)
+    await finish_cohort(server)
+    records = await participant.export(None)
+    assert records[0].state["response_digest_scheme"] == genrm.RESPONSE_DIGEST_SCHEME
+    await server.aclose()
+    records[0] = records[0].model_copy(
+        update={"state": {**records[0].state, "response_digest_scheme": "orjson-sha256"}}
+    )
+
+    restored, restored_participant = participant_server(config)
+    with pytest.raises(ValueError, match="response_digest_scheme"):
+        await restored_participant.install(records, [record.episode_id for record in records])
+    assert restored._verify_cohorts == {}
+    await restored.aclose()
+
+
 async def test_a_restored_cohort_refuses_an_older_attempt_of_its_group(config):
     server, participant = seeded(config)
     await asyncio.gather(*(verify_as(server, SESSIONS[index], member(index, attempt=1)) for index in range(2)))
