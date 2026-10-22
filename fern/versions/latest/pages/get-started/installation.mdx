@@ -162,6 +162,11 @@ lock, not in a startup-only dependency override.
 A dataset that needs additional preparation dependencies declares `prepare_project`
 pointing at an isolated project with `pyproject.toml` and `uv.lock`. Gym syncs it with
 `uv sync --locked` and imports/runs the preparer in that environment, including its
-cache-freshness hook. It never installs packages into the running Gym interpreter.
-Move legacy `prepare_dependencies` arguments into that project's dependency list;
-unlocked arguments now fail with migration guidance.
+cache-freshness hook, without installing packages into the running Gym interpreter.
+
+Existing `dataset.prepare_dependencies` configs remain supported unchanged. These
+arguments are passed to `uv pip install --python <running Gym interpreter>` before
+importing the preparer, including editable installs and requirements-file options.
+When nonempty, `prepare_dependencies` takes precedence over `prepare_project`, so
+existing config overrides keep their behavior. Use `prepare_project` for a
+reproducible locked environment; migrating existing preparation configs is optional.

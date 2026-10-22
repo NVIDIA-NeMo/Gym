@@ -17,8 +17,10 @@ import importlib
 import json
 import logging
 import os
+import site
 import subprocess
 import sys
+import sysconfig
 from collections.abc import Sequence
 from copy import deepcopy
 from multiprocessing import Pool
@@ -246,16 +248,43 @@ def _multiprocess_benchmark_prepare_fn(args):
     print(f"Dataset prepared at: {output_fpath}")
 
 
+def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:
+    """Install what a benchmark's prepare script imports, before importing it.
+
+    Gym cannot depend on every benchmark's data-prep requirements, so a benchmark
+    needing something extra had to shell out to pip from inside the prepare script
+    itself. Declaring it on the dataset puts it in the config instead.
+    """
+    dependencies = benchmark_config.dataset.prepare_dependencies
+    if not dependencies:
+        return
+    logger.info("Installing prepare dependencies for %s: %s", benchmark_config.name, " ".join(dependencies))
+    try:
+        subprocess.run(["uv", "pip", "install", "--python", sys.executable, *dependencies], check=True)
+        # An editable install only adds a .pth file, which `site` reads at
+        # interpreter startup -- this process would not see it otherwise.
+        importlib.invalidate_caches()
+        site.addsitedir(sysconfig.get_paths()["purelib"])
+    except FileNotFoundError as exc:
+        raise ConfigError(
+            f"`uv` is required to install prepare_dependencies for dataset '{benchmark_config.name}'."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise ConfigError(
+            f"Could not install prepare_dependencies for dataset '{benchmark_config.name}': {' '.join(dependencies)}"
+        ) from exc
+
+
 def _prepare_environment(benchmark_config: "BenchmarkConfig", venv_root: Path | None = None) -> Path | None:
-    """Sync the dataset's isolated project, never the already-running Gym environment."""
+    """Use explicit dependency arguments as before, or sync an isolated locked project."""
     from nemo_gym.cli._locked_env import sync_environment
 
     dataset = benchmark_config.dataset
     if dataset.prepare_dependencies:
-        raise ConfigError(
-            f"Dataset '{benchmark_config.name}' uses unlocked prepare_dependencies. "
-            "Move these dependencies into a pyproject.toml, commit uv.lock, and set prepare_project."
-        )
+        # Explicit arguments retain their existing meaning, including editable installs
+        # and requirements-file options. Do not silently ignore caller overrides.
+        _install_prepare_dependencies(benchmark_config)
+        return None
     if dataset.prepare_project is None:
         return None
     project = _resolve_under_cwd_or_install(dataset.prepare_project).resolve()

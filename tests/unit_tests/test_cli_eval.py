@@ -190,6 +190,45 @@ class TestPrepareDependencies:
         )
         return SimpleNamespace(name="b", dataset=dataset)
 
+    def test_declared_dependencies_are_installed_into_the_running_interpreter(self, monkeypatch) -> None:
+        calls = []
+        monkeypatch.setattr(cli_eval.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+        monkeypatch.setattr(cli_eval.site, "addsitedir", lambda path: None)
+
+        cli_eval._install_prepare_dependencies(self._benchmark(dependencies=["-e", "benchmarks/automationbench"]))
+
+        assert len(calls) == 1
+        # --python sys.executable: installing into whatever interpreter happens to
+        # be on PATH would put the package somewhere this process cannot import.
+        assert calls[0] == ["uv", "pip", "install", "--python", sys.executable, "-e", "benchmarks/automationbench"]
+
+    def test_an_editable_install_is_made_importable_without_a_restart(self, monkeypatch) -> None:
+        """An editable install only drops a .pth file, which `site` reads at startup."""
+        added = []
+        monkeypatch.setattr(cli_eval.subprocess, "run", lambda cmd, **kw: None)
+        monkeypatch.setattr(cli_eval.site, "addsitedir", lambda path: added.append(path))
+
+        cli_eval._install_prepare_dependencies(self._benchmark(dependencies=["-e", "benchmarks/automationbench"]))
+
+        assert added == [cli_eval.sysconfig.get_paths()["purelib"]]
+
+    def test_nothing_runs_when_no_dependencies_are_declared(self, monkeypatch) -> None:
+        calls = []
+        monkeypatch.setattr(cli_eval.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+
+        cli_eval._install_prepare_dependencies(self._benchmark(dependencies=[]))
+
+        assert calls == []
+
+    def test_a_failed_install_is_reported_against_the_dataset(self, monkeypatch) -> None:
+        def boom(cmd, **kw):
+            raise cli_eval.subprocess.CalledProcessError(1, cmd)
+
+        monkeypatch.setattr(cli_eval.subprocess, "run", boom)
+
+        with pytest.raises(ConfigError, match="prepare_dependencies for dataset 'b'"):
+            cli_eval._install_prepare_dependencies(self._benchmark(dependencies=["nope"]))
+
     def test_declared_project_syncs_without_mutating_parent(self, tmp_path, monkeypatch):
         from nemo_gym.cli import _locked_env
 
@@ -212,9 +251,61 @@ class TestPrepareDependencies:
         assert calls == [(project, venv, sys.executable, [], [])]
         assert not project.exists()
 
-    def test_legacy_unlocked_arguments_fail_with_migration(self):
-        with pytest.raises(ConfigError, match="commit uv.lock, and set prepare_project"):
-            cli_eval._prepare_environment(self._benchmark(dependencies=["-e", "benchmarks/automationbench"]))
+    @pytest.mark.parametrize("dependencies", [["tqdm"], ["-e", "benchmarks/automationbench"], ["-r", "deps.txt"]])
+    def test_dependency_arguments_retain_install_and_import_behavior(self, dependencies, monkeypatch):
+        calls = []
+        monkeypatch.setattr(cli_eval.subprocess, "run", lambda *a, **kw: calls.append((a, kw)))
+        monkeypatch.setattr(cli_eval.importlib, "invalidate_caches", lambda: calls.append("invalidate"))
+        monkeypatch.setattr(cli_eval.site, "addsitedir", lambda path: calls.append(("site", path)))
+        assert cli_eval._prepare_environment(self._benchmark(dependencies=dependencies)) is None
+        assert calls == [
+            ((["uv", "pip", "install", "--python", sys.executable, *dependencies],), {"check": True}),
+            "invalidate",
+            ("site", cli_eval.sysconfig.get_paths()["purelib"]),
+        ]
+
+    def test_non_benchmark_config_preserves_dependency_arguments(self, monkeypatch):
+        from nemo_gym.config_types import DatasetConfig
+
+        dataset = DatasetConfig(
+            name="training",
+            type="train",
+            jsonl_fpath="data.jsonl",
+            license="MIT",
+            prepare_script=Path("prepare.py"),
+            prepare_dependencies=["tqdm"],
+        )
+        calls = []
+        monkeypatch.setattr(cli_eval, "_install_prepare_dependencies", lambda config: calls.append(config))
+        benchmark = SimpleNamespace(name="training", dataset=dataset)
+        assert cli_eval._prepare_environment(benchmark) is None
+        assert calls == [benchmark]
+        assert dataset.model_dump()["prepare_dependencies"] == ["tqdm"]
+
+    def test_dependency_arguments_take_precedence_over_project(self, tmp_path, monkeypatch):
+        from nemo_gym.cli import _locked_env
+
+        monkeypatch.setattr(_locked_env, "sync_environment", lambda *a: pytest.fail("unexpected sync"))
+        calls = []
+        benchmark = self._benchmark(tmp_path, ["tqdm"])
+        monkeypatch.setattr(cli_eval, "_install_prepare_dependencies", lambda config: calls.append(config))
+        assert cli_eval._prepare_environment(benchmark) is None
+        assert calls == [benchmark]
+
+    @pytest.mark.parametrize("error", [FileNotFoundError("uv"), subprocess.CalledProcessError(1, ["uv"])])
+    def test_dependency_install_failure_names_dataset(self, error, monkeypatch):
+        def fail(*args, **kwargs):
+            raise error
+
+        monkeypatch.setattr(cli_eval.subprocess, "run", fail)
+        monkeypatch.setattr(cli_eval.site, "addsitedir", lambda *a: pytest.fail("unexpected import update"))
+        with pytest.raises(ConfigError, match="prepare_dependencies for dataset 'b'") as exc:
+            cli_eval._prepare_environment(self._benchmark(dependencies=["tqdm"]))
+        assert exc.value.__cause__ is error
+
+    def test_dependency_helper_without_arguments_does_not_install(self, monkeypatch):
+        monkeypatch.setattr(cli_eval.subprocess, "run", lambda *a, **kw: pytest.fail("unexpected install"))
+        assert cli_eval._install_prepare_dependencies(self._benchmark()) is None
 
     def test_nothing_runs_without_project(self, monkeypatch):
         from nemo_gym.cli import _locked_env

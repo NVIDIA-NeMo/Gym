@@ -479,7 +479,7 @@ class DatasetConfig(BaseModel):
     jsonl_fpath: str
     prepare_script: Optional[Path] = None
     prepare_project: Optional[Path] = None
-    # Legacy unlocked arguments are rejected at preparation with migration guidance.
+    # Optional `uv pip install` arguments, preserved for existing preparation configs.
     prepare_dependencies: List[str] = Field(default_factory=list)
     taskset: Optional[str] = Field(
         default=None,
@@ -598,7 +598,7 @@ class BenchmarkDatasetConfig(BaseModel):
     num_repeats: int = Field(default=1, ge=1)
     # Isolated project containing the committed dependency lock for preparation.
     prepare_project: Optional[Path] = None
-    # Legacy unlocked arguments are rejected at preparation with migration guidance.
+    # Optional `uv pip install` arguments, preserved for existing preparation configs.
     prepare_dependencies: List[str] = Field(default_factory=list)
     agent: Optional[str] = Field(
         default=None,
