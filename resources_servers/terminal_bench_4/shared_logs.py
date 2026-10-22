@@ -9,7 +9,7 @@ import json
 import shlex
 import tarfile
 from copy import deepcopy
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, resolve_provider_config
@@ -78,8 +78,8 @@ class SharedLogs:
     async def python(self, source, *args):
         command = "python3 -c " + shlex.quote(source) + " " + " ".join(shlex.quote(str(a)) for a in args)
         result = await self.main.exec(command, timeout_s=600)
-        if result.return_code:
-            raise RuntimeError(f"EFS logs operation failed: {result.stderr}")
+        if result.error_type or result.return_code:
+            raise RuntimeError(f"EFS logs operation failed: {result.error_type or result.stderr}")
         return result
 
     async def start(self):
@@ -179,6 +179,60 @@ class SharedLogs:
         )
         if result.stdout.strip() == "ready":
             self.restored_archive = f"/logs/{self.archive_name}"
+
+    async def snapshot_agent_artifacts(self, destination: Path, *, max_bytes: int) -> Path:
+        """Download only this episode's mini-SWE checkpoint and log via the surviving helper.
+
+        Directory descriptors and O_NOFOLLOW prevent task-controlled links from
+        reaching another role or episode. The archive is streamed by the sandbox
+        transfer and HTTP layers rather than encoded into a JSON response.
+        """
+        if not self.initialized or self.closed:
+            raise RuntimeError("The episode logs helper is unavailable")
+        name = ".miniswe-evidence-" + uuid4().hex + ".tar"
+        await self.python(
+            "import contextlib, os, pathlib, stat, sys, tarfile\n"
+            "root, owner, archive, max_bytes = sys.argv[1:]; max_bytes = int(max_bytes)\n"
+            "with contextlib.ExitStack() as stack:\n"
+            " def directory(name, parent=None):\n"
+            "  fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)\n"
+            "  stack.callback(os.close, fd); return fd\n"
+            " rootfd = directory(root)\n"
+            " with os.fdopen(os.open('.owner', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=rootfd)) as f:\n"
+            "  if f.read() != owner: raise RuntimeError('Episode logs ownership mismatch')\n"
+            " sourcefd = rootfd\n"
+            " for part in ('agent', 'agent', 'miniswe'):\n"
+            "  if sourcefd is not None:\n"
+            "   try: sourcefd = directory(part, sourcefd)\n"
+            "   except FileNotFoundError: sourcefd = None\n"
+            " total = 0\n"
+            " with tarfile.open(pathlib.Path(root) / archive, 'x') as tar:\n"
+            "  for filename in ('trajectory.json', 'agent.log'):\n"
+            "   fd = None\n"
+            "   if sourcefd is not None:\n"
+            "    try: fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=sourcefd)\n"
+            "    except FileNotFoundError: pass\n"
+            "   if fd is not None:\n"
+            "    with os.fdopen(fd, 'rb') as f:\n"
+            "     metadata = os.fstat(f.fileno())\n"
+            "     if not stat.S_ISREG(metadata.st_mode): raise RuntimeError('Agent evidence must be a regular file')\n"
+            "     total += metadata.st_size\n"
+            "     if total > max_bytes: raise RuntimeError('Agent evidence exceeds the configured artifact byte limit')\n"
+            "     item = tarfile.TarInfo(filename); item.size = metadata.st_size; item.mode = 0o600\n"
+            "     tar.addfile(item, f)\n",
+            self.root,
+            self.owner_token,
+            name,
+            max_bytes,
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(destination.name + ".tmp")
+        try:
+            await self.main.download(f"{self.root}/{name}", temporary)
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return destination
 
     def resource_identities(self):
         result = [{"efs_host_path": self.host_path, "efs_subpath": self.relative}]

@@ -132,3 +132,19 @@ deletion fails, EFS data is retained to avoid deleting a live mount. Persistent
 session records include the helper ID and exact EFS host path/subdirectory for
 recovery. Provider TTL expires sandboxes after abrupt process death, but EFS data
 requires separate cleanup in that case.
+
+When the agent's EFS mount is active, the seed advertises `durable_agent_logs`.
+mini-SWE writes its actual checkpoint and CLI log under `/logs/agent/miniswe`.
+If the workload disappears, the authenticated `/agent_artifacts` endpoint uses
+the independent logs helper to snapshot only `trajectory.json` and `agent.log`
+for that episode, before verification deletes its resources. Agent and verifier
+roles remain isolated; paths supplied by a task are never accepted. Unsupported
+EFS mounts keep the original agent filesystem and download behavior.
+
+Recovery streams an archive to disk, with a default total artifact limit of
+2 GiB and a 600-second budget (`agent_artifact_max_bytes` and
+`agent_artifact_timeout_sec`). Exceeding either limit is an explicit recovery
+failure, never a truncated successful artifact. These are evidence-transfer
+bounds, not model-output limits. Resource-limit scoring and existing saved run
+records are unchanged. Recovered interrupted checkpoints remain partial evidence
+and cannot establish a clean capture audit or release eligibility by themselves.

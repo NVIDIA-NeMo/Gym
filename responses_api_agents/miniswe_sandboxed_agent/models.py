@@ -37,6 +37,9 @@ class SeedSessionResponse(BaseModel):
     agent_timeout_sec: float = Field(default=28800, gt=0)
     mcp_servers: list[dict[str, JsonValue]] = Field(default_factory=list)
     skills_dir: str | None = None
+    durable_agent_logs: bool = False
+    agent_artifact_max_bytes: int = Field(default=2 * 1024**3, gt=0)
+    agent_artifact_timeout_sec: float = Field(default=600, gt=0)
     termination: HarnessOutcome | None = None
     verified_response: MiniSWEVerifyResponse | None = None
 

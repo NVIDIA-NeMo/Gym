@@ -77,7 +77,11 @@ Removing the custom wrapper has these limits:
   retain that evidence. The observability test asserts this gap until it is fixed.
 - Native trajectories are saved after each step. A forced kill during a model
   request or command can lose the active step, or leave a partially written
-  trajectory. Gym model-server capture remains independent of that file.
+  trajectory on the original filesystem path. With TB4's durable EFS capability,
+  a small native-agent subclass additionally saves the actual response before
+  tool execution and atomically replaces checkpoints. This adds a checkpoint
+  write per model call; representative smokes must check its I/O overhead.
+  Gym model-server capture remains independent of those files.
 - Wrapper-specific runtime metadata and `OutputTokenLimitExceeded` normalization
   are removed. Native termination names and CLI logs are retained.
 - MCP tools remain available through a persistent task-local CLI session, but
@@ -96,3 +100,13 @@ from remote sandboxes. Three-step smokes validate execution and verification,
 not task-solving accuracy. The TB4 profile retains one repeat; the three-repeat
 protocol requires `++num_repeats=3`. Selecting this profile does not establish
 benchmark coverage or exact methodology parity.
+
+TB4 can recover the checkpoint and `agent.log` through its surviving logs helper
+after sandbox eviction. The agent streams this fixed-file archive before asking
+resources to verify and clean up. Recovery never reconstructs history from model
+captures. A recovered interrupted checkpoint retains `native_trajectory_partial`
+and `turn_model_call_scope_incomplete` gaps, including when it contains valid
+earlier turns: an active model request or interrupted write may still be absent.
+Such a record must not be described as healthy or capture-complete. Recovery
+errors remain visible in `mini_swe_artifact_recovery`; the original provider
+termination and official resource-limit zero retain their existing meaning.

@@ -5,9 +5,10 @@
 
 import asyncio
 import logging
+import tarfile
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic, time
@@ -63,6 +64,7 @@ class MiniSWESession:
     setup_started_at: str | None = None
     result: AgentExecutionResult | None = None
     worker: asyncio.Task | None = None
+    resource_cookies: dict[str, str] = field(default_factory=dict)
 
 
 class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
@@ -207,6 +209,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                                 setup_timeout_sec=self.config.setup_timeout_sec,
                                 mcp_servers=seed.mcp_servers,
                                 skills_dir=seed.skills_dir,
+                                durable_agent_logs=seed.durable_agent_logs,
                             )
                             params.input = [NeMoGymEasyInputMessage(role="user", content=context.instruction)]
 
@@ -226,6 +229,9 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                                 + "/v1",
                                 model_name=self.config.model_server.name,
                                 directory=state.artifact_directory or self.config.artifacts_dir / seed.session_id,
+                                recover_artifacts=(lambda directory: self._recover_artifacts(state, directory))
+                                if seed.durable_agent_logs
+                                else None,
                             )
                             await harness.setup()
                         timings["agent_setup"]["finished_at"] = now()
@@ -356,6 +362,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                     else None,
                     setup_deadline=setup_deadline,
                     setup_started_at=setup_started_at,
+                    resource_cookies=cookies,
                 )
                 self._sessions[key] = state
                 with rollout_context(payload["rollout_id"]):
@@ -395,6 +402,56 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(response)
         return MiniSWEVerifyResponse.model_validate(await get_response_json(response))
+
+    async def _recover_artifacts(self, state: MiniSWESession, directory: Path) -> bool:
+        """Stream resource-owned evidence without constructing a second copy of a large JSON payload."""
+        async with asyncio.timeout(state.seed.agent_artifact_timeout_sec):
+            return await self._stream_artifacts(state, directory)
+
+    async def _stream_artifacts(self, state: MiniSWESession, directory: Path) -> bool:
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/agent_artifacts",
+            json={"session_id": state.seed.session_id},
+            cookies=state.resource_cookies,
+        )
+        archive = directory / "miniswe-recovery.tar"
+        temporary = archive.with_name(archive.name + ".tmp")
+        try:
+            await raise_for_status(response)
+            directory.mkdir(parents=True, exist_ok=True)
+            with temporary.open("wb") as stream:
+                size = 0
+                async for chunk in response.content.iter_chunked(1024 * 1024):
+                    size += len(chunk)
+                    if size > state.seed.agent_artifact_max_bytes + 2 * tarfile.RECORDSIZE:
+                        raise ValueError("Resources exceeded the configured mini-SWE artifact byte limit")
+                    stream.write(chunk)
+            temporary.replace(archive)
+            with tarfile.open(archive) as tar:
+                members = tar.getmembers()
+                if any(
+                    not member.isfile() or member.name not in {"trajectory.json", "agent.log"} for member in members
+                ):
+                    raise ValueError("Resources returned an unexpected mini-SWE artifact")
+                if len({member.name for member in members}) != len(members):
+                    raise ValueError("Resources returned duplicate mini-SWE artifacts")
+                if sum(member.size for member in members) > state.seed.agent_artifact_max_bytes:
+                    raise ValueError("Resources exceeded the configured mini-SWE artifact byte limit")
+                for member in members:
+                    target = directory / member.name
+                    pending = target.with_name(target.name + ".recovered")
+                    try:
+                        with tar.extractfile(member) as source, pending.open("wb") as output:
+                            while chunk := source.read(1024 * 1024):
+                                output.write(chunk)
+                        pending.replace(target)
+                    finally:
+                        pending.unlink(missing_ok=True)
+            return bool(members)
+        finally:
+            temporary.unlink(missing_ok=True)
+            response.release()
 
 
 if __name__ == "__main__":
