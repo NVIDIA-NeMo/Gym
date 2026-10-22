@@ -946,12 +946,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                 else:
                     raise NotImplementedError
 
-        # Drop a null top_logprobs on the non-capture path (caller-supplied logprobs=True).
-        # vLLM treats null as "no logprobs" but a missing field as its default (0), so forwarding null is never useful.
-        # The capture path above already set it to 0 and is unaffected.
-        if body_dict.get("top_logprobs") is None:
-            body_dict.pop("top_logprobs", None)
-
         if extra_body:
             body_dict = extra_body | body_dict
 
@@ -963,6 +957,14 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict = self._external_capture_handler.prepare_request(body_dict)
         else:
             body_dict = self._apply_prefix_supply(body_dict)
+
+        # Normalize after all request overrides and capture controls. vLLM treats
+        # null as no logprobs; zero explicitly requests the chosen token only.
+        if body_dict.get("top_logprobs") is None:
+            if body_dict.get("logprobs"):
+                body_dict["top_logprobs"] = 0
+            else:
+                body_dict.pop("top_logprobs", None)
 
         return body_dict
 

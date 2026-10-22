@@ -123,7 +123,11 @@ def test_handler_prepares_worker_staged_request(
         }
         assert "ng_capture" not in payload
     assert payload["logprobs"] is True
-    assert payload["top_logprobs"] == 0
+    if metadata_field is None:
+        # vLLM request preprocessing owns logprob-count normalization.
+        assert "top_logprobs" not in payload
+    else:
+        assert payload["top_logprobs"] == 0
     if token_return_field is None:
         # Megatron stages the delta on the worker; Gym asks for no token echo.
         assert "return_tokenized_data" not in payload
@@ -143,7 +147,7 @@ def test_vllm_handler_preserves_requested_top_logprobs(top_logprobs: int | None)
         reset_token_sink(token)
 
     assert payload["logprobs"] is True
-    assert payload["top_logprobs"] == (0 if top_logprobs is None else top_logprobs)
+    assert payload["top_logprobs"] == top_logprobs
     assert payload["return_tokens_as_token_ids"] is True
 
 

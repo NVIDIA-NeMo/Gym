@@ -337,12 +337,8 @@ class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):
         admission: CaptureAdmission,
     ) -> dict[str, Any]:
         request_payload[NG_CAPTURE_FIELD] = admission.model_dump(mode="json")
-        # Collect explicitly requested top-k data in the engine while the worker
-        # owns staging and removes the arrays before sending the HTTP response.
-        top_logprobs = request_payload.get("top_logprobs")
         request_payload.update(
             logprobs=True,
-            top_logprobs=0 if top_logprobs is None else top_logprobs,
             return_tokens_as_token_ids=True,
         )
         if admission.mode == "token_in":
