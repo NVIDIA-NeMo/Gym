@@ -118,11 +118,17 @@ The model-server url is resolved at request time and passed to `AIAgent(base_url
 
 Host and sandbox execution use the same request rules. User tasks remain user messages.
 Request `model` must match the configured model. Request `temperature`, `top_p`, and
-`max_output_tokens` apply to every model call through the Gym Model Server, including
-summary calls. `max_output_tokens` overrides config `max_tokens` and caps each call,
-preserving any smaller limit chosen by the harness; it is not an episode-wide budget.
-Omitted controls retain existing defaults; configured Model Server `sampling_overrides`
-take precedence. Unsupported non-default controls such as `store`,
+`max_output_tokens` apply to model calls through the Gym Model Server, including final
+summary calls. Request `max_output_tokens` replaces the agent YAML's `max_tokens` default,
+whether higher or lower; omitting it retains that default. For each model call, Gym uses
+the smaller of the request limit and any positive output limit Hermes sends for that call.
+This is a per-call limit, not an episode-wide budget.
+
+On the `vllm_model` Model Server, `sampling_overrides` are separate from the agent YAML defaults.
+They apply last and can replace the requested temperature, top-p, or the token limit computed
+above, even with a higher limit.
+Conflicting explicit values produce a warning. Omitted request controls retain existing defaults.
+Unsupported non-default controls such as `store`,
 `service_tier`, and request metadata return HTTP 422. Only text input is supported;
 `developer` messages are rejected.
 

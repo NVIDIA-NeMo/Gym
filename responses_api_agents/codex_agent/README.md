@@ -110,9 +110,14 @@ developer instructions in that order. Unsupported conversation/multimodal input,
 external tools, provider overrides, and extra host config are rejected before activation.
 
 Sandbox sessions accept request `temperature`, `top_p`, and `max_output_tokens` through the
-Gym Model Server. The token limit caps each model call, including summaries, preserving
-any smaller harness limit; it is not an episode-wide budget. Omitted controls retain existing
-defaults; configured Model Server `sampling_overrides` take precedence. Reasoning controls and unsupported tool policies are
+Gym Model Server. Codex has no corresponding agent-configured output limit. For each model
+call, including summaries, Gym uses the smaller of request `max_output_tokens` and any
+positive output limit Codex sends for that call. This is not an episode-wide budget.
+
+On the `vllm_model` Model Server, `sampling_overrides` apply last and can replace the requested
+temperature, top-p, or the token limit computed above, even with a higher limit.
+Conflicting explicit values produce a warning.
+Omitted request controls retain existing defaults. Reasoning controls and unsupported tool policies are
 rejected rather than ignored. A configured `reasoning_effort` is likewise rejected in sandbox
 sessions. An explicit request model must match the configured model.
 

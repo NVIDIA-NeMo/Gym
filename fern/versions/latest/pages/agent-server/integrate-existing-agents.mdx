@@ -31,7 +31,15 @@ The `allowed_agents` lists also name older adapters, such as `opencode_sandboxed
 <Note>
 Request-level `temperature`, `top_p`, and `max_output_tokens` controls cover the five agent session implementations listed above, plus Hermes host execution. They do not add request-control support to other agent adapters or to the older local entrypoints of Pi, Codex, OpenCode, and OpenClaw.
 
-For Hermes, Pi, OpenCode, and OpenClaw sessions, the agent's configured output-token limit is a default, not a hard ceiling: `max_tokens` for Hermes and `max_output_tokens` for the other three. An explicit request `max_output_tokens` replaces that default, whether higher or lower; omitting it retains the configured value. For example, config `1024` plus request `2048` selects a per-call request cap of `2048`. Model context restrictions and smaller per-call limits chosen by the harness still apply.
+The agent's YAML default, the limit a harness sends on an individual model call, and the Model Server's `sampling_overrides` have different roles. They are applied in this order:
+
+| Setting | Behavior |
+| --- | --- |
+| Agent's YAML output limit | For Hermes (`max_tokens`), Pi, OpenCode, and OpenClaw (`max_output_tokens`), an explicit request `max_output_tokens` replaces this default, whether higher or lower. Omitting it retains the default. Codex has no corresponding agent-configured output limit. |
+| Limit sent by the harness on an individual model call | When request `max_output_tokens` is set, Gym takes the smaller of that value and any positive output limit in the harness's model request. This preserves a smaller limit selected for that particular call. |
+| `vllm_model` Model Server's `sampling_overrides` | These explicit server-level overrides apply last and can replace the requested `temperature`, `top_p`, or the token limit computed above, even with a higher limit. A conflicting explicit value produces a warning showing the requested and overriding values. |
+
+For example, agent config `1024` plus request `2048` gives the harness a default of `2048`. If the harness then requests `512` for one model call, Gym keeps `512`. A Model Server token-limit override can still replace that value. The limit is per model call, not an episode-wide budget; model context restrictions still apply.
 
 The current Hermes integration does not automatically route context-compression calls through Gym: those calls use a separate auxiliary-provider resolver. The request controls described here do not cover that separate route. This differs from the final summary at the turn limit, which uses the normal Gym model route.
 

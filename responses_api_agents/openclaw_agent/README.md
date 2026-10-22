@@ -206,9 +206,14 @@ Sandbox request support is deliberately explicit:
   and prepended to OpenClaw's user prompt. The harness retains its own system prompt.
 - The request `model`, when supplied, must match the configured model.
 - Request `temperature`, `top_p`, and `max_output_tokens` apply through the Gym Model Server
-  to each model call, including summaries. The token limit overrides the configured output
-  limit and preserves smaller limits chosen by the harness; it is not an episode-wide budget.
-  Omitted controls retain existing defaults; configured Model Server `sampling_overrides` take precedence.
+  to each model call, including summaries. Request `max_output_tokens` replaces the agent
+  YAML's `max_output_tokens` default, whether higher or lower; omitting it retains that default.
+  For each model call, Gym uses the smaller of the request limit and any positive output
+  limit OpenClaw sends for that call. This is not an episode-wide budget.
+- On the `vllm_model` Model Server, `sampling_overrides` are separate from the agent YAML defaults.
+  They apply last and can replace the requested temperature, top-p, or the token limit computed
+  above, even with a higher limit.
+  Conflicting explicit values produce a warning. Omitted request controls retain existing defaults.
 - Reasoning overrides, tool-selection controls, output
   schemas, history replay, request `metadata`, and other unsupported Responses options are rejected before activation.
   This includes `metadata.extra_body.seed` added by `num_repeats_add_seed`; disable that option
