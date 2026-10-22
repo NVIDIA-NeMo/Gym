@@ -38,11 +38,11 @@ SUITES_DIR = Path(__file__).resolve().parent / "suites"
 
 # RNAInvBench (MIT) at a pinned commit. Its benchmark sets are pickled DataFrames, so each file is checked against
 # its hash before it is unpickled.
-RNAINVBENCH_COMMIT = "4aa5115bac70a086c76e646f2d758ecf0724536c"
+RNAINVBENCH_COMMIT = "4aa5115bac70a086c76e646f2d758ecf0724536c"  # pragma: allowlist secret
 RNAINVBENCH_URL = f"https://raw.githubusercontent.com/COLA-Laboratory/RNAInvBench/{RNAINVBENCH_COMMIT}/data/"
 RNAINVBENCH_FILES = {
-    "inverse_rna_folding_benchmark_dotbracket.pkl.gz": "f599461344b115753fd2683132fb3671c90fe3b456887702c38065521bde5685",
-    "constrained_design_benchmark_dotbracket.pkl.gz": "c563a9af081308f40c152f49d7ff4762a9027997d1db007cd01cadcc6cdd7272",
+    "inverse_rna_folding_benchmark_dotbracket.pkl.gz": "f599461344b115753fd2683132fb3671c90fe3b456887702c38065521bde5685",  # pragma: allowlist secret
+    "constrained_design_benchmark_dotbracket.pkl.gz": "c563a9af081308f40c152f49d7ff4762a9027997d1db007cd01cadcc6cdd7272",  # pragma: allowlist secret
 }
 
 

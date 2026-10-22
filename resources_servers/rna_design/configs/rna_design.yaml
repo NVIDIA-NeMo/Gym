@@ -28,7 +28,7 @@ rna_design_claude_code_agent:
       forward_mcp_tools: true
       agent_kwargs:
         model: ${policy_model_name}
-        anthropic_api_key: unused
+        anthropic_api_key: unused  # pragma: allowlist secret
         max_turns: 40
         timeout: 2400
         bare: true
