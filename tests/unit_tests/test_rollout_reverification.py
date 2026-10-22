@@ -26,6 +26,7 @@ from pydantic import ValidationError
 from nemo_gym.atif_reverification import AtifProjectionError
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ConfigError
+from nemo_gym.failure_kinds import INFRA
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -33,7 +34,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.rollout_collection import NG_FAILURE_CAUSE_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_reverification import (
     _RECOVERY_TWO_SOURCES_WARNING,
     ATIF_PROVENANCE_KEY,
@@ -1078,7 +1079,7 @@ class TestLoadCacheKeysByStatus:
             paths.failures,
             [
                 {TASK_INDEX_KEY_NAME: 5, ROLLOUT_INDEX_KEY_NAME: 0, NG_TERMINAL_KEY: True},
-                {TASK_INDEX_KEY_NAME: 6, ROLLOUT_INDEX_KEY_NAME: 0},  # non-terminal attempt
+                {TASK_INDEX_KEY_NAME: 6, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CAUSE_KEY: INFRA},  # infra: retried
             ],
         )
         cache = _load_cache_keys_by_status(paths)
@@ -1119,13 +1120,14 @@ class TestLoadCacheKeysByStatus:
                     NG_FAILURE_CLASS_KEY: "timeout_exceeded",
                     NG_TERMINAL_KEY: True,
                 },
+                # An unstamped class with no rule and no infra evidence: final by Gym's rule.
                 {TASK_INDEX_KEY_NAME: 6, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "skipped"},
             ],
         )
 
         cache = _load_cache_keys_by_status(paths)
 
-        assert cache.terminal_keys == {(5, 0)}
+        assert cache.terminal_keys == {(5, 0), (6, 0)}
 
     def test_maxed_out_keys_when_attempts_reach_configured_max(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

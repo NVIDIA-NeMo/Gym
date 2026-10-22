@@ -11,6 +11,7 @@ from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
 )
+from nemo_gym.base_environment_server import handled_failure_cause
 from nemo_gym.episode_types import (
     EpisodeId,
 )
@@ -21,6 +22,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
+from nemo_gym.rollout_collection import NG_FAILURE_CAUSE_KEY
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
@@ -51,7 +53,11 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
             else self._episode_request_from_row(row)
         )
         response = await self.run_request(request)
-        return self._legacy_result(response)
+        result = self._legacy_result(response)
+        # A flat row has no response header for the cause, so the cause read from the live error goes on the row.
+        if response.failure is not None and (cause := handled_failure_cause()) is not None:
+            result[NG_FAILURE_CAUSE_KEY] = cause
+        return result
 
     def _episode_request_from_row(self, row: dict[str, Any]) -> SingleAgentTurnRequest:
         task_source = row.get(TASK_SOURCE_KEY_NAME, self.config.resources_server.name)

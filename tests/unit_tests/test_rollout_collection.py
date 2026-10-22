@@ -51,7 +51,7 @@ from nemo_gym.config_types import (
     ConfigError,
     ConfigPathNotFoundError,
 )
-from nemo_gym.failure_kinds import CANCELLED
+from nemo_gym.failure_kinds import CANCELLED, INFRA
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -2228,6 +2228,8 @@ class TestRolloutCollection:
                 ROLLOUT_INDEX_KEY_NAME: 0,
                 NG_FAILURE_CLASS_KEY: failure_class,
                 "_ng_failure_http_status": 500,
+                # Retryable, so only the caller's opt-in counts it.
+                NG_FAILURE_CAUSE_KEY: INFRA,
             }
             return row if reward is None else {**row, "reward": reward}
 
@@ -3373,15 +3375,13 @@ class TestRolloutCollection:
             require_complete=True,
             count_failure_classes_as_zero=[AGENT_RUN_ERROR_FAILURE_CLASS] if count_failures_as_zero else [],
         )
-        with pytest.raises(RuntimeError, match="EVAL FAILED: 2/3 samples completed"):
-            await Helper().run_from_config(config)
+        # The third rollout is final, so it is settled: the run is complete and no resume chain reruns it.
+        await Helper().run_from_config(config)
 
         printed = capsys.readouterr().out
-        if count_failures_as_zero:
-            assert "Counting 1 failure row(s) as scored zeros" in printed
-        else:
-            assert "Rollouts missing from the score: 1 of 3 materialized" in printed
-            assert "Metrics cover: 2 of 3 rollouts" in printed
+        # The row is final, so it counts as 0 whether or not its class is opted in.
+        assert "Counting 1 failure row(s) as scored zeros" in printed
+        assert "Rollouts missing from the score" not in printed
 
     async def test_run_from_config_resume_progress_counts_only_dispatched_rollouts(
         self,
@@ -3712,7 +3712,9 @@ class TestRolloutCollection:
         row = {"responses_create_params": {"input": []}, "_ng_rollout_id": rollout_id, **identity}
         config.materialized_jsonl_fpath.write_bytes(orjson.dumps(row) + b"\n")
         Path(config.output_jsonl_fpath).write_bytes(b"")
-        _failures_path_for(Path(config.output_jsonl_fpath)).write_bytes(orjson.dumps(identity) + b"\n")
+        _failures_path_for(Path(config.output_jsonl_fpath)).write_bytes(
+            orjson.dumps(identity | {NG_FAILURE_CAUSE_KEY: INFRA}) + b"\n"
+        )
         return config
 
     def test_a_resume_retry_of_a_row_whose_rollout_id_names_an_attempt_fails_when_the_input_loads(
@@ -5846,8 +5848,12 @@ class TestRolloutCollection:
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
 
         assert [result["case"] for result in actual_returned_results] == ["case-0", "case-1", "case-2"]
-        assert [result["case"] for result in captured["results"]] == ["case-0"]
-        assert [row["x"] for row in captured["rows"]] == [0]
+        # The unclassified failure is final, so it is scored as 0; the non-persisted row stays out.
+        assert [(result["case"], result.get("reward")) for result in captured["results"]] == [
+            ("case-0", None),
+            ("case-1", 0.0),
+        ]
+        assert [row[TASK_INDEX_KEY_NAME] for row in captured["rows"]] == [0, 1]
 
         with output_jsonl_fpath.open() as f:
             actual_written_results = [json.loads(line) for line in f]
@@ -7437,8 +7443,8 @@ class TestLongestFirstDispatch:
     def test_known_timings_lead_unseen_rows_keep_order(self, tmp_path: Path) -> None:
         # Task 2 ran longest, task 0 next; tasks 1 and 3 have never been timed.
         failures = [
-            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 600},
-            {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 9000},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 600, NG_FAILURE_CAUSE_KEY: INFRA},
+            {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 9000, NG_FAILURE_CAUSE_KEY: INFRA},
         ]
         config = self._write_resume_state(tmp_path, failures)
 
@@ -7448,9 +7454,9 @@ class TestLongestFirstDispatch:
 
     def test_longest_attempt_wins_when_a_task_failed_twice(self, tmp_path: Path) -> None:
         failures = [
-            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 30},
-            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 9000},
-            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 60},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 30, NG_FAILURE_CAUSE_KEY: INFRA},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 9000, NG_FAILURE_CAUSE_KEY: INFRA},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 60, NG_FAILURE_CAUSE_KEY: INFRA},
         ]
         config = self._write_resume_state(tmp_path, failures)
 
@@ -7459,7 +7465,9 @@ class TestLongestFirstDispatch:
         assert [r[TASK_INDEX_KEY_NAME] for r in input_rows][:2] == [0, 1]
 
     def test_disabled_preserves_input_order(self, tmp_path: Path) -> None:
-        failures = [{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 9000}]
+        failures = [
+            {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, "elapsed_seconds": 9000, NG_FAILURE_CAUSE_KEY: INFRA}
+        ]
         config = self._write_resume_state(tmp_path, failures)
         config.dispatch_longest_first = False
 
@@ -7501,14 +7509,14 @@ class TestLongestFirstDispatch:
                 NG_FAILURE_CLASS_KEY: "timeout_exceeded",
                 NG_TERMINAL_KEY: True,
             },
-            # Not stamped terminal: retried in both modes.
+            # Not stamped terminal: still the agent's own time budget, so final by Gym's rule.
             {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "timeout_exceeded"},
         ]
         config = self._write_resume_state(tmp_path, failures)
 
         input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
 
-        assert [r[TASK_INDEX_KEY_NAME] for r in input_rows] == [0, 2, 3]
+        assert [r[TASK_INDEX_KEY_NAME] for r in input_rows] == [0, 3]
 
     def test_explicitly_terminal_rows_stay_gated(self, tmp_path: Path) -> None:
         failures = [{TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, NG_TERMINAL_KEY: True}]
@@ -7521,20 +7529,20 @@ class TestLongestFirstDispatch:
 
 
 class TestIsTerminalFailure:
-    """The failure contract is opt-in; off, a row is terminal iff it is stamped terminal."""
+    """A stamped row is final; an unstamped one follows Gym's rule, with no infra evidence final."""
 
     @pytest.mark.parametrize(
         ("failure_class", "stamped", "off", "on"),
         [
             ("timeout_exceeded", True, True, False),
-            ("timeout_exceeded", False, False, False),
+            ("timeout_exceeded", False, True, False),
             ("agent_run_error", True, True, True),
-            ("agent_run_error", False, False, False),
+            ("agent_run_error", False, True, True),
             (None, True, True, True),
-            (None, False, False, False),
+            (None, False, True, True),
         ],
     )
-    def test_off_matches_the_terminal_flag_and_on_applies_the_contract(
+    def test_a_stamp_is_final_and_unstamped_rows_follow_gyms_rule(
         self, failure_class: str | None, stamped: bool, off: bool, on: bool
     ) -> None:
         row: dict = {}
@@ -7970,6 +7978,32 @@ class TestRolloutAggregationHelper:
         )
         await RolloutAggregationHelper().run_from_config(config)
 
+    async def test_two_attempts_of_one_final_failure_are_one_zero_with_the_default_selection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """Two shards hold attempts of one rollout: the older names only its agent, the newer its server too."""
+        old, new = tmp_path / "old" / "rollouts.jsonl", tmp_path / "new" / "rollouts.jsonl"
+        final = {NG_FAILURE_CLASS_KEY: "agent_run_error", "_ng_failure_cause": "model"}
+        self._write_rows(old)
+        self._write_rows(new)
+        self._write_rows(_failures_path_for(old), self._rollout(0, "agent_a", **final))
+        self._write_rows(
+            _failures_path_for(new), self._rollout(0, "agent_a", **final, **{NG_ENVIRONMENT_SERVER_KEY: "env_a"})
+        )
+        by_server: dict[str, list] = {}
+        self._serve(monkeypatch, by_server, {"env_a": "agent_a"})
+
+        await RolloutAggregationHelper().run_from_config(
+            RolloutAggregationConfig(
+                input_glob=f"{old},{new}",
+                output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+                count_failure_classes_as_zero=[],
+                disable_health_check=True,
+            )
+        )
+
+        assert self._scores(by_server["env_a"]) == [(0, 0, 0.0)]
+
     @pytest.mark.parametrize("run1_has", ["a row", "a failure"])
     async def test_runs_that_reuse_task_indices_do_not_hide_each_others_lost_rollouts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock, run1_has: str
@@ -8091,7 +8125,10 @@ class TestRolloutAggregationHelper:
         self._write_rows(run2, self._rollout(1, "agent_b", reward=1.0))
         self._write_rows(
             _failures_path_for(run2),
-            self._rollout(0, "agent_b", **{NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS}),
+            # Retryable, so it is not counted; a final failure would be counted as 0.
+            self._rollout(
+                0, "agent_b", **{NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS, NG_FAILURE_CAUSE_KEY: INFRA}
+            ),
         )
         self._serve(monkeypatch, {}, {"env_a": "agent_a", "env_b": "agent_b"})
 
@@ -8130,10 +8167,12 @@ class TestRolloutAggregationHelper:
         """Only scoring reaches the head server, so a shard whose every rollout failed still reports coverage."""
         shard = tmp_path / "rollouts.jsonl"
         shard.write_bytes(b"")
-        # A sidecar written before rows were stamped with their server.
+        # A sidecar written before rows were stamped with their server; retryable, so nothing is scored.
         self._write_rows(
             _failures_path_for(shard),
-            self._rollout(0, "agent_a", **{NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS}),
+            self._rollout(
+                0, "agent_a", **{NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS, NG_FAILURE_CAUSE_KEY: INFRA}
+            ),
         )
 
         def no_head_server(*args, **kwargs):
@@ -10114,7 +10153,14 @@ class TestEnvironmentServerRouting:
                     return FakeResponse(
                         200,
                         identity
-                        | {"result": None, "failure": {"failure_reason": "agent unavailable", "terminal": False}},
+                        | {
+                            "result": None,
+                            "failure": {
+                                "failure_reason": "agent unavailable",
+                                "terminal": False,
+                                "failure_kind": "provider_unavailable",
+                            },
+                        },
                     )
                 return FakeResponse(
                     200,

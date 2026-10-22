@@ -61,12 +61,17 @@ from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.failure_kinds import (
     CANCELLED,
     FAILURE_CAUSE_HEADER,
+    FAILURE_RULES,
+    FINAL,
     INFRA,
     JUDGE_FAILED,
     MODEL,
+    RETRY,
     failure_cause_of_text,
     is_namespaced,
     is_registered,
+    is_retryable,
+    is_unscored,
 )
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -215,9 +220,9 @@ def _masking_step_metrics(agent_name: str, scored: Counter, dropped: Counter) ->
 #   - On resume, ``_load_from_cache`` reads BOTH files: main jsonl tells
 #     it what's permanently done, sidecar tells it how many attempts each
 #     non-success has consumed (capped at NEMO_GYM_MAX_ROLLOUT_ATTEMPTS,
-#     default 3). Rows flagged ``_ng_failure_terminal=True`` are never
-#     retried regardless of attempt count, unless ``retry_terminal_timeouts``
-#     opts into the retry contract in ``is_terminal_failure``.
+#     default 3). Which failures are retried is Gym's fixed rule in
+#     ``nemo_gym.failure_kinds``, applied by ``is_terminal_failure``. A final
+#     failure is never retried and counts as 0 in the score.
 # ---------------------------------------------------------------------------
 
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
@@ -420,6 +425,8 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             NG_FAILURE_CAUSE_KEY: cause,
             "_ng_failure_message": failure.get("failure_reason"),
         }
+        if failure.get("failure_kind") is not None:
+            record["failure_kind"] = failure["failure_kind"]
         if failure.get("stage") is not None:
             record["_ng_failure_stage"] = failure["stage"]
         if failure.get("partial_response") is not None:
@@ -1189,8 +1196,14 @@ class SharedRolloutCollectionConfig(RemovedRolloutOptionsMixin, UploadRolloutsCo
             raise ValueError("environment_server_routes are required when environment_routing_mode=taskset")
         return self
 
-    def check_completion(self, *, expected: int, results: List[Dict[str, Any]]) -> None:
-        """Reject incomplete submitted runs after saving their partial artifacts."""
+    def check_completion(
+        self, *, expected: int, results: List[Dict[str, Any]], settled_keys: Iterable[Tuple[Any, Any]] = ()
+    ) -> None:
+        """Reject incomplete submitted runs after saving their partial artifacts.
+
+        ``settled_keys`` are ``(task_index, rollout_index)`` pairs that need no further attempt: a final
+        failure, or one at the attempt cap. They are complete too, so a resume chain does not rerun them.
+        """
         if not self.require_complete:
             return
         completed = len(
@@ -1199,6 +1212,7 @@ class SharedRolloutCollectionConfig(RemovedRolloutOptionsMixin, UploadRolloutsCo
                 for r in results
                 if r.get(NG_FAILURE_CLASS_KEY) is None and not r.get(NG_NO_PERSIST_KEY)
             }
+            | {(None, *key) for key in settled_keys}
         )
         if completed < expected:
             raise RuntimeError(
@@ -1617,8 +1631,16 @@ def observed_elapsed(record: Dict[str, Any]) -> Optional[float]:
     return None
 
 
-# Where a row keeps the error text: the collector's own keys, an agent's ``error``, and a verifier's
-# ``failure_reason`` and ``infrastructure_error`` (Terminal-Bench puts its exception name only there).
+def _rule_kind(record: Mapping[str, Any]) -> Optional[str]:
+    """The name Gym's rule reads: the row's ``failure_kind`` when it has a rule, otherwise its class."""
+    failure_class = record.get(NG_FAILURE_CLASS_KEY)
+    failure_kind = record.get("failure_kind")
+    return failure_kind if failure_kind in FAILURE_RULES else failure_class
+
+
+# Where a row keeps the error text: the collector's own keys, an agent's ``error``, a verifier's
+# ``failure_reason`` and ``infrastructure_error`` (Terminal-Bench puts its exception name only there), and
+# ``error_message``, where Stirrup harness rows written by older Gym versions keep theirs.
 _FAILURE_TEXT_KEYS = (
     "_ng_failure_type",
     "_ng_failure_response_body",
@@ -1626,6 +1648,7 @@ _FAILURE_TEXT_KEYS = (
     "error",
     "failure_reason",
     "infrastructure_error",
+    "error_message",
 )
 
 
@@ -1638,6 +1661,10 @@ def failure_cause_of_row(record: Mapping[str, Any]) -> str:
     cause = record.get(NG_FAILURE_CAUSE_KEY)
     if cause in (INFRA, MODEL):
         return cause
+    # A kind with a fixed rule (judge_failed, whatever its status) has its cause in the rule, not in the row.
+    rule = FAILURE_RULES.get(_rule_kind(record))
+    if rule in (RETRY, FINAL):
+        return INFRA if rule == RETRY else MODEL
     # No reply, or a gateway status: something in front of the rollout failed before it ran.
     if record.get(NG_FAILURE_CLASS_KEY) == AGENT_REQUEST_FAILED_FAILURE_CLASS:
         return INFRA
@@ -1645,29 +1672,32 @@ def failure_cause_of_row(record: Mapping[str, Any]) -> str:
 
 
 def is_terminal_failure(record: Mapping[str, Any], *, retry_terminal_timeouts: bool = False) -> bool:
-    """Whether a persisted failure must be gated on resume.
+    """Whether a persisted failure is final: never retried on resume, and counted as 0 in the score.
 
-    By default a row is terminal iff it is stamped ``_ng_failure_terminal``, so
-    an agent that marks its timeouts terminal on purpose keeps them gated.
+    Gym's fixed rule in ``nemo_gym.failure_kinds`` decides, by the row's ``failure_kind`` (or its class
+    when the kind has no rule) and, for a class that can be either, by where the failure happened
+    (``failure_cause_of_row``). A class with no rule is final unless the row shows infra evidence. A row a server stamped
+    ``_ng_failure_terminal`` stays final: a server may withhold a retry, never grant one, so an
+    agent or benchmark that leaves a model failure unstamped no longer gives the model another attempt.
 
-    ``retry_terminal_timeouts`` is for agents whose older builds incorrectly
-    stamped per-attempt timeouts terminal. A timeout reflects the
-    load/remaining walltime of that attempt, so it remains retryable (up to the
-    normal max-attempt cap).
-
-    ``timeout_exceeded`` is an ``_ng_failure_class`` label that agents already
-    write to the failures sidecar (pinchbench, nooa). It predates
-    ``nemo_gym.failure_kinds`` and is not registered there; ``agent_timeout`` is
-    the shared name.
-
-    As ``failure_kinds`` requires, this function decides retryability for the
-    occurrence, under an explicit caller opt-in; the name carries no retry meaning.
+    ``retry_terminal_timeouts`` is for agents whose older builds incorrectly stamped per-attempt
+    timeouts terminal: ``timeout_exceeded`` (pinchbench, nooa) is then retried, stamped or not.
     """
-    if not retry_terminal_timeouts:
-        return bool(record.get(NG_TERMINAL_KEY))
-    if record.get(NG_FAILURE_CLASS_KEY) == "timeout_exceeded":
+    failure_class = record.get(NG_FAILURE_CLASS_KEY)
+    if retry_terminal_timeouts and failure_class == "timeout_exceeded":
         return False
-    return bool(record.get(NG_TERMINAL_KEY))
+    if record.get(NG_TERMINAL_KEY):
+        return True
+    return not is_retryable(_rule_kind(record), cause=failure_cause_of_row(record))
+
+
+def is_unscored_failure(record: Mapping[str, Any]) -> bool:
+    """Whether a persisted failure is a gap in the benchmark's own data: final, but left out of the score.
+
+    Such a row is never retried (``is_terminal_failure`` is true), counts as complete for ``require_complete``,
+    and stays in the failures sidecar, so the failure counts and the health check still see it.
+    """
+    return is_unscored(_rule_kind(record))
 
 
 class RolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -2101,9 +2131,13 @@ def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], D
 
 
 def _failure_rows_counted_as_zero(
-    failures_fpaths: List[Path], failure_classes: List[str], scored_keys: set
+    failures_fpaths: List[Path],
+    failure_classes: Optional[List[str]],
+    scored_keys: set,
+    *,
+    retry_terminal_timeouts: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Sidecar rows the caller opted to count in the metrics denominator.
+    """Sidecar rows counted in the metrics denominator: every final failure, and the classes the caller selected.
 
     The last attempt of a rollout is the one that stands, so it is selected across every failure
     class before the wanted classes are picked out. Selecting the other way round would let a
@@ -2113,20 +2147,66 @@ def _failure_rows_counted_as_zero(
     records that no rollout happened, so it is counted as a zero here and only here: the score
     enters the metric input, never the sidecar or the rollouts jsonl, which keeps the artifacts
     free of a verdict no verifier gave. A rollout that also succeeded is never counted.
-    """
-    if not failure_classes:
-        return []
+    ``None`` selects every class, and ``[]`` none.
 
+    A final failure (``is_terminal_failure``) is always counted, even with ``[]``: resume never retries
+    it, so leaving it out of the denominator would score the model only on the rollouts it did not break.
+    """
     latest_by_key = _latest_failure_rows(failures_fpaths)
-    wanted = set(failure_classes)
     return [
-        _counted_failure_row(row)
+        _counted_failure_row(row, final=is_terminal_failure(row, retry_terminal_timeouts=retry_terminal_timeouts))
         for key, row in latest_by_key.items()
-        if key not in scored_keys and row.get(NG_FAILURE_CLASS_KEY) in wanted
+        if key not in scored_keys
+        and _counts_failure_class(row, failure_classes, retry_terminal_timeouts=retry_terminal_timeouts)
     ]
 
 
-def _counted_failure_row(row: Dict[str, Any]) -> Dict[str, Any]:
+def _counts_failure_class(
+    row: Mapping[str, Any], failure_classes: Optional[List[str]], *, retry_terminal_timeouts: bool = False
+) -> bool:
+    """Whether a failure row scores 0: its class is selected (``None`` is every class), or it is final.
+
+    A data gap (``is_unscored_failure``) never scores 0, whatever the selection.
+    """
+    if is_unscored_failure(row):
+        return False
+    selected = failure_classes is None or row.get(NG_FAILURE_CLASS_KEY) in failure_classes
+    return selected or is_terminal_failure(row, retry_terminal_timeouts=retry_terminal_timeouts)
+
+
+def _counted_classes(selected: Optional[List[str]]) -> str:
+    return "every class" if selected is None else f"final ones and {selected}"
+
+
+def _settled_failure_keys(failures_fpath: Path, *, retry_terminal_timeouts: bool = False) -> set:
+    """Rollouts that resume will not dispatch again: a final failure, or one at the attempt cap."""
+    if not failures_fpath.exists():
+        return set()
+    attempts: Counter = Counter()
+    settled: set = set()
+    with failures_fpath.open("rb") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = orjson.loads(line)
+            if TASK_INDEX_KEY_NAME not in row or ROLLOUT_INDEX_KEY_NAME not in row:
+                continue
+            key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+            attempts[key] += 1
+            if is_terminal_failure(row, retry_terminal_timeouts=retry_terminal_timeouts):
+                settled.add(key)
+    max_attempts = _get_max_rollout_attempts()
+    return settled | {key for key, count in attempts.items() if count >= max_attempts}
+
+
+def _every_rollout_settled(rows: List[Dict[str, Any]], failures_fpath: Path, retry_terminal_timeouts: bool) -> bool:
+    """Whether a resume would dispatch none of these rows again: each failed for good or is at the attempt cap."""
+    settled = _settled_failure_keys(failures_fpath, retry_terminal_timeouts=retry_terminal_timeouts)
+    return all((row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) in settled for row in rows)
+
+
+def _counted_failure_row(row: Dict[str, Any], *, final: bool = False) -> Dict[str, Any]:
     """The metric-input copy of a sidecar row counted as zero."""
     # Diagnostics stay in the sidecar: an HTTP status is a number, and the aggregator
     # averages every number it is handed.
@@ -2138,6 +2218,9 @@ def _counted_failure_row(row: Dict[str, Any]) -> Dict[str, Any]:
     # This metrics-only copy honors the explicit denominator policy. The original
     # answer, failure diagnostics, and training mask remain untouched in the sidecar.
     scored["mask_sample"] = False
+    # A final failure scores 0 whatever reward its row carries; a selected retryable row keeps its reward.
+    if final:
+        scored["reward"] = 0.0
     scored.setdefault("reward", 0.0)
     return scored
 
@@ -3623,6 +3706,7 @@ class RolloutCollectionHelper(BaseModel):
                 [failures_fpath],
                 config.count_failure_classes_as_zero,
                 persisted_success_keys,
+                retry_terminal_timeouts=config.retry_terminal_timeouts,
             )
             # Opted-in missing rollouts are scored as well, so a run they fill still has a score. Only
             # when this run aggregates: otherwise it scores nothing, and an empty run must still fail.
@@ -3637,7 +3721,17 @@ class RolloutCollectionHelper(BaseModel):
                 if config.count_missing_rollouts_as_zero and not config.disable_aggregation
                 else []
             )
-            if input_rows and persisted_count == 0 and not counted and not missing:
+            # A run whose every rollout is settled (a data gap, or at the attempt cap) has no score, but nothing
+            # left for a resume to do.
+            if (
+                input_rows
+                and persisted_count == 0
+                and not counted
+                and not missing
+                and not await asyncio.to_thread(
+                    _every_rollout_settled, input_rows, failures_fpath, config.retry_terminal_timeouts
+                )
+            ):
                 if batch_tracker is not None:
                     batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True)
                 drained_note = (
@@ -3710,10 +3804,9 @@ class RolloutCollectionHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            if config.count_failure_classes_as_zero:
-                print(
-                    f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}"
-                )
+            if counted or config.count_failure_classes_as_zero != []:
+                classes = _counted_classes(config.count_failure_classes_as_zero)
+                print(f"Counting {len(counted)} failure row(s) as scored zeros: {classes}")
             if config.count_missing_rollouts_as_zero:
                 imputed = missing
                 print(f"Counting {len(imputed)} materialized rollout(s) with no row as scored zeros")
@@ -3786,7 +3879,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             else:
                 print(format_health_report(health_result))
 
-        config.check_completion(expected=expected_rollouts, results=persisted_results)
+        settled_keys = (
+            await asyncio.to_thread(
+                _settled_failure_keys, failures_fpath, retry_terminal_timeouts=config.retry_terminal_timeouts
+            )
+            if config.require_complete
+            else set()
+        )
+        config.check_completion(expected=expected_rollouts, results=persisted_results, settled_keys=settled_keys)
         return results
 
     async def _call_aggregate_metrics(
@@ -4649,7 +4749,14 @@ class RolloutAggregationHelper(BaseModel):
         def servers_by_agent() -> Mapping[str, list[str]]:
             # With nothing to score and nothing to count, only the coverage report keys rollouts, and an
             # agent's name does for that: the head server is reached for scoring alone.
-            if not (results or config.count_failure_classes_as_zero or config.count_missing_rollouts_as_zero):
+            # A final failure is scored whatever the selection, so it needs the servers to be told apart too.
+            final_scored = any(is_terminal_failure(row) for row in _latest_failure_rows(failures_fpaths).values())
+            if not (
+                results
+                or config.count_failure_classes_as_zero != []
+                or config.count_missing_rollouts_as_zero
+                or final_scored
+            ):
                 return {}
             return _environment_servers_by_agent(helper.setup_server_client().global_config_dict)
 
@@ -4670,17 +4777,17 @@ class RolloutAggregationHelper(BaseModel):
             if latest_failures or config.count_missing_rollouts_as_zero
             else set()
         )
-        wanted = set(config.count_failure_classes_as_zero)
         # A row that names no agent and no server cannot reach any server's metrics; it stays a dropped one.
         counted = [
-            _counted_failure_row(row)
+            _counted_failure_row(row, final=is_terminal_failure(row))
             for identity, row in latest_failures.items()
             if identity not in result_ids
-            and row.get(NG_FAILURE_CLASS_KEY) in wanted
+            and _counts_failure_class(row, config.count_failure_classes_as_zero)
             and _routing_identity(row) is not None
         ]
-        if config.count_failure_classes_as_zero:
-            print(f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}")
+        if counted or config.count_failure_classes_as_zero != []:
+            classes = _counted_classes(config.count_failure_classes_as_zero)
+            print(f"Counting {len(counted)} failure row(s) as scored zeros: {classes}")
         materialized_fpaths = [materialized_path_for(Path(path)) for path in input_paths]
         missing: List[Dict[str, Any]] = []
         if config.count_missing_rollouts_as_zero:

@@ -215,11 +215,8 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
     monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
     monkeypatch.setenv("NEMO_GYM_CONFIG_DICT", "{}")
-    if interface.endswith("error"):
-        with pytest.raises(RuntimeError, match="None of the 1 dispatched rollouts produced a result"):
-            await episode.run_episode(harness="codex", scenario_name="tool_success", directory=tmp_path, timeout=10)
-    else:
-        await episode.run_episode(harness="codex", scenario_name="tool_success", directory=tmp_path, timeout=10)
+    # A controlled 422 from the harness is its own failure: final and scored 0, so the episode still finishes.
+    await episode.run_episode(harness="codex", scenario_name="tool_success", directory=tmp_path, timeout=10)
 
     runtime = json.loads((tmp_path / "runtime.json").read_text())
     witness = json.loads((tmp_path / "witness.json").read_text())
@@ -241,6 +238,7 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
         failures = list(json_rows(tmp_path / "rollouts_failures.jsonl"))
         assert len(failures) == 1
         assert failures[0][1]["_ng_failure_stage"] == ("cleanup" if interface == "session_close_error" else "agent")
+        assert failures[0][1]["_ng_failure_terminal"] is True
         assert not list(json_rows(tmp_path / "rollouts.jsonl"))
     else:
         [(_, rollout)] = list(json_rows(tmp_path / "rollouts.jsonl"))

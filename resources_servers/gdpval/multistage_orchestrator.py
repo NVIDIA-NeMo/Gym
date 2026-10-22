@@ -105,7 +105,6 @@ from nemo_gym.rollout_collection import (
     _has_observation_gap,
     _record_rollout_outcome,
     get_max_rollout_attempts,
-    is_terminal_failure,
     observed_elapsed,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
@@ -1473,7 +1472,8 @@ async def run_multistage_stages(
         prior_attempts = resume.attempts_by_stage.get(index, {}) if resume is not None else {}
         for result in new_tagged:
             key = (result[TASK_INDEX_KEY_NAME], result[ROLLOUT_INDEX_KEY_NAME])
-            resolved = _is_success_row(result) or is_terminal_failure(result)
+            # The orchestrator decides stage retries itself, so only the explicit stamp makes a row final.
+            resolved = _is_success_row(result) or bool(result.get(NG_TERMINAL_KEY))
             if (
                 not resolved
                 and result.get(NG_FAILURE_CLASS_KEY) is not None
@@ -2092,7 +2092,7 @@ def load_gated_keys(
                 continue
             key = (int(fr.get("stage_index", 0) or 0), fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
             attempts[key] = attempts.get(key, 0) + 1
-            if is_terminal_failure(fr):
+            if fr.get(NG_TERMINAL_KEY):
                 terminal.add(key)
 
     for key in attempts:

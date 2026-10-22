@@ -141,6 +141,11 @@ class HandledEpisodeError(Exception):
 _failure_cause: contextvars.ContextVar[FailureCause | None] = contextvars.ContextVar("failure_cause", default=None)
 
 
+def handled_failure_cause() -> FailureCause | None:
+    """The cause of the handled failure the current request's ``run_request`` returned, if any."""
+    return _failure_cause.get()
+
+
 class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeResponseT]):
     """Expose a typed episode protocol with shared limits and cleanup."""
 
@@ -186,6 +191,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         return app
 
     async def run_request(self, request: EpisodeRequestT) -> EpisodeResponseT:
+        _failure_cause.set(None)
         acquired = False
         if self._admission is not None:
             try:

@@ -409,3 +409,27 @@ async def test_legacy_rows_take_part_in_checkpoints() -> None:
     assert prepared.json()["phase"] == "prepared"
     assert record.boundary["next"] == "invoke_agent"
     assert result.json()["reward"] == 1.0
+
+
+async def test_a_flat_failure_row_carries_the_cause_read_from_the_live_error(monkeypatch) -> None:
+    """str(TimeoutError()) is empty, so the row alone looks like the model's; the live error says infra."""
+    from environment_servers.single_agent_turn.app import SingleAgentTurnFailure
+    from nemo_gym.base_environment_server import HandledEpisodeError
+    from nemo_gym.failure_kinds import INFRA
+    from nemo_gym.rollout_collection import is_terminal_failure
+
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    async def run(self, request, cleanup):
+        raise HandledEpisodeError(
+            SingleAgentTurnFailure(stage="agent", failure_reason="", terminal=False), cause=INFRA
+        )
+
+    monkeypatch.setattr(SingleAgentTurnLegacyEnvironmentServer, "run", run)
+    row = await adapter.run_legacy(
+        {"_ng_task_index": 0, "_ng_rollout_index": 0, "instance_id": "task", "responses_create_params": {"input": "x"}}
+    )
+
+    assert row["_ng_failure_cause"] == INFRA
+    assert not is_terminal_failure(row)
