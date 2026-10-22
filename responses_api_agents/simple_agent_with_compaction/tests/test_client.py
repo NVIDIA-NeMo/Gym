@@ -1,13 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 from copy import deepcopy
+from inspect import signature
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientConnectorError, ClientSession, ServerDisconnectedError
+from omegaconf import DictConfig
 
-from nemo_gym.config_types import ModelServerRef
+import nemo_gym.server_utils
+from nemo_gym.config_types import BaseServerConfig, ModelServerRef
 from nemo_gym.context_management import ContextHistoryConfig, ContextManagedResponsesClient
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
@@ -121,7 +126,7 @@ async def test_identity_and_full_history_adapter_share_selected_parent_state():
     )
     assert [call["json"].model_dump() for call in explicit_calls] == [call["json"].model_dump() for call in full_calls]
     assert all("x-nemo-gym-capture-parent" not in call.get("headers", {}) for call in full_calls)
-    assert all(call["_retry"] is False for call in full_calls)
+    assert all(call["_resend_after_disconnect"] is False for call in full_calls)
     assert all("/group_g0/training-token-capture/v1/responses" in call["url_path"] for call in full_calls)
 
 
@@ -151,6 +156,46 @@ async def test_full_history_adapter_accepts_original_source_after_policy_compact
     ]
     assert "seed.png" not in calls[-1]["json"].model_dump_json()
     assert "newest.png" in calls[-1]["json"].model_dump_json()
+
+
+@pytest.mark.parametrize("measure", [False, True])
+@pytest.mark.parametrize("failure", [None, "connect", "disconnect"])
+async def test_context_client_uses_real_transport_retry_controls(monkeypatch, measure, failure):
+    transport = ServerClient(
+        head_server_config=BaseServerConfig(host="head", port=11000),
+        global_config_dict=DictConfig(
+            {"policy": {"responses_api_models": {"vllm_model": {"host": "model", "port": 9000}}}}
+        ),
+    )
+    calls = []
+
+    async def send(*, method, url, **kwargs):
+        # Exercise the real client/retry stack and aiohttp's accepted arguments.
+        signature(ClientSession._request).bind(None, method, url, **kwargs)
+        calls.append(url)
+        if len(calls) == 1:
+            if failure == "connect":
+                raise ClientConnectorError(MagicMock(), ConnectionRefusedError("not sent"))
+            if failure == "disconnect":
+                raise ServerDisconnectedError("delivery unknown")
+        payload = {"prompt_token_count": 10} if url.endswith("/measure") else answer(1).model_dump(mode="json")
+        return http_response(payload)
+
+    monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: MagicMock(request=send))
+    client = ContextManagedResponsesClient(
+        server_client=transport,
+        model_server=ModelServerRef(name="policy", type="responses_api_models"),
+        logical_rollout_id="group_g0",
+        config=ContextHistoryConfig(guards={"max_total_tokens": 100} if measure else {}),
+        initial_request=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+    )
+    if failure == "disconnect":
+        with pytest.raises(ServerDisconnectedError):
+            await asyncio.wait_for(client.create(), timeout=2)
+        assert len(calls) == 1
+    else:
+        assert (await asyncio.wait_for(client.create(), timeout=2)).id == "response-1"
+        assert len(calls) == 1 + int(measure) + int(failure == "connect")
 
 
 async def test_measurement_and_generation_use_same_history_without_parent_hint():
@@ -210,7 +255,7 @@ async def test_only_definite_responses_are_resampled_from_the_accepted_parent():
     assert "answer 3" not in json.dumps(client.output_items)
     assert calls[0]["json"] == calls[1]["json"]
     assert calls[2]["json"] == calls[3]["json"]
-    assert all(call["_retry"] is False for call in calls)
+    assert all(call["_resend_after_disconnect"] is False for call in calls)
 
 
 @pytest.mark.parametrize("accepted_calls", [0, 2])

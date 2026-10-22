@@ -91,7 +91,7 @@ async def test_simple_loop_preserves_tools_reward_final_identity_and_cookies_wit
         "/ng-rollout/dispatch_g0/training-token-capture/v1/responses",
         "/verify",
     ]
-    assert all(call["_retry"] is False for call in calls)
+    assert all(call["_resend_after_disconnect"] is False for call in calls)
     assert result.reward == 0.75 and result.resolved is True
     assert result.response.id == "response-2"
     assert [item.type for item in result.response.output] == ["function_call", "function_call_output", "message"]
@@ -277,4 +277,4 @@ def test_registered_http_run_returns_ordinary_result_without_cc_contract(monkeyp
     assert "context_compaction_result" not in payload
     assert "context_compaction_result" not in payload["response"]
     assert payload["response"]["id"] == "response-1"
-    assert all(call["_retry"] is False for call in calls)
+    assert all(call["_resend_after_disconnect"] is False for call in calls)

@@ -120,7 +120,7 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
                         url_path=f"/{call.name}",
                         json=arguments,
                         cookies=cookies,
-                        _retry=False,
+                        _resend_after_disconnect=False,
                     )
                     tool_output = (await tool_response.content.read()).decode()
                     cookies.update(tool_response.cookies)
@@ -173,7 +173,7 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
             url_path="/seed_session",
             json=body.model_dump(),
             cookies=cookies,
-            _retry=False,
+            _resend_after_disconnect=False,
         )
         await raise_for_status(seed_response)
         cookies.update(seed_response.cookies)
@@ -197,7 +197,7 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
                 url_path="/verify",
                 json=SimpleAgentWithCompactionVerifyRequest.model_validate(payload).model_dump(),
                 cookies=cookies,
-                _retry=False,
+                _resend_after_disconnect=False,
             )
             await raise_for_status(verify_response)
             verified = await get_response_json(verify_response)
@@ -222,7 +222,10 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
         if self.config.skip_verification:
             return await super().aggregate_metrics(body)
         response = await self.server_client.post(
-            server_name=self.config.resources_server.name, url_path="/aggregate_metrics", json=body, _retry=False
+            server_name=self.config.resources_server.name,
+            url_path="/aggregate_metrics",
+            json=body,
+            _resend_after_disconnect=False,
         )
         await raise_for_status(response)
         return AggregateMetrics.model_validate(await get_response_json(response))

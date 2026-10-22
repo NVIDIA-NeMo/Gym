@@ -151,7 +151,7 @@ class ContextManagedResponsesClient:
                 url_path=f"{rollout_path_prefix(self.logical_rollout_id, token_capture=True)}/context/measure",
                 json=body,
                 cookies=self.cookies,
-                _retry=False,
+                _resend_after_disconnect=False,
             )
             await raise_for_status(response)
             value = await get_response_json(response)
@@ -198,7 +198,7 @@ class ContextManagedResponsesClient:
                     url_path=f"{rollout_path_prefix(self.logical_rollout_id, token_capture=True)}/v1/responses",
                     json=request,
                     cookies=self.cookies,
-                    _retry=False,
+                    _resend_after_disconnect=False,
                 )
                 await raise_for_status(http_response)
                 response = NeMoGymResponse.model_validate(await get_response_json(http_response))
