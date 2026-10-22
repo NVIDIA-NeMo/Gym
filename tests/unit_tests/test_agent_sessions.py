@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -143,6 +144,25 @@ def test_an_unsupported_seed_fails_with_a_final_422_and_keeps_no_session() -> No
     assert agent._session_records == {}
     # The refusal bound nothing, so the same ID can still be seeded with a request the agent supports.
     assert TestClient(app).post("/v1/agent_sessions", json=_seed_request().model_dump(mode="json")).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("agent_class", "detail"),
+    [
+        (_Agent, "This agent does not implement episode sessions"),
+        (_GrantCheckingAgent, "this agent cannot use tool grants"),
+    ],
+)
+def test_a_refused_seed_logs_its_reason_once(caplog, agent_class, detail) -> None:
+    """FastAPI answers the 422 inside the router, so the exception middleware never logs the refusal."""
+    agent = agent_class.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.base_responses_api_agent"):
+        check_agent_seed_rejected(agent.setup_webserver(), _seed_request(tool_accesses=_REQUIRED_GRANT))
+
+    [record] = [record for record in caplog.records if record.name == "nemo_gym.base_responses_api_agent"]
+    assert record.levelno == logging.WARNING
+    assert record.getMessage() == f"Refused agent session seed agent-session: {detail}"
 
 
 def test_the_check_catches_a_seed_refusal_that_would_be_retried() -> None:
