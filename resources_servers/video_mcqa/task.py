@@ -40,6 +40,7 @@ class VideoQuestion:
     options: tuple[str, ...]
     level: int | None = None
     group_id: str | None = None
+    allow_duplicate_options: bool = False
 
     def __post_init__(self) -> None:
         for name in ("task_id", "dataset_source", "video_id", "video_source", "question"):
@@ -50,7 +51,9 @@ class VideoQuestion:
             raise ValueError(f"options must be an immutable tuple of two to {len(LABELS)} choices")
         for option in self.options:
             _text(option, "option")
-        if len({option.strip() for option in self.options}) != len(self.options):
+        if type(self.allow_duplicate_options) is not bool:
+            raise ValueError("allow_duplicate_options must be an explicit boolean")
+        if not self.allow_duplicate_options and len({option.strip() for option in self.options}) != len(self.options):
             raise ValueError("option texts must be distinct")
         if self.level is not None and (type(self.level) is not int or self.level < 1):
             raise ValueError("level must be a positive integer or None")
