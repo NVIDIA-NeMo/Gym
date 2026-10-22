@@ -56,7 +56,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryRecord,
 )
 from nemo_gym.server_utils import (
-    describe_dependency_error,
+    format_exception_with_response_body,
     get_response_json,
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
@@ -272,7 +272,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 except Exception as error:
                     raise self._failure(
                         stage="cleanup",
-                        failure_reason=describe_dependency_error(error),
+                        failure_reason=format_exception_with_response_body(error),
                         terminal=not _is_retryable_dependency_error(error),
                         partial_response=agent_response,
                     ) from error
@@ -362,7 +362,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="seed",
-                failure_reason=describe_dependency_error(error),
+                failure_reason=format_exception_with_response_body(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
         return seed
@@ -442,7 +442,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="agent",
-                failure_reason=describe_dependency_error(error),
+                failure_reason=format_exception_with_response_body(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
@@ -465,7 +465,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="agent",
-                failure_reason=describe_dependency_error(error),
+                failure_reason=format_exception_with_response_body(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
@@ -535,7 +535,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="verification",
-                failure_reason=describe_dependency_error(error),
+                failure_reason=format_exception_with_response_body(error),
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
                 agent_observations=observations,

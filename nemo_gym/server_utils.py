@@ -689,8 +689,8 @@ def _format_upstream_error_body(content: Any) -> str:
     return prefix[:_UPSTREAM_ERROR_LOG_BODY_CHARS] + ("…" if truncated else "")
 
 
-def describe_dependency_error(error: BaseException) -> str:
-    """Describe ``error`` for an episode failure, with the bounded response body of an HTTP error.
+def format_exception_with_response_body(error: BaseException) -> str:
+    """Format an exception, appending its bounded HTTP response body when available.
 
     ``str(ClientResponseError)`` names only the status, reason phrase, and URL. The upstream server's own reason,
     such as an agent's ``AgentSeedRejectedError`` detail, is in the body that ``raise_for_status`` keeps on

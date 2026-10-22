@@ -79,7 +79,7 @@ from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_met
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose
 from nemo_gym.server_utils import (
-    describe_dependency_error,
+    format_exception_with_response_body,
     get_response_json,
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
@@ -348,7 +348,7 @@ class HarborEnvironmentServer(
             # seed failure, retried elsewhere; the cleanup stops what was claimed.
             raise self._failure(
                 stage="seed",
-                failure_reason=f"{type(error).__name__}: {describe_dependency_error(error)}",
+                failure_reason=f"{type(error).__name__}: {format_exception_with_response_body(error)}",
                 terminal=False,
             )
 
@@ -417,7 +417,7 @@ class HarborEnvironmentServer(
         except Exception as error:
             raise self._failure(
                 stage="agent",
-                failure_reason=describe_dependency_error(error),
+                failure_reason=format_exception_with_response_body(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
@@ -442,7 +442,7 @@ class HarborEnvironmentServer(
                 pass  # Final unwind retries the close and logs its failure.
             raise self._failure(
                 stage="agent",
-                failure_reason=describe_dependency_error(error),
+                failure_reason=format_exception_with_response_body(error),
                 terminal=not _is_retryable_dependency_error(error),
                 agent_observations=agent_observations,
             ) from error
@@ -454,7 +454,7 @@ class HarborEnvironmentServer(
         except Exception as error:
             raise self._failure(
                 stage="cleanup",
-                failure_reason=describe_dependency_error(error),
+                failure_reason=format_exception_with_response_body(error),
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
             ) from error
