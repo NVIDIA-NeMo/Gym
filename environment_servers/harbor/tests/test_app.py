@@ -1747,7 +1747,15 @@ class TestSeparateVerification:
         # diagnostics and the archives are gone once restored.
         assert agent.archives["/logs/artifacts"] in verifier.uploaded_archives
         assert agent.archives["/app/output"] in verifier.uploaded_archives
-        assert sorted(p.name for p in artifacts.iterdir()) == ["00", "01"]
+        assert sorted(p.name for p in artifacts.iterdir()) == ["00", "01", "manifest.json"]
+        # The pass is recorded as Harbor's artifact handler records its own: every declared entry, in staging order.
+        manifest = json.loads((artifacts / "manifest.json").read_text())
+        assert [(e["index"], e["source"], e["origin"], e["status"], e["type"]) for e in manifest] == [
+            (0, "/logs/artifacts", "convention", "ok", "directory"),
+            (1, "/app/output/report.json", "task", "ok", "file"),
+            (2, "/var/log/api", "task", "skipped", None),
+        ]
+        assert manifest[1]["destination"] == "artifacts/01/app/output/report.json" and manifest[2]["service"] == "api"
         # A restored directory replaces what the image ships there and is world-writable, as Harbor leaves
         # it, so a verifier that drops privileges can still write scratch files next to the agent's output.
         assert any(
