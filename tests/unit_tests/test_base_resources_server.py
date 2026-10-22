@@ -23,6 +23,7 @@ from pydantic import ConfigDict, PrivateAttr
 from nemo_gym.base_resources_server import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
+    BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ClosedResourcesSessionRecords,
@@ -87,6 +88,13 @@ class TestBaseMultiRewardVerifyResponse:
 
 
 class TestBaseResourcesServer:
+    def test_run_request_does_not_emit_environment_specific_control_fields(self) -> None:
+        request = BaseRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+        )
+
+        assert set(request.model_dump()) == {"responses_create_params"}
+
     def test_sanity(self) -> None:
         _resources_server().setup_webserver()
 

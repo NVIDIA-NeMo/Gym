@@ -1468,24 +1468,33 @@ def _connect_server_to_ray(server_class: type, global_config_dict: DictConfig) -
     initialize_ray()
 
 
-def _declared_ray_enabled(class_node: ast.ClassDef) -> bool | None:
-    """The literal `ray_enabled` assigned in a class body, or None when there is none."""
+def _declared_class_flag(class_node: ast.ClassDef, name: str) -> bool | None:
+    """The literal boolean assigned to `name` in a class body, annotated or not, or None when there is none."""
     for item in class_node.body:
-        if not isinstance(item, ast.Assign):
+        if isinstance(item, ast.Assign):
+            targets = item.targets
+        elif isinstance(item, ast.AnnAssign):
+            targets = [item.target]
+        else:
             continue
-        if not any(isinstance(target, ast.Name) and target.id == "ray_enabled" for target in item.targets):
+        if not any(isinstance(target, ast.Name) and target.id == name for target in targets):
             continue
         if isinstance(item.value, ast.Constant) and isinstance(item.value.value, bool):
             return item.value.value
     return None
 
 
-def entrypoint_ray_enabled(entrypoint_fpath: Path) -> bool | None:
-    """The `ray_enabled` declaration of the server an entrypoint starts, read from source.
+def _declared_ray_enabled(class_node: ast.ClassDef) -> bool | None:
+    """The literal `ray_enabled` assigned in a class body, or None when there is none."""
+    return _declared_class_flag(class_node, "ray_enabled")
 
-    The supervisor must decide whether to start Ray before any server exists, and each server runs in its own
-    venv, so this reads the source instead of importing it. It finds the classes the entrypoint calls
-    `run_webserver()` on and checks their literal `ray_enabled` declarations.
+
+def entrypoint_class_flag(entrypoint_fpath: Path, name: str) -> bool | None:
+    """The boolean class attribute `name` declared by the server an entrypoint starts, read from source.
+
+    Gym settles some things before any server exists, and each server runs in its own venv, so this reads the
+    source instead of importing it. It finds the classes the entrypoint calls `run_webserver()` on and checks
+    their literal `name` declarations (`name = True` or `name: ClassVar[bool] = True` in the class body).
 
     Returns True when any of them declares True, False when all of them declare False, and None when that can't
     be settled from the source alone, such as an inherited declaration, a class imported from another module, or
@@ -1510,12 +1519,24 @@ def entrypoint_ray_enabled(entrypoint_fpath: Path) -> bool | None:
     }
     if not invoked_class_names:
         return None
-    declarations = [_declared_ray_enabled(classes[name]) if name in classes else None for name in invoked_class_names]
+    declarations = [
+        _declared_class_flag(classes[class_name], name) if class_name in classes else None
+        for class_name in invoked_class_names
+    ]
     if True in declarations:
         return True
     if all(declaration is False for declaration in declarations):
         return False
     return None
+
+
+def entrypoint_ray_enabled(entrypoint_fpath: Path) -> bool | None:
+    """The `ray_enabled` declaration of the server an entrypoint starts, read from source.
+
+    The supervisor must decide whether to start Ray before any server exists; see `entrypoint_class_flag` for
+    what the source alone can settle.
+    """
+    return entrypoint_class_flag(entrypoint_fpath, "ray_enabled")
 
 
 class SimpleServer(BaseServer):
