@@ -742,6 +742,7 @@ def _health_check_collected_rollouts(
 
 @exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
+    from nemo_gym.resolved_config import write_resolved_config
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
     from nemo_gym.telemetry.setup import (
         configure_telemetry_env,
@@ -752,6 +753,7 @@ def collect_rollouts():  # pragma: no cover
 
     global_config_dict = get_global_config_dict()
     config = RolloutCollectionConfig.model_validate(global_config_dict)
+    write_resolved_config(global_config_dict, Path(config.output_jsonl_fpath))
     rch = RolloutCollectionHelper()
     health_check_enabled = not config.disable_aggregation and not config.disable_health_check
     config.disable_health_check = True  # Run once below, also when collection fails.

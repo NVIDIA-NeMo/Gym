@@ -107,7 +107,12 @@ def hide_secrets_in_container(data: Any) -> Any:
         masked = {}
         for key, value in data.items():
             if isinstance(value, dict):
-                masked[key] = hide_secrets_in_container(value)
+                # A header map's names are arbitrary (`X-Auth`, `Api-Gateway-Token`), so its values are masked
+                # whatever the name looks like; the names stay for inspection.
+                if "header" in str(key).lower():
+                    masked[key] = {name: MASKED_VALUE for name in value}
+                else:
+                    masked[key] = hide_secrets_in_container(value)
             elif isinstance(value, list):
                 masked[key] = (
                     [MASKED_VALUE] * len(value) if looks_like_secret_key(key) else hide_secrets_in_container(value)
