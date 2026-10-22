@@ -1953,6 +1953,19 @@ _COMPACTION_CALL_FAILED = "Context overflow recovery failed: Summarization faile
             ],
             _COMPACTION_CALL_FAILED,
         ),
+        # A threshold compaction that fails after a non-overflow error must not replace that error.
+        (
+            False,
+            [
+                {"type": "compaction_start", "reason": "threshold"},
+                {
+                    "type": "compaction_end",
+                    "reason": "threshold",
+                    "errorMessage": "Auto-compaction failed: Summarization failed: 503 status code (no body)",
+                },
+            ],
+            "model error",
+        ),
     ],
 )
 async def test_provider_failure_is_reported_but_context_limit_preserves_patch(
