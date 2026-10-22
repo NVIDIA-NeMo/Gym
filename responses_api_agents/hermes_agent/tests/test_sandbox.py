@@ -717,7 +717,7 @@ async def test_stop_during_interpreter_startup_closes_without_starting_a_worker(
         "raise SystemExit(runner['main']())\n"
     )
     state.session.sandbox.upload.side_effect = lambda source, destination: shutil.copyfile(
-        wrapper if Path(source).name == SUPERVISOR_FILE else source, destination
+        wrapper if Path(destination).name == SUPERVISOR_FILE else source, destination
     )
     if stop_timing == "before-shell":
         (directory / STOP_REQUEST_FILE).touch()
@@ -905,7 +905,7 @@ async def test_session_prompt_and_limits_reach_runner(agent, state, overrides, t
     await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
     launch_command = state.session.sandbox.exec.await_args_list[0].args[0]
     launch_args = shlex.split(launch_command)
-    assert any(arg.endswith("/process_supervisor.py") for arg in launch_args)
+    assert any(arg.endswith("/process_supervisor") for arg in launch_args)
     assert float(launch_args[launch_args.index("--timeout") + 1]) == agent.config.sandbox_runner_timeout_seconds
     cleanup_timeout = float(launch_args[launch_args.index("--cleanup-timeout") + 1])
     assert cleanup_timeout * process_supervisor.CLEANUP_PHASE_COUNT == pytest.approx(

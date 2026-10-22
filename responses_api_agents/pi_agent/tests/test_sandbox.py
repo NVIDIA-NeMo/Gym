@@ -117,7 +117,7 @@ class Sandbox:
         self.cleanup_available = True
 
     async def execute(self, command, **kwargs):
-        if "--receipt" in command and "process_supervisor.py" in command:
+        if "--receipt" in command and "process_supervisor" in command:
             return await self.launch(command, **kwargs)
         if "ln -s stop " in command:
             await self.signal()
@@ -143,8 +143,8 @@ class Sandbox:
         payload = json.loads(self.files[payload_path])
         assert payload["cwd"] == getattr(self, "expected_workdir", "/app")
         assert kwargs["cwd"] == getattr(self, "expected_workdir", "/app")
-        assert "sandbox_runner.py" in command
-        assert "process_supervisor.py" in command
+        assert "/sandbox_runner " in command and "/bin/gym-runner" in command
+        assert "process_supervisor" in command
         self.directory = payload["directory"]
         self.started.set()
         if not self.blocked:
@@ -216,7 +216,7 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             assert created.status_code == 200, created.text
             session_id = created.json()["agent_session_id"]
             directory = agent._session_records[session_id].state.session.session_dir
-            assert f"{directory}/process_supervisor.py" not in sandbox.files
+            assert f"{directory}/process_supervisor" not in sandbox.files
             installer = f"{directory}/install_pi_runtime.sh"
             assert installer in sandbox.files
             assert agent.config.resources_server is None
@@ -227,7 +227,7 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             assert install_call.kwargs["timeout_s"] == agent.config.sandbox_install_timeout_seconds
             result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"})
             assert result.status_code == 200, result.text
-            assert f"{directory}/process_supervisor.py" in sandbox.files
+            assert f"{directory}/process_supervisor" in sandbox.files
             body = result.json()
             assert body["status"] == "completed"
             assert [item["type"] for item in body["output"]] == [
@@ -1481,7 +1481,7 @@ def _run_session_locally(sandbox, state, directory: Path, *, limit: float = 8) -
     from responses_api_agents.pi_agent import sandbox_runner
 
     state.session.session_dir = str(directory)
-    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner.py")
+    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner")
     sandbox.upload = AsyncMock(side_effect=shutil.copyfile)
     sandbox.download = AsyncMock(side_effect=shutil.copyfile)
     sandbox.exec.side_effect = functools.partial(_run_locally, limit=limit)
@@ -1509,7 +1509,7 @@ async def test_close_fences_delayed_launch_before_and_after_removing_session(loc
     commands = []
 
     async def queued_exec(command, **kwargs):
-        if "--receipt" in command and "process_supervisor.py" in command:
+        if "--receipt" in command and "process_supervisor" in command:
             commands.append(command)
             waiting.set()
             if failure == "cancel":

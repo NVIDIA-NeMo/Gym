@@ -404,7 +404,7 @@ Keep harness-specific response parsing and model and tool behavior in the adapte
 
 **1. Define the session state.** Subclass `AgentSessionState` and compose a `SandboxSession`. Implement two hooks:
 
-- `stage_activation` uploads the activation input and returns `SandboxCommand(argv=..., python=...)`. `python` is the sandbox interpreter that runs the supervisor. Install the runtime earlier, during seed.
+- `stage_activation` uploads the activation input and returns `SandboxCommand(argv=..., python=...)`. `python` is the sandbox interpreter that runs the supervisor. Install the runtime earlier, during seed. Set `stdlib_runner=True` when the runner needs only the standard library and `argv` starts with `python`: the runner then runs as `bin/gym-runner`, like the supervisor, so a `pkill -f python3` in the task cannot stop it. Upload such a runner without a `.py` suffix, as Codex and Pi do.
 - `collect` copies artifacts to the Agent Server after harness termination is confirmed, including partial output from interrupted runs. It may run a bounded snapshot command, but it must not restart the harness. Bound the size of what it downloads: trim large logs inside the sandbox first and keep the tail with a truncation marker. For example, the older `hermes_sandboxed_agent`, which calls the process supervisor directly, keeps the last 1 MiB of its runner log; apply the same bound in `collect`.
 
 ```python
@@ -463,7 +463,7 @@ async with self.sem:  # asyncio.Semaphore(self.config.concurrency)
     )
 ```
 
-`execute()` uploads `process_supervisor.py` into `session_dir` after `stage_activation` returns, so adapters do not upload it themselves. It then launches the harness under the supervisor, confirms harness termination, collects artifacts, and releases the provider exec. Captured artifacts remain in `session.artifacts` even when execution raises. If the supervisor writes a final negative receipt, `execute()` raises `HarnessTerminationError` and does not capture artifacts. A nonzero harness exit code does not raise by itself, because the output can still be useful. Convert artifacts into a response and observations in the adapter.
+`execute()` uploads `process_supervisor.py` into `session_dir`, as `process_supervisor`, after `stage_activation` returns, so adapters do not upload it themselves. It then launches the harness under the supervisor, confirms harness termination, collects artifacts, and releases the provider exec. Captured artifacts remain in `session.artifacts` even when execution raises. If the supervisor writes a final negative receipt, `execute()` raises `HarnessTerminationError` and does not capture artifacts. A nonzero harness exit code does not raise by itself, because the output can still be useful. Convert artifacts into a response and observations in the adapter.
 
 **4. Close the session.** In `_close_agent_session_state()`, call `session.close()` first, then cancel the activation task if it is still running. Close joins any finalization in progress, never captures artifacts twice, and is safe to retry while termination evidence is missing. After a final negative receipt, close skips capture, releases a borrowed connection, and leaves teardown to the Resources Server; an owned sandbox is stopped through the provider. Build observations from `session.artifacts` if activation was interrupted before parsing them.
 
@@ -496,7 +496,9 @@ All control files live under `session_dir`, and their names are defined in `supe
 
 | File | Writer and purpose |
 | --- | --- |
-| `process_supervisor.py` | `SandboxSession` uploads it after staging input and before launch. |
+| `process_supervisor` | `SandboxSession` uploads `process_supervisor.py` under this name after staging input and before launch. |
+| `bin/gym-supervisor` | The launch shell links it to the binary behind `SandboxCommand.python` and runs the supervisor through it, so the supervisor's process name doesn't mention python. If the link can't be made, the supervisor runs under `python`. |
+| `bin/gym-runner` | The same link for a runner that sets `stdlib_runner`. |
 | `launch.claim` | The launch or stop shell creates it atomically, either to claim execution or to fence a delayed launch. |
 | `supervisor.pid` | The launch shell records the PID that becomes the supervisor when the shell executes it. |
 | `stop.request` | The stop shell writes this cancellation marker before signaling the supervisor. |

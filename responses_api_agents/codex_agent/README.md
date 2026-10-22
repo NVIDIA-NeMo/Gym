@@ -154,6 +154,9 @@ blocks verification. Missing evidence stays retryable; a final negative receipt 
 the borrowed connection without making the failed activation gradable. The borrowing
 agent never destroys the sandbox.
 Cleanup coordinates lifecycle; it is not a security boundary against hostile task code.
+The supervisor and the runner above Codex run as `gym-supervisor` and `gym-runner` (links to the
+sandbox's `python3`) from files without a `.py` suffix, so a task agent's `pkill -f python3`,
+`pkill python3` or `killall python3` does not end Codex, as it would not under Harbor.
 
 Responses and close observations preserve text, reasoning, tool events, partial output,
 CLI aggregate usage, and sandbox hostname/PID/version. Wall-time and the pinned CLI's explicit

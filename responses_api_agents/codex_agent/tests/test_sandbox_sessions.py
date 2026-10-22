@@ -112,7 +112,7 @@ class Sandbox:
         self.files[f"{self.directory}/events.jsonl"] = self.events
 
     async def execute(self, command, **kwargs):
-        if "exec python3 -I " in command and "process_supervisor.py" in command:
+        if "--receipt" in command and "process_supervisor" in command:
             return await self.launch(command=command, **kwargs)
         if "touch " in command and "stop.request" in command:
             self.signals.append("SIGTERM")
@@ -127,7 +127,7 @@ class Sandbox:
         payload = json.loads(self.files[payload_path])
         assert payload["cwd"] == getattr(self, "expected_workdir", "/app")
         assert kwargs["cwd"] == getattr(self, "expected_workdir", "/app")
-        assert "sandbox_runner.py" in kwargs["command"]
+        assert "/sandbox_runner " in kwargs["command"] and "/bin/gym-runner" in kwargs["command"]
         self.directory = payload["directory"]
         self.started.set()
         if not self.blocked:
@@ -180,7 +180,7 @@ def test_http_agent_session_flow_runs_codex_in_borrowed_sandbox(setup):
             assert created.status_code == 200, created.text
             session_id = created.json()["agent_session_id"]
             directory = agent._session_records[session_id].state.session.session_dir
-            assert f"{directory}/process_supervisor.py" not in sandbox.files
+            assert f"{directory}/process_supervisor" not in sandbox.files
             installer = f"{directory}/install_codex_runtime.sh"
             assert installer in sandbox.files
             assert agent.config.resources_server is None
@@ -191,7 +191,7 @@ def test_http_agent_session_flow_runs_codex_in_borrowed_sandbox(setup):
             assert install_call.kwargs["timeout_s"] == agent.config.sandbox_install_timeout_seconds
             result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix the code"})
             assert result.status_code == 200, result.text
-            assert f"{directory}/process_supervisor.py" in sandbox.files
+            assert f"{directory}/process_supervisor" in sandbox.files
             body = result.json()
             assert body["status"] == "completed"
             assert [item["type"] for item in body["output"]] == [
@@ -1470,7 +1470,7 @@ async def local_session(setup, tmp_path):
     state.session.session_dir = str(directory)
     from responses_api_agents.codex_agent import sandbox_runner
 
-    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner.py")
+    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner")
     sandbox.upload = AsyncMock(side_effect=shutil.copyfile)
     sandbox.download = AsyncMock(side_effect=shutil.copyfile)
 
@@ -1509,7 +1509,7 @@ async def test_close_fences_delayed_launch_before_and_after_removing_session(loc
     commands = []
 
     async def queued_exec(command, **kwargs):
-        if "--receipt" in command and "process_supervisor.py" in command:
+        if "--receipt" in command and "process_supervisor" in command:
             commands.append(command)
             waiting.set()
             if failure == "cancel":
