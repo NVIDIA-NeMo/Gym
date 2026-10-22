@@ -143,7 +143,39 @@ and switch back for a later step that sets a different one; the verifier keeps i
 step's own `steps/<name>/solution/` at `/solution` before each turn (falling back to the task's top-level
 `solution/`), as Harbor's oracle resolves each step's solution, so `gym dataset validate` runs a task whose
 solutions are per step; such a task counts as validatable when every step has a solution (its own or the task's),
-and is listed unvalidated otherwise.
+and is listed unvalidated otherwise. A step's `steps/<name>/workdir/` is merged into the working directory before
+its turn (an upload over what the previous turns left, as root with the folder's own modes, the digest's ignored
+names left out; a symbolic link a previous turn's agent planted at a shipped name is removed as root right before
+the extraction, so BusyBox tar, which would follow it and write the shipped files through it, lands the merge where
+GNU tar and Harbor's `docker cp` do) and its `steps/<name>/workdir/setup.sh`, when the folder ships one, is then run as
+`bash <workdir>/setup.sh` from the working directory as the turn's agent user, within `step_setup_timeout_s` (unset
+by default: the step's own agent budget, `[steps.agent].timeout_sec` else `[agent].timeout_sec`; Harbor bounds the
+script by nothing but the trial's timeout), a bound the episode budget counts for every step that ships the script:
+Harbor 0.22.0's `_prepare_step` order (`_upload_step_workdir`, `_run_step_setup`), under the step's agent user,
+before the oracle's solution is placed and the agent session opens. A `setup.sh` that exits non-zero (or runs past
+that bound) is the step's failure, as Harbor records it in the step's `exception_info`: the turn is recorded
+with `failure_kind: harbor:step_setup_failed`, no response and no verifier result, no agent session or verifier
+runs for it, and the episode stops after it, scored as a measured 0 for that turn: it counts in `mean` and makes
+`final` 0, and the episode carries the step's failure kind and reason. That is a deliberate divergence from Harbor,
+whose `_aggregate_step_rewards` leaves a step without a verifier result out of its denominator and whose `final`
+then has no reward at all: the script ran in the sandbox the earlier turns' agent had, where a process it left
+running or a working directory it corrupted can fail it, and a masked sample (or a mean over the earlier turns
+alone) would give an RL policy no signal against wrecking the next step's setup. The mean is still over the turns
+that ran: the steps after the failed one never ran and are not in the denominator (Harbor's step loop stops at a
+step whose preparation failed and records none after it), so in a task of three or more steps a wrecked second step
+scores the first turn's reward over 2, not over the task's step count; the policy loses the step it broke, not the
+steps after it. A task whose own step preparation is broken fails the same way in every rollout, the oracle's
+included, under that failure kind. An episode whose
+first turn fails there has no rollout at all and is a terminal agent-stage failure with that kind (masked: no agent
+has acted). An entry of
+`workdir/` the sandbox refuses to unpack over what the previous turns left (a non-empty directory at the name of a
+shipped file, which the previous turn's agent can plant in the working directory it owns) is the step's failure as
+well, `failure_kind: harbor:step_workdir_failed` (Harbor's `docker cp` refuses the same mismatch and its trial
+errors; the sandbox is sound, so it is not an outage to retry). Nothing stops what an earlier turn left running
+before the script runs: a process it left behind can replace the uploaded `setup.sh` in the working directory it
+owned, so a step whose agent is root after a step whose agent was not must not rely on `setup.sh` to undo what the
+earlier step did (Harbor runs it the same way; the loader warns about such a task). A `setup.sh` beside
+`instruction.md` instead of inside `workdir/` is not a Harbor file: the loader warns and nothing runs it.
 
 The episode stops after a turn that is masked, writes no valid reward file, or misses the step's
 `min_reward` (a number gates `reward`, a table gates each named key). `multi_step_reward_strategy` rolls the
@@ -155,7 +187,7 @@ MemoryArena adapters write) are read as Harbor 0.22.0 reads them: `version` is `
 `multi_step_reward_mode = "aggregate"` is dropped and the task rolls up with the default `mean` (or its own
 `multi_step_reward_strategy`), as under Harbor, which has no such field; any other value of that key is dropped
 too, with a warning naming it, never read as a strategy. The result lists every turn under `turns`; its
-`response` and `ng_agent_observations` are the last turn's. Per-step `workdir/`, `setup.sh`, healthchecks,
+`response` and `ng_agent_observations` are the last turn's whose agent ran. Per-step healthchecks,
 artifacts and separate verification are refused by the loader, and `separate_verifier_for_artifacts`
 is refused at seed for such a task. Each turn is seeded with its step's agent budget and hands the verifier an
 ATIF transcript of its own request; with `enforce_task_timeouts` the task deadline sums every turn's harness

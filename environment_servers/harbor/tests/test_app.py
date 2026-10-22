@@ -3882,6 +3882,7 @@ def test_server_config_holds_only_deployment_settings():
         "secrets",
         "enforce_task_timeouts",
         "harness_setup_allowance_s",
+        "step_setup_timeout_s",
         "image_pull_retries",
         "separate_verifier_for_artifacts",
         "task_mcp_grants",
