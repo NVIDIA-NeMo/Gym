@@ -80,6 +80,8 @@ AGENT_INVALID_OUTPUT = "agent_invalid_output"
 # Preserve the upstream HTTP status separately; it is not a retry policy.
 MODEL_REQUEST_ERROR = "model_request_error"
 MODEL_TRANSPORT_ERROR = "model_transport_error"
+# Explicit evidence that the model's context window was exceeded, not an HTTP status alone.
+MODEL_CONTEXT_LIMIT = "model_context_limit"
 
 # --- verifier and judge --------------------------------------------------------------- #
 # ``judge_failed`` is produced today by judge_failsafe and by reverification.
@@ -123,6 +125,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         AGENT_INVALID_OUTPUT,
         MODEL_REQUEST_ERROR,
         MODEL_TRANSPORT_ERROR,
+        MODEL_CONTEXT_LIMIT,
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
         VERIFIER_ERROR,

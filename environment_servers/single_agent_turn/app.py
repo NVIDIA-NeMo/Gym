@@ -38,7 +38,13 @@ from nemo_gym.config_types import (
     AggregateMetricsRequest,
     ResourcesServerRef,
 )
-from nemo_gym.failure_kinds import AGENT_INVALID_OUTPUT, AGENT_LIMIT, FAILURE_KINDS, MODEL_TRANSPORT_ERROR
+from nemo_gym.failure_kinds import (
+    AGENT_INVALID_OUTPUT,
+    AGENT_LIMIT,
+    FAILURE_KINDS,
+    MODEL_CONTEXT_LIMIT,
+    MODEL_TRANSPORT_ERROR,
+)
 from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
@@ -109,6 +115,7 @@ class AgentOutcomePolicyConfig(BaseModel):
         default_factory=lambda: {
             AGENT_INVALID_OUTPUT: OutcomeAction.VERIFY,
             AGENT_LIMIT: OutcomeAction.VERIFY,
+            MODEL_CONTEXT_LIMIT: OutcomeAction.VERIFY,
             MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY,
             "unknown": OutcomeAction.RETRY,
         }
