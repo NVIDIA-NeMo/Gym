@@ -1230,6 +1230,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise failure
         if error and not reported_error:
             raise HTTPException(502, format_sandbox_error(error, stderr=state.stderr))
+        reported_message = None
+        if reported_error:
+            error_data = native_result["error"].get("data") or {}
+            reported_message = error_data.get("message")
+            if not isinstance(reported_message, str) or not reported_message:
+                reported_message = "OpenCode provider request failed"
+            upstream_status = error_data.get("statusCode")
+            if type(upstream_status) is int and 400 <= upstream_status <= 599:
+                reported_message = f"HTTP {upstream_status}: {reported_message}"
+            reported_message = format_sandbox_error(reported_message)
         response = self._make_session_response(
             state,
             body,
@@ -1237,7 +1247,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             outcome=outcome,
             output=output,
             usage=usage,
-            error_message=json.dumps(native_result["error"]) if reported_error else None,
+            error_message=reported_message,
         )
         return self.report_outcome(response, native_result)
 

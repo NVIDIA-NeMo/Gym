@@ -54,8 +54,8 @@ from nemo_gym.agent_activation_types import (
     AgentContinuationCapabilities,
     AgentContinuationRequirements,
 )
-from nemo_gym.agent_utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.agent_utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,

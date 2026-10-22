@@ -612,8 +612,8 @@ upstream model request's status, not the agent endpoint's HTTP status. The
 | Reported cause | Verify | Eligible for episode retry |
 | --- | --- | --- |
 | `agent_invalid_output`, `agent_limit`, or model request rejection 400/413/422 | Yes | No |
-| Model request errors 408/425/429/5xx or `model_transport_error` | No | Yes |
-| Other failures, including 401/403/404, `unknown`, or malformed metadata | No | No |
+| Model request errors 408/425/429/5xx, `model_transport_error`, or `unknown` | No | Yes |
+| Other failures, including 401/403/404 or malformed metadata | No | No |
 
 Excluded attempts retain their partial response and observations in the existing
 failure flow. Retry eligibility does not force a retry; the collector's retry budget
@@ -621,12 +621,23 @@ still applies. Responses without this metadata keep the existing grading behavio
 and completed or incomplete responses remain gradable. These decisions do not change
 native harness retries or model-adapter retries.
 
+For Pi, Codex, OpenCode and Hermes agent sessions, this changes some provider failures
+that previously surfaced as retryable agent HTTP 500/502 errors: reported 401/403/404
+errors, other unmatched failure kinds and malformed metadata now fail without
+verification or episode retry by default. Unclassified failures reported as `unknown`
+remain retryable.
+
 Configure `agent_outcome_policy` inside the `single_agent_turn` Environment Server's
 config to choose `verify`, `retry`, or `fail` (ungraded and nonretryable). HTTP status
 rules take precedence over failure-kind rules; unmatched failures use `default_action`
-(default: `fail`). Each supplied mapping replaces that mapping's defaults; omitted
-mappings retain their defaults. Failure names must be registered or `unknown`, and
+(default: `fail`). Supplied entries override matching defaults; omitted entries retain
+their defaults. Failure names must be registered or `unknown`, and
 HTTP status keys must be 400–599. Malformed outcome metadata always fails without retry.
+
+For example, `by_failure_kind: {model_request_error: fail}` applies only when no HTTP
+status rule matches; it does not override the default 400/408/413/422/425/429/5xx rules.
+Use `by_status_code: {503: fail}` to change 503 handling. Adding
+`by_status_code: {404: retry}` keeps the other default status rules, including 429 and 5xx.
 
 It applies to `single_agent_turn` and its legacy-response wrapper, not other
 Environment Server implementations or agents' own legacy `/run` methods.
