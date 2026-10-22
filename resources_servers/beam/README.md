@@ -49,14 +49,17 @@ benchmark split.
 
 ## Judge
 
-Upstream judges with `gpt-4.1-mini` at temperature 0:
+The default judge is GPT-5.4 (`azure/openai/gpt-5.4`) on the NVIDIA inference API at
+temperature 0; only the API key must be passed:
 
 ```bash
 gym env start --config resources_servers/beam/configs/beam.yaml --model-type vllm_model \
-    +judge_base_url=https://inference-api.nvidia.com/v1 \
-    +judge_api_key=$INFERENCE_API_KEY \
-    +judge_model_name=us/azure/openai/gpt-4.1-mini
+    +judge_api_key=$INFERENCE_API_KEY
 ```
+
+Upstream judges with `gpt-4.1-mini`; to reproduce it, add
+`+judge_model_name=us/azure/openai/gpt-4.1-mini`. Scores from the two judges are not directly
+comparable.
 
 ## License
 
