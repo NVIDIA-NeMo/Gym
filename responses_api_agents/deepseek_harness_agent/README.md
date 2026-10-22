@@ -49,7 +49,7 @@ name. For example, the existing SWE-bench topology can be configured with:
 
 ```bash
 gym env start \
-  --config responses_api_models/openai_model/configs/openai_model.yaml \
+  --config responses_api_models/deepseek_model/configs/deepseek_model.yaml \
   --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
   --config resources_servers/swebench/configs/swebench.yaml \
   --config responses_api_agents/deepseek_harness_agent/configs/deepseek_harness_agent.yaml \
@@ -64,8 +64,12 @@ as CLI overrides, plus the OpenSandbox connection settings as for the existing
 task metadata is forwarded unchanged to `/seed_session` and `/verify`.
 `/responses` is the execution step within that prepared `/run` context.
 
-Use `openai_model` for hosted Chat Completions endpoints to preserve their native
-`reasoning_content` fields through Gym's SSE bridge. The `vllm_model` converter
+Use `deepseek_model` for hosted DeepSeek Chat Completions endpoints. It reuses
+`openai_model` and Gym's SSE bridge, preserves `reasoning_content` and `thinking`,
+and accepts DeepSeek's `reasoning_effort: max` without changing Gym's shared
+OpenAI request schema. Existing configurations should switch the model component
+and its config path from `openai_model` to `deepseek_model`; the `policy_*`
+settings remain the same. The `vllm_model` converter
 wraps reasoning in `<think>` text, which DSH records as assistant text.
 
 Supported input is one text user task (a string or one user message). Conversation
@@ -96,24 +100,25 @@ injections, compaction, and subagent behavior.
 
 This is an evaluation integration. Training token IDs/logprobs are not synthesized
 from text. Gym currently buffers model completions before emitting SSE; align
-timeouts with the longest model call. Its `external_staging` training-capture path
-rejects streaming requests and needs separate integration work.
+timeouts with the longest model call. This integration has not been validated
+for training-token capture.
 
 ```bash
-pytest responses_api_agents/deepseek_harness_agent/tests
-ruff check responses_api_agents/deepseek_harness_agent
-ruff format --check responses_api_agents/deepseek_harness_agent
+pytest --import-mode=importlib responses_api_agents/deepseek_harness_agent/tests responses_api_models/deepseek_model/tests
+ruff check responses_api_agents/deepseek_harness_agent responses_api_models/deepseek_model
+ruff format --check responses_api_agents/deepseek_harness_agent responses_api_models/deepseek_model
 ```
 
 Install `deepseek-harness-sdk==0.1.5rc1` in the test environment to enable the SDK
 smokes. Those use the real published runtime and real shell tools with a
-deterministic model endpoint, for both profiles. They validate execution and event
-translation, not real-model quality or benchmark/provider compatibility. A real
-rollout with the intended model and sandbox provider is still required before
+deterministic model endpoint behind Gym's actual `deepseek_model` routes, for both
+profiles with `high` and `max` reasoning effort. They validate request forwarding,
+SSE, execution, and event translation, not real-model quality or benchmark/provider
+compatibility. A real rollout with the intended model and sandbox provider is still required before
 claiming benchmark validation.
 
-Tests are passed for both profiles with DeepSeek V4 Flash,
-Gym's `openai_model`, and an Enroot task container: read and repair a Python
+Earlier validation of commit `7d1761dc` passed for both profiles with DeepSeek V4
+Flash, Gym's `openai_model`, and an Enroot task container: read and repair a Python
 function, execute tool calls, export the trajectory, and pass independent Python
 assertions. This exercises `/responses` on a prepared sandbox; it does not
 validate the resource-server `/run` handoff or a benchmark. Enroot itself does
