@@ -11,6 +11,7 @@ from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Generic, TypeVar
 
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from anyio import CancelScope
 from fastapi import Body, FastAPI
 from pydantic import ConfigDict, Field, JsonValue, PositiveFloat, PositiveInt, model_validator
@@ -23,14 +24,16 @@ from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym._checkpoint.steps import StepMode
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure, EpisodeId
+from nemo_gym.failure_kinds import FailureStage
 from nemo_gym.rollout_correlation import rollout_context
-from nemo_gym.server_utils import SimpleServer
+from nemo_gym.server_utils import SimpleServer, describe_dependency_error
 
 
 LOGGER = logging.getLogger(__name__)
 
 EpisodeRequestT = TypeVar("EpisodeRequestT", bound=BaseEpisodeRequest[Any])
 EpisodeResponseT = TypeVar("EpisodeResponseT", bound=BaseEpisodeResponse[Any])
+EpisodeFailureT = TypeVar("EpisodeFailureT", bound=EpisodeFailure)
 CleanupCallback = Callable[[], Awaitable[None]]
 
 
@@ -128,6 +131,62 @@ class HandledEpisodeError(Exception):
     def __init__(self, failure: EpisodeFailure) -> None:
         super().__init__(failure.failure_reason)
         self.failure = failure
+
+
+# Request Timeout, Too Early and Too Many Requests clear on a later attempt.
+# Any other 4xx faults the request itself, so a retry is refused the same way.
+_RETRYABLE_CLIENT_ERROR_STATUSES = frozenset({408, 425, 429})
+
+
+def is_retryable_dependency_status(status: int) -> bool:
+    """Return whether an HTTP error status from another server is worth another episode attempt.
+
+    408, 425, 429 and every 5xx are retried; every other 4xx is final.
+    """
+    return status in _RETRYABLE_CLIENT_ERROR_STATUSES or status >= 500
+
+
+def is_retryable_dependency_error(error: BaseException) -> bool:
+    """Return whether a failed call to another server is worth another episode attempt.
+
+    An HTTP error is classified by its status (see ``is_retryable_dependency_status``). A refused or dropped
+    connection and a timeout are transient. Any other error, such as a reply that fails validation, would fail the
+    same way again.
+    """
+    if isinstance(error, ClientResponseError):
+        return is_retryable_dependency_status(error.status)
+    # A dropped connection mid-body raises ClientPayloadError, which is transient like a refused connection.
+    return isinstance(error, (ClientConnectionError, ClientPayloadError, TimeoutError))
+
+
+def dependency_failure(
+    error: BaseException,
+    *,
+    failure_model: type[EpisodeFailureT],
+    stage: FailureStage,
+    terminal: bool | None = None,
+    name_error_type: bool = False,
+    **fields: Any,
+) -> HandledEpisodeError:
+    """Turn a failed call to another server into the episode's failure.
+
+    ``failure_reason`` keeps the dependency's own explanation from its response body
+    (see ``describe_dependency_error``), prefixed with the error's class name when ``name_error_type`` is set,
+    and bounded to the failure's 2000 characters. ``terminal`` defaults to
+    ``not is_retryable_dependency_error(error)``; pass it only where the stage decides on its own.
+    ``fields`` fill the failure model's own fields, such as a partial response.
+    """
+    failure_reason = describe_dependency_error(error)
+    if name_error_type:
+        failure_reason = f"{type(error).__name__}: {failure_reason}"
+    return HandledEpisodeError(
+        failure_model(
+            stage=stage,
+            failure_reason=failure_reason[:2000],
+            terminal=not is_retryable_dependency_error(error) if terminal is None else terminal,
+            **fields,
+        )
+    )
 
 
 class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeResponseT]):

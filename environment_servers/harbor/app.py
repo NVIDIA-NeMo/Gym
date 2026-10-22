@@ -43,7 +43,6 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import Body, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, PositiveFloat
 
@@ -64,6 +63,7 @@ from nemo_gym.base_environment_server import (
     BaseEnvironmentServerConfig,
     CleanupContext,
     HandledEpisodeError,
+    dependency_failure,
 )
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
@@ -79,7 +79,6 @@ from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_met
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose
 from nemo_gym.server_utils import (
-    describe_dependency_error,
     get_response_json,
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
@@ -346,10 +345,12 @@ class HarborEnvironmentServer(
         except Exception as error:
             # The sandbox exists but cannot be described to the harness (serialize failed): a provider-side
             # seed failure, retried elsewhere; the cleanup stops what was claimed.
-            raise self._failure(
+            raise dependency_failure(
+                error,
+                failure_model=SingleAgentTurnFailure,
                 stage="seed",
-                failure_reason=f"{type(error).__name__}: {describe_dependency_error(error)}",
                 terminal=False,
+                name_error_type=True,
             )
 
         agent_session_id = f"agent-session-{uuid4().hex}"
@@ -415,10 +416,10 @@ class HarborEnvironmentServer(
                 stage="agent", failure_reason=str(error.detail), terminal=error.status_code < 500
             ) from error
         except Exception as error:
-            raise self._failure(
+            raise dependency_failure(
+                error,
+                failure_model=SingleAgentTurnFailure,
                 stage="agent",
-                failure_reason=describe_dependency_error(error),
-                terminal=not _is_retryable_dependency_error(error),
             ) from error
 
         agent_response = None
@@ -440,10 +441,10 @@ class HarborEnvironmentServer(
                 await agent_cleanup.close()
             except Exception:
                 pass  # Final unwind retries the close and logs its failure.
-            raise self._failure(
+            raise dependency_failure(
+                error,
+                failure_model=SingleAgentTurnFailure,
                 stage="agent",
-                failure_reason=describe_dependency_error(error),
-                terminal=not _is_retryable_dependency_error(error),
                 agent_observations=agent_observations,
             ) from error
 
@@ -452,10 +453,10 @@ class HarborEnvironmentServer(
         try:
             await agent_cleanup.close()
         except Exception as error:
-            raise self._failure(
+            raise dependency_failure(
+                error,
+                failure_model=SingleAgentTurnFailure,
                 stage="cleanup",
-                failure_reason=describe_dependency_error(error),
-                terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
             ) from error
 
@@ -623,13 +624,6 @@ class HarborEnvironmentServer(
 
 def _cookies(response: Any) -> dict[str, str]:
     return {str(name): str(morsel.value) for name, morsel in response.cookies.items()}
-
-
-def _is_retryable_dependency_error(error: Exception) -> bool:
-    if isinstance(error, ClientResponseError):
-        return error.status in {408, 425, 429} or error.status >= 500
-    # A dropped connection mid-body raises ClientPayloadError, which is transient like a refused connection.
-    return isinstance(error, (ClientConnectionError, ClientPayloadError, TimeoutError))
 
 
 if __name__ == "__main__":
