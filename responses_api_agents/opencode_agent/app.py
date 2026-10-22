@@ -100,6 +100,8 @@ LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 _TESTED_OUTCOME_VERSION = "1.17.11"
+_API_ERROR = "APIError"
+_CONTEXT_OVERFLOW_ERROR = "ContextOverflowError"
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -224,7 +226,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
         Independent worker failures, cleanup errors and timeouts are not provider reports.
         """
-        finishes = {"APIError": None, "ContextOverflowError": "error"}
+        finishes = {_API_ERROR: None, _CONTEXT_OVERFLOW_ERROR: "error"}
         name = (native_result.get("error") or {}).get("name")
         return (
             cleanup is not None
@@ -244,9 +246,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         the Environment Server still decides whether to retry the episode.
         """
         error = native_result.get("error") or {}
-        if error.get("name") == "ContextOverflowError":
+        if error.get("name") == _CONTEXT_OVERFLOW_ERROR:
             return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
-        if error.get("name") != "APIError":
+        if error.get("name") != _API_ERROR:
             return AgentOutcome(failure_kind="unknown")
         data = error.get("data") or {}
         status = data.get("statusCode")
@@ -1199,7 +1201,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         assistants = [m["info"] for m in export.get("messages", []) if m["info"].get("role") == "assistant"]
         native_result = assistants[-1] if assistants else {}
         reported_error = error is None and failure is None and self._reported_model_error(native_result, result)
-        context_limit = reported_error and (native_result.get("error") or {}).get("name") == "ContextOverflowError"
+        context_limit = reported_error and (native_result.get("error") or {}).get("name") == _CONTEXT_OVERFLOW_ERROR
         runtime = state.runtime_info
         if runtime is None:
             observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
