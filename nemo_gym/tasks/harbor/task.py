@@ -773,9 +773,10 @@ def _load_turns(path: Path, config: HarborTaskConfig) -> tuple[HarborTurn, ...]:
     A step's own ``[steps.agent].user`` is read as written: the server switches the sandbox's default user,
     the working directory's owner and the harness's user to it for that turn (and refuses a ``name:group``
     pair at seed on a provider that switches user by name only, as it refuses the task's own). A step's
-    ``workdir/`` and ``workdir/setup.sh`` are read by the server per turn (:attr:`HarborTurn.workdir_dir`,
-    :attr:`HarborTurn.setup_script`); a ``setup.sh`` beside ``instruction.md`` instead of inside ``workdir/`` is
-    not a Harbor file and is warned about, since Harbor 0.22.0 runs ``steps/<name>/workdir/setup.sh`` only.
+    ``workdir/``, ``workdir/setup.sh`` and ``[steps.healthcheck]`` are read by the server per turn
+    (:attr:`HarborTurn.workdir_dir`, :attr:`HarborTurn.setup_script`, ``HarborStep.healthcheck``); a ``setup.sh``
+    beside ``instruction.md`` instead of inside ``workdir/`` is not a Harbor file and is warned about, since Harbor
+    0.22.0 runs ``steps/<name>/workdir/setup.sh`` only.
     """
     turns: list[HarborTurn] = []
     # The agent users of the steps so far that are not root (`None` is the image's own user, unknown here).
@@ -814,8 +815,8 @@ def _load_turns(path: Path, config: HarborTaskConfig) -> tuple[HarborTurn, ...]:
                 STEP_WORKDIR,
                 STEP_SETUP_SCRIPT,
             )
-        if step.healthcheck is not None or step.artifacts:
-            raise HarborTaskError(f"{where}: per-step healthcheck and artifacts are not supported yet")
+        if step.artifacts:
+            raise HarborTaskError(f"{where}: per-step artifacts are not supported yet")
         if step.verifier.environment_mode == "separate" or step.verifier.environment is not None:
             raise HarborTaskError(f"{where}: separate per-step verification is not supported yet")
         if not (step_dir / "tests" / "test.sh").is_file() and not (path / "tests" / "test.sh").is_file():

@@ -1126,6 +1126,20 @@ class TestMultiStepTasks:
             load_task(root)
         assert "setup.sh runs as" not in caplog.text
 
+    def test_a_steps_healthcheck_loads_with_harbors_defaults_for_the_server_to_poll_per_turn(self, tmp_path):
+        """Harbor 0.22.0 runs `[steps.healthcheck]` after the step's setup and before its agent
+        (`_run_step_healthcheck`, Docker's start-period and retries semantics); the loader used to refuse it."""
+        root = write_multi_step_task(tmp_path / "t")
+        (root / "task.toml").write_text(
+            (root / "task.toml").read_text() + '[steps.healthcheck]\ncommand = "curl -sf localhost:8000/health"\n'
+            "start_period_sec = 20.0\nretries = 5\n"
+        )
+        plan, implement = load_task(root).turns
+        assert plan.config.healthcheck is None
+        check = implement.config.healthcheck
+        assert check is not None and check.command == "curl -sf localhost:8000/health"
+        assert (check.start_period_sec, check.retries, check.interval_sec, check.timeout_sec) == (20.0, 5, 5.0, 30.0)
+
     def test_a_step_agent_user_loads_as_written_for_the_server_to_apply_per_turn(self, tmp_path):
         """Harbor runs each step as its own `[steps.agent].user` (else the task's); the loader used to refuse a step
         that named one (G7 round 24, item 1b). The server now switches the sandbox to it for that turn, so the
