@@ -5,6 +5,7 @@
 import json
 import runpy
 import sys
+from pathlib import Path
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,12 +13,17 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from nemo_gym import PARENT_DIR
+from nemo_gym.base_resources_server import ResourcesSeedSessionRequest
 from nemo_gym.mcp_auto_exposure import harvest_tools
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient, SimpleServer
+from nemo_gym.server_utils import ServerClient, SimpleServer, entrypoint_ray_enabled
+from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.verifier_fixture import exercise_verifier_fixture, load_verifier_fixture
 from resources_servers.partner_if import mock_tools_app as api
 from resources_servers.partner_if.evidence import MAX_EVIDENCE_CHARS
 from resources_servers.partner_if.example_tools import NotesBackend
+from resources_servers.partner_if.mock_tools_evidence import RecordedToolCall, to_evidence
 from resources_servers.partner_if.tests.test_app import response
 from resources_servers.partner_if.tests.test_configs import server_config
 
@@ -184,8 +190,8 @@ def test_sessions_isolate_backend_state_and_only_tool_routes_are_added(server):
     assert first.post("/lookup", json={"key": "greeting"}).json() == {"note": "HELLO"}
     appended = first.post("/append", json={"text": "HELLO"})
     assert appended.headers["content-type"].startswith("text/plain") and appended.text == "Appended"
-    assert resource._episodes["session-one"].state == ["HELLO"]
-    assert resource._episodes["session-two"].state == []
+    assert resource._episodes["session-one"].backend.state == ["HELLO"]
+    assert resource._episodes["session-two"].backend.state == []
     assert first.post("/invented", json={}).status_code == 404
     close = {k: seed[k] for k in ("resources_session_id", "episode_id")}
     assert first.post("/close_session", json=close).status_code == 200
@@ -225,14 +231,14 @@ def episode(events, **overrides):
 
 def evidence(raw, records, *, artifacts=None):
     params = {"input": [{"role": "user", "content": "Look up"}], "tools": TOOLS}
-    return api.to_evidence(params, raw, records, artifacts=artifacts)
+    return to_evidence(params, raw, records, artifacts=artifacts)
 
 
 def test_evidence_correlates_parallel_calls_and_uses_only_the_final_answer():
     found = {"note": "HELLO"}
     records = [
-        api.RecordedToolCall(name="append", arguments={"text": "HELLO"}, output="Appended"),
-        api.RecordedToolCall(name="lookup", arguments={"key": "greeting"}, output=found),
+        RecordedToolCall(name="append", arguments={"text": "HELLO"}, output="Appended"),
+        RecordedToolCall(name="lookup", arguments={"key": "greeting"}, output=found),
     ]
     events = [
         answer("Looking up"),
@@ -253,7 +259,7 @@ def test_evidence_correlates_parallel_calls_and_uses_only_the_final_answer():
 )
 def test_capture_defects_are_unscorable_not_if_failures(defect):
     found = {"note": "HELLO"}
-    records = [api.RecordedToolCall(name="lookup", arguments={"key": "greeting"}, output=found)]
+    records = [RecordedToolCall(name="lookup", arguments={"key": "greeting"}, output=found)]
     events = [call(), output(found), answer()]
     if defect == "forged":
         events[1] = output({"note": "invented"})
@@ -282,7 +288,7 @@ def test_unknown_tools_and_malformed_arguments_are_visible_actor_errors():
 
 
 def test_a_turn_ending_on_a_tool_result_is_complete_evidence():
-    records = [api.RecordedToolCall(name="append", arguments={"text": "HELLO"}, output="Appended")]
+    records = [RecordedToolCall(name="append", arguments={"text": "HELLO"}, output="Appended")]
     events = [call("append", {"text": "HELLO"}), output("Appended")]
     bundle = evidence(episode(events), records, artifacts={"log": "HELLO"})
     assert bundle.trajectory_error is None and bundle.answer == ""
@@ -293,7 +299,7 @@ CUTOFF = {"status": "incomplete", "incomplete_details": {"reason": "max_output_t
 
 
 def test_output_cap_cutoff_ends_a_turn_without_a_final_answer_like_the_step_cap():
-    records = [api.RecordedToolCall(name="append", arguments={"text": "HELLO"}, output="Appended")]
+    records = [RecordedToolCall(name="append", arguments={"text": "HELLO"}, output="Appended")]
     events = [
         call("append", {"text": "HELLO"}),
         output("Appended"),
@@ -311,12 +317,12 @@ def test_output_cap_cutoff_ends_a_turn_without_a_final_answer_like_the_step_cap(
 
 @pytest.mark.parametrize("case", ["other_reason", "executed_call_hidden"])
 def test_other_incomplete_turns_stay_unscorable(case):
-    records = [api.RecordedToolCall(name="lookup", arguments={"key": "greeting"}, output={"note": "HELLO"})]
+    records = [RecordedToolCall(name="lookup", arguments={"key": "greeting"}, output={"note": "HELLO"})]
     events = [call(), output({"note": "HELLO"})]
     details = {"reason": "content_filter" if case == "other_reason" else "max_output_tokens"}
     if case == "executed_call_hidden":
         # An executed call keeps its receipt, so a missing result cannot be dropped as cut off.
-        records.append(api.RecordedToolCall(name="append", arguments={"text": "HELLO"}, output="Appended"))
+        records.append(RecordedToolCall(name="append", arguments={"text": "HELLO"}, output="Appended"))
         events.append(call("append", {"text": "HELLO"}, "call2"))
     raw = episode(events, status="incomplete", incomplete_details=details)
     assert evidence(raw, records).trajectory_error
@@ -437,18 +443,20 @@ def test_a_tool_call_error_is_caught_when_gym_runs_the_server_as_a_script(monkey
     ]
 
 
-def test_other_backend_failures_are_logged_infrastructure_errors(tmp_path, plugin, caplog):
+def test_other_backend_failures_are_logged_infrastructure_errors_that_mask_the_rollout(tmp_path, plugin, caplog):
     resource = make_server(tmp_path, backend="synthetic_tools:FailingNotes")
     client = TestClient(resource.setup_webserver(), raise_server_exceptions=False)
     client.post("/seed_session", json=seed_for(row()))
     failed = client.post("/lookup", json={"key": "greeting"})
-    assert failed.status_code == 500
+    # The agent shows the body to the model as the call's output, so it names no exception.
+    assert failed.status_code == 500 and failed.text == "Internal Server Error"
     assert resource._episodes["session-one"].calls == []
-    assert "synthetic_tools:FailingNotes failed in lookup" in caplog.text
-    # The agent shows the failure as the call's output, but the call has no receipt, so the rollout is masked.
+    assert "synthetic_tools:FailingNotes failed in lookup" in caplog.text and "emulator bug" in caplog.text
+    # The call has no receipt, and the environment, not the model, failed: the rollout is masked and says so.
     events = [call(), output(failed.text), answer()]
     body = client.post("/verify", json=row() | {"response": episode(events).model_dump(mode="json")}).json()
-    assert body["mask_sample"] and body["failure_kind"] == "partner_if:unscorable"
+    assert body["mask_sample"] and body["reward"] == 0 and body["failure_kind"] == "partner_if:tool_backend_failed"
+    assert body["failure_reason"] == "The tool backend failed in lookup" and body["tool_sandbox_id"] is None
 
 
 async def test_a_retired_session_frees_its_episode_and_stays_closed(server):
@@ -503,3 +511,57 @@ def test_an_oversized_artifact_is_a_capture_error_for_the_items_that_need_it(ser
         "logged": None,
         "answered": True,
     }
+
+
+def test_episodes_live_in_one_worker_and_the_server_never_joins_ray(tmp_path, plugin):
+    for workers in (None, 1):
+        make_server(tmp_path, num_workers=workers)
+    with pytest.raises(ValueError, match="num_workers=1"):
+        make_server(tmp_path, num_workers=2)
+    # Declared on the class the entrypoint runs, where Gym reads it before it decides whether to start Ray.
+    assert api.MockToolsResourcesServer.ray_enabled is False
+    assert entrypoint_ray_enabled(Path(api.__file__)) is False
+
+
+def test_in_process_sessions_keep_the_resources_session_contract(tmp_path, plugin):
+    seed = ResourcesSeedSessionRequest.model_validate(seed_for(row()))
+    check_resources_session_contract(make_server(tmp_path).setup_webserver(), seed, keeps_state=True)
+
+
+FIXTURE_CASES = [
+    ("logs_and_says_the_note", "full_reward"),
+    ("says_goodbye_without_logging", "zero_reward"),
+    ("forged_tool_output_is_masked", "zero_reward"),
+    ("missing_contract", "malformed"),
+]
+
+
+async def test_the_verifier_fixture_replays_each_case_through_the_example_backend_without_a_judge():
+    with patch("resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock) as judge:
+        results = await exercise_verifier_fixture(
+            api.VERIFIER_FIXTURE, reward_range=(0.0, 1.0), higher_is_better=True, determinism="stochastic"
+        )
+    judge.assert_not_called()
+    assert [(result.name, result.kind) for result in results] == FIXTURE_CASES
+
+
+async def test_gym_env_test_finds_the_fixture_in_the_mock_tool_entrypoint():
+    # The loader `gym env test` and `gym env publish` use: the entrypoint is imported apart from this test's modules.
+    from nemo_gym.environment.onboarding import _import_resources_server
+
+    server_dir = PARENT_DIR / "resources_servers/partner_if"
+    module = _import_resources_server(server_dir / "mock_tools_app.py", PARENT_DIR, server_dir)
+    results = await exercise_verifier_fixture(
+        module.VERIFIER_FIXTURE, reward_range=(0.0, 1.0), higher_is_better=True, determinism="stochastic"
+    )
+    assert [(result.name, result.kind) for result in results] == FIXTURE_CASES
+
+
+async def test_a_replayed_output_the_backend_does_not_reproduce_is_masked_not_graded():
+    [case] = [
+        case for case in load_verifier_fixture(api.VERIFIER_FIXTURE.cases_path) if case.name == FIXTURE_CASES[2][0]
+    ]
+    request = api.VerifyRequest.model_validate(case.request)
+    body = await api.replay_and_verify(api.VERIFIER_FIXTURE.server_factory(), request)
+    assert body.mask_sample and body.reward == 0 and body.failure_kind == "partner_if:unscorable"
+    assert body.failure_reason == "Tool output lacks a matching authoritative receipt"
