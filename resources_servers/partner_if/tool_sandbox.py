@@ -51,6 +51,8 @@ class ToolSandboxConfig(SandboxConfig):
     the image, network and timeouts of the backend in it."""
 
     image: str = "python:3.13-slim"
+    # The backstop that stops a sandbox whose close never came.
+    ttl_s: float = Field(default=3600, gt=0)
     # package_index: egress only to the hosts of package_index_egress, to install each bundle's requirements from
     # package_index_url. none: no egress; the image must already have the requirements. Both need OpenSandbox's
     # network policies. provider_default: no policy from this server, for a provider without them such as Docker;
@@ -242,9 +244,12 @@ class ToolSandboxes:
                     f"--target {ROOT}/{SITE_DIR} -r {ROOT}/requirements.txt",
                     timeout_s=config.install_timeout_s,
                 )
-                if installed.return_code != 0:
+                if installed.return_code != 0 or installed.error_type:
                     output = (installed.stderr or "") + (installed.stdout or "")
-                    raise RuntimeError(f"Installing {bundle.entrypoint}'s requirements failed: {output[-2000:]}")
+                    raise RuntimeError(
+                        f"Installing {bundle.entrypoint}'s requirements failed ({installed.error_type or 'exit'}): "
+                        f"{output[-2000:]}"
+                    )
             started = await sandbox.exec(
                 # Only the runner goes to the background, with none of this command's streams, so the command
                 # ends at once; a backgrounded `cd && ...` list would hold them open and never end.
@@ -252,8 +257,10 @@ class ToolSandboxes:
                 timeout_s=60,
                 preserve_background_services=True,
             )
-            if started.return_code != 0:
-                raise RuntimeError(f"Starting the tool runner failed: {started.stderr or started.stdout}")
+            if started.return_code != 0 or started.error_type:
+                raise RuntimeError(
+                    f"Starting the tool runner failed ({started.error_type or 'exit'}): {started.stderr or started.stdout}"
+                )
             episode._endpoint = await sandbox.endpoint(RUNNER_PORT)
             await episode._wait_until_ready(config.runner_timeout_s)
             served = (await episode._expect("POST", "tools", {"row": actor_row}))["tools"]

@@ -347,6 +347,24 @@ def test_a_backend_failure_is_a_masked_infrastructure_error_whose_details_stay_i
     assert [recorded["name"] for recorded in body["tool_calls"]] == ["append"]
 
 
+def test_a_runner_lost_before_verify_masks_the_rollout(tmp_path, provider, caplog):
+    task = sandboxed_row()
+    client = TestClient(make_server(tmp_path, [task]).setup_webserver())
+    client.post("/seed_session", json=seed_for(task))
+    appended = client.post("/append", json={"text": "HELLO"}).text
+    # The sandbox dies after the last call, such as a killed container.
+    runner = provider.processes["sandbox-0"]
+    runner.terminate()
+    runner.wait()
+    events = [call("append", {"text": "HELLO"}), output(appended), answer()]
+    checked = client.post("/verify", json=task | {"response": episode(events).model_dump(mode="json")})
+    assert checked.status_code == 200, checked.text
+    body = checked.json()
+    assert body["mask_sample"] and body["reward"] == 0 and body["failure_kind"] == "partner_if:tool_backend_failed"
+    assert body["failure_reason"] == "The tool backend failed before verify" and body["environment_receipts"] == {}
+    assert "failed before verify" in caplog.text
+
+
 def test_a_task_whose_backend_does_not_serve_its_tools_fails_its_seed(tmp_path, provider):
     task = sandboxed_row(PROBE_BUNDLE)
     task["responses_create_params"]["tools"] = [*TOOLS, TOOLS[0] | {"name": "erase"}]
@@ -361,6 +379,31 @@ def test_a_backend_that_cannot_load_fails_its_seed_and_its_sandbox_stops(tmp_pat
     client = TestClient(resource.setup_webserver(), raise_server_exceptions=False)
     assert client.post("/seed_session", json=seed_for(task)).status_code == 500
     assert provider.stopped == ["sandbox-0"] and not resource._episodes
+
+
+def test_an_install_the_provider_reports_as_failed_fails_the_seed_and_its_sandbox_stops(
+    tmp_path, provider, monkeypatch
+):
+    original = provider.exec
+
+    async def exec_(handle, command, **options):
+        if "pip install" in command:
+            # A provider can report a failure without a process exit code.
+            return SandboxExecResult(stdout="", stderr="", return_code=0, error_type="timeout")
+        return await original(handle, command, **options)
+
+    monkeypatch.setattr(provider, "exec", exec_)
+    task = sandboxed_row()
+    resource = make_server(tmp_path, [task])
+    client = TestClient(resource.setup_webserver(), raise_server_exceptions=False)
+    assert client.post("/seed_session", json=seed_for(task)).status_code == 500
+    assert provider.stopped == ["sandbox-0"] and not resource._episodes
+
+
+def test_tool_sandboxes_always_have_a_ttl_backstop():
+    assert ToolSandboxConfig().ttl_s == 3600
+    with pytest.raises(ValidationError):
+        ToolSandboxConfig(ttl_s=None)
 
 
 def test_sandboxed_sessions_keep_the_resources_session_contract(tmp_path, provider):

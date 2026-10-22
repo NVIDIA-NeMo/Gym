@@ -51,6 +51,13 @@ class FailingNotes(NotesBackend):
         raise RuntimeError("emulator bug")
 
 
+class LostNotes(NotesBackend):
+    """A backend whose episode is gone by the time the episode is verified."""
+
+    def artifacts(self, state):
+        raise RuntimeError("state lost")
+
+
 def row():
     rubrics = [
         ("logged", "artifact:log", "Logs HELLO."),
@@ -87,6 +94,7 @@ def row():
 def plugin(monkeypatch):
     module = ModuleType("synthetic_tools")
     module.NotesBackend, module.StepCappedNotes, module.FailingNotes = NotesBackend, StepCappedNotes, FailingNotes
+    module.LostNotes = LostNotes
     monkeypatch.setitem(sys.modules, module.__name__, module)
     return module
 
@@ -457,6 +465,23 @@ def test_other_backend_failures_are_logged_infrastructure_errors_that_mask_the_r
     body = client.post("/verify", json=row() | {"response": episode(events).model_dump(mode="json")}).json()
     assert body["mask_sample"] and body["reward"] == 0 and body["failure_kind"] == "partner_if:tool_backend_failed"
     assert body["failure_reason"] == "The tool backend failed in lookup" and body["tool_sandbox_id"] is None
+
+
+def test_a_backend_lost_before_verify_masks_the_rollout(tmp_path, plugin, caplog):
+    resource = make_server(tmp_path, backend="synthetic_tools:LostNotes")
+    client = TestClient(resource.setup_webserver(), raise_server_exceptions=False)
+    client.post("/seed_session", json=seed_for(row()))
+    found = client.post("/lookup", json={"key": "greeting"}).json()
+    checked = client.post(
+        "/verify", json=row() | {"response": episode([call(), output(found), answer()]).model_dump(mode="json")}
+    )
+    assert checked.status_code == 200, checked.text
+    body = checked.json()
+    # The environment failed, not the model: masked with the backend's failure kind, not a failed /verify.
+    assert body["mask_sample"] and body["reward"] == 0 and body["failure_kind"] == "partner_if:tool_backend_failed"
+    assert body["failure_reason"] == "The tool backend failed before verify" and body["environment_receipts"] == {}
+    assert body["evaluation_completed"] is False
+    assert "failed before verify" in caplog.text and "state lost" in caplog.text
 
 
 async def test_a_retired_session_frees_its_episode_and_stays_closed(server):

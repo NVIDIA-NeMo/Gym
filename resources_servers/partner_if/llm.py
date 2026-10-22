@@ -5,7 +5,7 @@
 import json
 import re
 
-from pydantic import Field, JsonValue, StrictInt
+from pydantic import ConfigDict, Field, JsonValue, StrictInt, model_validator
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.partner_if.evidence import EvidenceBundle, EvidenceTooLarge
@@ -77,7 +77,20 @@ No extra fields, markdown, or reasoning before/after JSON."""
 
 
 class EvidenceReference(StrictModel):
+    # A judge sometimes annotates a reference with keys of its own, such as a source's supports_candidate. They carry
+    # no grading meaning, so they are dropped rather than invalidating the whole judgment. Quote text is the
+    # exception: the host extracts it, and a judge that writes its own is rewriting the evidence.
+    model_config = ConfigDict(extra="ignore")
+
     source: str = Field(min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def no_judge_quotes(cls, value: object) -> object:
+        if isinstance(value, dict) and {"quote", "quotes", "text"} & value.keys():
+            raise ValueError("References carry source and line numbers only; the host extracts quotes")
+        return value
+
     start_line: StrictInt = Field(ge=1)
     end_line: StrictInt = Field(ge=1)
 

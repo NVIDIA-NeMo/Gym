@@ -199,7 +199,8 @@ async def test_invalid_judge_is_not_actor_failure(bad):
     ):
         output = await server().verify(request())
     assert output.mask_sample and output.if_result.status == "unscorable"
-    assert output.failure_kind == "partner_if:unscorable"
+    # Gym's own kind for a judge reply that cannot be used.
+    assert output.failure_kind == "judge_unparseable"
     assert output.failure_reason.startswith("Invalid shared IF judge response")
     assert output.judge_response is not None
 
@@ -299,6 +300,8 @@ async def test_unsigned_audit_requires_explicit_development_option():
     result = await server().verify(body)
     assert result.mask_sample and result.if_result.status == "unscorable"
     assert result.failure_kind == "partner_if:unsigned_contract"
+    # Gym's evidence gate (TE-6) reads a masked rollout's grading as not completed.
+    assert result.evaluation_completed is False
     with patch(
         "resources_servers.partner_if.grading_service.call_judge",
         new_callable=AsyncMock,
@@ -307,6 +310,7 @@ async def test_unsigned_audit_requires_explicit_development_option():
         provisional = await server(allow_provisional_rubrics=True).verify(body)
     assert provisional.reward == 1
     assert provisional.if_result.status == "provisional"
+    assert provisional.evaluation_completed is True
 
 
 async def test_incomplete_judge_not_scored():
@@ -345,6 +349,8 @@ async def test_empty_visible_text_never_earns_reward(text):
     ) as call:
         result = await server().verify(body)
     assert result.reward == 0 and not result.mask_sample and result.failure_kind == "partner_if:no_answer"
+    # The model failed, not the evaluation: grading completed.
+    assert result.evaluation_completed is True
     call.assert_not_called()
 
 

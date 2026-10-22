@@ -33,7 +33,6 @@ from harbor.models.trial.paths import TrialPaths
 from harbor.models.trial.result import TrialResult
 from pydantic import ConfigDict, Field, PrivateAttr, ValidationError, ValidationInfo, field_validator, model_validator
 
-from nemo_gym import _extra_roots
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
@@ -67,14 +66,6 @@ _RAY_WORKER_EVENT_LOOP: asyncio.AbstractEventLoop | None = None
 def resolve_harbor_path(path: Path, *, from_gym_root: bool) -> Path:
     """Resolve paths from cwd by default, with an opt-in root for built-in datasets."""
     return (GYM_ROOT / path).resolve() if from_gym_root else path.resolve()
-
-
-def resolve_harbor_dataset_path(path: Path) -> Path:
-    """Resolve a dataset path under the first root that has it: the benchmark plugin roots
-    (`NEMO_GYM_EXTRA_ROOTS`, set by `--search-dir`), then the Gym root. A path that no root has resolves
-    under the Gym root."""
-    roots = [*_extra_roots(), GYM_ROOT]
-    return next((root / path for root in roots if (root / path).exists()), GYM_ROOT / path).resolve()
 
 
 @contextmanager
@@ -180,7 +171,7 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
         from_gym_root = info.data.get("harbor_resolve_paths_from_gym_root", False)
         job.jobs_dir = resolve_harbor_path(job.jobs_dir, from_gym_root=from_gym_root)
         if from_gym_root and job.datasets[0].path is not None:
-            job.datasets[0].path = resolve_harbor_dataset_path(job.datasets[0].path)
+            job.datasets[0].path = resolve_harbor_path(job.datasets[0].path, from_gym_root=True)
         if job.jobs_dir.suffix.lower() == ".jsonl":
             job.jobs_dir = job.jobs_dir.parent / "harbor"
         return job
@@ -240,20 +231,14 @@ class HarborAgent(SimpleResponsesAPIAgent):
         metrics, _, _, _ = compute_pass_majority_metrics(tasks, score_fn=self._score_fn)
         return metrics
 
-    def job_config_for_run(self, body: HarborRunRequest) -> JobConfig:
-        """The Harbor job for one run, a copy of the configured `job`. Override to add per-run settings, such as
-        a model URL built with `base_url_for_run`. Harbor resumes a job by its name, so per-run values that
-        change between attempts need `harbor_unique_job_names: true`."""
-        return self.config.build_job_config(
-            task_name=body.task_name,
-            ## Stable names allow resume unless fresh jobs are configured.
-            job_name=f"t{body.task_index}-r{body.rollout_index}",
-        )
-
     async def run(self, body: HarborRunRequest) -> HarborVerifyResponse:
         async with self._sem:
             try:
-                job_config = self.job_config_for_run(body)
+                job_config = self.config.build_job_config(
+                    task_name=body.task_name,
+                    ## Stable names allow resume unless fresh jobs are configured.
+                    job_name=f"t{body.task_index}-r{body.rollout_index}",
+                )
 
                 job_ref = harbor_job_worker.options(num_cpus=self.config.harbor_ray_task_num_cpus).remote(
                     job_config.model_dump(mode="json"),

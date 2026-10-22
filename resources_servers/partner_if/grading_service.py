@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 
+from nemo_gym.failure_kinds import JUDGE_UNPARSEABLE
 from nemo_gym.judge import call_judge
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
@@ -72,14 +73,15 @@ async def grade(
             raise
         except ValueError as error:
             # A reply that fails protocol or validation checks leaves these items
-            # unscorable and keeps the actual request/reply. A failed judge call
-            # raises JudgeError, which propagates to Gym's judge_failsafe.
+            # unscorable, as Gym's judge_unparseable, and keeps the actual request/reply.
+            # A failed judge call raises JudgeError, which propagates to Gym's judge_failsafe.
             return [
                 RawJudgment(
                     id=item.id,
                     passed=None,
                     reason=f"Invalid shared IF judge response: {error}",
                     evidence="Judge validation failed; original receipts retained for review",
+                    failure_kind=JUDGE_UNPARSEABLE,
                 )
                 for item in items
             ]

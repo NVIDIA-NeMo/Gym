@@ -295,27 +295,6 @@ def test_relative_paths_opt_in_to_gym_root(tmp_path: Path, monkeypatch: pytest.M
     assert config.job.datasets[0].path == GYM_ROOT / "relative/tasks"
 
 
-def test_relative_dataset_paths_search_benchmark_plugin_roots_first(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    plugin = tmp_path / "plugin"
-    (plugin / "benchmarks/tasks").mkdir(parents=True)
-    monkeypatch.setenv("NEMO_GYM_EXTRA_ROOTS", str(plugin))
-
-    def dataset_path(path: str) -> Path:
-        config = _make_config(
-            tmp_path, tmp_path / "jobs", harbor_dataset={"path": path}, harbor_resolve_paths_from_gym_root=True
-        )
-        return config.job.datasets[0].path
-
-    assert dataset_path("benchmarks/tasks") == (plugin / "benchmarks/tasks").resolve()
-    # A path only the Gym root has, or that no root has, resolves under the Gym root.
-    assert dataset_path("responses_api_agents/harbor_agent_general/configs") == (
-        GYM_ROOT / "responses_api_agents/harbor_agent_general/configs"
-    )
-    assert dataset_path("benchmarks/missing") == GYM_ROOT / "benchmarks/missing"
-
-
 @pytest.mark.parametrize("from_gym_root", [False, True])
 def test_absolute_paths_are_unchanged(tmp_path: Path, from_gym_root: bool) -> None:
     config = _make_config(tmp_path, tmp_path / "jobs", harbor_resolve_paths_from_gym_root=from_gym_root)

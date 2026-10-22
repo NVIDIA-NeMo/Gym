@@ -376,8 +376,16 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
             calls = list(episode.calls) if episode else []
             failure = episode.backend_failure if episode else None
             # A failed backend may be gone; its rollout is masked without its artifacts.
-            artifacts = await episode.backend.artifacts() if episode and not failure else None
-            receipts = await episode.backend.receipts() if episode and not failure else {}
+            artifacts, receipts = None, {}
+            if episode and not failure:
+                try:
+                    artifacts = await episode.backend.artifacts()
+                    receipts = await episode.backend.receipts()
+                except Exception:
+                    # A backend or sandbox lost after the last call is the environment's failure too.
+                    logger.exception("Tool backend %s failed before verify", episode.backend.name)
+                    artifacts, receipts = None, {}
+                    failure = "The tool backend failed before verify"
         recorded = {
             "tool_calls": calls,
             "environment_receipts": receipts,

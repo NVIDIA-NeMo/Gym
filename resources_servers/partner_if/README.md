@@ -64,8 +64,11 @@ answer's own structure:
   of the first item that could not be scored or, for a row masked as a whole (such as an
   unsigned contract, unsupported input or output, a missing `verification_input` or a
   provider error), the row's own reason:
+  - `judge_unparseable` (Gym's kind): the judge replied, but its reply is incomplete or fails
+    the verdict protocol or validation for an item that gates reward. Unknown keys inside a
+    reference are dropped rather than rejected;
   - `partner_if:unscorable`: an IF item, or a prerequisite an IF item depends on, is
-    unscorable: the judge reply is invalid or incomplete, a capture the item needs is
+    unscorable: a capture the item needs is
     missing or failed, a live agent's trajectory is incomplete or does not match its tool
     receipts, or an item it depends on is unscorable. On this server's `/verify`, also a
     provider error or another incomplete reply, and input or output its mode does not
@@ -92,8 +95,8 @@ size it to the judge's context window), `allow_provisional_rubrics` (false) and
 `task_check_modules` ([]). The SWE server defaults to 32768 output tokens and a
 concurrency of 2.
 
-The sandboxed mock-tool server's `sandbox_config` takes Gym's `SandboxConfig` settings (`ttl_s`,
-`ready_timeout_s`, `resources`, `env`, `metadata`, `provider_options`) plus `image` (any Python 3 image;
+The sandboxed mock-tool server's `sandbox_config` takes Gym's `SandboxConfig` settings (`ttl_s`, 3600 here and
+never unset, `ready_timeout_s`, `resources`, `env`, `metadata`, `provider_options`) plus `image` (any Python 3 image;
 `python:3.13-slim`), `network`, `package_index_url` (`https://pypi.org/simple`), `package_index_egress`
 (`https://pypi.org`, `https://files.pythonhosted.org`), `install_timeout_s` (300), `runner_timeout_s` (60, until
 the backend has loaded) and `call_timeout_s` (60, each request to the runner). `network` is one of:
@@ -146,8 +149,7 @@ Running the sandboxed mode outside `gym` needs Gym's `sandbox` extra (`uv sync -
   request instead.
   `configs/swe.yaml` validates, but it runs only with a sandbox provider and Scale-SWE
   rows that carry a `live_agent` contract, which Gym does not ship.
-- An agent that runs a `live_agent` episode itself, such as
-  `responses_api_agents/partner_if_harbor_agent`, sends what it captured to this server's
+- An agent that runs a `live_agent` episode itself sends what it captured to this server's
   `/verify` as `verification_input` (`native_evidence.LiveAgentCapture`: the input the
   actor was given, its documents and artifact capture receipts). With
   `accept_verification_input: true`, the server grades it with the response's visible

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 from benchmarks.partner_if import prepare as prepare_module
 
@@ -65,6 +66,19 @@ def test_prepare_refuses_content_other_than_the_pinned_release(prepared, content
     # The previous output survives a failed download.
     assert (prepared / "partner_if_benchmark.jsonl").read_text() == "previous"
     assert not prepare_module.is_prepared_data_current(prepared / "partner_if_benchmark.jsonl")
+
+
+def test_routes_cover_the_release_and_name_its_environments():
+    config = yaml.safe_load((prepare_module.BENCHMARK_DIR / "config.yaml").read_text())
+    routes = config["partner_if_dispatcher"]["responses_api_agents"]["partner_if_dispatcher"]["task_routes"]
+    assert list(routes) == [f"pif_{index:03d}" for index in range(1, prepare_module.ROW_COUNT + 1)]
+    environments = {
+        name for name, server in config.items() if isinstance(server, dict) and "environment_servers" in server
+    }
+    assert {route["name"] for route in routes.values()} <= environments
+    # The tool environments' server loads the rows that prepare.py splits off for it.
+    tools = config["partner_if_tools"]["resources_servers"]["partner_if"]
+    assert tools["tasks_path"] == f"benchmarks/partner_if/data/{prepare_module.TOOLS_FPATH.name}"
 
 
 def test_rows_split_on_newlines_only():

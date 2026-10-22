@@ -169,6 +169,15 @@ def test_references_extract_literal_text_without_model_escape_roundtrip(source, 
     assert result[0].quotes[0].quote == quote
 
 
+def test_a_references_extra_keys_are_dropped_not_fatal():
+    # Judges sometimes echo a source property such as supports_candidate onto a reference.
+    reference = {"source": "answer", "start_line": 1, "end_line": 1, "supports_candidate": True}
+    result = llm.parse_verdict(
+        json.dumps(verdict(references=[reference])), rubric(), EvidenceBundle(answer="HELLO"), gating={"one"}
+    )
+    assert result[0].passed is True and result[0].quotes[0].quote == "HELLO"
+
+
 def test_judge_supplied_quotes_are_rejected():
     evidence = EvidenceBundle(artifacts={"output": {"status": "present", "text": "first\n  second"}})
     with pytest.raises(ValueError, match="quotes"):

@@ -1,3 +1,0 @@
--e nemo-gym[dev,ray,sandbox] @ ../../
-harbor==0.24.0
-pathspec==1.1.1

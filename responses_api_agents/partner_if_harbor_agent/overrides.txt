@@ -1,3 +1,0 @@
-# Harbor's job planner imports pathspec. Opt in only in this server's venv;
-# leave the root package/container's dependency exclusions unchanged.
-pathspec==1.1.1

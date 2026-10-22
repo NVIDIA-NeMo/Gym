@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from fastapi import HTTPException
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -82,6 +82,14 @@ class VerifyResponse(VerifyRequest, BaseVerifyResponse):
     judge_response: NeMoGymResponse | None = None
     judge_request: dict | None = None
     grading_result: Evaluation | None = None
+    # Whether grading ran to completion, as Gym's evidence gate reads it: a masked rollout's did not.
+    evaluation_completed: bool | None = None
+
+    @model_validator(mode="after")
+    def completion_follows_masking(self) -> "VerifyResponse":
+        if self.evaluation_completed is None:
+            self.evaluation_completed = not self.mask_sample
+        return self
 
 
 # Simple Agent marks a provider-completed reply that has neither a message nor a call as incomplete,
