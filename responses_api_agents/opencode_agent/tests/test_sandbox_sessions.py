@@ -1566,7 +1566,7 @@ def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
         assert closed.status_code == 200, closed.text
 
 
-@pytest.mark.parametrize("status", [400, 401, 429, 503, None])
+@pytest.mark.parametrize("status", [400, 401, 413, 429, 503, None])
 async def test_native_model_error_is_reported_with_classification(setup, status):
     agent, sandbox = setup
     export = json.loads(sandbox.events)
@@ -1705,7 +1705,7 @@ async def test_context_limit_preserves_partial_work_without_hiding_cleanup_failu
         assert response.error is None
         assert response.output
         assert response.usage.total_tokens > 0
-        assert agent.classify_outcome(assistant).failure_kind == "agent_limit"
+        assert agent.classify_outcome(assistant).failure_kind == "model_context_limit"
         assert agent_outcome_policy(response) == OutcomeAction.VERIFY
     closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     root = next(r for r in closed.agent_observations.records if r.kind == "agent_invocation")

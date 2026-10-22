@@ -50,7 +50,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.failure_kinds import AGENT_LIMIT, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
+from nemo_gym.failure_kinds import MODEL_CONTEXT_LIMIT, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -244,7 +244,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         """
         error = native_result.get("error") or {}
         if error.get("name") == "ContextOverflowError":
-            return AgentOutcome(failure_kind=AGENT_LIMIT)
+            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         if error.get("name") != "APIError":
             return AgentOutcome(failure_kind="unknown")
         data = error.get("data") or {}
@@ -1192,7 +1192,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         assistants = [m["info"] for m in export.get("messages", []) if m["info"].get("role") == "assistant"]
         native_result = assistants[-1] if assistants else {}
         reported_error = error is None and failure is None and self._reported_model_error(native_result, result)
-        context_limit = reported_error and self.classify_outcome(native_result).failure_kind == AGENT_LIMIT
+        context_limit = reported_error and (native_result.get("error") or {}).get("name") == "ContextOverflowError"
         runtime = state.runtime_info
         if runtime is None:
             observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
