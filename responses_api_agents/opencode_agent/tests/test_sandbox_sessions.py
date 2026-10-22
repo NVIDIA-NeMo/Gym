@@ -1410,3 +1410,53 @@ def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
         assert accepted.status_code == 200, accepted.text
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
+
+
+@pytest.mark.parametrize("status", [400, 401, 429, 503])
+async def test_native_model_error_is_reported_with_classification(setup, status):
+    agent, sandbox = setup
+    export = json.loads(sandbox.events)
+    assistant = export["messages"][-1]["info"]
+    assistant.pop("finish")
+    assistant["error"] = {
+        "name": "APIError",
+        "data": {
+            "statusCode": status,
+            "message": "provider error",
+            "responseHeaders": {"x-provider-detail": "private-header"},
+            "responseBody": "private-body",
+        },
+    }
+    sandbox.events = json.dumps(export)
+    sandbox.result["return_code"] = 1
+    request, session_id, task = await activate(agent, sandbox)
+    response = await task
+    assert response.status == "failed"
+    assert response.error.message == f"HTTP {status}: provider error"
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {
+        "failure_kind": "model_request_error",
+        "status_code": status,
+    }
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+@pytest.mark.parametrize("message", [None, "", {"responseBody": "private-body"}])
+async def test_native_model_error_without_message_uses_safe_fallback(setup, message):
+    agent, sandbox = setup
+    export = json.loads(sandbox.events)
+    assistant = export["messages"][-1]["info"]
+    assistant.pop("finish")
+    assistant["error"] = {
+        "name": "APIError",
+        "data": {"statusCode": 503, "message": message, "responseBody": "private-body"},
+    }
+    sandbox.events = json.dumps(export)
+    sandbox.result["return_code"] = 1
+    request, session_id, task = await activate(agent, sandbox)
+    response = await task
+    assert response.error.message == "HTTP 503: OpenCode provider request failed"
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {
+        "failure_kind": "model_request_error",
+        "status_code": 503,
+    }
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
