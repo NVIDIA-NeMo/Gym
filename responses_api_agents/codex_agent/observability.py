@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Read exact tool identities and model-visible results from a native Codex session."""
+"""Read exact tool identities and model-visible results from a Codex CLI session record."""
 
 import json
 import re
@@ -30,7 +30,7 @@ def read_codex_observations(
             try:
                 event = json.loads(line)
                 if not isinstance(event, dict):
-                    raise ValueError("expected a native session record")
+                    raise ValueError("expected a Codex CLI session record")
                 if event.get("type") != "response_item":
                     continue
                 item = dict(event["payload"])

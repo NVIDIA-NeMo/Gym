@@ -242,3 +242,32 @@ def test_model_error_502_uses_the_same_combined_diagnostic_bound(setup):
         assert "MODEL ERROR TAIL" in detail
         assert detail.count("STDERR TAIL") == 1
         client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+
+
+@pytest.mark.parametrize("failure,status", [("receipt", 500), ("missing_export", 500), ("malformed_export", 502)])
+def test_single_turn_failure_preserves_observations_and_runtime(setup, tmp_path, failure, status):
+    agent, sandbox = setup
+    capture_observations(sandbox, tmp_path)
+    if failure == "receipt":
+        sandbox.task_environment_receipt = None
+    elif failure == "malformed_export":
+        sandbox.events = "{malformed"
+    download = sandbox.download
+
+    async def read(source, destination):
+        if failure == "missing_export" and source.endswith("/export.json"):
+            raise FileNotFoundError("missing export")
+        await download(source, destination)
+
+    sandbox.download = read
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        session_id = created.json()["agent_session_id"]
+        state = active_sessions(agent)[session_id]
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == status, result.text
+        assert state.runtime_info.hostname == "task-container"
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        closed.raise_for_status()
+        invocation = next(r for r in closed.json()["agent_observations"]["records"] if r["kind"] == "agent_invocation")
+        assert invocation["conversation"][-1]["content"][0]["text"] == "Fixed"

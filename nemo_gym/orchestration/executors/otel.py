@@ -60,6 +60,28 @@ def driver_telemetry_env(gym_job_id: str, span_groups: str, *, logs: bool = True
     }
 
 
+VLLM_TRACES_FLAG = "--otlp-traces-endpoint"
+
+
+def vllm_traces_flag(host: str = "localhost") -> str:
+    """The `vllm serve` flag that sends one span per request to the collector's OTLP/HTTP receiver."""
+    return f"{VLLM_TRACES_FLAG} http://{host}:{OTLP_HTTP_PORT}/v1/traces"
+
+
+def vllm_traces_env(component: str, service_name: str) -> dict[str, str]:
+    """Environment for a traced vLLM service.
+
+    vLLM picks the exporter by `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` and defaults to gRPC, so the
+    protocol has to match the HTTP endpoint in the flag. vLLM sets no `service.name` of its own; the
+    collector copies the one given here into `service.name.override`, so the spans carry the same
+    display identity as the service's scraped metrics (`<component>/<service>`).
+    """
+    return {
+        "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
+        "OTEL_SERVICE_NAME": f"{component}/{service_name}",
+    }
+
+
 # Seconds the collector keeps running after the driver exits, so one more scrape sees the final
 # counters before it is asked to flush and stop.
 FINAL_SCRAPE_GRACE_SECONDS = 20

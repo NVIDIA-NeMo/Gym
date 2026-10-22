@@ -162,6 +162,18 @@ async def test_native_execution_preserves_settings_timing_and_verification(agent
         assert "Failed to stop Pi sandbox" in caplog.text
 
 
+@pytest.mark.parametrize("budget,expected", [(None, 600), ("12.5", 12.5), ("3600", 600)])
+async def test_task_timeout_bounds_pi_execution_but_not_setup(agent, budget, expected):
+    server, sandbox = agent
+    body = request_body()
+    body.responses_create_params.metadata = None if budget is None else {"agent_timeout_sec": budget}
+    result = await server.run(SimpleNamespace(cookies={}), body)
+    setup, *_, execution = sandbox.exec.await_args_list
+    assert setup.kwargs["timeout_s"] == 600
+    assert execution.kwargs["timeout_s"] == expected
+    assert result.response.metadata["agent_timeout_sec"] == str(float(expected))
+
+
 @pytest.mark.parametrize(
     "failure,tail,recover",
     [

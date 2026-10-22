@@ -17,6 +17,7 @@ from nemo_gym.server_utils import (
     SimpleServer,
     _connect_server_to_ray,
     _declared_ray_enabled,
+    entrypoint_class_flag,
     entrypoint_ray_enabled,
 )
 
@@ -42,7 +43,6 @@ DIRECT_RAY_COMPONENTS = {
         "mini_swe_agent",
         "mini_swe_agent_2",
         "osworld_agent",
-        "stirrup_agent",
         "swe_agents",
     },
     "responses_api_models": {"local_vllm_model"},
@@ -226,6 +226,11 @@ def test_only_ray_servers_declare_ray_enabled_true() -> None:
             True,
             id="declared-true",
         ),
+        pytest.param(
+            "from typing import ClassVar\nclass Server:\n    ray_enabled: ClassVar[bool] = True\nServer.run_webserver()\n",
+            True,
+            id="declared-annotated",
+        ),
         pytest.param("class Server:\n    pass\nServer.run_webserver()\n", None, id="undeclared"),
         pytest.param(
             "from elsewhere import Server\nServer.run_webserver()\n",
@@ -264,6 +269,52 @@ def test_entrypoint_ray_enabled_reads_only_literal_declarations(
 
 def test_missing_entrypoint_has_unknown_ray_declaration(tmp_path: Path) -> None:
     assert entrypoint_ray_enabled(tmp_path / "missing.py") is None
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        pytest.param(
+            "class Agent:\n    calls_model_from_sandbox = True\nAgent.run_webserver()\n",
+            True,
+            id="declared",
+        ),
+        pytest.param(
+            "from typing import ClassVar\nclass Agent:\n    calls_model_from_sandbox: ClassVar[bool] = True\n"
+            "Agent.run_webserver()\n",
+            True,
+            id="declared-annotated",
+        ),
+        pytest.param(
+            "class Agent:\n    calls_model_from_sandbox = False\nAgent.run_webserver()\n",
+            False,
+            id="declared-false",
+        ),
+        pytest.param("class Agent:\n    ray_enabled = True\nAgent.run_webserver()\n", None, id="not-declared"),
+        pytest.param(
+            "class Base:\n    calls_model_from_sandbox = True\nclass Agent(Base):\n    pass\nAgent.run_webserver()\n",
+            None,
+            id="inherited-default-not-seen",
+        ),
+        pytest.param(
+            "class Agent:\n    calls_model_from_sandbox: bool\nAgent.run_webserver()\n",
+            None,
+            id="annotation-without-value",
+        ),
+        pytest.param(
+            "class Agent:\n    calls_model_from_sandbox = flag\nAgent.run_webserver()\n",
+            None,
+            id="not-a-literal",
+        ),
+    ],
+)
+def test_entrypoint_class_flag_reads_the_named_literal(tmp_path: Path, source: str, expected: bool | None) -> None:
+    """The reader behind `ray_enabled` serves any boolean class declaration, such as `calls_model_from_sandbox`."""
+    entrypoint = tmp_path / "app.py"
+    entrypoint.write_text(source)
+
+    assert entrypoint_class_flag(entrypoint, "calls_model_from_sandbox") is expected
+    assert entrypoint_class_flag(entrypoint, "ray_enabled") is entrypoint_ray_enabled(entrypoint)
 
 
 def test_entrypoint_detection_matches_shipped_server_declarations() -> None:

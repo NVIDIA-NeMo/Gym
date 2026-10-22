@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import shlex
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,8 @@ from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSee
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.tasks.harbor.materialize import materialize_task
+from nemo_gym.tasks.harbor.task import load_task
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig
 
 
@@ -710,15 +713,13 @@ def test_session_http_usage_gaps_follow_persisted_optional_counter_availability(
     assert ("token_usage_detail_unavailable" in gaps) == (cache == 0 or reasoning == 0)
 
 
-@pytest.mark.parametrize("option", ["missing-sandbox", "worker", "required-tool", "workdir", "unpinned", "provider"])
+@pytest.mark.parametrize("option", ["missing-sandbox", "required-tool", "workdir", "unpinned", "provider"])
 def test_invalid_seed_never_connects(setup, option):
     agent, sandbox = setup
     body = seed().model_dump(mode="json")
     if option == "missing-sandbox":
         body["sandbox_access"] = None
         agent.config.sandbox_provider = ""
-    elif option == "worker":
-        agent.config.num_workers = 2
     elif option == "required-tool":
         body["tool_accesses"] = [
             {"kind": "direct_http", "name": "tools", "base_url": "http://resources", "required": True}
@@ -730,12 +731,18 @@ def test_invalid_seed_never_connects(setup, option):
     else:
         agent.config.opencode_config = {"provider": {"other": {"apiKey": "must-not-copy"}}}
     with TestClient(agent.setup_webserver()) as client:
-        if option == "worker":
-            with pytest.raises(ValueError, match="num_workers=1"):
-                client.post("/v1/agent_sessions", json=body)
-        else:
-            assert client.post("/v1/agent_sessions", json=body).status_code == 422
+        assert client.post("/v1/agent_sessions", json=body).status_code == 422
     sandbox.exec.assert_not_awaited()
+
+
+def test_several_workers_seed_sessions(setup):
+    """Session routing sends a session's later requests to the worker that seeded it."""
+    agent, sandbox = setup
+    agent.config.num_workers = 2
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        assert created.json()["agent_session_id"] in agent._session_records
 
 
 @pytest.mark.parametrize("output_budget", [0, -1, 32001])
@@ -1352,3 +1359,54 @@ async def test_missing_task_environment_hook_rejects_otherwise_valid_result(setu
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "budget,expected", [(None, 1800), ("900.0", 900), ("12.5", 12.5), ("3600", 1800), ("nan", 1800)]
+)
+def test_task_timeout_metadata_reaches_sandbox_supervisor(
+    setup: tuple[OpenCodeAgent, Sandbox], tmp_path: Path, budget: str | None, expected: float
+) -> None:
+    agent, sandbox = setup
+    agent.config.timeout = 1800
+    (tmp_path / "task.toml").write_text("[agent]\ntimeout_sec = 900.0\n")
+    (tmp_path / "instruction.md").write_text("Fix the code")
+    (tmp_path / "tests").mkdir()
+    body = materialize_task(load_task(tmp_path), "timeout-test").task_input.responses_create_params
+    if budget != "900.0":
+        body.metadata = None if budget is None else {"agent_timeout_sec": budget}
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        session_id = created.json()["agent_session_id"]
+        response = client.post(
+            "/ng-rollout/opencode-smoke-a2/v1/responses", json=body.model_dump(mode="json", exclude_unset=True)
+        )
+        assert response.status_code == 200, response.text
+        command = shlex.split(sandbox.launch.await_args.kwargs["command"])
+        assert float(command[command.index("--timeout") + 1]) == expected
+        assert agent.config.timeout == 1800
+        assert response.json()["metadata"]["agent_timeout_sec"] == str(float(expected))
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+
+
+def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
+    setup: tuple[OpenCodeAgent, Sandbox],
+) -> None:
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        session_id = created.json()["agent_session_id"]
+        path = "/ng-rollout/opencode-smoke-a2/v1/responses"
+        rejected = client.post(
+            path, json={"input": "Fix the code", "metadata": {"agent_timeout_sec": "900.0", "ignored": "value"}}
+        )
+        assert rejected.status_code == 422
+        assert "metadata" in rejected.json()["detail"]
+        sandbox.launch.assert_not_awaited()
+        accepted = client.post(path, json={"input": "Fix the code", "metadata": {"agent_timeout_sec": "900.0"}})
+        assert accepted.status_code == 200, accepted.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
