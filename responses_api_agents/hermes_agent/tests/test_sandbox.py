@@ -1513,9 +1513,12 @@ async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monk
         ),
         (
             {"partial": True, "error": "Context length exceeded (200,000 tokens). Cannot compress further."},
-            "agent_limit",
+            "model_context_limit",
         ),
-        ({"partial": True, "error": "Context length exceeded: max compression attempts (3) reached."}, "agent_limit"),
+        (
+            {"partial": True, "error": "Context length exceeded: max compression attempts (3) reached."},
+            "model_context_limit",
+        ),
         ({"partial": True, "error": "Model generated invalid tool call: nonexistent"}, "agent_invalid_output"),
     ],
 )
@@ -1534,8 +1537,20 @@ def test_limit_and_invalid_output_keep_distinct_policy_routes(agent, result, exp
         status="failed",
     )
     reported = agent.report_outcome(response, result)
-    # Distinct overrides expose misclassification that the default verify/verify policy hides.
-    policy = AgentOutcomePolicyConfig(by_failure_kind={"agent_limit": "retry", "agent_invalid_output": "fail"})
-    assert agent_outcome_policy(reported, config=policy) == (
-        OutcomeAction.RETRY if expected_kind == "agent_limit" else OutcomeAction.FAIL
+    # Distinct overrides expose misclassification that the default verify policy hides.
+    actions = {
+        "agent_limit": OutcomeAction.RETRY,
+        "agent_invalid_output": OutcomeAction.FAIL,
+        "model_context_limit": OutcomeAction.VERIFY,
+    }
+    policy = AgentOutcomePolicyConfig(by_failure_kind=actions)
+    assert agent_outcome_policy(reported, config=policy) == actions[expected_kind]
+
+
+@pytest.mark.parametrize("status", [400, 413])
+def test_http_status_alone_does_not_establish_context_overflow(agent, status):
+    outcome = agent.classify_outcome({"failed": True, "error": f"Error code: {status}"})
+    assert (outcome.failure_kind, outcome.status_code) == (
+        "model_request_error",
+        status,
     )

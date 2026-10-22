@@ -46,7 +46,13 @@ from nemo_gym.base_responses_api_agent import (
     assert_model_url_reachable_from_sandbox,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.failure_kinds import AGENT_INVALID_OUTPUT, AGENT_LIMIT, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
+from nemo_gym.failure_kinds import (
+    AGENT_INVALID_OUTPUT,
+    AGENT_LIMIT,
+    MODEL_CONTEXT_LIMIT,
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
+)
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -104,7 +110,7 @@ def _is_limit_result(result: Mapping[str, Any]) -> bool:
             bool(result.get("partial"))
             and (
                 error == "Response truncated due to output length limit"
-                or error.startswith(("Request payload too large", "Context length exceeded"))
+                or error.startswith("Request payload too large")
             )
         )
     )
@@ -325,6 +331,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
         """Read Hermes 26bb847a native result flags and API errors; tested on that pin."""
         error = str(native_result.get("error") or "")
+        if native_result.get("partial") and error.startswith("Context length exceeded"):
+            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         if _is_limit_result(native_result):
             return AgentOutcome(failure_kind=AGENT_LIMIT)
         if native_result.get("failed"):
