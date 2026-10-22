@@ -118,7 +118,14 @@ def parse_rubric_score(judge_text: str, max_score: float = 10.0) -> Optional[flo
     if not judge_text.strip():
         return None
 
-    match = _RUBRIC_VERDICT_RE.fullmatch(judge_text.strip().splitlines()[-1].strip())
+    lines = judge_text.strip().splitlines()
+    while lines and re.fullmatch(r"`{3,}|~{3,}", lines[-1].strip()):
+        lines.pop()
+    if not lines:
+        return None
+    # Ignore presentation around the final verdict, never intermediate scores.
+    final_line = lines[-1].strip("`*_ \t.,;")
+    match = _RUBRIC_VERDICT_RE.fullmatch(final_line)
     if match is None:
         return None
     score = float(match.group(1))
@@ -312,7 +319,11 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
             json=request_params,
             response_model=NeMoGymResponse,
         )
-        if self.config.judge_mode == "research" and judge_response.status != "completed":
+        if self.config.judge_mode == "research" and (
+            judge_response.status not in (None, "completed")
+            or judge_response.incomplete_details is not None
+            or judge_response.error is not None
+        ):
             raise JudgeError(f"FrontierScience Research judge did not complete: {judge_response.status}")
         return extract_text_from_response(judge_response)
 

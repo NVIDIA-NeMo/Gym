@@ -81,6 +81,20 @@ class TestParseJudgement:
 
 
 class TestParseRubricScore:
+    @mark.parametrize(
+        "verdict",
+        [
+            "**VERDICT: 8**",
+            "`VERDICT: 8`",
+            "VERDICT: 8.",
+            "VERDICT: 8\n```",
+            "```text\nVERDICT: 8\n```",
+            "**VERDICT: 8**.",
+        ],
+    )
+    def test_cosmetic_verdict_formatting(self, verdict):
+        assert parse_rubric_score("Score: 1/10\n" + verdict) == 8
+
     @mark.parametrize("score", [0, 2.7, 7, 10])
     def test_paper_verdict(self, score: float) -> None:
         assert parse_rubric_score(f"Score: 1/10\nReasoning\nVERDICT: {score}\n") == approx(score)
@@ -701,10 +715,31 @@ class TestFrontierScienceJudgeServer:
         with raises(JudgeError, match="did not complete"):
             await server._call_judge("prompt")
 
-    async def test_research_rejects_incomplete_responses_grade(self, config: FrontierScienceJudgeConfig) -> None:
+    @mark.parametrize("status", [None, "completed", "incomplete", "failed", "cancelled", "in_progress", "queued"])
+    async def test_research_response_completion_status(self, config: FrontierScienceJudgeConfig, status) -> None:
         config.judge_mode = "research"
         server = FrontierScienceJudgeServer(config=config, server_client=MagicMock(spec=ServerClient))
-        payload = self._make_judge_response("VERDICT: 7") | {"status": "incomplete"}
+        payload = self._make_judge_response("VERDICT: 7") | {"status": status}
+        response = AsyncMock()
+        response.read = AsyncMock(return_value=orjson.dumps(payload))
+        server.server_client.post = AsyncMock(return_value=response)
+        if status in (None, "completed"):
+            assert await server._call_judge("prompt") == "VERDICT: 7"
+        else:
+            with raises(JudgeError, match="did not complete"):
+                await server._call_judge("prompt")
+
+    @mark.parametrize(
+        "failure",
+        [
+            {"incomplete_details": {"reason": "max_output_tokens"}},
+            {"error": {"code": "server_error", "message": "judge failed"}},
+        ],
+    )
+    async def test_missing_status_does_not_hide_explicit_response_failure(self, config, failure):
+        config.judge_mode = "research"
+        server = FrontierScienceJudgeServer(config=config, server_client=MagicMock(spec=ServerClient))
+        payload = self._make_judge_response("VERDICT: 7") | {"status": None} | failure
         response = AsyncMock()
         response.read = AsyncMock(return_value=orjson.dumps(payload))
         server.server_client.post = AsyncMock(return_value=response)
