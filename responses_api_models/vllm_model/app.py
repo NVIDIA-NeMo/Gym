@@ -67,6 +67,7 @@ from nemo_gym.token_id_capture.external_capture import (
     ExternalCaptureHandler,
     make_external_capture_handler,
 )
+from responses_api_models.vllm_model.least_loaded import LeastLoadedPlacement, default_state_path
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 
 
@@ -434,6 +435,17 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     endpoint_failure_threshold: int = Field(default=3, ge=1)
     endpoint_retry_after_s: float = Field(default=60.0, gt=0)
 
+    # Where a rollout's calls go, with several endpoints. "hash": the rollout id hashes onto an
+    # endpoint, which needs no shared state but ignores load, so some endpoints carry noticeably more
+    # rollouts than others. "least_loaded": a rollout's first call picks the endpoint with the fewest
+    # live rollouts and its later calls stay there. The placements are kept in a SQLite file shared by
+    # this server's workers (`least_loaded_state_path`, by default a per-server file in /dev/shm); a
+    # rollout counts as live until it has made no call for `least_loaded_live_s`. Calls without a
+    # rollout id, and any call made while the file is unavailable, use the hash.
+    endpoint_placement: Literal["hash", "least_loaded"] = "hash"
+    least_loaded_live_s: float = Field(default=600.0, gt=0)
+    least_loaded_state_path: Optional[str] = None
+
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
     # entries in ``metadata.audio_paths``), and ``metadata.audio_ref.archive``.
     # audio_path/audio_paths permit absolute paths; audio_ref archives must
@@ -594,6 +606,12 @@ class VLLMModel(SimpleResponsesAPIModel):
         ]
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
+        self._least_loaded: Optional[LeastLoadedPlacement] = None
+        if self.config.endpoint_placement == "least_loaded":
+            self._least_loaded = LeastLoadedPlacement(
+                self.config.least_loaded_state_path or default_state_path(self.config.name, self.config.port),
+                live_s=self.config.least_loaded_live_s,
+            )
         # Keyed by base_url so the record outlives a client rebind to the same address.
         self._endpoint_health: Dict[str, _EndpointHealth] = dict()
         self._generation_cut_control_urls = dict(
@@ -732,7 +750,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._apply_sampling_overrides(body_dict)
 
         note_generation_request(body_dict)
-        client = self._resolve_client(request)
+        client = await self._resolve_client_for_call(request)
         execution = start_model_execution(request, upstream_attempted=True)
         try:
             response_dict = await self._call_endpoint(client, client.create_response(**body_dict))
@@ -1179,7 +1197,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
         note_generation_request(body_dict)
-        client = self._resolve_client(request)
+        client = await self._resolve_client_for_call(request)
         # Rank-affine routing downstream: expose the Gym session (one per rollout)
         # as the backend's canonical conversation id so a disaggregated server can
         # pin every turn of a conversation to the ADP rank holding its prefix.
@@ -1594,7 +1612,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._validate_single_choice_token_request(completion_body)
 
         note_generation_request(body_dict)
-        client = self._resolve_client(request)
+        client = await self._resolve_client_for_call(request)
 
         execution = start_model_execution(request, upstream_attempted=True)
         try:
@@ -1974,30 +1992,48 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise ValueError(f"no generation_cut_control_url is configured for backend {base_url}")
         return control_url.rstrip("/")
 
-    def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
+    async def _resolve_client_for_call(self, request: Request) -> NeMoGymAsyncOpenAI:
+        """The client for this call, placing a new rollout on the least-loaded endpoint when configured."""
+        placed_index = None
+        rollout_id = current_rollout_id()
+        if self._least_loaded is not None and rollout_id:
+            self._maybe_rebind_endpoint()
+            placed_index = await self._least_loaded.endpoint_for(rollout_id, len(self._clients))
+        if placed_index is None:
+            # Hash placement calls `_resolve_client` exactly as before, for code that overrides it.
+            return self._resolve_client(request)
+        return self._resolve_client(request, placed_index=placed_index)
+
+    def _resolve_client(self, request: Request, *, placed_index: Optional[int] = None) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
         # Route by rollout when the call carries one: agents that drop cookies get a new
         # session per call, which scatters a rollout's turns and lets the slowest endpoint
         # collect them. Keying on the rollout keeps its turns on one endpoint.
         session_id = current_rollout_id() or request.session[SESSION_ID_KEY]
+        own = self._own_client(session_id, placed_index)
         client = self._session_id_to_client.get(session_id)
         if self.config.route_around_failing_endpoints:
-            hashed = self._hashed_client(session_id)
-            if client is not hashed and self._endpoint_serves(hashed):
+            if client is not own and self._endpoint_serves(own):
                 # The session's own endpoint serves again, or is due for its trial
                 # call: this call goes back to it. Sessions moved off a failed
                 # endpoint are the only callers left once a wave has started, so
                 # they are what probes it, and a recovered endpoint gets its
                 # sessions back.
-                client = hashed
+                client = own
             elif client is not None and not self._endpoint_serves(client):
                 client = None
         if client is None:
-            client = self._assign_client(session_id)
+            client = self._assign_client(session_id, own)
         self._session_id_to_client[session_id] = client
         note_generation_backend(getattr(client, "base_url", None))
 
         return client
+
+    def _own_client(self, session_id: str, placed_index: Optional[int]) -> NeMoGymAsyncOpenAI:
+        """The endpoint a session belongs on: its least-loaded placement, else where its id hashes."""
+        if placed_index is not None and placed_index < len(self._clients):
+            return self._clients[placed_index]
+        return self._hashed_client(session_id)
 
     def _hashed_client(self, session_id: str) -> NeMoGymAsyncOpenAI:
         # Uvicorn workers do not share the session cache. A stable assignment keeps
@@ -2009,8 +2045,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         digest = hashlib.sha256(session_id.encode("utf-8")).digest()
         return int.from_bytes(digest[:8], byteorder="big") % n
 
-    def _assign_client(self, session_id: str) -> NeMoGymAsyncOpenAI:
-        client = self._hashed_client(session_id)
+    def _assign_client(self, session_id: str, own: NeMoGymAsyncOpenAI) -> NeMoGymAsyncOpenAI:
+        client = own
         if not self.config.route_around_failing_endpoints or self._endpoint_serves(client):
             return client
         # The same digest picks among the serving endpoints, so the assignment stays a
