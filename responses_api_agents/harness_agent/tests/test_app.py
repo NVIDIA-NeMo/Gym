@@ -567,3 +567,33 @@ def test_gym_source_prebuilt_path_and_url():
         assert remote._gym_tar is None
         assert remote._gym_source_url == "https://example.com/gym.tar.gz"
         build.assert_not_called()
+
+
+_SEGMENT = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+
+
+def test_sandbox_model_url_names_the_current_span_after_the_prefix(monkeypatch):
+    monkeypatch.setattr("responses_api_agents.harness_agent.app.trace_context_path_segment", lambda: _SEGMENT)
+    agent = _make_agent(model_server={"type": "responses_api_models", "name": "policy_model"})
+    agent.server_client._build_server_base_url = MagicMock(return_value="http://model-host:8000")
+    agent.server_client.global_config_dict = MagicMock()
+    with patch("responses_api_agents.harness_agent.app.get_first_server_config_dict", return_value={}):
+        bare = agent._sandbox_model_url(MagicMock())
+        token = _RUN_CONTEXT.set({"url_prefix": "/ng-rollout/rollout-1"})
+        try:
+            prefixed = agent._sandbox_model_url(MagicMock())
+        finally:
+            _RUN_CONTEXT.reset(token)
+    assert bare == f"http://model-host:8000{_SEGMENT}"
+    assert prefixed == f"http://model-host:8000/ng-rollout/rollout-1{_SEGMENT}"
+
+
+def test_sandbox_model_url_override_keeps_the_span(monkeypatch):
+    monkeypatch.setattr("responses_api_agents.harness_agent.app.trace_context_path_segment", lambda: _SEGMENT)
+    agent = _make_agent(sandbox_model_base_url="http://sandbox-gateway:8000/v1")
+    token = _RUN_CONTEXT.set({"url_prefix": "/ng-rollout/rollout-1"})
+    try:
+        url = agent._sandbox_model_url(MagicMock())
+    finally:
+        _RUN_CONTEXT.reset(token)
+    assert url == f"http://sandbox-gateway:8000/ng-rollout/rollout-1{_SEGMENT}"
