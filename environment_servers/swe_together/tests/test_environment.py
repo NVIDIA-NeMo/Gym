@@ -376,13 +376,15 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
         final = json.loads((tmp_path / "one" / "failure.json").read_text())
         assert final["agent_close"]["cleanup_confirmed"] is True
         assert final["cleanup_receipts"]["candidate_sandbox"]["cleanup_confirmed"] is True
+        collected = _episode_record(result.model_dump(mode="json"))
+        assert collected["ng_trajectory"]["rollout_id"] == "one"
         assert (tmp_path / "one" / "candidate-agent-close.json").exists()
         return
     assert result.result and result.result.reward == 1
     collected = _episode_record(result.model_dump(mode="json"))
     assert collected["reward"] == 1
-    assert result.result.candidate_trajectory.rollout_id == "one"
-    assert collected["candidate_trajectory"]["rollout_id"] == "one"
+    assert result.result.ng_trajectory.rollout_id == "one"
+    assert collected["ng_trajectory"]["rollout_id"] == "one"
     assert "ng_agent_observations" in collected
     assert order == [
         "prepare",
