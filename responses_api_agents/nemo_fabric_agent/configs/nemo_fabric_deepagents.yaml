@@ -6,6 +6,7 @@ nemo_fabric_deepagents:
   responses_api_agents:
     nemo_fabric_agent:
       adapter_id: nvidia.fabric.langchain.deepagents
+      model_provider: openai-compatible
       harness_settings: {}
       fabric_config: {}
 

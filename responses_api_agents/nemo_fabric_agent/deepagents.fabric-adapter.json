@@ -1,0 +1,215 @@
+{
+  "contract_version": "fabric.adapter/v1alpha2",
+  "adapter_id": "nemo-gym.deepagents",
+  "adapter_kind": "python",
+  "runner": {
+    "module": "responses_api_agents.nemo_fabric_agent.deepagents_adapter"
+  },
+  "settings_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$defs": {
+      "interrupt_on": {
+        "type": "object",
+        "propertyNames": {
+          "minLength": 1
+        },
+        "additionalProperties": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "allowed_decisions": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "approve",
+                      "edit",
+                      "reject",
+                      "respond"
+                    ]
+                  },
+                  "description": "Human decisions allowed for this tool call."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Static description shown with the approval request."
+                },
+                "args_schema": {
+                  "type": "object",
+                  "description": "JSON Schema for editable tool arguments."
+                }
+              },
+              "required": [
+                "allowed_decisions"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "declarative_subagent": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Unique subagent identifier exposed to the main agent."
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Description the main agent uses to select this subagent."
+          },
+          "system_prompt": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Instructions for the subagent."
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional provider:model override; the main agent model is inherited when omitted."
+          },
+          "interrupt_on": {
+            "$ref": "#/$defs/interrupt_on",
+            "description": "Subagent-specific tool interrupt policy; the main agent policy is inherited when omitted."
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Skill source paths loaded only for this subagent."
+          },
+          "response_format": {
+            "type": "object",
+            "description": "JSON Schema for this subagent's structured response."
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "system_prompt"
+        ],
+        "additionalProperties": false
+      },
+      "async_subagent": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Unique asynchronous subagent identifier exposed to the main agent."
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Description the main agent uses to select this asynchronous subagent."
+          },
+          "graph_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Graph or assistant identifier on the Agent Protocol server."
+          },
+          "url": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional Agent Protocol server URL; omit it to use the SDK's default endpoint."
+          },
+          "headers": {
+            "type": "object",
+            "propertyNames": {
+              "minLength": 1
+            },
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Additional string-valued HTTP headers sent to the Agent Protocol server."
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "graph_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "type": "object",
+    "properties": {
+      "deepagents": {
+        "type": "object",
+        "properties": {
+          "interrupt_on": {
+            "$ref": "#/$defs/interrupt_on",
+            "default": {},
+            "description": "Mapping of Deep Agents tool names to human-in-the-loop interrupt policies; omitted tools run without an interrupt."
+          },
+          "subagents": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/declarative_subagent"
+                },
+                {
+                  "$ref": "#/$defs/async_subagent"
+                }
+              ]
+            },
+            "default": [],
+            "description": "Caller-defined declarative or asynchronous subagents; the built-in general-purpose subagent remains available by default."
+          }
+        },
+        "required": [],
+        "additionalProperties": false,
+        "default": {},
+        "description": "JSON-serializable options forwarded to Deep Agents."
+      },
+      "filesystem_root": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^/",
+        "description": "Optional absolute filesystem root. Use / only inside the task container. The execution workspace is unchanged."
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  },
+  "requirements": {},
+  "config": {
+    "accepts": [
+      "models",
+      "models.base_url",
+      "models.temperature",
+      "instructions.system",
+      "tools.enabled",
+      "tools.blocked",
+      "mcp",
+      "skills"
+    ]
+  },
+  "telemetry": {
+    "providers": {
+      "relay": {
+        "outputs": [
+          "atif",
+          "otel",
+          "openinference"
+        ]
+      },
+      "native": {
+        "outputs": [
+          "otel",
+          "openinference"
+        ]
+      }
+    }
+  }
+}

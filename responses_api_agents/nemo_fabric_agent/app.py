@@ -3,6 +3,8 @@
 
 import json
 import logging
+import os
+import sys
 import tempfile
 from asyncio import Semaphore
 from contextlib import nullcontext
@@ -38,6 +40,7 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 
 LOG = logging.getLogger(__name__)
 _MODEL_API_KEY_ENV = "NEMO_GYM_FABRIC_MODEL_API_KEY"  # pragma: allowlist secret
+_FABRIC_RESULT_PATH = Path("/logs/agent/fabric-result.json")
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -373,10 +376,23 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
         skills: list[str],
     ) -> FabricConfig:
         authored = deepcopy(self.config.fabric_config)
+        adapter_id = self.config.adapter_id
+        if adapter_id in {"nvidia.fabric.mini-swe-agent", "nemo-gym.mini-swe-agent"}:
+            adapter_id = "nemo-gym.mini-swe-agent"
+            discovery = authored.setdefault("discovery", {})
+            discovery["local_paths"] = [
+                str(Path(__file__).with_name("mini-swe-agent.fabric-adapter.json")),
+                *discovery.get("local_paths", []),
+            ]
+            child_site = Path(os.environ.get("NGSWE_AGENT_DEPS_DIR", sys.prefix)) / "mini-mcp-site"
+            if child_site.is_dir():
+                child_env = authored.setdefault("environment", {}).setdefault("env", {})
+                pythonpath = child_env.get("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
+                child_env["PYTHONPATH"] = os.pathsep.join(part for part in (str(child_site), pythonpath) if part)
         generated: dict[str, Any] = {
             "metadata": {"name": self.config.name or "nemo-gym-fabric-agent"},
             "harness": {
-                "adapter_id": self.config.adapter_id,
+                "adapter_id": adapter_id,
                 "settings": deepcopy(self.config.harness_settings),
             },
             "runtime": {"timeout_seconds": self.config.timeout},
@@ -465,15 +481,31 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             )
 
         result_mapping = result.to_mapping()
-        if result.status != "succeeded":
-            error = result.error.message if result.error is not None else "unknown Fabric failure"
-            error_mapping = _mapping(result_mapping.get("error"))
-            details = {k: v for k, v in error_mapping.items() if k != "message" and v not in (None, {}, [])}
-            if details:
-                error = f"{error} ({json.dumps(details, default=str, sort_keys=True)})"
-            raise RuntimeError(f"NeMo Fabric invocation failed: {error}")
-
         output = _mapping(result.output)
+        messages = output.get("messages") or []
+        mini_turn_limit = (
+            self.config.adapter_id in {"nvidia.fabric.mini-swe-agent", "nemo-gym.mini-swe-agent"}
+            and result.status == "failed"
+            and _mapping(result_mapping.get("error")).get("code") == "mini_swe_agent_incomplete"
+            and isinstance(messages, list)
+            and bool(messages)
+            and _mapping(messages[-1]).get("role") == "exit"
+            and _mapping(messages[-1].get("extra")).get("exit_status") == "LimitsExceeded"
+        )
+        if result.status != "succeeded":
+            try:
+                _FABRIC_RESULT_PATH.parent.mkdir(parents=True, exist_ok=True)
+                _FABRIC_RESULT_PATH.write_text(json.dumps(result_mapping, ensure_ascii=False, default=str) + "\n")
+            except OSError as error:
+                LOG.warning("Could not save Fabric result: %s", error)
+            if not mini_turn_limit:
+                error = result.error.message if result.error is not None else "unknown Fabric failure"
+                error_mapping = _mapping(result_mapping.get("error"))
+                details = {k: v for k, v in error_mapping.items() if k != "message" and v not in (None, {}, [])}
+                if details:
+                    error = f"{error} ({json.dumps(details, default=str, sort_keys=True)})"
+                raise RuntimeError(f"NeMo Fabric invocation failed: {error}")
+
         usage = _normalized_usage(result_mapping, output)
         input_tokens = _usage_value(usage, "input_tokens", "prompt_tokens", "inputTokens")
         output_tokens = _usage_value(usage, "output_tokens", "completion_tokens", "outputTokens")
@@ -508,6 +540,14 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                 total_tokens=total_tokens,
             ),
         )
+        if mini_turn_limit:
+            response.output.pop()  # Omit the synthesized final message after the real partial trajectory.
+            response.status = "incomplete"
+            response.metadata = {
+                "stop_reason": "turn_limit",
+                "fabric_status": "failed",
+                "fabric_result": json.dumps(result_mapping, default=str),
+            }
         return response, json.loads(json.dumps(result_mapping, default=str))
 
     async def responses(
@@ -555,6 +595,7 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             finished_naturally = not fabric_output.get("failed", False)
             if "completed" in fabric_output:
                 finished_naturally = bool(fabric_output["completed"])
+            finished_naturally = finished_naturally and fabric_result.get("status") == "succeeded"
             return NeMoFabricAgentVerifyResponse.model_validate(
                 verify_json
                 | {

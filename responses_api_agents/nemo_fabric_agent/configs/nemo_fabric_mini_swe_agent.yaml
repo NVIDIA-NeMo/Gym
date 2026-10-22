@@ -5,13 +5,14 @@ nemo_fabric_mini_swe_agent:
   _inherit_from: nemo_fabric_agent
   responses_api_agents:
     nemo_fabric_agent:
-      adapter_id: nvidia.fabric.mini-swe-agent
-      model_provider: anthropic
+      adapter_id: nemo-gym.mini-swe-agent
+      model_provider: openai-compatible
       harness_settings: {}
       fabric_config:
-        environment:
-          env:
-            MSWEA_COST_TRACKING: ignore_errors
+        models:
+          default:
+            settings:
+              cost_tracking: ignore_errors
         runtime:
           max_turns: 8
 

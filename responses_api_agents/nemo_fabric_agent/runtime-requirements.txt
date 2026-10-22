@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Shared controller runtime. Mini also needs the isolated MCP 2 child site described in README.md.
+nemo-fabric[mini-swe-agent,deepagents]==0.2.0
+mini-swe-agent==2.4.6
+deepagents==0.6.12
+litellm==1.106.0
+# Match the Gym common runtime instead of selecting incompatible transitive releases.
+openai==2.44.0
+mcp==1.29.0
+langchain-openai==1.3.4

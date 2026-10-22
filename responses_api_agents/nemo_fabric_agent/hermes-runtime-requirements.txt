@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Hermes pins OpenAI 2.24.0, incompatible with the Gym controller's 2.44.0.
+nemo-fabric[hermes-agent]==0.2.0
+hermes-agent @ git+https://github.com/NousResearch/hermes-agent@0ee05d72f2b30385d4861fd8e30511c6d51100e4
+tokenizers>=0.22.2
