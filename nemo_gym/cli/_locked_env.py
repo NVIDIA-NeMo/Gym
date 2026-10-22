@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Sync an isolated component from its committed lock, without runtime resolution."""
+"""Prefer committed component locks while retaining inherited parent requirements."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from packaging.requirements import Requirement
@@ -148,6 +149,44 @@ def _wheel_project(project: Path, venv: Path) -> Path:
     return destination
 
 
+def _install_parent_compatible(
+    project: Path,
+    venv: Path,
+    requirements: list[str],
+    constraints: list[str],
+    extras: tuple[str, ...],
+    env: dict[str, str],
+    verbose: bool,
+) -> None:
+    """Resolve the original project with inherited requirements, never mutate its lock.
+
+    This is the pre-lock installer contract for parent-only provider plugins and
+    compatible OpenAI versions. Ray constraints are also overrides, and apply only
+    when the component requires Ray; they must not add Ray to other components.
+    """
+    metadata = tomllib.loads((project / "pyproject.toml").read_text())
+    command = ["uv", "pip", "install", "--python", str(venv / "bin/python")]
+    config = project / "uv.toml"
+    if config.is_file():
+        command.extend(["--config-file", str(config)])
+    if metadata.get("tool", {}).get("uv", {}).get("package") is False:
+        command.extend(["--requirements", str(project / "pyproject.toml")])
+        for extra in extras:
+            command.extend(["--extra", extra])
+    else:
+        selected = f".[{','.join(extras)}]" if extras else "."
+        command.extend(["--editable", selected])
+    command.extend(requirements)
+    if verbose:
+        command.append("--verbose")
+    with TemporaryDirectory(prefix="gym-parent-constraints-") as directory:
+        if constraints:
+            path = Path(directory) / "constraints.txt"
+            path.write_text("\n".join(constraints) + "\n")
+            command.extend(["--constraint", str(path), "--overrides", str(path)])
+        subprocess.run(command, cwd=project, env=env, check=True)
+
+
 def sync_environment(
     project: Path,
     venv: Path,
@@ -158,7 +197,7 @@ def sync_environment(
     extras: tuple[str, ...] = (),
     verbose: bool = False,
 ) -> None:
-    """Install exactly the component lock, then verify parent-process contracts."""
+    """Sync the lock; resolve compatibility only for inherited parent mismatches."""
     project = project.absolute()
     for filename in ("pyproject.toml", "uv.lock"):
         if not (project / filename).is_file():
@@ -172,9 +211,11 @@ def sync_environment(
     env["UV_PROJECT_ENVIRONMENT"] = str(venv)
     # An enclosing training workspace or an inherited active venv must not redirect sync.
     command = ["uv", "sync", "--locked", "--project", str(project), "--python", python, "--no-dev"]
+    selected_extras = list(extras)
     if any(canonicalize_name(Requirement(value).name) == "nemo-lens" for value in requirements):
-        command.extend(["--extra", "telemetry"])
-    for extra in extras:
+        selected_extras.append("telemetry")
+    selected_extras = tuple(dict.fromkeys(selected_extras))
+    for extra in selected_extras:
         command.extend(["--extra", extra])
     if verbose:
         command.append("--verbose")
@@ -184,7 +225,16 @@ def sync_environment(
         check.extend(["--requirement", value])
     for value in constraints:
         check.extend(["--constraint", value])
-    subprocess.run(check, check=True)
+    try:
+        subprocess.run(check, check=True)
+    except subprocess.CalledProcessError as error:
+        # Only an explicit parent-contract mismatch permits compatibility resolution.
+        # Failed sync, stale locks, inaccessible sources and checker crashes stay fatal.
+        if error.returncode != 2:
+            raise
+        print("Resolving component dependencies with inherited parent requirements.", file=sys.stderr)
+        _install_parent_compatible(project, venv, requirements, constraints, selected_extras, env, verbose)
+        subprocess.run(check, check=True)
 
 
 def main() -> None:
@@ -224,11 +274,11 @@ def main() -> None:
     except RuntimeError as error:
         print(
             f"Locked environment setup failed: {error}\n"
-            "Update and commit the component lock to match the required parent packages; "
-            "setup will not fall back to an unlocked install.",
+            "Parent mismatches use compatibility resolution during component setup; "
+            "other failures require fixing the component metadata or environment.",
             file=sys.stderr,
         )
-        raise SystemExit(1) from error
+        raise SystemExit(2 if args.check else 1) from error
 
 
 if __name__ == "__main__":

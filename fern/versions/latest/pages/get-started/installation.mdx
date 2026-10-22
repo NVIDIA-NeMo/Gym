@@ -136,20 +136,25 @@ Run your first evaluation.
 
 ## Component dependency locks
 
-Each independently installed server has its own `pyproject.toml` and committed
-`uv.lock`. `gym env start`, `gym env prefetch`, and `gym env test` use
-`uv sync --locked` for that component, including when `uv_venv_dir` places its
-virtual environment outside the checkout. Components are not combined into one
-workspace.
+Repository-managed servers have their own `pyproject.toml` and committed
+`uv.lock`, enforced by CI. `gym env start`, `gym env prefetch`, and `gym env test`
+prefer `uv sync --locked`, including when `uv_venv_dir` places the virtual
+environment outside the checkout. Components are not combined into one workspace.
+Existing custom components with `requirements.txt` or an unlocked `pyproject.toml`
+retain their previous setup, discovery, and onboarding behavior without migration.
 
-A missing or stale lock fails setup. After intentionally editing a component's
-dependencies, run `uv lock` in that directory and commit both files. Do not use
-`--frozen` to hide a stale lock or add packages with an unlocked install.
+A stale component lock fails setup; sync errors do not trigger an unlocked retry.
+After intentionally editing managed dependencies, run `uv lock` in that directory
+and commit both files. Do not use `--frozen` to hide a stale lock.
 
-The server's locked OpenAI version must match the parent process. Ray is checked
-only when installed by that server. Telemetry uses the component's locked
-`telemetry` extra; additional parent plugins must be declared and locked in the
-component before startup. Incompatible versions or sources fail explicitly.
+If a successful locked sync does not satisfy inherited parent requirements, setup
+automatically uses compatibility resolution against the component's dependency
+metadata without changing its committed project or lock. This propagates parent-only
+sandbox provider plugins (including their exact sources and dependencies) and the
+parent's compatible OpenAI version. Ray constraints also act as overrides and apply
+only to components that require Ray. The resulting environment is checked again;
+unresolvable requirements or source mismatches still fail explicitly. Telemetry
+retains its selected extra. No user configuration changes are required.
 
 Wheel installations carry the source metadata needed for relative Gym dependencies;
 the installer reconstructs that metadata beside the writable component environment

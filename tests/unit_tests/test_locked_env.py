@@ -237,18 +237,18 @@ def test_main_preserves_command_failure_without_prescribing_a_lock_update(tmp_pa
     assert (project / "uv.lock").read_text() == "unchanged lock"
 
 
-def test_main_parent_contract_failure_retains_lock_migration_guidance(monkeypatch, capsys):
+def test_main_parent_contract_failure_signals_compatibility_resolution(monkeypatch, capsys):
     monkeypatch.setattr(_locked_env.sys, "argv", ["locked-env", "--check", "--requirement", "openai==0"])
     monkeypatch.setattr(importlib.metadata, "distribution", lambda _: _distribution("1"))
 
     with pytest.raises(SystemExit) as result:
         _locked_env.main()
 
-    assert result.value.code == 1
+    assert result.value.code == 2
     diagnostic = capsys.readouterr().err
     assert "Parent requires openai==0, but the component installed openai==1" in diagnostic
-    assert "Update and commit the component lock" in diagnostic
-    assert "will not fall back to an unlocked install" in diagnostic
+    assert "Parent mismatches use compatibility resolution" in diagnostic
+    assert "Update and commit" not in diagnostic
 
 
 @pytest.mark.parametrize("url", ["file:///opt/source%20tree", "https://example.invalid/source.tar.gz"])

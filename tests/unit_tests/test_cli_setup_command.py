@@ -82,12 +82,24 @@ class TestCLISetupCommandSetupEnvCommand:
         with raises(RuntimeError, match="must be a list"):
             setup_env_command(server, config, "sample")
 
-    @pytest.mark.parametrize("missing", ["pyproject.toml", "uv.lock"])
-    def test_missing_metadata_fails_before_install(self, tmp_path: Path, missing: str) -> None:
+    def test_missing_install_manifest_fails_before_install(self, tmp_path: Path) -> None:
         server, config = self._setup(tmp_path)
-        (server / missing).unlink()
-        with raises(RuntimeError, match=f"Missing {missing}"):
+        (server / "pyproject.toml").unlink()
+        with raises(RuntimeError, match="Missing pyproject.toml or requirements.txt"):
             setup_env_command(server, config, "sample")
+
+    @pytest.mark.parametrize("manifest", ["requirements.txt", "pyproject.toml"])
+    def test_custom_component_keeps_legacy_setup(self, tmp_path: Path, manifest: str) -> None:
+        server, config = self._setup(tmp_path)
+        (server / "uv.lock").unlink()
+        if manifest == "requirements.txt":
+            (server / "pyproject.toml").unlink()
+            (server / manifest).write_text("example-dependency==1\n")
+        command = setup_env_command(server, config, "sample")
+        assert "uv pip install" in command
+        assert "openai==test openai version" in command
+        assert "--overrides" in command and "ray==test ray version" in command
+        assert "_locked_env.py" not in command
 
     def test_verbosity_is_forwarded(self, tmp_path: Path) -> None:
         server, config = self._setup(tmp_path)

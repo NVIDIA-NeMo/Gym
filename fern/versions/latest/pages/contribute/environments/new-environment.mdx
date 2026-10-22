@@ -133,8 +133,12 @@ uv lock --project resources_servers/my_eval
 gym env test my_eval
 ```
 
-Commit both `pyproject.toml` and `uv.lock`. Setup uses `uv sync --locked` and will
-not resolve missing or stale locks at runtime.
+For repository-managed components, commit both `pyproject.toml` and `uv.lock`;
+CI enforces this contract. Setup prefers `uv sync --locked` and does not retry a
+failed or stale lock with an unlocked install. Existing external components may
+continue using `requirements.txt` or an unlocked project. If inherited parent
+plugins or compatible version pins differ from a successful locked install,
+setup resolves compatibility without modifying the committed lock.
 
 Write and run tests for your resources server:
 
