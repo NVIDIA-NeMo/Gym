@@ -1,0 +1,270 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""RNA design tools for an outside harness such as Claude Code, served over MCP.
+
+The same campaign as rna_design_agent, with the harness choosing the calls. Each rollout gets its own tool
+worker process holding its campaign. verify re-scores the pool with the suite's own metric and gates, the
+same reward as the agent.
+"""
+
+import asyncio
+import json
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Optional
+
+from fastapi import FastAPI, Request
+from pydantic import ConfigDict, Field
+
+from nemo_gym import failure_kinds
+from nemo_gym.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+from nemo_gym.server_utils import SESSION_ID_KEY
+
+
+HERE = Path(__file__).resolve().parent
+AGENT_DIR = HERE.parent.parent / "responses_api_agents" / "rna_design_agent"
+SUITES_DIR = AGENT_DIR / "suites"
+
+
+class RnaDesignResourcesServerConfig(BaseResourcesServerConfig):
+    worker_python: Optional[str] = Field(
+        default=None, description="Python with torch for gRNAde, from prepare.py --setup. Unset uses this server's."
+    )
+    work_dir: str = Field(default="", description="Where run directories go. Empty uses a temp dir.")
+    call_timeout_s: float = Field(default=1800.0, description="Wall-clock limit for one tool call.")
+
+
+class RnaDesignSeedSessionRequest(BaseSeedSessionRequest):
+    model_config = ConfigDict(extra="allow")
+    suite: str
+    target: dict[str, Any]
+
+
+class RnaDesignVerifyRequest(BaseVerifyRequest):
+    model_config = ConfigDict(extra="allow")
+    suite: str
+    target: dict[str, Any]
+
+
+class RnaDesignVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+    suite: str
+    target_name: str
+    best: Optional[float] = None
+    solved: bool = False
+    pool_size: int = 0
+    n_passing_gates: int = 0
+    rounds: int = 0
+    tool_calls: int = 0
+    tool_failures: int = 0
+    transcript: list[str] = Field(default_factory=list)
+
+
+class ToolWorker:
+    """One rollout's campaign process. Calls are serialized because the campaign state is not thread-safe.
+
+    Every request carries an id and its reply echoes it. A harness may give up on a slow call while the
+    worker still runs it, so the next request skips that late reply instead of taking it as its own.
+    """
+
+    def __init__(self, proc: asyncio.subprocess.Process, timeout_s: float) -> None:
+        self.proc, self.timeout_s, self.lock, self.next_id = proc, timeout_s, asyncio.Lock(), 0
+
+    async def ask(self, request: dict) -> dict:
+        async with self.lock:
+            self.next_id += 1
+            self.proc.stdin.write((json.dumps({**request, "id": self.next_id}) + "\n").encode())
+            await self.proc.stdin.drain()
+            while True:
+                line = await asyncio.wait_for(self.proc.stdout.readline(), timeout=self.timeout_s)
+                if not line:
+                    raise RuntimeError("the tool worker exited")
+                reply = json.loads(line)
+                if reply.get("id") == self.next_id:
+                    return reply
+
+    async def close(self) -> None:
+        if self.proc.returncode is None:
+            self.proc.kill()
+            await self.proc.wait()
+
+
+def _tool_specs() -> list[tuple[str, str, dict]]:
+    """(model-facing name, description, input schema) for every rds tool, the same the agent's model sees."""
+    sys.path.insert(0, str(AGENT_DIR))
+    from rds import registry
+
+    return [(spec.llm_name, spec.summary, spec.llm_tool()["input_schema"]) for spec in registry.all_tools()]
+
+
+class RnaDesignResourcesServer(SimpleResourcesServer):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    config: RnaDesignResourcesServerConfig
+    workers: dict[str, ToolWorker] = Field(default_factory=dict)
+    tool_names: dict[str, str] = Field(default_factory=dict)  # model-facing name -> registry name
+
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+        sys.path.insert(0, str(AGENT_DIR))
+        from prepare import ensure_suites
+        from rds import registry
+        from setup_eternafold import ensure_eternafold
+
+        ensure_eternafold()
+        ensure_suites()
+        self.tool_names = {spec.llm_name: spec.name for spec in registry.all_tools()}
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post("/campaign_state")(self.campaign_state)
+        app.post("/{path}")(self.call_tool)
+        return app
+
+    def mcp_tools(self, harvested, catchall):
+        # One tool per rds tool, each with its own schema, all dispatched through POST /{path}.
+        return harvested + [catchall.tool(name, schema, summary) for name, summary, schema in _tool_specs()]
+
+    def mcp_allowed_tools_for_session(self, seed_body: dict[str, Any]) -> Optional[list[str]]:
+        """The tools this rollout's task offers, the same the agent's model sees, plus the free campaign_state."""
+        from rds.campaign import applicable_tools
+        from rds.suite import Suite
+        from rds.targets import from_dict, register
+
+        name = str((seed_body.get("target") or {}).get("name", ""))
+        suite = Suite.load(self._suite_path(str(seed_body.get("suite", ""))))
+        campaign = next((c for c in suite.campaigns() if c.inline_target["name"] == name), None)
+        if campaign is None:
+            raise ValueError(f"target {name!r} is not in suite {suite.name!r}")
+        register(from_dict(campaign.inline_target))
+        return ["campaign_state"] + [spec.llm_name for spec in applicable_tools(campaign)]
+
+    def _suite_path(self, suite: str) -> Path:
+        known = {p.stem: p for p in SUITES_DIR.glob("*.yaml")}
+        if suite not in known:
+            raise ValueError(f"unknown suite {suite!r}; known suites: {sorted(known)}")
+        return known[suite]
+
+    async def seed_session(self, request: Request, body: RnaDesignSeedSessionRequest) -> BaseSeedSessionResponse:
+        session_id = request.session[SESSION_ID_KEY]
+        base = Path(self.config.work_dir) if self.config.work_dir else Path(tempfile.gettempdir()) / "rna_design"
+        base.mkdir(parents=True, exist_ok=True)
+        proc = await asyncio.create_subprocess_exec(
+            self.config.worker_python or sys.executable,
+            "-I",
+            str(HERE / "tool_worker.py"),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        worker = ToolWorker(proc, self.config.call_timeout_s)
+        opened = await worker.ask(
+            {
+                "op": "open",
+                "suite_path": str(self._suite_path(body.suite)),
+                "target_name": str(body.target.get("name", "")),
+                "run_dir": tempfile.mkdtemp(prefix="run_", dir=base),
+            }
+        )
+        if not opened["ok"]:
+            await worker.close()
+            raise RuntimeError(opened["error"])
+        self.workers[session_id] = worker
+        return BaseSeedSessionResponse()
+
+    async def campaign_state(self, request: Request, body: dict) -> dict:
+        """Show the campaign: the target and its constraints, how designs are ranked, the budget left, the best
+        designs so far and recent failures. It costs nothing, so read it before you start and whenever you need."""
+        worker = self.workers.get(request.session[SESSION_ID_KEY])
+        if worker is None:
+            return {"error": "no campaign for this session; seed_session was not called"}
+        reply = await worker.ask({"op": "view"})
+        return reply["result"] if reply["ok"] else {"error": reply["error"]}
+
+    async def call_tool(self, request: Request, path: str) -> dict:
+        """Run one rds tool for this rollout and return the campaign state after it."""
+        worker = self.workers.get(request.session[SESSION_ID_KEY])
+        if worker is None:
+            return {"error": "no campaign for this session; seed_session was not called"}
+        tool = self.tool_names.get(path, path)
+        reply = await worker.ask({"op": "call", "tool": tool, "arguments": await request.json()})
+        return reply["result"] if reply["ok"] else {"error": reply["error"]}
+
+    async def verify(self, request: Request, body: RnaDesignVerifyRequest) -> RnaDesignVerifyResponse:
+        session_id = request.session[SESSION_ID_KEY]
+        worker = self.workers.pop(session_id, None)
+        base = {**body.model_dump(), "suite": body.suite, "target_name": str(body.target.get("name", ""))}
+        if worker is None:
+            return RnaDesignVerifyResponse(
+                **base,
+                reward=0.0,
+                mask_sample=True,
+                failure_kind=failure_kinds.AGENT_RUN_ERROR,
+                failure_reason="no campaign for this session",
+            )
+        try:
+            reply = await worker.ask({"op": "score"})
+        finally:
+            await worker.close()
+        if not reply["ok"]:
+            return RnaDesignVerifyResponse(
+                **base,
+                reward=0.0,
+                mask_sample=True,
+                failure_kind=failure_kinds.AGENT_RUN_ERROR,
+                failure_reason=reply["error"],
+            )
+        result = reply["result"]
+        usage = body.response.usage
+        if result["tool_calls"] == 0 and not (usage and usage.input_tokens):
+            # The model was never reached (a dead or wrong endpoint), so this is no measurement of it.
+            failure = "the harness made no model call and no tool call"
+        elif result["tool_calls"] > 0 and result["tool_failures"] == result["tool_calls"] and not result["pool_size"]:
+            # Every tool call raised and nothing was designed, so the tools never worked. Same rule as the agent.
+            failure = "every tool call failed and no design was produced"
+        else:
+            failure = None
+        return RnaDesignVerifyResponse(
+            **base,
+            **{
+                k: result[k]
+                for k in (
+                    "best",
+                    "solved",
+                    "pool_size",
+                    "n_passing_gates",
+                    "rounds",
+                    "tool_calls",
+                    "tool_failures",
+                    "transcript",
+                )
+            },
+            reward=1.0 if result["solved"] else 0.0,
+            mask_sample=failure is not None,
+            failure_kind=failure_kinds.AGENT_RUN_ERROR if failure else None,
+            failure_reason=failure,
+        )
+
+
+if __name__ == "__main__":
+    RnaDesignResourcesServer.run_webserver()

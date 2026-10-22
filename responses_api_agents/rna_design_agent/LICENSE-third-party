@@ -1,0 +1,23 @@
+# Third-party components
+
+`rds/` is a copy of the RNA Design Scientist harness, Apache-2.0, © NVIDIA. It calls the
+components below rather than vendoring them. No model weights are in this directory.
+
+## Called by the harness
+
+| Component | Role | Licence |
+|---|---|---|
+| [EternaFold](https://github.com/eternagame/EternaFold) | folding engine behind `fold.eternafold`, `score.fold_match`, `score.switch_match`, `score.ensemble_defect` | BSD-3-Clause, © Stanford |
+| [arnie](https://github.com/DasLab/arnie) | interface to EternaFold | MIT, DasLab |
+| [gRNAde](https://github.com/chaitjo/geometric-rna-design) | generative model behind `generate.grnade` | MIT, © 2025 C. K. Joshi |
+| [RibonanzaNet / -SS](https://github.com/Shujun-He/RibonanzaNet) | secondary structure behind `struct.rnet_ss`, and gRNAde's own filter | MIT |
+
+`rds/tools/pyg_shims/` holds pure-PyTorch versions of the two functions gRNAde uses from
+`torch_scatter` and `torch_cluster` (MIT), used only when those packages are not installed.
+
+## Data
+
+| File | Source | Licence |
+|---|---|---|
+| `suites/` (built on first start, not in the repository) | target structures collated by [RNAInvBench](https://github.com/COLA-Laboratory/RNAInvBench) from Eterna100 v1/v2, Rfam-learn, Rfam-taneda, antaRNA and ArchiveII, read from its published files at a pinned commit | MIT. Structures and pinned bases only, no sequences from those sets. |
+| `data/example.jsonl` and `resources_servers/rna_design/data/` | five Eterna100 v1 targets from the same files, and their example rollouts | MIT |
