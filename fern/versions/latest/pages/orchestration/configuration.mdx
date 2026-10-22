@@ -64,7 +64,7 @@ If `health_check` is not set, it defaults to `/health` on `port`. If it is set w
 
 ### type: vllm_pd
 
-Prefill/decode disaggregated vLLM: two vLLM tiers behind a `vllm-router`. A single `vllm_pd` entry named `X` deploys three services: `X-prefill`, `X-decode`, and the router `X`. Set `driver.policy_model` to `X`. The router's `container` must provide `vllm-router`. See the [how-to](/orchestration/how-to/prefill-decode-disaggregation).
+Prefill/decode disaggregated vLLM: two vLLM tiers behind a `vllm-router`. A single `vllm_pd` entry named `X` deploys three services: `X-prefill`, `X-decode`, and the router `X`. Set `driver.policy_model` to `X`. The router's `container` must provide `vllm-router`. See the [Prefill/Decode Disaggregation how-to](/orchestration/how-to/prefill-decode-disaggregation).
 
 | Field | Default | Description |
 | --- | --- | --- |
