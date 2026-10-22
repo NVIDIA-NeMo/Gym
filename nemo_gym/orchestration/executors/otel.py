@@ -208,17 +208,16 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
         ]
     }
 
-    # The engine span names its rollout only inside `gen_ai.request.id`, which vLLM builds from Gym's
-    # `X-Request-Id: <rollout id>-<8 hex>` (with its own `chatcmpl-` in front). Aggregators group on whole
-    # attributes, so copy the rollout id out into the key every other Gym span uses. Engine request ids
-    # that are not Gym's (a plain uuid) do not match and are left alone.
+    # vLLM records Gym's `X-Request-Id: <rollout id>-<8 hex>` as `gen_ai.request.id` (prefixed `chatcmpl-`), the
+    # only place the engine span names its rollout. Aggregators group on whole attributes, so copy it into the
+    # key every other Gym span uses. Request ids that are not Gym's (a plain uuid) do not match.
     gym_engine_request_id = "^(?:chatcmpl-)?(.+)-[0-9a-f]{8}$$"
     engine_rollout_id = {
         "trace_statements": [
             {
                 "context": "span",
                 "statements": [
-                    # Two editors rather than one converter: `replace_pattern` only edits in place.
+                    # Copy, then trim in place: the pinned collector has no converter form of `replace_pattern`.
                     f'set(attributes["{ROLLOUT_ID_ATTRIBUTE}"], attributes["gen_ai.request.id"]) '
                     f'where name == "llm_request" and attributes["{ROLLOUT_ID_ATTRIBUTE}"] == nil '
                     f'and attributes["gen_ai.request.id"] != nil '
