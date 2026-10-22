@@ -249,10 +249,22 @@ class HarborStepAgent(HarborPhaseSettings):
     user: str | int | None = None
 
 
+# Harbor's `VerifierConfig.timeout_sec` default, which a step's verifier gets when `[steps.verifier]` names none:
+# `StepConfig.verifier` is a full `VerifierConfig` (0.22.0 and main alike), so the task's `[verifier].timeout_sec`
+# never reaches a step (`_step_verifier_timeout_sec`'s fallback to it is dead code there).
+HARBOR_STEP_VERIFIER_TIMEOUT_SEC = 600.0
+
+
 class HarborStepVerifier(HarborPhaseSettings):
-    """``[steps.verifier]``: unset values fall back to the task's ``[verifier]``, as in Harbor. ``collect`` is the
+    """``[steps.verifier]``: ``user``, ``env``, ``environment_mode`` and ``environment`` fall back to the task's
+    ``[verifier]`` as Harbor resolves them (``_step_verifier_user``, ``resolve_step_verifier_mode``,
+    ``resolve_effective_verifier_env_config``). ``timeout_sec`` does not: Harbor's step verifier is a
+    ``VerifierConfig`` of its own with the 600 s default, so a step that names none is graded within
+    :data:`HARBOR_STEP_VERIFIER_TIMEOUT_SEC`, whatever the task's ``[verifier].timeout_sec`` says
+    (:meth:`HarborTaskConfig.step_verifier_timeout_sec`; the loader warns when the two differ). ``collect`` is the
     step's own ``[[steps.verifier.collect]]`` hooks, run after the task's in the step's collection pass (Harbor's
-    ``_collect_hooks_for``: the task's hooks, then the step's)."""
+    ``_collect_hooks_for``: the task's hooks, then the step's). A shared step cannot declare its own environment, as
+    the task's verifier cannot (Harbor's ``_validate_mode_env_consistency`` is on the class both share)."""
 
     timeout_sec: float | None = Field(default=None, gt=0)
     user: str | int | None = None
@@ -260,6 +272,15 @@ class HarborStepVerifier(HarborPhaseSettings):
     environment_mode: Literal["separate", "shared"] | None = None
     environment: HarborEnvironment | None = None
     collect: list[HarborCollectHook] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def shared_has_no_environment(self) -> "HarborStepVerifier":
+        if self.environment_mode == "shared" and self.environment is not None:
+            raise ValueError(
+                "[steps.verifier].environment_mode='shared' is incompatible with [steps.verifier.environment]; "
+                "omit the environment or set environment_mode='separate'"
+            )
+        return self
 
 
 class HarborStep(HarborSettings):
@@ -337,7 +358,13 @@ class HarborTaskConfig(HarborSettings):
         return step.agent.timeout_sec if step.agent.timeout_sec is not None else self.agent.timeout_sec
 
     def step_verifier_timeout_sec(self, step: HarborStep) -> float:
-        return step.verifier.timeout_sec if step.verifier.timeout_sec is not None else self.verifier.timeout_sec
+        """The step's own ``[steps.verifier].timeout_sec``, else Harbor's step default of 600 s, never the task's
+        ``[verifier].timeout_sec`` (:data:`HARBOR_STEP_VERIFIER_TIMEOUT_SEC`)."""
+        if step.verifier.timeout_sec is not None:
+            return step.verifier.timeout_sec
+        # Harbor's `_step_verifier_timeout_sec` feeds that default through `_resolve_timeout_sec`, so it scales by
+        # the dataset's `timeout_multiplier` like every budget the task names (`apply_dataset_config` carries it).
+        return HARBOR_STEP_VERIFIER_TIMEOUT_SEC * self._timeout_multiplier
 
     @property
     def is_shared_verifier(self) -> bool:

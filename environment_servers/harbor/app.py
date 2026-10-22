@@ -161,6 +161,8 @@ class HarborTurnResult(BaseModel):
     verifier_logs_dir: str | None = None
     verifier_seconds: float | None = None
     verifier_network: str | None = None
+    # "shared": the step's test.sh ran in the agent's sandbox; "separate": in a sandbox of its own for this turn.
+    verifier_mode: Literal["shared", "separate"] | None = None
     response: NeMoGymResponse | None = None
     agent_observations: AgentObservationBundle | None = None
     # The harness's own turns from the session close, as ``ng_trajectory`` carries them for a single-turn task.
@@ -211,8 +213,9 @@ class HarborEpisodeResult(SingleAgentTurnResult):
     verifier_return_code: int | None = None
     verifier_logs_dir: str | None = None
     verifier_seconds: float | None = None
-    # "shared": test.sh ran in the agent's sandbox; "separate": in its own sandbox from [verifier.environment].
-    verifier_mode: Literal["shared", "separate"] | None = None
+    # "shared": test.sh ran in the agent's sandbox; "separate": in its own sandbox from [verifier.environment]. A
+    # multi-step task reports the mode its turns shared, or "mixed" when its steps resolved to both (each turn says).
+    verifier_mode: Literal["shared", "separate", "mixed"] | None = None
     # The network the verifier ran under (the task's `[verifier].network_mode`, "public" when unset).
     verifier_network: str | None = None
     turns: list[HarborTurnResult] | None = None
@@ -651,11 +654,11 @@ class HarborEnvironmentServer(
         per start and the image pull retries, so a start that recovered on a retry begins the task with its whole
         budget.
         """
-        separate = self._separate_verifier(task)
         hooks = sum(hook.timeout_sec + COLLECT_HOOK_GRACE_S for hook in task.config.verifier.collect)
         if task.turns:
             # Every step is a turn of its own: a fresh harness session, the step's setup.sh and healthcheck when it
-            # has them, the task's hooks and the step's own, and the step's verifier.
+            # has them, the task's hooks and the step's own, and the step's verifier, plus a verifier sandbox start
+            # (and overlay) for every turn that verifies separately.
             budget = sum(
                 self.config.harness_setup_allowance_s
                 + self._step_setup_budget_s(task, turn)
@@ -667,14 +670,20 @@ class HarborEnvironmentServer(
                 + self.config.verifier_grace_s
                 for turn in task.turns
             )
-        else:
-            budget = (
-                self.config.harness_setup_allowance_s
-                + task.config.agent.timeout_sec
-                + hooks
-                + task.config.verifier.timeout_sec
-                + self.config.verifier_grace_s
-            )
+            for turn in task.turns:
+                if self._turn_separate(task, turn):
+                    budget += self.config.sandbox_ready_timeout_s
+                    if _verifier_gets_overlay(self._turn_verifier_view(task, turn), True):
+                        budget += task.config.environment.build_timeout_sec
+            return budget
+        budget = (
+            self.config.harness_setup_allowance_s
+            + task.config.agent.timeout_sec
+            + hooks
+            + task.config.verifier.timeout_sec
+            + self.config.verifier_grace_s
+        )
+        separate = self._separate_verifier(task)
         if separate:
             budget += self.config.sandbox_ready_timeout_s
             if _verifier_gets_overlay(task, separate):
@@ -926,9 +935,10 @@ class HarborEnvironmentServer(
     ) -> dict[str, Any]:
         """Export the turn's transcript for the verifier and run it: the task's verifier for a single-turn
         episode, or, for ``turn`` (the step and the request it was sent), the turn's collection pass
-        (:meth:`_collect_turn_artifacts`) and then the shared verifier with the step's settings and ``tests/``. A
-        transcript the converter cannot represent masks the turn instead of grading it; a collection the sandbox
-        could not serve masks it as an outage."""
+        (:meth:`_collect_turn_artifacts`) and then the step's verifier with its settings and ``tests/``, in the
+        agent's sandbox or, for a step that verifies separately (:meth:`_turn_separate`), in a verifier sandbox of
+        its own. A transcript the converter cannot represent masks the turn instead of grading it; a collection the
+        sandbox could not serve masks it as an outage."""
         task = session.task
         try:
             if turn is None:
@@ -942,7 +952,11 @@ class HarborEnvironmentServer(
             return await self._run_verifier(session, trajectory, response=agent_response)
         step = turn[0]
         # Harbor's per-step order: the collection pass (hooks, /logs/artifacts, the task's and the step's artifacts)
-        # after the agent and before the verifier, into the turn's own logs folder, with nothing stopped.
+        # after the agent and before the verifier, into the turn's own logs folder. Nothing is stopped, except on the
+        # last turn of a task whose last step verifies separately (Harbor's `_run_step`: `main` before the sidecar
+        # pass, the whole agent environment before the step's verifier), as the single-step separate path stops it.
+        separate = self._turn_separate(task, step)
+        last_separate = separate and step.name == task.turns[-1].name
         try:
             logs_dir = self._reserve_logs_dir()
         except (OSError, RuntimeError) as exc:
@@ -951,8 +965,14 @@ class HarborEnvironmentServer(
                 failure_kinds.PERSISTENCE_FAILED,
                 f"Could not create verifier logs under {self._artifacts_dir}: {type(exc).__name__}: {exc}",
             )
+        started = asyncio.get_running_loop().time()
         try:
-            await self._collect_turn_artifacts(session, step, logs_dir / "artifacts")
+            restored = await self._collect_turn_artifacts(
+                session, step, logs_dir / "artifacts", stop_main=last_separate
+            )
+            if last_separate:
+                # Nothing of the agent's may keep running while the verifier sandbox grades its last turn.
+                await session.stop_agent_side()
         except HTTPException:
             raise
         except Exception as exc:
@@ -960,14 +980,30 @@ class HarborEnvironmentServer(
             return self._masked(failure_kinds.PROVIDER_UNAVAILABLE, f"{type(exc).__name__}: {exc}") | {
                 "verifier_logs_dir": str(logs_dir.resolve())
             }
-        return await self._run_shared_verifier(
-            session,
-            trajectory,
-            settings=self._turn_verifier_settings(task, step),
-            test_dirs=(task.path / "tests", task.path / step.tests_dir),
-            logs_dir=logs_dir,
-            collect_hooks=False,
+        settings = self._turn_verifier_settings(task, step)
+        test_dirs = (task.path / "tests", task.path / step.tests_dir)
+        if separate:
+            # Harbor's separate mode for this step alone: a verifier sandbox of its own around this verification,
+            # fed the collected archives and the tests, while the agent's sandbox keeps running for the next turn.
+            outcome = await self._verify_separately(
+                session,
+                self._turn_verifier_view(task, step),
+                settings,
+                trajectory,
+                logs_dir,
+                restored,
+                started=started,
+                test_dirs=test_dirs,
+            )
+            return outcome | {"verifier_mode": "separate"}
+        # A shared turn restores nothing: the staged trees stay as the diagnostic, the archives have served their
+        # purpose (a separate turn's are removed once restored, by `_verify_separately`).
+        for archive, *_ in restored:
+            archive.unlink(missing_ok=True)
+        outcome = await self._run_shared_verifier(
+            session, trajectory, settings=settings, test_dirs=test_dirs, logs_dir=logs_dir, collect_hooks=False
         )
+        return outcome | {"verifier_mode": "shared"}
 
     async def _agent_turn(
         self,
@@ -1259,7 +1295,7 @@ class HarborEnvironmentServer(
             response=ran.response,
             ng_agent_observations=ran.agent_observations,
             ng_trajectory=ran.trajectory,
-            verifier_mode="shared",
+            verifier_mode=_turns_verifier_mode(results),
             turns=results,
             turn_reward_strategy=strategy,
             turns_without_verifier_result=sum(1 for result in results if result.verifier_rewards is None),
@@ -1272,12 +1308,14 @@ class HarborEnvironmentServer(
         """What a turn needs in place before its agent session opens: no grading files from the previous turn, the
         step's user, the step's ``workdir/`` and ``setup.sh``, and the step's solution.
 
-        Every turn after the first follows a shared verification in this sandbox (a multi-step task verifies in
-        the agent's sandbox), which left its tests, its reward and the previous agent's transcript there, so they
-        are removed first (:meth:`_reset_shared_verifier_dirs`); the first turn keeps whatever the image put in
-        ``/tests``. Harbor 0.22.0 empties ``/tests`` and ``/logs/verifier`` only right before each step's shared
-        verifier, so its next step's agent still sees the previous step's tests; Harbor main moved that reset into
-        its step preparation, and this follows main. Harbor also empties the whole ``/logs/agent`` before a step
+        A turn that follows a turn verified in this sandbox (a shared turn, :meth:`_turn_separate` false) opens
+        where that verification left its tests, its reward and the previous agent's transcript, so they are removed
+        first (:meth:`_reset_shared_verifier_dirs`); the first turn, and a turn after one that verified in a
+        sandbox of its own, keep whatever the image put in ``/tests``, since nothing was graded here. Harbor 0.22.0
+        empties ``/tests`` and ``/logs/verifier`` only right before each step's shared verifier, so its next step's
+        agent still sees the previous step's tests, and its separate mode never touches the agent's ``/tests``;
+        Harbor main moved that reset into its step preparation, gated on the previous step having run a shared
+        verifier there, and this follows main. Harbor also empties the whole ``/logs/agent`` before a step
         that does not resume (or moves the bind-mounted contents away); here only the server's
         ``trajectory.json`` goes and the agent's own files under ``/logs/agent`` stay. The reset removes files at
         those paths: a process the previous agent left running, or a copy it took during its verification, is out
@@ -1295,7 +1333,8 @@ class HarborEnvironmentServer(
         The oracle alone then gets the step's ``solution/`` at ``/solution`` (:meth:`_place_turn_solution`).
         """
         task = session.task
-        if turn is not task.turns[0]:
+        index = next(i for i, candidate in enumerate(task.turns) if candidate is turn)
+        if index and not self._turn_separate(task, task.turns[index - 1]):
             await self._reset_shared_verifier_dirs(session.sandbox)
         user = str(turn.config.agent.user) if turn.config.agent.user is not None else task.user
         if user != session.agent_user:
@@ -1398,15 +1437,25 @@ class HarborEnvironmentServer(
                 422, f"Task {task.task_id!r} declares no image; sandbox-less tasks are not supported yet"
             )
         separate = self._separate_verifier(task)
-        if separate and task.turns:
-            # The loader admits multi-step tasks in Harbor's shared mode only; `separate_verifier_for_artifacts`
-            # must not force them into a mode their turns do not run.
-            raise HTTPException(
-                422,
-                f"Task {task.task_id!r} is a multi-step task; separate verification of its turns is not supported "
-                "yet (unset separate_verifier_for_artifacts or drop the task's artifacts)",
-            )
-        if separate and _verifier_image(task, separate) is None:
+        # A multi-step task's separate turns each verify in a view of the task (`_turn_verifier_view`): the checks
+        # below that read the task's verifier image, environment and network run on every such view too.
+        views = [
+            (f" step {turn.name!r}", self._turn_verifier_view(task, turn))
+            for turn in task.turns
+            if self._turn_separate(task, turn)
+        ]
+        for where, view in views:
+            if _verifier_image(view, True) is None:
+                raise HTTPException(
+                    422,
+                    f"Task {task.task_id!r}{where} has no image for its separate verifier: no [steps.verifier.environment] "
+                    f"or [verifier.environment] names a docker_image and no verifier image built from "
+                    f"{TESTS_DOCKERFILE} is recorded in {task.path.parent / BUILT_IMAGES_FILE}; prepare the dataset "
+                    "again, or name a prebuilt image",
+                )
+            if view.config.verifier.environment is not None:
+                resolve_env_templates(view.config.verifier.environment.env)
+        if separate and not task.turns and _verifier_image(task, separate) is None:
             # The loader refuses this shape (no [verifier.environment].docker_image and no verifier image built from
             # tests/Dockerfile recorded); kept as the seed's invariant for a task object that did not come from it.
             raise HTTPException(
@@ -1432,11 +1481,13 @@ class HarborEnvironmentServer(
             verifier_network_policy = self._verifier_network_policy(task)
         except ValueError as exc:
             raise HTTPException(422, f"Task {task.task_id!r} [verifier] network policy: {exc}") from exc
-        if verifier_network_policy is not None and not separate:
+        shared_turns = [turn.name for turn in task.turns if not self._turn_separate(task, turn)]
+        if verifier_network_policy is not None and (not separate or shared_turns):
             raise HTTPException(
                 422,
-                f"Task {task.task_id!r} restricts the verifier's network but verifies in the agent's sandbox, whose "
-                "network policy cannot be changed after it started; declare separate verification",
+                f"Task {task.task_id!r} restricts the verifier's network but verifies in the agent's sandbox"
+                f"{' for step(s) ' + ', '.join(shared_turns) if shared_turns else ''}, whose network policy cannot be "
+                "changed after it started; declare separate verification",
             )
         for turn in task.turns:
             resolve_env_templates(turn.config.verifier.env)
@@ -1649,6 +1700,15 @@ class HarborEnvironmentServer(
                 trajectory=trajectory,
             )
         )
+
+
+def _turns_verifier_mode(turns: list[HarborTurnResult]) -> Literal["shared", "separate", "mixed"] | None:
+    """The episode's ``verifier_mode`` from its turns': the one mode every graded turn used, ``mixed`` when the steps
+    resolved to both (Harbor's ``resolve_step_verifier_mode`` is per step), ``None`` when no turn was graded."""
+    modes = {turn.verifier_mode for turn in turns if turn.verifier_mode is not None}
+    if not modes:
+        return None
+    return next(iter(modes)) if len(modes) == 1 else "mixed"
 
 
 def _harness_params(responses_create_params: Any) -> Any:
