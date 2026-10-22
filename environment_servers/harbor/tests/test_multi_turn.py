@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from omegaconf import OmegaConf
 
 from environment_servers.harbor.app import (
     NO_TURN_RESULT_KIND,
@@ -2089,6 +2090,76 @@ async def test_a_separate_turn_whose_verifier_sandbox_fails_masks_that_turn_only
     assert result.turns[1].mask_sample and result.turns[1].failure_kind == "provider_unavailable"
     assert "provider down" in result.turns[1].failure_reason and result.mask_sample
     assert result.turns[1].verifier_mode == "separate"
+
+
+async def test_a_task_shipping_harbors_seed_trajectory_runs_for_the_oracle_and_is_refused_for_any_other_agent(
+    tmp_path, monkeypatch
+):
+    """Harbor 0.22.0's `_resolve_load_trajectory` loads `steps/<first step>/trajectory.json` into the agent's session for
+    every agent but the oracle and nop ("the oracle runs the task's own solution ... task authors validate with it").
+    No harness here can be seeded with it yet: the oracle runs the task as Harbor's does, and any other agent is
+    refused at seed, terminally, naming the file, before any sandbox is paid for."""
+    steps = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n'
+    seed = '{"schema_version": "ATIF-v1.7", "steps": []}'
+    server, task, _, created = multi_turn_server(tmp_path, monkeypatch, steps, {"plan": "P", "build": "B"})
+    (task.path / "steps" / "plan" / "trajectory.json").write_text(seed)
+    task = load_task(task.path)
+    assert task.seed_trajectory == Path("steps/plan/trajectory.json")
+    server.config.tasksets["ds"].tasks["hello"] = task.digest
+
+    response = await server.run_request(request_for(task))
+
+    failure = response.failure
+    assert failure is not None and failure.stage == "seed" and failure.terminal
+    assert "ships Harbor's seed trajectory steps/plan/trajectory.json" in failure.failure_reason
+    assert (
+        "refused for agent 'agent'" in failure.failure_reason and "The oracle validates it" in failure.failure_reason
+    )
+    assert created == [] and not server.server_client.seed_bodies()
+
+    server, task, _, created = multi_turn_server(
+        tmp_path / "oracle",
+        monkeypatch,
+        steps,
+        {"plan": "P", "build": "B"},
+        agent_implementation="harbor_oracle_agent",
+    )
+    (task.path / "steps" / "plan" / "trajectory.json").write_text(seed)
+    task = load_task(task.path)
+    server.config.tasksets["ds"].tasks["hello"] = task.digest
+    response = await server.run_request(request_for(task))
+    assert response.failure is None, response.failure
+    assert [turn.reward for turn in response.result.turns] == [1.0, 1.0] and len(created) == 1
+
+
+async def test_a_seed_trajectory_is_not_refused_for_an_agent_block_the_server_cannot_read(
+    tmp_path, monkeypatch, caplog
+):
+    """An agent instance with several implementations under it (or a client the merged config does not show) is not
+    known to be any harness: `_seed_solution` places no solution for it and warns, and the seed trajectory check does
+    the same rather than refusing an oracle wired that way as "agent 'agent'"."""
+    steps = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n'
+    server, task, _, created = multi_turn_server(
+        tmp_path, monkeypatch, steps, {"plan": "P", "build": "B"}, agent_implementation="harbor_oracle_agent"
+    )
+    (task.path / "steps" / "plan" / "trajectory.json").write_text('{"schema_version": "ATIF-v1.7", "steps": []}')
+    task = load_task(task.path)
+    server.config.tasksets["ds"].tasks["hello"] = task.digest
+    block = OmegaConf.to_container(server.server_client.global_config_dict)
+    block["agent"]["responses_api_agents"]["other_agent"] = dict(
+        block["agent"]["responses_api_agents"]["harbor_oracle_agent"]
+    )
+    server.server_client.global_config_dict = OmegaConf.create(block)
+    assert server._agent_implementation() is None
+
+    with caplog.at_level("WARNING"):
+        response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    assert [turn.reward for turn in response.result.turns] == [1.0, 1.0] and len(created) == 1
+    assert "ships Harbor's seed trajectory steps/plan/trajectory.json" in caplog.text
+    assert "no single responses_api_agents implementation" in caplog.text
+    assert "the task runs without its prior context" in caplog.text
 
 
 def test_the_budget_counts_a_verifier_sandbox_start_per_separate_turn(tmp_path, monkeypatch):
