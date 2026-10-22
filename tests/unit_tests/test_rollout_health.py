@@ -1919,6 +1919,7 @@ def test_failed_collection_still_writes_quality_summary_with_counts(
     seen = {}
 
     async def failing_collection(self, config):
+        self._collection_started = True
         seen["disable_health_check"] = config.disable_health_check
         _write_fixture(tmp_path, [(_record(0, 0), [_call()])])
         (tmp_path / "rollouts_failures.jsonl").write_bytes(
@@ -1926,7 +1927,7 @@ def test_failed_collection_still_writes_quality_summary_with_counts(
         )
         raise RuntimeError("EVAL FAILED: 1/3 samples completed.")
 
-    monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", failing_collection)
+    monkeypatch.setattr(RolloutCollectionHelper, "_run_locked_from_config", failing_collection)
     monkeypatch.setattr(
         cli_eval,
         "get_global_config_dict",
@@ -1938,7 +1939,7 @@ def test_failed_collection_still_writes_quality_summary_with_counts(
         cli_eval.collect_rollouts()
 
     artifacts = json.loads((tmp_path / "quality_summary.json").read_text())["run"]["artifacts"]
-    assert seen["disable_health_check"] is True
+    assert seen["disable_health_check"] is False
     assert (artifacts["records"], artifacts["expected"], artifacts["missing"]) == (1, 3, 1)
     assert "partial" not in artifacts  # A Python error keeps the full check.
     assert artifacts["failed"] == {"total": 1, "final": 0, "not_final": 1, "by_class": {"agent_run_error": 1}}
@@ -1973,13 +1974,14 @@ from nemo_gym.rollout_collection import RolloutCollectionHelper
 root = Path({str(tmp_path)!r})
 
 async def collection(self, config):
+    self._collection_started = True
     (root / "rollouts.jsonl").write_bytes((root / "landed.jsonl").read_bytes())
     self._landed_keys.add((0, 0))
     (root / "rollouts.jsonl").chmod(0)
     (root / "collecting").touch()
     await asyncio.sleep(600)
 
-RolloutCollectionHelper.run_from_config = collection
+RolloutCollectionHelper._run_locked_from_config = collection
 cli_eval.get_global_config_dict = lambda: {{
     "input_jsonl_fpath": str(root / "input.jsonl"),
     "output_jsonl_fpath": str(root / "rollouts.jsonl"),
@@ -2011,30 +2013,6 @@ cli_eval.collect_rollouts()
     assert "verdicts" not in summary["run"]
     assert process.returncode == 143
     assert elapsed < 30
-
-
-def test_a_new_run_removes_the_previous_jobs_health_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("quality_summary.json", "rollout_verdicts.jsonl"):
-        (tmp_path / name).write_text('{"run": {"artifacts": {"healthy": true}}}')
-    seen = {}
-
-    async def collection(self, config):
-        seen["reports"] = sorted(path.name for path in tmp_path.iterdir())
-
-    monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", collection)
-    monkeypatch.setattr(
-        cli_eval,
-        "get_global_config_dict",
-        lambda: {
-            "input_jsonl_fpath": str(tmp_path / "input.jsonl"),
-            "output_jsonl_fpath": str(tmp_path / "out.jsonl"),
-        },
-    )
-    monkeypatch.setattr("nemo_gym.telemetry.setup.init_telemetry", lambda **kwargs: None)
-
-    cli_eval.collect_rollouts()
-
-    assert seen["reports"] == []
 
 
 def test_duplicated_rollout_rows_make_the_run_unhealthy(tmp_path: Path) -> None:

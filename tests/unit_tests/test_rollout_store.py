@@ -143,6 +143,7 @@ def test_recovery_and_offline_selection_use_the_newest_dispatch(prepared_run):
 
 @pytest.mark.parametrize("reopen", [False, True])
 def test_large_history_retains_offsets_instead_of_trajectories(prepared_run, reopen, monkeypatch):
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "80")
     output, prepare = prepared_run
     store = RolloutStore.start_or_resume(output, prepare, resume=False)
     blob = "x" * (256 * 1024)
@@ -812,7 +813,8 @@ def test_judge_recovery_does_not_promote_diagnostics_to_saved_answers(saved):
 
 
 @pytest.mark.parametrize("stop_after_reset", [False, True])
-def test_resubmit_budget_survives_reopen_without_reusing_attempt_ids(prepared_run, stop_after_reset):
+def test_resubmit_budget_survives_reopen_without_reusing_attempt_ids(prepared_run, stop_after_reset, monkeypatch):
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
     from nemo_gym.path_utils import resubmit_offset_path_for
 
     output, prepare = prepared_run
@@ -852,7 +854,8 @@ def test_resubmit_budget_survives_reopen_without_reusing_attempt_ids(prepared_ru
 
 
 @pytest.mark.parametrize("tail", [b"", b"\n\n", b'{"interrupted":'])
-def test_resubmit_repaired_tail_does_not_exempt_new_failures(prepared_run, tail):
+def test_resubmit_repaired_tail_does_not_exempt_new_failures(prepared_run, tail, monkeypatch):
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
     from nemo_gym.path_utils import resubmit_offset_path_for
 
     output, prepare = prepared_run
@@ -877,7 +880,8 @@ def test_resubmit_repaired_tail_does_not_exempt_new_failures(prepared_run, tail)
     assert offline.selected("failure")[0]["_ng_failure_terminal"] is True
 
 
-def test_resubmit_identity_refusal_does_not_reset_budget(prepared_run):
+def test_resubmit_identity_refusal_does_not_reset_budget(prepared_run, monkeypatch):
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
         row = store.pending(1)[0]
@@ -905,7 +909,8 @@ def test_resubmit_offset_is_part_of_alias_ownership(prepared_run):
     assert snapshot(output) == before
 
 
-def test_resubmit_legacy_main_file_failures_match_offline_budget(prepared_run):
+def test_resubmit_legacy_main_file_failures_match_offline_budget(prepared_run, monkeypatch):
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
     output, prepare = prepared_run
     rows, _ = prepare()
     materialized_path_for(output).write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
@@ -949,3 +954,100 @@ def test_resubmit_offset_helper_keeps_existing_public_contract(tmp_path):
     failures_path_for(output).write_bytes(b'{"failure": 1}\n\n')
     assert record_resubmit_offset(output) == 2
     assert load_resubmit_offset(output) == 2
+
+
+def test_saved_retry_cap_drives_resume_exporters_and_health(prepared_run, monkeypatch):
+    from nemo_gym.health.types import RunHealthLimits
+    from nemo_gym.rollout_collection import _failure_export_metrics
+    from nemo_gym.rollout_health import run_health_checks, write_provisional_summary
+
+    output, prepare = prepared_run
+    rows, _ = prepare()
+    rows.extend({"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(2, 5))
+    (output.parent / "source.jsonl").write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        success, failure, omitted, interrupted, _ = store.pending()
+        store.record_dispatches([success, failure, interrupted])
+        store.record_outcome(success | {"reward": 1.0})
+        store.record_outcome(failure | {"_ng_failure_class": "agent_run_error"})
+        store.record_omission(omitted, "Intentionally excluded")
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "99")
+    resumed = RolloutStore.start_or_resume(output, prepare, resume=True)
+    reader = RolloutStore.read(output)
+    assert reader.manifest.max_rollout_attempts == 1
+    assert resumed.coverage() == reader.coverage()
+    assert [row["_ng_task_index"] for row in resumed.pending()] == [3, 4]
+    coverage = reader.coverage()
+    assert (coverage["failed_final"], coverage["failed_not_final"], coverage["failure_budget_exhausted"]) == (1, 0, 1)
+    assert (coverage["missing"], coverage["not_started"], coverage["intentionally_omitted"]) == (1, 1, 1)
+    metrics = _failure_export_metrics([], lambda row: None, set(), histories=[reader])
+    assert metrics["retries/max_attempts"] == metrics["retries/at_cap"] == 1
+    assert metrics["coverage/failed/agent_run_error"] == 1
+    assert metrics["coverage/failed/skipped"] == 0
+    limits = RunHealthLimits(max_final_failure_fraction=0.3)
+    full = run_health_checks(output, workers=1, limits=limits).summary["run"]["artifacts"]
+    assert full["failed"] == {"total": 1, "final": 1, "not_final": 0, "by_class": {"agent_run_error": 1}}
+    assert (full["missing"], full["not_started"], full["omitted"]) == (1, 1, 1)
+    assert "final failures" not in " ".join(full["unhealthy_reasons"])
+    monkeypatch.setattr(RolloutStore, "read", lambda *a, **kw: pytest.fail("SIGTERM must not reload trajectories"))
+    summary = write_provisional_summary(output, {(0, 0)}, limits=limits, run_coverage=coverage)
+    provisional = orjson.loads(summary.read_bytes())["run"]["artifacts"]
+    for key in ("expected", "failed", "missing", "not_started", "omitted", "unhealthy_reasons"):
+        assert provisional[key] == full[key]
+
+
+def test_resubmit_and_interruptions_are_free_in_exported_budget(prepared_run, monkeypatch):
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        first, second = store.pending()
+        store.record_dispatch(second)
+        store.record_outcome(second | {"reward": 1.0})
+        for attempt in range(2):
+            row = first | {"_ng_attempt_index": attempt}
+            store.record_dispatch(row)
+            store.record_outcome(row | {"_ng_failure_class": "agent_run_error"})
+    assert RolloutStore.read(output).failure_export_metrics()["retries/at_cap"] == 1
+    with RolloutStore.start_or_resume(output, prepare, resume=True, resubmit=True) as store:
+        for _ in range(3):
+            (row,) = store.pending()
+            store.record_dispatch(row)
+            store.record_outcome(
+                row | {"_ng_failure_class": "agent_request_failed", "_ng_failure_legacy_class": "kill_shaped"}
+            )
+    reader = RolloutStore.read(output)
+    assert reader.failure_export_metrics()["retries/at_cap"] == reader.coverage()["failure_budget_exhausted"] == 0
+    assert reader.failure_export_metrics()["retries/attempts"] == 5
+    assert reader.coverage()["counted_failures"] == 0
+    assert len(reader.pending()) == 1
+
+
+def test_newer_unknown_attempt_supersedes_failure_in_health(prepared_run):
+    from nemo_gym.rollout_health import run_health_checks
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        first, second = store.pending()
+        store.record_dispatches([first, second])
+        store.record_outcome(first | {"_ng_failure_class": "agent_run_error"})
+        store.record_outcome(second | {"reward": 1.0})
+        store.allocate_attempt(first)
+    artifacts = run_health_checks(output, workers=1).summary["run"]["artifacts"]
+    assert artifacts["failed"]["total"] == 0
+    assert artifacts["missing"] == 1
+    assert not artifacts["healthy"]
+
+
+def test_older_manifest_records_retry_cap_on_first_validated_resume(prepared_run, monkeypatch):
+    output, prepare = prepared_run
+    RolloutStore.start_or_resume(output, prepare, resume=False)
+    saved = orjson.loads(manifest_path_for(output).read_bytes())
+    saved.pop("max_rollout_attempts")
+    atomic_write_json(manifest_path_for(output), saved)
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "5")
+    resumed = RolloutStore.start_or_resume(output, prepare, resume=True)
+    assert resumed.manifest.max_rollout_attempts == 5
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
+    assert RolloutStore.read(output).coverage()["max_rollout_attempts"] == 5
+    assert RolloutStore.start_or_resume(output, prepare, resume=True).coverage()["max_rollout_attempts"] == 5

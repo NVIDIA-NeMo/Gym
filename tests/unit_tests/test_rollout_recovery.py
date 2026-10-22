@@ -964,7 +964,14 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
     assert exported[-1] == {
         "coverage/expected": 3,
         "coverage/scored": report["scored"],
-        "coverage/missing": 3 - report["scored"],
+        "coverage/missing": 0,
+        "coverage/not_scored": 3 - report["scored"],
+        "coverage/failed/agent_request_failed": 1,
+        "coverage/failed/skipped": 0,
+        "retries/attempts": 1,
+        "retries/rollouts_retried": 0,
+        "retries/at_cap": 0,
+        "retries/max_attempts": 3,
         "coverage/measured": 0,
         "coverage/masked": 1,
         "coverage/unscored": 0,
@@ -1211,13 +1218,17 @@ async def test_budget_drained_work_resumes_without_consuming_attempts(runner_con
     assert (after["attempts"], after["successful"]) == (3, 3)
 
 
-async def test_journal_resume_preserves_terminal_timeout_opt_in(runner_config, monkeypatch):
+@pytest.mark.parametrize("failure_kind", [None, "agent_timeout"])
+async def test_journal_resume_preserves_terminal_timeout_opt_in(runner_config, monkeypatch, failure_kind):
     from nemo_gym.rollout_store import RolloutStore
 
     async def post(**kwargs):
         if kwargs["json"]["task"] == 0:
             return FakeResponse(200, {"reward": 0.0, "response": {}})
-        return FakeResponse(200, {"_ng_failure_class": "timeout_exceeded", "_ng_failure_terminal": True})
+        result = {"_ng_failure_class": "timeout_exceeded", "_ng_failure_terminal": True}
+        if failure_kind:
+            result["failure_kind"] = failure_kind
+        return FakeResponse(200, result)
 
     client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
     await RolloutCollectionHelper().run_from_config(runner_config)
@@ -1645,6 +1656,7 @@ async def test_batch_status_uses_current_journal_attempts(tmp_path, monkeypatch,
     )
     post = AsyncMock(return_value=FakeResponse(200, {"reward": 1.0, "response": {}}))
     install_fake_server_client(monkeypatch, post)
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "4" if latest_outcome == "suppressed_retry" else "1")
     await RolloutCollectionHelper().run_from_config(config)
     success = list(read_records(output))[0]
     original_output = output.read_bytes()
@@ -1699,7 +1711,7 @@ async def test_batch_status_uses_current_journal_attempts(tmp_path, monkeypatch,
     assert output.read_bytes() == original_output
 
 
-@pytest.mark.parametrize("kind", ["admission", "kill_shaped", "judge_failed"])
+@pytest.mark.parametrize("kind", ["admission", "kill_shaped", "kill_shaped_with_kind", "judge_failed"])
 @pytest.mark.parametrize("mixed_success", [False, True])
 async def test_interruption_failures_do_not_spend_budget_or_create_retry_progress(
     runner_config, monkeypatch, kind, mixed_success
@@ -1729,7 +1741,10 @@ async def test_interruption_failures_do_not_spend_budget_or_create_retry_progres
             return FakeResponse(200, result)
         if mixed_success and row["task"] == 0:
             return FakeResponse(200, {"reward": 1.0, "response": {}})
-        return FakeResponse(200, {"_ng_failure_class": kind, "_ng_failure_message": "Interrupted or unavailable"})
+        result = {"_ng_failure_class": kind, "_ng_failure_message": "Interrupted or unavailable"}
+        if kind == "kill_shaped_with_kind":
+            result.update(_ng_failure_class="kill_shaped", failure_kind="agent_request_failed")
+        return FakeResponse(200, result)
 
     client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
     if kind == "admission":
@@ -1837,6 +1852,8 @@ def test_run_lock_refusal_names_owner_and_releases_after_exit(tmp_path, monkeypa
     ("field", "before", "after"),
     [
         ("resubmit", False, True),
+        ("health_check_max_final_failure_fraction", None, 0.02),
+        ("health_check_max_not_final_failure_fraction", 0.01, 0.2),
         ("dispatch_start_report_within_s", 60, 30),
         ("dispatch_start_report_min_fraction", 0.99, 0.9),
         ("dispatch_all_started_within_s", 60, 90),
@@ -1909,3 +1926,106 @@ async def test_run_outcomes_early_close_cancels_requests_and_can_drain_typed_res
                 next(outcomes)
     finally:
         await outcomes.aclose()
+
+
+@pytest.mark.parametrize("require_complete", [False, True])
+@pytest.mark.parametrize("interrupted", [False, True])
+@pytest.mark.parametrize(("retryable", "progress", "exit_code"), [(1, 1, 75), (1, 0, 1), (0, 1, 76)])
+def test_e2e_completion_policy_respects_opt_in_and_interrupts(
+    tmp_path, require_complete, interrupted, retryable, progress, exit_code
+):
+    from nemo_gym.cli.eval import _check_collection_completion
+    from nemo_gym.rollout_recovery import IncompleteEvaluationError
+
+    output = tmp_path / "rollouts.jsonl"
+    coverage_path_for(output).write_text(
+        json.dumps(
+            {
+                "complete": False,
+                "expected": 2,
+                "successful": 1,
+                "retryable": retryable,
+                "progress_outcomes_recorded": progress,
+            }
+        )
+    )
+    options = {"require_complete": require_complete, "completed": not interrupted, "interrupted": interrupted}
+    if not require_complete:
+        _check_collection_completion(output, **options)
+    elif interrupted:
+        with pytest.raises(RuntimeError, match="collection interrupted"):
+            _check_collection_completion(output, **options)
+    else:
+        with pytest.raises(IncompleteEvaluationError) as error:
+            _check_collection_completion(output, **options)
+        assert error.value.exit_code == exit_code
+    # An unrelated collection error must not be replaced by the completion check.
+    _check_collection_completion(output, require_complete=require_complete, completed=False)
+
+
+async def test_health_reports_are_cleared_after_validation_and_written_under_run_lock(runner_config, monkeypatch):
+    import nemo_gym.cli.eval as cli_eval
+    from nemo_gym.rollout_recovery import run_lock
+
+    output = Path(runner_config.output_jsonl_fpath)
+    reports = [output.parent / name for name in ("quality_summary.json", "rollout_verdicts.jsonl")]
+    for report in reports:
+        report.write_text("old report")
+    checked = []
+
+    async def post(**kwargs):
+        assert not any(report.exists() for report in reports)
+        return FakeResponse(200, {"reward": 1.0, "response": {}})
+
+    def health(path, config, landed, **kwargs):
+        with pytest.raises(ConfigError, match="Another collector owns"):
+            with run_lock(path):
+                pytest.fail("Reporting must retain the collector's ownership")
+        assert landed == {(0, 0), (1, 0), (2, 0)}
+        assert kwargs["coverage"]["successful"] == 3
+        checked.append(path)
+        for report in reports:
+            report.write_text("validated report")
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", AsyncMock(return_value=None))
+    monkeypatch.setattr(cli_eval, "_health_check_collected_rollouts", health)
+    runner_config.disable_aggregation = runner_config.disable_health_check = False
+    await RolloutCollectionHelper().run_from_config(runner_config)
+    assert checked == [output]
+    runner_config.resume_from_cache = True
+    Path(runner_config.input_jsonl_fpath).write_text('{"different": true}\n')
+    with pytest.raises((ConfigError, ValueError)):
+        await RolloutCollectionHelper().run_from_config(runner_config)
+    with run_lock(output):
+        with pytest.raises(ConfigError):
+            await RolloutCollectionHelper().run_from_config(runner_config)
+    assert checked == [output]
+    assert all(report.read_text() == "validated report" for report in reports)
+
+
+async def test_judge_class_with_shared_kind_keeps_a_recoverable_saved_answer(runner_config, monkeypatch):
+    from nemo_gym.rollout_reverification import _is_judge_failure, _rollout_response
+
+    answer = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "saved answer"}]}]}
+    post = AsyncMock(
+        return_value=FakeResponse(
+            200,
+            {
+                "_ng_failure_class": "judge_failed",
+                "failure_kind": "judge_timeout",
+                "response": answer,
+            },
+        )
+    )
+    install_fake_server_client(monkeypatch, post)
+    with pytest.raises(RuntimeError, match="None of the 3 dispatched"):
+        await RolloutCollectionHelper().run_from_config(runner_config)
+    failures = RolloutStore.read(Path(runner_config.output_jsonl_fpath)).failures()
+    assert len(failures) == 3
+    for failure in failures:
+        assert failure["_ng_failure_class"] == "judge_timeout"
+        assert failure["_ng_failure_legacy_class"] == "judge_failed"
+        assert _is_judge_failure(failure)
+        assert _rollout_response(failure) == answer
+        assert "reward" not in failure

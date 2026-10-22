@@ -64,6 +64,7 @@ from nemo_gym.rollout_collection import (
     _rollout_for_export,
     _rollout_request_debug_summary,
     is_terminal_failure,
+    matches_failure_class,
 )
 from nemo_gym.rollout_records import (
     coverage_path_for,
@@ -478,7 +479,7 @@ def summarize_cache_usage(cache: CacheKeysByStatus, all_payloads: List[Dict], fi
 
 def _is_judge_failure(row: Dict[str, Any]) -> bool:
     """Whether a failures-sidecar row is a judge failure, the class `--judge-failed-only` recovers."""
-    return row.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED_FAILURE_CLASS
+    return matches_failure_class(row, {JUDGE_FAILED_FAILURE_CLASS})
 
 
 def _recovery_rollout_predicate(

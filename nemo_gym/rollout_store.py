@@ -21,6 +21,7 @@ execution numbers. There is no dispatch journal or second outcome commit.
 
 import logging
 import os
+from collections import Counter
 from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
@@ -49,6 +50,7 @@ from nemo_gym.rollout_records import (
 )
 from nemo_gym.rollout_recovery import (
     RunManifest,
+    _get_max_rollout_attempts,
     atomic_write_json,
     manifest_path_for,
     record_resubmit_offset,
@@ -199,7 +201,11 @@ class RolloutStore:
                     next_attempt[identity] = max(next_attempt.get(identity, 0), attempt + 1)
                 manifest = manifest.model_copy(update={"next_attempt": next_attempt})
                 state.manifest = manifest
-            if manifest.identity_overridden or manifest.legacy_import or not manifest_path.exists():
+            if manifest.max_rollout_attempts is None:
+                manifest = manifest.model_copy(update={"max_rollout_attempts": _get_max_rollout_attempts()})
+                state.manifest = manifest
+                manifest.write(manifest_path)
+            elif manifest.identity_overridden or manifest.legacy_import or not manifest_path.exists():
                 manifest.write(manifest_path)
             if resubmit:
                 # Validate before resetting anything, and repair an interrupted
@@ -387,10 +393,18 @@ class RolloutStore:
         )
 
     def pending(
-        self, max_attempts: int, *, retry_terminal_timeouts: bool = False, dispatch_longest_first: bool = False
+        self,
+        max_attempts: int | None = None,
+        *,
+        retry_terminal_timeouts: bool = False,
+        dispatch_longest_first: bool = False,
     ) -> list[dict]:
-        # The caller supplies its attempt budget; the stored selection policy is
-        # latest_allocated, including newer attempts with unknown outcomes.
+        # The saved manifest owns the budget; an explicit argument is retained
+        # for older callers but must agree with the run's persisted cap.
+        saved_cap = self.manifest.max_rollout_attempts
+        if max_attempts is not None and saved_cap is not None and max_attempts != saved_cap:
+            raise ConfigError(f"This run's saved retry cap is {saved_cap}, not {max_attempts}.")
+        max_attempts = saved_cap or max_attempts or _get_max_rollout_attempts()
         self._state.retry_terminal_timeouts = retry_terminal_timeouts
         exhausted = self._state.exhausted_count(max_attempts)
         if exhausted:
@@ -430,6 +444,34 @@ class RolloutStore:
 
     def inputs_for(self, results: list[dict]) -> list[dict]:
         return [self._state.expected[logical_rollout_id(result)] for result in results]
+
+    def failure_export_metrics(self) -> dict[str, int]:
+        """Export saved failure totals with current outcome selection and retry budgets.
+
+        Failed-attempt totals retain history across resubmissions. Budget exhaustion
+        uses only eligible failures since the most recent reset and the manifest's
+        saved cap, rather than the exporting process's configuration.
+        """
+        attempts: Counter[str] = Counter()
+        failed: Counter[str] = Counter()
+        for key, outcome in self._state.payloads.items():
+            if outcome.failure_class is None:
+                continue
+            failed.setdefault(outcome.failure_class, 0)
+            if key in self._state.omitted or (outcome.failure_class == "skipped" and outcome.terminal):
+                continue
+            attempts[key[0]] += 1
+        coverage = self.coverage()
+        failed.update(coverage["failed_by_class"])
+        return {
+            "retries/attempts": sum(attempts.values()),
+            "retries/rollouts_retried": sum(
+                n + (self._state.disposition(identity) == "success") > 1 for identity, n in attempts.items()
+            ),
+            "retries/at_cap": coverage["failure_budget_exhausted"],
+            "retries/max_attempts": coverage["max_rollout_attempts"],
+            **{f"coverage/failed/{name}": count for name, count in sorted(failed.items())},
+        }
 
     def coverage(self) -> dict:
         return self._state.coverage()

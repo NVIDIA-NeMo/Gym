@@ -614,7 +614,8 @@ def e2e_rollout_collection():  # pragma: no cover
     )
     # This E2E entry point prints health before its server-shutdown phase.
     # The no-serve entry point calls the collection helper directly.
-    rollout_collection_config.disable_health_check = True
+    if driver_path:
+        rollout_collection_config.disable_health_check = True
 
     print(
         f"""Output artifacts:
@@ -624,9 +625,11 @@ def e2e_rollout_collection():  # pragma: no cover
 {f"Rollout collection driver: {driver_path}" if driver_path else ""}
 """
     )
-    _remove_health_reports(output_fpath)
+    if driver_path:
+        _remove_health_reports(output_fpath)
     _interrupt_on_sigterm()
     collection_completed = False
+    interrupted = False
     try:
         if driver_path:
             module_name, _, fn_name = driver_path.partition(":")
@@ -639,23 +642,25 @@ def e2e_rollout_collection():  # pragma: no cover
             asyncio.run(rch.run_from_config(rollout_collection_config))
         collection_completed = True
     except KeyboardInterrupt:
-        if rollout_collection_config.require_complete:
-            raise RuntimeError("EVAL FAILED: rollout collection interrupted; partial artifacts retained.") from None
-        pass
+        interrupted = True
     finally:
         # Before the server shutdown, so a run Slurm stops writes its summary within KillWait.
         # A failed or interrupted run reports health too, so its failed and missing rollouts are counted.
         try:
-            if health_check_enabled:
-                # A custom driver keeps no landed keys, so its stopped run gets the full check.
+            if health_check_enabled and driver_path:
+                # The built-in collector reports under its run lock, before shutdown.
                 _health_check_collected_rollouts(
                     output_fpath, rollout_collection_config, None if driver_path else rch._landed_keys
                 )
         finally:
             rh.shutdown()
     _exit_if_terminated()
-    if collection_completed and rollout_collection_config.require_complete:
-        _check_saved_completion(output_fpath)
+    _check_collection_completion(
+        output_fpath,
+        require_complete=rollout_collection_config.require_complete,
+        completed=collection_completed,
+        interrupted=interrupted,
+    )
 
 
 _terminated = False
@@ -687,7 +692,9 @@ def _remove_health_reports(output_fpath: Path) -> None:
         (output_fpath.parent / report).unlink(missing_ok=True)
 
 
-def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_keys: set | None = None) -> None:
+def _health_check_collected_rollouts(
+    output_fpath: Path, config: Any, landed_keys: set | None = None, *, coverage: dict | None = None
+) -> None:
     """Write the quality summary for whatever a run collected; a run that never started collection has none.
 
     After SIGTERM, Slurm kills the job once KillWait (120 s on some clusters) is over, and the full check can take
@@ -710,6 +717,7 @@ def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_key
                 landed_keys,
                 limits=config.run_health_limits,
                 ignored_checks=config.health_check_ignored_checks,
+                run_coverage=coverage,
             )
         except JournalHealthUnavailable as error:
             print(f"Rollout health checks skipped: {error}")
@@ -724,6 +732,7 @@ def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_key
             workers=config.health_check_workers,
             ignored_checks=config.health_check_ignored_checks,
             limits=config.run_health_limits,
+            run_coverage=[coverage],
         )
     except JournalHealthUnavailable as error:
         print(f"Rollout health checks skipped: {error}")
@@ -731,6 +740,18 @@ def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_key
         logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
     else:
         print(format_health_report(health_result))
+
+
+def _check_collection_completion(
+    output: Path, *, require_complete: bool, completed: bool, interrupted: bool = False
+) -> None:
+    """Apply the same completion opt-in after successful or interrupted collection."""
+    if not require_complete:
+        return
+    if interrupted:
+        raise RuntimeError("EVAL FAILED: rollout collection interrupted; partial artifacts retained.")
+    if completed:
+        _check_saved_completion(output)
 
 
 def _check_saved_completion(output: Path) -> None:
@@ -776,27 +797,21 @@ def collect_rollouts():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     config = RolloutCollectionConfig.model_validate(global_config_dict)
     rch = RolloutCollectionHelper()
-    health_check_enabled = not config.disable_aggregation and not config.disable_health_check
-    config.disable_health_check = True  # Run once below, also when collection fails.
 
     # A standalone driver starts no supervisor, so it sets up its own telemetry for the `gym.job` span and driver metrics.
     configure_telemetry_env(telemetry_config_from_global_config(global_config_dict))
     init_telemetry(server_name="driver", server_type="driver")
-    _remove_health_reports(Path(config.output_jsonl_fpath))
     _interrupt_on_sigterm()
     try:
         asyncio.run(rch.run_from_config(config))
-        if config.require_complete:
-            _check_saved_completion(Path(config.output_jsonl_fpath))
+        _check_collection_completion(
+            Path(config.output_jsonl_fpath), require_complete=config.require_complete, completed=True
+        )
     except KeyboardInterrupt:
         if not _terminated:
             raise
     finally:
-        try:
-            shutdown_telemetry()
-        finally:
-            if health_check_enabled:
-                _health_check_collected_rollouts(Path(config.output_jsonl_fpath), config, rch._landed_keys)
+        shutdown_telemetry()
     _exit_if_terminated()
 
 

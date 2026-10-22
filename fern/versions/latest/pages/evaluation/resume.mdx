@@ -82,15 +82,18 @@ a task whose response violates the contract. Environment replies establish deliv
 A logical rollout retains its task/rollout identity across restarts. Each execution receives a larger attempt index,
 reserved by the controller in the run manifest. An execution number is separate from the failure retry budget.
 
-`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS` limits counted failures per logical rollout (default: 3). Only a recorded,
+`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS` sets the counted-failure limit when a run starts (default: 3). Gym saves that limit
+as `max_rollout_attempts` in the run manifest. Resume, health reports, and offline aggregation reuse it even when
+their process has a different environment setting. Older draft manifests without the field use the current setting
+and record it on their first validated resume. Only a recorded,
 nonterminal failure whose request was delivered or possibly delivered consumes that budget. A collector interruption,
 a checkpoint continuation, an admission timeout, a `kill_shaped` interruption, or a failure known to occur before sending does not consume it. The shared record supports
 `delivery: "not_sent"`; current collector transport failures conservatively use `possibly_delivered`. Terminal failures and
 intentional omissions stop retrying independently of the budget. The explicit terminal-timeout override makes those
 otherwise terminal failures eligible and counted under its existing opt-in policy.
 
-When the cap is reached, Gym reports the exhausted count and failure sidecar path. Raising the cap allows more retries.
-An explicit `gym eval resubmit <gym_job_id> <benchmark>` also gives retryable failures a fresh budget.
+When the cap is reached, Gym reports the exhausted count and failure sidecar path. Changing the environment variable
+does not change an existing run. An explicit `gym eval resubmit <gym_job_id> <benchmark>` also gives retryable failures a fresh budget.
 Completed results and terminal failures remain selected, all history is kept, and execution numbers keep increasing.
 The collector records the reset in `<stem>_resubmit_offset` beside the output; keep this companion with the run.
 Ordinary automatic restarts reuse that boundary and do not reset the budget again. Resubmission still validates
@@ -114,7 +117,7 @@ conflicting or foreign payloads still fail validation. Core collection retries u
 GDPVal manages its own cached-deliverable reuse; core invalid-judge migration options are no longer supported.
 
 Offline aggregation accepts the same `+retry_terminal_timeouts=true` option. Coverage records the active
-`retry_terminal_timeouts` and `max_rollout_attempts` policy alongside `failure_budget_exhausted`; use the same settings as
+`retry_terminal_timeouts` policy and the saved `max_rollout_attempts` alongside `failure_budget_exhausted`; use the same timeout override as
 collection to compare that diagnostic count. These settings do not change selected scores.
 
 Reported `kill_shaped` failures are persisted in the failure sidecar, even when the legacy producer
@@ -136,6 +139,8 @@ Gym writes `<output_stem>_coverage.json` with an exact inventory:
 | `masked` | Completed results with a numeric reward whose producer set `mask_sample`. These remain saved and reusable on resume. |
 | `unscored` | Completed results without a numeric reward, including those also marked `mask_sample`. |
 | `failed` | Rollouts whose selected attempt reported a no-result failure. |
+| `failed_final` / `failed_not_final` | Selected failures with no retry available (terminal or budget exhausted), versus selected failures still eligible for retry. |
+| `failed_by_class` | Selected failure counts by failure class; excludes omissions. |
 | `intentionally_omitted` | Explicit producer omissions, including terminal `skipped` outcomes. |
 | `not_started` | Rollouts with no reserved execution. |
 | `missing` | Rollouts whose newest reserved execution has no saved outcome. |
@@ -164,15 +169,28 @@ An explicit `skipped` entry in `count_failure_classes_as_zero` includes terminal
 completion disposition remains intentionally omitted. Omissions without a failure payload cannot be scored this way.
 
 Collection and offline aggregation export the same counts as `coverage/measured`, `coverage/masked`, `coverage/unscored`, `coverage/failed`,
-`coverage/omitted`, `coverage/not_started`, and `coverage/missing_outcomes`. The existing `coverage/missing` metric
-still means expected minus scored, which differs from missing execution outcomes. For legacy shards without a manifest
-or journal, observed measured/masked counts remain available, while the inventory categories cannot be determined.
+`coverage/omitted`, `coverage/not_started`, and `coverage/missing_outcomes`. For runs with a manifest,
+`coverage/missing` now means reserved executions with no outcome, matching `missing` in the coverage and health reports.
+Use `coverage/not_scored` for expected minus scored. This changes the meaning of an existing dashboard metric.
+For legacy shards without validated history, observed measured/masked counts remain available while the inventory categories cannot be determined.
+
+`coverage/failed/<class>` counts selected failures; omissions are excluded. `retries/at_cap` equals
+`failure_budget_exhausted`, so interruptions and failures before an explicit budget reset do not exhaust the run.
+`retries/max_attempts` reports the saved limit and is omitted when aggregated runs have different limits.
+`retries/attempts` remains a historical count of saved failed attempts, including interruption records;
+it is distinct from the current budget's `counted_failures`. Legacy runs without a manifest retain raw-sidecar
+accounting and their per-row `_ng_failure_max_attempts` limits.
 
 The coverage file is a snapshot written at collection start and cleanup. After an abrupt process kill it may be stale;
 resume or aggregate to reconstruct it from the manifest and saved outcomes. An incomplete final JSONL write is ignored during
 reconciliation and its partial bytes are removed before appending. Malformed complete records remain errors.
 An old materialized inventory alone does not establish validated completion coverage during aggregation.
 Merged rollout files are selected-result projections; keep the original shard artifacts for further recovery.
+
+Automatic health reporting stays inside the collector's run lock. Identity validation must succeed before old reports
+are removed; a rejected resume leaves them untouched. For runs with a manifest, health accounting uses the same
+selected history as coverage and exporters. Intentional omissions do not trip failure-rate limits, and exhausted
+failures count as final.
 
 Every newly collected run has recovery history, including its first collection. Health checks work when all rows
 in the file being checked still represent selected attempts. A superseded failure in the separate failure sidecar

@@ -26,7 +26,7 @@ import time
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict, deque
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import AsyncExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -141,6 +141,7 @@ from nemo_gym.rollout_recovery import (
     is_terminal_failure,
     load_resubmit_offset,
     manifest_path_for,
+    matches_failure_class,
     observed_elapsed,
     run_lock,
 )
@@ -2311,7 +2312,7 @@ def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], D
 
 def _matches_failure_class(row: Mapping[str, Any], failure_classes: Collection[str]) -> bool:
     """Match the canonical class or the original legacy producer's routing class."""
-    return row.get(NG_FAILURE_CLASS_KEY) in failure_classes or row.get(NG_FAILURE_LEGACY_CLASS_KEY) in failure_classes
+    return matches_failure_class(row, failure_classes)
 
 
 def _counted_failure_rows(rows: List[Dict], failure_classes: List[str]) -> List[Dict]:
@@ -2522,7 +2523,11 @@ async def _read_jsonl(path: Path) -> List[Dict]:
 
 
 def _failure_export_metrics(
-    failures_fpaths: List[Path], identity: Callable[[Mapping[str, Any]], Any], landed: set
+    failures_fpaths: List[Path],
+    identity: Callable[[Mapping[str, Any]], Any],
+    landed: set,
+    *,
+    histories: Sequence[RolloutStore] = (),
 ) -> Dict[str, int]:
     """Failure and retry counts for exporters, read from the failures sidecars.
 
@@ -2535,6 +2540,18 @@ def _failure_export_metrics(
     current cap for a row written before the cap was recorded. ``retries/max_attempts`` is that cap, and is
     left out when the rollouts were collected with different caps.
     """
+    if histories:
+        parts = [history.failure_export_metrics() for history in histories]
+        if failures_fpaths:
+            parts.append(_failure_export_metrics(failures_fpaths, identity, landed))
+        merged: Counter[str] = Counter()
+        for part in parts:
+            merged.update({key: value for key, value in part.items() if key != "retries/max_attempts"})
+        caps = {part.get("retries/max_attempts") for part in parts}
+        if len(caps) == 1 and None not in caps:
+            merged["retries/max_attempts"] = caps.pop()
+        return dict(merged)
+
     attempts: Counter = Counter()
     latest: Dict[Any, Dict[str, Any]] = {}
     # Every class the sidecars name starts at 0: a reopened tracking run keeps a class's last value until it is sent.
@@ -2884,6 +2901,8 @@ class RolloutCollectionHelper(BaseModel):
     # (task index, rollout index) of every record persisted to the rollouts jsonl, kept current as rows land,
     # so a run stopped by SIGTERM can be accounted for without re-reading that file.
     _landed_keys: set = PrivateAttr(default_factory=set)
+    _collection_started: bool = PrivateAttr(default=False)
+    _store: RolloutStore | None = PrivateAttr(default=None)
 
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
@@ -3362,8 +3381,26 @@ class RolloutCollectionHelper(BaseModel):
             update={"output_jsonl_fpath": str(resolve_rollout_path(Path(config.output_jsonl_fpath)))}
         )
         # Hold ownership from identity validation through final aggregation/reporting.
+        self._collection_started = False
+        self._store = None
         with run_lock(Path(config.output_jsonl_fpath)):
-            return await self._run_locked_from_config(config)
+            try:
+                return await self._run_locked_from_config(config)
+            finally:
+                if self._collection_started and not config.disable_aggregation and not config.disable_health_check:
+                    from nemo_gym.cli import eval as cli_eval
+
+                    report = functools.partial(
+                        cli_eval._health_check_collected_rollouts,
+                        Path(config.output_jsonl_fpath),
+                        config,
+                        self._landed_keys,
+                        coverage=self._store.coverage() if self._store is not None else None,
+                    )
+                    if cli_eval._terminated:
+                        report()  # The small provisional summary must finish within Slurm's KillWait.
+                    else:
+                        await asyncio.to_thread(report)
 
     async def _run_locked_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
@@ -3428,6 +3465,11 @@ class RolloutCollectionHelper(BaseModel):
             allow_unsafe=config.allow_unsafe_resume,
             resubmit=config.resubmit,
         )
+        from nemo_gym.cli.eval import _remove_health_reports
+
+        _remove_health_reports(output_fpath)
+        self._store = store
+        self._collection_started = True
         persisted_success_keys = self._landed_keys
         persisted_success_keys.clear()
         persisted_success_keys.update(
@@ -3437,7 +3479,6 @@ class RolloutCollectionHelper(BaseModel):
             )
         )
         input_rows = store.pending(
-            _get_max_rollout_attempts(),
             retry_terminal_timeouts=config.retry_terminal_timeouts,
             dispatch_longest_first=config.dispatch_longest_first,
         )
@@ -3712,6 +3753,10 @@ class RolloutCollectionHelper(BaseModel):
                     legacy_class = diagnostics.get(NG_FAILURE_CLASS_KEY)
                     if isinstance(legacy_class, str) and legacy_class != result.sidecar_failure_class:
                         compatibility[NG_FAILURE_LEGACY_CLASS_KEY] = legacy_class
+                    if verification_response is not None and matches_failure_class(
+                        compatibility, {"judge_failed", "judge_invalid"}
+                    ):
+                        compatibility["response"] = verification_response
                     # Keep producer evidence without making it the canonical failure reason.
                     if diagnostics.get("error"):
                         compatibility.pop("error")
@@ -3779,9 +3824,9 @@ class RolloutCollectionHelper(BaseModel):
                 # It leaves harness output and reward unchanged.
                 # Direct callers of run_examples finalize each record themselves.
                 token_capture_build = None
-                recoverable_generation = failure_class in ("judge_failed", "judge_invalid") and isinstance(
-                    result.get("response"), dict
-                )
+                recoverable_generation = matches_failure_class(
+                    result, {"judge_failed", "judge_invalid"}
+                ) and isinstance(result.get("response"), dict)
                 if (not no_result or recoverable_generation) and token_id_capture_enabled_for_agent(
                     global_config,
                     self._agent_name_for_row(row, global_config),
@@ -3816,6 +3861,8 @@ class RolloutCollectionHelper(BaseModel):
                                 "mostly token-less data."
                             )
 
+                if failure_class is not None:
+                    result[NG_FAILURE_MAX_ATTEMPTS_KEY] = store.manifest.max_rollout_attempts
                 completed_count += 1
                 if config.retain_results_in_memory:
                     rows.append(row)
@@ -3848,8 +3895,6 @@ class RolloutCollectionHelper(BaseModel):
                         f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
                         f"class={failure_class} execution {row.get(ATTEMPT_INDEX_KEY_NAME, 0)} error={detail}"
                     )
-                    # Keep the attempt's retry cap with its persisted failure.
-                    result[NG_FAILURE_MAX_ATTEMPTS_KEY] = _get_max_rollout_attempts()
                     store.record_outcome(result)
                     outcome = "omitted" if store.disposition(row) == "omitted" else "failed"
                     _record_rollout_outcome(metric_result, outcome, dispatch_name)
@@ -4112,15 +4157,17 @@ class RolloutCollectionHelper(BaseModel):
         if get_exporters():
             failure_metrics = await asyncio.to_thread(
                 _failure_export_metrics,
-                [failures_fpath],
+                [],
                 lambda row: (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)),
                 persisted_success_keys,
+                histories=[store],
             )
             export_metrics(
                 {
                     "coverage/expected": expected_rollouts,
                     "coverage/scored": scored_rollouts,
-                    "coverage/missing": expected_rollouts - scored_rollouts,
+                    "coverage/missing": completion["missing"],
+                    "coverage/not_scored": expected_rollouts - scored_rollouts,
                     "coverage/measured": completion["measured"],
                     "coverage/masked": completion["masked"],
                     "coverage/unscored": completion["unscored"],
@@ -4139,28 +4186,8 @@ Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
-        if not config.disable_aggregation and not config.disable_health_check:
-            from nemo_gym.rollout_health import JournalHealthUnavailable, format_health_report, run_health_checks
-
-            try:
-                health_result = await asyncio.to_thread(
-                    run_health_checks,
-                    output_fpath,
-                    workers=config.health_check_workers,
-                    ignored_checks=config.health_check_ignored_checks,
-                    limits=config.run_health_limits,
-                )
-            except JournalHealthUnavailable as error:
-                print(f"Rollout health checks skipped: {error}")
-            except Exception:
-                logger.exception(
-                    "Rollout health checks failed after collection; rollout artifacts are still available."
-                )
-            else:
-                print(format_health_report(health_result))
-
         config.check_completion(
-            expected=expected_rollouts,
+            expected=completion["expected"],
             results=persisted_results,
             completed=completion["successful"],
             intentionally_omitted=completion["intentionally_omitted"],
@@ -5370,13 +5397,20 @@ class RolloutAggregationHelper(BaseModel):
             "masked": masked_rollouts,
             "unscored": unscored_rollouts,
             "failed": sum(c["failed"] for c in components) if inventory_known else None,
+            "failed_final": sum(c["failed_final"] for c in components) if inventory_known else None,
+            "failed_not_final": sum(c["failed_not_final"] for c in components) if inventory_known else None,
+            "failed_by_class": dict(sum((Counter(c["failed_by_class"]) for c in components), Counter()))
+            if inventory_known
+            else None,
             "intentionally_omitted": sum(c["intentionally_omitted"] for c in components) if inventory_known else None,
             "not_started": sum(c["not_started"] for c in components) if inventory_known else None,
             "missing": sum(c["missing"] for c in components) if inventory_known else None,
             "failure_budget_exhausted": sum(c["failure_budget_exhausted"] for c in components)
             if inventory_known
             else None,
-            "max_rollout_attempts": _get_max_rollout_attempts(),
+            "max_rollout_attempts": components[0]["max_rollout_attempts"]
+            if components and len({c["max_rollout_attempts"] for c in components}) == 1
+            else None,
             "retry_terminal_timeouts": config.retry_terminal_timeouts,
             "complete": inventory_known and all(c["complete"] for c in components),
             "coverage_known": inventory_known,
@@ -5411,9 +5445,10 @@ class RolloutAggregationHelper(BaseModel):
         if get_exporters():  # pragma: no cover
             failure_metrics = await asyncio.to_thread(
                 _failure_export_metrics,
-                failures_fpaths + [failures_path_for(history.output) for history in histories],
+                failures_fpaths,
                 lambda row: _identity_key(row, group),
-                {_identity_key(r, group) for r in results},
+                {_identity_key(r, group) for r in results} if failures_fpaths else set(),
+                histories=histories,
             )
             metrics = {
                 **failure_metrics,
@@ -5426,7 +5461,8 @@ class RolloutAggregationHelper(BaseModel):
             }
             if inventory_known:
                 metrics["coverage/expected"] = completion["expected"]
-                metrics["coverage/missing"] = completion["expected"] - scored_rollouts
+                metrics["coverage/missing"] = completion["missing"]
+                metrics["coverage/not_scored"] = completion["expected"] - scored_rollouts
                 metrics["coverage/failed"] = completion["failed"]
                 metrics["coverage/omitted"] = completion["intentionally_omitted"]
                 metrics["coverage/not_started"] = completion["not_started"]
@@ -5444,8 +5480,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             try:
                 health_result = await asyncio.to_thread(
                     run_health_checks,
-                    # The shards, not the merged file: their sidecars and inventories sit next to them.
-                    [Path(path) for path in input_paths],
+                    # A managed merged projection has no superseded trajectories.
+                    # Its accounting still comes from the original selected histories.
+                    [output_fpath]
+                    if config.merge_shards and inventory_known
+                    else [Path(path) for path in input_paths],
+                    run_coverage=[completion] if config.merge_shards and inventory_known else None,
                     output_dir=output_fpath.parent,
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,

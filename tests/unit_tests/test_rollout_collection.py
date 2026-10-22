@@ -2945,7 +2945,8 @@ class TestRolloutCollection:
         assert coverage == {
             "coverage/expected": 2,
             "coverage/scored": 2,
-            "coverage/missing": 0,
+            "coverage/missing": 1,
+            "coverage/not_scored": 0,
             "coverage/imputed": 1,
             "coverage/measured": 1,
             "coverage/masked": 0,
@@ -2999,7 +3000,7 @@ class TestRolloutCollection:
             if url_path == "/run":
                 if json[TASK_INDEX_KEY_NAME] == 1:
                     raise http_error(500, "unhandled tool-call json")
-                return FakeResponse(200, {"reward": 1.0})
+                return FakeResponse(200, {"reward": 1.0, "response": {}})
             return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
@@ -3013,6 +3014,7 @@ class TestRolloutCollection:
             input_jsonl_fpath=str(tmp_path / "input.jsonl"),
             output_jsonl_fpath=str(output_jsonl_fpath),
             resume_from_cache=True,
+            allow_unsafe_resume=True,
             route_failures_to_sidecar=True,
             disable_health_check=True,
         )
@@ -3021,7 +3023,16 @@ class TestRolloutCollection:
         assert {k: v for k, v in exported.items() if k.startswith(("coverage/", "retries/"))} == {
             "coverage/expected": 3,
             "coverage/scored": 2,
-            "coverage/missing": 1,
+            "coverage/missing": 0,
+            "coverage/not_scored": 1,
+            "coverage/measured": 2,
+            "coverage/masked": 0,
+            "coverage/unscored": 0,
+            "coverage/failed": 1,
+            "coverage/omitted": 0,
+            "coverage/not_started": 0,
+            "coverage/missing_outcomes": 0,
+            "coverage/failure_budget_exhausted": 1,
             # Task 0 failed with this class before it landed: the reopened tracking run is told it is 0 now.
             f"coverage/failed/{AGENT_REQUEST_FAILED_FAILURE_CLASS}": 0,
             f"coverage/failed/{AGENT_RUN_ERROR_FAILURE_CLASS}": 1,
@@ -5139,6 +5150,7 @@ class TestRolloutCollection:
             workers=None,
             ignored_checks=[],
             limits=RunHealthLimits(),
+            run_coverage=[nemo_gym.rollout_collection.RolloutStore.read(output_fpath).coverage()],
         )
         format_health_report.assert_called_once_with(health_result)
 
@@ -8469,9 +8481,11 @@ class TestRolloutAggregationHelper:
         await RolloutAggregationHelper().run_from_config(cfg)
 
         assert {k: v for k, v in exported.items() if k.startswith(("coverage/", "retries/"))} == {
-            "coverage/expected": 3,
+            "coverage/known": 0,
+            "coverage/measured": 2,
+            "coverage/masked": 0,
+            "coverage/unscored": 0,
             "coverage/scored": 2,
-            "coverage/missing": 1,
             "coverage/failed/timeout_exceeded": 1,
             "coverage/failed/transient": 0,
             "retries/attempts": 4,

@@ -28,7 +28,7 @@ import re
 import socket
 import stat
 import warnings
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Annotated, Any, BinaryIO, Literal
@@ -68,6 +68,8 @@ _COLLECTION_OPTIONS = frozenset(
         "disable_health_check",
         "health_check_workers",
         "health_check_ignored_checks",
+        "health_check_max_not_final_failure_fraction",
+        "health_check_max_final_failure_fraction",
         "upload_rollouts",
         "count_failure_classes_as_zero",
         "count_missing_rollouts_as_zero",
@@ -382,6 +384,7 @@ class RunManifest(BaseModel):
     selection_policy: Literal["latest_allocated"] = "latest_allocated"
     # Controller-owned execution numbers. Reserving a number is not a failure.
     next_attempt: dict[str, Annotated[int, Field(ge=1, strict=True)]] = Field(default_factory=dict)
+    max_rollout_attempts: Annotated[int, Field(ge=1, strict=True)] | None = None
     run_id: str
     source_digest: str
     materialized_digest: str
@@ -392,6 +395,7 @@ class RunManifest(BaseModel):
     @classmethod
     def create(cls, source: Path, rows: list[dict], config: dict, global_config: dict) -> "RunManifest":
         return cls(
+            max_rollout_attempts=_get_max_rollout_attempts(),
             run_id=uuid4().hex,
             source_digest=_file_digest(source),
             materialized_digest=_digest(rows),
@@ -405,6 +409,7 @@ class RunManifest(BaseModel):
     @classmethod
     def import_legacy(cls, rows: list[dict]) -> "RunManifest":
         return cls(
+            max_rollout_attempts=_get_max_rollout_attempts(),
             run_id=uuid4().hex,
             source_digest="unverified",
             materialized_digest=_digest(rows),
@@ -481,6 +486,11 @@ def observed_elapsed(record: dict[str, Any]) -> float | None:
     return None
 
 
+def matches_failure_class(record: Mapping[str, Any], classes: Collection[str]) -> bool:
+    """Match shared failure names and retained producer routing names alike."""
+    return record.get("_ng_failure_class") in classes or record.get("_ng_failure_legacy_class") in classes
+
+
 def is_terminal_failure(record: Mapping[str, Any], *, retry_terminal_timeouts: bool = False) -> bool:
     """Whether a persisted failure must be gated on resume.
 
@@ -502,7 +512,7 @@ def is_terminal_failure(record: Mapping[str, Any], *, retry_terminal_timeouts: b
     """
     if not retry_terminal_timeouts:
         return bool(record.get("_ng_failure_terminal"))
-    if record.get("_ng_failure_class") == "timeout_exceeded":
+    if matches_failure_class(record, {"timeout_exceeded"}):
         return False
     return bool(record.get("_ng_failure_terminal"))
 

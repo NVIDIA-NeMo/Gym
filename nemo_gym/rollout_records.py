@@ -43,6 +43,7 @@ from nemo_gym.rollout_recovery import (
     is_terminal_failure,
     load_resubmit_offset,
     manifest_path_for,
+    matches_failure_class,
     observed_elapsed,
 )
 
@@ -168,6 +169,7 @@ class RolloutRecord:
 class _Outcome:
     record: RolloutRecord
     failure_class: str | None
+    legacy_failure_class: str | None
     terminal: bool
     masked: bool
     has_reward: bool
@@ -246,7 +248,7 @@ def prepare_append(path: Path) -> None:
 def is_interruption_failure(row: dict) -> bool:
     """Identify failures that spend neither the failure budget nor retry progress."""
     failure = row.get("_ng_failure_record")
-    return row.get("_ng_failure_class") == "kill_shaped" or (
+    return matches_failure_class(row, {"kill_shaped"}) or (
         isinstance(failure, dict)
         and (failure.get("delivery") == "not_sent" or failure.get("failure", {}).get("stage") == "admission")
     )
@@ -341,6 +343,7 @@ class RolloutRecords:
         self.payloads[key] = _Outcome(
             record=replace(record, expected_identity=(row.get(RUN_ID_KEY), key[0], key[1])),
             failure_class=row.get("_ng_failure_class"),
+            legacy_failure_class=row.get("_ng_failure_legacy_class"),
             terminal=bool(row.get("_ng_failure_terminal")),
             masked=bool(row.get("mask_sample")),
             has_reward=type(row.get("reward")) in (int, float),
@@ -445,7 +448,11 @@ class RolloutRecords:
         terminal = payload.terminal if payload else False
         if payload and self.retry_terminal_timeouts:
             terminal = is_terminal_failure(
-                {"_ng_failure_class": payload.failure_class, "_ng_failure_terminal": payload.terminal},
+                {
+                    "_ng_failure_class": payload.failure_class,
+                    "_ng_failure_legacy_class": payload.legacy_failure_class,
+                    "_ng_failure_terminal": payload.terminal,
+                },
                 retry_terminal_timeouts=True,
             )
         return self.disposition(identity) not in {"success", "omitted"} and not terminal
@@ -473,7 +480,7 @@ class RolloutRecords:
     def coverage(self) -> dict:
         counts = Counter(self.disposition(identity) for identity in self.expected)
         expected = len(self.expected)
-        max_attempts = _get_max_rollout_attempts()
+        max_attempts = self.manifest.max_rollout_attempts or _get_max_rollout_attempts()
         not_started = expected - len(self.latest)
         missing = counts["unknown"] - not_started
         # A producer-masked result completed execution, so recovery still reuses
@@ -489,6 +496,10 @@ class RolloutRecords:
             for identity in self.expected
             if self.disposition(identity) == "success"
         )
+        failures = self.selected_records("failure")
+        failed_final = sum(
+            not self._retryable(identity) or self.failure_count(identity) >= max_attempts for identity, _ in failures
+        )
         return {
             "schema_version": 2,
             "selection_policy": self.manifest.selection_policy,
@@ -499,6 +510,9 @@ class RolloutRecords:
             "masked": masked,
             "unscored": unscored,
             "failed": counts["failure"],
+            "failed_final": failed_final,
+            "failed_not_final": len(failures) - failed_final,
+            "failed_by_class": dict(sorted(Counter(self.payloads[key].failure_class for key in failures).items())),
             "intentionally_omitted": counts["omitted"],
             "not_started": not_started,
             "missing": missing,
