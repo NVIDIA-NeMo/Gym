@@ -1357,10 +1357,12 @@ class OpenCodeAdapter:
             json=self._body.model_dump(mode="json") | {"response": outcome.response.model_dump(mode="json")},
         )
         await raise_for_status(reply)
-        patch = (await get_response_json(reply)).get("model_patch")
+        prepared = await get_response_json(reply)
+        patch = prepared.get("model_patch")
         if not isinstance(patch, str):
             raise ValueError(f"/prepare_verify returned no model_patch: {patch!r}")
-        return {"model_patch": patch}
+        # Native verifiers also need the patch-capture provenance after a restore.
+        return prepared
 
     async def verify_prepared(
         self, cookies: dict[str, str], outcome: OpenCodeOutcome, prepared: dict[str, JsonValue]
@@ -1374,7 +1376,7 @@ class OpenCodeAdapter:
             cookies,
             force_zero_reward=self._force_zero_reward(outcome),
             url_path="/verify_prepared",
-            extra={"model_patch": prepared["model_patch"]},
+            extra=prepared,
         )
 
     def _force_zero_reward(self, outcome: OpenCodeOutcome) -> bool:
