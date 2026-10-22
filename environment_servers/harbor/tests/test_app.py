@@ -68,6 +68,7 @@ from environment_servers.harbor.verifier import (
     verifier_command,
 )
 from nemo_gym import failure_kinds
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
 from nemo_gym.base_environment_server import BaseEnvironmentServerConfig
 from nemo_gym.config_types import AggregateMetricsRequest
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle, SandboxSpec
@@ -1286,6 +1287,58 @@ class TestAgentStage:
         assert server.server_client.paths()[-1] == "/v1/agent_sessions/close"
         assert not any("test.sh" in call["command"] for call in sandbox.execs)
         assert sandbox.stopped
+
+    @staticmethod
+    def failed_turn(outcome: str) -> dict:
+        response = agent_response().model_dump(mode="json")
+        response.update(
+            status="failed",
+            error={"code": "server_error", "message": "stream disconnected before completion"},
+            metadata={AGENT_OUTCOME_METADATA_KEY: outcome},
+        )
+        return response
+
+    @pytest.mark.parametrize(
+        ("outcome", "terminal"),
+        [('{"failure_kind":"unknown"}', False), ('{"failure_kind":"model_transport_error"}', False), ("{", True)],
+        ids=["unknown-retried", "transport-retried", "malformed-failed"],
+    )
+    async def test_failed_agent_response_is_not_scored(self, tmp_path, monkeypatch, outcome, terminal):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.turn_response = self.failed_turn(outcome)
+        server.server_client.observations = {"source": "harness", "records": [], "gaps": []}
+
+        response = await run_episode(server, task)
+
+        assert response.result is None
+        assert response.failure.stage == "agent" and response.failure.terminal is terminal
+        assert response.failure.failure_reason == "stream disconnected before completion"
+        assert response.failure.partial_response.status == "failed"
+        assert response.failure.agent_observations is not None
+        assert not any("test.sh" in call["command"] for call in sandbox.execs)
+        assert sandbox.stopped and not server._sandboxes
+
+    async def test_failed_agent_response_with_a_verify_cause_is_scored(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.turn_response = self.failed_turn('{"failure_kind":"agent_limit"}')
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0 and response.result.response.status == "failed"
+        assert any("test.sh" in call["command"] for call in sandbox.execs)
+
+    async def test_agent_outcome_policy_is_configurable(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.config.agent_outcome_policy = AgentOutcomePolicyConfig(
+            by_failure_kind={"unknown": OutcomeAction.VERIFY}
+        )
+        server.server_client.turn_response = self.failed_turn('{"failure_kind":"unknown"}')
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert any("test.sh" in call["command"] for call in sandbox.execs)
 
     async def test_failed_close_is_a_cleanup_failure_with_the_turn_attached(self, tmp_path, monkeypatch):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
@@ -3766,6 +3819,7 @@ def test_server_config_holds_only_deployment_settings():
     own = set(HarborEnvironmentServerConfig.model_fields) - set(BaseEnvironmentServerConfig.model_fields)
     assert own == {
         "agent_server",
+        "agent_outcome_policy",
         "tasksets",
         "sandbox_provider",
         "sandbox_ready_timeout_s",

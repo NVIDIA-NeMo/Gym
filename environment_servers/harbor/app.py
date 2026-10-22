@@ -33,7 +33,10 @@ the sandbox lives for that budget. Operator secrets reach the ``test.sh`` proces
 
 Reward rule: when ``test.sh`` ran, the sample is measured. A missing or invalid reward
 file scores 0 with a ``failure_kind``. Only a Gym-side failure (sandbox lost, transfer
-failed) masks the sample. A task that cannot be set up is a handled episode failure:
+failed) masks the sample. A failed agent response whose harness classified the cause
+(``ng_agent_outcome``) goes through ``agent_outcome_policy`` before verification, as on
+``single_agent_turn``: by default a transport or unknown cause is retried ungraded instead
+of scoring 0. A task that cannot be set up is a handled episode failure:
 terminal when the task itself is at fault (unknown task, changed folder, unsupported
 settings), retryable when the sandbox provider failed.
 """
@@ -74,6 +77,7 @@ from environment_servers.harbor.verifier import (
     _verifier_key,
 )
 from nemo_gym import RESULTS_DIR
+from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
 from nemo_gym.atif_export import AtifExportError
 from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
@@ -240,6 +244,8 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
 
     # The harness that works in the sandbox; it receives a ``SandboxAccess`` when its session is seeded.
     agent_server: AgentServerRef
+    # Whether a failed agent response the harness classified is verified, retried or failed ungraded.
+    agent_outcome_policy: AgentOutcomePolicyConfig = Field(default_factory=AgentOutcomePolicyConfig)
     tasksets: dict[str, HarborTasksetConfig] = Field(default_factory=dict)
     # Name of the top-level sandbox provider block in the merged config.
     sandbox_provider: str = "sandbox"
@@ -912,6 +918,21 @@ class HarborEnvironmentServer(
                 stage="cleanup",
                 partial_response=agent_response,
             ) from error
+
+        # A failed response whose harness classified the cause is routed by the deployment's policy before any
+        # grading: a transport or unknown cause is retried ungraded, as on ``single_agent_turn``, instead of
+        # handing test.sh a half-finished sandbox and recording a real 0. In a multi-step task this ends the
+        # episode at the turn that failed; a verify cause is graded as before.
+        action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
+        if action != OutcomeAction.VERIFY:
+            raise self._failure(
+                stage="agent",
+                failure_reason=agent_response.error.message if agent_response.error else "Agent reported failure",
+                terminal=action == OutcomeAction.FAIL,
+                partial_response=agent_response,
+                agent_observations=agent_observations,
+                trajectory=agent_trajectory,
+            )
         return agent_response, agent_observations, agent_trajectory
 
     async def _run_turns(

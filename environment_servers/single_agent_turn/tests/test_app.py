@@ -19,12 +19,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import nemo_gym.server_utils
 from environment_servers.single_agent_turn.app import (
-    AgentOutcomePolicyConfig,
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
     SingleAgentTurnResult,
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
+from nemo_gym.agent_outcome import AgentOutcomePolicyConfig
 from nemo_gym.base_environment_server import is_retryable_dependency_error
 from nemo_gym.base_resources_server import (
     BaseVerifyRequest,

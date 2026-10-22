@@ -17,7 +17,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from environment_servers.single_agent_turn.app import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
+from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
 from nemo_gym.agent_utils import process_supervisor
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE, SUPERVISOR_FILE, parse_cleanup_receipt
