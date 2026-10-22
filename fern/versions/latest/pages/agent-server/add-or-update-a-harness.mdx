@@ -607,15 +607,17 @@ not retry or grading policy.
 
 Use `model_context_limit` only when a provider or harness explicitly reports that the
 model's context window was exceeded. HTTP 400 or 413 alone does not establish that
-cause. Keep it distinct from `agent_limit`, so each can have its own policy override.
+cause. Report a context-limit stop as `status="incomplete"` with this reason: the
+partial work proceeds to verification without an automatic episode retry.
 
 The helper writes JSON to `response.metadata.ng_agent_outcome`; `status_code` is the
 upstream model request's status, not the agent endpoint's HTTP status. The
-`single_agent_turn` Environment Server applies this default policy after closing the agent:
+`single_agent_turn` Environment Server applies this default policy to classified
+failed responses after closing the agent:
 
 | Reported cause | Verify | Eligible for episode retry |
 | --- | --- | --- |
-| `agent_invalid_output`, `agent_limit`, `model_context_limit`, or model request rejection 400/413/422 | Yes | No |
+| `agent_invalid_output`, `agent_limit`, or model request rejection 400/413/422 | Yes | No |
 | Model request errors 408/425/429/5xx, `model_transport_error`, or `unknown` | No | Yes |
 | Other failures, including 401/403/404 or malformed metadata | No | No |
 
@@ -632,8 +634,9 @@ verification or episode retry by default. Unclassified failures reported as `unk
 remain retryable.
 
 Configure `agent_outcome_policy` inside the `single_agent_turn` Environment Server's
-config to choose `verify`, `retry`, or `fail` (ungraded and nonretryable). HTTP status
-rules take precedence over failure-kind rules; unmatched failures use `default_action`
+config to choose `verify`, `retry`, or `fail` (ungraded and nonretryable) for classified
+failed responses. These overrides do not apply to completed or incomplete responses.
+HTTP status rules take precedence over failure-kind rules; unmatched failures use `default_action`
 (default: `fail`). Supplied entries override matching defaults; omitted entries retain
 their defaults. Failure names must be registered or `unknown`, and
 HTTP status keys must be 400–599. Malformed outcome metadata always fails without retry.

@@ -1123,7 +1123,6 @@ async def test_verify_says_that_the_resources_session_is_closed_afterwards() -> 
     [
         ({"failure_kind": "agent_invalid_output"}, True, False),
         ({"failure_kind": "agent_limit"}, True, False),
-        ({"failure_kind": "model_context_limit"}, True, False),
         ({"failure_kind": "model_request_error", "status_code": 400}, True, False),
         ({"failure_kind": "model_request_error", "status_code": 413}, True, False),
         ({"failure_kind": "model_request_error", "status_code": 422}, True, False),
@@ -1181,9 +1180,6 @@ async def test_classified_agent_failure_policy(outcome: dict, verifiable: bool, 
         ({"by_failure_kind": {"unknown": "retry"}}, {"failure_kind": "agent_invalid_output"}, True, False),
         ({"by_failure_kind": {"unknown": "verify"}}, {"failure_kind": "unknown"}, True, False),
         ({"by_failure_kind": {"unknown": "fail"}}, {"failure_kind": "unknown"}, False, False),
-        ({"by_failure_kind": {"agent_limit": "fail"}}, {"failure_kind": "model_context_limit"}, True, False),
-        ({"by_failure_kind": {"model_context_limit": "fail"}}, {"failure_kind": "agent_limit"}, True, False),
-        ({"by_failure_kind": {"model_context_limit": "fail"}}, {"failure_kind": "model_context_limit"}, False, False),
         ({"default_action": "retry"}, {"failure_kind": "agent_run_error"}, False, True),
         ({"by_failure_kind": {}, "by_status_code": {}}, {"failure_kind": "model_transport_error"}, False, True),
     ],
@@ -1271,6 +1267,34 @@ async def test_nonfailed_outcomes_still_reach_verification(status: str | None) -
     assert result.failure is None
     verify = next(kwargs for _, path, kwargs in client.calls if path == "/verify")
     assert verify["json"]["response"]["status"] == status
+
+
+@pytest.mark.parametrize("action", ["fail", "retry"])
+async def test_incomplete_context_limit_verifies_partial_work(action: str) -> None:
+    from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+
+    environment, client = _environment_server()
+    environment.config.agent_outcome_policy = AgentOutcomePolicyConfig(default_action=action)
+    response = (
+        _agent_response()
+        .model_copy(
+            update={
+                "status": "incomplete",
+                "metadata": {
+                    AGENT_OUTCOME_METADATA_KEY: AgentOutcome(failure_kind="model_context_limit").model_dump_json()
+                },
+            }
+        )
+        .model_dump(mode="json")
+    )
+    client.responses[2] = _Response(response)
+
+    result = await environment.run_request(_request())
+
+    assert result.failure is None
+    assert result.result.reward == 1.0
+    verify = next(kwargs for _, path, kwargs in client.calls if path == "/verify")
+    assert verify["json"]["response"] == response
 
 
 @pytest.mark.parametrize("raw", ["not valid JSON", '{"failure_kind":"unregistered_error"}'])
