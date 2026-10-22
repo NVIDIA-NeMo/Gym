@@ -22,7 +22,7 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY
+from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnRequest,
@@ -38,7 +38,7 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
-        # Legacy rows still run the native protocol through run_request, so its episodes checkpoint too.
+        # Flat rows still run the episode protocol through run_request, so its episodes checkpoint too.
         self.setup_environment_checkpoint(app)
         app.post("/run")(self.run_legacy)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
@@ -99,6 +99,8 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
                 failure["_ng_failure_partial_response"] = response.failure.partial_response.model_dump(mode="json")
             if response.failure.agent_observations is not None:
                 failure[NG_AGENT_OBSERVATIONS_KEY] = response.failure.agent_observations.model_dump(mode="json")
+            if response.failure.trajectory is not None:
+                failure[NG_TRAJECTORY_KEY] = response.failure.trajectory.model_dump(mode="json")
             return failure
         if response.result is None:
             raise ValueError("Successful episode response has no result")

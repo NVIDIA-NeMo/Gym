@@ -2643,6 +2643,7 @@ def test_response_field_set_is_pinned() -> None:
         "max_output_tokens",
         "max_tool_calls",
         "metadata",
+        "metrics",  # Gym extension: provider metrics preserved by the converter.
         "model",
         "moderation",
         "object",

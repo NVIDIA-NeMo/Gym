@@ -557,8 +557,8 @@ class TestApp:
         with pytest.raises(ValueError, match="does not support required MCP"):
             await server.seed_agent_session(request, body)
 
-    async def test_several_workers_are_allowed_but_reject_sessions(self) -> None:
-        """The legacy /run path keeps no session, so only session seeding needs a single worker."""
+    async def test_several_workers_seed_sessions(self) -> None:
+        """Session routing sends a session's later requests to the worker that seeded it."""
         server, _ = _make_agent(False)
         server = type(server)(
             config=server.config.model_copy(update={"num_workers": 2}), server_client=server.server_client
@@ -569,8 +569,11 @@ class TestApp:
             task_id=TaskId(taskset="example", task_id="0"),
         )
 
-        with pytest.raises(ValueError, match="sessions require num_workers=1"):
-            await server.seed_agent_session(MagicMock(session={}), body)
+        request = MagicMock(session={})
+        await server.seed_agent_session(request, body)
+
+        assert server._require_agent_session("agent-session").request == body
+        assert request.session[AGENT_SESSION_COOKIE_KEY] == "agent-session"
 
     async def test_agent_session_without_a_grant_refuses_tool_calls(self, monkeypatch: MonkeyPatch) -> None:
         # The configured resources_server has no session for this episode, so a tool call must not fall back to it.
@@ -2095,6 +2098,42 @@ class TestCheckpointAcrossModelCalls:
         assert record.boundary == _STEP_ZERO
         # After resume the activation continues with the reply it held.
         assert len(calls) == 1
+        assert result.output[0].content[0].text == "cold"
+
+    async def test_a_reply_whose_headers_arrived_before_prepare_and_whose_body_is_held_does_not_hold_up_prepare(
+        self,
+    ) -> None:
+        server, server_client = _make_agent(False)
+        request = await _restored_session(server, activations=0, boundary=None)
+        participant = server.checkpoint_participant
+        controller = ParticipantControlPlane(participant, instance_name="agent", lease_grace_seconds=60)
+        # The model server prepared first: its gate sent the reply's headers and holds the body until it resumes.
+        model_server_resumed = asyncio.Event()
+        reading_body = asyncio.Event()
+
+        async def read() -> bytes:
+            reading_body.set()
+            await model_server_resumed.wait()
+            return json.dumps(_FINAL_RESPONSE).encode()
+
+        reply = _mock_response()
+        reply.read = AsyncMock(side_effect=read)
+        server_client.post = AsyncMock(return_value=reply)
+        activation = asyncio.create_task(
+            server.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="q"))
+        )
+        await asyncio.wait_for(reading_body.wait(), 5)
+        # The agent server prepares after the headers arrived, while the body is still held.
+        prepared = await controller.prepare(CheckpointRequest(**_checkpoint("c1") | {"deadline_ts": time.time() + 1}))
+        [record] = await participant.export(None)
+        await controller.resume(CheckpointRequest(**_checkpoint("c1")))
+        model_server_resumed.set()
+        result = await asyncio.wait_for(activation, 5)
+
+        assert prepared["phase"] == "prepared"
+        # The boundary before the call: a restore calls the model again from there.
+        assert record.boundary == _STEP_ZERO
+        assert server_client.post.await_count == 1
         assert result.output[0].content[0].text == "cold"
 
     async def test_an_activation_already_completed_is_answered_with_its_reply_without_running_again(self) -> None:
