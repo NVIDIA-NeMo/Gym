@@ -31,6 +31,15 @@ from nemo_gym.orchestration.api import ResumeConfig
 # `_stage` in slurm.py always writes this benchmark's script to exactly this
 # filename inside its job dir, which `#SBATCH --chdir` makes `$PWD` at runtime.
 _JOB_SCRIPT_NAME = "job.sh"
+# The first line of the prologue, so a resubmit can tell a resumable job.sh from one without the chain.
+PROLOGUE_MARKER = "# --- Auto-resume chain ---"
+JOB_CHAIN_NAME = ".gym_job_chain"
+RETRY_FILE_NAME = ".gym_infra_retries"
+# Written when the chain stops before the run finished (the walltime cap, or a cancel), so a reader of the
+# job dir, not only of sacct, sees that rollouts are missing. A chain that continues removes it.
+INCOMPLETE_MARKER_NAME = ".gym_chain_incomplete"
+# Set to 1 in the environment of a job queued by `gym eval resubmit`.
+RESUBMIT_ENV = "GYM_RESUBMIT"
 
 _PROLOGUE_TEMPLATE = """\
 # --- Auto-resume chain ---
@@ -38,7 +47,25 @@ OUTPUT_DIR="$PWD"
 _this_script="$OUTPUT_DIR/{job_script_name}"
 _prev_slurm_job_id="${{1:-}}"
 _walltime_file="$OUTPUT_DIR/.gym_accumulated_walltime"
-_retry_file="$OUTPUT_DIR/.gym_infra_retries"
+_retry_file="$OUTPUT_DIR/{retry_file_name}"
+_incomplete_file="$OUTPUT_DIR/{incomplete_marker_name}"
+
+# The chain only stops here after a job that did not finish the run: a finished run's job COMPLETEs,
+# and its follow-up never starts. So the stop exits non-zero, and sacct does not read the run as done.
+_gym_stop_incomplete() {{
+    echo "$1" > "$_incomplete_file"
+    echo "$1"
+    exit 1
+}}
+
+# A job queued by `gym eval resubmit` starts a fresh retry count and a fresh walltime budget: a chain
+# stopped at the walltime cap says "resubmit to continue". The variable is read once and unset,
+# so the follow-up queued below (which inherits this environment) is an ordinary chain hop.
+_gym_resubmit="${{{resubmit_env}:-}}"
+unset {resubmit_env}
+if [[ "$_gym_resubmit" == 1 ]]; then
+    rm -f "$_retry_file" "$_walltime_file"
+fi
 
 if [[ "$_prev_slurm_job_id" != "" ]]; then
     for _sacct_try in 1 2 3 4 5 6; do
@@ -59,8 +86,7 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         echo "Previous job $_prev_slurm_job_id completed successfully. Exiting."
         exit 0
     elif [[ $_prev_state == CANCELLED* ]]; then
-        echo "Previous job $_prev_slurm_job_id was cancelled. Stopping chain."
-        exit 0
+        _gym_stop_incomplete "Previous job $_prev_slurm_job_id was cancelled. Chain stopped with rollouts missing; resubmit to continue."
     elif [[ $_prev_state == 'TIMEOUT' || $_prev_state == 'PREEMPTED' || $_prev_state == 'NODE_FAIL' ]]; then
         echo "Previous job $_prev_slurm_job_id: $_prev_state. Resuming..."
 {max_walltime_check}
@@ -76,20 +102,30 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
     fi
 fi
 
-echo "$SLURM_JOB_ID" >> "$OUTPUT_DIR/.gym_job_chain"
+# This job continues the run, so an earlier stop no longer describes it.
+rm -f "$_incomplete_file"
+echo "$SLURM_JOB_ID" >> "$OUTPUT_DIR/{job_chain_name}"
+# A requeued job keeps its job id and runs this script again. One follow-up per job id, so a requeue
+# does not queue a second one on the same dependency. mkdir is atomic on shared filesystems.
+_guard_marker="$OUTPUT_DIR/.gym_followup_queued.$SLURM_JOB_ID"
+if ! mkdir "$_guard_marker" 2>/dev/null; then
+    echo "Auto-resume follow-up for job $SLURM_JOB_ID is already queued (requeued job). Not queueing another."
 # kill-on-invalid-dep: without it, clusters lacking kill_invalid_depend keep the successor pending forever.
-_next_output=$(sbatch --dependency=afternotok:$SLURM_JOB_ID --kill-on-invalid-dep=yes "$_this_script" $SLURM_JOB_ID 2>&1) && {{
+elif _next_output=$(sbatch --dependency=afternotok:$SLURM_JOB_ID --kill-on-invalid-dep=yes "$_this_script" $SLURM_JOB_ID 2>&1); then
     _next_id=$(echo "$_next_output" | grep -oE '[0-9]+')
     if [[ -n "$_next_id" ]]; then
         echo "Auto-resume follow-up queued: $_next_id (afternotok:$SLURM_JOB_ID)"
     fi
-}} || echo "WARNING: Failed to submit auto-resume follow-up. Chain will NOT continue on failure."
+else
+    # Release the marker so a requeue of this job can try again.
+    rmdir "$_guard_marker" 2>/dev/null
+    echo "WARNING: Failed to submit auto-resume follow-up. Chain will NOT continue on failure."
+fi
 """
 
 _MAX_WALLTIME_CHECK_TEMPLATE = """\
         if (( _gym_accumulated >= {seconds} )); then
-            echo "Accumulated walltime (${{_gym_accumulated}}s) reached max_walltime cap ({raw} = {seconds}s). Stopping chain."
-            exit 0
+            _gym_stop_incomplete "Accumulated walltime (${{_gym_accumulated}}s) reached max_walltime cap ({raw} = {seconds}s). Chain stopped at the walltime cap with rollouts missing; resubmit to continue."
         fi"""
 
 
@@ -140,6 +176,10 @@ def render_resume_prologue(resume: ResumeConfig) -> str:
 
     return _PROLOGUE_TEMPLATE.format(
         job_script_name=_JOB_SCRIPT_NAME,
+        job_chain_name=JOB_CHAIN_NAME,
+        retry_file_name=RETRY_FILE_NAME,
+        incomplete_marker_name=INCOMPLETE_MARKER_NAME,
+        resubmit_env=RESUBMIT_ENV,
         max_retries=resume.max_retries,
         max_walltime_check=max_walltime_check,
     )

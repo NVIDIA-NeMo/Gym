@@ -1,3 +1,7 @@
+responses_create_params:
+  temperature: 1.0
+  top_p: 0.95
+
 genrm_eval:
   resources_servers:
     genrm_eval:

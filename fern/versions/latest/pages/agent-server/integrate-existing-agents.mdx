@@ -20,7 +20,7 @@ These adapters run a coding harness inside a task sandbox that a Resources serve
 | --- | --- | --- | --- | --- | --- |
 | Hermes (`hermes_agent`) | Chat Completions | MCP only | Returned in a result file that the model can also write; evaluation only | Declared | Not declared |
 | Pi (`pi_agent`) | Chat Completions | None | Not wired up; evaluation only | Declared | Declared |
-| Codex (`codex_agent`) | Responses (streaming) | None | Not wired up; evaluation only | Declared | Declared |
+| Codex (`codex_agent`) | Responses (streaming) | MCP only | Not wired up; evaluation only | Declared | Declared |
 | OpenCode (`opencode_agent`) | Chat Completions | None | Off by default; the session path is evaluation only | Not declared | Declared |
 | OpenClaw (`openclaw_agent`) | Chat Completions | None | Not wired up; evaluation only | Not declared | Declared |
 
@@ -34,7 +34,7 @@ An experiment is a few composable YAML files: the model and provider, the benchm
 
 ### Configure an experiment
 
-The following evaluation example pairs SWE-bench Pro with Hermes. Before you start, install a current Gym checkout with the native-session adapters, Gym's development environment, and the benchmark's preparation dependencies. Save the four files below under `experiments/onboarding/`, and run all commands from the repository root. Entries in `config_paths` are relative to the root.
+The following evaluation example pairs SWE-bench Pro with Hermes. Before you start, install a current Gym checkout with the agent session adapters, Gym's development environment, and the benchmark's preparation dependencies. Save the four files below under `experiments/onboarding/`, and run all commands from the repository root. Entries in `config_paths` are relative to the root.
 
 You also need a running vLLM-compatible model endpoint and an OpenSandbox deployment. Export the following variables in your shell:
 
@@ -136,7 +136,7 @@ gym eval prepare --config experiments/onboarding/run.yaml
 gym env resolve --config experiments/onboarding/run.yaml
 ```
 
-Then run one task. This command collates the declared benchmark data into native task rows, starts the servers, collects rollouts, and shuts the servers down:
+Then run one task. This command collates the declared benchmark data into materialized task rows, starts the servers, collects rollouts, and shuts the servers down:
 
 ```bash
 gym eval run \
@@ -202,6 +202,44 @@ Before you try a pairing, review the benchmark's session and tool contract and t
 To swap a component, change the imported configuration and its matching implementation block together. Keep task data and preparation in the benchmark declaration, and keep harness selection in the Environment Server's `agent_server` reference. The `--agent-type` shortcut for legacy agent-to-Resources bindings does not replace these edits. To compare agents on the same endpoint, keep the model and provider file unchanged. To compare models or providers, change that file in a separate experiment.
 
 For where the harness runs and who cleans up, including borrowed and agent-owned sandboxes and host execution, see [Select an execution mode](/main/agent-server/add-or-update-a-harness#select-an-execution-mode).
+
+## Resuming harness sessions
+
+OpenCode can resume its saved session across multiple activations in either
+an owned or borrowed sandbox. Opt in during `/v1/agent_sessions` seed with
+`continuation: {mode: resume_harness_session}`. Existing adapters reject continuation
+requirements they cannot satisfy before preparing the sandbox.
+
+Use the existing `/v1/responses` request body and session cookie. Send
+`x-ng-agent-activation: 1` for the first input delta, `2` for the next, and so on.
+Identical requests at the same index replay the original response. Conflicting
+retries, skipped indices, and overlapping new activations fail. The existing
+`metadata.agent_timeout_sec` sets the per-activation budget, including preparation,
+queueing and staging. Setup and cleanup retain their separate bounds.
+
+Adapters that support continuation override `_agent_continuation_capabilities()` to return
+the supported mode and observations, implement `_validate_agent_activation()` before
+binding an index, `_activate_agent_session_state()` for execution, and
+`_continuation_close_timeout()` for their cleanup bound. The ordinary `responses()`
+handler delegates to `activate_agent_session()` only for opted-in sessions; its
+existing HTTP signature remains unchanged. The shared ledger protects active work
+from a disconnected waiter and fences it during close. These guarantees are
+process-local, separate from checkpoint recovery.
+
+`SandboxSession` still launches once by default. An adapter that supports continuation may call
+`begin_activation()` with a fresh supervisor directory after the previous process
+has confirmed cleanup. Saved harness session storage remains outside these launch
+directories. Finalization stays private to the lifecycle; close removes the retained
+session directory tree before releasing the connection.
+
+Emit one invocation per activation, recording `harness_session_id` as context, and tag
+each trajectory turn with its activation. OpenCode's header plugin uses that
+activation-scoped invocation identity to attribute captured model calls. Responses
+carry only new output, usage and evidence; close supplies the cumulative record.
+`cleanup_confirmed` is omitted when an adapter does not report it. A final negative
+termination receipt fails the activation and skips verification; close releases
+the borrowed connection and returns `cleanup_confirmed: false`. Failures to release
+the connection remain retryable.
 
 ## Tools in Agent vs. Resources Server
 
