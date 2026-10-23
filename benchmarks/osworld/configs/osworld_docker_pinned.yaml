@@ -6,3 +6,11 @@ osworld_simple_agent:
   responses_api_agents:
     osworld_agent:
       container_image: docker://happysixd/osworld-docker@sha256:0e6497a9295647cf05bf2b2af522fdd79bdeba2737595259cab310a3bcf6baa9
+
+osworld_simple_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: osworld_simple_agent

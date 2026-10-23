@@ -19,33 +19,49 @@ from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock
 
 from omegaconf import OmegaConf
-from pytest import LogCaptureFixture, MonkeyPatch, mark, raises
+from omegaconf.errors import ConfigKeyError
+from pydantic import ValidationError
+from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, fixture, mark, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
 from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, RESULTS_DIR, WORKING_DIR
+from nemo_gym._config_aliases import LEGACY_AGENT_ALIASES, LEGACY_CONFIG_PATH_ALIASES
 from nemo_gym.config_types import (
+    AgentCompositionError,
+    AgentWithoutEnvironmentServerError,
     AlmostServerError,
+    AmbiguousAgentRenameError,
     ConfigError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
+    HeadServerConfigMalformedError,
     MalformedConfigPathsError,
     NoServerInstancesError,
     ServerRefNotFoundError,
+    UnsupportedAgentOverrideError,
+    UnsupportedAgentPairingError,
+    UnsupportedModelPairingError,
     WANDBConfig,
+    is_almost_server,
 )
 from nemo_gym.global_config import (
+    ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
+    ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     USE_ABSOLUTE_IP,
+    UV_LOCK_TIMEOUT_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     _openai_version_matches_nemo_gym_constraint,
     find_open_port,
     get_first_server_config_dict,
     get_global_config_dict,
+    resolve_dataset_agent,
 )
-from nemo_gym.secret_utils import recursively_hide_secrets
+from nemo_gym.rollout_collection import _environment_servers_by_agent
+from nemo_gym.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
 from nemo_gym.server_utils import (
     DictConfig,
 )
@@ -53,6 +69,8 @@ from nemo_gym.server_utils import (
 
 class TestGlobalConfig:
     def _mock_versions_for_testing(self, monkeypatch: MonkeyPatch) -> None:
+        # An exported UV_LOCK_TIMEOUT becomes the resolved default; keep snapshots hermetic.
+        monkeypatch.delenv("UV_LOCK_TIMEOUT", raising=False)
         monkeypatch.setattr(nemo_gym.global_config, "openai_version", "test openai version")
         monkeypatch.setattr(nemo_gym.global_config, "ray_version", "test ray version")
 
@@ -68,13 +86,16 @@ class TestGlobalConfig:
             "port_range_low": 10_001,
             "port_range_high": 20_000,
             # From self._mock_versions_for_testing
-            "head_server_deps": ["ray[default]==test ray version", "openai==test openai version"],
+            "head_server_deps": ["openai==test openai version"],
+            "head_server_constraints": ["ray==test ray version"],
             "python_version": "test python version",
             "skip_venv_if_present": False,
             "dry_run": False,
+            "server_spinup_timeout_seconds": 600,
             "model_endpoint_readiness_timeout_seconds": 600,
             "allow_openai_version_skew": False,
             "uv_cache_dir": str(CACHE_DIR.expanduser().resolve() / "uv"),
+            "uv_lock_timeout_seconds": 1800,
             "uv_venv_dir": str(WORKING_DIR),
             "results_dir": str(RESULTS_DIR.expanduser().resolve()),
             "cache_dir": str(CACHE_DIR.expanduser().resolve()),
@@ -85,6 +106,7 @@ class TestGlobalConfig:
 
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.delenv("UV_LOCK_TIMEOUT", raising=False)
         monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         # Explicitly handle any local .env.yaml files. Either read or don't read.
@@ -109,6 +131,7 @@ class TestGlobalConfig:
     def test_offline_resolution_uses_invalid_port_without_probing(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
         monkeypatch.delenv("UV_CACHE_DIR", raising=False)
+        monkeypatch.delenv("UV_LOCK_TIMEOUT", raising=False)
         probe = MagicMock(side_effect=AssertionError("offline resolution must not probe sockets"))
         hostname = MagicMock(side_effect=AssertionError("offline resolution must not resolve hostnames"))
         setup_exporters = MagicMock(side_effect=AssertionError("offline resolution must not start exporters"))
@@ -137,6 +160,56 @@ class TestGlobalConfig:
         hostname.assert_not_called()
         setup_exporters.assert_not_called()
         assert "UV_CACHE_DIR" not in nemo_gym.global_config.environ
+        assert "UV_LOCK_TIMEOUT" not in nemo_gym.global_config.environ
+        assert config[UV_LOCK_TIMEOUT_KEY_NAME] == 1800
+
+    def test_uv_lock_timeout_is_exported_and_overridable(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        monkeypatch.setattr(nemo_gym.global_config, "environ", dict())
+        self._mock_parse_environment(monkeypatch, DictConfig({}))
+
+        default_config = get_global_config_dict()
+
+        assert default_config[UV_LOCK_TIMEOUT_KEY_NAME] == 1800
+        assert nemo_gym.global_config.environ["UV_LOCK_TIMEOUT"] == "1800"
+
+        monkeypatch.setattr(nemo_gym.global_config, "environ", dict())
+        self._mock_parse_environment(monkeypatch, DictConfig({UV_LOCK_TIMEOUT_KEY_NAME: 60}))
+
+        overridden_config = get_global_config_dict()
+
+        assert overridden_config[UV_LOCK_TIMEOUT_KEY_NAME] == 60
+        assert nemo_gym.global_config.environ["UV_LOCK_TIMEOUT"] == "60"
+
+    @mark.parametrize(
+        ("exported", "configured", "expected"),
+        [
+            ("3600", {}, 3600),  # a timeout the user already exported survives
+            ("3600", {UV_LOCK_TIMEOUT_KEY_NAME: 60}, 60),  # the config key wins over the export
+            ("not a number", {}, 1800),  # uv cannot use a non-integer value either
+        ],
+    )
+    def test_uv_lock_timeout_precedence(
+        self, monkeypatch: MonkeyPatch, exported: str, configured: dict, expected: int
+    ) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        monkeypatch.setattr(nemo_gym.global_config, "environ", {"UV_LOCK_TIMEOUT": exported})
+        self._mock_parse_environment(monkeypatch, DictConfig(configured))
+
+        config = get_global_config_dict()
+
+        assert config[UV_LOCK_TIMEOUT_KEY_NAME] == expected
+        assert nemo_gym.global_config.environ["UV_LOCK_TIMEOUT"] == str(expected)
+
+    def test_null_uv_lock_timeout_leaves_the_environment_alone(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        monkeypatch.setattr(nemo_gym.global_config, "environ", dict())
+        self._mock_parse_environment(monkeypatch, DictConfig({UV_LOCK_TIMEOUT_KEY_NAME: None}))
+
+        config = get_global_config_dict()
+
+        assert config[UV_LOCK_TIMEOUT_KEY_NAME] is None
+        assert "UV_LOCK_TIMEOUT" not in nemo_gym.global_config.environ
 
     def _mock_parse_environment(self, monkeypatch: MonkeyPatch, config_dict: "DictConfig") -> None:
         """Standard parser mocks (no env var, no .env.yaml, fixed hydra config)."""
@@ -158,12 +231,37 @@ class TestGlobalConfig:
         monkeypatch.setattr(nemo_gym.global_config, "python_version", MagicMock(return_value="test python version"))
         monkeypatch.setattr(importlib.metadata, "requires", lambda name: ["openai<=2.7.2"])
 
+    def test_ray_version_is_a_constraint_not_a_requirement(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
+        self._mock_parse_environment(monkeypatch, DictConfig({}))
+
+        global_config_dict = get_global_config_dict()
+        assert global_config_dict["head_server_constraints"] == ["ray==test ray version"]
+        assert not any(dep.startswith("ray") for dep in global_config_dict["head_server_deps"])
+
+    def test_config_parses_without_ray_installed(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
+        monkeypatch.setattr(nemo_gym.global_config, "ray_version", None)
+        self._mock_parse_environment(monkeypatch, DictConfig({}))
+
+        global_config_dict = get_global_config_dict()
+        assert global_config_dict["head_server_constraints"] == []
+
     def test_head_server_deps_pins_compatible_parent_openai(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
         self._mock_parse_environment(monkeypatch, DictConfig({}))
 
         global_config_dict = get_global_config_dict()
         assert "openai==2.6.0" in global_config_dict["head_server_deps"]
+
+    def test_head_server_deps_carry_provider_plugins(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
+        self._mock_parse_environment(monkeypatch, DictConfig({}))
+        monkeypatch.setattr(nemo_gym.global_config, "plugin_distributions", lambda: ["gym-substrate"])
+        monkeypatch.setattr(nemo_gym.global_config, "installed_requirement", lambda dist, req: f"{req}==0.1.0")
+
+        global_config_dict = get_global_config_dict()
+        assert "gym-substrate==0.1.0" in global_config_dict["head_server_deps"]
 
     def test_head_server_deps_raises_on_incompatible_parent_openai(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.52.0")
@@ -333,6 +431,49 @@ b: 2
             }
             == global_config_dict
         )
+
+    def test_duplicate_config_paths_warning_goes_to_stderr(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys: CaptureFixture
+    ) -> None:
+        """Diagnostics must stay off stdout, which carries the `--json` payload."""
+        self._mock_versions_for_testing(monkeypatch)
+
+        # Clear any lingering env vars.
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        # Two roots pulling in the same child is what triggers the duplicate-path warning.
+        (tmp_path / "shared.yaml").write_text("a: 1\n")
+        for name in ("first.yaml", "second.yaml"):
+            (tmp_path / name).write_text(f"""\
+config_paths:
+- {tmp_path}/shared.yaml
+""")
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = True
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig({"config_paths": [f"{tmp_path}/first.yaml", f"{tmp_path}/second.yaml"]})
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        omegaconf_load_mock = MagicMock()
+        original_load = OmegaConf.load
+        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+
+        get_global_config_dict()
+
+        captured = capsys.readouterr()
+        assert "Found configs that reference the same source config path" in captured.err
+        assert f"- {tmp_path}/shared.yaml" in captured.err
+        assert captured.out == ""
 
     def test_get_global_config_dict_config_paths_recursive(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
@@ -662,6 +803,12 @@ contested: second_inner
                             }
                         }
                     },
+                    "agent_name_environment_server": {
+                        "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent_name"}}}
+                    },
+                    "explicit_agent_name_environment_server": {
+                        "environment_servers": {"legacy_agent": {"agent_server": {"name": "explicit_agent_name"}}}
+                    },
                 }
             )
         )
@@ -722,6 +869,9 @@ contested: second_inner
                             }
                         }
                     },
+                    "agent_name_environment_server": {
+                        "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent_name"}}}
+                    },
                 }
             )
             return lambda: fn(config_dict)
@@ -756,6 +906,9 @@ contested: second_inner
                             "domain": "other",
                         }
                     }
+                },
+                "agent_name_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent_name"}}}
                 },
                 "disallowed_ports": [11000, 12345, 123456],
             }
@@ -795,6 +948,9 @@ contested: second_inner
                                 },
                             }
                         }
+                    },
+                    "agent_name_environment_server": {
+                        "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent_name"}}}
                     },
                 }
             )
@@ -853,6 +1009,9 @@ contested: second_inner
                             }
                         }
                     },
+                    "agent_name_environment_server": {
+                        "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent_name"}}}
+                    },
                 }
             )
             return lambda: fn(config_dict)
@@ -900,6 +1059,9 @@ contested: second_inner
                                 "domain": "other",
                             }
                         }
+                    },
+                    "agent_name_environment_server": {
+                        "environment_servers": {"legacy_agent": {"agent_server": {"name": "agent_name"}}}
                     },
                 }
             )
@@ -970,6 +1132,35 @@ contested: second_inner
         missing = parser.collect_missing_value_paths(config)
         assert "viacopy.b" in missing
         assert "viainherit.b" in missing
+
+    def test_recursively_swap_keys_helper_new_struct(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            GlobalConfigDictParser, "parse_global_config_dict_from_cli", lambda *args, **kwargs: struct
+        )
+
+        parser = GlobalConfigDictParser()
+        struct = DictConfig(
+            {
+                "a": {
+                    "b": 1,
+                },
+                "a2": {
+                    "_inherit_from": "a",
+                    "c": 2,
+                },
+            },
+            flags={"struct": True},
+        )
+
+        parse_config = GlobalConfigDictParserConfig(skip_load_from_cli=False, skip_load_from_dotenv=True)
+
+        """
+        Assert no error:
+        omegaconf.errors.ConfigKeyError: Key 'c' is not in struct
+            full_key: a.c
+            object_type=dict
+        """
+        parser.parse(parse_config)
 
     def test_copy_of_missing_leaf_is_reported_not_opaque_error(self) -> None:
         # `${copy:source.model}` where source.model is unset must not raise an opaque "path does not
@@ -1315,6 +1506,9 @@ contested: second_inner
                             }
                         }
                     },
+                    "test_agent_environment_server": {
+                        "environment_servers": {"legacy_agent": {"agent_server": {"name": "test_agent"}}}
+                    },
                 }
             )
             return lambda: fn(config_dict)
@@ -1326,6 +1520,20 @@ contested: second_inner
         with raises(AlmostServerError, match="almost-server.*validation errors") as exc_info:
             get_global_config_dict()
         assert isinstance(exc_info.value, ConfigError)
+        # Diagnostics must stay off stdout, which carries the `--json` payload.
+        assert all(call.kwargs.get("file") is sys.stderr for call in rich_print_mock.call_args_list)
+
+    def test_environment_server_is_recognized_as_an_almost_server(self) -> None:
+        config = DictConfig(
+            {
+                "environment_servers": {
+                    "first": {"entrypoint": "first.py"},
+                    "second": {"entrypoint": "second.py"},
+                }
+            }
+        )
+
+        assert is_almost_server(config) is True
 
     def test_almost_servers_error_flag_bypasses_value_error(self, monkeypatch: MonkeyPatch) -> None:
         """
@@ -1372,6 +1580,9 @@ contested: second_inner
                             }
                         }
                     },
+                    "test_agent_environment_server": {
+                        "environment_servers": {"legacy_agent": {"agent_server": {"name": "test_agent"}}}
+                    },
                 }
             )
             return lambda: fn(config_dict)
@@ -1391,6 +1602,8 @@ contested: second_inner
         assert "Configuration Warnings" in printed_messages
         assert "license" in printed_messages
         assert "domain" in printed_messages
+        # Diagnostics must stay off stdout, which carries the `--json` payload.
+        assert all(call.kwargs.get("file") is sys.stderr for call in rich_print_mock.call_args_list)
 
     def test_use_absolute_ip(self, monkeypatch: MonkeyPatch) -> None:
         """Test that use_absolute_ip=True uses machine's hostname ip for default_host."""
@@ -1419,7 +1632,7 @@ contested: second_inner
         hydra_main_mock.return_value = hydra_main_wrapper
         monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
 
-        expected_ip = "abcd ip"
+        expected_ip = "192.0.2.20"
         gethostbyname_mock = MagicMock(return_value=expected_ip)
         monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", gethostbyname_mock)
 
@@ -1449,6 +1662,47 @@ contested: second_inner
             "key": "****",
             "not": "not",
         }
+
+    @mark.parametrize(
+        ("key", "masked"),
+        [
+            ("policy_api_key", True),
+            ("hf_token", True),
+            ("otlp_headers", True),
+            ("db_password", True),
+            ("DB_PASSWORD", True),
+            ("client_secret", True),
+            ("auth_credential", True),
+            ("bearer_auth", True),
+            ("session_cookie", True),
+            ("OPENAI_API_KEY", True),
+            ("apiKey", True),
+            ("Authorization", True),
+            ("author", False),
+            ("session_id", False),
+            ("wandb_project", False),
+            ("mlflow_tracking_uri", False),
+            (1, False),
+        ],
+    )
+    def test_recursively_hide_secrets_masks_secret_shaped_keys(self, key, masked: bool) -> None:
+        value = "sk-FAKE-CANARY"  # pragma: allowlist secret
+        dict_config = DictConfig({key: value, "nested": {key: value}})
+
+        recursively_hide_secrets(dict_config)
+
+        expected = "****" if masked else value
+        assert dict_config[key] == expected
+        assert dict_config["nested"][key] == expected
+
+    def test_hide_secrets_in_overrides_masks_keys_case_insensitively(self) -> None:
+        overrides = ["++DB_PASSWORD=sk-FAKE-CANARY", "+policy.OPENAI_API_KEY=sk-FAKE-CANARY", "++wandb_project=proj"]
+
+        assert hide_secrets_in_overrides(overrides) == [
+            "++DB_PASSWORD=****",
+            "+policy.OPENAI_API_KEY=****",
+            "++wandb_project=proj",
+        ]
 
     def test_recursively_replace_keys(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
@@ -1742,6 +1996,17 @@ contested: second_inner
         GlobalConfigDictParser.parse_global_config_dict_from_cli(None)
 
 
+def _discover_repo_configs(repo_root: Path, config_dirs: tuple[str, ...]) -> list[Path]:
+    # Hidden directories under a server hold local tool checkouts, such as the ether0 clone in `.ether0/`.
+    # YAML files in those checkouts are not Gym configs, so the sweep skips them.
+    return [
+        p
+        for d in config_dirs
+        for p in (repo_root / d).rglob("*.yaml")
+        if not any(part.startswith(".") for part in p.relative_to(repo_root / d).parts)
+    ]
+
+
 class TestConfigLoadErrors:
     """Actionable, fail-fast errors for bad/malformed/empty config_paths (no raw traceback)."""
 
@@ -1790,6 +2055,67 @@ class TestConfigLoadErrors:
         assert str(missing) in message
         assert message.count("  - ") == 1
 
+    @mark.parametrize(("legacy", "canonical"), LEGACY_CONFIG_PATH_ALIASES.items())
+    def test_load_extra_config_paths_resolves_legacy_alias(
+        self, caplog: LogCaptureFixture, legacy: str, canonical: str
+    ) -> None:
+        parser = GlobalConfigDictParser()
+
+        with caplog.at_level("WARNING"):
+            config_paths, configs = parser.load_extra_config_paths([legacy])
+
+        assert config_paths == [canonical]
+        assert len(configs) == 1
+        assert f"Config path `{legacy}` is deprecated; use `{canonical}`." in caplog.text
+
+    def test_existing_legacy_config_path_takes_precedence(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, caplog: LogCaptureFixture
+    ) -> None:
+        legacy = next(iter(LEGACY_CONFIG_PATH_ALIASES))
+        local_config = tmp_path / legacy
+        local_config.parent.mkdir(parents=True)
+        local_config.write_text("local: true\n")
+        monkeypatch.chdir(tmp_path)
+
+        parser = GlobalConfigDictParser()
+        with caplog.at_level("WARNING"):
+            config_paths, configs = parser.load_extra_config_paths([legacy])
+
+        assert config_paths == [legacy]
+        assert configs[0].local is True
+        assert "deprecated" not in caplog.text
+
+    @mark.parametrize(("legacy", "canonical"), LEGACY_AGENT_ALIASES.items())
+    def test_legacy_agent_names_route_to_canonical_instance(
+        self, caplog: LogCaptureFixture, legacy: str, canonical: str
+    ) -> None:
+        config = OmegaConf.create(
+            {
+                canonical: {},
+                "agent_name": legacy,
+                "agent_map": {"source": legacy},
+                "fan_out": {"source": [legacy]},
+            }
+        )
+
+        with caplog.at_level("WARNING"):
+            GlobalConfigDictParser.apply_legacy_agent_aliases(config)
+
+        assert config.agent_name == canonical
+        assert config.agent_map.source == canonical
+        assert config.agent_map[legacy] == canonical
+        assert config.fan_out.source == [canonical]
+        assert f"`{legacy}` -> `{canonical}`" in caplog.text
+
+    def test_legacy_agent_alias_follows_composed_agent_route(self) -> None:
+        legacy, canonical = next(iter(LEGACY_AGENT_ALIASES.items()))
+        composed = "reasoning_gym_custom_agent"
+        config = OmegaConf.create({composed: {}, "agent_map": {canonical: composed}})
+
+        GlobalConfigDictParser.apply_legacy_agent_aliases(config)
+
+        assert config.agent_map[legacy] == composed
+
     def test_load_extra_config_paths_malformed_yaml_raises_config_error(self, tmp_path: Path) -> None:
         bad = tmp_path / "bad.yaml"
         bad.write_text("foo: [1, 2\nbar: : :\n")  # invalid YAML syntax
@@ -1828,6 +2154,120 @@ class TestConfigLoadErrors:
         assert "config_paths" in message
         assert "list" in message
 
+    @mark.parametrize(
+        ("head_server", "named_fields"),
+        [
+            ({"port": "notanint"}, ["head_server.port"]),  # what `++head_server.port=notanint` arrives as
+            ({"host": None}, ["head_server.host"]),  # setdefault keeps an explicit null
+            ({"host": None, "port": "notanint"}, ["head_server.host", "head_server.port"]),  # all at once
+        ],
+    )
+    def test_parse_malformed_head_server_raises_actionable_error(
+        self, head_server: dict, named_fields: list[str]
+    ) -> None:
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig({"head_server": head_server}),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+        with raises(HeadServerConfigMalformedError) as exc_info:
+            parser.parse(parse_config)
+
+        message = str(exc_info.value)
+        for field in named_fields:
+            assert field in message
+        assert "++head_server.port=" in message
+        assert isinstance(exc_info.value, ValueError)  # same compat contract as the rest of the family
+        assert isinstance(exc_info.value.__cause__, ValidationError)  # `from e` keeps the pydantic detail
+
+    @mark.parametrize(
+        ("head_server", "shown_as"),
+        [
+            ("foo", "'foo'"),  # `++head_server=foo` used to die with an AttributeError on the block's first `.get`
+            # Falsy non-mappings are malformed too, not "absent": they must not fall back to the defaults.
+            (False, "False"),
+            (0, "0"),
+            ("", "''"),
+            ([], "[]"),
+        ],
+        ids=["scalar", "false", "zero", "empty-string", "empty-list"],
+    )
+    def test_parse_non_mapping_head_server_raises_actionable_error(self, head_server: object, shown_as: str) -> None:
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig({"head_server": head_server}),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+        with raises(HeadServerConfigMalformedError) as exc_info:
+            parser.parse(parse_config)
+
+        message = str(exc_info.value)
+        assert "must be a mapping" in message
+        assert f"Got: {shown_as}." in message
+        assert "++head_server.port=" in message
+
+    def test_parse_null_head_server_takes_the_defaults(self) -> None:
+        # `head_server: null` is the one non-mapping that means "not configured".
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig({"head_server": None}),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+
+        parsed = parser.parse(parse_config)
+
+        assert parsed["head_server"] == {"host": "127.0.0.1", "port": DEFAULT_HEAD_SERVER_PORT}
+        assert parsed["disallowed_ports"] == [DEFAULT_HEAD_SERVER_PORT]
+
+    @mark.parametrize(
+        "server_host",
+        [{"host": None}, {}],  # an explicit null, and no `host` key at all
+        ids=["null-host", "omitted-host"],
+    )
+    def test_parse_head_server_host_may_reference_a_defaulted_server_host(self, server_host: dict) -> None:
+        # The referenced host is only filled in by validate_and_populate_defaults, so the head server block must not
+        # be resolved and validated before that runs.
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig(
+                {
+                    "test_resource": {
+                        "resources_servers": {
+                            "test_server": {"entrypoint": "app.py", "domain": "other", "port": 12000, **server_host}
+                        }
+                    },
+                    "head_server": {"host": "${test_resource.resources_servers.test_server.host}"},
+                }
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+
+        parsed = parser.parse(parse_config)
+
+        assert parsed["test_resource"]["resources_servers"]["test_server"]["host"] == "127.0.0.1"
+        assert parsed["head_server"]["host"] == "127.0.0.1"
+        assert parsed["head_server"]["port"] == DEFAULT_HEAD_SERVER_PORT
+
+    def test_parse_keeps_a_head_server_value_pydantic_can_coerce(self) -> None:
+        # The check is deliberately lax and validate-only: a quoted port in existing YAML keeps working, and the
+        # block is left exactly as written, so `gym env resolve` still prints what the user configured. The
+        # validated int is what reaches the port allocator, so the head server's port is still kept off it.
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig({"head_server": {"host": "127.0.0.1", "port": "8080"}}),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+
+        parsed = parser.parse(parse_config)
+
+        assert parsed["head_server"] == {"host": "127.0.0.1", "port": "8080"}
+        assert parsed["disallowed_ports"] == [8080]
+
     def test_raise_on_no_server_instances_raises_when_empty(self) -> None:
         parser = GlobalConfigDictParser()
         config = DictConfig({"config_paths": [], "head_server": {"port": 11000}})
@@ -1839,6 +2279,503 @@ class TestConfigLoadErrors:
         parser = GlobalConfigDictParser()
         config = DictConfig({"my_server": {"resources_servers": {"x": {"entrypoint": "app.py", "domain": "other"}}}})
         parser.raise_on_no_server_instances(config)
+
+    @staticmethod
+    def _agent_without_environment_server_config(**extra) -> DictConfig:
+        return DictConfig(
+            {
+                "mcqa": {"resources_servers": {"mcqa": {"entrypoint": "app.py", "domain": "other"}}},
+                "mcqa_simple_agent": {
+                    "responses_api_agents": {
+                        "simple_agent": {
+                            "entrypoint": "app.py",
+                            "resources_server": {"type": "resources_servers", "name": "mcqa"},
+                        }
+                    }
+                },
+                **extra,
+            }
+        )
+
+    def test_agent_without_environment_server_gets_a_legacy_relay(self, caplog: LogCaptureFixture) -> None:
+        # A config written before environment servers keeps running.
+        # Collection reaches the agent through a generated relay, never directly.
+        # The warning tells the user exactly how to migrate.
+        config = self._agent_without_environment_server_config()
+        with caplog.at_level("WARNING"):
+            GlobalConfigDictParser()._front_agents_without_environment_server(config)
+
+        # Named as the migration script would declare it, so pasting the logged block matches the script.
+        assert OmegaConf.to_container(config["mcqa_environment_server"]) == {
+            "environment_servers": {
+                "legacy_agent": {
+                    "entrypoint": "app.py",
+                    "agent_server": {"type": "responses_api_agents", "name": "mcqa_simple_agent"},
+                }
+            }
+        }
+        assert _environment_servers_by_agent(config) == {"mcqa_simple_agent": ["mcqa_environment_server"]}
+        assert "DEPRECATED: agents without an environment server: `mcqa_simple_agent`" in caplog.text
+        assert "AgentWithoutEnvironmentServerError" in caplog.text
+        assert "python scripts/add_legacy_agent_environment_servers.py path/to/config.yaml" in caplog.text
+        assert "mcqa_environment_server:\n" in caplog.text
+        assert "name: mcqa_simple_agent" in caplog.text
+        assert "error_on_agent_without_environment_server: true" in caplog.text
+
+    def test_agent_without_environment_server_is_rejected_when_strict(self) -> None:
+        config = self._agent_without_environment_server_config(error_on_agent_without_environment_server=True)
+        with raises(AgentWithoutEnvironmentServerError) as exc_info:
+            GlobalConfigDictParser()._front_agents_without_environment_server(config)
+        assert "mcqa_simple_agent" in str(exc_info.value)
+        assert "scripts/add_legacy_agent_environment_servers.py" in str(exc_info.value)
+        assert "mcqa_environment_server" not in config
+
+        config["mcqa_environment_server"] = {
+            "environment_servers": {
+                "legacy_agent": {
+                    "entrypoint": "app.py",
+                    "agent_server": {"type": "responses_api_agents", "name": "mcqa_simple_agent"},
+                }
+            }
+        }
+        GlobalConfigDictParser()._front_agents_without_environment_server(config)
+
+    def test_agent_with_environment_server_gets_no_relay(self, caplog: LogCaptureFixture) -> None:
+        # A second server in front of the same agent would make agent-routed rows ambiguous.
+        config = self._agent_without_environment_server_config(
+            mcqa_served={
+                "environment_servers": {
+                    "legacy_agent": {
+                        "entrypoint": "app.py",
+                        "agent_server": {"type": "responses_api_agents", "name": "mcqa_simple_agent"},
+                    }
+                }
+            }
+        )
+        with caplog.at_level("WARNING"):
+            GlobalConfigDictParser()._front_agents_without_environment_server(config)
+
+        assert "mcqa_environment_server" not in config
+        assert _environment_servers_by_agent(config) == {"mcqa_simple_agent": ["mcqa_served"]}
+        assert "DEPRECATED" not in caplog.text
+
+    def test_generated_relay_name_avoids_existing_entries(self) -> None:
+        config = self._agent_without_environment_server_config(
+            mcqa_environment_server={"note": "an unrelated top-level entry"}
+        )
+        GlobalConfigDictParser()._front_agents_without_environment_server(config)
+
+        assert config["mcqa_environment_server"] == {"note": "an unrelated top-level entry"}
+        assert _environment_servers_by_agent(config) == {"mcqa_simple_agent": ["mcqa_simple_agent_environment_server"]}
+
+    def _agent_with_environment_server_config(self, **extra) -> DictConfig:
+        return OmegaConf.merge(
+            GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            self._agent_without_environment_server_config(
+                mcqa_environment_server={
+                    "environment_servers": {
+                        "legacy_agent": {
+                            "entrypoint": "app.py",
+                            "agent_server": {"type": "responses_api_agents", "name": "mcqa_simple_agent"},
+                        }
+                    }
+                },
+                **extra,
+            ),
+        )
+
+    @mark.parametrize("inherit", [{"_inherit_from": "mcqa_simple_agent"}, "${inherit_from:mcqa_simple_agent}"])
+    def test_agent_rename_preserves_environment_server_and_routes(self, inherit) -> None:
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=self._agent_with_environment_server_config(
+                    renamed_agent=inherit,
+                    error_on_agent_without_environment_server=True,
+                    environment_server_routes={"mcqa_tasks": "mcqa_environment_server"},
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert "mcqa_simple_agent" not in resolved
+        assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["mcqa_environment_server"]}
+        assert resolved.environment_server_routes == {"mcqa_tasks": "mcqa_environment_server"}
+        assert resolved.renamed_agent.responses_api_agents.simple_agent.resources_server.name == "mcqa"
+
+    def test_copying_agent_keeps_original_environment_server(self) -> None:
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=self._agent_with_environment_server_config(
+                    copied_agent={"_copy": "mcqa_simple_agent"},
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert "mcqa_simple_agent" in resolved
+        assert _environment_servers_by_agent(resolved) == {
+            "mcqa_simple_agent": ["mcqa_environment_server"],
+            "copied_agent": ["copied_environment_server"],
+        }
+
+    def test_agent_rename_ignores_non_agent_destination(self) -> None:
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=self._agent_with_environment_server_config(
+                    renamed_agent={"_inherit_from": "mcqa_simple_agent"},
+                    holder={"_inherit_from": "mcqa_simple_agent", "_delete_key": "responses_api_agents"},
+                    error_on_agent_without_environment_server=True,
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert "mcqa_simple_agent" not in resolved
+        assert "responses_api_agents" not in resolved.holder
+        assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["mcqa_environment_server"]}
+
+    def test_agent_rename_preserves_explicit_environment_server_override(self) -> None:
+        config = self._agent_with_environment_server_config(renamed_agent={"_inherit_from": "mcqa_simple_agent"})
+        config["other_agent"] = OmegaConf.create(config.mcqa_simple_agent)
+        config.mcqa_environment_server.environment_servers.legacy_agent.agent_server.name = "other_agent"
+
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=config,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert _environment_servers_by_agent(resolved) == {
+            "other_agent": ["mcqa_environment_server"],
+            "renamed_agent": ["renamed_environment_server"],
+        }
+
+    @mark.parametrize(
+        "target",
+        [
+            {"nested": {"_inherit_from": "mcqa_simple_agent"}},
+            {
+                "_inherit_from": "mcqa_simple_agent",
+                "_delete_key": "responses_api_agents",
+                "resources_servers": {"mcqa": {"entrypoint": "app.py", "domain": "other"}},
+            },
+        ],
+        ids=["nested-agent", "non-agent"],
+    )
+    def test_inheritance_into_non_agent_destination_does_not_retarget_environment_server(self, target) -> None:
+        with raises(ServerRefNotFoundError, match="references responses_api_agents/'mcqa_simple_agent'") as error:
+            GlobalConfigDictParser().parse(
+                GlobalConfigDictParserConfig(
+                    initial_global_config_dict=self._agent_with_environment_server_config(target=target),
+                    skip_load_from_cli=True,
+                    skip_load_from_dotenv=True,
+                    offline=True,
+                )
+            )
+        assert "point this server's agent_server.name at an existing agent" in str(error.value)
+        assert "add_legacy_agent_environment_servers" not in str(error.value)
+
+    def test_parse_runs_a_config_without_environment_servers(self) -> None:
+        # End to end through parse(), the generated relay resolves its agent reference.
+        # It is assigned an address like any declared server.
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.merge(
+                    GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                    self._agent_without_environment_server_config(),
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        relay = resolved["mcqa_environment_server"]["environment_servers"]["legacy_agent"]
+        assert relay["agent_server"] == {"type": "responses_api_agents", "name": "mcqa_simple_agent"}
+        assert "host" in relay and "port" in relay
+
+    # `user_agent` is one of several agents a multi-agent environment server can reference.
+    @mark.parametrize("field, typed", [("agent_server", True), ("user_agent", True), ("agent_server", False)])
+    def test_ambiguous_agent_rename_names_destinations_and_reference(self, field: str, typed: bool) -> None:
+        reference = {"name": "mcqa_simple_agent"}
+        if typed:
+            reference["type"] = "responses_api_agents"
+        config = OmegaConf.merge(
+            GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            self._agent_without_environment_server_config(
+                renamed_agent={"_inherit_from": "mcqa_simple_agent"},
+                # Two destinations make the move ambiguous; the wrapper needs an explicit target.
+                other_renamed_agent={"_inherit_from": "mcqa_simple_agent"},
+                holder={"_inherit_from": "mcqa_simple_agent", "_delete_key": "responses_api_agents"},
+                mcqa_environment_server={
+                    "environment_servers": {
+                        "legacy_agent": {
+                            "entrypoint": "app.py",
+                            field: reference,
+                        }
+                    }
+                },
+            ),
+        )
+        with raises(AmbiguousAgentRenameError) as error:
+            GlobalConfigDictParser().parse(
+                GlobalConfigDictParserConfig(
+                    initial_global_config_dict=config,
+                    skip_load_from_cli=True,
+                    skip_load_from_dotenv=True,
+                    offline=True,
+                )
+            )
+        message = str(error.value)
+        assert "mcqa_simple_agent" in message
+        assert "'renamed_agent', 'other_renamed_agent'" in message
+        assert "holder" not in message
+        assert f"mcqa_environment_server.environment_servers.legacy_agent.{field}.name" in message
+        assert "Give each new agent its own environment server that inherits 'mcqa_environment_server'" in message
+        assert "ensure the other agents also have environment servers" in message
+        assert "add_legacy_agent_environment_servers" not in message
+
+    def test_multiple_agent_renames_preserve_explicit_wrapper_targets(self) -> None:
+        config = self._agent_with_environment_server_config(
+            renamed_agent={"_inherit_from": "mcqa_simple_agent"},
+            other_renamed_agent={"_inherit_from": "mcqa_simple_agent"},
+            error_on_agent_without_environment_server=True,
+        )
+        config.mcqa_environment_server.environment_servers.legacy_agent.agent_server.name = "renamed_agent"
+        config["other_environment_server"] = OmegaConf.create(config.mcqa_environment_server)
+        config.other_environment_server.environment_servers.legacy_agent.agent_server.name = "other_renamed_agent"
+
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=config,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert "mcqa_simple_agent" not in resolved
+        assert _environment_servers_by_agent(resolved) == {
+            "renamed_agent": ["mcqa_environment_server"],
+            "other_renamed_agent": ["other_environment_server"],
+        }
+
+    def test_multiple_agent_renames_with_inherited_wrappers_load_in_strict_mode(self) -> None:
+        config = self._agent_with_environment_server_config(error_on_agent_without_environment_server=True)
+        for variant in ("variant_a", "variant_b"):
+            config[variant] = {"_inherit_from": "mcqa_simple_agent"}
+            config[f"{variant}_environment_server"] = {
+                "_inherit_from": "mcqa_environment_server",
+                "environment_servers": {"legacy_agent": {"agent_server": {"name": variant}}},
+            }
+
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=config,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert "mcqa_simple_agent" not in resolved
+        assert "mcqa_environment_server" not in resolved
+        assert _environment_servers_by_agent(resolved) == {
+            "variant_a": ["variant_a_environment_server"],
+            "variant_b": ["variant_b_environment_server"],
+        }
+
+    @mark.parametrize(
+        "missing_path",
+        [
+            "required_setting",
+            "mcqa_environment_server.environment_servers.legacy_agent.required_setting",
+            "mcqa_environment_server.environment_servers.legacy_agent.agent_server.name",
+        ],
+    )
+    def test_multiple_agent_renames_preserve_missing_value_diagnostic(self, missing_path: str) -> None:
+        config = self._agent_with_environment_server_config(
+            renamed_agent={"_inherit_from": "mcqa_simple_agent"},
+            other_renamed_agent={"_inherit_from": "mcqa_simple_agent"},
+        )
+        config.mcqa_environment_server.environment_servers.legacy_agent.agent_server.name = "renamed_agent"
+        OmegaConf.update(config, missing_path, "???", force_add=True)
+
+        with raises(ConfigMissingValuesError) as error:
+            GlobalConfigDictParser().parse(
+                GlobalConfigDictParserConfig(
+                    initial_global_config_dict=config,
+                    skip_load_from_cli=True,
+                    skip_load_from_dotenv=True,
+                    offline=True,
+                )
+            )
+
+        assert missing_path in str(error.value)
+
+    @mark.parametrize("resources_server", ["reasoning_gym", "tavily_search"])
+    def test_langchain_deepagents_configs_have_environment_servers(self, resources_server: str) -> None:
+        agent_name = f"{resources_server}_langchain_deepagents_agent_model_server"
+        config_path = (
+            Path(__file__).resolve().parents[2]
+            / "resources_servers"
+            / resources_server
+            / "configs"
+            / f"{agent_name}.yaml"
+        )
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.merge(
+                    GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                    OmegaConf.load(config_path),
+                    {
+                        "tavily_api_key": "test-key",
+                        "exclude_domains_file_path": None,
+                        "search_judge_model_base_url": "http://example.invalid/v1",
+                        "search_judge_model_api_key": "test-key",
+                        "search_judge_model_name": "test-model",
+                        # A generated relay has the same name, so require the declared one.
+                        "error_on_agent_without_environment_server": True,
+                    },
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        environment = resolved[f"{agent_name}_environment_server"]["environment_servers"]["legacy_agent"]
+        assert environment["entrypoint"] == "app.py"
+        assert environment["agent_server"] == {"type": "responses_api_agents", "name": agent_name}
+
+    def test_multi_agent_environment_server_satisfies_agent_routing(self) -> None:
+        parser = GlobalConfigDictParser()
+        config = self._multi_agent_environment_config()
+
+        parser._front_agents_without_environment_server(config)
+
+        assert _environment_servers_by_agent(config) == {
+            "participant_a": ["multi_agent_environment"],
+            "participant_b": ["multi_agent_environment"],
+        }
+
+    def test_multi_agent_environment_server_requires_every_participant(self) -> None:
+        parser = GlobalConfigDictParser()
+        config = self._multi_agent_environment_config()
+        del config["multi_agent_environment"]["environment_servers"]["multi_agent"]["participant_b"]
+        config["error_on_agent_without_environment_server"] = True
+
+        with raises(AgentWithoutEnvironmentServerError, match="participant_b"):
+            parser._front_agents_without_environment_server(config)
+
+    def test_composition_retargets_only_the_swapped_participant(self) -> None:
+        config = self._multi_agent_environment_config()
+
+        GlobalConfigDictParser._retarget_environment_servers(config, {"participant_b": "participant_b_swapped"})
+
+        server = config["multi_agent_environment"]["environment_servers"]["multi_agent"]
+        assert server["participant_a"]["name"] == "participant_a"
+        assert server["participant_b"]["name"] == "participant_b_swapped"
+
+    def test_agent_rename_preserves_multi_agent_environment_and_taskset(self) -> None:
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.merge(
+                    GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                    self._multi_agent_environment_config(),
+                    {
+                        "renamed_b": {"_inherit_from": "participant_b"},
+                        "error_on_agent_without_environment_server": True,
+                        "environment_server_routes": {"dialogue": "multi_agent_environment"},
+                    },
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert "participant_b" not in resolved
+        assert _environment_servers_by_agent(resolved) == {
+            "participant_a": ["multi_agent_environment"],
+            "renamed_b": ["multi_agent_environment"],
+        }
+        assert resolved.environment_server_routes == {"dialogue": "multi_agent_environment"}
+        assert resolve_dataset_agent(resolved, "renamed_b", taskset="dialogue") == "renamed_b"
+
+    @staticmethod
+    def _multi_agent_environment_config() -> DictConfig:
+        return OmegaConf.create(
+            {
+                "participant_a": {
+                    "responses_api_agents": {
+                        "simple_agent": {
+                            "entrypoint": "app.py",
+                        }
+                    }
+                },
+                "participant_b": {
+                    "responses_api_agents": {
+                        "simple_agent": {
+                            "entrypoint": "app.py",
+                        }
+                    }
+                },
+                "multi_agent_environment": {
+                    "environment_servers": {
+                        "multi_agent": {
+                            "entrypoint": "app.py",
+                            "participant_a": {
+                                "type": "responses_api_agents",
+                                "name": "participant_a",
+                            },
+                            "participant_b": {
+                                "type": "responses_api_agents",
+                                "name": "participant_b",
+                            },
+                        }
+                    }
+                },
+            }
+        )
+
+    def test_all_repo_configs_load_without_duplicate_keys(self) -> None:
+        # OmegaConf.load (the loader `gym env start` actually uses) rejects duplicate YAML keys,
+        # but a plain PyYAML parse silently allows them (last-writer-wins). A repeated key like a
+        # second `datasets:` block can land unnoticed and only surface at runtime. Sweep every real
+        # config in the repo so this fails fast in CI instead.
+        repo_root = Path(__file__).resolve().parents[2]
+        config_dirs = ("responses_api_agents", "resources_servers", "nemo_gym/sandbox/providers")
+        config_paths = _discover_repo_configs(repo_root, config_dirs)
+        assert config_paths, "no config files discovered -- sweep dirs may have moved"
+
+        failures = []
+        for path in config_paths:
+            try:
+                OmegaConf.load(path)
+            except Exception as e:
+                failures.append(f"{path.relative_to(repo_root)}: {e}")
+
+        assert not failures, "malformed config(s) found:\n" + "\n".join(failures)
+
+    def test_repo_config_sweep_skips_hidden_directories(self, tmp_path: Path) -> None:
+        server_dir = tmp_path / "resources_servers" / "my_server"
+        (server_dir / "configs").mkdir(parents=True)
+        (server_dir / "configs" / "my_server.yaml").write_text("a: 1\n")
+        workflow_dir = server_dir / ".my_tool" / ".github" / "workflows"
+        workflow_dir.mkdir(parents=True)
+        (workflow_dir / "lint-test.yaml").write_text("run: ${{ matrix.python }}\n")
+
+        assert _discover_repo_configs(tmp_path, ("resources_servers",)) == [server_dir / "configs" / "my_server.yaml"]
 
 
 class TestOpenAIVersionMatchesNemoGymConstraint:
@@ -1873,3 +2810,966 @@ class TestOpenAIVersionMatchesNemoGymConstraint:
 
         monkeypatch.setattr(importlib.metadata, "requires", raise_not_found)
         assert _openai_version_matches_nemo_gym_constraint("2.52.0") is True
+
+
+class TestModelServerPairing:
+    _ABSENT = object()
+
+    def _config(self, model_type: str = "openai_model", declared=_ABSENT) -> DictConfig:
+        resources_config = {"entrypoint": "app.py", "domain": "other"}
+        if declared is not self._ABSENT:
+            resources_config["allowed_model_types"] = declared
+        return DictConfig(
+            {
+                "audio_resources_server": {"resources_servers": {"audio": resources_config}},
+                "audio_simple_agent": {
+                    "responses_api_agents": {
+                        "simple_agent": {
+                            "entrypoint": "app.py",
+                            "resources_server": {"type": "resources_servers", "name": "audio_resources_server"},
+                            "model_server": {"type": "responses_api_models", "name": "policy_model"},
+                        }
+                    }
+                },
+                "policy_model": {"responses_api_models": {model_type: {"entrypoint": "app.py"}}},
+            }
+        )
+
+    def test_rejects_an_unsupported_model_adapter_with_an_actionable_error(self) -> None:
+        config = self._config(declared=["vllm_model", "local_vllm_model"])
+
+        with raises(UnsupportedModelPairingError) as error:
+            GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+        message = str(error.value)
+        assert "audio_simple_agent" in message
+        assert "policy_model" in message
+        assert "openai_model" in message
+        assert "audio_resources_server" in message
+        assert "--model-type vllm_model" in message
+        assert "Supported model types: vllm_model, local_vllm_model" in message
+        assert "--allow-unsupported-pairing" in message
+
+    def test_allows_a_declared_model_adapter(self) -> None:
+        config = self._config(model_type="vllm_model", declared=["vllm_model"])
+
+        GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+    @mark.parametrize("declared", [_ABSENT, None, []], ids=["key absent", "null", "empty list"])
+    def test_resources_server_without_a_restriction_remains_compatible(self, declared) -> None:
+        config = self._config(declared=declared)
+
+        GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+    def test_accepts_a_bare_model_type_string(self) -> None:
+        config = self._config(model_type="vllm_model", declared="vllm_model")
+
+        GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+    @mark.parametrize("declared", [5, {"vllm_model": True}], ids=["scalar", "mapping"])
+    def test_rejects_a_malformed_model_type_declaration(self, declared) -> None:
+        config = self._config(declared=declared)
+
+        with raises(ConfigError) as error:
+            GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+        message = str(error.value)
+        assert "audio_resources_server.resources_servers.audio.allowed_model_types" in message
+        assert "must be a list of model types" in message
+
+    def test_pairing_override_also_waives_model_compatibility(self) -> None:
+        config = self._config(declared=["vllm_model"])
+        config[ALLOW_UNSUPPORTED_PAIRING_KEY_NAME] = True
+
+        GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+    def test_dummy_model_does_not_break_model_free_parser_clients(self) -> None:
+        config = self._config(model_type="dummy_model", declared=["vllm_model"])
+
+        GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+    @staticmethod
+    def _parse_librispeech(model_config_path: str) -> DictConfig:
+        initial = DictConfig(
+            {
+                "config_paths": [
+                    "benchmarks/librispeech_pc/config.yaml",
+                    model_config_path,
+                ],
+                "policy_base_url": "https://example.test/v1",
+                "policy_api_key": "test-key",
+                "policy_model_name": "test-model",
+            }
+        )
+        return GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=initial,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+    def test_librispeech_config_fails_during_parse_with_openai_model(self) -> None:
+        model_config_path = "responses_api_models/openai_model/configs/openai_model.yaml"
+
+        with raises(UnsupportedModelPairingError) as error:
+            self._parse_librispeech(model_config_path)
+
+        message = str(error.value)
+        assert "librispeech_pc_asr_with_pc_simple_agent" in message
+        assert "type 'openai_model'" in message
+        assert "--model-type vllm_model" in message
+
+    def test_librispeech_config_resolves_with_vllm_model(self) -> None:
+        model_config_path = "responses_api_models/vllm_model/configs/vllm_model.yaml"
+
+        resolved = self._parse_librispeech(model_config_path)
+
+        assert "vllm_model" in resolved["policy_model"]["responses_api_models"]
+
+
+class TestComposeUnboundAgent:
+    """Composition of a standalone agent config onto the environment's agent instances."""
+
+    HARNESS_INSTANCE = "hermes_agent"
+
+    def _harness(self, **overrides) -> dict:
+        """The agent as its standalone config ships it, with `resources_server.name` left unset."""
+        block = {
+            "entrypoint": "app.py",
+            "resources_server": {"type": "resources_servers", "name": "???"},
+            # Deliberately not the environment's `policy_model`: assertions must be able to tell which
+            # side a carried-over binding came from.
+            "model_server": {"type": "responses_api_models", "name": "harness_model"},
+            "max_turns": 30,
+            "terminal_backend": "local",
+        }
+        block.update(overrides)
+        return {"responses_api_agents": {"hermes_agent": block}}
+
+    def _environment_agent(self, resources_server: str, **overrides) -> dict:
+        block = {
+            "entrypoint": "app.py",
+            "resources_server": {"type": "resources_servers", "name": resources_server},
+            "model_server": {"type": "responses_api_models", "name": "policy_model"},
+            "max_steps": 6,
+            "datasets": [
+                {
+                    "name": "gpqa",
+                    "type": "benchmark",
+                    "jsonl_fpath": "benchmarks/gpqa/data/gpqa_diamond_benchmark.jsonl",
+                    "prompt_config": "benchmarks/prompts/eval/aai/mcq-4choices.yaml",
+                    "prepare_script": "benchmarks/gpqa/prepare.py",
+                    "num_repeats": 8,
+                    "license": "CC-BY-4.0",
+                }
+            ],
+        }
+        block.update(overrides)
+        return {"responses_api_agents": {"simple_agent": block}}
+
+    def _config(self, **extra) -> DictConfig:
+        config = {
+            self.HARNESS_INSTANCE: self._harness(),
+            "gpqa_mcqa_simple_agent": self._environment_agent("gpqa_mcqa_resources_server"),
+            "gpqa_mcqa_resources_server": {
+                "resources_servers": {"mcqa": {"entrypoint": "app.py", "domain": "knowledge"}}
+            },
+            # Named after the environment, so composition swapping the agent leaves it alone.
+            "gpqa_mcqa_environment_server": {
+                "environment_servers": {"legacy_agent": {"agent_server": {"name": "gpqa_mcqa_simple_agent"}}}
+            },
+        }
+        config.update(extra)
+        return DictConfig(config)
+
+    def _composed_name(self, original: str) -> str:
+        """The name an instance takes once rehosted: its environment prefix plus the new agent type."""
+        stem = original.removesuffix("_simple_agent").removesuffix("simple_agent").rstrip("_")
+        if stem == original:
+            stem = original.removesuffix("_agent").rstrip("_")
+        return f"{stem}_hermes_agent" if stem else "hermes_agent"
+
+    def _composed_block(self, config: DictConfig, instance: str) -> DictConfig:
+        renamed = self._composed_name(instance)
+        assert instance == renamed or instance not in config, f"{instance} was not renamed after rehosting"
+        agents = config[renamed]["responses_api_agents"]
+        assert list(agents) == ["hermes_agent"], f"{renamed} was not rehosted on the harness"
+        return agents["hermes_agent"]
+
+    def _guarded_config(self, *required_agents: str) -> DictConfig:
+        """The standard config with the environment's resources server declaring `allowed_agents`."""
+        config = self._config()
+        config["gpqa_mcqa_resources_server"]["resources_servers"]["mcqa"]["allowed_agents"] = list(required_agents)
+        return config
+
+    def _parse(self, config: DictConfig) -> DictConfig:
+        return GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.merge(
+                    GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT, config
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+    def _parse_config_paths(self, *paths: str) -> DictConfig:
+        return self._parse(DictConfig({"config_paths": list(paths)}))
+
+    def test_shipped_terminus_template_replaces_a_benchmarks_agent(self) -> None:
+        """`--benchmark terminal_bench_2_1/opencode --agent-type terminus_2_sandboxed_agent` swaps the harness."""
+        config = self._parse_config_paths(
+            "benchmarks/terminal_bench_2_1/opencode.yaml",
+            "responses_api_agents/terminus_2_sandboxed_agent/configs/terminus_2_sandboxed_agent.yaml",
+        )
+        agents = {
+            name: list(block["responses_api_agents"])
+            for name, block in config.items()
+            if isinstance(block, DictConfig) and "responses_api_agents" in block
+        }
+        assert "terminus_2_sandboxed_agent" not in config, "the swap source is dropped once composed"
+        assert not any("opencode_sandboxed_agent" in impls for impls in agents.values()), agents
+        composed = config["terminal_bench_2_1_terminus_2_sandboxed_agent"]["responses_api_agents"][
+            "terminus_2_sandboxed_agent"
+        ]
+        assert composed.resources_server.name == "terminal_bench_2_1_opencode_resources_server"
+        assert composed.datasets[0].name == "terminal_bench_2_1"
+        environment = config["terminal_bench_2_1_environment_server"]["environment_servers"]["legacy_agent"]
+        assert environment.agent_server.name == "terminal_bench_2_1_terminus_2_sandboxed_agent"
+
+    def test_noop_when_no_instance_is_unbound(self) -> None:
+        config = self._config()
+        config.pop(self.HARNESS_INSTANCE)
+        before = OmegaConf.to_container(config, resolve=False, throw_on_missing=False)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert OmegaConf.to_container(config, resolve=False, throw_on_missing=False) == before
+
+    def test_absent_resources_server_is_not_a_source(self) -> None:
+        # Self-contained agents omit `resources_server` entirely, which is not the same as leaving it unset.
+        self_contained = {
+            "responses_api_agents": {"swe_agents": {"entrypoint": "app.py", "agent_framework": "openhands"}}
+        }
+        config = self._config()
+        config.pop(self.HARNESS_INSTANCE)
+        config["swe_agents"] = self_contained
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config["swe_agents"]["responses_api_agents"]) == ["swe_agents"]
+        assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["simple_agent"]
+
+    @mark.parametrize("declared", [None, []], ids=["key absent", "empty list"])
+    def test_swap_allowed_when_the_verifier_declares_nothing(self, declared) -> None:
+        config = self._config() if declared is None else self._guarded_config(*declared)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]) == ["hermes_agent"]
+
+    def test_swap_allowed_when_the_selected_agent_is_declared(self) -> None:
+        config = self._guarded_config("simple_agent", "hermes_agent")
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]) == ["hermes_agent"]
+
+    def _set_allowed_agents(self, declared) -> DictConfig:
+        """The standard config with `allowed_agents` set to an arbitrary value, not just a list."""
+        config = self._config()
+        config["gpqa_mcqa_resources_server"]["resources_servers"]["mcqa"]["allowed_agents"] = declared
+        return config
+
+    def test_a_single_agent_may_be_declared_as_a_bare_string(self) -> None:
+        config = self._set_allowed_agents("hermes_agent")
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "gpqa_mcqa_hermes_agent" in config
+        assert "gpqa_mcqa_simple_agent" not in config
+        assert list(config["gpqa_mcqa_hermes_agent"]["responses_api_agents"]) == ["hermes_agent"]
+
+    def test_a_bare_string_still_rejects_a_different_agent(self) -> None:
+        config = self._set_allowed_agents("scicode_agent")
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "accepts scicode_agent" in str(error.value)
+
+    @mark.parametrize("declared", [5, {"a": 1}], ids=["scalar", "mapping"])
+    def test_a_value_that_is_neither_string_nor_list_is_reported(self, declared) -> None:
+        config = self._set_allowed_agents(declared)
+
+        with raises(ConfigError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        message = str(error.value)
+        assert "gpqa_mcqa_resources_server.resources_servers.mcqa.allowed_agents" in message
+        assert "must be a list of agent types" in message
+
+    def test_swap_rejected_when_the_selected_agent_is_not_declared(self) -> None:
+        config = self._guarded_config("scicode_agent")
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        message = str(error.value)
+        assert "gpqa_mcqa_simple_agent" in message
+        assert "scicode_agent" in message and "hermes_agent" in message
+        assert "--allow-unsupported-pairing" in message
+        # The rejected swap must not have been applied.
+        assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["simple_agent"]
+
+    def test_override_config_key_allows_the_rejected_swap(self) -> None:
+        config = self._guarded_config("scicode_agent")
+        config[ALLOW_UNSUPPORTED_PAIRING_KEY_NAME] = True
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]) == ["hermes_agent"]
+
+    @mark.parametrize("value, allowed", [("1", True), ("true", True), ("0", False), ("", False)])
+    def test_override_env_var(self, monkeypatch: MonkeyPatch, value: str, allowed: bool) -> None:
+        monkeypatch.setenv(ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME, value)
+        config = self._guarded_config("scicode_agent")
+
+        if allowed:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+            assert list(config[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]) == [
+                "hermes_agent"
+            ]
+        else:
+            with raises(UnsupportedAgentPairingError):
+                GlobalConfigDictParser().compose_unbound_agent(config)
+
+    def test_swap_allowed_when_the_requirement_cannot_be_determined(self) -> None:
+        """The guard permits what it cannot read, so the permissive paths are asserted, not assumed.
+
+        A server instance pins exactly one implementation, so a block with two is already invalid and is
+        reported by almost-server detection; the guard must not turn it into a pairing error.
+        """
+        config = self._config()
+        config["gpqa_mcqa_resources_server"]["resources_servers"]["extra"] = DictConfig(
+            {"entrypoint": "app.py", "domain": "knowledge", "allowed_agents": ["scicode_agent"]}
+        )
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]) == ["hermes_agent"]
+
+    def test_every_target_is_checked_not_just_the_first(self) -> None:
+        """A permissive verifier must not vouch for a restrictive one in the same config."""
+        config = self._guarded_config("hermes_agent")
+        config["strict_resources_server"] = DictConfig(
+            {"resources_servers": {"scicode": {"entrypoint": "app.py", "allowed_agents": ["scicode_agent"]}}}
+        )
+        config["strict_agent"] = DictConfig(self._environment_agent("strict_resources_server"))
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "strict_agent" in str(error.value)
+
+    def test_reports_every_rejected_instance_at_once(self) -> None:
+        """Fixing one instance per re-resolve is the slow path; name them all in one error."""
+        config = self._guarded_config("simple_agent")
+        for name, required in (("scicode", ["scicode_agent", "simple_agent"]), ("critpt", ["critpt_agent"])):
+            config[f"{name}_resources_server"] = DictConfig(
+                {"resources_servers": {name: {"entrypoint": "app.py", "allowed_agents": required}}}
+            )
+            config[f"{name}_agent"] = DictConfig(self._environment_agent(f"{name}_resources_server"))
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        message = str(error.value)
+        # All three rejected instances, each with what it accepts, not just the first one hit.
+        for instance in ("gpqa_mcqa_simple_agent", "scicode_agent", "critpt_agent"):
+            assert instance in message, f"{instance} missing from:\n{message}"
+        assert "3 of the agent instance(s)" in message
+        # critpt accepts no agent the others do, so there is nothing to recommend.
+        assert "No single agent satisfies all of them." in message
+
+    def test_recommendation_accounts_for_targets_that_accept_the_selection(self) -> None:
+        """An instance that accepts the selected agent still constrains what could replace it."""
+        config = self._guarded_config("hermes_agent")
+        config["strict_resources_server"] = DictConfig(
+            {"resources_servers": {"scicode": {"entrypoint": "app.py", "allowed_agents": ["scicode_agent"]}}}
+        )
+        config["strict_agent"] = DictConfig(self._environment_agent("strict_resources_server"))
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        message = str(error.value)
+        assert "No single agent satisfies all of them." in message
+        assert "Select one of" not in message, "scicode_agent would only move the failure to gpqa"
+
+    def test_recommends_the_agent_every_rejected_instance_accepts(self) -> None:
+        config = self._guarded_config("scicode_agent", "simple_agent")
+        config["critpt_resources_server"] = DictConfig(
+            {
+                "resources_servers": {
+                    "critpt": {"entrypoint": "app.py", "allowed_agents": ["critpt_agent", "simple_agent"]}
+                }
+            }
+        )
+        config["critpt_agent"] = DictConfig(self._environment_agent("critpt_resources_server"))
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "Select one of: simple_agent." in str(error.value)
+
+    def test_instance_is_renamed_after_the_agent_that_runs_it(self) -> None:
+        """#2657: the instance advertises the harness actually running it, not the one it was written for."""
+        config = self._config()
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "gpqa_mcqa_simple_agent" not in config
+        assert list(config["gpqa_mcqa_hermes_agent"]["responses_api_agents"]) == ["hermes_agent"]
+
+    @mark.parametrize(
+        "original, expected",
+        [
+            ("gpqa_mcqa_simple_agent", "gpqa_mcqa_hermes_agent"),
+            # Names not ending in their agent type keep their whole stem rather than losing part of it.
+            ("osworld_nano_omni", "osworld_nano_omni_hermes_agent"),
+            # Falls back to the generic `_agent` suffix rather than keeping the whole old name.
+            ("scicode_benchmark_agent", "scicode_benchmark_hermes_agent"),
+            ("simple_agent", "hermes_agent"),
+        ],
+    )
+    def test_rename_substitutes_the_trailing_agent_type(self, original: str, expected: str) -> None:
+        config = self._config()
+        config[original] = DictConfig(self._environment_agent("gpqa_mcqa_resources_server"))
+        if original != "gpqa_mcqa_simple_agent":
+            config.pop("gpqa_mcqa_simple_agent")
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert expected in config, f"expected {expected}, got {sorted(config)}"
+
+    def test_raises_when_the_rename_would_collide(self) -> None:
+        config = self._config()
+        config["gpqa_mcqa_hermes_agent"] = DictConfig(
+            {"resources_servers": {"mcqa": {"entrypoint": "app.py", "domain": "knowledge"}}}
+        )
+
+        with raises(AgentCompositionError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "same name" in str(error.value)
+
+    def test_rehosts_environment_instance_on_the_standalone_agent(self) -> None:
+        config = self._config()
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert self.HARNESS_INSTANCE not in config
+        # _composed_block asserts the instance kept its name and now hosts the harness.
+        block = self._composed_block(config, "gpqa_mcqa_simple_agent")
+
+        # The harness's own configuration comes across.
+        assert block["terminal_backend"] == "local"
+        assert block["max_turns"] == 30
+
+        # The environment's bindings and data are carried over, its agent parameters are not.
+        assert block["resources_server"] == {"type": "resources_servers", "name": "gpqa_mcqa_resources_server"}
+        assert block["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
+        assert "max_steps" not in block
+        assert OmegaConf.to_container(block["datasets"]) == [
+            {
+                "name": "gpqa",
+                "type": "benchmark",
+                "jsonl_fpath": "benchmarks/gpqa/data/gpqa_diamond_benchmark.jsonl",
+                "prompt_config": "benchmarks/prompts/eval/aai/mcq-4choices.yaml",
+                "prepare_script": "benchmarks/gpqa/prepare.py",
+                "num_repeats": 8,
+                "license": "CC-BY-4.0",
+            }
+        ]
+
+    def test_preserves_model_server_per_instance(self) -> None:
+        # Two instances differing only by model server, as genrm_compare does.
+        config = self._config(
+            genrm_reasoning_on=self._environment_agent(
+                "genrm_resources_server",
+                model_server={"type": "responses_api_models", "name": "policy_model"},
+            ),
+            genrm_reasoning_off=self._environment_agent(
+                "genrm_resources_server",
+                model_server={"type": "responses_api_models", "name": "policy_model_reasoning_off"},
+            ),
+        )
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert self._composed_block(config, "genrm_reasoning_on")["model_server"]["name"] == "policy_model"
+        assert (
+            self._composed_block(config, "genrm_reasoning_off")["model_server"]["name"] == "policy_model_reasoning_off"
+        )
+
+    def test_replaces_every_agent_instance(self) -> None:
+        # jailbreak_detection declares five agent instances, one per category.
+        categories = [f"jailbreak_{index}" for index in range(5)]
+        config = self._config(**{name: self._environment_agent("jailbreak_resources_server") for name in categories})
+        config.pop("gpqa_mcqa_simple_agent")
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        for name in categories:
+            assert self._composed_block(config, name)["resources_server"]["name"] == "jailbreak_resources_server"
+
+    def test_falls_back_to_harness_model_when_environment_has_none(self) -> None:
+        environment_agent = self._environment_agent("gpqa_mcqa_resources_server")
+        environment_agent["responses_api_agents"]["simple_agent"].pop("model_server")
+        config = self._config(no_model_server_agent=environment_agent)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert self._composed_block(config, "no_model_server_agent")["model_server"]["name"] == "harness_model"
+
+    def test_skips_an_instance_whose_agent_block_is_unset(self) -> None:
+        # Resolving the block would raise MissingMandatoryValue, which is not a ConfigError, so the CLI
+        # would print a traceback instead of the usual missing-value report.
+        config = self._config(broken={"responses_api_agents": {"simple_agent": "???"}})
+
+        names = {instance.name for instance in GlobalConfigDictParser()._agent_instances(config)}
+
+        assert "broken" not in names
+
+    def test_parse_reports_an_unset_agent_block(self) -> None:
+        config = self._config(broken={"responses_api_agents": {"simple_agent": "???"}})
+
+        with raises(ConfigMissingValuesError) as exc_info:
+            self._parse(config)
+
+        assert "broken.responses_api_agents.simple_agent" in str(exc_info.value)
+
+    def test_carries_over_a_binding_the_environment_leaves_unset(self) -> None:
+        # OmegaConf reports a '???' value as absent, so skipping on `in` alone let the incoming agent's own
+        # model server stand in for one the environment deliberately left for the user to supply.
+        config = self._config(unset_model=self._environment_agent("gpqa_mcqa_resources_server", model_server="???"))
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        block = self._composed_block(config, "unset_model")
+        assert OmegaConf.is_missing(block, "model_server"), "an unset binding must stay unset, not silently resolve"
+
+    def test_carry_over_leaves_an_absent_binding_to_the_incoming_agent(self) -> None:
+        # Absent is not unset: the environment simply has no opinion, so the agent's own value stands.
+        environment = self._environment_agent("gpqa_mcqa_resources_server")
+        del environment["responses_api_agents"]["simple_agent"]["model_server"]
+        config = self._config(no_model=environment)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        harness_model = self._harness()["responses_api_agents"]["hermes_agent"]["model_server"]["name"]
+        assert self._composed_block(config, "no_model")["model_server"]["name"] == harness_model
+
+    def test_leaves_self_contained_agents_alone(self) -> None:
+        # A self-contained agent declares no resources server, so there is no task to hand the new agent.
+        self_contained = self._environment_agent("unused")
+        agents = self_contained["responses_api_agents"]
+        agents["tau2"] = agents.pop("simple_agent")
+        del agents["tau2"]["resources_server"]
+        config = self._config(tau2_benchmark_agent=self_contained)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config["tau2_benchmark_agent"]["responses_api_agents"]) == ["tau2"]
+        composed = self._composed_block(config, "gpqa_mcqa_simple_agent")
+        assert composed["resources_server"]["name"] == "gpqa_mcqa_resources_server"
+
+    def test_reads_a_self_contained_agent_from_a_struct_config(self) -> None:
+        # Hydra hands the command line over in struct mode, where reading the absent `resources_server`
+        # raises instead of reporting it missing.
+        self_contained = self._environment_agent("unused")
+        agents = self_contained["responses_api_agents"]
+        agents["tau2"] = agents.pop("simple_agent")
+        del agents["tau2"]["resources_server"]
+        config = self._config(tau2_benchmark_agent=self_contained)
+        OmegaConf.set_struct(config, True)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config["tau2_benchmark_agent"]["responses_api_agents"]) == ["tau2"]
+
+    def test_raises_when_two_instances_are_unbound(self) -> None:
+        config = self._config(second_harness=self._harness())
+
+        with raises(AgentCompositionError) as exc_info:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        message = str(exc_info.value)
+        assert "2 agent instances leave their 'resources_server' unset" in message
+        assert "'hermes_agent'" in message
+        assert "'second_harness'" in message
+
+    def test_raises_when_there_is_nothing_to_rehost(self) -> None:
+        config = DictConfig({self.HARNESS_INSTANCE: self._harness()})
+
+        with raises(AgentCompositionError) as exc_info:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "no other agent instance to rehost it on" in str(exc_info.value)
+
+    def test_parse_fills_unbound_binding_before_missing_value_check(self) -> None:
+        resolved = self._parse(self._config())
+
+        block = resolved[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]["hermes_agent"]
+        assert block["resources_server"]["name"] == "gpqa_mcqa_resources_server"
+
+    def test_raises_when_every_other_agent_is_self_contained(self) -> None:
+        # Self-contained agents are left alone, so there is nothing here for the selected agent to run.
+        environment_agent = self._environment_agent("gpqa_mcqa_resources_server")
+        environment_agent["responses_api_agents"]["simple_agent"].pop("resources_server")
+        config = self._config()
+        config.pop("gpqa_mcqa_simple_agent")
+        config["self_contained_agent"] = environment_agent
+
+        with raises(AgentCompositionError) as exc_info:
+            self._parse(config)
+
+        assert "no other agent instance to rehost it on" in str(exc_info.value)
+
+    def test_real_benchmark_composes_onto_real_harness(self) -> None:
+        # Hermes for agent sessions has no Resources binding; harness swaps on the agent's own /run explicitly leave it unbound.
+        resolved = self._parse(
+            DictConfig(
+                {
+                    "config_paths": [
+                        "benchmarks/gpqa/config.yaml",
+                        "responses_api_agents/hermes_agent/configs/hermes_agent.yaml",
+                    ],
+                    "hermes_agent": {
+                        "responses_api_agents": {
+                            "hermes_agent": {"resources_server": {"type": "resources_servers", "name": "???"}}
+                        }
+                    },
+                }
+            )
+        )
+
+        block = resolved[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]["hermes_agent"]
+        assert block["resources_server"]["name"] == "gpqa_mcqa_resources_server"
+        assert block["max_turns"] == 30
+        assert "max_steps" not in block
+        assert OmegaConf.to_container(block["datasets"])[0]["num_repeats"] == 8
+        assert "hermes_agent" not in resolved
+
+    def _cli_dict(self, config: dict) -> DictConfig:
+        """A command line dict as Hydra hands it over: struct, so an undeclared key is an error."""
+        dict_config = DictConfig(config)
+        OmegaConf.set_struct(dict_config, True)
+        return dict_config
+
+    def _cli_override(self, instance: str, **block) -> DictConfig:
+        """An override addressed to an instance's agent, as `++<instance>...=<value>` produces."""
+        return self._cli_dict({instance: {"responses_api_agents": {"hermes_agent": block}}})
+
+    def _parse_with_cli(self, config: DictConfig, cli: DictConfig, monkeypatch: MonkeyPatch) -> DictConfig:
+        monkeypatch.setattr(GlobalConfigDictParser, "parse_global_config_dict_from_cli", lambda self: cli)
+        return GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.merge(
+                    GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT, config
+                ),
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+    def test_predicts_the_names_composition_will_produce(self) -> None:
+        names = GlobalConfigDictParser()._composed_instance_names(self._config())
+
+        assert names == {self._composed_name("gpqa_mcqa_simple_agent")}
+
+    def test_predicts_no_names_when_nothing_is_unbound(self) -> None:
+        config = self._config()
+        config.pop(self.HARNESS_INSTANCE)
+
+        assert GlobalConfigDictParser()._composed_instance_names(config) == set()
+
+    def test_applies_command_line_override_to_the_composed_agent(self, monkeypatch: MonkeyPatch) -> None:
+        renamed = self._composed_name("gpqa_mcqa_simple_agent")
+
+        resolved = self._parse_with_cli(self._config(), self._cli_override(renamed, max_turns=99), monkeypatch)
+
+        assert resolved[renamed]["responses_api_agents"]["hermes_agent"]["max_turns"] == 99
+
+    def test_config_resolution_restores_held_agent_override_after_inheritance(self, monkeypatch: MonkeyPatch) -> None:
+        instance = "terminal_bench_2_1_terminus_2_sandboxed_agent"
+        agent_type = "terminus_2_sandboxed_agent"
+        config = DictConfig(
+            {
+                agent_type: {
+                    "responses_api_agents": {
+                        agent_type: {
+                            "entrypoint": "app.py",
+                            "sandbox_timeout": 10800,
+                        }
+                    }
+                },
+                instance: {
+                    "_inherit_from": agent_type,
+                    "responses_api_agents": {agent_type: {}},
+                },
+                f"{instance}_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": instance}}}
+                },
+            }
+        )
+        cli = self._cli_dict(
+            {
+                instance: {"responses_api_agents": {agent_type: {"sandbox_timeout": 21600}}},
+            }
+        )
+
+        resolved = self._parse_with_cli(config, cli, monkeypatch)
+
+        assert agent_type not in resolved
+        assert resolved[instance]["responses_api_agents"][agent_type]["sandbox_timeout"] == 21600
+
+    def test_command_line_override_outranks_the_carried_over_bindings(self, monkeypatch: MonkeyPatch) -> None:
+        # The override must carry only the fields the user set, leaving the environment's bindings intact.
+        config = self._config(
+            **{
+                self.HARNESS_INSTANCE: self._harness(
+                    model_server={"type": "responses_api_models", "name": "policy_model"}
+                )
+            }
+        )
+        renamed = self._composed_name("gpqa_mcqa_simple_agent")
+
+        resolved = self._parse_with_cli(config, self._cli_override(renamed, max_turns=99), monkeypatch)
+
+        block = resolved[renamed]["responses_api_agents"]["hermes_agent"]
+        assert block["resources_server"]["name"] == "gpqa_mcqa_resources_server"
+        assert block["max_turns"] == 99
+
+    def test_holds_back_only_the_names_composition_produces(self) -> None:
+        renamed = self._composed_name("gpqa_mcqa_simple_agent")
+        cli = self._cli_dict(
+            {
+                renamed: {"responses_api_agents": {"hermes_agent": {"max_turns": 99}}},
+                "some_other_server": {"responses_api_models": {"a_model": {"entrypoint": "app.py"}}},
+            }
+        )
+
+        held = GlobalConfigDictParser()._hold_back_composed_agent_overrides(cli, self._config())
+
+        assert list(held) == [renamed], "only the composed instance should be held back"
+        assert list(cli) == ["some_other_server"], "everything else must still reach the merge"
+
+    def test_rejects_an_override_naming_an_instance_that_never_appears(self, monkeypatch: MonkeyPatch) -> None:
+        # The names are predicted before inheritance runs, which can drop an instance a base defined. An
+        # override held for one of those would otherwise vanish without trace.
+        config = self._config(base_simple_agent=self._environment_agent("gpqa_mcqa_resources_server"))
+        config["gpqa_mcqa_simple_agent"]["_inherit_from"] = "base_simple_agent"
+        cli = self._cli_override(self._composed_name("base_simple_agent"), max_turns=99)
+
+        with raises(UnsupportedAgentOverrideError) as exc_info:
+            self._parse_with_cli(config, cli, monkeypatch)
+
+        assert self._composed_name("base_simple_agent") in str(exc_info.value)
+
+    def test_rejects_a_field_the_incoming_agent_does_not_declare(self, monkeypatch: MonkeyPatch) -> None:
+        renamed = self._composed_name("gpqa_mcqa_simple_agent")
+
+        with raises(ConfigKeyError):
+            self._parse_with_cli(self._config(), self._cli_override(renamed, no_such_field=1), monkeypatch)
+
+
+def test_partial_head_server_inherits_the_resolved_host(monkeypatch):
+    """Pinning only the port must not suppress the host default.
+
+    A caller that constrains the head server to an allocated port range cannot
+    also supply the host: it is the address of whichever node the job lands on,
+    which only `use_absolute_ip` resolves, and only here.
+    """
+    from omegaconf import OmegaConf
+
+    from nemo_gym.global_config import (
+        HEAD_SERVER_KEY_NAME,
+        USE_ABSOLUTE_IP,
+        GlobalConfigDictParser,
+        GlobalConfigDictParserConfig,
+    )
+
+    monkeypatch.setattr("nemo_gym.global_config.gethostname", lambda: "node-17")
+    monkeypatch.setattr("nemo_gym.global_config.gethostbyname", lambda _h: "10.1.2.3")
+
+    initial = OmegaConf.create(
+        {
+            **GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            USE_ABSOLUTE_IP: True,
+            HEAD_SERVER_KEY_NAME: {"port": 63000},
+        }
+    )
+    parsed = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial)
+
+    assert parsed[HEAD_SERVER_KEY_NAME]["port"] == 63000, "explicit port must survive"
+    assert parsed[HEAD_SERVER_KEY_NAME]["host"] == "10.1.2.3", "host must be filled in"
+
+
+class TestRolloutRunLabels:
+    def test_rows_group_by_environment_server_and_keep_agent_labels(self) -> None:
+        from nemo_gym.global_config import rollout_run_key, rollout_run_labels
+
+        rows = [
+            {"agent_ref": {"name": "hermes"}, "_ng_environment_server": "hermes_relay"},
+            {"agent_ref": {"name": "hermes"}, "_ng_environment_server": "hermes_turn"},
+            {"_ng_environment_server": "episode_server"},
+            {"agent_ref": {"name": "simple"}},
+        ]
+
+        assert [rollout_run_key(row) for row in rows] == ["hermes_relay", "hermes_turn", "episode_server", "simple"]
+        # Every server that fronts a shared agent is labelled by its own name, so the result is order-independent.
+        expected = {
+            "hermes_relay": "hermes_relay",
+            "hermes_turn": "hermes_turn",
+            "episode_server": "episode_server",
+            "simple": "simple",
+        }
+        assert rollout_run_labels(rows) == expected
+        assert rollout_run_labels(reversed(rows)) == expected
+
+    def test_a_stamped_record_and_an_older_record_of_one_agent_get_distinct_labels(self) -> None:
+        from nemo_gym.global_config import rollout_run_labels
+
+        stamped = {"agent_ref": {"name": "hermes"}, "_ng_environment_server": "hermes_relay"}
+        older = {"agent_ref": {"name": "hermes"}}
+
+        labels = rollout_run_labels([stamped, older])
+
+        assert labels == {"hermes_relay": "hermes_relay", "hermes": "hermes"}
+
+    def test_labels_stay_unique_when_a_server_name_matches_another_agent(self) -> None:
+        from nemo_gym.global_config import label_runs
+
+        # Servers "judge" and "judge_twin" share agent "policy", so both use their own names.
+        # Server "grader" fronts an agent that happens to be named "judge", which would repeat that label.
+        agent_by_key = {"judge": "policy", "judge_twin": "policy", "grader": "judge"}
+
+        labels = label_runs(agent_by_key)
+
+        assert labels == {"judge": "judge", "judge_twin": "judge_twin", "grader": "grader"}
+        assert label_runs(dict(reversed(list(agent_by_key.items())))) == labels
+
+
+def _absolute_ip_parse_config(settings: dict) -> GlobalConfigDictParserConfig:
+    return GlobalConfigDictParserConfig(
+        initial_global_config_dict=OmegaConf.create({"use_absolute_ip": True, **settings}),
+        skip_load_from_cli=True,
+        skip_load_from_dotenv=True,
+    )
+
+
+def test_explicit_default_host_skips_hostname_resolution(monkeypatch):
+    from socket import gaierror
+
+    # An explicit address wins even on a machine whose short hostname has no DNS entry.
+    resolver = MagicMock(side_effect=gaierror("hostname does not resolve"))
+    monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", resolver)
+    config = GlobalConfigDictParser().parse(_absolute_ip_parse_config({"default_host": "192.0.2.20"}))
+    assert config.head_server.host == "192.0.2.20"
+    resolver.assert_not_called()
+
+
+@mark.parametrize("resolved", [None, "127.0.1.1", "0.0.0.0"])
+def test_absolute_ip_reports_unusable_hostname(monkeypatch, resolved):
+    from socket import gaierror
+
+    from nemo_gym.config_types import ConfigError
+
+    resolver = (
+        MagicMock(side_effect=gaierror("hostname does not resolve"))
+        if resolved is None
+        else MagicMock(return_value=resolved)
+    )
+    monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", resolver)
+    with raises(ConfigError, match="default_host=.*reachable from the sandbox"):
+        GlobalConfigDictParser().parse(_absolute_ip_parse_config({}))
+
+
+class TestAbsoluteIpServerTypes:
+    """``absolute_ip_server_types`` scopes the address ``use_absolute_ip`` resolves to the server types it names."""
+
+    SERVERS = {
+        "model": {"responses_api_models": {"m": {"entrypoint": "app.py"}}},
+        "tools": {"resources_servers": {"r": {"entrypoint": "app.py", "domain": "other"}}},
+    }
+
+    @fixture(autouse=True)
+    def _network(self, monkeypatch):
+        monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", MagicMock(return_value="192.0.2.20"))
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", MagicMock(return_value=12345))
+
+    @staticmethod
+    def _hosts(config) -> dict[str, str]:
+        return {
+            "head": config.head_server.host,
+            "model": config.model.responses_api_models.m.host,
+            "tools": config.tools.resources_servers.r.host,
+        }
+
+    def test_named_types_get_the_address_and_the_head_stays_on_loopback(self):
+        config = GlobalConfigDictParser().parse(
+            _absolute_ip_parse_config({"absolute_ip_server_types": ["responses_api_models"], **self.SERVERS})
+        )
+        assert self._hosts(config) == {"head": "127.0.0.1", "model": "192.0.2.20", "tools": "127.0.0.1"}
+
+    def test_unset_moves_every_server_as_before(self):
+        config = GlobalConfigDictParser().parse(_absolute_ip_parse_config(dict(self.SERVERS)))
+        assert self._hosts(config) == {"head": "192.0.2.20", "model": "192.0.2.20", "tools": "192.0.2.20"}
+        config = GlobalConfigDictParser().parse(
+            _absolute_ip_parse_config({"absolute_ip_server_types": None, **self.SERVERS})
+        )
+        assert self._hosts(config) == {"head": "192.0.2.20", "model": "192.0.2.20", "tools": "192.0.2.20"}
+
+    def test_a_servers_own_host_and_an_explicit_default_host_still_win(self):
+        servers = {
+            "model": {"responses_api_models": {"m": {"entrypoint": "app.py", "host": "10.0.0.5"}}},
+            "tools": self.SERVERS["tools"],
+        }
+        config = GlobalConfigDictParser().parse(
+            _absolute_ip_parse_config({"absolute_ip_server_types": ["responses_api_models"], **servers})
+        )
+        assert self._hosts(config) == {"head": "127.0.0.1", "model": "10.0.0.5", "tools": "127.0.0.1"}
+        # `default_host` is the explicit, broader opt-in: it applies to every server, the list notwithstanding.
+        config = GlobalConfigDictParser().parse(
+            _absolute_ip_parse_config(
+                {"default_host": "192.0.2.30", "absolute_ip_server_types": ["responses_api_models"], **self.SERVERS}
+            )
+        )
+        assert self._hosts(config) == {"head": "192.0.2.30", "model": "192.0.2.30", "tools": "192.0.2.30"}
+
+    def test_without_use_absolute_ip_the_list_changes_nothing(self):
+        config = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.create(
+                    {"absolute_ip_server_types": ["responses_api_models"], **self.SERVERS}
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+            )
+        )
+        assert self._hosts(config) == {"head": "127.0.0.1", "model": "127.0.0.1", "tools": "127.0.0.1"}
+
+    @mark.parametrize(
+        "value, match",
+        [("responses_api_models", "must be a list"), (["models"], "unknown server types"), (True, "must be a list")],
+    )
+    def test_malformed_list_is_a_config_error(self, value, match):
+        from nemo_gym.config_types import ConfigError
+
+        with raises(ConfigError, match=match):
+            GlobalConfigDictParser().parse(_absolute_ip_parse_config({"absolute_ip_server_types": value}))

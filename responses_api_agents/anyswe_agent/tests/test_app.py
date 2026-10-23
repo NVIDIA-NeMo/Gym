@@ -16,18 +16,27 @@
 These exercise runner generation, image resolution, and configuration.
 """
 
+import asyncio
 import base64
 import json
+import os
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from nemo_gym.openai_utils import NeMoGymResponse
 from responses_api_agents.anyswe_agent.agent_runner import _extract_patch, _snapshot_repo
 from responses_api_agents.anyswe_agent.app import (
     AnySweAgent,
     AnySweAgentConfig,
+    AnySweRunRequest,
+    SWEBenchMetrics,
     _classify_agent_error,
     _dataset_family,
+    _model_url_for_rollout,
     _r2e_resolved,
     _safe_config_json,
     _should_mask_sample,
@@ -62,7 +71,7 @@ class TestAgentRunner:
         compile(source, "<runner>", "exec")
         assert 'os.environ["NGSWE_AGENT_MODULE"]' in source
         assert '["git", "add", "-A"]' in source
-        assert '["git", "diff", "--no-color", "--cached", baseline_tree]' in source
+        assert '["git", "diff", "--no-color", "--cached", baseline_tree, "--", ".", *excludes]' in source
 
     def test_patch_extraction_excludes_image_dirt_and_includes_agent_files(self, tmp_path) -> None:
         repo = tmp_path / "repo"
@@ -83,7 +92,7 @@ class TestAgentRunner:
 
         (repo / "agent-edited.txt").write_text("agent change\n")
         (repo / "agent-new.txt").write_text("new from agent\n")
-        patch_text = _extract_patch(repo, index_path, baseline_tree)
+        patch_text = _extract_patch(repo, index_path, baseline_tree).decode()
 
         assert "agent-edited.txt" in patch_text
         assert "agent change" in patch_text
@@ -102,6 +111,21 @@ class TestAgentRunner:
 
 
 class TestSandboxAPI:
+    def test_run_request_preserves_rollout_indices(self) -> None:
+        request = AnySweRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": [], "model": "model"},
+                "_ng_task_index": 3,
+                "_ng_rollout_index": 1,
+            }
+        )
+        assert getattr(request, "_ng_task_index") == 3
+        assert getattr(request, "_ng_rollout_index") == 1
+
+    def test_model_url_carries_rollout_correlation(self) -> None:
+        assert _model_url_for_rollout("http://model-host:8000", "3-1") == "http://model-host:8000/ng-rollout/3-1"
+        assert _model_url_for_rollout("http://model-host:8000", None) == "http://model-host:8000"
+
     def test_default_provider_is_named_sandbox(self) -> None:
         config = AnySweAgentConfig(
             host="0.0.0.0",
@@ -146,6 +170,28 @@ class TestSandboxAPI:
         assert spec.metadata["sandbox-api"] == "opensandbox-sdk"
         assert spec.provider_options == {"platform": {"arch": "amd64"}}
         assert spec.files == {"/tmp/input": "data"}
+
+    def test_agent_network_policy_applies_to_agent_box_only(self) -> None:
+        policy = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.0.0.0/16"}]}
+        params = SimpleNamespace(
+            sandbox_spec={"provider_options": {"platform": {"arch": "amd64"}}},
+            sandbox_default_metadata={},
+            swebench_agent_timeout=100,
+            swebench_tests_timeout=200,
+            instance_id="astropy__astropy-12907",
+            container="image:tag",
+            resolved_sandbox_provider={"opensandbox": {}},
+            agent_network_policy=policy,
+        )
+        agent_spec = AnySweAgent._sandbox_spec(params, agent=True)
+        grading_spec = AnySweAgent._sandbox_spec(params)
+        assert agent_spec.provider_options == {"platform": {"arch": "amd64"}, "network_policy": policy}
+        assert grading_spec.provider_options == {"platform": {"arch": "amd64"}}
+
+        params.agent_network_policy = policy
+        params.resolved_sandbox_provider = {"docker": {}}
+        with pytest.raises(ValueError, match="opensandbox"):
+            AnySweAgent._sandbox_spec(params, agent=True)
 
     def test_agent_config_is_forwarded_without_harness_specific_changes(self) -> None:
         params = SimpleNamespace(
@@ -203,10 +249,17 @@ class TestSandboxAPI:
         class Params:
             def model_dump_json(self) -> str:
                 return json.dumps(
-                    {"sandbox_provider": {"opensandbox": {"api_key": "secret"}}}  # pragma: allowlist secret
+                    {
+                        "sandbox_provider": {"opensandbox": {"api_key": "secret"}},  # pragma: allowlist secret
+                        "agent_runtime_source": "https://example.test/runtime?token=secret",
+                        "agent_deps_url": "https://example.test/runtime?token=secret",
+                    }
                 )
 
-        assert json.loads(_safe_config_json(Params()))["sandbox_provider"]["opensandbox"]["api_key"] == "***"
+        result = json.loads(_safe_config_json(Params()))
+        assert result["sandbox_provider"]["opensandbox"]["api_key"] == "***"
+        assert "agent_runtime_source" not in result
+        assert "agent_deps_url" not in result
 
 
 class TestSetupScriptsExist:
@@ -226,6 +279,90 @@ class TestSetupScriptsExist:
         assert 'PBS_RELEASE="${PBS_RELEASE:-20260805}"' in script
 
 
+def _fake_bin(tmp_path: Path, machine: str) -> Path:
+    """A PATH dir whose `uname -m` reports ``machine`` and whose `curl` logs the URL and fails."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "uname").write_text(f'#!/bin/sh\necho "{machine}"\n')
+    (bin_dir / "curl").write_text(f'#!/bin/sh\nfor a; do url="$a"; done\necho "$url" >> "{tmp_path}/urls"\nexit 1\n')
+    for tool in ("uname", "curl"):
+        (bin_dir / tool).chmod(0o755)
+    return bin_dir
+
+
+def _portable_python_arch(
+    tmp_path: Path, machine: str, arch_override: str | None = None
+) -> subprocess.CompletedProcess:
+    script = Path(__file__).parent.parent / "setup_scripts" / "_portable_python.sh"
+    env = {**os.environ, "PATH": f"{_fake_bin(tmp_path, machine)}:{os.environ['PATH']}"}
+    env.pop("ARCH", None)
+    if arch_override:
+        env["ARCH"] = arch_override
+    return subprocess.run(
+        ["bash", "-c", f'source "{script}" && echo "$ARCH"'], env=env, capture_output=True, text=True
+    )
+
+
+class TestSetupScriptsHostArch:
+    @pytest.mark.parametrize(
+        "machine,expected",
+        [
+            ("x86_64", "x86_64-unknown-linux-gnu"),
+            ("aarch64", "aarch64-unknown-linux-gnu"),
+            ("arm64", "aarch64-unknown-linux-gnu"),
+        ],
+    )
+    def test_portable_python_arch_follows_host(self, tmp_path: Path, machine: str, expected: str) -> None:
+        result = _portable_python_arch(tmp_path, machine)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == expected
+
+    def test_portable_python_arch_override_wins(self, tmp_path: Path) -> None:
+        result = _portable_python_arch(tmp_path, "aarch64", arch_override="x86_64-unknown-linux-gnu")
+        assert result.stdout.strip() == "x86_64-unknown-linux-gnu"
+
+    def test_portable_python_rejects_unknown_arch(self, tmp_path: Path) -> None:
+        result = _portable_python_arch(tmp_path, "riscv64")
+        assert result.returncode != 0
+        assert "unsupported portable python architecture" in result.stderr
+
+    @pytest.mark.parametrize(
+        "deps_script",
+        [
+            "claude_code_agent_deps.sh",
+            "cline_agent_deps.sh",
+            "opencode_agent_deps.sh",
+            "openclaw_agent_deps.sh",
+            "pi_agent_deps.sh",
+        ],
+    )
+    @pytest.mark.parametrize("machine,node_arch", [("x86_64", "linux-x64"), ("aarch64", "linux-arm64")])
+    def test_node_download_follows_host(self, tmp_path: Path, deps_script: str, machine: str, node_arch: str) -> None:
+        # Run the deps script with the portable-python helpers stubbed out; the fake curl records the Node URL.
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        shutil.copy(Path(__file__).parent.parent / "setup_scripts" / deps_script, scripts / deps_script)
+        (scripts / "_portable_python.sh").write_text(
+            "install_portable_python() { :; }\ninstall_nemo_gym_deps() { :; }\n"
+        )
+        deps_dir = tmp_path / "deps"
+        deps_dir.mkdir()
+        env = {
+            **os.environ,
+            "PATH": f"{_fake_bin(tmp_path, machine)}:{os.environ['PATH']}",
+            "DEPS_DIR": str(deps_dir),
+            "NEMO_GYM_ROOT": str(tmp_path),
+        }
+        env.pop("NODE_ARCH", None)
+
+        result = subprocess.run(["bash", str(scripts / deps_script)], env=env, capture_output=True, text=True)
+
+        assert result.returncode != 0  # the fake curl fails right after recording the URL
+        urls = (tmp_path / "urls").read_text().split()
+        assert len(urls) == 1 and urls[0].startswith("https://nodejs.org/dist/")
+        assert urls[0].endswith(f"-{node_arch}.tar.xz")
+
+
 class TestExampleData:
     def test_prepared_rows_do_not_set_sampling(self) -> None:
         row = _to_gym_row({"instance_id": "repo__repo-1", "problem_statement": "Fix it"}, "test")
@@ -238,3 +375,65 @@ class TestExampleData:
         for row in rows:
             assert "metadata" in row["responses_create_params"]
             assert "instance_id" in row["responses_create_params"]["metadata"]
+
+
+class TestRunReportsMaskSample:
+    """`/run` must build a serializable response and carry the masking decision."""
+
+    def _agent(self, *, mask_sample: bool) -> AnySweAgent:
+        metrics = SWEBenchMetrics(resolved=True, mask_sample=mask_sample)
+        instance_config = {
+            "problem_info": {"instance_id": "astropy__astropy-12907"},
+            "body": {"input": "fix it"},
+            "persistent_dir": "/tmp/anyswe",
+            "metrics_fpath": "/tmp/anyswe/metrics.json",
+            "container": "swebench/sweb.eval.x86_64.astropy__astropy-12907",
+            "run_session_id": "run-1",
+            "base_results_dir": "/tmp/anyswe/results",
+            "model_server_url": "http://localhost:9000",
+            "resolved_sandbox_provider": {"opensandbox": {}},
+            "sandbox_config": {},
+            "sandbox_default_metadata": {},
+            **_config().model_dump(mode="json"),
+        }
+        response = NeMoGymResponse.model_construct(
+            id="resp-1",
+            output=[],
+            tools=[],
+            metadata={
+                "metrics": metrics.model_dump_json(),
+                "instance_config": json.dumps(instance_config),
+                "input": json.dumps("fix it"),
+            },
+        )
+
+        class _StubbedAgent(AnySweAgent):
+            async def _responses(self, *args, **kwargs):
+                return response
+
+            def rollout_id_from_run(self, body):
+                return None
+
+        agent = _StubbedAgent.__new__(_StubbedAgent)
+        object.__setattr__(agent, "__dict__", {"_sem": asyncio.Semaphore(1)})
+        object.__setattr__(agent, "__pydantic_fields_set__", set())
+        object.__setattr__(agent, "__pydantic_extra__", None)
+        object.__setattr__(agent, "__pydantic_private__", {})
+        return agent
+
+    def _body(self) -> AnySweRunRequest:
+        return AnySweRunRequest(responses_create_params={"input": "fix it"})
+
+    def test_a_masked_run_serializes_and_reports_the_flag_once(self) -> None:
+        dumped = asyncio.run(self._agent(mask_sample=True).run(self._body())).model_dump()
+
+        assert dumped["mask_sample"] is True
+        assert dumped["reward"] == 1.0
+        # The compatibility location keeps reporting the same decision.
+        assert dumped["instance_config"]["mask_sample"] is True
+
+    def test_an_unmasked_run_is_not_implicitly_masked(self) -> None:
+        dumped = asyncio.run(self._agent(mask_sample=False).run(self._body())).model_dump()
+
+        assert dumped["mask_sample"] is False
+        assert dumped["instance_config"]["mask_sample"] is False

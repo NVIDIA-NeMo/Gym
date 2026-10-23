@@ -11,6 +11,10 @@ torch==2.11.0
 # another Gym server on the repository's Python 3.13 line.
 matplotlib==3.10.6
 
+# OSWorld pins pillow<11.1.dev0 (CVE-affected). Bypass the stale constraint
+# to install the patched version already used elsewhere in the repo.
+pillow==12.3.0
+
 # SurferH is not loaded by this Gym adapter, and agp-client is not published on
 # the configured package indexes.
 agp-client; sys_platform == 'never'

@@ -86,6 +86,7 @@ apptainer:
     default_binds: ["/tmp"]
     extra_exec_args: ["--writable-tmpfs"]
     default_timeout_s: 180
+    timeout_grace_s: 15
     concurrency: 32
   create:
     mount_point: /sandbox
@@ -116,6 +117,7 @@ Settings for running commands (`apptainer exec`) and global provider behavior.
 | Field | Default | Meaning |
 |---|---|---|
 | `default_timeout_s` | `180` | Default per-command timeout when the caller doesn't pass one (`None` = no timeout). |
+| `timeout_grace_s` | `15` | Seconds to wait after sending `SIGTERM` on timeout before escalating to `SIGKILL` (`0` = immediate hard kill). |
 | `fakeroot_for_root` | `true` | When running as root, add `--fakeroot` (map the host user to root inside the container). |
 | `default_binds` | `[]` | Extra `--bind host:container` mounts added at instance start. |
 | `extra_exec_args` | `[]` | Extra raw flags appended to every `apptainer exec` (e.g. `--no-home`, `--writable-tmpfs`, `--contain`). |
@@ -246,8 +248,9 @@ are unaffected.
 
 - **Normal** — the command's real `return_code`, `error_type=None`.
 - **Timeout** — `return_code=125`, `error_type="timeout"`.
-- **Apptainer runtime failure** (instance gone, etc., detected via stderr markers like
-  `FATAL:`) — `return_code=125`, `error_type="sandbox"`.
+- **Apptainer runtime failure** (instance gone, etc., detected via Apptainer's own
+  stderr lines: a line starting with `FATAL:`, a missing-instance message, or an
+  `ERROR:` line with exit code 255) — `return_code=125`, `error_type="sandbox"`.
 
 `125` is the sentinel `SANDBOX_RUNTIME_RETURN_CODE`, signaling "the sandbox runtime
 failed" rather than "the command exited 125".
@@ -262,8 +265,9 @@ failed" rather than "the command exited 125".
   was started *without* fakeroot varies by Apptainer version and host configuration.
 - **Resource enforcement.** CPU/memory cgroup flags require cgroups v2 delegation.
   Disable them with `create.apply_resource_limits: false`.
-- **Runtime-failure detection is heuristic.** It keys off stderr markers, so a user
-  command whose own output contains `FATAL:` could be misclassified as a sandbox error.
+- **Runtime-failure detection is heuristic.** It keys off Apptainer's stderr line format,
+  so a user command that prints a line starting with `FATAL:` could be misclassified as a
+  sandbox error.
 
 ## Development
 

@@ -22,7 +22,7 @@ policy_model_name: "Qwen/Qwen3-4B-Instruct-2507"
 ```
 # start nemo gym servers
 gym env start \
-    --config responses_api_agents/verifiers_agent/configs/acereason-math.yaml \
+    --config responses_api_agents/verifiers_agent/configs/verifiers_agent.yaml \
     --model-type vllm_model
 
 # generate a rollout

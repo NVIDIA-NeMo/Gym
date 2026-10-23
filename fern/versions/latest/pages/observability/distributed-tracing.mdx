@@ -1,0 +1,189 @@
+---
+title: "Distributed Tracing"
+description: ""
+position: 5
+---
+A NeMo Gym rollout crosses several processes. This page explains how those hops become a
+single trace, and what to check when they do not.
+
+## The Problem
+
+NeMo Gym runs each server as an independent FastAPI process:
+
+```
+gym env start
+├── resources server   (verification, tools, per-task state)
+├── model server       (inference)
+└── agent server       (the harness that drives the rollout)
+```
+
+They communicate over HTTP. Nothing in a plain HTTP request tells the receiving server
+which rollout it belongs to, so without propagation each server produces its own
+disconnected spans and a rollout looks like three unrelated traces.
+
+## How Context Crosses a Process Boundary
+
+NeMo Gym uses W3C Trace Context, the standard OpenTelemetry mechanism. Two halves make it
+work.
+
+**Outbound.** Every cross-server call in NeMo Gym goes through one function,
+`nemo_gym.server_utils.request()`. NeMo Gym bans `httpx` for async HTTP precisely so that
+this stays true, which means there is exactly one place to inject trace context. The
+function starts a CLIENT span and writes a `traceparent` header identifying it:
+
+```
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+             ^  ^                                ^                ^
+             |  trace id                          parent span id   flags
+             version
+```
+
+CLIENT spans measure total request time. When metrics export is enabled, the separate
+`gym.http.connection_pool.queue_duration_ms` histogram measures connection-pool wait without
+requiring a span for every request. See
+[Configuration](/main/reference/configuration#http-connection-pool) for the metric and pool-sizing
+reference.
+
+**Inbound.** Every NeMo Gym server applies OpenTelemetry FastAPI auto-instrumentation,
+which reads `traceparent` off the incoming request and makes the caller's span the parent
+of its own SERVER span.
+
+The result is a continuous parent chain across processes:
+
+```
+gym.rollout.dispatch           driver              (span R, root; span link → gym.job)
+└─ HTTP POST                   driver              (parent = R)
+   └─ POST /run                agent server        (parent = the driver's client span)
+      └─ gym.rollout           agent server        (span A)
+         └─ HTTP POST          agent server        (span B, parent = A)
+            └─ POST /v1/responses       model server   (span C, parent = B)
+               └─ gym.model.responses   model server   (span D, parent = C)
+```
+
+Span C lives in a different operating system process from span B and knows nothing about
+it except what arrived in the header.
+
+## Rollout Correlation
+
+NeMo Gym already had a correlation scheme before it had traces. `current_rollout_id()`
+tracks the active rollout in a `ContextVar`, and rollout-scoped routes carry the ID in the
+URL path as `/ng-rollout/{rollout_id}/...`.
+
+Telemetry joins that scheme rather than replacing it. The rollout ID is attached to spans
+as `nemo.gym.rollout.id`, so you can move between a trace, NeMo Gym's own logs, and a
+captured trajectory for the same rollout:
+
+```bash
+# From a trace, find the rollout
+jq -r 'select(.attributes."nemo.gym.rollout.id") | .attributes."nemo.gym.rollout.id"' spans.jsonl
+
+# From a rollout ID, find its captured model calls
+ls <capture_dir>/<rollout_id>.capture.jsonl
+```
+
+### Engine Request Ids
+
+Inside a rollout, every call a Gym model server makes to its inference backend carries
+`X-Request-Id: <rollout id>-<8 hex chars>`. vLLM uses that header as its request id and records it
+as `gen_ai.request.id` on its request span and in its request log, so an engine span or log line
+can be matched to a rollout directly, without walking the trace. A caller's own `X-Request-Id`
+header is kept. In a submitted job with `vllm_traces: true`, the job's collector also copies the rollout
+id into `nemo.gym.rollout.id` on the engine span, so it groups per rollout like every other Gym span
+(see [Collector for Submitted Jobs](/main/observability/eval-submit-collector)).
+
+## Span Kinds
+
+Span kind is what tells a backend that a call left one service and arrived at another.
+NeMo Gym emits:
+
+- **CLIENT** on the outbound request from `server_utils.request()`.
+- **SERVER** on the inbound request, from FastAPI auto-instrumentation.
+- **INTERNAL** for everything inside a process, such as `gym.verify`.
+
+Without the CLIENT and SERVER pairing, service maps in Jaeger, Tempo, and Honeycomb cannot
+draw the edge between the agent server and the model server.
+
+## Verify Propagation
+
+Run with the console exporter and drive one rollout, then confirm that spans from
+different servers share a trace ID:
+
+```bash
+NEMO_LENS_ENABLED=1 NEMO_GYM_OTEL_EXPORTER=console \
+gym env start --resources-server example_single_tool_call --model-type vllm_model
+```
+
+```bash
+cat *.log | grep '"trace_id"' \
+  | jq -r '[.trace_id, .resource.attributes."service.name", .kind, .name] | @tsv' \
+  | sort
+```
+
+A working trace shows one trace ID across several `service.name` values. A broken one
+shows a different trace ID per service.
+
+## Troubleshooting
+
+### Every Span Is Its Own Trace
+
+The `traceparent` header is not arriving. Check, in order:
+
+1. **Is the `http_client` span group enabled?** Injection happens inside the outbound
+   span, so disabling that group disables propagation. Every preset includes it. If you
+   set `span_groups` to a hand-picked list, include `http_client` and `server`.
+2. **Is the call going through `server_utils.request()`?** A server that uses `httpx` or
+   `aiohttp` directly bypasses the only injection point. NeMo Gym bans `httpx` for this
+   and other reasons. See the async patterns section of `AGENTS.md`.
+3. **Is telemetry enabled in the *receiving* process?** A server that never initialized
+   telemetry does not extract the header. Confirm that the environment reached it —
+   `NEMO_GYM_OTEL_ENABLED` must be set in the server process, not only in your shell.
+
+### A Request Nests Under the Previous One on the Same Connection
+
+Seen as a server span whose parent is the previous request's server span, in another rollout's
+trace, with the caller's client span left without a child. uvicorn starts a pipelined request's
+task from inside the previous request's task, so it inherits that request's context, and the
+instrumentor then skips `traceparent` extraction. Gym's servers wrap every request in
+`RequestContextIsolationMiddleware`, installed outside the instrumentor by `run_webserver`, which
+resets the OpenTelemetry context before the instrumentor runs (and clears the rollout id as a
+guard). An app served without `run_webserver` needs `install_request_context_isolation(app)` after
+instrumenting to be safe from this.
+
+### Traces Are Missing Their Last Spans
+
+Spans export in batches. A process that exits before its batch flushes drops whatever was
+pending. NeMo Gym flushes on normal shutdown, but a `SIGKILL` cannot be caught. Prefer
+`Ctrl-C`, which sends `SIGINT` and lets each server shut down cleanly.
+
+### One Trace Per Rollout, Linked to the Job
+
+The eval driver's `gym.job` span wraps a whole rollout-collection run, but rollouts are not
+its children. Each dispatch opens `gym.rollout.dispatch` as the root of a new trace with a
+span link to `gym.job`, and the agent's `gym.rollout` span and everything below it join that
+trace. A run therefore produces one small job trace and one bounded trace per rollout, all
+carrying the same `run_id`, instead of one trace that grows with the run and stays open until
+the job ends. This holds for a standalone `gym eval run`; an embedder that runs the driver inside
+its own trace keeps parent/child nesting, and nemo-lens's `ENABLE_SINGLE_TRACEID` gives every root
+the job's trace id, which makes the run one trace again.
+
+Sampling is decided per trace, so each rollout trace makes its own decision and the job trace
+makes another. Under a ratio sampler a kept rollout trace can link to a `gym.job` span that was
+not sampled and is absent from the backend.
+
+### Startup Traces
+
+Server startup is its own trace, separate from the `gym.job` trace of the run. Both traces carry the same `run_id`, so a backend can group them.
+
+The supervisor, which is the process running `gym env start` or `gym eval run`, opens a `gym.startup` span. Under it, the supervisor adds one span per stage of its own work, such as `spawn_servers` and `wait_for_servers`. It also adds one `gym.startup.server` span per server, which runs from spawning the server to the server's first answered health probe.
+
+Each server receives a `traceparent` for its `gym.startup.server` span in its environment. The server parents its own `gym.server.startup` span to it, with one child span per startup stage. In a multi-worker server, every Uvicorn worker inherits the same `traceparent` and adds its own `gym.server.startup.worker` span next to the main process's span.
+
+Every startup span carries `nemo.gym.startup.outcome`. A startup that completes ends with `ready`. A startup that times out, fails, or is interrupted still exports its trace: the supervisor ends `gym.startup` and the span of every server that was not ready yet with `timeout`, `failed`, or `interrupted` and an error status, and records the stage it was in as `unfinished`. Filter on that attribute to find the servers that held up a failed run.
+
+These spans belong to the `startup` span group, which is in the `default` preset.
+
+### Only the Supervisor Emits Spans
+
+The `telemetry:` block reaches servers through environment variables exported before the
+servers start. If you set them after `gym env start` is already running, the servers never
+see them. Set them in the shell before you start the run.

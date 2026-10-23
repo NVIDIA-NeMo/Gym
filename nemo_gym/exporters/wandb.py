@@ -49,11 +49,16 @@ class WandbExporter(BaseExporter):
     def setup(self) -> None:
         # The wandb SDK reads the key from the environment rather than from init kwargs.
         environ["WANDB_API_KEY"] = self.config.wandb_api_key
+        # A resumed or resubmitted run resumes the W&B run recorded next to its output.
+        run_id = self._recorded_run_id()
+        resume = {"id": run_id, "resume": "allow"} if run_id is not None else {}
         self.run = wandb.init(
             project=self.config.wandb_project,
             name=self.config.wandb_name,
             dir=str(Path(self.global_config_dict[RESULTS_DIR_KEY_NAME]) / "wandb"),
+            **resume,
         )
+        self._record_run_id(self.run.id)
 
     def teardown(self) -> None:
         if self.run is not None:
@@ -69,7 +74,8 @@ class WandbExporter(BaseExporter):
         self._active_run().config.update(OmegaConf.to_container(config_dict))
 
     def _log_metrics(self, metrics: dict[str, Any], step: Optional[int] = None) -> None:
-        self._active_run().log(metrics, step=step)
+        # @bxyu-nvidia: Commit here so the rollouts show up in W&B on the current step, rather than being flushed in the next step
+        self._active_run().log(metrics, step=step, commit=True)
 
     def _log_rollouts(self, rollouts: list[dict[str, Any]]) -> None:
         # One JSON blob per row: rollouts have no stable column set across environments.

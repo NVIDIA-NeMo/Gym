@@ -71,6 +71,7 @@
 parallel_tool_calls_single_step_tool_use_with_argument_comparison_resources_server:
   resources_servers:
     single_step_tool_use_with_argument_comparison:
+      allowed_agents: [tool_simulation_agent]
       entrypoint: app.py
       domain: agent
       tool_call_comparator_config:
@@ -106,3 +107,11 @@ parallel_tool_calls_single_step_tool_use_with_argument_comparison_agent:
         type: example
         jsonl_fpath: resources_servers/single_step_tool_use_with_argument_comparison/data/parallel_example.jsonl
         num_repeats: 1
+
+parallel_tool_calls_single_step_tool_use_with_argument_comparison_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: parallel_tool_calls_single_step_tool_use_with_argument_comparison_agent

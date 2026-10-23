@@ -30,6 +30,11 @@ osworld_nano_omni_agent:
   responses_api_agents:
     osworld_agent:
       runner_name: nemotron_v3_nano_omni_agent
+      model_protocol_id: nano-omni-v3-osworld-v1
+      history_policy:
+        name: fixed
+        params:
+          keep_images: 3
       provider_name: docker
       sandbox_provider: osworld_sandbox
       max_steps: 100
@@ -39,3 +44,10 @@ osworld_nano_omni_agent:
       top_p: 0.95
       sleep_after_execution: 5.0
       task_timeout: 7200
+
+osworld_nano_omni_environment_server:
+  _inherit_from: osworld_simple_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: osworld_nano_omni_agent

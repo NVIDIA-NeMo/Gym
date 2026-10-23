@@ -23,3 +23,10 @@ config_paths:
         prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/aime25-x/prepare.py
         num_repeats: 32
+
+aime25-x_math_with_judge_environment_server:
+  _inherit_from: math_with_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: aime25-x_math_with_judge_simple_agent

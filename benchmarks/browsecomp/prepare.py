@@ -178,7 +178,7 @@ BROWSECOMP_SUBSET_SEED = 42
 
 def _select_samples(df, run_full: bool):
     """1266-row df in -> the full df if run_full, else a deterministic 400-row subset (seed 42).
-    Uses stdlib random.Random(seed).sample, the same selection the bc_frankie harness's
+    Uses stdlib random.Random(seed).sample, the same selection the reference harness's
     browsecomp_eval.py performs, so both harnesses' seed-42 subset is the same 400."""
     if run_full:
         return df

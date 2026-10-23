@@ -1,27 +1,136 @@
 ---
 title: "Add a benchmark"
-description: ""
+description: "Prepare, declare, and validate a reproducible benchmark using reusable Gym components and a manifest."
 position: 3
 ---
-The most important principle when adding benchmarks into NeMo Gym is ensuring the fidelity of the benchmark. As a result, there are additional steps and best practices to adding a benchmark that are required on top of adding just a training environment (although the steps below are still suggested for training environments).
 
-## Reward profiling
+# Add a benchmark
 
-In order to ensure the rough software correctness of your benchmark, baseline against publicly available models including a mixture of open-source and closed-source models. This process is also known as reward profiling.
+A benchmark contribution should let any user prepare the same tasks, run them under a stated configuration, and understand what the score measures.
 
-1. Typically any open-source model, even smaller ones such as [Qwen 3 30B A3B Instruct 2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507), will suffice as long as the resulting performance of running that model on the benchmark is in a meaningful range such as 30% or higher. Otherwise you should run a larger model that attains a meaningful score. If no open model is able to achieve meaningful performance, this may indicate that you have a software bug or indeed your benchmark is quite difficult.  
-2. For closed-source models, as of February 11, 2026, it is typically fine to run just OpenAI models (rather than Anthropic or Gemini models) for a variety of reasons.  
-   1. Typically OpenAI models are the most affordable and have good robustness over various benchmarks, while the same cannot be currently said for Anthropic or Gemini models.  
-   2. These closed-source models should reach at least the same scores as open-source models, if not significantly better. It is rare that open-source models outperform closed-source models. If this is not the case, your benchmark may have a software bug.
+When onboarding a benchmark, it is important to keep the task contract independent of the harness wherever possible. The task defines the inputs, tools, state, required artifacts, and scoring rules; the harness chooses how to solve it. If the harness itself is part of the subject being measured, this must be stated explicitly. See [Component Ownership](/main/contribute/environments/new-environment#component-ownership) for the agent/environment separation design and the current implementation boundaries.
 
-As of February 11, 2026, an example suite of models to reward profile on your benchmark is: your policy model of interest, GPT 5 Nano, GPT 5, [Qwen 3 30B A3B Instruct 2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507), and [Qwen 3 30B A3B Thinking2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Thinking-2507). If the 30B-level Qwen models are not strong enough, consider [Qwen 3 235B A22B Instruct 2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507) and [Qwen 3 235B A22B Thinking 2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Thinking-2507). If those models are also not enough, consider models such as [Kimi K2 Instruct](https://huggingface.co/moonshotai/Kimi-K2-Instruct) or [GLM-4.7](https://huggingface.co/zai-org/GLM-4.7). 
+## Overview
 
-## Best practices
+Onboarding can be done in the following order:
 
-After running on a variety of models, you should do a quick analysis of some of each model's failure cases. It is critical to look at the actual results and rollouts produced by your benchmark because it will help catch many software bugs and issues that may lead to unexpectedly low or high scores.
+1. **Reuse and scaffold:** choose an existing harness and scorer, or scaffold a verifier for your task.
+2. **Prepare and declare:** convert source data reproducibly, define prompts, and complete the manifest and measurement contract.
+3. **Validate and test:** check the declaration, prepared inputs, and scoring behavior.
+4. **Evaluate:** run a small sample with a configured model and inspect the trajectories and scores.
+5. **Check local publication:** for workloads with verifier fixtures, finish metadata and run `gym env publish` to confirm validation, verifier tests, and catalog discovery.
 
-In order to ensure infra robustness, also run your benchmark on a mixture of instruct and thinking models. We want to make our benchmark code model-agnostic, and leave the model-specific logic to things like Responses API Model servers in Gym. It should be as simple as tweaking the config of the model server you are using to switch between instruct and thinking models and achieve reasonable and expected scores for both types.
+## Onboarding Example: Hello World
 
-For integrating existing benchmarks into Gym, you must first use the original repository to reproduce the publicly reported numbers first and achieve reproduction success there. In case we run into reproduction issues down the line, this helps decouple the possible causes of our issues. Then, you can integrate the existing benchmark into Gym and rerun against those same models and reproduce the same scores again.
+Use a [development checkout](/main/contribute/development-setup), activate its environment, and run commands from the repository root. This example uses the scaffold's built-in sample task unchanged:
 
-Once you have a stable setup to run your benchmark, run it a few times on the highest scoring open source model to understand the variance. We want to increase the number of repeats of the benchmark (that is, average @ k, where k is the number of repeats) so that the variance is less than 1%.
+```bash
+gym env init --benchmark hello_world --profile custom-gym-verifier
+gym eval prepare --benchmark hello_world
+gym env validate hello_world
+gym env test hello_world
+```
+
+The scaffold creates `benchmarks/hello_world/` and `resources_servers/hello_world/`. Its source data is one row:
+
+```json
+{"question": "What is 6 x 7?", "expected_answer": "42"}
+```
+
+To try a model, [configure its endpoint](/main/model-server), then run:
+
+```bash
+gym eval run --benchmark hello_world --model-type openai_model \
+    --split benchmark --limit 1 --num-repeats 1 \
+    --output results/hello_world_smoke.jsonl
+```
+
+The scaffold is the starting point: the sample data and scoring should be replaced as needed, the measurement contract documented, and the manifest's placeholder metadata completed before running local publication checks.
+
+## Before implementation
+
+The measurement contract should be recorded in the benchmark's README:
+
+- **Provenance:** upstream repository or dataset, pinned revision, data and software licenses, split, filtering, task count, and any synthetic data generation.
+- **Task contract:** model-visible inputs, prompt construction, tools, sandbox requirements, and how the harness produces every artifact the verifier reads. Keep reference answers out of model-visible prompts.
+- **Scoring and run conditions:** reward range and direction, aggregate metric, judge settings, harness and model, sampling settings, token or step budgets, timeouts, repeats, and seeds where supported.
+
+When the task definition changes, update this contract together with preparation, prompts, verifier logic, and representative fixtures. Regenerate the data and rerun validation, scoring tests, and a representative evaluation. If component wiring changes, review the composition mirror with `gym env validate --sync` as described below.
+
+## Onboarding workflow
+
+Use a [development checkout](/main/contribute/development-setup), activate its environment, and run commands from the repository root. The example below creates a benchmark named `my_benchmark` using the standard agent loop and a new verifier.
+
+### 1. Reuse components and scaffold
+
+Search for an existing task or scorer before adding one:
+
+```bash
+gym search "task description"
+gym list resources-servers
+gym env init --benchmark my_benchmark --profile custom-gym-verifier
+```
+
+The scaffold creates these files under `benchmarks/my_benchmark/`:
+
+| File | What to complete |
+| --- | --- |
+| `config.yaml` | Component wiring, dataset declaration, preparation path, and runtime settings |
+| `manifest.yaml` | Identity, license, reward contract, split, prompt source, and composition mirror |
+| `prepare.py` | Reproducible source-data conversion into benchmark JSONL |
+| `prompt.yaml` | Prompt template for the default scaffold's source rows |
+| `data/source.jsonl`, `data/example.jsonl` | Replace the sample task and retain representative examples |
+| `README.md` | Measurement contract, preparation and evaluation commands, and limitations |
+
+It also creates `resources_servers/my_benchmark/` with a verifier implementation, config, dependencies, unit tests, and verifier fixture. Reuse a harness for a new task; a new dataset or prompt does not by itself require a new Agent Server. See [Single Step Environment](/main/environment-tutorials/single-step-environment) when implementing new task tools or scoring.
+
+If an existing scorer exports `VERIFIER_FIXTURE`, use `--reuse-verifier NAME --reward-range 0 1 --higher-is-better` with the scaffold command instead. Supply that scorer's actual reward contract. Other integration shapes are covered in [Integration Profiles](/main/contribute/environments/new-environment#integration-profiles).
+
+### 2. Prepare data and complete the manifest
+
+Replace the scaffold's sample logic. The synchronous `prepare()` function must write the dataset declared in the config and return its output path. Pin the source, document transformations, and include representative rows that exercise both successful and failed verification.
+
+```bash
+gym eval prepare --benchmark my_benchmark
+```
+
+Preparation must run before validation when the declared data is absent. Validation reads the prepared JSONL; it does not download data or execute `prepare()`.
+
+Complete the manifest's authored metadata and keep its composition mirror consistent with `config.yaml`. For a benchmark:
+
+- Set `kind: benchmark`, the source `canonical_split`, and at least one dataset with `type: benchmark` and `prepare_script`. The source split name and Gym's dataset type may differ.
+- Use `prompt_source: template` (the default) with `standard_prompt_config` for templated rows; use `prepared` when rows already contain `responses_create_params.input`; use `agent` when prompts are constructed during harness or external-engine execution. Follow the [prompt field rules](/main/contribute/environments/new-environment#prompt-sources).
+- Keep task data with the resources-server instance for new Gym-native tasks, as the standard scaffold does. Existing agent-owned declarations remain supported. Update the runtime config first when wiring changes.
+- Keep `experimental: true` initially. A manifest is a discovery and validation contract, not a certification of the benchmark's scores. This value moves to *false* with specific approval from the Gym developer team.
+
+See [Environment Manifest](/main/contribute/environments/new-environment#environment-manifest) for the example and field reference, including `config_path` for named configurations and `dataset_owner` for ambiguous compositions.
+
+### 3. Check the declaration and scoring
+
+```bash
+gym env validate my_benchmark
+gym env test my_benchmark
+gym env test --resources-server my_benchmark
+```
+
+These check the manifest and prepared inputs, the workload's verifier fixture, and the resources server's component tests respectively. Run the component tests when you change its implementation. The fixture must cover both reward endpoints, malformed requests, and reseeding when determinism is claimed. Add workload-specific cases for grading modes or state transitions that a shared scorer fixture does not cover.
+
+After an intentional config change, `gym env validate --sync my_benchmark` updates mirrored composition fields only after static checks pass. Review the diff; authored metadata such as split and prompt source still needs your judgment.
+
+<Note>
+The fixture-based `gym env test NAME` and `gym env publish NAME` commands currently require a resources server exporting `VERIFIER_FIXTURE`. External engines with `resources_server: null` can have valid manifests, but must use their own scoring tests and representative rollouts; record this limitation in the PR.
+</Note>
+
+### 4. Run a representative evaluation
+
+For an existing benchmark, try to reproduce a published result using your model of choice. Configure your endpoint as described in [Configure Model](/main/model-server). This example uses the OpenAI-compatible adapter; choose the adapter for your endpoint:
+
+```bash
+gym eval run --benchmark my_benchmark --model-type openai_model \
+    --split benchmark --limit 5 --num-repeats 1 \
+    --output results/my_benchmark_smoke.jsonl
+```
+
+### 5. Check local publication
+
+For workloads with a verifier fixture, finish the local onboarding checks with `gym env publish my_benchmark`. This reruns validation and the fixture, rejects unfinished metadata, and confirms catalog discovery. It does not upload data, register a hosted workload, or push changes.

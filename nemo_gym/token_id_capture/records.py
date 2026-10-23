@@ -25,23 +25,92 @@ Both records share a ``model_call_id``.
 
 from __future__ import annotations
 
+import hashlib
+import struct
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+# Separator between a namespace tool's group name and a member tool's name when
+# the group is flattened into plain function tools for a chat-completions
+# engine (``nemo_gym.responses_streaming``). Defined here because terminal
+# attribution needs it to strip the group name from a recorded call, and this
+# package must not import the server stack.
+NAMESPACE_TOOL_DELIMITER = "__"
 
 
 # These fields carry token metadata on a served response.
 # ``routed_experts`` is optional for MoE backends.
 TOKEN_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_probs", "routed_experts")
 
-# Increment this version when a field or its meaning changes.
+# Keep this at version 1 while the initial record contract is under development.
 # Writers and readers may run in different processes or repositories.
 # Records may outlive a deployment.
 # Readers must reject unsupported newer records.
 # ``extra="allow"`` otherwise hides unknown fields.
-#
-#   1  rollout and call identity, the token arrays, the output items and their carrier index
 TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 1
+
+# Version 1 is the only supported initial schema.
+TOKEN_ENTRY_MIN_SCHEMA_VERSION = 1
+
+# Increment this version when the digest encoding changes.
+# A stale digest must fail verification.
+DIGEST_VERSION = 1
+_DIGEST_DOMAIN = b"nemo-gym-tokens"
+_EMPTY_DIGEST = hashlib.sha256(_DIGEST_DOMAIN).hexdigest()
+
+# Capture failure reasons shared by the built-in and external staging paths.
+# These strings are a wire contract: the training framework switches on them.
+# Never repurpose one.
+
+# Parent resolution could not admit the call. Written by ``resolve_parent``.
+UNRESOLVED_PARENT_REASON = "unresolved_parent"
+# The call was admitted but finished without worker commit coordinates.
+# Written by the capture middleware.
+UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
+# A committed ledger row lacks the served response id that terminal attribution joins on.
+LEDGER_ROW_MISSING_RESPONSE_ID_REASON = "ledger_row_missing_response_id"
+# A committed ledger row lacks the chain or cumulative digest that verification anchors on.
+LEDGER_ROW_MISSING_CHAIN_HASH_REASON = "ledger_row_missing_chain_hash"
+
+
+class ParentResolutionStatus(StrEnum):
+    """Describe whether a model call has a proven captured predecessor."""
+
+    ROOT = "root"
+    RESOLVED = "resolved"
+    UNRESOLVED = "unresolved"
+
+
+def encode_token_ids(token_ids: list[int]) -> bytes:
+    """Stable, length-delimited, big-endian encoding of a token sequence.
+
+    Independent implementations can hash the same bytes.
+    One vectorized pack replaces the per-token loop.
+    The byte layout remains identical to the original encoding.
+    """
+    header = struct.pack(">BQ", DIGEST_VERSION, len(token_ids))
+    if not token_ids:
+        return header
+    try:
+        return header + struct.pack(f">{len(token_ids)}Q", *token_ids)
+    except struct.error:
+        negative = next(token_id for token_id in token_ids if token_id < 0)
+        raise ValueError(f"token ids must be non-negative, got {negative}") from None
+
+
+def compute_digest(token_ids: list[int]) -> str:
+    """Digest of an exact token sequence.
+
+    The builder verifies a claimed parent by hashing the corresponding prompt prefix.
+    A mismatch quarantines the call.
+    This prevents stale or interleaved records from merging silently.
+    """
+    if not token_ids:
+        return _EMPTY_DIGEST
+    return hashlib.sha256(_DIGEST_DOMAIN + encode_token_ids(token_ids)).hexdigest()
 
 
 class TokenEntry(BaseModel):
@@ -71,8 +140,58 @@ class TokenEntry(BaseModel):
     # This index identifies the item that carried token arrays.
     # ``None`` means no item carried them.
     token_item_index: int | None = None
+    # The response id returned to the client for this model call.
+    # Terminal attribution uses it to match the agent's final response to these captured tokens.
+    response_id: str | None = None
+    # Why generation stopped, usually in the Chat Completions vocabulary: ``stop``, ``length``,
+    # ``tool_calls``, or ``content_filter``. ``response_finish_reason`` derives it from either
+    # served payload shape, and other engine values pass through unchanged; only ``length`` and
+    # ``content_filter`` are consumed. ``None`` means the payload stated no reason or the record
+    # predates this field.
+    finish_reason: str | None = None
     # This non-semantic timestamp helps diagnose retries and sibling branches.
     created_at: float = 0.0
+
+    # These fields preserve parent resolution within the initial schema.
+    # A missing parent call ID triggers strict token-prefix matching.
+    #
+    # A parent link identifies the exact call retained by the harness.
+    # This disambiguates retries with the same prompt.
+    # The builder verifies the link instead of trusting it.
+    parent_call_id: str | None = None
+    # This is the length of this call's prompt and generation.
+    # A child must start with a prefix of this length.
+    cum_len: int | None = None
+    # This is ``compute_digest(prompt_token_ids + generation_token_ids)``.
+    digest: str | None = None
+    # A request-time decision distinguishes a valid root from a missing parent.
+    # ``None`` is reserved for compatibility callers that do not provide one.
+    parent_resolution: ParentResolutionStatus | None = None
+    # These fields make a committed entry visible to request-time resolution.
+    # The fingerprint identifies the model-authored output.
+    continuation_fingerprint: str = ""
+    # The context fields verify the request that produced this call.
+    continuation_context_len: int = 0
+    continuation_context_digest: str = ""
+
+    # The resolver's diagnostic reason for the parent decision above.
+    # Persisted so a resolution-rate regression is debuggable from records alone.
+    parent_resolution_reason: str = ""
+    # The fingerprint algorithm version that produced continuation_fingerprint.
+    # A resolver must not match records stamped by a different algorithm.
+    fingerprint_version: int | None = None
+
+    # Delta storage is part of the initial record schema.
+    # A delta prompt stores only the suffix after the resolved parent.
+    # Root and unresolved records always store full prompts.
+    # This guarantees that every reconstructable chain has a full-prompt anchor.
+    prompt_is_delta: bool = False
+
+    # Prefix supply fields are part of the initial record schema.
+    # Request intent is distinct from generation-time proof.
+    prefix_requested: bool = False
+    # This is true only when generation-time prompt_token_ids prove prefix application.
+    prefix_supplied: bool = False
 
     @model_validator(mode="after")
     def _refuse_a_newer_record(self) -> "TokenEntry":
@@ -88,6 +207,12 @@ class TokenEntry(BaseModel):
                 f"up to {TOKEN_ENTRY_RECORD_SCHEMA_VERSION}. Upgrade the reader, or point it at "
                 "records written by a writer it matches."
             )
+        if self.schema_version < TOKEN_ENTRY_MIN_SCHEMA_VERSION:
+            raise ValueError(
+                f"token record is schema_version {self.schema_version}, below the supported minimum "
+                f"{TOKEN_ENTRY_MIN_SCHEMA_VERSION}. Pre-lineage records were never written in "
+                "production; regenerate the rollout with a current writer."
+            )
         if len(self.generation_token_ids) != len(self.generation_log_probs):
             raise ValueError(
                 "generation_token_ids and generation_log_probs must have the same length "
@@ -97,7 +222,57 @@ class TokenEntry(BaseModel):
             raise ValueError(
                 f"token_item_index {self.token_item_index} is outside output_items of length {len(self.output_items)}"
             )
+        if self.parent_resolution == ParentResolutionStatus.RESOLVED and not self.parent_call_id:
+            raise ValueError("resolved parent metadata requires parent_call_id")
+        if self.parent_resolution in {ParentResolutionStatus.ROOT, ParentResolutionStatus.UNRESOLVED}:
+            if self.parent_call_id is not None:
+                raise ValueError(f"{self.parent_resolution.value} parent metadata cannot carry parent_call_id")
+        if self.prompt_is_delta and (
+            self.parent_call_id is None or self.parent_resolution != ParentResolutionStatus.RESOLVED
+        ):
+            raise ValueError("a delta prompt requires a RESOLVED parent_call_id to reconstruct from")
         return self
+
+
+def cumulative_tokens(entry: TokenEntry) -> list[int]:
+    """The full sequence a child of this call must start with.
+
+    Delta records require parent-chain reconstruction.
+    """
+    if entry.prompt_is_delta:
+        raise ValueError(
+            f"model call {entry.model_call_id} stores a delta prompt; reconstruct through its parent chain"
+        )
+    return list(entry.prompt_token_ids) + list(entry.generation_token_ids)
+
+
+def stamp_lineage(
+    entry: TokenEntry,
+    parent_call_id: str | None,
+    *,
+    parent_resolution: ParentResolutionStatus | None = None,
+    cumulative: list[int] | None = None,
+) -> TokenEntry:
+    """Fill token lineage and the request-time parent decision.
+
+    ``cum_len`` and ``digest`` describe the full sequence.
+    A delta entry must pass ``cumulative`` explicitly.
+    ``parent_resolution=None`` preserves records built by compatibility callers.
+    """
+    if cumulative is None:
+        cumulative = cumulative_tokens(entry)
+    elif entry.prompt_is_delta is False and cumulative != cumulative_tokens(entry):
+        raise ValueError("provided cumulative tokens disagree with the entry's own arrays")
+    entry.cum_len = len(cumulative)
+    entry.digest = compute_digest(cumulative)
+    entry.parent_call_id = parent_call_id
+    entry.parent_resolution = parent_resolution
+    if parent_resolution == ParentResolutionStatus.RESOLVED and parent_call_id is None:
+        raise ValueError("resolved parent metadata requires parent_call_id")
+    if parent_resolution in {ParentResolutionStatus.ROOT, ParentResolutionStatus.UNRESOLVED}:
+        if parent_call_id is not None:
+            raise ValueError(f"{parent_resolution.value} parent metadata cannot carry parent_call_id")
+    return entry
 
 
 def response_to_output_items(payload: dict) -> list[dict]:
@@ -105,11 +280,28 @@ def response_to_output_items(payload: dict) -> list[dict]:
 
     Responses payloads already carry ``output``.
     Chat payloads carry ``choices[*].message``.
+    Anthropic Messages payloads carry top-level assistant content.
     Wrap each assistant message as a Responses ``message`` item.
     """
     output = payload.get("output")
     if isinstance(output, list) and output:
         return [item for item in output if isinstance(item, dict)]
+    if payload.get("type") == "message" and payload.get("role") == "assistant":
+        reasoning_items: list[dict] = []
+        message_content: list[Any] = []
+        for block in payload.get("content") or []:
+            if not isinstance(block, dict) or block.get("type") not in {"thinking", "redacted_thinking"}:
+                message_content.append(block)
+                continue
+            reasoning_item: dict[str, Any] = {"type": "reasoning", "summary": []}
+            if block.get("type") == "thinking" and isinstance(block.get("thinking"), str):
+                reasoning_item["summary"] = [{"type": "summary_text", "text": block["thinking"]}]
+            elif block.get("type") == "redacted_thinking" and block.get("data") is not None:
+                reasoning_item["encrypted_content"] = block["data"]
+            reasoning_items.append(reasoning_item)
+        if message_content:
+            reasoning_items.append({"type": "message", "role": "assistant", "content": message_content})
+        return reasoning_items
     items: list[dict] = []
     for choice in payload.get("choices") or []:
         message = (choice or {}).get("message") or {}
@@ -120,6 +312,98 @@ def response_to_output_items(payload: dict) -> list[dict]:
         item.setdefault("role", "assistant")
         items.append(item)
     return items
+
+
+# ``incomplete_details.reason`` values of a Responses payload, keyed to the chat finish
+# reasons that ``nemo_gym.responses_converter`` maps onto them.
+_INCOMPLETE_REASON_TO_FINISH_REASON = {"max_output_tokens": "length", "content_filter": "content_filter"}
+# The reverse direction: the Responses ``incomplete_details.reason`` a rebuilt response reports for
+# its terminal call's finish reason. ``stop`` and ``tool_calls`` are complete endings and map to nothing.
+_FINISH_REASON_TO_INCOMPLETE_REASON = {"length": "max_output_tokens", "content_filter": "content_filter"}
+
+# The Chat Completions finish reason behind each Anthropic Messages ``stop_reason``: the inverse of
+# the table ``nemo_gym.anthropic_converter`` applies when it serves a Responses payload as a
+# Messages response.
+_STOP_REASON_TO_FINISH_REASON = {
+    "end_turn": "stop",
+    "stop_sequence": "stop",
+    "tool_use": "tool_calls",
+    "max_tokens": "length",
+    "model_context_window_exceeded": "length",
+    "refusal": "content_filter",
+}
+
+# Responses output items that the converter builds from a chat message's tool calls.
+_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call"})
+
+
+def incomplete_reason_for_finish_reason(finish_reason: str | None) -> str | None:
+    """Return the ``incomplete_details.reason`` a response that stopped for ``finish_reason`` reports.
+
+    ``length`` becomes ``max_output_tokens`` and ``content_filter`` stays ``content_filter``, the
+    verdict the Responses converter gives a chat completion that ended the same way. A complete
+    ending (``stop``, ``tool_calls``), an unknown reason, and ``None`` return ``None``.
+    """
+    return _FINISH_REASON_TO_INCOMPLETE_REASON.get(finish_reason)
+
+
+def apply_capture_incomplete_verdict(response: dict, incomplete_reason: str | None) -> bool:
+    """Put the capture's truncation verdict on a harness response, under one precedence rule.
+
+    ``incomplete_reason`` is the ``incomplete_details.reason`` the capture derived for the
+    delivered chain: ``incomplete_reason_for_finish_reason`` of the terminal call's finish reason
+    on the local path, ``staging.rebuild.LinearizedRow.incomplete_reason`` under worker custody.
+    ``None`` means the chain ended on its own and leaves the response alone. The verdict is
+    written only when the harness reported no status or ``completed``: a harness that reported
+    ``incomplete`` or ``failed`` itself gave the more specific verdict and keeps its ``status`` and
+    ``incomplete_details``. Returns whether the response changed. Gym's delivery and a framework
+    that rebuilds from staged records both apply this rule, so a rollout gets the same verdict
+    whichever placement captured it.
+    """
+    if incomplete_reason is None or response.get("status") not in (None, "completed"):
+        return False
+    response["status"] = "incomplete"
+    response["incomplete_details"] = {"reason": incomplete_reason}
+    return True
+
+
+# Attribution-trail token ``resolve_terminal`` appends when the terminal call was chosen among
+# token-identical calls that recorded different finish reasons, with no witness singling one out.
+# The local projection and the staged rebuild withhold the truncation verdict when the trail
+# carries it, because the verdict would otherwise depend on which twin drew the smaller call id.
+FINISH_REASON_DISAGREEMENT_REASON = "finish_reason_disagreement"
+
+
+def response_finish_reason(payload: dict) -> str | None:
+    """Return why a served response stopped, in the Chat Completions vocabulary.
+
+    A chat payload states it directly as ``choices[0].finish_reason``.
+    An Anthropic Messages payload states ``stop_reason``; map it back through the converter's table.
+    A Responses payload carries no finish reason.
+    The converter maps ``length`` and ``content_filter`` to ``incomplete_details.reason``; reverse that map.
+    A completed Responses payload stopped at a tool call (``tool_calls``) or at the end of its text (``stop``).
+    Return ``None`` when the payload is none of these shapes or is incomplete without a stated reason.
+    """
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        reason = first.get("finish_reason")
+        return reason if isinstance(reason, str) else None
+    if payload.get("type") == "message" and "stop_reason" in payload:
+        stop_reason = payload.get("stop_reason")
+        return _STOP_REASON_TO_FINISH_REASON.get(stop_reason) if isinstance(stop_reason, str) else None
+    output = payload.get("output")
+    if not isinstance(output, list):
+        return None
+    details = payload.get("incomplete_details")
+    reason = details.get("reason") if isinstance(details, dict) else None
+    if isinstance(reason, str):
+        return _INCOMPLETE_REASON_TO_FINISH_REASON.get(reason, reason)
+    if payload.get("status") not in (None, "completed"):
+        return None
+    if any(isinstance(item, dict) and item.get("type") in _TOOL_CALL_ITEM_TYPES for item in output):
+        return "tool_calls"
+    return "stop"
 
 
 def strip_token_fields(items: list[dict]) -> tuple[list[dict], int | None]:

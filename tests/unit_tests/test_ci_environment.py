@@ -1,19 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CICD_MAIN_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "cicd-main.yml"
 CLASSIFY_CHANGES_ACTION = REPO_ROOT / ".github" / "actions" / "classify-changes" / "action.yml"
 FULL_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "full-test-suite.yml"
+GPU_E2E_CONFIG = REPO_ROOT / "tests" / "e2e" / "gpu_e2e.yaml"
+GPU_E2E_DATASET = REPO_ROOT / "tests" / "e2e" / "gpu_smoke.jsonl"
+GPU_E2E_VERIFIER = REPO_ROOT / "tests" / "e2e" / "verify_gpu_rollout.py"
 GPU_E2E_SCRIPT = REPO_ROOT / "tests" / "e2e" / "gpu_e2e_test.sh"
+INFERENCE_PROVIDER_E2E_SCRIPT = REPO_ROOT / "tests" / "e2e" / "run_inference_provider_e2e.sh"
+INFERENCE_PROVIDER_ROLLOUT_VERIFIER = REPO_ROOT / "tests" / "e2e" / "verify_inference_provider_rollout.py"
 GITLAB_PIPELINE = REPO_ROOT / ".gitlab-ci.yml"
 IS_RETRYABLE_FULL_SUITE_FAILURE = REPO_ROOT / "scripts" / "ci" / "is_retryable_full_suite_failure.sh"
 RECLAIM_RUNNER_DISK = REPO_ROOT / "scripts" / "ci" / "reclaim_runner_disk.sh"
@@ -23,6 +31,7 @@ SERVER_TESTS = REPO_ROOT / "scripts" / "ci" / "server_tests.sh"
 SETUP_DEV = REPO_ROOT / "scripts" / "ci" / "setup_dev.sh"
 TEST_TEMPLATE_ACTION = REPO_ROOT / ".github" / "actions" / "test-template" / "action.yml"
 UNIT_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "unit-tests.yml"
+QWEN_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 BEHAVIOR_CHANGING_ENV = {
     "GYM_CI_DEV_VENV_DIR": "/tmp/injected-driver-venv",
@@ -180,39 +189,116 @@ def test_github_full_test_jobs_reclaim_disk_before_dependency_restore() -> None:
             assert section.index("reclaim_runner_disk.sh") < section.index("Cache uv dependencies")
 
 
+def test_scheduled_cicd_runs_do_not_cancel_in_progress() -> None:
+    cicd_workflow = CICD_MAIN_WORKFLOW.read_text()
+    unit_workflow = UNIT_TEST_WORKFLOW.read_text()
+
+    assert (
+        "concurrency:\n"
+        "  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}\n"
+        "  cancel-in-progress: ${{ github.event_name != 'schedule' }}\n" in cicd_workflow
+    )
+    assert "concurrency:" not in unit_workflow
+
+
+def test_coverage_gate_compares_fractional_percentages() -> None:
+    import tomllib
+
+    coverage_report = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["tool"]["coverage"]["report"]
+
+    assert coverage_report["precision"] == 2
+    assert coverage_report["fail_under"] == 95.0
+
+
+def test_full_test_suite_installs_telemetry_extra_for_coverage_gate() -> None:
+    # The full test suite measures coverage against the repo-wide gate
+    # (pyproject.toml fail_under). The tests/unit_tests/telemetry tests are gated on
+    # nemo-lens (requires_lens), which only the telemetry extra installs. If the
+    # full-test-suite install omits that extra, those tests skip, the telemetry
+    # modules count as uncovered, and the gate fails below its threshold.
+    workflow = FULL_TEST_WORKFLOW.read_text()
+
+    assert "uv sync" in workflow, "full test suite must install dependencies with uv sync"
+    sync_lines = [line for line in workflow.splitlines() if "uv sync" in line]
+    assert any("--extra telemetry" in line for line in sync_lines), (
+        "full-test-suite.yml must sync the telemetry extra so the nemo-lens-gated "
+        "telemetry tests run and the coverage gate is not starved: " + repr(sync_lines)
+    )
+
+
 def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
+    results_path = (
+        "${{ runner.temp }}/nemo-gym-gpu-e2e/"
+        "${{ github.run_id }}-${{ github.run_attempt }}/${{ matrix.artifact_name }}"
+    )
 
     assert "      - main\n" in workflow
     assert '      - "pull-request/[0-9]+"\n' in workflow
     assert "deploy-release" not in workflow
-    assert "schedule:" not in workflow
-    assert "workflow_dispatch:" not in workflow
+    # container_build/gpu_e2e_tests/provider_e2e_tests run on a periodic
+    # schedule (or on-demand via workflow_dispatch) instead of on every PR
+    # push, since they compete for the shared, contention-prone
+    # nemo-ci-aws-gpu-x2 runner pool.
+    assert '    - cron: "0 */4 * * *"' in workflow
+    assert "  workflow_dispatch:" in workflow
+    assert "      send_notification:" in workflow
     assert "  contents: read\n" in workflow
     assert "  pull-requests: read\n" in workflow
     assert "id-token:" not in workflow
     assert "uses: ./.github/workflows/unit-tests.yml" in workflow
-    assert workflow.count("base-ref: ${{ needs.pre-flight.outputs.base_ref }}") == 2
+    jobs = _cicd_main_jobs()
+    base_ref = "${{ needs.pre-flight.outputs.base_ref }}"
+    assert jobs["unit_tests"]["with"]["base-ref"] == base_ref
+    assert jobs["harness_conformance"]["with"]["base-ref"] == (
+        "${{ github.event.merge_group.base_sha || "
+        "(github.ref == 'refs/heads/main' && github.event.before) || needs.pre-flight.outputs.base_ref }}"
+    )
+    assert [
+        step["with"]["base-ref"]
+        for step in jobs["classify_changes"]["steps"]
+        if step.get("uses") == "./.github/actions/classify-changes"
+    ] == [base_ref]
     assert "uses: ./.github/actions/classify-changes" in workflow
     assert "uses: ./.github/actions/test-template" in workflow
     assert "base-ref: ${{ needs.pre-flight.outputs.base_ref }}" in workflow
     assert "needs: [pre-flight, classify_changes, unit_tests]" in workflow
     assert "needs: [pre-flight, classify_changes, unit_tests, container_build]" in workflow
-    assert workflow.count("if: needs.classify_changes.outputs.docs_only != 'true'") == 3
+    # Only unit_tests still uses the plain docs-only gate; container_build/
+    # gpu_e2e_tests/provider_e2e_tests are schedule/workflow_dispatch-gated
+    # instead (checked in test_cicd_nightly_jobs_require_upstream_success).
+    assert workflow.count("if: needs.classify_changes.outputs.docs_only != 'true'") == 1
+    assert "if: false" not in workflow
+    assert "Temporarily disabled" not in workflow
     assert "needs.pre-flight.outputs.docs_only" not in workflow
-    assert "runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}" in workflow
+    runner_label = (
+        "runs-on: ${{ startsWith(needs.pre-flight.outputs.runner_prefix, 'ephe-v2-') "
+        "&& format('{0}-a{1}', needs.pre-flight.outputs.runner_prefix, github.run_attempt) "
+        "|| needs.pre-flight.outputs.runner_prefix }}"
+    )
+    assert runner_label in workflow
     assert "matrix:" in workflow
     assert "script: ${{ matrix.script }}" in workflow
     assert "test-type: ${{ matrix.test_type }}" in workflow
     assert "test-data-path: ${{ needs.pre-flight.outputs.test_data_path }}" in workflow
     assert "container-image: ${{ needs.container_build.outputs.image }}" in workflow
+    assert "model: ${{ matrix.model }}" in workflow
+    assert "model-revision: ${{ matrix.model_revision }}" in workflow
+    assert "hf-cache-path:" not in workflow
+    assert f"results-path: {results_path}" in workflow
+    assert f"path: {results_path}" in workflow
 
 
 def test_cicd_container_build_pushes_sha_image_after_unit_tests() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
 
     assert "name: Build Gym container" in workflow
-    assert "runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}" in workflow
+    runner_label = (
+        "runs-on: ${{ startsWith(needs.pre-flight.outputs.runner_prefix, 'ephe-v2-') "
+        "&& format('{0}-a{1}', needs.pre-flight.outputs.runner_prefix, github.run_attempt) "
+        "|| needs.pre-flight.outputs.runner_prefix }}"
+    )
+    assert runner_label in workflow
     assert "uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f" in workflow
     assert "uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25" in workflow
     assert "build-contexts: nemo-gym=." in workflow
@@ -221,18 +307,225 @@ def test_cicd_container_build_pushes_sha_image_after_unit_tests() -> None:
     assert 'echo "image=$REGISTRY/gym:$GITHUB_SHA"' in workflow
     assert "cache-from: type=registry" in workflow
     assert "cache-to: type=registry" in workflow
+    assert "NEMO_GYM_PREFETCH_CONFIGS=tests/e2e/gpu_e2e.yaml" in workflow
 
 
 def test_cicd_summary_accepts_only_expected_docs_only_skips() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
 
-    assert "needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests]" in workflow
+    assert (
+        "needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests]"
+        in workflow
+    )
     assert "if: always() && !cancelled()" in workflow
     assert '"$PREFLIGHT_RESULT" != "success"' in workflow
     assert '"$CLASSIFY_RESULT" != "success"' in workflow
     assert '"$DOCS_ONLY" == "true"' in workflow
-    assert '"$CONTAINER_BUILD_RESULT" == "skipped"' in workflow
-    assert '"$CONTAINER_BUILD_RESULT" == "success"' in workflow
+    assert '"$IS_NIGHTLY" == "true"' in workflow
+    assert "PROVIDER_E2E_TEST_RESULT: ${{ needs.provider_e2e_tests.result }}" in workflow
+    assert '"$UNIT_TEST_RESULT" != "success" && "$UNIT_TEST_RESULT" != "skipped"' in workflow
+
+
+def _cicd_main_jobs() -> dict:
+    return yaml.safe_load(CICD_MAIN_WORKFLOW.read_text())["jobs"]
+
+
+def _run_step(job_name: str, step_name: str, env_overrides: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    steps = _cicd_main_jobs()[job_name]["steps"]
+    (script,) = (step["run"] for step in steps if step.get("name") == step_name)
+    env = os.environ.copy()
+    env.update(env_overrides)
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
+
+
+_ALL_SUCCESS_RESULTS = {
+    "PREFLIGHT_RESULT": "success",
+    "CLASSIFY_RESULT": "success",
+    "DOCS_ONLY": "false",
+    "UNIT_TEST_RESULT": "success",
+    "CONTAINER_BUILD_RESULT": "success",
+    "GPU_E2E_TEST_RESULT": "success",
+    "PROVIDER_E2E_TEST_RESULT": "success",
+}
+
+
+@pytest.mark.parametrize(
+    ("event_name", "overrides", "expect_success"),
+    [
+        # PR/push events never gate on the nightly-only jobs.
+        ("pull_request", {}, True),
+        ("pull_request", {"CONTAINER_BUILD_RESULT": "failure"}, True),
+        ("pull_request", {"UNIT_TEST_RESULT": "failure"}, False),
+        (
+            "pull_request",
+            {"DOCS_ONLY": "true", "UNIT_TEST_RESULT": "skipped"},
+            True,
+        ),
+        (
+            "pull_request",
+            {"DOCS_ONLY": "true", "UNIT_TEST_RESULT": "success"},
+            False,
+        ),
+        # Nightly/manual runs: docs_only no longer short-circuits the
+        # nightly-job check (the bug fixed in this PR).
+        ("schedule", {}, True),
+        ("schedule", {"CONTAINER_BUILD_RESULT": "failure"}, False),
+        ("schedule", {"GPU_E2E_TEST_RESULT": "failure"}, False),
+        ("schedule", {"PROVIDER_E2E_TEST_RESULT": "failure"}, False),
+        ("schedule", {"PROVIDER_E2E_TEST_RESULT": "skipped"}, True),
+        (
+            "schedule",
+            {"DOCS_ONLY": "true", "UNIT_TEST_RESULT": "skipped", "CONTAINER_BUILD_RESULT": "failure"},
+            False,
+        ),
+        (
+            "schedule",
+            {"DOCS_ONLY": "true", "UNIT_TEST_RESULT": "skipped"},
+            True,
+        ),
+        ("schedule", {"UNIT_TEST_RESULT": "failure"}, False),
+        ("workflow_dispatch", {"CONTAINER_BUILD_RESULT": "failure"}, False),
+        ("workflow_dispatch", {}, True),
+    ],
+)
+def test_nemo_cicd_test_gate_matches_event_and_job_results(
+    event_name: str, overrides: dict[str, str], expect_success: bool
+) -> None:
+    is_nightly = "true" if event_name in ("schedule", "workflow_dispatch") else "false"
+    env = {"EVENT_NAME": event_name, "IS_NIGHTLY": is_nightly, **_ALL_SUCCESS_RESULTS, **overrides}
+
+    result = _run_step("Nemo_CICD_Test", "Check test results", env)
+
+    assert (result.returncode == 0) == expect_success, result.stdout + result.stderr
+
+
+def test_cicd_nightly_jobs_require_upstream_success() -> None:
+    workflow = CICD_MAIN_WORKFLOW.read_text()
+
+    # `is_nightly` is a single source of truth on classify_changes, referenced
+    # by three downstream jobs (container_build, gpu_e2e_tests, and
+    # provider_e2e_tests) instead of each re-deriving github.event_name.
+    # notify-failure deliberately does NOT use it (see
+    # test_notify_failure_fires_even_if_classify_changes_is_skipped for why).
+    assert workflow.count("needs.classify_changes.outputs.is_nightly == 'true'") == 3
+    non_definition = workflow.replace(
+        "is_nightly: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}", ""
+    )
+    assert non_definition.count("github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'") == 1
+    assert "needs.pre-flight.result == 'success' &&" in workflow
+    assert workflow.count("needs.classify_changes.result == 'success' &&") == 3
+    assert "(needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')" in workflow
+    assert "needs.container_build.result == 'success'" in workflow
+
+
+def test_cicd_docs_only_nightly_jobs_override_skipped_unit_status() -> None:
+    jobs = _cicd_main_jobs()
+
+    # Scheduled docs-only runs skip unit_tests. The explicit status function
+    # makes GitHub evaluate each downstream condition instead of applying its
+    # implicit success() check to the skipped dependency first.
+    for job_name in ("container_build", "gpu_e2e_tests", "provider_e2e_tests"):
+        condition = jobs[job_name]["if"]
+        assert "always() && !cancelled() &&" in condition
+        assert ("(needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')") in condition
+
+
+@pytest.mark.parametrize(
+    ("ref", "allowed"),
+    [
+        ("main", "true"),
+        ("r0.5.1", "true"),
+        ("r0.5.10", "true"),
+        ("r1.0.0", "true"),
+        ("feature-branch", "false"),
+        ("gym-nightly-heavy-ci", "false"),
+        ("r0.5", "false"),
+    ],
+)
+def test_notify_failure_ref_check_allows_only_main_and_release_branches(
+    ref: str, allowed: str, tmp_path: Path
+) -> None:
+    jobs = yaml.safe_load(CICD_MAIN_WORKFLOW.read_text())["jobs"]
+    (script,) = (step["run"] for step in jobs["notify-failure"]["steps"] if step.get("id") == "ref_check")
+
+    output_path = tmp_path / f"github_output_{ref}"
+    output_path.write_text("")
+    result = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "REF": ref, "GITHUB_OUTPUT": str(output_path)},
+    )
+
+    assert f"allowed={allowed}" in output_path.read_text(), (result.stdout, result.stderr)
+
+
+def test_notification_workflows_use_pinned_shared_summary_without_checkout() -> None:
+    expected_action = (
+        "NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@631c404d00a9e60afc591cd071d35d2e18f82fc6"
+    )
+    ref_scripts = []
+    for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
+        jobs = yaml.safe_load(workflow_file.read_text())["jobs"]
+        notify = jobs["notify-failure"]
+        steps = notify["steps"]
+        (ref_step,) = (step for step in steps if step.get("id") == "ref_check")
+        (notify_step,) = (step for step in steps if step.get("name") == "Notify Gym alerts channel")
+
+        ref_scripts.append(ref_step["run"])
+        assert ref_step["env"] == {"REF": "${{ github.ref_name }}"}
+        assert notify_step["if"] == "steps.ref_check.outputs.allowed == 'true'"
+        assert notify_step["uses"] == expected_action, workflow_file
+        assert notify_step["with"] == {
+            "needs-json": "${{ toJSON(needs) }}",
+            "webhook": "${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}",
+        }
+        assert notify["environment"] == "main"
+        assert notify["permissions"] == {}
+        assert all("checkout" not in step.get("uses", "") for step in steps)
+        excluded_jobs = {"notify-failure", "merge-queue-notification"}
+        if workflow_file == CICD_MAIN_WORKFLOW:
+            # Harness P0 is reported separately and is not part of Gym's nightly gate.
+            excluded_jobs.add("harness_conformance")
+        assert set(notify["needs"]) == set(jobs) - excluded_jobs
+        assert "failure()" in notify["if"]
+        assert "always() && !cancelled()" in notify["if"]
+        assert "needs." not in notify["if"]
+        assert "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'" in notify["if"]
+    assert ref_scripts[0] == ref_scripts[1]
+
+
+def test_full_test_suite_runs_on_schedule_and_dispatch_not_push() -> None:
+    workflow = FULL_TEST_WORKFLOW.read_text()
+    on_block = workflow.split("\non:", 1)[1].split("\nconcurrency:", 1)[0]
+
+    assert '    - cron: "0 */4 * * *"' in on_block
+    assert "  workflow_dispatch:" in on_block
+    assert "      send_notification:" in on_block
+    assert "push:" not in on_block
+
+
+def test_notify_failure_respects_send_notification_input() -> None:
+    guard = "(github.event_name != 'workflow_dispatch' || inputs.send_notification)"
+    for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
+        jobs = yaml.safe_load(workflow_file.read_text())["jobs"]
+        assert guard in jobs["notify-failure"]["if"], workflow_file
+
+
+def test_notify_failure_fires_even_if_classify_changes_is_skipped() -> None:
+    # classify_changes has no explicit `if:`, so it (and all its outputs,
+    # including literal ones like is_nightly) is skipped whenever pre-flight
+    # fails. notify-failure's *gating* condition must not depend on that
+    # output, or a pre-flight failure on a nightly run would silently
+    # suppress the alert; classify_changes may still appear in `needs:` for
+    # message content (its always()/!cancelled() `if:` doesn't require it
+    # to have succeeded).
+    jobs = yaml.safe_load(CICD_MAIN_WORKFLOW.read_text())["jobs"]
+    notify_if = jobs["notify-failure"]["if"]
+
+    assert "needs.classify_changes" not in notify_if
+    assert "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'" in notify_if
+    assert "always()" in notify_if
 
 
 def test_shared_change_classifier_matches_gym_docs_and_server_paths() -> None:
@@ -241,7 +534,12 @@ def test_shared_change_classifier_matches_gym_docs_and_server_paths() -> None:
 
     for path in ("**.md", "fern/**", "LICENSE", "benchmarks/**"):
         assert path in action
-    for path in ("resources_servers/**", "responses_api_agents/**", "responses_api_models/**"):
+    for path in (
+        "resources_servers/**",
+        "responses_api_agents/**",
+        "responses_api_models/**",
+        "environment_servers/**",
+    ):
         assert path in action
 
     assert "uses: ./.github/actions/classify-changes" in unit_workflow
@@ -259,7 +557,13 @@ def test_test_template_runs_cpu_or_gpu_script_in_container() -> None:
     assert "          gpu)" in action
     assert "gpu_args=(--runtime=nvidia --gpus all)" in action
     assert 'docker pull "$CONTAINER_IMAGE"' in action
-    assert '--volume "$TEST_DATA_PATH:$TEST_DATA_PATH"' in action
+    assert '--volume "$TEST_DATA_PATH:/home/TestData"' in action
+    assert '--env "TEST_DATA_PATH=/home/TestData"' in action
+    assert '--env "HF_HOME=/home/TestData/HF_HOME"' in action
+    assert '--volume "$RESULTS_PATH:$CONTAINER_RESULTS_DIR"' in action
+    assert '--env "MODEL=$MODEL"' in action
+    assert '--env "MODEL_REVISION=$MODEL_REVISION"' in action
+    assert 'TEST_DATA_PATH="$(prepare_mount_source test-data-path "$TEST_DATA_PATH")"' in action
     assert '-e -u -o pipefail "$TEST_SCRIPT"' in action
     assert "continue-on-error: true" in action
     assert "      if: always()" in action
@@ -273,14 +577,218 @@ def test_test_template_runs_cpu_or_gpu_script_in_container() -> None:
     assert action.count("required: true") == 4
 
 
-def test_gpu_e2e_matrix_uses_placeholder_script() -> None:
+def test_gpu_e2e_matrix_uses_qwen_smoke_config() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
+    config = GPU_E2E_CONFIG.read_text()
+    dataset = json.loads(GPU_E2E_DATASET.read_text())
 
     assert "fail-fast: false" in workflow
-    assert "- name: GPU E2E - NVIDIA SMI" in workflow
+    assert "- name: GPU E2E - Qwen vLLM rollout" in workflow
     assert "script: ./tests/e2e/gpu_e2e_test.sh" in workflow
     assert "test_type: gpu" in workflow
-    assert GPU_E2E_SCRIPT.read_text().rstrip().endswith("nvidia-smi")
+
+    assert "resources_servers/string_match/configs/string_match.yaml" in config
+    assert "responses_api_models/vllm_model/configs/vllm_model.yaml" in config
+    assert "skip_venv_if_present: true" in config
+    assert QWEN_MODEL in config
+    assert dataset["expected_answer"] == "Paris"
+    assert dataset["extraction_mode"] == "final_answer"
+    assert dataset["case_sensitive"] is False
+
+
+def _valid_gpu_rollout() -> dict:
+    return {
+        "response": {
+            "status": "completed",
+            "error": None,
+            "model": QWEN_MODEL,
+            "usage": {"input_tokens": 12, "output_tokens": 6},
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "Final answer: Paris"}],
+                }
+            ],
+        },
+        "reward": 1.0,
+        "expected_answer": "Paris",
+        "extracted_answer": "Paris",
+        "agent_ref": {"name": "string_match_simple_agent"},
+    }
+
+
+def _run_gpu_rollout_verifier(tmp_path: Path, rollout: dict) -> subprocess.CompletedProcess[str]:
+    rollouts_path = tmp_path / "rollouts.jsonl"
+    rollouts_path.write_text(json.dumps(rollout) + "\n")
+    return subprocess.run(
+        [
+            sys.executable,
+            str(GPU_E2E_VERIFIER),
+            "--rollouts",
+            str(rollouts_path),
+            "--expected-model",
+            QWEN_MODEL,
+            "--expected-answer",
+            "Paris",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_gpu_e2e_verifier_accepts_successful_qwen_rollout(tmp_path: Path) -> None:
+    result = _run_gpu_rollout_verifier(tmp_path, _valid_gpu_rollout())
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_gpu_e2e_verifier_accepts_case_insensitive_reward(tmp_path: Path) -> None:
+    rollout = _valid_gpu_rollout()
+    rollout["response"]["output"][0]["content"][0]["text"] = "Final answer: paris"
+    rollout["extracted_answer"] = "paris"
+
+    result = _run_gpu_rollout_verifier(tmp_path, rollout)
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("failure", ["wrong-model", "zero-reward"])
+def test_gpu_e2e_verifier_rejects_vacuous_rollout(tmp_path: Path, failure: str) -> None:
+    rollout = _valid_gpu_rollout()
+    if failure == "wrong-model":
+        rollout["response"]["model"] = "unexpected/model"
+    else:
+        rollout["reward"] = 0.0
+
+    result = _run_gpu_rollout_verifier(tmp_path, rollout)
+
+    assert result.returncode != 0
+
+
+def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
+    workflow = CICD_MAIN_WORKFLOW.read_text()
+
+    assert "provider_e2e_tests:" in workflow
+    assert "TEMPORARILY DISABLED: this live Fireworks smoke test is currently failing." in workflow
+    assert "false &&" in workflow
+    assert "name: ${{ matrix.provider }}-e2e" in workflow
+    assert "timeout-minutes: 20" in workflow
+    assert "provider: fireworks" in workflow
+    assert "config: responses_api_models/inference_provider/configs/fireworks.yaml" in workflow
+    assert "model: accounts/fireworks/models/gpt-oss-20b" in workflow
+    assert "model_api_key_secret_name: FIREWORKS" in workflow
+    assert "MODEL_API_KEY: ${{ secrets[matrix.model_api_key_secret_name] }}" in workflow
+    assert workflow.count("secrets[matrix.model_api_key_secret_name]") == 1
+    assert "model-api-key:" not in workflow
+    assert "needs: [classify_changes, unit_tests]" in workflow
+    assert "runs-on: ubuntu-latest" in workflow
+    assert "UV_VERSION=\"$(sed -n 's/^ARG UV_VERSION=//p' docker/Dockerfile)\"" in workflow
+    assert 'curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh' in workflow
+    assert "https://astral.sh/uv/0.11.29/install.sh" not in workflow
+    assert "E2E_MODEL: ${{ matrix.model }}" in workflow
+    assert "E2E_PROVIDER_CONFIG: ${{ matrix.config }}" in workflow
+    assert "run: bash tests/e2e/run_inference_provider_e2e.sh" in workflow
+
+    script = INFERENCE_PROVIDER_E2E_SCRIPT.read_text()
+    assert "E2E_PROVIDER_CONFIG" in script
+    assert "E2E_MODEL" in script
+    assert "MODEL_API_KEY" in script
+    assert "--model-api-key" not in script
+    assert "tests/e2e/inference_provider_smoke.jsonl" in script
+    assert "--max-output-tokens 4096" in script
+
+    env_config = (REPO_ROOT / "tests" / "e2e" / "inference_provider_env.yaml").read_text()
+    assert "max_policy_calls: 2" in env_config
+
+
+def _valid_inference_provider_rollout() -> dict:
+    return {
+        "reward": 1.0,
+        "response": {
+            "status": "completed",
+            "error": None,
+            "incomplete_details": None,
+            "usage": {"input_tokens": 30, "output_tokens": 12, "total_tokens": 42},
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "get_weather",
+                    "arguments": '{"city": "San Francisco"}',
+                    "call_id": "weather-call",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "weather-call",
+                    "output": (
+                        '{"city": "San Francisco", "weather_description": "The weather in San Francisco is cold."}'
+                    ),
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "It is cold in San Francisco."}],
+                },
+            ],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda rollout: rollout["response"].update(status="incomplete"),
+        lambda rollout: rollout["response"]["usage"].update(input_tokens=0),
+        lambda rollout: rollout["response"]["usage"].update(output_tokens=0),
+        lambda rollout: rollout["response"]["output"].__setitem__(slice(0, 1), []),
+        lambda rollout: rollout["response"]["output"][1].update(call_id="wrong-call"),
+        lambda rollout: rollout["response"]["output"][-1].update(content=[]),
+    ],
+)
+def test_inference_provider_rollout_verifier_rejects_invalid_tool_loop(tmp_path: Path, mutate) -> None:
+    rollout = _valid_inference_provider_rollout()
+    mutate(rollout)
+    rollouts_path = tmp_path / "rollouts.jsonl"
+    rollouts_path.write_text(f"{json.dumps(rollout)}\n")
+
+    result = subprocess.run(
+        [sys.executable, str(INFERENCE_PROVIDER_ROLLOUT_VERIFIER), "--rollouts", str(rollouts_path)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+
+
+def test_inference_provider_rollout_verifier_accepts_completed_tool_loop(tmp_path: Path) -> None:
+    rollouts_path = tmp_path / "rollouts.jsonl"
+    rollouts_path.write_text(f"{json.dumps(_valid_inference_provider_rollout())}\n")
+
+    result = subprocess.run(
+        [sys.executable, str(INFERENCE_PROVIDER_ROLLOUT_VERIFIER), "--rollouts", str(rollouts_path)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_inference_provider_rollout_verifier_reports_incomplete_reason(tmp_path: Path) -> None:
+    rollout = _valid_inference_provider_rollout()
+    rollout["response"].update(
+        status="incomplete",
+        incomplete_details={"reason": "max_output_tokens"},
+    )
+    rollouts_path = tmp_path / "rollouts.jsonl"
+    rollouts_path.write_text(f"{json.dumps(rollout)}\n")
+
+    result = subprocess.run(
+        [sys.executable, str(INFERENCE_PROVIDER_ROLLOUT_VERIFIER), "--rollouts", str(rollouts_path)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "max_output_tokens" in result.stderr
 
 
 def test_runner_disk_reclamation_fails_fast_when_space_is_still_low(tmp_path: Path) -> None:
@@ -326,14 +834,12 @@ def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -
     bin_dir.mkdir()
     capture_path = tmp_path / "ng-test-all.args"
 
+    # setup_dev.sh reuses a uv already on PATH when it is the pinned version, so the
+    # test puts a fake pinned uv first. The fake uv's `sync` is a no-op so it works
+    # against this bare repo (which intentionally has no pyproject.toml).
     _write_executable(
-        bin_dir / "curl",
+        bin_dir / "uv",
         """#!/usr/bin/env bash
-cat <<'INSTALL'
-set -eu
-mkdir -p "${UV_UNMANAGED_INSTALL}"
-cat > "${UV_UNMANAGED_INSTALL}/uv" <<'UV'
-#!/usr/bin/env bash
 set -eu
 case "${1:-}" in
     --version) printf '%s\\n' 'uv 0.11.29' ;;
@@ -345,12 +851,9 @@ case "${1:-}" in
         : > "${venv_dir}/bin/python"
         chmod +x "${venv_dir}/bin/python"
         ;;
-    sync) ;;
+    lock|sync) ;;
     *) printf 'unexpected fake uv command: %s\\n' "$*" >&2; exit 2 ;;
 esac
-UV
-chmod +x "${UV_UNMANAGED_INSTALL}/uv"
-INSTALL
 """,
     )
     _write_executable(
@@ -397,3 +900,107 @@ def test_server_tests_rejects_unsafe_venv_root(venv_root: str) -> None:
 
     assert result.returncode == 2
     assert f"GYM_CI_UV_VENV_DIR must be an absolute non-root path: {venv_root}" in result.stderr
+
+
+def test_setup_dev_reuses_pinned_uv_and_syncs_offline_in_container() -> None:
+    # setup_dev.sh reuses a present uv when it is the pinned version (baked CI
+    # image or a runner that ships it) and only downloads the pinned uv when it
+    # is absent or wrong; in the container (NEMO_GYM_CONTAINER=1) it syncs
+    # offline from the pre-populated cache.
+    setup_dev = SETUP_DEV.read_text()
+
+    assert "command -v uv >/dev/null 2>&1" in setup_dev
+    assert "setup_uv_sync_args=(--offline)" in setup_dev
+    assert "setup_uv_sync_args=()" in setup_dev
+
+
+def test_lint_reuses_pre_commit_on_path() -> None:
+    # lint.sh reuses a pre-commit already on PATH (the offline/container dev
+    # environment); otherwise it installs the pinned pre-commit (version from
+    # uv.lock) into an isolated venv. It does not use uv or setup_dev.sh.
+    lint = (REPO_ROOT / "scripts" / "ci" / "lint.sh").read_text()
+
+    assert "command -v pre-commit" in lint
+    assert "uv.lock" in lint
+    assert "uv sync" not in lint
+    assert "setup_dev.sh" not in lint
+
+
+def test_dockerfile_seeds_runtime_uv_cache_for_offline_ci() -> None:
+    # The release image must pre-populate the runtime uv cache with the full
+    # dependency set (project + dev extra) so setup_dev.sh's `uv sync --offline`
+    # resolves entirely from the cache in a fresh venv (e.g. ray, pytest).
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+
+    assert "ENV UV_CACHE_DIR=/opt/nemo-gym/cache/uv" in dockerfile
+    assert "--extra vllm --extra telemetry --extra dev" in dockerfile
+
+
+def test_dockerfile_seeds_pre_commit_hook_cache_for_offline_lint() -> None:
+    # lint.sh's offline branch reuses the baked pre-commit executable, but
+    # `pre-commit run` also needs the hook repositories and per-hook
+    # environments declared in .pre-commit-config.yaml: without a seeded
+    # PRE_COMMIT_HOME, the first lint run in a clean container still clones
+    # the hook repos from GitHub and pip-installs the local hooks'
+    # dependencies from PyPI. The release image must seed the hook cache at
+    # build time and leave it writable by the runtime UID (asserted by the
+    # non-root smoke test).
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
+
+    assert "ENV PRE_COMMIT_HOME=/opt/nemo-gym/cache/pre-commit" in dockerfile
+    seed_cache_start = dockerfile.index("RUN git init --quiet")
+    install_hooks = dockerfile.index("pre-commit install-hooks", seed_cache_start)
+    remove_git_dir = dockerfile.index("rm -rf .git", install_hooks)
+    assert seed_cache_start < install_hooks < remove_git_dir
+    assert 'chown -R "${RUNTIME_UID}:${RUNTIME_GID}" "${PRE_COMMIT_HOME}"' in dockerfile
+    assert 'test -w "${PRE_COMMIT_HOME}"' in dockerfile
+
+
+@pytest.mark.parametrize("container", [False, True])
+@pytest.mark.parametrize("lock_status", [0, 1])
+def test_setup_dev_checks_lock_before_sync(tmp_path: Path, container: bool, lock_status: int) -> None:
+    repo_root = tmp_path / "repo"
+    ci_dir = repo_root / "scripts" / "ci"
+    ci_dir.mkdir(parents=True)
+    shutil.copy2(SETUP_DEV, ci_dir / "setup_dev.sh")
+    shutil.copy2(REPO_ROOT / ".python-version", repo_root / ".python-version")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    capture = tmp_path / "uv.args"
+    _write_executable(
+        bin_dir / "uv",
+        """#!/usr/bin/env bash
+set -eu
+case "$1" in
+    --version) echo 'uv 0.11.29' ;;
+    cache) echo "${UV_CACHE_DIR}" ;;
+    lock) echo "$*" >> "${GYM_CI_CAPTURE}"; exit "${LOCK_STATUS}" ;;
+    sync) echo "$*" >> "${GYM_CI_CAPTURE}" ;;
+    *) echo "unexpected uv command: $*" >&2; exit 2 ;;
+esac
+""",
+    )
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    _write_executable(venv / "bin" / "python", "#!/usr/bin/env bash\nexit 0\n")
+    (venv / "bin" / "activate").write_text("")
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{bin_dir}:{env['PATH']}",
+            "GYM_CI_DEV_VENV_DIR": str(venv),
+            "UV_CACHE_DIR": str(tmp_path / "cache"),
+            "GYM_CI_CAPTURE": str(capture),
+            "LOCK_STATUS": str(lock_status),
+            "NEMO_GYM_CONTAINER": "1" if container else "0",
+        }
+    )
+
+    result = subprocess.run(["bash", str(ci_dir / "setup_dev.sh")], capture_output=True, text=True, env=env)
+
+    assert result.returncode == lock_status, result.stderr
+    offline = " --offline" if container else ""
+    expected = [f"lock --check{offline}"]
+    if lock_status == 0:
+        expected.append(f"sync --extra dev{offline}")
+    assert capture.read_text().splitlines() == expected

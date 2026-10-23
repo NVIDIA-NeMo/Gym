@@ -15,7 +15,7 @@
 import json
 from unittest.mock import MagicMock
 
-from openai.types.responses import FunctionTool
+from openai.types.responses import FunctionToolParam
 from pytest import approx, fixture
 
 from nemo_gym.openai_utils import (
@@ -70,7 +70,7 @@ class TestApp:
         self,
         resources_server: SingleStepToolUseArgumentComparisonResourcesServer,
         responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
-        tool: FunctionTool,
+        tool: FunctionToolParam,
         expected_action: ExpectedAction,
         response_id: str,
         output_item: NeMoGymResponseOutputItem,
@@ -100,10 +100,15 @@ class TestApp:
         assert verify_response.category == expected_reward_category
 
     async def test_verify(self, resources_server: SingleStepToolUseArgumentComparisonResourcesServer) -> None:
-        tool = FunctionTool(
-            type="function",
-            name="set_metric_count",
-            parameters={
+        # Build the request type directly because the SDK types differ in optionality.
+        # `FunctionTool.defer_loading` defaults to `None`.
+        # `FunctionToolParam` requires a boolean when the field is present.
+        # Dumping the model includes `None`, which the request model rejects.
+        tool: FunctionToolParam = {
+            "type": "function",
+            "name": "set_metric_count",
+            "strict": None,
+            "parameters": {
                 "type": "object",
                 "properties": {
                     "metric_name": {
@@ -118,8 +123,7 @@ class TestApp:
                     "metric_count",
                 ],
             },
-        )
-        tool_param = tool.model_dump()
+        }
         tool_call_responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
             input=[
                 NeMoGymEasyInputMessage(
@@ -127,7 +131,7 @@ class TestApp:
                     content="Set the views metric count to 75.",
                 )
             ],
-            tools=[tool_param],
+            tools=[tool],
         )
 
         expected_arguments = {
@@ -224,7 +228,7 @@ class TestApp:
                     content="This is a greeting.",
                 )
             ],
-            tools=[tool_param],
+            tools=[tool],
         )
         expected_message = MessageAction(
             type="message",
@@ -252,11 +256,12 @@ class TestApp:
             StepRewardCategory.NO_EXPECTED_CHAT_MESSAGE,
         )
 
-    def _search_tool(self) -> FunctionTool:
-        return FunctionTool(
-            type="function",
-            name="search",
-            parameters={
+    def _search_tool(self) -> FunctionToolParam:
+        return {
+            "type": "function",
+            "name": "search",
+            "strict": None,
+            "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
@@ -267,10 +272,10 @@ class TestApp:
                     "query",
                 ],
             },
-        )
+        }
 
     def _parallel_verify_request(
-        self, tool: FunctionTool, actual_queries: list[str], expected_queries: list[str]
+        self, tool: FunctionToolParam, actual_queries: list[str], expected_queries: list[str]
     ) -> SingleStepToolUseArgumentComparisonVerifyRequest:
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
             input=[
@@ -280,7 +285,7 @@ class TestApp:
                 )
             ],
             parallel_tool_calls=True,
-            tools=[tool.model_dump()],
+            tools=[tool],
         )
         response = NeMoGymResponse(
             id="parallel_tool_calls",
@@ -359,3 +364,111 @@ class TestApp:
         )
         assert verify_response.reward == approx(4 / 7)
         assert verify_response.category == StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT
+
+    def _metric_tool(self) -> FunctionToolParam:
+        return {
+            "type": "function",
+            "name": "set_metric_count",
+            "strict": None,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "metric_name": {"type": "string"},
+                    "metric_count": {"type": "integer"},
+                },
+                "required": ["metric_name", "metric_count"],
+            },
+        }
+
+    def _single_call_verify_request(
+        self, tool: FunctionToolParam, name: str, expected_arguments: dict, actual_arguments: dict
+    ) -> SingleStepToolUseArgumentComparisonVerifyRequest:
+        return SingleStepToolUseArgumentComparisonVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[NeMoGymEasyInputMessage(role="user", content="Set the views metric count to 75.")],
+                tools=[tool],
+            ),
+            response=NeMoGymResponse(
+                id="single_call",
+                created_at=1001,
+                model="test_model",
+                object="response",
+                output=[
+                    NeMoGymResponseFunctionToolCall(call_id="call", name=name, arguments=json.dumps(actual_arguments))
+                ],
+                parallel_tool_calls=False,
+                tool_choice="auto",
+                tools=[tool],
+            ),
+            expected_action=FunctionCallAction(
+                type="function_call", name=name, arguments=json.dumps(expected_arguments)
+            ),
+        )
+
+    async def test_verify_declared_tool_schema_check_is_opt_in(
+        self, resources_server: SingleStepToolUseArgumentComparisonResourcesServer
+    ) -> None:
+        tool = self._metric_tool()
+        schema_server = build_resources_server(validate_against_declared_tool_schema=True)
+        undeclared = self._single_call_verify_request(
+            tool, "reset_metric", {"metric_name": "views"}, {"metric_name": "views"}
+        )
+
+        # Off by default: an undeclared tool is still compared against the expected call.
+        verify_response = await resources_server.verify(undeclared)
+        assert verify_response.reward == approx(1.0)
+        assert verify_response.category == StepRewardCategory.EXPECTED_TOOL_CALL
+
+        verify_response = await schema_server.verify(undeclared)
+        assert verify_response.reward == approx(0.0)
+        assert verify_response.category == StepRewardCategory.TOOL_SCHEMA_NOT_FOUND
+
+        expected_arguments = {"metric_name": "views", "metric_count": 75}
+        verify_response = await schema_server.verify(
+            self._single_call_verify_request(
+                tool, "set_metric_count", expected_arguments, {"metric_name": "views", "metric_count": "75"}
+            )
+        )
+        assert verify_response.reward == approx(0.0)
+        assert verify_response.category == StepRewardCategory.TOOL_SCHEMA_VALIDATION_FAILED
+
+        verify_response = await schema_server.verify(
+            self._single_call_verify_request(tool, "set_metric_count", expected_arguments, expected_arguments)
+        )
+        assert verify_response.reward == approx(1.0)
+        assert verify_response.category == StepRewardCategory.EXPECTED_TOOL_CALL
+
+    async def test_verify_declared_tool_schema_check_skips_batches(self) -> None:
+        schema_server = build_resources_server(validate_against_declared_tool_schema=True)
+        # The batch calls `search`, but only `set_metric_count` is declared.
+        verify_request = self._parallel_verify_request(self._metric_tool(), ["beta", "alpha"], ["alpha", "beta"])
+
+        verify_response = await schema_server.verify(verify_request)
+        assert verify_response.reward == approx(1.0)
+        assert verify_response.category == StepRewardCategory.EXPECTED_TOOL_CALL_BATCH
+
+    async def test_verify_list_f1_match_details(self) -> None:
+        resources_server = build_resources_server(use_f1_for_list=True, use_list_f1_threshold=False)
+        tool: FunctionToolParam = {
+            "type": "function",
+            "name": "search",
+            "strict": None,
+            "parameters": {
+                "type": "object",
+                "properties": {"items": {"type": "array", "items": {"type": "integer"}}},
+                "required": ["items"],
+            },
+        }
+
+        verify_response = await resources_server.verify(
+            self._single_call_verify_request(tool, "search", {"items": [1, 2, 3]}, {"items": [1, 2]})
+        )
+        assert verify_response.reward == approx(0.8)
+        assert verify_response.category == StepRewardCategory.ARGUMENT_LIST_F1_PARTIAL
+        assert len(verify_response.list_f1_match_details) == 1
+        detail = verify_response.list_f1_match_details[0]
+        assert detail.expected_values == [1, 2, 3]
+        assert detail.actual_values == [1, 2]
+        assert detail.tp == 2
+        assert detail.matched_pairs == [(0, 0), (1, 1)]
+        assert detail.f1 == approx(0.8)

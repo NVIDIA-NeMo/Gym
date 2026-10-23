@@ -12,3 +12,10 @@ longcodebench_mcqa_simple_agent:
         prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/longcodebench/prepare.py
         license: Creative Commons Attribution 4.0 International
+
+longcodebench_mcqa_environment_server:
+  _inherit_from: mcqa_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: longcodebench_mcqa_simple_agent

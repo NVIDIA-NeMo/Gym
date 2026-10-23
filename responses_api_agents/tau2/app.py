@@ -13,7 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from collections import defaultdict
+from collections.abc import Mapping
+from contextvars import ContextVar
+from functools import partial
 from os import environ
 from pathlib import Path
 from time import time
@@ -27,7 +31,8 @@ environ["TAU2_DATA_DIR"] = str(DATA_DIR)
 
 from fastapi import Body
 from loguru import logger
-from pydantic import ConfigDict, Field
+from openai.types.completion_usage import CompletionUsage
+from pydantic import ConfigDict, Field, ValidationError
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -39,16 +44,158 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
+    NeMoGymAsyncOpenAI,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseUsage,
 )
+from nemo_gym.responses_converter import chat_completion_usage_to_response_usage
+from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
+from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import get_server_url, is_nemo_gym_fastapi_entrypoint
+from responses_api_agents.tau2.observability import build_tool_observations
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 from tau2.data_model.simulation import SimulationRun, TextRunConfig
 from tau2.data_model.tasks import Task
 from tau2.evaluator.evaluator import EvaluationType
 from tau2.runner.batch import run_single_task
+from tau2.utils import llm_utils as tau2_llm_utils
 from tau2.utils.llm_utils import to_litellm_messages
+
+
+TAU2_MALFORMED_TOOL_CALL_FAILURE_CLASS = "tau2_malformed_tool_call"
+TAU2_AGENT_FAILURE_CLASS = "tau2_agent_error"
+
+# The model names Tau2 sends with the policy and user-simulator calls; the shared client tells them apart by it.
+TAU2_AGENT_MODEL = "openai/dummy agent model"
+TAU2_USER_MODEL = "openai/dummy user model"
+
+# Usage of every policy-model response that finished in the current rollout, including responses Tau2 or the
+# malformed-tool-call retry discarded. Set by `Tau2Agent.run`.
+_POLICY_CALL_USAGES: ContextVar[Optional[List[Optional[NeMoGymResponseUsage]]]] = ContextVar(
+    "tau2_policy_call_usages", default=None
+)
+
+_RESERVED_RESULT_KEYS = (
+    "reward",
+    "response",
+    "error",
+    NG_FAILURE_CLASS_KEY,
+    NG_NO_PERSIST_KEY,
+    NG_TERMINAL_KEY,
+)
+
+
+class Tau2MalformedToolCallError(ValueError):
+    """A model response whose tool arguments are not a JSON object."""
+
+
+def _validate_tool_call_arguments(response: Mapping[str, Any]) -> None:
+    """Validate the raw chat-completion tool arguments before Tau2 calls json.loads."""
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return
+
+    first_choice = choices[0]
+    if not isinstance(first_choice, Mapping):
+        return
+    message = first_choice.get("message")
+    if not isinstance(message, Mapping):
+        return
+
+    tool_calls = message.get("tool_calls")
+    if tool_calls is None:
+        return
+    if not isinstance(tool_calls, list):
+        raise Tau2MalformedToolCallError("tool_calls must be a list")
+
+    for index, tool_call in enumerate(tool_calls):
+        if not isinstance(tool_call, Mapping):
+            raise Tau2MalformedToolCallError(f"tool call {index} must be an object")
+        function = tool_call.get("function")
+        if not isinstance(function, Mapping):
+            raise Tau2MalformedToolCallError(f"tool call {index} function must be an object")
+        arguments = function.get("arguments")
+        if not isinstance(arguments, str):
+            raise Tau2MalformedToolCallError(f"tool call {index} function.arguments must be a JSON string")
+        try:
+            parsed_arguments = json.loads(arguments)
+        except json.JSONDecodeError as error:
+            raise Tau2MalformedToolCallError(
+                f"tool call {index} function.arguments is invalid JSON at character {error.pos}"
+            ) from error
+        if not isinstance(parsed_arguments, dict):
+            raise Tau2MalformedToolCallError(
+                f"tool call {index} function.arguments must decode to an object, got {type(parsed_arguments).__name__}"
+            )
+
+
+def _record_policy_usage(model: Any, response: Mapping[str, Any]) -> None:
+    usages = _POLICY_CALL_USAGES.get()
+    if usages is None or model != TAU2_AGENT_MODEL:
+        return
+    raw_usage = response.get("usage")
+    try:
+        usage = (
+            chat_completion_usage_to_response_usage(CompletionUsage.model_validate(raw_usage)) if raw_usage else None
+        )
+    except ValidationError:
+        # A malformed usage block is unknown usage, not a reason to fail the rollout.
+        usage = None
+    usages.append(usage)
+
+
+class Tau2ToolValidatingAsyncOpenAI(NeMoGymAsyncOpenAI):
+    """Reject chat completions whose raw tool arguments Tau2 cannot parse, and record policy-call usage."""
+
+    malformed_tool_call_max_retries: int = Field(default=0, ge=0)
+
+    async def create_chat_completion(self, **kwargs: Any) -> Dict[str, Any]:
+        max_attempts = self.malformed_tool_call_max_retries + 1
+        for attempt in range(1, max_attempts + 1):
+            response = await super().create_chat_completion(**kwargs)
+            _record_policy_usage(kwargs.get("model"), response)
+            try:
+                _validate_tool_call_arguments(response)
+            except Tau2MalformedToolCallError as error:
+                event = "retry" if attempt < max_attempts else "hard_fail"
+                print(
+                    f"TAU2_MALFORMED_TOOL_CALL event={event} attempt={attempt}/{max_attempts} error={error}",
+                    flush=True,
+                )
+                if attempt == max_attempts:
+                    raise Tau2MalformedToolCallError(
+                        f"model returned malformed tool arguments in {max_attempts} consecutive attempts: {error}"
+                    ) from error
+                continue
+            return response
+
+        raise AssertionError("unreachable")
+
+
+def _find_nested_exception(error: BaseException, error_type: type[BaseException]) -> Optional[BaseException]:
+    """Find an exception even when asyncio.TaskGroup wrapped it in an ExceptionGroup."""
+    if isinstance(error, error_type):
+        return error
+    nested_errors = getattr(error, "exceptions", ())
+    if not isinstance(nested_errors, tuple):
+        return None
+    for nested_error in nested_errors:
+        if isinstance(nested_error, BaseException):
+            match = _find_nested_exception(nested_error, error_type)
+            if match is not None:
+                return match
+    return None
+
+
+def _first_nested_exception(error: BaseException) -> BaseException:
+    """Return an informative leaf rather than an ExceptionGroup wrapper message."""
+    nested_errors = getattr(error, "exceptions", ())
+    if isinstance(nested_errors, tuple):
+        for nested_error in nested_errors:
+            if isinstance(nested_error, BaseException):
+                return _first_nested_exception(nested_error)
+    return error
 
 
 class Tau2Config(BaseResponsesAPIAgentConfig):
@@ -61,6 +208,7 @@ class Tau2Config(BaseResponsesAPIAgentConfig):
     max_steps: int = 200
     max_agent_steps: Optional[int] = None
     turns_remaining_interval: int = 1
+    malformed_tool_call_max_retries: int = Field(default=0, ge=0)
 
 
 class Tau2RunRequest(BaseRunRequest):
@@ -82,6 +230,7 @@ class Tau2RunRequest(BaseRunRequest):
 
 
 class Tau2VerifyResponse(Tau2RunRequest, BaseVerifyResponse):
+    ng_agent_observations: AgentObservationBundle
     result: SimulationRun
     duration: float
     num_steps: int
@@ -96,6 +245,10 @@ class Tau2VerifyResponse(Tau2RunRequest, BaseVerifyResponse):
     max_completion_tokens: Optional[float]
 
 
+class Tau2FailureResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+
+
 class Tau2Agent(SimpleResponsesAPIAgent):
     config: Tau2Config
 
@@ -103,6 +256,14 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
     def setup_webserver(self):
         ensure_tau2_data_dir(DATA_DIR)
+
+        # Tau2 resolves this module-global class each time it generates an agent or
+        # simulated-user turn. Override it only inside this Tau2 server process so
+        # malformed tool arguments can be regenerated before Tau2 parses them.
+        tau2_llm_utils.NeMoGymAsyncOpenAI = partial(
+            Tau2ToolValidatingAsyncOpenAI,
+            malformed_tool_call_max_retries=self.config.malformed_tool_call_max_retries,
+        )
 
         if not self.config.debug:
             print("Removing loguru logging since `debug=False`")
@@ -116,14 +277,52 @@ class Tau2Agent(SimpleResponsesAPIAgent):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         raise NotImplementedError
 
-    async def run(self, body: Tau2RunRequest) -> Tau2VerifyResponse:
-        body_dict = {name: getattr(body, name) for name in Tau2RunRequest.model_fields}
+    async def run(self, body: Tau2RunRequest) -> Tau2VerifyResponse | Tau2FailureResponse:
+        record = self._sanitized_record(body)
+        policy_call_usages: List[Optional[NeMoGymResponseUsage]] = []
+        usages_token = _POLICY_CALL_USAGES.set(policy_call_usages)
+        try:
+            result = await self._run(body)
+        except Exception as error:  # noqa: BLE001 -- one bad rollout must not abort the full collection
+            malformed_error = _find_nested_exception(error, Tau2MalformedToolCallError)
+            if malformed_error is not None:
+                failure_class = TAU2_MALFORMED_TOOL_CALL_FAILURE_CLASS
+                detail = malformed_error
+            else:
+                failure_class = TAU2_AGENT_FAILURE_CLASS
+                detail = _first_nested_exception(error)
+            result = self._failure_response(
+                body,
+                record,
+                failure_class,
+                f"{type(detail).__name__}: {detail}",
+            )
+        finally:
+            _POLICY_CALL_USAGES.reset(usages_token)
+
+        # A failed rollout still spent the tokens of the policy calls that finished. A finished call whose usage was
+        # lost makes the total unknown rather than a partial sum (rollout-evidence.mdx). No recorded call also stays
+        # unknown: the recorder sees only calls made through `Tau2ToolValidatingAsyncOpenAI`, so an empty record does
+        # not prove that no policy call finished.
+        result.response.usage = (
+            NeMoGymResponseUsage.sum_from_list(policy_call_usages)
+            if policy_call_usages and all(usage is not None for usage in policy_call_usages)
+            else None
+        )
+        return result
+
+    async def _run(self, body: Tau2RunRequest) -> Tau2VerifyResponse:
+        # Gym-internal request fields (e.g. `capture_rollout_id`) are marked `exclude=True`;
+        # skip them so only tau2-bench arguments reach `run_single_task`.
+        body_dict = {
+            name: getattr(body, name) for name, field in Tau2RunRequest.model_fields.items() if not field.exclude
+        }
         responses_create_params = body_dict.pop("responses_create_params").model_dump(exclude_unset=True)
 
         config: TextRunConfig = body_dict["config"]
 
         # Need `openai/` provider prefix for LiteLLM
-        config.llm_user = "openai/dummy user model"
+        config.llm_user = TAU2_USER_MODEL
         config.llm_args_user |= {
             "api_base": f"{self.base_url_for_run(get_server_url(self.config.user_model_server.name), body)}/v1",
             "api_key": "dummy api key",  # pragma: allowlist secret
@@ -135,7 +334,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             extra_agent_args["max_tokens"] = responses_create_params["max_output_tokens"]
 
         # Need `openai/` provider prefix for LiteLLM
-        config.llm_agent = "openai/dummy agent model"
+        config.llm_agent = TAU2_AGENT_MODEL
         config.llm_args_agent = {
             "api_base": f"{self.base_url_for_run(get_server_url(self.config.model_server.name), body)}/v1",
             "api_key": "dummy api key",  # pragma: allowlist secret
@@ -196,6 +395,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
         return Tau2VerifyResponse(
             **body_dict,
+            ng_agent_observations=build_tool_observations(result),
             responses_create_params=dict(
                 input=body.responses_create_params.input + input_items_1 + input_items_2,
                 model=body.responses_create_params.model or "",
@@ -226,6 +426,51 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             mean_completion_tokens=mean_completion_tokens,
             max_prompt_tokens=max_prompt_tokens,
             max_completion_tokens=max_completion_tokens,
+        )
+
+    def _sanitized_record(self, body: Tau2RunRequest) -> Dict[str, Any]:
+        record = body.model_dump(mode="json")
+        for key in _RESERVED_RESULT_KEYS:
+            record.pop(key, None)
+        return record
+
+    def _failure_response(
+        self,
+        body: Tau2RunRequest,
+        record: Dict[str, Any],
+        failure_class: str,
+        error: str,
+    ) -> Tau2FailureResponse:
+        print(f"[tau2] rollout failed: {error}", flush=True)
+        return Tau2FailureResponse.model_validate(
+            record
+            | {
+                "reward": 0.0,
+                "response": self._empty_response(body).model_dump(mode="json"),
+                NG_FAILURE_CLASS_KEY: failure_class,
+                "error": error[:500],
+            }
+        )
+
+    def _empty_response(self, body: Tau2RunRequest) -> NeMoGymResponse:
+        """Return a minimal valid response so the failure path itself never emits HTTP 500."""
+        return NeMoGymResponse(
+            id=f"tau2-failure-{body.config.domain}-{body.task.id}",
+            created_at=0.0,
+            model=body.responses_create_params.model or "tau2",
+            object="response",
+            output=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "id": "msg_0",
+                    "content": [{"type": "output_text", "text": "", "annotations": []}],
+                }
+            ],
+            parallel_tool_calls=False,
+            tools=[],
+            tool_choice="auto",
         )
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:

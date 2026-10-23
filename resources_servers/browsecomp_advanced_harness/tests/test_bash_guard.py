@@ -14,7 +14,7 @@
 # limitations under the License.
 """Tests for the read-only bash_command guards (terminal mode).
 
-Ported byte-for-byte from the bc_frankie_bash_tool harness @ ee72d54
+Ported byte-for-byte from an internal reference harness
 (tests/test_bash_denylist.py + tests/test_bash_allowlist.py). Two always-on
 layers run before any subprocess in `_run_bash_readonly`: the deny-list first
 (specific reasons), then the default-deny read-only allow-list (catch-all).

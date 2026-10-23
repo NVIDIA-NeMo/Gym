@@ -19,7 +19,6 @@ Gym rollout collection and trainer finalization use this consumer.
 Gym reads a frozen snapshot from the local token store.
 A trainer freezes the ``TokenSource`` provided by its transport.
 Both paths pass snapshot entries through the same build and projection.
-Single-response delivery rejects ``per_request`` because it can return multiple trajectories.
 
 This module does not import rollout-record or model-server modules.
 The caller supplies the ``rollout_id``.
@@ -41,6 +40,7 @@ from nemo_gym.token_id_capture.builder import (
 from nemo_gym.token_id_capture.protocols import TokenSource
 from nemo_gym.token_id_capture.records import TokenEntry
 from nemo_gym.token_id_capture.store import TokenCaptureStore
+from nemo_gym.token_id_capture.terminal import TerminalAttribution, resolve_terminal
 
 
 logger = logging.getLogger(__name__)
@@ -81,14 +81,11 @@ def clear_token_captures_for_rollouts(records: list, token_capture_dirs: list[Pa
     """
     if not token_capture_dirs:
         return
-    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
+    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 
+    rollout_ids = [rollout_id for record in records if (rollout_id := maybe_rollout_id_from_run_body(record))]
     for directory in token_capture_dirs:
-        store = TokenCaptureStore(directory)
-        for record in records:
-            rollout_id = maybe_rollout_id_from_run_body(record)
-            if rollout_id:
-                store.delete(rollout_id)
+        TokenCaptureStore(directory).delete_now(rollout_ids)
 
 
 def _assemble(
@@ -96,23 +93,52 @@ def _assemble(
     entries: list[TokenEntry],
     builder: str,
     model: str,
+    *,
+    verified_response: dict | None = None,
+    explicit_terminal_call_id: str | None = None,
+    declared_response_id: str | None = None,
 ) -> dict:
-    if builder == "per_request":
-        # Single-response delivery cannot represent multiple trajectories.
-        return _failed_build(
-            rollout_id,
-            builder,
-            "per_request returns multiple trajectories and is not supported by single-response delivery",
-            n_calls=len(entries),
+    # Attribute the verified terminal before building.
+    # ``verified_response`` is the scored response from the /run result.
+    # Attribution anchors chain selection; its absence falls back to the
+    # strict single-chain policy. It must never fail a build.
+    try:
+        attribution = resolve_terminal(
+            entries, verified_response, explicit_terminal_call_id, declared_response_id=declared_response_id
         )
+    except Exception:
+        logger.warning("Terminal attribution failed for rollout %s.", rollout_id, exc_info=True)
+        attribution = TerminalAttribution(None, reason="attribution_error")
+
     # Mask a malformed rollout instead of failing the caller.
     # The contiguity check and projection can raise.
     # An uncaught exception could fail a full rollout or training batch.
+    def _attribution_metric(chain_status: str) -> dict:
+        return {
+            "method": attribution.method or "none",
+            "call_id": attribution.model_call_id,
+            "reason": attribution.reason,
+            "chain": chain_status,
+        }
+
     try:
-        out = run_builder(entries, builder)
+        out = run_builder(entries, builder, terminal_call_id=attribution.model_call_id)
+    except (AssertionError, ValueError, KeyError, IndexError, TypeError) as error:
+        logger.warning(
+            "Could not build a trajectory for rollout %s from %d captured call(s): %s",
+            rollout_id,
+            len(entries),
+            error,
+        )
+        failed = _failed_build(rollout_id, builder, f"{type(error).__name__}: {error}", n_calls=len(entries))
+        failed["metrics"]["terminal_attribution"] = _attribution_metric("error")
+        return failed
+    try:
         for chain in out.chains:
             chain.validate()
-        response = project_main_chain_response(rollout_id, out, model=model)
+        response = project_main_chain_response(
+            rollout_id, out, model=model, finish_reason_resolved=attribution.finish_reason_resolved
+        )
         assert_prefix_contiguity(response)
     except (AssertionError, ValueError, KeyError, IndexError, TypeError) as error:
         logger.warning(
@@ -121,18 +147,20 @@ def _assemble(
             len(entries),
             error,
         )
-        return _failed_build(
-            rollout_id,
-            builder,
-            f"{type(error).__name__}: {error}",
-            n_calls=len(entries),
-        )
+        failed = _failed_build(rollout_id, builder, f"{type(error).__name__}: {error}", n_calls=len(entries))
+        # The builder's verdict survives a failed projection.
+        # A broken terminal chain must stay diagnosable in aggregate metrics.
+        failed["metrics"]["terminal_attribution"] = _attribution_metric(out.notes.terminal_chain or "error")
+        return failed
 
     notes = out.notes
     # Report everything dropped by the build.
     # A partial build must not appear complete.
     metrics = {
         "n_calls": len(entries),
+        # Attribution names the call whose response the verifier scored.
+        # ``chain`` reports what the builder did with that name.
+        "terminal_attribution": _attribution_metric(notes.terminal_chain),
         "chains": notes.chains,
         "roots": notes.roots,
         "quarantined_calls": len(out.quarantined),
@@ -140,21 +168,69 @@ def _assemble(
         "delivered_fraction": notes.delivered_fraction,
         "generated_tokens_captured": notes.generated_tokens_captured,
         "generated_tokens_delivered": notes.generated_tokens_delivered,
+        "parent_link_failures": dict(notes.parent_link_failures),
+        "unresolved_parent_calls": len(notes.unresolved_parent_calls),
         # Calls without generated tokens have no training signal.
         # A nonzero count can indicate an output-budget or content-filter cutoff.
         "empty_generation_calls": len(notes.empty_generation_calls),
     }
     unresolved = notes.unresolved_retries
+    if notes.terminal_chain == "delivered":
+        # The verified chain is attributed and intact.
+        # Off-path calls (auxiliary calls, sub-agent forks, abandoned retries)
+        # are excluded from delivery instead of masking the rollout.
+        mask = False
+    elif attribution.attributed or declared_response_id:
+        # A declared terminal must be attributable, and an attributed terminal
+        # must have a buildable chain. Neither can use the single-chain fallback.
+        mask = True
+    else:
+        # No attribution: the strict single-chain policy applies.
+        # A retry of the final call can leave two plausible generations.
+        # Mask the rollout when the client-selected generation is unknown.
+        mask = bool(unresolved) or bool(notes.unresolved_parent_calls) or notes.roots != 1 or notes.chains != 1
+    # An empty delivery must never be trainable, whatever produced it.
+    mask = mask or not any(item.get("generation_token_ids") for item in response.get("output", []))
     return {
         "rollout_id": rollout_id,
         "builder": builder,
         "rebuilt_response": response,
         "metrics": metrics,
-        # A retry of the final call can leave two plausible generations.
-        # Mask the rollout when the client-selected generation is unknown.
-        "mask_sample": bool(unresolved) or notes.roots != 1 or notes.chains != 1,
+        "mask_sample": mask,
         "unresolved_retries": list(unresolved),
+        "unresolved_parent_calls": list(notes.unresolved_parent_calls),
     }
+
+
+def _incomplete_masks(built: dict, *, always: bool) -> bool:
+    """Whether an incomplete snapshot masks this build.
+
+    Incomplete means some model call registered its capture intent and never
+    committed a record (a harness killed at its timeout backstop leaves exactly
+    this signature). With ``always`` the build is masked, because that call may
+    be the trajectory's real terminal.
+
+    Without ``always`` a delivered terminal attribution keeps the build: the
+    attributed terminal is the verified response's final model output, the
+    delivered chain reaches it whole, and a call with no record cannot sit
+    inside that chain, so the uncaptured call is outside the scored trajectory.
+    Any other attribution outcome still masks.
+    """
+    if always:
+        return True
+    attribution = (built.get("metrics") or {}).get("terminal_attribution") or {}
+    return attribution.get("chain") != "delivered"
+
+
+def mask_incomplete_when_attributed_from_config(global_config_dict) -> bool:
+    """Return the ``token_id_capture.mask_incomplete_when_attributed`` setting.
+
+    A caller that holds the Gym global config reads the setting here and passes
+    it to the build functions below, which default to the strict behavior.
+    """
+    from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
+
+    return TokenIdCaptureConfig.model_validate(global_config_dict).token_id_capture.mask_incomplete_when_attributed
 
 
 def trajectories_for_rollout(
@@ -163,12 +239,18 @@ def trajectories_for_rollout(
     *,
     builder: str = "prefix_merging",
     model: str = "",
+    verified_response: dict | None = None,
+    explicit_terminal_call_id: str | None = None,
+    mask_incomplete_when_attributed: bool = True,
 ) -> dict | None:
     """Build trajectories from a frozen local token-store snapshot.
 
     Return ``None`` only when no capture directory is configured.
     Missing records are unsafe and return a masked result.
-    An incomplete snapshot is unsafe and returns a masked result.
+    An incomplete snapshot masks the result. With
+    ``mask_incomplete_when_attributed`` set to ``False`` it masks only when
+    terminal attribution did not deliver its chain, because a delivered chain
+    places the uncaptured call off the scored path.
     """
     for directory in token_capture_dirs:
         store = TokenCaptureStore(directory)
@@ -180,10 +262,18 @@ def trajectories_for_rollout(
         if not snapshot.entries:
             built = _failed_build(rollout_id, builder, "capture contains no token records")
         else:
-            built = _assemble(rollout_id, list(snapshot.entries), builder, model)
+            built = _assemble(
+                rollout_id,
+                list(snapshot.entries),
+                builder,
+                model,
+                verified_response=verified_response,
+                explicit_terminal_call_id=explicit_terminal_call_id,
+            )
         if snapshot.incomplete:
-            built["mask_sample"] = True
             built.setdefault("metrics", {})["capture_incomplete"] = True
+            if _incomplete_masks(built, always=mask_incomplete_when_attributed):
+                built["mask_sample"] = True
         built["_capture_snapshot"] = {
             "snapshot_id": snapshot.snapshot_id,
             "version": snapshot.version,
@@ -198,11 +288,21 @@ async def trajectories_from_source(
     *,
     builder: str = "prefix_merging",
     model: str = "",
+    verified_response: dict | None = None,
+    explicit_terminal_call_id: str | None = None,
+    mask_incomplete_when_attributed: bool = True,
+    declared_response_id: str | None = None,
 ) -> dict | None:
     """Build trajectories from a frozen ``TokenSource`` snapshot.
 
+    ``declared_response_id`` is the served response id the harness reports;
+    a declared id that matches no entry masks the rollout.
+
     Missing records are unsafe and return a masked result.
-    An incomplete snapshot is unsafe and returns a masked result.
+    An incomplete snapshot masks the result. With
+    ``mask_incomplete_when_attributed`` set to ``False`` it masks only when
+    terminal attribution did not deliver its chain, because a delivered chain
+    places the uncaptured call off the scored path.
     """
     try:
         snapshot = await source.freeze(rollout_id)
@@ -212,10 +312,22 @@ async def trajectories_from_source(
     if not snapshot.entries:
         built = _failed_build(rollout_id, builder, "capture contains no token records")
     else:
-        built = await asyncio.to_thread(_assemble, rollout_id, list(snapshot.entries), builder, model)
+        entries = list(snapshot.entries)
+        built = await asyncio.to_thread(
+            lambda: _assemble(
+                rollout_id,
+                entries,
+                builder,
+                model,
+                verified_response=verified_response,
+                explicit_terminal_call_id=explicit_terminal_call_id,
+                declared_response_id=declared_response_id,
+            )
+        )
     if snapshot.incomplete:
-        built["mask_sample"] = True
         built.setdefault("metrics", {})["capture_incomplete"] = True
+        if _incomplete_masks(built, always=mask_incomplete_when_attributed):
+            built["mask_sample"] = True
     built["_capture_snapshot"] = {
         "snapshot_id": snapshot.snapshot_id,
         "version": snapshot.version,

@@ -30,3 +30,11 @@ math_with_autograder_simple_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/math_with_autograder/data/example.jsonl
+
+math_with_autograder_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: math_with_autograder_simple_agent

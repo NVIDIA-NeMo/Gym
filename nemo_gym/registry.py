@@ -22,10 +22,15 @@ import yaml
 from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym import PARENT_DIR, component_search_roots
-from nemo_gym.benchmarks import _benchmark_config_name, _benchmark_config_paths
+from nemo_gym.benchmarks import MANIFEST_FILENAME, _benchmark_config_name, _benchmark_config_paths
 from nemo_gym.config_types import ConfigError
 from nemo_gym.discovery import iter_server_configs, read_config_metadata
-from nemo_gym.environment.manifest import EnvironmentManifest, ManifestError, load_manifest
+from nemo_gym.environment.manifest import (
+    EnvironmentManifest,
+    ManifestError,
+    load_manifest,
+    resolve_manifest_config_path,
+)
 
 
 ENVIRONMENTS_SUBDIR = "environments"
@@ -33,7 +38,7 @@ ENVIRONMENTS_DIR = PARENT_DIR / ENVIRONMENTS_SUBDIR
 BENCHMARKS_SUBDIR = "benchmarks"
 RESOURCES_SERVERS_SUBDIR = "resources_servers"
 ENVIRONMENT_CONFIG_FILENAME = "config.yaml"
-MANIFEST_FILENAME = "manifest.yaml"
+ENVIRONMENT_TOMBSTONE_FILENAME = ".nemo_gym_tombstone"
 
 CatalogKind = Literal["environment", "benchmark"]
 CatalogStatus = Literal["experimental", "no-manifest"]
@@ -54,7 +59,7 @@ class EnvironmentCatalogEntry:
     description: Optional[str] = None
     domain: Optional[str] = None
     kind: CatalogKind = "environment"
-    status: CatalogStatus = "no-manifest"
+    status: Optional[CatalogStatus] = "no-manifest"
     manifest_path: Optional[Path] = None
     version: Optional[str] = None
     integration_profile: Optional[str] = None
@@ -103,9 +108,12 @@ def _manifest_entry(
             f"but its catalog path requires '{expected_name}'."
         )
 
-    config_path = manifest_path.with_name(ENVIRONMENT_CONFIG_FILENAME)
+    config_path = resolve_manifest_config_path(manifest_path, manifest)
     if not config_path.is_file():
-        raise RegistryError(f"Manifest '{manifest_path}' requires a sibling config.yaml.")
+        expected = (
+            "a sibling config.yaml" if manifest.config_path == ENVIRONMENT_CONFIG_FILENAME else manifest.config_path
+        )
+        raise RegistryError(f"Manifest '{manifest_path}' requires {expected} (resolved to '{config_path}').")
 
     values = {
         "name": manifest.name,
@@ -113,7 +121,7 @@ def _manifest_entry(
         "path": manifest_path.parent,
         "description": manifest.description,
         "domain": _enum_value(manifest.domain),
-        "status": "experimental",
+        "status": "experimental" if manifest.experimental else None,
         "manifest_path": manifest_path,
         "version": manifest.version,
         "integration_profile": _enum_value(manifest.integration_profile),
@@ -220,13 +228,13 @@ def _discover_resource_workloads(
 def _legacy_config_paths(tree_dir: Path, kind: CatalogKind) -> Iterable[tuple[str, Path]]:
     if kind == "benchmark":
         for config_path in _benchmark_config_paths(tree_dir):
-            if config_path.name != MANIFEST_FILENAME:
-                yield _benchmark_config_name(config_path.relative_to(tree_dir)), config_path
+            yield _benchmark_config_name(config_path.relative_to(tree_dir)), config_path
         return
 
     for child in sorted(tree_dir.iterdir()):
         config_path = child / ENVIRONMENT_CONFIG_FILENAME
-        if child.is_dir() and config_path.is_file():
+        tombstone_path = child / ENVIRONMENT_TOMBSTONE_FILENAME
+        if child.is_dir() and config_path.is_file() and not tombstone_path.is_file():
             yield child.name, config_path
 
 
@@ -243,6 +251,9 @@ def _discover_registry_tree(
     entries: Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry] = {}
     manifest_configs: set[Path] = set()
     for manifest_path in sorted(tree_dir.rglob(MANIFEST_FILENAME)):
+        relative_path = manifest_path.relative_to(tree_dir)
+        if kind == "environment" and (tree_dir / relative_path.parts[0] / ENVIRONMENT_TOMBSTONE_FILENAME).is_file():
+            continue
         key = (kind, _path_identity(tree_dir, manifest_path))
         if key in claimed:
             continue

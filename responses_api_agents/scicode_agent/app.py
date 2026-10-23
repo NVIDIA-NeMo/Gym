@@ -29,10 +29,11 @@ Templated on responses_api_agents/proof_refinement_agent (the multi-turn run() s
 
 import logging
 import statistics
+from time import time
 from typing import Any, Dict, List
 
 from fastapi import Request, Response
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 from step_utils import (
     OUT_OF_CONTEXT,
     PREFILLED_STEPS_CODE,
@@ -41,7 +42,7 @@ from step_utils import (
     process_problem_steps,
 )
 
-from nemo_gym.base_resources_server import BaseRunRequest
+from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, BaseRunRequest
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
@@ -53,12 +54,22 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseUsage,
+    accumulate_response_usage,
 )
 from nemo_gym.prompt import PromptConfig, load_prompt_config
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    ModelCallRef,
+    ObservationGap,
+    TrajectoryRecord,
+    TrajectoryTurn,
+)
 from nemo_gym.server_utils import raise_for_status
 
 
 LOG = logging.getLogger(__name__)
+TOKEN_USAGE_VERSION = 1
 
 
 class ScicodeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -78,6 +89,9 @@ class ScicodeAgentRunRequest(BaseRunRequest):
     problem_id: str
     sub_steps: List[dict]
     required_dependencies: str
+    # Benchmark-specific official code for steps that provide context but are not generated/scored.
+    # Keys are canonical step numbers such as "13.6".
+    prefilled_steps_code: Dict[str, str] = Field(default_factory=dict)
 
 
 def _empty_response() -> dict:
@@ -131,6 +145,38 @@ def _across_run_stats(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
     return metrics
 
 
+def _token_metrics(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    """Pool generated steps across attempts, rather than averaging per-problem ratios."""
+    rows = [r for task in tasks for r in task]
+    versions = {r.get("token_usage_version") for r in rows}
+    if not rows or versions == {None}:
+        # Historical rollouts contain only the last step's usage.
+        return {}
+    if versions != {TOKEN_USAGE_VERSION}:
+        raise ValueError("Cannot aggregate SciCode rollouts with different token accounting versions")
+
+    steps = [step for r in rows for step in r["step_usage"] if step["status"] != "prefilled"]
+    generated = [step for step in steps if step["status"] == "generated"]
+    metrics = {
+        # Aggregate values are exported as numeric scores by NeMo Evaluator.
+        "token_usage_version": TOKEN_USAGE_VERSION,
+        "num_subproblems": len(steps),
+        "num_generated_steps": len(generated),
+        "num_steps_with_usage": sum(step["usage"] is not None for step in generated),
+        "generation_coverage": len(generated) / len(steps) if steps else None,
+    }
+    complete = metrics["num_steps_with_usage"] == len(generated)
+    metrics["token_usage_complete"] = complete
+    # Override the generic means too: pandas would otherwise silently average only
+    # the rollouts with known usage, presenting a partial measurement as a full one.
+    for name in ("input_tokens", "output_tokens", "total_tokens"):
+        total = sum(step["usage"][name] for step in steps) if complete else None
+        metrics[f"mean/{name}"] = total / len(rows) if total is not None else None
+        metrics[f"mean/{name}_per_problem"] = metrics[f"mean/{name}"]
+        metrics[f"mean/{name}_per_subproblem"] = total / len(steps) if complete and steps else None
+    return metrics
+
+
 class ScicodeAgent(SimpleResponsesAPIAgent):
     """Agent that drives the SciCode per-sub-step generation + code-accumulation loop."""
 
@@ -152,8 +198,8 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
 
         model_response = await self.server_client.post(
             server_name=self.config.model_server.name,
-            url_path="/v1/responses",
-            json=body,
+            url_path=self.url_path_for_request("/v1/responses", request),
+            json=body.model_dump(exclude_unset=True, exclude_none=True),
             cookies=request.cookies,
         )
         await raise_for_status(model_response)
@@ -173,11 +219,38 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         solutions: Dict[str, str] = {}
         out_of_context = False
         last_response_json = None
+        zero_usage = NeMoGymResponseUsage.sum_from_list([])
+        usage = zero_usage
+        usage_complete = True
+        step_usage = []
+        rollout_id = self.rollout_id_from_run(body)
+        trajectory = (
+            TrajectoryRecord(task_id=body.problem_id, rollout_id=rollout_id)
+            if self._model_call_capture_enabled() and rollout_id is not None
+            else None
+        )
+        invocation = AgentInvocation(invocation_id="root")
+        response_create_params = body.responses_create_params.model_dump(exclude_unset=True, exclude_none=True)
+        response_create_params.pop("input", None)
+        response_create_params["model"] = body.responses_create_params.model or self.config.model_server.name
+        response_create_params["tools"] = body.responses_create_params.tools
 
         for cur_step in range(total):
+            step_record = {
+                "step_number": sub_steps[cur_step]["step_number"],
+                "status": "skipped",
+                "usage": zero_usage.model_dump(),
+            }
+            step_usage.append(step_record)
             # Prefilled steps provide context for later steps but are not scored (no solution entry).
+            step_number = sub_steps[cur_step]["step_number"]
+            if step_number in body.prefilled_steps_code:
+                previous_llm_code[cur_step] = body.prefilled_steps_code[step_number]
+                step_record["status"] = "prefilled"
+                continue
             if (body.problem_id, cur_step) in PREFILLED_STEPS_CODE:
                 previous_llm_code[cur_step] = PREFILLED_STEPS_CODE[(body.problem_id, cur_step)]
+                step_record["status"] = "prefilled"
                 continue
             if out_of_context:
                 solutions[f"{body.problem_id}.{cur_step + 1}"] = OUT_OF_CONTEXT
@@ -192,11 +265,15 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                 problem_steps_str=problem_steps_str, next_step_str=next_step_str, dependencies=dependencies
             )
 
+            turn_timestamp = time()
             try:
                 gen_response = await self.server_client.post(
                     server_name=self.config.name,
-                    url_path="/v1/responses",
-                    json={"input": [{"role": "user", "content": user_content}]},
+                    url_path=self.url_path_for_run("/v1/responses", body),
+                    json={
+                        **response_create_params,
+                        "input": [{"role": "user", "content": user_content}],
+                    },
                     cookies=cookies,
                 )
                 await raise_for_status(gen_response)
@@ -204,13 +281,43 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                 if is_context_window_error(error):
                     LOG.warning("SciCode step %s: context window exceeded; failing remaining steps.", cur_step)
                     out_of_context = True
+                    step_record["status"] = "context_window_exceeded"
                     solutions[f"{body.problem_id}.{cur_step + 1}"] = OUT_OF_CONTEXT
                     continue
                 raise
 
             cookies = gen_response.cookies
             last_response_json = await gen_response.json()
-            generation = NeMoGymResponse.model_validate(last_response_json).output_text
+            model_response = NeMoGymResponse.model_validate(last_response_json)
+            if trajectory is not None:
+                refs = (
+                    [ModelCallRef(model_ref=self.config.model_server, response_id=model_response.id)]
+                    if model_response.id
+                    else []
+                )
+                if not refs:
+                    trajectory.gaps.append(
+                        ObservationGap(code="model_call_reference_unavailable", invocation_id="root")
+                    )
+                invocation.model_calls.extend(refs)
+                trajectory.turns.append(
+                    TrajectoryTurn(
+                        invocation_id="root",
+                        task_id=trajectory.task_id,
+                        rollout_id=trajectory.rollout_id,
+                        turn_no=len(trajectory.turns) + 1,
+                        timestamp=turn_timestamp,
+                        question=[{"role": "user", "content": user_content}],
+                        answer=model_response.output,
+                        step_count=len(trajectory.turns) + 1,
+                        model_calls=refs,
+                    )
+                )
+            step_record["status"] = "generated"
+            step_record["usage"] = model_response.usage.model_dump() if model_response.usage is not None else None
+            usage_complete = usage_complete and model_response.usage is not None
+            usage = accumulate_response_usage(usage, model_response.usage)
+            generation = model_response.output_text
             extracted = extract_python_script(generation)
             previous_llm_code[cur_step] = extracted
             solutions[f"{body.problem_id}.{cur_step + 1}"] = f"{previous_code}\n{extracted}"
@@ -219,6 +326,10 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         verify_request_data["solutions"] = solutions
         # /verify requires a response; record the last sub-step's generation (empty if none ran).
         verify_request_data["response"] = last_response_json if last_response_json is not None else _empty_response()
+        # Keep the final generation for inspection, but account for the whole problem.
+        verify_request_data["response"]["usage"] = usage.model_dump() if usage_complete else None
+        verify_request_data["token_usage_version"] = TOKEN_USAGE_VERSION
+        verify_request_data["step_usage"] = step_usage
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
@@ -226,7 +337,37 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
             cookies=cookies,
         )
         await raise_for_status(verify_response)
-        return await verify_response.json()
+        result = await verify_response.json()
+        if trajectory is not None:
+            # Prefilled/skipped subproblems are not model decisions.
+            if trajectory.turns:
+                invocation.status = "incomplete" if out_of_context else "completed"
+                trajectory.invocations.append(invocation)
+            result["ng_trajectory"] = trajectory.model_dump(mode="json")
+        return result
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        if any(
+            step["status"] == "generated" and step["usage"] is None
+            for row in body.verify_responses
+            for step in (row.get("step_usage") or [])
+        ):
+            # Suppress generic token statistics at every level (including per-task
+            # and per-repeat). Keep the caller's raw rollout records unchanged.
+            body = body.model_copy(
+                update={
+                    "verify_responses": [
+                        {**row, "response": {**(row.get("response") or {}), "usage": None}}
+                        for row in body.verify_responses
+                    ]
+                }
+            )
+        metrics = await super().aggregate_metrics(body)
+        # NeMo Evaluator requires numeric scores. Omit unavailable values rather
+        # than exporting nulls or inventing zero consumption.
+        metrics.agent_metrics = {k: v for k, v in metrics.agent_metrics.items() if v is not None}
+        metrics.key_metrics = {k: v for k, v in metrics.key_metrics.items() if v is not None}
+        return metrics
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Headline SciCode metric: sub-step-weighted accuracy = total passed / total over all rollouts."""
@@ -234,10 +375,20 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         total = sum(r.get("num_steps_total", 0) for task in tasks for r in task)
         metrics = {"subtask_accuracy": passed / total if total else 0.0}
         metrics.update(_across_run_stats(tasks))
+        metrics.update(_token_metrics(tasks))
         return metrics
 
+    def compute_repeat_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        return self.compute_metrics(tasks)
+
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        return {k: v for k, v in agent_metrics.items() if k.startswith("mean/") or k.startswith("subtask_accuracy")}
+        return {
+            k: v
+            for k, v in agent_metrics.items()
+            if k.startswith("mean/")
+            or k.startswith("subtask_accuracy")
+            or k in {"generation_coverage", "token_usage_complete"}
+        }
 
 
 if __name__ == "__main__":

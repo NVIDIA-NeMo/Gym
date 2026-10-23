@@ -13,11 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
+import unicodedata
 from typing import Any, ClassVar, Literal, Optional
 
 from fastapi import FastAPI
 
 from nemo_gym.base_resources_server import (
+    BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -36,6 +38,8 @@ class MCQAResourcesServerConfig(BaseResourcesServerConfig):
             "lenient_boxed",
             "lenient_answer_colon",
             "lenient_answer_colon_md",
+            "milu_v2",
+            "boxed_and_normalized",
         ]
     ] = None
 
@@ -55,6 +59,8 @@ class MCQARunRequest(BaseRunRequest):
         "strict_single_letter_boxed",
         "lenient_boxed",
         "lenient_answer_colon",
+        "milu_v2",
+        "boxed_and_normalized",
     ] = "strict_single_letter_boxed"
     # Template metadata with custom regex support
     template_metadata: Optional[dict[str, Any]] = None
@@ -67,6 +73,15 @@ class MCQAVerifyRequest(MCQARunRequest, BaseVerifyRequest):
 class MCQAVerifyResponse(BaseVerifyResponse):
     expected_answer: str
     extracted_answer: Optional[str]
+
+
+class MCQADualVerifyResponse(MCQAVerifyResponse, BaseMultiRewardVerifyResponse):
+    """Independent answer-format scores; the scalar reward uses strict boxed scoring."""
+
+    strict_boxed_reward: float
+    normalized_reward: float
+    strict_boxed_answer: Optional[str]
+    normalized_answer: Optional[str]
 
 
 def _extract_options_and_expected(
@@ -86,6 +101,20 @@ BOXED_LETTER_LABEL_PATTERN = re.compile(r"^\s*([A-Z])\s*[:).\-]")
 ANSWER_COLON_PATTERN = re.compile(r"(?i)answer\s*:\s*(.+)")
 # Markdown-aware variant: captures the final-answer payload after Answer:.
 ANSWER_COLON_PAYLOAD_PATTERN = re.compile(r"(?im)[*_]{0,2}Answer[*_]{0,2}\s*:[*_\s]{0,2}(.+)")
+# Match the reference MILU v2 regex filter, including its first-match semantics.
+MILU_V2_ANSWER_PATTERN = re.compile(
+    r"(?i)(?:\\boxed\s*\{\s*\*?\s*([ABCD])\s*\*?\s*\}|answer is\s*\*?\(?\*?([ABCD])\*?\)?\*?)"
+)
+# Recognized Indic answer labels only; arbitrary labels such as "Eliminated
+# option" must never supply an answer. This fallback also requires a row opt-in.
+LOCALIZED_ANSWER_LABELS = frozenset(
+    {"উত্তৰ", "উত্তর", "જવાબ", "उत्तर", "ಉತ್ತರ", "ഉത്തരം", "ଉତ୍ତର", "ਉੱਤਰ", "उत्तरम्", "उत्तरं", "பதில்", "விடை", "సమాధానం", "جواب"}
+)
+TERMINAL_LABELED_CHOICE_PATTERN = re.compile(
+    r"^[\s*_`#~-]*(?P<label>[^:：\n]{2,80})[:：]"
+    r"[\s*_`#~\[({-]*(?P<choice>[A-Za-z])"
+    r"[\s*_`#~\])}.।。!?,;:：-]*$"
+)
 
 
 def _parse_answer_letter_strict_boxed(text: str, allowed_letters: set[str]) -> tuple[Optional[str], str, bool]:
@@ -233,7 +262,49 @@ def _match_option_text(text: str, options: list[dict[str, str]], allowed_letters
     return None
 
 
+def _answer_payloads(text: str, answer_prefix: Optional[str]) -> list[str]:
+    """Collect final-answer payloads after Answer: or a row-provided prefix."""
+    text = unicodedata.normalize("NFKC", text)
+    found: list[tuple[int, str]] = []
+    for match in ANSWER_COLON_PAYLOAD_PATTERN.finditer(text):
+        found.append((match.start(), match.group(1)))
+    if answer_prefix:
+        normalized_prefix = unicodedata.normalize("NFKC", answer_prefix)
+        pattern = re.compile(re.escape(normalized_prefix) + r"\s*", re.IGNORECASE)
+        for match in pattern.finditer(text):
+            line_end = text.find("\n", match.end())
+            if line_end < 0:
+                line_end = len(text)
+            found.append((match.start(), text[match.end() : line_end]))
+    found.sort(key=lambda item: item[0])
+    return [payload for _start, payload in found]
+
+
+def _extract_from_answer_payloads(
+    text: str, allowed_letters: set[str], answer_prefix: Optional[str] = None
+) -> Optional[str]:
+    pred = None
+    for candidate in reversed(_answer_payloads(text, answer_prefix)):
+        if pred is None:
+            pred = _extract_choice_letter(candidate, allowed_letters)
+    return pred
+
+
+def _extract_terminal_labeled_choice(text: str, allowed_letters: set[str]) -> Optional[str]:
+    """Accept a recognized Indic label and one choice on the final nonempty line."""
+    line = next((line.strip() for line in reversed(text.splitlines()) if line.strip()), "")
+    match = TERMINAL_LABELED_CHOICE_PATTERN.fullmatch(unicodedata.normalize("NFKC", line))
+    if not match:
+        return None
+    label = match.group("label").strip("*_`#~ ")
+    if label not in LOCALIZED_ANSWER_LABELS:
+        return None
+    choice = match.group("choice").upper()
+    return choice if choice in allowed_letters else None
+
+
 def _normalize_extracted_answer(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text)
     return (
         text.replace("أ", " A")
         .replace("ب", " B")
@@ -313,6 +384,10 @@ def _parse_answer_with_custom_regexes(
 
 
 class MCQAResourcesServer(SimpleResourcesServer):
+    # Each verification matches the chosen option against the request: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: MCQAResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -320,11 +395,29 @@ class MCQAResourcesServer(SimpleResourcesServer):
         return app
 
     def compute_metrics(self, tasks):
-        return compute_pass_majority_metrics(
+        metrics = compute_pass_majority_metrics(
             tasks,
             score_fn=lambda r: {"accuracy": r["reward"]},
             answer_key="extracted_answer",
         )[0]
+        rows = [row for task in tasks for row in task]
+        if any("strict_boxed_reward" in row or "normalized_reward" in row for row in rows):
+            for name in ("strict_boxed", "normalized"):
+                if any(f"{name}_reward" not in row or f"{name}_answer" not in row for row in rows):
+                    raise ValueError("Mixed single/dual MCQA scores: reverify all rows before aggregation")
+                component_metrics = compute_pass_majority_metrics(
+                    tasks,
+                    score_fn=lambda r: {f"{name}_accuracy": r[f"{name}_reward"]},
+                    answer_key=f"{name}_answer",
+                )[0]
+                for key, value in component_metrics.items():
+                    if key == "per_sample_aggregate":
+                        metrics[key].update(
+                            {(f"{name}_no_answer" if k == "no_answer" else k): v for k, v in value.items()}
+                        )
+                    else:
+                        metrics[key.replace("/no_answer", f"/{name}_no_answer")] = value
+        return metrics
 
     def get_key_metrics(self, agent_metrics):
         key = {}
@@ -335,9 +428,16 @@ class MCQAResourcesServer(SimpleResourcesServer):
         key.update(highest_k_metrics(agent_metrics, "majority@{k}", score_names=["accuracy"]))
         if "pass@1/accuracy" in agent_metrics:
             key["pass@1/accuracy"] = agent_metrics["pass@1/accuracy"]
+        for name in ("strict_boxed", "normalized"):
+            score_names = [f"{name}_accuracy", f"{name}_no_answer"]
+            key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=score_names))
+            key.update(highest_k_metrics(agent_metrics, "majority@{k}", score_names=[f"{name}_accuracy"]))
+            metric = f"pass@1/{name}_accuracy"
+            if metric in agent_metrics:
+                key[metric] = agent_metrics[metric]
         return key
 
-    async def verify(self, body: MCQAVerifyRequest) -> MCQAVerifyResponse:
+    async def verify(self, body: MCQAVerifyRequest) -> MCQADualVerifyResponse | MCQAVerifyResponse:
         # Pull options/expected_answer from dataset-style metadata if available
         options, expected_answer = _extract_options_and_expected(body)
         gold = (expected_answer or "").strip().upper()
@@ -349,6 +449,31 @@ class MCQAResourcesServer(SimpleResourcesServer):
         pred: Optional[str] = None
 
         text = body.response.output_text.strip()
+        if grading_mode == "boxed_and_normalized":
+            strict, normalized = extract_boxed_and_normalized_answers(text, options=options)
+            strict_reward = float(strict is not None and strict == gold)
+            normalized_reward = float(normalized is not None and normalized == gold)
+            return MCQADualVerifyResponse(
+                **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
+                reward=strict_reward,
+                reward_components={"strict_boxed": strict_reward, "normalized": normalized_reward},
+                expected_answer=gold,
+                extracted_answer=strict,
+                strict_boxed_answer=strict,
+                normalized_answer=normalized,
+                strict_boxed_reward=strict_reward,
+                normalized_reward=normalized_reward,
+            )
+        if grading_mode == "milu_v2":
+            match = MILU_V2_ANSWER_PATTERN.search(text)
+            pred = next((group.upper() for group in match.groups() if group), None) if match else None
+            return MCQAVerifyResponse(
+                **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
+                reward=float(pred is not None and pred == gold),
+                expected_answer=gold,
+                extracted_answer=pred,
+            )
+
         if not text:
             return MCQAVerifyResponse(
                 **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
@@ -396,10 +521,18 @@ class MCQAResourcesServer(SimpleResourcesServer):
                             if pred is not None:
                                 break
             elif grading_mode == "lenient_answer_colon_md":
-                for candidate in reversed(ANSWER_COLON_PAYLOAD_PATTERN.findall(text)):
-                    pred = _extract_choice_letter(candidate, allowed_letters)
-                    if pred is not None:
-                        break
+                answer_prefix = (body.template_metadata or {}).get("answer_prefix")
+                pred = _extract_from_answer_payloads(
+                    text,
+                    allowed_letters,
+                    answer_prefix=answer_prefix,
+                )
+                if pred is None and answer_prefix:
+                    pred, _, _ = _parse_answer_letter_strict_boxed(text, allowed_letters)
+                # Preserve all existing consumers and fallback precedence. Only
+                # explicitly opted-in rows gain localized-label normalization.
+                if pred is None and (body.template_metadata or {}).get("allow_localized_answer_labels") is True:
+                    pred = _extract_terminal_labeled_choice(text, allowed_letters)
 
         is_correct = (pred == gold) if (pred is not None and gold) else False
         reward = 1.0 if is_correct else 0.0
@@ -424,6 +557,63 @@ def _get_allowed_letters_from_options(
                 if isinstance(k, str) and len(k) == 1 and k.isalpha() and v is not None:
                     letters.add(k.upper())
     return letters
+
+
+def extract_boxed_and_normalized_answers(
+    text: str, *, options: Optional[list[dict[str, str]]]
+) -> tuple[Optional[str], Optional[str]]:
+    """Return strict boxed and normalized letters without consulting the gold label.
+
+    Strict uses Gym's existing last-box parser, including its supported LaTeX
+    wrappers. Normalized preserves any valid strict answer; otherwise it accepts
+    a normalized last-box payload, the last Answer:/answer is payload, or a bare
+    letter/unique exact option text. An invalid explicit final payload does not
+    fall back to an earlier answer or arbitrary letters in the explanation.
+    """
+    allowed = _get_allowed_letters_from_options(options)
+    strict, _, _ = _parse_answer_letter_strict_boxed(text, allowed)
+    if strict is not None:
+        return strict, strict
+
+    canonical = unicodedata.normalize("NFKC", text).strip()
+    canonical = re.sub(r"\\boxed\s+\{", r"\\boxed{", canonical)
+    inner = _extract_boxed_inner(canonical)
+    if "\\boxed{" in canonical:
+        if inner is None:
+            return None, None
+        payload = _strip_latex_wrappers(inner.strip())
+        explicit = True
+    else:
+        payloads = _answer_payloads(canonical, answer_prefix="answer is")
+        payload = payloads[-1] if payloads else canonical
+        explicit = bool(payloads)
+
+    # Exact equality avoids awarding credit for a short option inside unrelated prose.
+    # Match before label normalization, which can turn letters inside Indic words
+    # into apparent choice labels.
+    normalized_payload = _normalize_for_match(payload.strip().strip("*_`"))
+    matches = {
+        label.upper()
+        for entry in options or []
+        for label, option in entry.items()
+        if option is not None and label.upper() in allowed and _normalize_for_match(option) == normalized_payload
+    }
+    if matches:
+        return None, next(iter(matches)) if len(matches) == 1 else None
+
+    candidate = _normalize_extracted_answer(payload)
+    if _contains_ambiguous_choice_list(candidate, allowed):
+        return None, None
+    bare = candidate.strip("*_`[]() \t\n\r.,;:!").upper()
+    if len(bare) == 1 and bare in allowed:
+        return None, bare
+
+    # Only a leading choice label may precede an explanation. Do not search prose
+    # for incidental letters (including letters inside Indic words after normalization).
+    leading_label = re.match(r"^[A-Z](?=$|[\s).:\-])", bare)
+    if explicit and leading_label and leading_label.group(0) in allowed:
+        return None, leading_label.group(0)
+    return None, None
 
 
 if __name__ == "__main__":

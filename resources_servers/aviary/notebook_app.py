@@ -15,7 +15,6 @@ import logging
 import os
 import shutil
 import zipfile
-from ast import literal_eval
 from pathlib import Path
 from tempfile import mkdtemp
 from typing import cast
@@ -27,6 +26,7 @@ from tqdm import tqdm
 
 from aviary.core import EvalAnswerMode, Message, Messages, TaskDataset, Tool, eval_answer
 from aviary.envs.notebook import NBEnvironment
+from aviary.envs.notebook import config as notebook_config
 from aviary.envs.notebook.utils import NBLanguage
 from resources_servers.aviary.app import AviaryResourcesServer
 
@@ -34,6 +34,9 @@ from resources_servers.aviary.app import AviaryResourcesServer
 logger = logging.getLogger(__name__)
 
 CAPSULE_DATA_LOCATION = os.getenv("BIXBENCH_CAPSULE_DATA_LOCATION", "~/bixbench_capsules")
+notebook_config.NB_ENVIRONMENT_DOCKER_IMAGE = os.getenv(
+    "NB_ENVIRONMENT_DOCKER_IMAGE", "futurehouse/bixbench:aviary-notebook-env"
+)
 
 
 class BixBenchEnv(NBEnvironment):
@@ -109,16 +112,14 @@ class BixBenchDataset(TaskDataset[BixBenchEnv]):
     def __init__(self, split: str = "train"):
         bixbench_repo_id = "futurehouse/BixBench"
         dataset = cast(Dataset, load_dataset(bixbench_repo_id, split=split))
-        self.dataset: list[dict] = []
-        for row in dataset:
-            for question in literal_eval(row["questions"]):
-                self.dataset.append(
-                    {
-                        "uuid": row["uuid"],
-                        "question": question["question"],
-                        "answer": question["ideal_answer"],
-                    }
-                )
+        self.dataset = [
+            {
+                "uuid": row["capsule_uuid"],
+                "question": row["question"],
+                "answer": row["ideal"],
+            }
+            for row in dataset
+        ]
 
         self.capsule_path = Path(CAPSULE_DATA_LOCATION).expanduser()
         if not self.capsule_path.exists():

@@ -1,0 +1,12 @@
+simple_agent_with_compaction:
+  responses_api_agents:
+    simple_agent_with_compaction:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model_for_compaction
+      context_history:
+        enabled: true

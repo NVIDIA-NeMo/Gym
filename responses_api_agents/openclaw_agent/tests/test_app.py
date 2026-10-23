@@ -15,9 +15,16 @@
 
 import asyncio
 import json
+import os
+import signal
+import sys
+import threading
 from pathlib import Path
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import psutil
+import pytest
 import yaml
 
 from nemo_gym.config_types import ModelServerRef
@@ -44,6 +51,12 @@ from responses_api_agents.openclaw_agent.app import (
     parse_openclaw_session_events,
     parse_openclaw_session_items,
 )
+
+
+@pytest.fixture(autouse=True)
+def no_host_install():
+    with patch("responses_api_agents.openclaw_agent.app.ensure_openclaw"):
+        yield
 
 
 class _FakeResponse:
@@ -74,9 +87,7 @@ def _config(**kwargs) -> OpenClawAgentConfig:
 
 
 def _make_agent(**kwargs) -> OpenClawAgent:
-    with patch("responses_api_agents.openclaw_agent.app.OpenClawAgent.model_post_init"):
-        agent = OpenClawAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
+    agent = OpenClawAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
     return agent
 
 
@@ -100,6 +111,53 @@ class TestSanity:
     def test_semaphore_initialized(self) -> None:
         agent = _make_agent(concurrency=4)
         assert agent.sem._value == 4
+
+
+@pytest.mark.asyncio
+async def test_lazy_local_install_uses_configured_node_runtime(tmp_path: Path) -> None:
+    with patch("responses_api_agents.openclaw_agent.app.ensure_openclaw") as install:
+        agent = _make_agent(node_bin_dir="/opt/task-node/bin")
+        install.assert_not_called()
+        with (
+            patch.object(agent, "_workspace_root", return_value=tmp_path),
+            patch.object(agent, "_run_exec", AsyncMock(side_effect=RuntimeError("stop before onboard"))),
+        ):
+            for _ in range(2):
+                with pytest.raises(RuntimeError, match="stop before onboard"):
+                    await agent._run_openclaw("task", None)
+        install.assert_called_once_with("2026.6.11", node_bin_dir="/opt/task-node/bin")
+
+
+async def test_failed_install_retries_after_all_waiters_cancel() -> None:
+    started, release = threading.Event(), threading.Event()
+
+    def fail_install(*args, **kwargs) -> None:
+        started.set()
+        assert release.wait(3)
+        raise RuntimeError("install failed after cancellation")
+
+    agent = _make_agent()
+    with (
+        patch("responses_api_agents.openclaw_agent.app.ensure_openclaw", side_effect=fail_install) as install,
+        patch.object(agent, "_workspace_root", side_effect=RuntimeError("install completed")),
+    ):
+        waiter = asyncio.create_task(agent._run_openclaw("task", None))
+        try:
+            async with asyncio.timeout(2):
+                while not started.is_set():
+                    await asyncio.sleep(0.01)
+            setup = agent._local_setup_task
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+        finally:
+            release.set()
+        with pytest.raises(RuntimeError, match="after cancellation"):
+            await setup
+        install.side_effect = None
+        with pytest.raises(RuntimeError, match="install completed"):
+            await agent._run_openclaw("task", None)
+        assert install.call_count == 2
 
 
 class TestExtractInstruction:
@@ -353,6 +411,17 @@ class TestBuildOpenclawConfig:
         assert agent._effective_model() == "nemo/Qwen3.6-35B-A3B"
         assert provider["baseUrl"] == "http://model/v1"
         assert provider["models"][0]["id"] == "Qwen3.6-35B-A3B"
+        assert provider["timeoutSeconds"] == 600
+
+    def test_explicit_local_provider_timeout_is_preserved(self) -> None:
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            openclaw_config={"models": {"providers": {"nemo": {"timeoutSeconds": 1800}}}},
+        )
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            cfg = agent._build_openclaw_config({})
+
+        assert cfg["models"]["providers"]["nemo"]["timeoutSeconds"] == 1800
 
     def test_context_window_and_max_tokens_omitted_by_default(self) -> None:
         # Regression: a static default here previously caused every request to fail unconditionally
@@ -661,6 +730,254 @@ class TestObservability:
         assert [gap.code for gap in episode.observations.gaps] == ["observation_capture_failed"]
 
 
+def _seed_session(home: Path, session_id: str, text: str, mtime: Optional[float] = None) -> Path:
+    session_path = home / ".openclaw" / "agents" / "main" / "sessions" / f"{session_id}.jsonl"
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    session_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session", "id": session_id}),
+                json.dumps(
+                    {
+                        "type": "message",
+                        "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+                    }
+                ),
+            ]
+        )
+    )
+    if mtime is not None:
+        os.utime(session_path, (mtime, mtime))
+    return session_path
+
+
+class TestFindPartialSession:
+    def test_returns_most_recently_written_parseable_session(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        older = _seed_session(home, "older", "old", mtime=1)
+        newer = _seed_session(home, "newer", "new", mtime=2)
+
+        assert OpenClawAgent._find_partial_session(home) == newer
+        assert older != newer
+
+    def test_skips_unparseable_files_and_returns_none_when_none_parse(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / "empty.jsonl").write_text("")
+        (home / "garbage.jsonl").write_text("not json\n")
+
+        assert OpenClawAgent._find_partial_session(home) is None
+
+    def test_returns_none_when_home_missing(self, tmp_path: Path) -> None:
+        assert OpenClawAgent._find_partial_session(tmp_path / "missing") is None
+
+
+class TestTimeoutSalvage:
+    def test_config_timeout_returns_partial_session_from_disk(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        work_dir = tmp_path / "run"
+        home = work_dir / ".openclaw-home"
+        config_path = home / ".openclaw" / "openclaw.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("{}")
+        _seed_session(home, "session-1", "partial")
+
+        async def _run_exec_stub(cmd, *, cwd, env, timeout):
+            if "onboard" in cmd:
+                return 0, "", ""
+            raise TimeoutError("openclaw timed out")
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=work_dir),
+            patch.object(agent, "_run_exec", _run_exec_stub),
+        ):
+            output, usage, _ = asyncio.run(agent._run_openclaw("solve", None))
+
+        assert output
+        assert output[0].content[0].text == "partial"
+        assert not work_dir.exists()  # workdir cleanup still runs after salvage
+
+
+class TestRunExecCancellation:
+    def test_cancellation_kills_child_process(self) -> None:
+        agent = _make_agent()
+        captured: dict = {}
+        orig_create = asyncio.create_subprocess_exec
+
+        async def _capturing_create(*args, **kwargs):
+            proc = await orig_create(*args, **kwargs)
+            captured["proc"] = proc
+            return proc
+
+        async def _main():
+            with patch("asyncio.create_subprocess_exec", _capturing_create):
+                task = asyncio.ensure_future(
+                    agent._run_exec(["sleep", "30"], cwd=None, env=os.environ.copy(), timeout=100)
+                )
+                for _ in range(200):
+                    if "proc" in captured:
+                        break
+                    await asyncio.sleep(0.01)
+                assert "proc" in captured, "subprocess never started"
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                await captured["proc"].wait()
+
+        asyncio.run(_main())
+
+        assert captured["proc"].returncode is not None  # cancellation killed it, not left running
+
+    def test_cancellation_kills_descendant_processes(self) -> None:
+        agent = _make_agent()
+        captured: dict = {}
+        orig_create = asyncio.create_subprocess_exec
+
+        async def _capturing_create(*args, **kwargs):
+            proc = await orig_create(*args, **kwargs)
+            captured["proc"] = proc
+            return proc
+
+        async def _main():
+            with patch("asyncio.create_subprocess_exec", _capturing_create):
+                task = asyncio.ensure_future(
+                    agent._run_exec(
+                        [
+                            sys.executable,
+                            "-c",
+                            "import subprocess, sys, time; "
+                            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                            "time.sleep(30)",
+                        ],
+                        cwd=None,
+                        env=os.environ.copy(),
+                        timeout=100,
+                    )
+                )
+                for _ in range(200):
+                    proc = captured.get("proc")
+                    children = psutil.Process(proc.pid).children(recursive=True) if proc else []
+                    if children:
+                        break
+                    await asyncio.sleep(0.01)
+                assert children, "descendant process never started"
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=5)
+                return children
+
+        children = asyncio.run(_main())
+
+        assert captured["proc"].returncode is not None
+        # Orphaned descendants are reaped asynchronously by init after SIGKILL.
+        # Require disappearance within a bound, without racing that OS cleanup.
+        _, alive = psutil.wait_procs(children, timeout=3)
+        assert not alive, f"Descendants remain after cancellation: {alive}"
+        assert all(not psutil.pid_exists(child.pid) for child in children)
+
+
+class TestSigtermSalvage:
+    def test_sigterm_returns_partial_session_from_disk(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        work_dir = tmp_path / "run"
+        home = work_dir / ".openclaw-home"
+        config_path = home / ".openclaw" / "openclaw.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("{}")
+        _seed_session(home, "session-1", "partial")
+
+        registered: dict = {}
+
+        async def _run_exec_stub(cmd, *, cwd, env, timeout):
+            if "onboard" in cmd:
+                return 0, "", ""
+            await asyncio.Event().wait()  # hangs until the SIGTERM path cancels it
+
+        async def _main():
+            task = asyncio.ensure_future(agent._run_openclaw("solve", None))
+            for _ in range(100):
+                if signal.SIGTERM in registered:
+                    break
+                await asyncio.sleep(0.01)
+            assert signal.SIGTERM in registered, "SIGTERM handler was never installed"
+            registered[signal.SIGTERM](signal.SIGTERM, None)
+            return await task
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=work_dir),
+            patch.object(agent, "_run_exec", _run_exec_stub),
+            patch("signal.getsignal", return_value=signal.SIG_DFL),
+            patch("signal.signal", side_effect=lambda sig, cb: registered.__setitem__(sig, cb)),
+        ):
+            output, usage, _ = asyncio.run(_main())
+
+        assert output
+        assert output[0].content[0].text == "partial"
+        assert not work_dir.exists()
+
+    def test_handler_installed_once_and_chains_to_previous_across_concurrent_runs(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        work_dir_a, work_dir_b = tmp_path / "run_a", tmp_path / "run_b"
+        for work_dir in (work_dir_a, work_dir_b):
+            home = work_dir / ".openclaw-home"
+            config_path = home / ".openclaw" / "openclaw.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text("{}")
+            _seed_session(home, "session-1", "partial")
+
+        async def _run_exec_stub(cmd, *, cwd, env, timeout):
+            if "onboard" in cmd:
+                return 0, "", ""
+            await asyncio.Event().wait()  # hangs until the SIGTERM path cancels it
+
+        install_calls = 0
+        previous_calls = 0
+
+        def _fake_previous() -> None:
+            nonlocal previous_calls
+            previous_calls += 1
+
+        async def _main():
+            loop = asyncio.get_running_loop()
+            loop.add_signal_handler(signal.SIGTERM, _fake_previous)
+            process_handler = signal.getsignal(signal.SIGTERM)
+            real_signal = signal.signal
+
+            def _install_signal(sig, handler):
+                nonlocal install_calls
+                install_calls += 1
+                return real_signal(sig, handler)
+
+            try:
+                work_dirs = iter([work_dir_a, work_dir_b])
+                with (
+                    patch.object(agent, "_workspace_root", side_effect=lambda: next(work_dirs)),
+                    patch.object(agent, "_run_exec", _run_exec_stub),
+                    patch("signal.signal", side_effect=_install_signal),
+                ):
+                    task_a = asyncio.ensure_future(agent._run_openclaw("solve", None))
+                    task_b = asyncio.ensure_future(agent._run_openclaw("solve", None))
+                    for _ in range(100):
+                        if len(agent.sigterm_events) == 2:
+                            break
+                        await asyncio.sleep(0.01)
+                    assert len(agent.sigterm_events) == 2
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    return await asyncio.gather(task_a, task_b)
+            finally:
+                real_signal(signal.SIGTERM, process_handler)
+                loop.remove_signal_handler(signal.SIGTERM)
+
+        results = asyncio.run(_main())
+
+        assert install_calls == 1  # installed once, not once per run
+        assert previous_calls == 1  # the previously-installed handler (uvicorn's) still fires
+        for output, _usage, _model in results:
+            assert output[0].content[0].text == "partial"
+
+
 class TestDeepMerge:
     def test_nested_merge(self) -> None:
         base = {"a": {"b": 1, "c": 2}}
@@ -673,11 +990,38 @@ class TestConfigYaml:
         app_path = Path(__file__).resolve().parent.parent / "app.py"
         compile(app_path.read_text(), str(app_path), "exec")
 
-    def test_config_yaml_parses(self) -> None:
+    def test_default_config_selects_environment_sessions(self) -> None:
         cfg_path = Path(__file__).resolve().parent.parent / "configs" / "openclaw_agent.yaml"
         data = yaml.safe_load(cfg_path.read_text())
-        assert "openclaw_agent" in data
+        assert set(data) == {"openclaw_agent"}
         inner = data["openclaw_agent"]["responses_api_agents"]["openclaw_agent"]
         assert inner["entrypoint"] == "app.py"
-        assert inner["concurrency"] == 32
-        assert inner["command"] == "openclaw"
+        assert inner["resources_server"] is None
+        assert inner["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
+        assert inner["model"] == "${policy_model_name}"
+        assert inner["sandbox_install_timeout_seconds"] == 600
+        assert inner["session_close_timeout_seconds"] == 60
+
+
+@pytest.mark.parametrize("budget,expected", [(None, 1800), ("12.5", 12.5), ("3600", 1800), ("invalid", 1800)])
+async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget: str | None, expected: float) -> None:
+    agent = _make_agent(timeout=1800, workspace_root=str(tmp_path))
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input="task", metadata=None if budget is None else {"agent_timeout_sec": budget}
+    )
+    process = MagicMock(returncode=0)
+    process.communicate = AsyncMock(return_value=(b"", b""))
+    work_dir = tmp_path / "run"
+    config_path = work_dir / ".openclaw-home" / ".openclaw" / "openclaw.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("{}")
+    module = "responses_api_agents.openclaw_agent.app"
+    with (
+        patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)),
+        patch(f"{module}.asyncio.wait_for", wraps=asyncio.wait_for) as wait,
+        patch.object(agent, "_workspace_root", return_value=work_dir),
+    ):
+        response = await agent._create_response(body)
+    assert [call.kwargs["timeout"] for call in wait.await_args_list] == [agent.config.setup_timeout, expected]
+    assert response.metadata == {"agent_timeout_sec": str(float(expected))}
+    assert agent.config.timeout == 1800
