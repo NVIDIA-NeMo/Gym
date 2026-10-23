@@ -329,7 +329,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 async with self.checkpoint_step(request, handles.resources_verify):
                     verification = await self._verify(request, handles, agent_response, observations, trajectory)
             else:
-                # The flag marks the fixed reward, so reward profiling and training can tell it from a measured one.
+                # The flag marks the fixed reward, so anything reading the result can tell it from a measured one.
                 verification = SingleAgentTurnResult.model_validate(
                     self._verify_body(request, agent_response)
                     | {"reward": skipped_reward, "verification_skipped": True}
