@@ -41,7 +41,9 @@ def inspect_row(row: dict, *, asset_root: Path) -> list[str]:
     for turn in turns:
         response = turn.get("response") or {}
         native_id = (response.get("metadata") or {}).get("harness_session_id")
-        if native_id:
+        if not isinstance(native_id, str) or not native_id:
+            errors.append("native_conversation_not_continuous")
+        else:
             sessions.add(native_id)
         records = (response.get("_ng_agent_observations") or {}).get("records") or []
         roots = [r for r in records if r.get("kind") == "agent_invocation" and not r.get("parent_invocation_id")]

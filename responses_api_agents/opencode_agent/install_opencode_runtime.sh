@@ -38,10 +38,32 @@ mkdir -p "$runtime/home" "$runtime/cache" "$runtime/data" "$runtime/config"
 export HOME="$runtime/home" XDG_CACHE_HOME="$runtime/cache" XDG_DATA_HOME="$runtime/data" XDG_CONFIG_HOME="$runtime/config"
 if [ -n "$source_binary" ]; then
   [ -n "$source_sha256" ] || { echo 'A preinstalled OpenCode binary requires its SHA-256' >&2; exit 1; }
-  "$python_executable" -I -c 'import hashlib,pathlib,sys; p=pathlib.Path(sys.argv[1]); assert p.is_file() and hashlib.sha256(p.read_bytes()).hexdigest() == sys.argv[2], "OpenCode executable digest mismatch"' "$source_binary" "$source_sha256"
-  cp -- "$source_binary" "$runtime/opencode"
-  chmod +x "$runtime/opencode"
-  [ "$("$runtime/opencode" --version)" = "$version" ] || { echo 'OpenCode executable version mismatch' >&2; exit 1; }
+  # Publish a verified new inode so active sessions can keep executing the old one.
+  "$python_executable" -I - "$source_binary" "$source_sha256" "$runtime/opencode" "$version" <<'PY'
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+source, expected, target, version = sys.argv[1:]
+if not Path(source).is_file():
+    raise ValueError("OpenCode executable digest mismatch")
+fd, staged = tempfile.mkstemp(prefix=".opencode-", dir=Path(target).parent)
+os.close(fd)
+try:
+    shutil.copyfile(source, staged)
+    if hashlib.sha256(Path(staged).read_bytes()).hexdigest() != expected:
+        raise ValueError("OpenCode executable digest mismatch")
+    os.chmod(staged, 0o755)
+    if subprocess.check_output([staged, "--version"], text=True).rstrip("\n") != version:
+        raise ValueError("OpenCode executable version mismatch")
+    os.replace(staged, target)
+finally:
+    Path(staged).unlink(missing_ok=True)
+PY
 fi
 cached=false
 if [ -x "$runtime/opencode" ] && [ "$("$runtime/opencode" --version)" = "$version" ]; then

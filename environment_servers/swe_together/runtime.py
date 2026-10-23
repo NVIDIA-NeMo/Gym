@@ -50,7 +50,8 @@ class RuntimeProvisioner:
 
     def __init__(self, *, provider_config: dict, manifest_path: Path, helper_image: str):
         self.manifest = load_runtime_manifest(manifest_path)
-        self.provider = create_provider(provider_config)
+        self._provider_config = dict(provider_config)
+        self.provider = create_provider(self._provider_config)
         if not isinstance(self.provider, SupportsSandboxSharedStorage):
             raise ValueError("SWE-Together requires provider shared storage for private runtime mounts")
         self.helper = AsyncSandbox(self.provider)
@@ -116,6 +117,8 @@ class RuntimeProvisioner:
                 # A failed install is retryable by a later episode. Release the
                 # failed helper before allocating a replacement.
                 await self.helper.stop()
+                self.provider = create_provider(self._provider_config)
+                self.helper = AsyncSandbox(self.provider)
                 self._start_task = None
                 raise
             if session_id in self._bundles:
@@ -148,9 +151,10 @@ class RuntimeProvisioner:
         return self.provider.shared_volume_metadata()
 
     async def release(self, session_id: str):
-        if relative := self._bundles.get(session_id):
-            await self._exec("release", STORAGE_ROOT + "/" + relative, "gym-swet-runtime-" + self._owner)
-            self._bundles.pop(session_id)
+        async with self._lock:
+            if relative := self._bundles.get(session_id):
+                await self._exec("release", STORAGE_ROOT + "/" + relative, "gym-swet-runtime-" + self._owner)
+                self._bundles.pop(session_id)
 
     async def close(self):
         if self._bundles:

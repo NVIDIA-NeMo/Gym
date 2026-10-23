@@ -7,6 +7,7 @@ import json
 import shutil
 import sys
 import tarfile
+from pathlib import Path
 from shlex import quote
 from types import SimpleNamespace
 
@@ -44,8 +45,8 @@ def test_runtime_hashes_are_checked_before_provider_allocation(tmp_path, monkeyp
         runtime.RuntimeProvisioner(provider_config={}, manifest_path=path, helper_image="helper")
 
 
-@pytest.mark.asyncio
-async def test_cache_upload_once_and_private_role_mounts(tmp_path, monkeypatch):
+@pytest.fixture
+def provisioner(tmp_path, monkeypatch):
     root = tmp_path / "storage"
     root.mkdir()
     monkeypatch.setattr(runtime, "STORAGE_ROOT", str(root))
@@ -57,8 +58,7 @@ async def test_cache_upload_once_and_private_role_mounts(tmp_path, monkeypatch):
         def shared_volume_metadata(self):
             return {"placement": "shared"}
 
-    provider = Provider()
-    monkeypatch.setattr(runtime, "create_provider", lambda _: provider)
+    monkeypatch.setattr(runtime, "create_provider", lambda _: Provider())
 
     class Helper:
         def __init__(self, provider):
@@ -66,6 +66,8 @@ async def test_cache_upload_once_and_private_role_mounts(tmp_path, monkeypatch):
             self.stopped = False
 
         async def start(self, spec):
+            if self.stopped:
+                raise RuntimeError("Helper is closed")
             self.spec = spec
 
         async def exec(self, command, **kwargs):
@@ -86,9 +88,12 @@ async def test_cache_upload_once_and_private_role_mounts(tmp_path, monkeypatch):
             self.stopped = True
 
     monkeypatch.setattr(runtime, "AsyncSandbox", Helper)
-    provisioner = runtime.RuntimeProvisioner(
-        provider_config={}, manifest_path=manifest(tmp_path), helper_image="helper"
-    )
+    return runtime.RuntimeProvisioner(provider_config={}, manifest_path=manifest(tmp_path), helper_image="helper")
+
+
+@pytest.mark.asyncio
+async def test_cache_upload_once_and_private_role_mounts(provisioner):
+    root = Path(runtime.STORAGE_ROOT)
     first = await provisioner.prepare("one")
     second = await provisioner.prepare("two")
     assert first != second and provisioner.helper.uploads == 4
@@ -109,3 +114,105 @@ async def test_cache_upload_once_and_private_role_mounts(tmp_path, monkeypatch):
     await provisioner.release("two")
     await provisioner.close()
     assert provisioner.helper.stopped and (root / "gym-swet-runtime-cache").is_dir()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_fails", [False, True])
+async def test_failed_startup_retries_with_fresh_helper_and_provider(provisioner, monkeypatch, stop_fails):
+    helper, provider = provisioner.helper, provisioner.provider
+    cache = provisioner._cache
+    stop = helper.stop
+
+    async def fail_cache_once(name, artifact):
+        monkeypatch.setattr(provisioner, "_cache", cache)
+        raise RuntimeError("Transient cache failure")
+
+    async def fail_stop_once():
+        monkeypatch.setattr(helper, "stop", stop)
+        raise RuntimeError("Transient stop failure")
+
+    monkeypatch.setattr(provisioner, "_cache", fail_cache_once)
+    if stop_fails:
+        monkeypatch.setattr(helper, "stop", fail_stop_once)
+    with pytest.raises(RuntimeError, match="Transient stop failure" if stop_fails else "Transient cache failure"):
+        await provisioner.prepare("one")
+    if stop_fails:
+        assert provisioner.helper is helper and provisioner.provider is provider
+        assert provisioner._start_task.done() and not helper.stopped
+        with pytest.raises(RuntimeError, match="Transient cache failure"):
+            await provisioner.prepare("one")
+    assert helper.stopped
+    assert provisioner.helper is not helper and provisioner.provider is not provider
+    await provisioner.prepare("two")
+    await provisioner.release("two")
+    await provisioner.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_waiter_preserves_shared_startup(provisioner, monkeypatch):
+    entered, resume = asyncio.Event(), asyncio.Event()
+    cache = provisioner._cache
+    helper = provisioner.helper
+
+    async def delayed_cache(name, artifact):
+        entered.set()
+        await resume.wait()
+        await cache(name, artifact)
+
+    monkeypatch.setattr(provisioner, "_cache", delayed_cache)
+    waiter = asyncio.create_task(provisioner.prepare("one"))
+    await entered.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert not provisioner._start_task.done() and not helper.stopped
+    resume.set()
+    await provisioner.prepare("two")
+    assert provisioner.helper is helper and helper.uploads == 4
+    await provisioner.release("two")
+    await provisioner.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_release_and_prepare_are_serialized(provisioner, monkeypatch):
+    first, second = await provisioner.prepare("one"), await provisioner.prepare("two")
+    execute = provisioner._exec
+    active = 0
+
+    async def exclusive_exec(action, *args):
+        nonlocal active
+        active += 1
+        try:
+            assert active == 1, "Runtime bundle filesystem operations overlap"
+            await asyncio.sleep(0)
+            return await execute(action, *args)
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(provisioner, "_exec", exclusive_exec)
+    await asyncio.gather(provisioner.release("one"), provisioner.release("two"), provisioner.prepare("three"))
+    root = Path(runtime.STORAGE_ROOT)
+    assert not (root / first).exists() and not (root / second).exists()
+    assert set(provisioner._bundles) == {"three"}
+    assert (root / provisioner._bundles["three"]).is_dir()
+    await provisioner.release("three")
+    await provisioner.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_release_retains_bundle_for_retry(provisioner, monkeypatch):
+    relative = await provisioner.prepare("one")
+    execute = provisioner._exec
+
+    async def fail_release(action, *args):
+        raise RuntimeError("Transient deletion failure")
+
+    monkeypatch.setattr(provisioner, "_exec", fail_release)
+    with pytest.raises(RuntimeError, match="Transient deletion failure"):
+        await provisioner.release("one")
+    assert provisioner._bundles == {"one": relative}
+    with pytest.raises(RuntimeError, match="remain owned"):
+        await provisioner.close()
+    monkeypatch.setattr(provisioner, "_exec", execute)
+    await provisioner.release("one")
+    await provisioner.close()
