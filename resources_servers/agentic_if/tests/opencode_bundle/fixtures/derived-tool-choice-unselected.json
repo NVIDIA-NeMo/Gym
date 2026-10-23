@@ -1,0 +1,99 @@
+{
+ "case": "derived-tool-choice-unselected",
+ "kind": "gateway",
+ "source": "derived: model_boundary refuses a tool_choice that names an unselected tool",
+ "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
+ "notes": "",
+ "spec": {
+  "schema_version": 1,
+  "harness": "opencode",
+  "task_backend": "swe",
+  "tools": {
+   "tool_names": {
+    "read": "read"
+   },
+   "tool_descriptions": {},
+   "tool_parameter_descriptions": {},
+   "tool_interfaces": {}
+  },
+  "workspace_files": {},
+  "events": [],
+  "checks": [],
+  "provenance": {}
+ },
+ "params": {
+  "input": [
+   {
+    "content": "Fix it",
+    "role": "user",
+    "type": "message"
+   }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": []
+ },
+ "calls": [
+  {
+   "headers": {
+    "x-session-id": "root",
+    "x-opencode-assistant-message-id": "a1"
+   },
+   "opencode_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "description": "Native",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    ],
+    "tool_choice": {
+     "type": "function",
+     "function": {
+      "name": "bash"
+     }
+    }
+   },
+   "upstream_reply": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "never"
+       }
+      }
+     ]
+    }
+   },
+   "returned": null,
+   "error": "ValueError: tool_choice names an unselected tool",
+   "outgoing_request": null,
+   "opencode_request_unchanged": true
+  }
+ ],
+ "observations": [],
+ "issues": [
+  "ValueError"
+ ]
+}

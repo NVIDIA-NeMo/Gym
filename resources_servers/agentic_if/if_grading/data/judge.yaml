@@ -1,0 +1,162 @@
+# The calibrated LLM judge of the IF checks: everything it sends to the model except each check's own question.
+#
+# - A check carries its own question (`rubric`). The language checker's question, which belongs to no check, lives here
+#   (`checker_questions`).
+# - Identity: resources_servers.agentic_if.if_grading.configuration.config_hash hashes every key below except `version`, `changed` and
+#   `note`. Every cached verdict records that hash; a verdict made under another hash is never reused.
+version: v2-rule-judge-12
+changed: 2026-10-14
+note: >-
+  v12: a rule's judge question is asked together with the instruction the model was given, as the model saw it, where
+  it was and the text around it (`instruction_prompt`, `instruction`). The question stays the checklist of what to look
+  for; where the instruction says more (a condition, an exception, a scope, or the message it applies to), the
+  instruction decides, and an exception the question makes still holds unless the instruction mentions that thing. The
+  plain `prompt` stays for the language checker and for a run whose instruction is not known.
+
+model:
+  name: nvidia/zai-org/glm-5.3      # nv-inference, through the resources server's `judge_model_server`
+  api: responses
+  temperature: 0.6                  # reasoning models are never run at temperature 0
+  reasoning_effort: low
+  reasoning_summary: auto           # GLM-5.3 reasons on nv-inference only when a summary is asked for
+  max_output_tokens: 8192
+  votes: 1                          # odd; with more than one, the majority answer counts; a context's `votes` overrides it
+  attempts: 4                       # a call without a readable verdict is retried; then the grading stops with an error
+
+prompt: |-
+  You check one rule on part of a coding assistant's session.
+
+  THE QUESTION (yes means the assistant kept the rule):
+  {question}
+
+  {context_name}:
+  <<<
+  {context}
+  >>>
+
+  First give one sentence of reason, then answer the question with yes or no. Judge only this question; ignore the quality and
+  correctness of the work and every other rule.
+  Reply with one JSON object, the reason first: {{"why": "...", "answer": "yes"}} or {{"why": "...", "answer": "no"}}
+
+# The prompt of a rule's judge question when the instruction the model was given is known (v12): the instruction, where
+# it was ({where}: a line from `instruction` below, with the text around it when there is one), then the question. The
+# instruction decides where it says more; an exception of the question holds unless the instruction mentions
+# that thing.
+instruction_prompt: |-
+  You check one rule on part of a coding assistant's session.
+
+  THE INSTRUCTION THE ASSISTANT WAS GIVEN (word for word):
+  <<<
+  {instruction}
+  >>>
+  {where}
+  THE QUESTION (yes means the assistant kept the instruction):
+  {question}
+
+  Grade what the instruction asks. The question is a checklist for this kind of instruction: use it to know what to look
+  for. Where the instruction says more than the question (a condition, an exception, a scope, or the message it applies
+  to), the instruction decides. Where the question says that something does not count and the instruction does not
+  mention that thing, it still does not count.{weigh}
+
+  {context_name}:
+  <<<
+  {context}
+  >>>
+
+  First give one sentence of reason, then answer the question with yes or no. Judge only this instruction; ignore the
+  quality and correctness of the work and every other rule.
+  Reply with one JSON object, the reason first: {{"why": "...", "answer": "yes"}} or {{"why": "...", "answer": "no"}}
+
+# How the instruction is shown (v12; `instruction_parts` in resources_servers/agentic_if/if_grading/instructions.py). `where` names the
+# place by the rule's placement; the text it was in (`carrier`: the system prompt, a tool's description, the task message, the mid-run
+# message, the planted tool result) is shown around it with the instruction marked [[ ]] (`marked`), whole up to
+# whole_chars, else from before_chars before it to after_chars after it, each end moved to a line break within
+# snap_chars. An instruction that is its whole text gets `whole`; one not found in its text word for word (a translated
+# task message) gets the text unmarked (`unmarked`); one without a known text gets `bare`. `weigh` follows the
+# instruction prompt's middle paragraph when text around the instruction is shown.
+instruction:
+  where:
+    system_prompt: THE ASSISTANT'S SYSTEM PROMPT
+    task_message: THE USER'S TASK MESSAGE (the first message of the session)
+    user_turn: A USER MESSAGE THAT ARRIVED DURING THE SESSION
+    tool_output: A TOOL RESULT THE ASSISTANT GOT DURING THE SESSION
+    tool: THE DESCRIPTION OF THE TOOL {tool}
+    # Not a placement a check can have; the key stays because config_hash covers it.
+    example: NOWHERE (THIS IS A LABELLED EXAMPLE OF THE RULE, SO THE RULE'S OWN QUESTION STANDS IN FOR THE INSTRUCTION)
+  marked: "\nWHERE IT WAS: {where}, with the text around it (the instruction is marked [[ ]]):\n<<<\n{around}\n>>>\n"
+  whole: "\nWHERE IT WAS: {where} (the instruction above is the whole of it).\n"
+  unmarked: "\nWHERE IT WAS: {where}, in this text (the instruction is not in it word for word):\n<<<\n{around}\n>>>\n"
+  bare: "\nWHERE IT WAS: {where}.\n"
+  weigh: " Anything else the assistant was told next to the instruction counts where it bears on the instruction (for example a line that asks for something the instruction would otherwise forbid)."
+  whole_chars: 3000
+  before_chars: 900
+  after_chars: 500
+  snap_chars: 300
+
+# What the judge sees (a rule's `check.context`). Lengths are in characters; a longer part keeps its first 70% and its
+# last 30% with a "[... n characters cut ...]" marker between.
+contexts:
+  message:
+    title: THE MESSAGE
+    max_chars: 14000
+    call_chars: 300                 # the message's own tool calls, one line each
+  message_with_changed_files:     # for rules about the files the assistant created or changed (one call per message)
+    title: THE FILES THE ASSISTANT HAS CREATED OR CHANGED BEFORE THE MESSAGE, THEN THE MESSAGE
+    files_label: 'Files created or changed before this message (the paths of its earlier write and edit calls):'
+    message_label: '--- the message ---'
+    path_chars: 300
+    max_files: 50                   # the message itself is cut as in `message`
+  message_and_request:
+    title: THE USER'S LAST MESSAGE AND THE ASSISTANT'S REPLY
+    request_chars: 4000             # the reply itself is cut as a message
+  messages_after_request:         # the request, then every assistant message with text after it, in order (v10)
+    title: THE USER'S LAST MESSAGE, THEN EVERY ASSISTANT MESSAGE AFTER IT, IN ORDER (THE LAST ONE IS THE GRADED REPLY)
+    request_chars: 4000
+    assistant_chars: 2500           # each message before the graded one
+    max_chars: 30000                # all the messages before the graded one; the graded one is cut as a message
+  message_and_conversation:       # the conversation the assistant was given, then its reply (v10)
+    title: EVERY USER MESSAGE BEFORE THE ASSISTANT'S REPLY (THE CONVERSATION IT WAS GIVEN), THEN THE REPLY
+    user_chars: 12000               # each user message
+    max_chars: 30000                # all the user messages; the reply is cut as a message
+    reply_label: '--- the reply ---'
+  run:
+    title: THE SESSION (user messages, assistant messages, tool calls and their results, in order)
+    votes: 3                        # asked three times; the majority answer counts (v10)
+    max_chars: 40000
+    user_chars: 2000
+    assistant_chars: 2500
+    final_chars: 14000              # the last assistant message (the final report): shown whole up to this (v7)
+    call_chars: 400
+    edit_chars: 6000                # a rule with `edits: diff`: each write or edit call shown as its change, up to this (v9)
+    result_chars: 600
+    planted_chars: 3000             # a planted user message or tool result, whatever the run's length (v9)
+    long_run_steps: 60              # runs with this many steps or more cut tool results harder
+    long_run_result_chars: 250
+    evidence_chars: 3000            # a rule with `evidence: true`: the cut-out lines that hold a token the assistant wrote (v9)
+    evidence_line_chars: 300
+    over_max:                       # a run longer than max_chars is shown again with these caps before its middle is cut (v9)
+      assistant_chars: 600
+      call_chars: 160
+      edit_chars: 2500
+      user_chars: 600
+      result_chars: 120
+  after_event:
+    title: THE SESSION FROM THE EVENT ON (with the task first)
+    votes: 3                        # a long run is asked three times, the majority counts (v10) ...
+    votes_from_steps: 60            # ... from this many steps on, counted from the event (as run.long_run_steps); a shorter view is asked once
+    task_chars: 2000
+    before_chars: 1500              # the assistant message just before the event, for comparison
+    # the steps from the event on are cut as in `run`
+
+checker_questions:
+  language: >-
+    Is the message written in {language}? Its sentences must be in {language}, with no sentence or phrase in another
+    language mixed in. Code, commands, file paths, identifiers, names, technical terms, quoted text and command output
+    may stay as they are, in any language. So a sentence in {language} may keep the English form of technical terms
+    and code names (nouns such as tests, diff, commit, fix, branch, merge request, also as a heading) and of words or
+    numbers taken from a tool's output (for example a test summary such as "87 passed"), also without quotes or
+    backticks, and it is still a sentence in {language}. The words that carry the sentence (its verbs, adjectives and
+    linking words) must be in {language}: an English word in their place (for example "fixed" or "but" inside a French
+    sentence), or an English phrase or sentence of the assistant's own, breaks the rule. Text in backticks may stay as
+    it is only when it is code: a sentence of prose written in backticks is still prose, and it must be in {language}
+    too.

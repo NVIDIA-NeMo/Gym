@@ -1,0 +1,349 @@
+{
+ "case": "derived-json-history-restore",
+ "kind": "gateway",
+ "source": "derived from test_model_gateway.py::test_successful_invalid_alias_keeps_its_result_in_current_and_imported_history, alias-free",
+ "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
+ "notes": "",
+ "spec": {
+  "schema_version": 1,
+  "harness": "opencode",
+  "task_backend": "swe",
+  "tools": {
+   "tool_names": {
+    "read": "read"
+   },
+   "tool_descriptions": {},
+   "tool_parameter_descriptions": {},
+   "tool_interfaces": {}
+  },
+  "workspace_files": {},
+  "events": [],
+  "checks": [],
+  "provenance": {}
+ },
+ "params": {
+  "input": [
+   {
+    "content": "Fix it",
+    "role": "user",
+    "type": "message"
+   }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": []
+ },
+ "calls": [
+  {
+   "headers": {
+    "x-session-id": "root",
+    "x-opencode-assistant-message-id": "a1"
+   },
+   "opencode_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "upstream_reply": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+         {
+          "id": "r1",
+          "type": "function",
+          "function": {
+           "name": "read",
+           "arguments": "{ \"filePath\" : \"/app/a.py\" }"
+          }
+         }
+        ]
+       },
+       "finish_reason": "tool_calls"
+      }
+     ]
+    }
+   },
+   "returned": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+         {
+          "id": "r1",
+          "type": "function",
+          "function": {
+           "name": "read",
+           "arguments": "{ \"filePath\" : \"/app/a.py\" }"
+          }
+         }
+        ]
+       },
+       "finish_reason": "tool_calls"
+      }
+     ]
+    }
+   },
+   "error": null,
+   "outgoing_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "opencode_request_unchanged": true
+  },
+  {
+   "headers": {
+    "x-session-id": "root",
+    "x-opencode-assistant-message-id": "a2"
+   },
+   "opencode_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "r1",
+        "type": "function",
+        "function": {
+         "name": "read",
+         "arguments": "{\"filePath\":\"/app/a.py\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "r1",
+      "name": "read",
+      "content": "contents"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "upstream_reply": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "Done"
+       },
+       "finish_reason": "stop"
+      }
+     ]
+    }
+   },
+   "returned": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "Done"
+       },
+       "finish_reason": "stop"
+      }
+     ]
+    }
+   },
+   "error": null,
+   "outgoing_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "r1",
+        "type": "function",
+        "function": {
+         "name": "read",
+         "arguments": "{ \"filePath\" : \"/app/a.py\" }"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "r1",
+      "content": "contents"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "opencode_request_unchanged": true
+  }
+ ],
+ "observations": [
+  {
+   "source": "model",
+   "session_id": "root",
+   "assistant_message_id": "a1",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "execution_tools": {
+    "read": "read"
+   },
+   "response": {
+    "choices": [
+     {
+      "message": {
+       "role": "assistant",
+       "content": null,
+       "tool_calls": [
+        {
+         "id": "r1",
+         "type": "function",
+         "function": {
+          "name": "read",
+          "arguments": "{ \"filePath\" : \"/app/a.py\" }"
+         }
+        }
+       ]
+      },
+      "finish_reason": "tool_calls"
+     }
+    ]
+   }
+  },
+  {
+   "source": "model",
+   "session_id": "root",
+   "assistant_message_id": "a2",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "r1",
+        "type": "function",
+        "function": {
+         "name": "read",
+         "arguments": "{ \"filePath\" : \"/app/a.py\" }"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "r1",
+      "content": "contents"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "execution_tools": {
+    "read": "read"
+   },
+   "response": {
+    "choices": [
+     {
+      "message": {
+       "role": "assistant",
+       "content": "Done"
+      },
+      "finish_reason": "stop"
+     }
+    ]
+   }
+  }
+ ],
+ "issues": []
+}

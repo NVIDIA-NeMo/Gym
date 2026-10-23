@@ -1,0 +1,395 @@
+{
+ "case": "derived-child-intersection",
+ "kind": "gateway",
+ "source": "derived from test_model_boundary.py::test_child_permissions_are_intersected_not_expanded (child), alias-free",
+ "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
+ "notes": "",
+ "spec": {
+  "schema_version": 1,
+  "harness": "opencode",
+  "task_backend": "swe",
+  "tools": {
+   "tool_names": {
+    "read": "read",
+    "task": "task"
+   },
+   "tool_descriptions": {},
+   "tool_parameter_descriptions": {},
+   "tool_interfaces": {}
+  },
+  "workspace_files": {},
+  "events": [],
+  "checks": [],
+  "provenance": {}
+ },
+ "params": {
+  "input": [
+   {
+    "content": "Literal system for every session",
+    "role": "system",
+    "type": "message"
+   },
+   {
+    "content": "Fix it",
+    "role": "user",
+    "type": "message"
+   }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": []
+ },
+ "calls": [
+  {
+   "headers": {
+    "x-session-id": "root",
+    "x-opencode-assistant-message-id": "a1"
+   },
+   "opencode_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "description": "Native",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "task",
+       "description": "Native",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    ]
+   },
+   "upstream_reply": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "Delegating"
+       }
+      }
+     ]
+    }
+   },
+   "returned": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "Delegating"
+       }
+      }
+     ]
+    }
+   },
+   "error": null,
+   "outgoing_request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "Literal system for every session"
+     },
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "description": "Native",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "task",
+       "description": "Native",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    ]
+   },
+   "opencode_request_unchanged": true
+  },
+  {
+   "headers": {
+    "x-session-id": "child",
+    "x-opencode-assistant-message-id": "c1"
+   },
+   "opencode_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Child goal"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "description": "Native",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    ]
+   },
+   "upstream_reply": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "Child done"
+       }
+      }
+     ]
+    }
+   },
+   "returned": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "Child done"
+       }
+      }
+     ]
+    }
+   },
+   "error": null,
+   "outgoing_request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "Literal system for every session"
+     },
+     {
+      "role": "user",
+      "content": "Child goal"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "description": "Native",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    ]
+   },
+   "opencode_request_unchanged": true
+  }
+ ],
+ "observations": [
+  {
+   "source": "model",
+   "session_id": "root",
+   "assistant_message_id": "a1",
+   "request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "Literal system for every session"
+     },
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "description": "Native",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "task",
+       "description": "Native",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    ]
+   },
+   "execution_tools": {
+    "task": "task",
+    "read": "read"
+   },
+   "response": {
+    "choices": [
+     {
+      "message": {
+       "role": "assistant",
+       "content": "Delegating"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "source": "model",
+   "session_id": "child",
+   "assistant_message_id": "c1",
+   "request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "Literal system for every session"
+     },
+     {
+      "role": "user",
+      "content": "Child goal"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "description": "Native",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    ]
+   },
+   "execution_tools": {
+    "read": "read"
+   },
+   "response": {
+    "choices": [
+     {
+      "message": {
+       "role": "assistant",
+       "content": "Child done"
+      }
+     }
+    ]
+   }
+  }
+ ],
+ "issues": []
+}

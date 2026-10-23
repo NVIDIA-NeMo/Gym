@@ -138,6 +138,8 @@ class VerificationResult:
     test_output: str
     error: str | None = None
     test_patch_failed: bool = False
+    # The eval exec's error_type ("timeout", "sandbox") when the provider reported no exit status.
+    exec_error_type: str | None = None
 
 
 def clean_commands(value: str) -> str:
@@ -315,6 +317,7 @@ async def run_verification(
             test_results=None,
             test_output=output,
             error=f"workdir {inputs.workdir} not present in the image",
+            exec_error_type=result.error_type,
         )
 
     target_ids = list(inputs.fail_to_pass) + list(inputs.pass_to_pass)
@@ -329,4 +332,28 @@ async def run_verification(
         test_output=output,
         error="held-out test patch did not apply" if test_patch_failed else None,
         test_patch_failed=test_patch_failed,
+        exec_error_type=result.error_type,
     )
+
+
+def infrastructure_failure(result: VerificationResult) -> str | None:
+    """Why a completed run did not test the patch, or None when it did.
+
+    Two outcomes belong to the infrastructure, not the patch:
+
+    - The provider ended the exec without an exit status for a reason other than a timeout (``exec_error_type``
+      "sandbox").
+    - The exec exited normally but never printed ``TEST_OUTPUT_BEGIN``. The script prints it after
+      ``pre_commands`` and the patch steps, just before pytest. Under ``set +e`` none of those steps ends the script,
+      and applying the patch runs nothing from it, so the patch cannot be what stopped it.
+
+    A timeout stays a verdict: a provider may return no output on timeout, and a test the patch made hang must
+    still score 0.
+    """
+    if not result.completed:
+        return None
+    if result.exec_error_type not in (None, "timeout"):
+        return f"verifier exec ended without an exit status ({result.exec_error_type})"
+    if result.exec_error_type is None and TEST_OUTPUT_BEGIN not in result.test_output:
+        return "eval script stopped before the tests started"
+    return None

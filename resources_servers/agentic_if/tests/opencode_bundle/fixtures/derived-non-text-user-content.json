@@ -1,0 +1,80 @@
+{
+ "case": "derived-non-text-user-content",
+ "kind": "gateway",
+ "source": "derived: model_boundary refuses non-text user content in the root session",
+ "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
+ "notes": "",
+ "spec": {
+  "schema_version": 1,
+  "harness": "opencode",
+  "task_backend": "swe",
+  "tools": {
+   "tool_descriptions": {},
+   "tool_parameter_descriptions": {},
+   "tool_interfaces": {}
+  },
+  "workspace_files": {},
+  "events": [],
+  "checks": [],
+  "provenance": {}
+ },
+ "params": {
+  "input": [
+   {
+    "content": "Fix it",
+    "role": "user",
+    "type": "message"
+   }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": []
+ },
+ "calls": [
+  {
+   "headers": {
+    "x-session-id": "root",
+    "x-opencode-assistant-message-id": "a1"
+   },
+   "opencode_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "Fix it"
+       },
+       {
+        "type": "image_url",
+        "image_url": {
+         "url": "data:,"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "upstream_reply": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "never"
+       }
+      }
+     ]
+    }
+   },
+   "returned": null,
+   "error": "ValueError: OpenCode's user prompts must contain only Chat Completions text parts",
+   "outgoing_request": null,
+   "opencode_request_unchanged": true
+  }
+ ],
+ "observations": [],
+ "issues": [
+  "ValueError"
+ ]
+}

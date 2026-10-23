@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Agentic instruction following: OpenCode works each task in its sandbox through single_agent_turn, and the
+# agentic_if resources server grades the session. The resources server config wires the servers and the example
+# split; this adds the private task set, which prepare.py downloads from Gym's dataset registry (set
+# mlflow_tracking_uri and mlflow_tracking_token). README.md has the measurement contract and run conditions.
+config_paths:
+  - resources_servers/agentic_if/configs/agentic_if.yaml
+
+environment_server_routes:
+  agentic_if:benchmark: agentic_if_environment_server
+
+# The benchmark's episodes can use their whole deadline (default_episode_timeout_seconds, 18000), so the task
+# sandboxes outlive it and its cleanup.
+scale_swe_resources_server:
+  resources_servers:
+    scale_swe:
+      sandbox_config:
+        ttl_s: 21600
+terminal_bench_2_1_resources_server:
+  resources_servers:
+    terminal_bench_2_1:
+      sandbox_config:
+        ttl_s: 21600
+
+agentic_if_resources:
+  resources_servers:
+    agentic_if:
+      datasets:
+        - name: agentic_if
+          type: benchmark
+          jsonl_fpath: benchmarks/agentic_if/data/agentic_if_benchmark.jsonl
+          prepare_script: benchmarks/agentic_if/prepare.py
+          taskset: agentic_if:benchmark
+          num_repeats: 1

@@ -1,0 +1,137 @@
+{
+ "case": "derived-missing-call-identity",
+ "kind": "gateway",
+ "source": "derived: ModelGateway._record_dispatch refuses a tool call without an ID",
+ "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
+ "notes": "",
+ "spec": {
+  "schema_version": 1,
+  "harness": "opencode",
+  "task_backend": "swe",
+  "tools": {
+   "tool_names": {
+    "read": "read"
+   },
+   "tool_descriptions": {},
+   "tool_parameter_descriptions": {},
+   "tool_interfaces": {}
+  },
+  "workspace_files": {},
+  "events": [],
+  "checks": [],
+  "provenance": {}
+ },
+ "params": {
+  "input": [
+   {
+    "content": "Fix it",
+    "role": "user",
+    "type": "message"
+   }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": []
+ },
+ "calls": [
+  {
+   "headers": {
+    "x-session-id": "root",
+    "x-opencode-assistant-message-id": "a1"
+   },
+   "opencode_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "upstream_reply": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "tool_calls": [
+         {
+          "type": "function",
+          "function": {
+           "name": "read",
+           "arguments": "{}"
+          }
+         }
+        ]
+       }
+      }
+     ]
+    }
+   },
+   "returned": null,
+   "error": "ValueError: missing tool call identity",
+   "outgoing_request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "opencode_request_unchanged": true
+  }
+ ],
+ "observations": [
+  {
+   "source": "model",
+   "session_id": "root",
+   "assistant_message_id": "a1",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "execution_tools": {
+    "read": "read"
+   }
+  }
+ ],
+ "issues": [
+  "ValueError"
+ ]
+}

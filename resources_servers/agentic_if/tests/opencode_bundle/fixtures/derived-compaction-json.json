@@ -1,0 +1,134 @@
+{
+ "case": "derived-compaction-json",
+ "kind": "gateway",
+ "source": "derived: OpenCode's compaction call bypasses actor presentation but is recorded",
+ "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
+ "notes": "",
+ "spec": {
+  "schema_version": 1,
+  "harness": "opencode",
+  "task_backend": "swe",
+  "tools": {
+   "tool_names": {
+    "read": "read"
+   },
+   "tool_descriptions": {},
+   "tool_parameter_descriptions": {},
+   "tool_interfaces": {}
+  },
+  "workspace_files": {},
+  "events": [],
+  "checks": [],
+  "provenance": {}
+ },
+ "params": {
+  "input": [
+   {
+    "content": "Literal system",
+    "role": "system",
+    "type": "message"
+   },
+   {
+    "content": "Fix it",
+    "role": "user",
+    "type": "message"
+   }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": []
+ },
+ "calls": [
+  {
+   "headers": {
+    "x-session-id": "root",
+    "x-opencode-assistant-message-id": "summary",
+    "x-opencode-request-kind": "compaction"
+   },
+   "opencode_request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "Summarize natively"
+     },
+     {
+      "role": "user",
+      "content": "History without the original task"
+     }
+    ],
+    "tools": []
+   },
+   "upstream_reply": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "Native summary"
+       }
+      }
+     ]
+    }
+   },
+   "returned": {
+    "json": {
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "Native summary"
+       }
+      }
+     ]
+    }
+   },
+   "error": null,
+   "outgoing_request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "Summarize natively"
+     },
+     {
+      "role": "user",
+      "content": "History without the original task"
+     }
+    ],
+    "tools": []
+   },
+   "opencode_request_unchanged": true
+  }
+ ],
+ "observations": [
+  {
+   "source": "compaction",
+   "session_id": "root",
+   "assistant_message_id": "summary",
+   "request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "Summarize natively"
+     },
+     {
+      "role": "user",
+      "content": "History without the original task"
+     }
+    ],
+    "tools": []
+   },
+   "execution_tools": {},
+   "response": {
+    "choices": [
+     {
+      "message": {
+       "role": "assistant",
+       "content": "Native summary"
+      }
+     }
+    ]
+   }
+  }
+ ],
+ "issues": []
+}

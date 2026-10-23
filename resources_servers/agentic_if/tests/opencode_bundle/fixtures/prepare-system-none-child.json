@@ -1,0 +1,93 @@
+{
+ "case": "prepare-system-none-child",
+ "kind": "prepare",
+ "source": "environment_servers/agentic_if/tests/test_model_boundary.py::test_one_system_contract_preserves_defaults_or_replaces_all_system_input",
+ "code": "00be1884d931e3f083a548dc5ea6d231c74902e2",
+ "spec": {
+  "schema_version": 1,
+  "harness": "opencode",
+  "task_backend": "swe",
+  "tools": {
+   "tool_descriptions": {},
+   "tool_parameter_descriptions": {},
+   "tool_interfaces": {}
+  },
+  "workspace_files": {},
+  "events": [],
+  "checks": [],
+  "provenance": {}
+ },
+ "params": {
+  "input": [
+   {
+    "content": "Task",
+    "role": "user",
+    "type": "message"
+   }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": []
+ },
+ "opencode_request": {
+  "messages": [
+   {
+    "role": "system",
+    "content": "Native policy"
+   },
+   {
+    "role": "developer",
+    "content": "Native environment and project instructions"
+   },
+   {
+    "role": "user",
+    "content": "Native framing: Task"
+   },
+   {
+    "role": "assistant",
+    "content": "Earlier turn"
+   },
+   {
+    "role": "user",
+    "content": "Terminal observation"
+   }
+  ],
+  "instructions": "Separate native system instructions",
+  "tools": []
+ },
+ "child_session": true,
+ "require_user_prompt": true,
+ "prepared": {
+  "payload": {
+   "messages": [
+    {
+     "role": "system",
+     "content": "Native policy"
+    },
+    {
+     "role": "developer",
+     "content": "Native environment and project instructions"
+    },
+    {
+     "role": "user",
+     "content": "Native framing: Task"
+    },
+    {
+     "role": "assistant",
+     "content": "Earlier turn"
+    },
+    {
+     "role": "user",
+     "content": "Terminal observation"
+    }
+   ],
+   "instructions": "Separate native system instructions",
+   "tools": []
+  },
+  "names": {},
+  "allowed_names": [],
+  "execution_tools": {},
+  "restricted": false
+ },
+ "error": null
+}

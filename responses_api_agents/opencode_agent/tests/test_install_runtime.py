@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -19,7 +20,7 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     """Run the real installer with an isolated PATH and no access to the host package manager."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    for name in ("bash", "uname", "getconf", "mkdir", "cp", "tar", "gzip", "chmod"):
+    for name in ("bash", "uname", "getconf", "mkdir", "cp", "tar", "gzip", "chmod", "mktemp", "mv", "rm"):
         executable = shutil.which(name)
         if executable is None:
             pytest.skip(f"Installer test requires {name}")
@@ -60,15 +61,120 @@ fi
     return tmp_path, os.environ | {"PATH": str(bindir), "TEST_ROOT": str(tmp_path)}
 
 
-def run_installer(root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def run_installer(root: Path, env: dict[str, str], *pinned: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(root / "bin/bash"), str(root / "install.sh"), str(root / "runtime"), "1.17.11"],
+        [str(root / "bin/bash"), str(root / "install.sh"), str(root / "runtime"), "1.17.11", *pinned],
         env=env,
         capture_output=True,
         text=True,
         errors="replace",
         timeout=10,
     )
+
+
+def pinned_binary(root: Path, script: str = "#!/bin/bash\necho 1.17.11\n") -> tuple[Path, str]:
+    """A staged binary as a mount would provide it: not executable, with its trusted digest."""
+    binary = root / "mounted/opencode-linux-x64"
+    binary.parent.mkdir(exist_ok=True)
+    binary.write_text(script)
+    binary.chmod(0o444)
+    return binary, hashlib.sha256(binary.read_bytes()).hexdigest()
+
+
+def leftovers(root: Path) -> list[str]:
+    return [path.name for path in (root / "runtime").glob(".opencode.*")]
+
+
+def test_pinned_binary_installs_offline_without_packages_or_download(sandbox):
+    root, env = sandbox
+    # Neither the download tools nor a package manager or CA bundle are needed for a pin.
+    for name in ("apt-get", "tar", "gzip"):
+        (root / "bin" / name).unlink()
+    (root / "debian-ca.crt").unlink()
+    binary, digest = pinned_binary(root)
+    result = run_installer(root, env | {"TEST_UID": "1000"}, str(binary), digest)
+    assert result.returncode == 0, result.stderr
+    installed = root / "runtime/opencode"
+    assert installed.read_bytes() == binary.read_bytes()
+    assert os.access(installed, os.X_OK)
+    assert not (root / "download.log").exists()
+    assert not (root / "packages.log").exists()
+    assert leftovers(root) == []
+
+
+def test_pinned_sha_mismatch_exits_3_without_installing(sandbox):
+    root, env = sandbox
+    binary, _ = pinned_binary(root)
+    result = run_installer(root, env, str(binary), "0" * 64)
+    assert result.returncode == 3, result.stderr
+    assert f"Pinned OpenCode executable SHA-256 mismatch: expected {'0' * 64}" in result.stderr
+    assert not (root / "runtime/opencode").exists()
+    assert not (root / "download.log").exists()
+    assert leftovers(root) == []
+
+
+@pytest.mark.parametrize(
+    ("script", "found"),
+    [
+        ("#!/bin/bash\necho 1.17.10\n", "found 1.17.10"),
+        ("#!/bin/bash\necho broken >&2\nexit 7\n", "no version (exit 7)"),
+    ],
+)
+def test_pinned_binary_with_another_version_exits_3_without_installing(sandbox, script, found):
+    root, env = sandbox
+    binary, digest = pinned_binary(root, script)
+    result = run_installer(root, env, str(binary), digest)
+    assert result.returncode == 3, result.stderr
+    assert "Pinned OpenCode executable version mismatch: requested 1.17.11" in result.stderr
+    assert found in result.stderr
+    assert not (root / "runtime/opencode").exists()
+    assert leftovers(root) == []
+
+
+@pytest.mark.parametrize(
+    ("script", "code", "message"),
+    [
+        ("#!/bin/bash\nkill -KILL $$\n", 1, "--version did not complete (exit 137)"),
+        # Bash reports a missing interpreter as 127, or as 126 ("bad interpreter") before 5.2.
+        ("#!/nonexistent/interpreter\n", 1, "--version did not complete (exit 12"),
+        ("\x7fELF\x00\x00\x00 not a program", 3, "version mismatch: requested 1.17.11, found no version (exit 126)"),
+    ],
+    ids=["signal", "missing interpreter", "exec format"],
+)
+def test_only_a_version_check_that_finishes_can_reject_the_pin(sandbox, script, code, message):
+    root, env = sandbox
+    binary, digest = pinned_binary(root, script)
+    result = run_installer(root, env, str(binary), digest)
+    assert result.returncode == code, result.stderr
+    assert message in result.stderr
+    assert not (root / "runtime/opencode").exists()
+    assert leftovers(root) == []
+
+
+def test_missing_pinned_source_is_not_a_rejected_pin(sandbox):
+    root, env = sandbox
+    result = run_installer(root, env, str(root / "mounted/absent"), "0" * 64)
+    assert result.returncode == 1
+    assert "Pinned OpenCode executable not found in the sandbox" in result.stderr
+    assert not (root / "download.log").exists()
+
+
+@pytest.mark.parametrize("matching", [True, False])
+def test_cached_pinned_runtime_is_hashed_before_it_runs(sandbox, matching):
+    root, env = sandbox
+    binary, digest = pinned_binary(root)
+    (root / "runtime").mkdir()
+    cached = root / "runtime/opencode"
+    # A different cached build would leave a marker if it were executed before its hash check.
+    cached.write_text(binary.read_text() if matching else '#!/bin/bash\ntouch "$TEST_ROOT/ran"\necho 1.17.11\n')
+    cached.chmod(0o755)
+    if matching:
+        binary.unlink()
+    result = run_installer(root, env, str(binary), digest)
+    assert result.returncode == 0, result.stderr
+    assert not (root / "ran").exists()
+    assert hashlib.sha256(cached.read_bytes()).hexdigest() == digest
+    assert not (root / "download.log").exists()
 
 
 def test_missing_curl_is_installed_before_downloading_opencode(sandbox: tuple[Path, dict[str, str]]) -> None:
@@ -241,3 +347,17 @@ def test_musl_bootstraps_with_apk_and_downloads_matching_binary(sandbox: tuple[P
     assert (root / "packages.log").read_text().splitlines() == ["add --no-cache curl"]
     arch = {"x86_64": "x64-baseline", "aarch64": "arm64"}[os.uname().machine]
     assert f"opencode-linux-{arch}-musl.tar.gz" in (root / "download.log").read_text()
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+def test_pinned_ripgrep_replaces_the_best_effort_package_install(sandbox, pinned):
+    root, env = sandbox
+    (root / "bin/rg").unlink()
+    (root / "runtime").mkdir()
+    cached = root / "runtime/opencode"
+    cached.write_text("#!/bin/bash\necho 1.17.11\n")
+    cached.chmod(0o755)
+    result = run_installer(root, env | ({"NG_OPENCODE_SKIP_RIPGREP": "1"} if pinned else {}))
+    assert result.returncode == 0, result.stderr
+    assert (root / "packages.log").exists() is not pinned
+    assert ("ripgrep" in result.stderr or (root / "bin/rg").exists()) is not pinned
