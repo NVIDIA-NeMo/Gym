@@ -70,7 +70,7 @@ from nemo_gym.openai_utils import (
     PermanentEndpointError,
 )
 from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
-from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.rollout_sampling import rollout_context
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.token_id_capture import (
     CaptureContext,

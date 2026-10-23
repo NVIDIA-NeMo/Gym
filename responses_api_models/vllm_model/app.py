@@ -57,7 +57,7 @@ from nemo_gym.responses_converter import (
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
-from nemo_gym.rollout_correlation import current_rollout_id
+from nemo_gym.rollout_sampling import current_rollout_id
 from nemo_gym.server_utils import SESSION_ID_KEY, _redacted_url, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
     current_capture_context,

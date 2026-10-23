@@ -48,7 +48,7 @@ from nemo_gym.rollout_collection import (
     NG_TERMINAL_KEY,
     SharedRolloutCollectionConfig,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_sampling import maybe_rollout_id_from_run_body
 from resources_servers.gdpval.multistage_elo import PartialStagePolicy
 from resources_servers.gdpval.multistage_orchestrator import (
     ACCEPTED_STAGE_ROW_COUNT_KEY,

@@ -84,8 +84,7 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import rollout_context, scope_with_routed_path
-from nemo_gym.rollout_sampling import ModelSamplingMiddleware
+from nemo_gym.rollout_sampling import ModelSamplingMiddleware, rollout_context, scope_with_routed_path
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
@@ -1844,6 +1843,6 @@ __getattr__ = moved_attr_getter(
             ),
             "nemo_gym.observability.model_calls",
         ),
-        "maybe_rollout_id_from_run_body": "nemo_gym.rollout_correlation",
+        "maybe_rollout_id_from_run_body": "nemo_gym.rollout_sampling",
     },
 )
