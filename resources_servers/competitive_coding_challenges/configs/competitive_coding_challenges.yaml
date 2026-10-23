@@ -30,8 +30,12 @@ competitive_coding_challenges_simple_agent:
 
 competitive_coding_challenges_environment_server:
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
       agent_server:
         type: responses_api_agents
         name: competitive_coding_challenges_simple_agent
+      resources_tool_transports:
+      - direct_http
+      default_episode_timeout_seconds: 21600
+      cleanup_timeout_seconds: 180

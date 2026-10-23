@@ -669,7 +669,7 @@ def test_shared_container_config_with_core_suite_covers_both_batches(monkeypatch
             # Build-time interpolation must work without an endpoint or credentials.
             OmegaConf.to_container(config, resolve=True)
     assert components["core"] | components["swe"] <= components["container"]
-    assert len(components["core"] | components["swe"]) == 17
+    assert len(components["core"] | components["swe"]) == 18
 
 
 @pytest.mark.parametrize("extra_configs", [[], ["extra with spaces.yaml", "literal $(touch INJECTED).yaml"]])

@@ -247,7 +247,7 @@ def test_native_config_reuses_english_components_and_preserves_generation_defaul
         agent_key,
         environment_key,
     }
-    assert indic[environment_key].environment_servers.legacy_agent.agent_server.name == agent_key
+    assert indic[environment_key].environment_servers.single_agent_turn_legacy.agent_server.name == agent_key
     agent = indic[agent_key].responses_api_agents.simple_agent
     assert (
         agent.datasets[0].prompt_config
