@@ -115,7 +115,7 @@ def test_retry_classification_checks_primary_and_cleanup_with_cycles(
 
     primary = ConnectionError("primary transport") if primary_transient else ValueError("primary failure")
     cleanup = TimeoutError("cleanup timeout") if cleanup_transient else ValueError("cleanup failure")
-    primary.nooa_cleanup_error = cleanup
+    primary.nooa_cleanup_errors = (cleanup,)
     cleanup.__context__ = primary
     wrapper = RuntimeError("wrapper")
     wrapper.__cause__ = primary
@@ -126,7 +126,7 @@ def test_close_only_nontransient_cleanup_marker_does_not_loop() -> None:
     from responses_api_agents.nooa_agent.result import is_transient_infrastructure_error
 
     error = ValueError("close-only failure")
-    error.nooa_cleanup_error = error
+    error.nooa_cleanup_errors = (error,)
     assert not is_transient_infrastructure_error(error)
 
 
@@ -141,7 +141,6 @@ def test_retry_classification_checks_all_cleanup_errors_with_cycles(
     first = ConnectionError("agent close") if first_transient else ValueError("agent close")
     second = TimeoutError("scope close") if second_transient else ValueError("scope close")
     primary.nooa_cleanup_errors = (first, second, first)
-    primary.nooa_cleanup_error = second
     first.__context__ = primary
     second.__cause__ = primary
     wrapper = RuntimeError("wrapper")

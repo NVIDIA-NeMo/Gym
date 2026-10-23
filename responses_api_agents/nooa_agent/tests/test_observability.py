@@ -484,13 +484,17 @@ def test_policy_stop_labels_preserve_unrelated_outer_failures(invalid_output: bo
 
 
 @pytest.mark.parametrize("invalid_output", [False, True])
-def test_later_cleanup_failure_updates_final_trace_without_changing_checkpoint(invalid_output: bool) -> None:
+def test_final_root_outcome_preserves_child_and_checkpoint_outcomes(invalid_output: bool) -> None:
     from responses_api_agents.nooa_agent.gym_llm import InvalidPolicyOutputError, PolicyCallBudgetExceeded
 
     stop = InvalidPolicyOutputError("invalid answer") if invalid_output else PolicyCallBudgetExceeded("call limit")
     trace = GymTraceHooks()
     context = trace.before_agent_call(call_id="root", parent_call_id=None)
+    child = trace.before_agent_call(call_id="child", parent_call_id="root")
+    trace.after_agent_call(context=child, exception=stop)
     trace.after_agent_call(context=context, exception=stop)
+    summary = trace.before_agent_call(call_id="summary", parent_call_id=None)
+    trace.after_agent_call(context=summary, exception=None)
     projection = dict(
         create_params=NeMoGymResponseCreateParamsNonStreaming(input="task"),
         state=RolloutLLMState(max_policy_calls=1),
@@ -501,7 +505,12 @@ def test_later_cleanup_failure_updates_final_trace_without_changing_checkpoint(i
     assert checkpoint.invocations[0].status == "incomplete"
     # The invocation adapter finishes cleanup after NOOA emits after_agent_call.
     stop.nooa_cleanup_errors = (ConnectionError("cleanup transport failed"),)
-    _, final = trace.project(**projection)
+    _, final = trace.project(**projection, root_status="failed", root_error_type=type(stop).__name__)
     assert final.invocations[0].status == "failed"
     assert final.invocations[0].error_type == type(stop).__name__
     assert checkpoint.invocations[0].status == "incomplete"
+    assert final.invocations[1].status == checkpoint.invocations[1].status == "incomplete"
+    assert final.invocations[2].status == checkpoint.invocations[2].status == "completed"
+    # Projection never revisits the shared, now mutated exception or its frames.
+    _, unchanged = trace.project(**projection)
+    assert [invocation.status for invocation in unchanged.invocations] == ["incomplete", "incomplete", "completed"]
