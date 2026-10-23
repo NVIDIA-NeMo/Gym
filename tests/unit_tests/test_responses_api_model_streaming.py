@@ -407,11 +407,10 @@ class TestSanitizeStreamingBody:
         body = {"stream": True, "input": [{"role": "user", "content": "fix multiply"}, reasoning, call, result]}
         original = json.loads(json.dumps(body))
         cleaned, _ = sanitize_streaming_responses_body(body)
-        item_id = cleaned["input"][1]["id"]
-        assert item_id == provided_id if provided_id is not None else item_id.startswith("rs_")
-        assert cleaned["input"][1] == {**reasoning, "id": item_id}
+        assert cleaned["input"][1] == reasoning
         assert body == original
         params = validate_streaming_responses_params(cleaned)
+        assert params.input[1].id == provided_id
         assert params.input[1].summary[0].text == summary
         converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
             params
@@ -434,8 +433,8 @@ class TestSanitizeStreamingBody:
         }
         cleaned, _ = sanitize_streaming_responses_body({"stream": True, "input": [reasoning]})
         params = validate_streaming_responses_params(cleaned)
-        actual = params.input[0].model_dump(mode="json")
-        assert actual == {**reasoning, "id": actual["id"]}
+        # The encrypted content verifies only under the id it was issued for, so none is sent.
+        assert params.model_dump(mode="json", exclude_unset=True)["input"][0] == reasoning
 
     def test_drops_unknown_top_level_fields(self) -> None:
         cleaned, _ = sanitize_streaming_responses_body(
@@ -1019,7 +1018,8 @@ class TestResponsesDispatchRoute:
         assert response.status_code == 200
         assert len(server.last_params.input) == 1
         assert server.last_params.input[0].summary[0].text == "Inspect multiply"
-        assert server.last_params.input[0].id.startswith("rs_")
+        assert server.last_params.input[0].id is None
+        assert "id" not in server.last_params.model_dump(exclude_unset=True)["input"][0]
 
     @pytest.mark.parametrize(
         "reasoning",
