@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +30,14 @@ from nemo_gym.cli.eval import list_benchmarks, prepare_benchmark
 def _mock_global_config(config: dict = None):
     """Return an OmegaConf config without CLI/file parsing."""
     return OmegaConf.create(config or {})
+
+
+def test_ioi26_prepare_imports_as_a_package_module() -> None:
+    # `gym eval prepare --benchmark ioi26` imports benchmarks.ioi26.prepare, where a bare
+    # `from subtask_split import ...` fails because the benchmark directory is not on sys.path.
+    prepare = importlib.import_module("benchmarks.ioi26.prepare")
+
+    assert prepare.split_subtasks is importlib.import_module("benchmarks.ioi26.subtask_split").split
 
 
 def test_pinchbench_tavily_key_is_derived_from_environment() -> None:

@@ -28,7 +28,7 @@ hf_dataset_prefix: str  # field to override the default value "Nemotron-RL" prep
 
 Naming convention for Hugging Face datasets is as follows.
 
-`{hf_organization}/{hf_dataset_prefix}-{domain}–{resources_server OR dataset_name}`
+`{hf_organization}/{hf_dataset_prefix}-{domain}-{resources_server OR dataset_name}`
 
 E.g.:
 
@@ -38,10 +38,11 @@ You will only need to manually input the `{dataset_name}` portion of the above w
 
 To upload to Hugging Face, use the below command:
 ```bash
+dataset_name="my_dataset"  # your dataset name
 resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
 gym dataset upload \
-    --name {your dataset name} \
-    --input data/multineedle_benchmark.jsonl \
+    --name ${dataset_name} \
+    --input resources_servers/example_multi_step/data/example.jsonl \
     +resource_config_path=${resource_config_path}
 ```
 
@@ -50,10 +51,11 @@ Because of the required dataset nomenclature, the resources server config path i
 By default, the `split` parameter for uploading is set to `train`, which will run a check on the required fields `{"responses_create_params"}`. Specifying `validation` or `test` bypasses this check:
 
 ```bash
+dataset_name="my_dataset"  # your dataset name
 resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
 gym dataset migrate \
-    --name {your dataset name} \
-    --input data/multineedle_benchmark_validation.jsonl \
+    --name ${dataset_name} \
+    --input resources_servers/example_multi_step/data/example.jsonl \
     --split validation \
     +resource_config_path=${resource_config_path}
 ```
@@ -61,9 +63,10 @@ gym dataset migrate \
 ## Uploading with Pull Request workflow
 When uploading to an organization repository where you don't have direct write access (e.g., nvidia/), use the `+create_pr=true` flag to create a Pull Request instead of pushing directly. You can also customize the commit message and description.
 
-If you want to specify the revision (branch name), you can add the `+revision={your branch name}` flag. Excluding `create_pr` (or setting it to `false`) assumes you are committing to an existing branch. Including it assumes it will be a brand new branch.
+To target a specific branch, add `--revision <branch-name>`. Without `--create-pr`, the upload commits directly to that branch; with `--create-pr`, it opens a Pull Request against that branch. In both cases the branch must already exist on Hugging Face.
 
 ```bash
+resource_config_path="resources_servers/math_with_judge/configs/math_with_judge.yaml"
 gym dataset upload \
     --name OpenMathReasoning \
     --input data/validation.jsonl \
@@ -88,10 +91,11 @@ The commit_message and commit_description parameters work for both direct pushes
 ## Deleting Datasets from GitLab
 You can optionally pass a `+delete_from_gitlab=true` flag to the above command, which will delete the model and all of its artifacts from GitLab. By default, this is set to `False`.
 ```bash
+dataset_name="my_dataset"  # your dataset name
 resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
 gym dataset upload \
-    +dataset_name={your dataset name} \
-    +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
+    +dataset_name=${dataset_name} \
+    +input_jsonl_fpath=resources_servers/example_multi_step/data/example.jsonl \
     +resource_config_path=${resource_config_path} \
     +delete_from_gitlab=true
 ```
@@ -105,17 +109,19 @@ There will be a confirmation dialog to confirm the deletion:
 You can also run the below command which does the same thing without the need for a `+delete_from_gitlab` flag:
 
 ```bash
+dataset_name="my_dataset"  # your dataset name
 resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
 gym dataset migrate \
-    --name {your dataset name} \
-    --input data/multineedle_benchmark.jsonl \
+    --name ${dataset_name} \
+    --input resources_servers/example_multi_step/data/example.jsonl \
     +resource_config_path=${resource_config_path}
 ```
 
 If you've already uploaded to Hugging Face and just want to do a standalone delete from GitLab:
 ```bash
+dataset_name="my_dataset"  # your dataset name
 gym dataset rm \
-    --name {your dataset name}
+    --name ${dataset_name}
 ```
 
 <Info>

@@ -32,6 +32,7 @@ from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
 from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_CONFIG_NAME,
     COLLECTOR_DIR,
+    collector_config_path,
     otel_active,
     render_collector_config,
     resolve_token,
@@ -167,8 +168,10 @@ def _submission_env_exports(compute: SlurmComputeConfig) -> list[str]:
 def _submission_exports(config: SubmitConfig) -> list[str]:
     """What `run()` exports ahead of sbatch: the forwarded values, then the telemetry token when it is on."""
     exports = _submission_env_exports(next(iter(config.compute.values())))
-    if otel_active(config):
-        exports.append(f"export {config.otel.token_env}={shlex.quote(resolve_token(config))}")
+    token = resolve_token(config)
+    validate_destination(config)
+    if token is not None:
+        exports.append(f"export {config.otel.token_env}={shlex.quote(token)}")
     return exports
 
 
@@ -196,9 +199,9 @@ class SlurmExecutor(BaseExecutor):
         pool.shutdown(wait=False)
         token = None
         if otel_active(config):
+            token = resolve_token(config)
             validate_destination(config)
             validate_gym_telemetry(config)
-            token = resolve_token(config)
         now = utc_now()
         gym_job_id = new_gym_job_id(now)
         remote_run_dir = Path(config.job.output_path) / gym_job_id
@@ -238,7 +241,17 @@ class SlurmExecutor(BaseExecutor):
         job = record.benchmark_job(benchmark)
         job_dir = Path(job.job_dir)
         with get_connection(record.hostname) as conn:
-            exports = _submission_exports(self._saved_config(conn, Path(record.run_dir)))
+            config = self._saved_config(conn, Path(record.run_dir))
+            exports = _submission_exports(config)
+            # A resubmit can lose access to the remote token. Refresh only this benchmark's
+            # collector config, inside the lock and after refusing any active job in its dir.
+            collector_update = []
+            if otel_active(config):
+                collector_yaml = render_collector_config(config, benchmark, job_dir)
+                collector_path = shlex.quote(str(collector_config_path(job_dir)))
+                collector_update = [
+                    f"printf %s {shlex.quote(collector_yaml)} > {collector_path} || fail 'cannot update collector config'"
+                ]
             # One script, so the lock spans the scheduler check and sbatch; any failed step stops it.
             # The job itself resets the run's retry and attempt state when it starts (see RESUBMIT_ENV).
             results = _parse_sbatch_results(
@@ -260,6 +273,7 @@ class SlurmExecutor(BaseExecutor):
                         "&& ! grep -qF -- ++resubmit=True job.sh; then "
                         'fail "job.sh in $PWD predates resubmit, so it could start the run fresh and delete its '
                         'rollouts; submit the run again instead"; fi',
+                        *collector_update,
                         f"export {RESUBMIT_ENV}=1",
                         _sbatch_command(benchmark, job_dir / "job.sh"),
                     ]

@@ -3,14 +3,16 @@
 
 """Resources-backed single-agent environment server."""
 
-from typing import Any, Literal
+from enum import StrEnum
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import Body
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator
 
 from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepMode, seed_restarts, seed_verify_mode
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
@@ -36,6 +38,12 @@ from nemo_gym.config_types import (
     AggregateMetricsRequest,
     ResourcesServerRef,
 )
+from nemo_gym.failure_kinds import (
+    AGENT_INVALID_OUTPUT,
+    AGENT_LIMIT,
+    FAILURE_KINDS,
+    MODEL_TRANSPORT_ERROR,
+)
 from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
@@ -48,6 +56,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryRecord,
 )
 from nemo_gym.server_utils import (
+    format_exception_with_response_body,
     get_response_json,
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
@@ -84,6 +93,58 @@ class SessionHandles(BaseModel):
         )
 
 
+class OutcomeAction(StrEnum):
+    """Mutually exclusive grading or episode-failure action."""
+
+    VERIFY = "verify"
+    RETRY = "retry"
+    FAIL = "fail"
+
+
+class AgentOutcomePolicyConfig(BaseModel):
+    """Route classified failed responses; HTTP status rules take precedence over failure-kind rules.
+
+    Supplied entries override matching defaults; omitted entries keep their defaults.
+    Unmatched failures use default_action.
+    Retry means an ungraded episode failure eligible for the collector's bounded retries.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    by_failure_kind: dict[str, OutcomeAction] = Field(
+        default_factory=lambda: {
+            AGENT_INVALID_OUTPUT: OutcomeAction.VERIFY,
+            AGENT_LIMIT: OutcomeAction.VERIFY,
+            MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY,
+            "unknown": OutcomeAction.RETRY,
+        }
+    )
+    by_status_code: dict[Annotated[int, Field(ge=400, le=599)], OutcomeAction] = Field(
+        default_factory=lambda: {
+            **dict.fromkeys((400, 413, 422), OutcomeAction.VERIFY),
+            **dict.fromkeys((408, 425, 429, *range(500, 600)), OutcomeAction.RETRY),
+        }
+    )
+    default_action: OutcomeAction = OutcomeAction.FAIL
+
+    @field_validator("by_failure_kind", "by_status_code")
+    @classmethod
+    def merge_default_rules(
+        cls, value: dict[str | int, OutcomeAction], info: ValidationInfo
+    ) -> dict[str | int, OutcomeAction]:
+        """Merge validated overrides so JSON status keys are normalized before replacing defaults."""
+        return cls.model_fields[info.field_name].get_default(call_default_factory=True) | value
+
+    @field_validator("by_failure_kind")
+    @classmethod
+    def require_registered_kinds(cls, value: dict[str, OutcomeAction]) -> dict[str, OutcomeAction]:
+        """Reject misspelled failure names at configuration load, before starting an evaluation."""
+        invalid = value.keys() - FAILURE_KINDS - {"unknown"}
+        if invalid:
+            raise ValueError(f"Unregistered failure kinds: {sorted(invalid)}")
+        return value
+
+
 class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
     """Bind Resources and Agent Servers for one agent turn."""
 
@@ -91,6 +152,7 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
 
     resources_server: ResourcesServerRef
     agent_server: AgentServerRef
+    agent_outcome_policy: AgentOutcomePolicyConfig = Field(default_factory=AgentOutcomePolicyConfig)
     resources_tool_transports: list[Literal["direct_http", "mcp"]] = Field(default_factory=list)
 
 
@@ -210,7 +272,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 except Exception as error:
                     raise self._failure(
                         stage="cleanup",
-                        failure_reason=str(error),
+                        failure_reason=format_exception_with_response_body(error),
                         terminal=not _is_retryable_dependency_error(error),
                         partial_response=agent_response,
                     ) from error
@@ -225,6 +287,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             return trajectory.model_dump(mode="json") if trajectory else None
 
         if stage == "verify":
+            action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
+            if action != OutcomeAction.VERIFY:
+                raise self._failure(
+                    stage="agent",
+                    failure_reason=agent_response.error.message if agent_response.error else "Agent reported failure",
+                    terminal=action == OutcomeAction.FAIL,
+                    partial_response=agent_response,
+                    agent_observations=observations,
+                )
             await self.checkpoint_boundary(
                 request,
                 lambda: {
@@ -291,7 +362,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="seed",
-                failure_reason=str(error),
+                failure_reason=format_exception_with_response_body(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
         return seed
@@ -371,7 +442,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="agent",
-                failure_reason=str(error),
+                failure_reason=format_exception_with_response_body(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
@@ -394,7 +465,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="agent",
-                failure_reason=str(error),
+                failure_reason=format_exception_with_response_body(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
@@ -464,7 +535,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="verification",
-                failure_reason=str(error),
+                failure_reason=format_exception_with_response_body(error),
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
                 agent_observations=observations,
@@ -505,6 +576,28 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 trajectory=trajectory,
             )
         )
+
+
+def agent_outcome_policy(
+    response: NeMoGymResponse, *, config: AgentOutcomePolicyConfig | None = None
+) -> OutcomeAction:
+    """Apply configured grading/retry rules to a classified failed response.
+
+    Unclassified legacy responses retain their existing grading behavior; malformed
+    metadata is an ungraded, nonretryable failure regardless of configuration.
+    """
+    raw = (response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY)
+    if response.status != "failed" or raw is None:
+        return OutcomeAction.VERIFY
+    try:
+        outcome = AgentOutcome.model_validate_json(raw)
+    except ValidationError:
+        # Keep malformed classification in the partial response for diagnosis, not scoring.
+        return OutcomeAction.FAIL
+    config = config or AgentOutcomePolicyConfig()
+    return config.by_status_code.get(
+        outcome.status_code, config.by_failure_kind.get(outcome.failure_kind, config.default_action)
+    )
 
 
 def _cookies(response: Any) -> dict[str, str]:

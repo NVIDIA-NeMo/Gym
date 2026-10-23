@@ -29,3 +29,12 @@ sandbox protection. Only injected resource methods are Gym/verifier-observable a
 side effects belong to NOOA and are not reliably visible to verification or replay. The trajectory distinguishes
 the outer `execute_python` call from nested resource calls. A sandboxed or remote executor is a future integration;
 sandboxed execution is not implemented here.
+
+
+## Sandbox worker supervision
+
+`sandbox_runner_timeout_seconds` bounds the worker execution budget; task metadata can shorten it. Exhausting that
+budget is an ungradable, non-retryable execution failure, rather than a retryable model or provider outage.
+Partial checkpoints remain available for failure inspection; they never authorize grading. Transient artifact
+transfer failures receive one retry within the existing capture deadline. Worker startup and supervisor failures
+retain up to 2,000 characters of output-log diagnostics after artifact capture.
