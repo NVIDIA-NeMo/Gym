@@ -29,20 +29,25 @@ and named to match how `deepagents`' own docs/examples name the object `create_d
 
 from abc import abstractmethod
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, ClassVar
 
 from fastapi import Body, Request, Response
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.runnables import RunnableConfig
 from pydantic import Field, model_validator
 
+from nemo_gym.base_responses_api_agent import AgentSeedRejectedError, AgentSeedSessionRequest
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from responses_api_agents.langchain_deepagents_agent.responses_langchain_bridge import (
     GymResponsesChatModel,
     to_langchain,
     to_responses,
 )
-from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
+from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, SimpleAgentSessionState
+
+
+OBSERVATION_SOURCE = "langchain_deepagents_agent"
 
 
 class DeepAgentsAgentConfig(SimpleAgentConfig):
@@ -65,13 +70,29 @@ class DeepAgentsAgentConfig(SimpleAgentConfig):
             )
         return self
 
+    @model_validator(mode="after")
+    def reject_execute_tools_false(self) -> "DeepAgentsAgentConfig":
+        # SimpleAgent can hand unresolved tool calls back to the Environment Server; this graph cannot,
+        # because deepagents always runs its own tools inside ainvoke().
+        if not self.execute_tools:
+            raise ValueError(
+                "execute_tools=false is not supported by DeepAgentsAgent: the deepagents graph always runs its "
+                "own tools. Remove execute_tools from this agent's config."
+            )
+        return self
+
 
 class DeepAgentsAgent(SimpleAgent):
-    """Inherits SimpleAgent.run() unchanged (seed_session -> self-POST /v1/responses -> verify). Overrides
-    responses() with everything true of any deepagents-based agent wired into Gym.
+    """Inherits SimpleAgent.run() unchanged (seed_session -> self-POST /v1/responses -> verify) and SimpleAgent's
+    agent-session endpoints. Overrides responses() with everything true of any deepagents-based agent wired into
+    Gym, and narrows the session seed to what the graph actually uses.
 
     Does not build a TrajectoryRecord (per-tool-call/model-call observability) — see README.md's "Known
-    limitation" section. That's deliberately deferred, not an oversight."""
+    limitation" section. That's deliberately deferred, not an oversight; a session reports it as a gap."""
+
+    # The graph's state lives inside one ainvoke() call, which a checkpoint cannot export. Checkpointing
+    # therefore restarts an unfinished rollout from its input instead of resuming it (GYMINT-357).
+    checkpoint_sessions_supported: ClassVar[bool] = False
 
     config: DeepAgentsAgentConfig
     agent: Any = Field(default=None, exclude=True)
@@ -86,17 +107,53 @@ class DeepAgentsAgent(SimpleAgent):
         Called once, from __init__ — not per-request."""
         raise NotImplementedError
 
+    def _new_session_state(self, body: AgentSeedSessionRequest) -> SimpleAgentSessionState:
+        """Accept a session only for what the graph uses: its own tools, no sandbox and no required grant.
+
+        The graph never calls a granted Resources tool, so a required grant is refused rather than silently
+        dropped. An optional grant is skipped. The session holds no Resources cookie jar, so close leaves the
+        Environment Server's jar for /verify unchanged.
+        """
+        if body.sandbox_access is not None:
+            raise AgentSeedRejectedError("DeepAgents agent does not support sandbox access")
+        required = [access.name for access in self.effective_tool_accesses(body) if access.required]
+        if required:
+            raise AgentSeedRejectedError(
+                f"DeepAgents agent does not support required tool access: {', '.join(required)}"
+            )
+        return SimpleAgentSessionState(
+            request=body,
+            tool_access=None,
+            resources_cookies=None,
+            observations=AgentObservationBundle(
+                source=OBSERVATION_SOURCE,
+                gaps=[
+                    ObservationGap(
+                        code="agent_transcript_unavailable",
+                        detail="the deepagents graph reports no invocation or tool-call records",
+                    ),
+                    ObservationGap(code="model_call_ownership_unavailable"),
+                ],
+            ),
+        )
+
     async def responses(
         self,
         request: Request,
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        # Different servers have different session-middleware keys (get_session_middleware_key() is
-        # f"{class_name}___{server_name}"), so a cookie from the resources server's /seed_session does not
-        # automatically ride through to /verify unless re-set explicitly here.
-        for key, value in request.cookies.items():
-            response.set_cookie(key, value)
+        agent_session_id = self._agent_session_id_from_request(request)
+        if agent_session_id is not None:
+            # An activation of a seeded session: the Environment Server holds the Resources cookies and sends
+            # them to /verify itself, so nothing is mirrored back. An unknown or closing session answers 409.
+            self._require_agent_session(agent_session_id)
+        else:
+            # Legacy self-dispatch from run(). Different servers have different session-middleware keys
+            # (get_session_middleware_key() is f"{class_name}___{server_name}"), so a cookie from the resources
+            # server's /seed_session does not automatically ride through to /verify unless re-set here.
+            for key, value in request.cookies.items():
+                response.set_cookie(key, value)
 
         if isinstance(body.input, str):
             input_items = [NeMoGymEasyInputMessage(role="user", content=body.input)]

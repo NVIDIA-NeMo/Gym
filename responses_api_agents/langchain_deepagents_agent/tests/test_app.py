@@ -18,13 +18,19 @@ from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
+from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from pydantic import ValidationError
 
+from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
+from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.langchain_deepagents_agent.app import DeepAgentsAgent
 from responses_api_agents.langchain_deepagents_agent.reasoning_search_agent import (
     ReasoningSearchDeepAgent,
@@ -500,3 +506,143 @@ async def test_stable_thread_id_keeps_offloaded_history_in_one_appended_log():
     assert "user turn 0" not in scattered_latest, (
         "without a stable thread_id the file the model is finally pointed at has lost the original context"
     )
+
+
+# --- agent sessions (single_agent_turn / single_agent_turn_legacy) ------------------------------------
+
+
+def _session_agent(global_config: dict | None = None) -> ReasoningSearchDeepAgent:
+    agent = _make_agent()
+    agent.server_client.global_config_dict = global_config or {}
+    agent.agent = MagicMock()
+
+    async def ainvoke(state: dict, config: RunnableConfig) -> dict:
+        # Like the real graph, return the input history followed by the new messages.
+        return {"messages": [*state["messages"], AIMessage(content="<answer>42</answer>")]}
+
+    agent.agent.ainvoke = AsyncMock(side_effect=ainvoke)
+    return agent
+
+
+def _seed_body(**kwargs) -> AgentSeedSessionRequest:
+    return AgentSeedSessionRequest(
+        agent_session_id="agent-session",
+        episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+        task_id=TaskId(taskset="reasoning_gym", task_id="0"),
+        **kwargs,
+    )
+
+
+def test_config_rejects_execute_tools_false():
+    with pytest.raises(ValidationError, match="execute_tools=false is not supported"):
+        _config(execute_tools=False)
+
+
+@pytest.mark.parametrize(
+    ("unsupported", "reason"),
+    [
+        (
+            {"tool_accesses": [DirectHTTPToolAccess(name="resources", required=True, base_url="http://r:8000")]},
+            "DeepAgents agent does not support required tool access: resources",
+        ),
+        (
+            {
+                "tool_accesses": [
+                    MCPToolAccess(
+                        name="resources",
+                        required=True,
+                        connection=MCPStreamableHTTPConnection(url="http://r:8000/mcp"),
+                    )
+                ]
+            },
+            "DeepAgents agent does not support required tool access: resources",
+        ),
+        (
+            {
+                "sandbox_access": SandboxAccess(
+                    connection=DirectSandboxConnection(provider_config_ref="runtime", descriptor={}),
+                    workdir="/work",
+                )
+            },
+            "DeepAgents agent does not support sandbox access",
+        ),
+    ],
+)
+def test_unsupported_seed_is_refused_with_a_final_422(unsupported: dict, reason: str):
+    agent = _session_agent()
+    assert check_agent_seed_rejected(agent.setup_webserver(), _seed_body(**unsupported)) == reason
+
+
+def test_session_skips_an_optional_grant_and_runs_the_graph_without_mirroring_cookies():
+    agent = _session_agent()
+    client = TestClient(agent.setup_webserver())
+    seed = client.post(
+        "/v1/agent_sessions",
+        json=_seed_body(
+            tool_accesses=[DirectHTTPToolAccess(name="resources", required=False, base_url="http://r:8000")]
+        ).model_dump(mode="json"),
+    )
+    assert seed.status_code == 200
+
+    result = client.post(
+        "/ng-rollout/rollout/v1/responses",
+        json={"input": [{"role": "user", "content": "6 * 7?"}]},
+        cookies={"resources_cookie": "from-seed"},
+    )
+
+    assert result.status_code == 200
+    assert result.json()["output"][0]["content"][0]["text"] == "<answer>42</answer>"
+    assert agent.agent.ainvoke.await_count == 1
+    # The Environment Server owns the Resources cookies on the session path; the agent sends none back.
+    assert "resources_cookie" not in result.cookies
+
+
+def test_session_close_reports_observation_gaps_and_no_resources_cookie_jar():
+    agent = _session_agent()
+    client = TestClient(agent.setup_webserver())
+    episode_id = EpisodeId(rollout_id="rollout", attempt=0)
+    assert client.post("/v1/agent_sessions", json=_seed_body().model_dump(mode="json")).status_code == 200
+    assert client.post("/ng-rollout/rollout/v1/responses", json={"input": "6 * 7?"}).status_code == 200
+
+    close = client.post(
+        "/v1/agent_sessions/close",
+        json=AgentCloseSessionRequest(agent_session_id="agent-session", episode_id=episode_id).model_dump(mode="json"),
+    )
+
+    assert close.status_code == 200
+    body = close.json()
+    # No jar: the seed's Resources cookie, which the Environment Server sends to /verify, stays unchanged.
+    assert body["resources_cookies"] is None
+    observations = body["agent_observations"]
+    assert observations["source"] == "langchain_deepagents_agent"
+    assert observations["records"] == []
+    assert [gap["code"] for gap in observations["gaps"]] == [
+        "agent_transcript_unavailable",
+        "model_call_ownership_unavailable",
+    ]
+
+
+def test_activation_without_a_seeded_session_is_refused():
+    agent = _session_agent()
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=_seed_body().model_dump(mode="json")).status_code == 200
+    episode_id = EpisodeId(rollout_id="rollout", attempt=0)
+    close_body = AgentCloseSessionRequest(agent_session_id="agent-session", episode_id=episode_id)
+    assert client.post("/v1/agent_sessions/close", json=close_body.model_dump(mode="json")).status_code == 200
+
+    # The client still carries the closed session's cookie.
+    result = client.post("/ng-rollout/rollout/v1/responses", json={"input": "6 * 7?"})
+
+    assert result.status_code == 409
+    agent.agent.ainvoke.assert_not_awaited()
+
+
+def test_checkpointing_restarts_deepagents_rollouts_instead_of_exporting_them():
+    """The graph's state lives inside one ainvoke(), which a checkpoint cannot export, so the agent takes part
+    as restart-only rather than claiming SimpleAgent's resumable sessions."""
+    agent = _session_agent({"checkpoint": {"enabled": True, "control_auth_token": "t"}})
+
+    agent.setup_webserver()
+
+    assert agent.checkpoint_participant is None
+    assert agent._restart_only is not None
