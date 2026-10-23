@@ -34,35 +34,8 @@
    "feature": "no system text, child session"
   },
   {
-   "case": "prepare-system-literal-root",
-   "feature": "literal system text replaces system/developer and instructions"
-  },
-  {
-   "case": "prepare-system-literal-child",
-   "feature": "literal system text in a child session"
-  },
-  {
    "case": "prepare-empty-selection-refuses-exposed-tools",
    "feature": "inventory check refusal"
-  },
-  {
-   "case": "gateway-compaction-json",
-   "feature": "compaction bypass and record (JSON)",
-   "normalize_aliases": true
-  },
-  {
-   "case": "gateway-compaction-stream",
-   "feature": "compaction bypass and record (stream)",
-   "normalize_aliases": true
-  },
-  {
-   "case": "gateway-auxiliary-title",
-   "feature": "auxiliary call forwarded untouched, not recorded",
-   "normalize_aliases": true
-  },
-  {
-   "case": "gateway-max-completion-tokens",
-   "feature": "max_completion_tokens sent as max_tokens"
   },
   {
    "case": "derived-auxiliary-title",

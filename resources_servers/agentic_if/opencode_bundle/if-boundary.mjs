@@ -227,16 +227,6 @@ function pyStr(value) {
   return "{" + Object.keys(value).map((key) => `${pyStringRepr(key)}: ${repr(value[key])}`).join(", ") + "}";
 }
 
-// min(a, b): the first of equal values, as Python does.
-function pyMin(a, b) {
-  const x = numeric(a);
-  const y = numeric(b);
-  if (x === null || y === null) {
-    throw new PyError("TypeError", `'<' not supported between instances of '${typeName(b)}' and '${typeName(a)}'`);
-  }
-  return y < x ? b : a;
-}
-
 // ---------------------------------------------------------------------------------------------------------------
 // JSON with Python's json.loads / json.dumps semantics: floats and big integers keep their text, so what OpenCode
 // receives and what the records hold read back in Python unchanged.
@@ -1024,7 +1014,6 @@ export const IfBoundary = async () => {
         return role !== "system" && role !== "developer";
       });
       messages = [{ role: "system", content: state.system }, ...kept];
-      delete payload.instructions;
     }
     payload.messages = messages;
   };
@@ -1214,11 +1203,6 @@ export const IfBoundary = async () => {
       }
       const outgoing = clone(prepared !== null ? prepared.payload : payload);
       if (actor) restoreRejectedCalls(outgoing, session, payload);
-      if (has(outgoing, "max_completion_tokens")) {
-        const limit = outgoing.max_completion_tokens;
-        delete outgoing.max_completion_tokens;
-        if (limit !== null) outgoing.max_tokens = pyMin(or(get(outgoing, "max_tokens"), limit), limit);
-      }
       if (actor || compaction) {
         writeRecord({
           kind: "request",

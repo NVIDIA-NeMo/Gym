@@ -12,7 +12,6 @@
 """
 
 import json
-from copy import deepcopy
 from pathlib import Path
 
 import orjson
@@ -30,12 +29,8 @@ INDEX = json.loads((FIXTURES / "index.json").read_text())
 OK = {"choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]}
 
 
-def _spec(fixture: dict, entry: dict) -> RuntimeSpec:
-    spec = deepcopy(fixture["spec"])
-    if entry.get("normalize_aliases") and spec["tools"].get("tool_names"):
-        # The fixture's spec names an alias; the call bypasses tool presentation, so identity names give the same output.
-        spec["tools"]["tool_names"] = {name: name for name in spec["tools"]["tool_names"]}
-    return RuntimeSpec.model_validate(spec)
+def _spec(fixture: dict) -> RuntimeSpec:
+    return RuntimeSpec.model_validate(fixture["spec"])
 
 
 def _system(params: dict) -> str | None:
@@ -78,7 +73,7 @@ def _replay_calls(tmp_path: Path, fixture: dict, entry: dict) -> None:
         for item in fixture["calls"]
     ]
     run = run_boundary(
-        tmp_path, boundary=compile_boundary(_spec(fixture, entry)), calls=calls, system=_system(fixture["params"])
+        tmp_path, boundary=compile_boundary(_spec(fixture)), calls=calls, system=_system(fixture["params"])
     )
     for index, (expected, actual) in enumerate(zip(fixture["calls"], run.calls, strict=True)):
         where = f"{fixture['case']} call {index}"
@@ -107,7 +102,7 @@ def _replay_calls(tmp_path: Path, fixture: dict, entry: dict) -> None:
     _check_receipts(run)
 
 
-def _replay_prepare(tmp_path: Path, fixture: dict, entry: dict) -> None:
+def _replay_prepare(tmp_path: Path, fixture: dict) -> None:
     calls = []
     if fixture["child_session"]:
         calls.append(
@@ -122,7 +117,7 @@ def _replay_prepare(tmp_path: Path, fixture: dict, entry: dict) -> None:
         call(fixture["opencode_request"], upstream(json.dumps(OK).encode()), session=session, assistant="msg-prepare")
     )
     run = run_boundary(
-        tmp_path, boundary=compile_boundary(_spec(fixture, entry)), calls=calls, system=_system(fixture["params"])
+        tmp_path, boundary=compile_boundary(_spec(fixture)), calls=calls, system=_system(fixture["params"])
     )
     actual = run.calls[-1]
     if fixture["error"] is not None:
@@ -148,7 +143,7 @@ def _check_receipts(run: BoundaryRun) -> None:
 def test_fixture_matches_byte_for_byte(tmp_path: Path, entry: dict) -> None:
     fixture = json.loads((FIXTURES / f"{entry['case']}.json").read_text())
     if fixture["kind"] == "prepare":
-        _replay_prepare(tmp_path, fixture, entry)
+        _replay_prepare(tmp_path, fixture)
     else:
         _replay_calls(tmp_path, fixture, entry)
 
