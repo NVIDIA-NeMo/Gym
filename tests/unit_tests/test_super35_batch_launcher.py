@@ -287,7 +287,7 @@ def test_serving_workers_do_not_install_gym_dependencies(checkout) -> None:
     assert not (root / "prefetch-args").exists()
 
 
-@pytest.mark.parametrize("batch, expected_venvs", [("core", 15), ("swe", 4)])
+@pytest.mark.parametrize("batch, expected_venvs", [("core", 16), ("swe", 4)])
 @pytest.mark.parametrize("missing_file", [None, "bin/python", "bin/activate"])
 def test_prebuilt_check_uses_resolved_server_environments(
     checkout, monkeypatch, capsys, batch: str, expected_venvs: int, missing_file: str | None
