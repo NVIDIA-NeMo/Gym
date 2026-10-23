@@ -87,10 +87,17 @@ from the Responses request before invoking NOOA. Swap the provider configuration
 remote infrastructure without changing the agent recipe.
 
 The overall deadline belongs to the Environment Server (`default_episode_timeout_seconds`). The standard
-task contract has no separate NOOA agent deadline. The inherited SWE-bench Pro sandbox TTL is **18,000 seconds
-(five hours)**, shorter than the default six-hour episode deadline and 21,420-second worker ceiling. The sandbox may expire
-first. For long runs, set both deadlines below the TTL and reserve time for verification and cleanup, or raise
-the TTL in the provider overlay; a model-call limit alone is not a wall-clock guarantee.
+task contract has no separate NOOA agent deadline. This recipe sets the task sandbox TTL to **25,200 seconds
+(seven hours)** through
+`swebench_pro_nooa_resources_server.resources_servers.swebench_pro.sandbox_config.ttl_s`.
+Override that Resources key when changing the budget; provider overlays do not set this TTL.
+Keep the worker ceiling plus patch extraction and cleanup below `ttl_s`, and also keep the episode deadline
+plus final cleanup below it. The defaults are a 21,420-second worker ceiling and a 21,600-second episode timeout.
+Patch generation and patch-file removal each use the sandbox command timeout (180 seconds); stopping the task
+sandbox has a 120-second budget. Patch download has no separate timeout; the episode deadline bounds the caller's wait.
+Final cleanup allows 180 seconds per callback, with at most three registered callbacks including the Resources retry.
+The episode budget includes setup, so it can expire before the worker reaches its ceiling. Protected grading uses a
+separate sandbox after patch extraction; a model-call limit alone is not a wall-clock guarantee.
 NOOA has no model-call limit by default (`max_policy_calls: null`). Set a positive `max_policy_calls` to opt into a
 shared model-call budget for the rollout. The optional `resources_server` agent reference identifies the Resources
 server that owns the dataset and its schema. Runtime tool and sandbox access comes from the standard environment's

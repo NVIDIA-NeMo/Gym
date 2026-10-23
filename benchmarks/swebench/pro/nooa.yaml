@@ -14,6 +14,9 @@ swebench_pro_nooa_resources_server:
   resources_servers:
     swebench_pro:
       allowed_agents: [nooa_agent]
+      sandbox_config:
+        # Outlive the episode, patch extraction, and final cleanup budgets.
+        ttl_s: 25200
       datasets:
         - name: swebench_pro
           type: benchmark
