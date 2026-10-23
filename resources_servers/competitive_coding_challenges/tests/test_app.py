@@ -711,5 +711,6 @@ class TestSandboxPath:
         server._evaluator.get_problem_metadata.side_effect = ValueError("Problem 'prob-1' not found in metadata.")
         response = await server.verify(_make_verify_request())
 
-        assert response.reward == 0.0 and not response.mask_sample
+        assert response.reward == 0.0 and response.mask_sample
+        assert response.failure_kind == "verifier_error"
         assert response.details == {"error": "Problem 'prob-1' not found in metadata."}

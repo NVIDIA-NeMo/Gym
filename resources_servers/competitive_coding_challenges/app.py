@@ -439,8 +439,8 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
             # The generated code cannot be written as UTF-8 (a lone surrogate): the model's output, so it stays scored.
             details = {"error": str(e)}
         except ImportError:
-            # A provider SDK missing from the server venv is a deployment error; scoring it 0.0 would silently
-            # drop every CCC sample.
+            # A provider SDK missing from the server venv is a deployment error; masking it as a verifier error
+            # would silently drop every CCC sample.
             raise
         except Exception as e:
             details = {"error": str(e)}
