@@ -11,6 +11,12 @@ PROFILE_PREFILL="${PROFILE_PREFILL:-0}"
 PREFILL_PROFILE_STEPS="${PREFILL_PROFILE_STEPS:-20}"
 PREFILL_PROFILE_DELAY_SECONDS="${PREFILL_PROFILE_DELAY_SECONDS:-300}"
 
+# Optional operation input/output dumps; choose a directory on a mounted volume.
+# The launcher enables eager execution only on prefill workers when this is set.
+# Captures ten calls per FlashInfer API in real forwards above 16,384 tokens.
+# Example: export PREFILL_FLASHINFER_DUMP_DIR=/lustre/path/to/flashinfer-dumps
+PREFILL_FLASHINFER_DUMP_DIR="${PREFILL_FLASHINFER_DUMP_DIR:-}"
+
 GYM_MODEL_PARAMS=(
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95"

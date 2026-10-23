@@ -488,6 +488,14 @@ ensure_nsys() {
 serve_prefill() {
     local profile_port=\$1
     shift
+    if [[ -n "\${PREFILL_FLASHINFER_DUMP_DIR:-}" ]]; then
+        export VLLM_FLASHINFER_DUMP_DIR="\$PREFILL_FLASHINFER_DUMP_DIR"
+        # Validate vLLM's hook against the installed, unmodified FlashInfer.
+        python -c 'import vllm; import flashinfer.api_logging as api; assert getattr(api, "_vllm_capture_installed", False), "vLLM FlashInfer capture hook missing"'
+        # Graph replay/compiled fusion would hide Python API invocations.
+        set -- "\$@" --enforce-eager
+        echo "FlashInfer capture: first 10 calls per API per worker in real forwards >16384 tokens; eager prefill; output=\$VLLM_FLASHINFER_DUMP_DIR" >&2
+    fi
     if [[ "\${PROFILE_PREFILL:-0}" != 1 ]]; then
         vllm serve "\$@"
         return
