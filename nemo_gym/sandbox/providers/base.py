@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
+from nemo_gym.execution_timing import ExecutionTiming
+
 
 # How long a provider may spend finding and deleting the sandbox a timed-out create left behind (one list
 # and one delete per orphan). A caller that puts its own deadline on a create leaves at least this much room
@@ -224,12 +226,23 @@ class SandboxExecResult:
     command. Providers may use a non-process sentinel with ``error_type`` set
     when the sandbox runtime reports an execution failure without a process
     exit code.
+
+    ``execution_timing`` contains runtime clocks when the provider reports them;
+    ``duration_ms`` exposes their duration. Client dispatch, polling and transport
+    time are excluded. Unknown endpoints stay absent even when duration is known.
+    Compare endpoints only within their explicit clock domain.
     """
 
     stdout: str | None
     stderr: str | None
     return_code: int
     error_type: str | None = None
+    execution_timing: ExecutionTiming | None = None
+
+    @property
+    def duration_ms(self) -> float | None:
+        """Measured runtime duration, when supplied by this provider."""
+        return self.execution_timing.duration_ms if self.execution_timing is not None else None
 
 
 ExecResult = SandboxExecResult
