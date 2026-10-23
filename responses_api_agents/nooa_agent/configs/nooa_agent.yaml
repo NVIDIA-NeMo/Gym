@@ -15,7 +15,7 @@ nooa_agent:
         execution_mode: embedded
         # execution_mode: sandboxed  # Requires Resources-provided sandbox_access.
       max_policy_calls: null
-      # Leave 180 seconds of the default episode budget for finalization.
+      # Worker ceiling is below the episode timeout; setup can still make the episode deadline fire first.
       sandbox_runner_timeout_seconds: 21420
       session_close_timeout_seconds: 30
 
