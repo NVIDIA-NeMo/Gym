@@ -54,9 +54,13 @@ def verdict(**options):
 
 
 def test_a_measured_episode_reports_the_task_reward_and_no_failure():
-    assert verdict() == Verdict(1.0, False, True)
-    assert verdict(execution="length") == Verdict(1.0, False, True)
-    assert Verdict(1.0, False, True).fields() == {"reward": 1.0, "mask_sample": False, "evaluation_completed": True}
+    assert verdict() == Verdict(reward=1.0, mask_sample=False, evaluation_completed=True)
+    assert verdict(execution="length") == Verdict(reward=1.0, mask_sample=False, evaluation_completed=True)
+    assert Verdict(reward=1.0, mask_sample=False, evaluation_completed=True).fields() == {
+        "reward": 1.0,
+        "mask_sample": False,
+        "evaluation_completed": True,
+    }
 
 
 @pytest.mark.parametrize(

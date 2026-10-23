@@ -43,9 +43,10 @@ def test_the_ledger_keeps_each_reply_s_id_and_usage_and_why_a_call_got_none():
     ]
     assert calls[0].prompt_sha256 == calls[1].prompt_sha256 == hashlib.sha256(b"first question").hexdigest()
     assert (calls[0].input_tokens, calls[0].output_tokens, calls[0].reasoning_tokens) == (1200, 300, 120)
-    # A verify result reports the reply ID and the tokens only.
+    # A verify result reports the reply ID, the model that answered and the tokens only.
     assert calls[0].summary().model_dump() == {
         "response_id": "resp-1",
+        "model": "judge",
         "input_tokens": 1200,
         "output_tokens": 300,
         "reasoning_tokens": 120,

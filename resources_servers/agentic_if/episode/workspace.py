@@ -5,7 +5,7 @@
 import json
 from shlex import quote
 
-from resources_servers.agentic_if.episode.runtime import BoundSandbox
+from resources_servers.agentic_if.episode.runtime import BoundSandbox, private_staging, upload_text
 
 
 # Match the profile plugin's per-tool snapshots without changing the actor's Git index. Keep
@@ -81,7 +81,8 @@ async def snapshot_workspace(sandbox: BoundSandbox) -> str | None:
 # beyond the task identity, including for explicitly declared absolute files.
 _STAGE = """
 import json, os, stat, sys
-files = json.loads(sys.argv[1])
+with open(sys.argv[1], encoding='utf-8') as manifest:
+    files = json.load(manifest)
 resolved = [(os.path.abspath(path), text) for path, text in files.items()]
 paths = {path for path, _ in resolved}
 if len(paths) != len(resolved) or any(
@@ -144,6 +145,10 @@ async def stage_workspace_files(sandbox: BoundSandbox, files: dict[str, str]) ->
         if result.return_code or result.error_type or not workdir.startswith("/"):
             raise RuntimeError("could not resolve initial workspace working directory")
         sandbox.workdir = workdir
-    result = await sandbox.exec(command=f"python3 -c {quote(_STAGE)} {quote(json.dumps(files))}", timeout_s=30)
+    # The files go by upload, not on the command line, which caps a single argument at 128 KiB.
+    async with private_staging(sandbox, "workspace") as staging:
+        manifest = f"{staging}/files.json"
+        await upload_text(sandbox, manifest, json.dumps(files))
+        result = await sandbox.exec(command=f"python3 -c {quote(_STAGE)} {quote(manifest)}", timeout_s=30)
     if result.return_code or result.error_type:
         raise RuntimeError("could not stage initial workspace files")

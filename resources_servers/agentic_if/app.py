@@ -590,11 +590,13 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
         content = {key: value for key, value in (body.model_extra or {}).items() if not key.startswith("_ng_")}
         spec = self._verified_runtime(body, content | {"agentic_if": body.agentic_if}, task_id=None)
         verdict = Verdict(
-            0.0,
-            True,
-            False,
-            SESSION_LOST,
-            "No live agentic IF session for this verify and no persisted episode (deliverables_dir) to re-grade",
+            reward=0.0,
+            mask_sample=True,
+            evaluation_completed=False,
+            failure_kind=SESSION_LOST,
+            failure_reason=(
+                "No live agentic IF session for this verify and no persisted episode (deliverables_dir) to re-grade"
+            ),
         )
         return AgenticIFVerifyResponse.model_validate(
             body.model_dump(mode="json") | {"agentic_if": spec.model_dump(mode="json")} | verdict.fields()

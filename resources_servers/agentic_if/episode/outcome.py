@@ -85,7 +85,7 @@ def execution_status(
     return "completed"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Verdict:
     """The task reward and the failure fields of one verify result."""
 
@@ -162,27 +162,51 @@ def classify(
     """
     reward = _reward(backend_result)
     if collection_error is not None:
-        return Verdict(reward, True, False, SESSION_LOST, collection_error[:2000])
+        return Verdict(
+            reward=reward,
+            mask_sample=True,
+            evaluation_completed=False,
+            failure_kind=SESSION_LOST,
+            failure_reason=collection_error[:2000],
+        )
     if backend_error is not None or backend_result is None:
-        return Verdict(reward, True, False, VERIFIER_ERROR, (backend_error or "Task verification did not run")[:2000])
+        return Verdict(
+            reward=reward,
+            mask_sample=True,
+            evaluation_completed=False,
+            failure_kind=VERIFIER_ERROR,
+            failure_reason=(backend_error or "Task verification did not run")[:2000],
+        )
     measured = backend_result.get("reward")
     if isinstance(measured, bool) or not isinstance(measured, (int, float)):
-        return Verdict(reward, True, False, VERIFIER_ERROR, "The task verifier returned no numeric reward")
+        return Verdict(
+            reward=reward,
+            mask_sample=True,
+            evaluation_completed=False,
+            failure_kind=VERIFIER_ERROR,
+            failure_reason="The task verifier returned no numeric reward",
+        )
     if backend_result.get("mask_sample") is True:
         kind = backend_result.get("failure_kind")
         reason = backend_result.get("failure_reason") or backend_result.get("error") or "The task verifier masked it"
         return Verdict(
-            reward,
-            True,
-            backend_result.get("evaluation_completed") is True,
-            kind if isinstance(kind, str) and kind else VERIFIER_ERROR,
-            str(reason)[:2000],
+            reward=reward,
+            mask_sample=True,
+            evaluation_completed=backend_result.get("evaluation_completed") is True,
+            failure_kind=kind if isinstance(kind, str) and kind else VERIFIER_ERROR,
+            failure_reason=str(reason)[:2000],
         )
     if backend_result.get("evaluation_completed") is False:
         reason = (
             backend_result.get("failure_reason") or backend_result.get("error") or "Task verification did not complete"
         )
-        return Verdict(reward, True, False, VERIFIER_ERROR, str(reason)[:2000])
+        return Verdict(
+            reward=reward,
+            mask_sample=True,
+            evaluation_completed=False,
+            failure_kind=VERIFIER_ERROR,
+            failure_reason=str(reason)[:2000],
+        )
     assistants = _assistants(root_export)
     last = assistants[-1] if assistants else {}
     error = last.get("error")
@@ -190,15 +214,33 @@ def classify(
     if (execution == "timeout" or context_limit) and not setup_unverified(evidence):
         if execution == "timeout":
             return Verdict(
-                reward,
-                False,
-                True,
-                AGENT_TIMEOUT,
-                "OpenCode stopped at its harness timeout; the final state was verified",
+                reward=reward,
+                mask_sample=False,
+                evaluation_completed=True,
+                failure_kind=AGENT_TIMEOUT,
+                failure_reason="OpenCode stopped at its harness timeout; the final state was verified",
             )
-        return Verdict(reward, False, True, MODEL_CONTEXT_LIMIT, _agent_failure_reason(response, last)[:2000])
+        return Verdict(
+            reward=reward,
+            mask_sample=False,
+            evaluation_completed=True,
+            failure_kind=MODEL_CONTEXT_LIMIT,
+            failure_reason=_agent_failure_reason(response, last)[:2000],
+        )
     if evidence.status != "complete":
-        return Verdict(reward, True, False, EVIDENCE_INCOMPLETE, "; ".join(evidence.issues)[:2000])
+        return Verdict(
+            reward=reward,
+            mask_sample=True,
+            evaluation_completed=False,
+            failure_kind=EVIDENCE_INCOMPLETE,
+            failure_reason="; ".join(evidence.issues)[:2000],
+        )
     if execution == "error":
-        return Verdict(reward, True, True, _agent_failure_kind(response), _agent_failure_reason(response, last)[:2000])
-    return Verdict(reward, False, True)
+        return Verdict(
+            reward=reward,
+            mask_sample=True,
+            evaluation_completed=True,
+            failure_kind=_agent_failure_kind(response),
+            failure_reason=_agent_failure_reason(response, last)[:2000],
+        )
+    return Verdict(reward=reward, mask_sample=False, evaluation_completed=True)

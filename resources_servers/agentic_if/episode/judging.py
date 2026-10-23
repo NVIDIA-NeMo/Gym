@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Keep each judge call's reply ID and token usage, and tell a judge outage apart from a judge that answered.
+"""Keep each judge call's reply ID, model and token usage, and tell a judge outage apart from a judge that answered.
 
-Both stay outside ``if_grading``, which keeps only a reply's text and turns a vote without a verdict into an ``error``
-decision, whatever the cause; it stays byte-identical (its sources are part of the scorer's identity).
+Both stay outside ``if_grading``, whose sources make up the scorer's identity: it keeps only a reply's text and turns a
+vote without a verdict into an ``error`` decision, whatever the cause.
 
 The Resources Server asks the judge outside the rollout's context, so the judge's calls are not in the rollout's
-model-call capture: the ledger is their only record. Per grade, it keeps every call's reply ID and token usage, or why
+model-call capture: the ledger is their only record. Per grade, it keeps every call's reply ID, the model that
+answered (a model server may serve another model than the judge configuration names) and token usage, or why
 the call got no reply, and which judge questions any request reached. A check that errored on a question no request
 reached is a judge outage: verify raises ``JudgeError`` so ``judge_failsafe`` records ``judge_failed``, which
 re-verification recovers. An unparseable reply stays a graded check outcome.
@@ -50,11 +51,12 @@ def _failure(error: JudgeError) -> str:
 
 
 class JudgeCallSummary(BaseModel):
-    """One judge call as a verify result reports it: the reply's ID and token usage, None where there are none."""
+    """One judge call as a verify result reports it: the reply's ID, model and token usage (None where missing)."""
 
     model_config = ConfigDict(extra="forbid")
 
     response_id: str | None = None
+    model: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
     reasoning_tokens: int | None = None
@@ -119,6 +121,7 @@ class JudgeLedger:
         call = JudgeCall(
             prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest(),
             response_id=reply.id or None,
+            model=reply.model or None,
             input_tokens=usage.input_tokens if usage is not None else None,
             output_tokens=usage.output_tokens if usage is not None else None,
             reasoning_tokens=usage.output_tokens_details.reasoning_tokens if usage is not None else None,

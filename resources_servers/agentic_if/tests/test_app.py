@@ -690,9 +690,10 @@ async def test_each_judge_call_s_reply_id_and_usage_are_reported_and_kept_with_t
     n = len(sent)
     assert n > 0 and [call.response_id for call in result.judge_calls] == [f"judge-reply-{i}" for i in range(1, n + 1)]
     row_view = result.model_dump(mode="json")
-    # What lands in rollouts.jsonl: each call's reply ID and tokens, and their totals.
+    # What lands in rollouts.jsonl: each call's reply ID, the model that answered and tokens, and their totals.
     assert row_view["judge_calls"][0] == {
         "response_id": "judge-reply-1",
+        "model": "nvidia/zai-org/glm-5.3",
         "input_tokens": 1200,
         "output_tokens": 300,
         "reasoning_tokens": 120,

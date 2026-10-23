@@ -8,17 +8,14 @@ continued root session back to the prefix it restored (``continued_session``).
 """
 
 import re
-import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from shlex import quote
-from uuid import uuid4
 
 from pydantic import JsonValue
 
 from resources_servers.agentic_if.episode import opencode_prefix
-from resources_servers.agentic_if.episode.runtime import BoundSandbox
+from resources_servers.agentic_if.episode.runtime import BoundSandbox, private_staging, upload_text
 from resources_servers.agentic_if.episode.workspace import WORKSPACE_DIFF
 from resources_servers.agentic_if.if_grading.contracts import SessionEvidence
 from resources_servers.agentic_if.task_variants.runtime import ContinuationSpec, RuntimeSpec
@@ -44,18 +41,6 @@ def workspace_patches_equal(left: str, right: str) -> bool:
         if any(not (x[k].startswith(y[k]) or y[k].startswith(x[k])) for k in (1, 2)):
             return False
     return True
-
-
-async def _upload(sandbox: BoundSandbox, directory: str, *, filename: str, text: str) -> str:
-    remote = directory + "/" + filename
-    with tempfile.TemporaryDirectory(prefix="if-replay-") as temporary:
-        path = Path(temporary) / filename
-        path.write_text(text)
-        await sandbox.upload(path, remote)
-    mode = await sandbox.transport.exec(command=f"chmod 0644 {quote(remote)}", user="root", timeout_s=30)
-    if mode.return_code != 0 or mode.error_type:
-        raise RuntimeError("cannot stage the prefix patch")
-    return remote
 
 
 async def _workspace_diff(sandbox: BoundSandbox, *, exclude: tuple[str, ...] = ()) -> str:
@@ -86,7 +71,8 @@ async def restore_workspace(
     remote = None
     touched = set()
     if continuation.workspace_diff.strip():
-        remote = await _upload(sandbox, staging, filename="prefix.patch", text=continuation.workspace_diff)
+        remote = f"{staging}/prefix.patch"
+        await upload_text(sandbox, remote, continuation.workspace_diff)
         stats = await sandbox.exec(command=f"git apply --numstat -z {quote(remote)}", timeout_s=30)
         if stats.return_code or stats.error_type:
             raise RuntimeError("cannot inspect recorded prefix workspace diff")
@@ -142,14 +128,8 @@ async def restore_prefix_workspace(sandbox: BoundSandbox, spec: RuntimeSpec) -> 
     recorded = opencode_prefix.recorded_workspace_diff(continuation.prefix_export)
     if recorded is not None and not workspace_patches_equal(recorded, continuation.workspace_diff):
         raise ValueError("continuation workspace diff disagrees with the recorded prefix")
-    staging = f"/tmp/nemo-gym-agentic-if-replay-{uuid4().hex}"
-    created = await sandbox.exec(command=f"umask 077; mkdir -p {quote(staging)}", timeout_s=30)
-    if created.return_code or created.error_type:
-        raise RuntimeError("could not prepare a private prefix staging directory")
-    try:
+    async with private_staging(sandbox, "replay") as staging:
         return await restore_workspace(sandbox, spec, continuation, staging=staging)
-    finally:
-        await sandbox.transport.exec(command=f"rm -rf {quote(staging)}", user="root", timeout_s=30)
 
 
 @dataclass(frozen=True)

@@ -214,7 +214,8 @@ class _Reader:
         data = await self.read(relative, gap=f"{gap}_unavailable")
         if data is None:
             return []
-        rows, gaps = parse_jsonl(data, name=gap)
+        # Off the event loop: the records of a long episode run to megabytes.
+        rows, gaps = await asyncio.to_thread(parse_jsonl, data, name=gap)
         self.gaps.extend(gaps)
         return rows
 
@@ -246,7 +247,7 @@ async def _exports(io: SandboxIO, reader: _Reader, timeout: float) -> tuple[dict
         if data is None:
             continue
         try:
-            document = json.loads(data)
+            document = await asyncio.to_thread(json.loads, data)
             identity = document["info"]["id"]
             if not isinstance(identity, str) or not identity:
                 raise ValueError("the export names no session")

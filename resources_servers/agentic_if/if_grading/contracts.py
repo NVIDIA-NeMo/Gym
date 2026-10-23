@@ -119,7 +119,7 @@ class SessionStep(Contract):
 
 
 class SessionInfo(Contract):
-    """Native session identity, including real delegated child sessions."""
+    """OpenCode session identity, including real delegated child sessions."""
 
     id: str = Field(min_length=1)
     parent_id: str | None = None

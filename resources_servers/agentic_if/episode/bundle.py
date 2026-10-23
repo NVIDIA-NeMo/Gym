@@ -6,6 +6,7 @@
 ``SandboxIO``.
 """
 
+import asyncio
 import json
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -35,7 +36,7 @@ class BundleSandboxIO:
         """Write ``data`` to ``path`` in the task sandbox."""
         with tempfile.TemporaryDirectory(prefix="agentic-if-bundle-") as temporary:
             local = Path(temporary) / "payload"
-            local.write_bytes(data)
+            await asyncio.to_thread(local.write_bytes, data)
             await self.transport.upload(local, path)
 
     async def download_bytes(self, path: str) -> bytes:
@@ -43,7 +44,7 @@ class BundleSandboxIO:
         with tempfile.TemporaryDirectory(prefix="agentic-if-bundle-") as temporary:
             local = Path(temporary) / "payload"
             await self.transport.download(path, local)
-            return local.read_bytes()
+            return await asyncio.to_thread(local.read_bytes)
 
 
 async def stage(

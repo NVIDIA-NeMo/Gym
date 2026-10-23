@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Evaluate resolved checks against the session evidence an Environment Server records."""
+"""Evaluate resolved checks against the session evidence the resources server records."""
 
 from collections.abc import Sequence
 from copy import deepcopy

@@ -120,6 +120,22 @@ async def test_verification_failure_still_releases_the_correct_owned_resource(tr
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reply", ["not an object", {"resources_session_id": "attempt-a"}, "unknown provider"])
+async def test_a_seed_reply_without_a_usable_sandbox_is_an_infrastructure_failure(transport, monkeypatch, reply):
+    """Not the task's fault: a RuntimeError, which seed reports as a retryable 503 rather than an invalid task."""
+    if reply == "unknown provider":
+        monkeypatch.setattr(Remote, "global_config_dict", {})
+        reply = seeded()
+    remote = Remote(reply)
+    task = session(remote)
+    with pytest.raises(RuntimeError, match="tasks"):
+        await task.prepare()
+    await task.close()
+    # Nothing was bound, and the backend's session is still released.
+    assert task.sandbox is None and remote.calls[-1]["url_path"] == "/close_session"
+
+
+@pytest.mark.asyncio
 async def test_nonroot_identity_failure_cannot_start_harness_but_still_cleans_up(transport):
     transport.uid = "0"
     task = session(Remote(seeded()), task_row=row() | {"agent_user": "agent"})

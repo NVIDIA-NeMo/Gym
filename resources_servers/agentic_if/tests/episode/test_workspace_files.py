@@ -98,12 +98,19 @@ async def test_staging_preserves_exact_bytes_and_identity(tmp_path, monkeypatch,
         "docs/a.rst": "rst\n",
         # An absolute file is staged at its declared path, even outside the working directory.
         str(tmp_path.parent / (tmp_path.name + "-outside") / "config"): "exact λ\n",
+        # Larger than Linux's 128 KiB limit on one command-line argument.
+        "large.txt": "x" * (256 * 1024),
     }
     await stage_workspace_files(sandbox, files)
     assert all((tmp_path / path).read_bytes() == text.encode("utf-8") for path, text in files.items())
     assert all((tmp_path / path).stat().st_uid == os.getuid() for path in files)
-    assert all(user == os.getuid() for _, user in transport.calls)
-    assert len(transport.calls) <= 2
+    # One write, as the task user, that reads the uploaded files rather than taking them on its command line.
+    ((command, user),) = [call for call in transport.calls if call[0].startswith("python3 ")]
+    assert user == os.getuid() and "literal ${tool}" not in command
+    # Only the private staging directory's chmod and removal run as root, and the directory is gone afterwards.
+    assert {user for command, user in transport.calls if command.startswith(("chmod ", "rm "))} == {"root"}
+    (staging,) = {command.split()[-1] for command, _ in transport.calls if command.startswith("umask 077; mkdir -p ")}
+    assert staging.startswith("/tmp/nemo-gym-agentic-if-workspace-") and not os.path.exists(staging)
 
 
 @pytest.mark.asyncio

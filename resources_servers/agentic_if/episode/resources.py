@@ -64,18 +64,10 @@ class SandboxTaskSession:
         self.cookies.update({key: getattr(value, "value", value) for key, value in response.cookies.items()})
         result = await get_response_json(response)
         if not isinstance(result, dict):
-            raise ValueError(f"{self.server_name} {path} response must be a JSON object")
+            raise RuntimeError(f"{self.server_name} {path} response must be a JSON object")
         return result
 
-    async def _bind(
-        self,
-        descriptor: dict[str, JsonValue],
-        provider_config: dict[str, JsonValue],
-        *,
-        workdir: str | None,
-        user: str | int | None,
-    ) -> None:
-        self._provider = create_provider(provider_config)
+    async def _bind(self, descriptor: dict[str, JsonValue], *, workdir: str | None, user: str | int | None) -> None:
         self._transport = await AsyncSandbox.connect(descriptor, provider=self._provider)
         user = normalize_agent_user(user)
         execution_env = {}
@@ -118,10 +110,16 @@ class SandboxTaskSession:
             task_data=self.row,
         )
         seeded = await self._post("/seed_session", seed.model_dump(mode="json"))
-        self.access = SandboxAccess.model_validate(seeded.get("sandbox_access"))
+        try:
+            self.access = SandboxAccess.model_validate(seeded.get("sandbox_access"))
+            self._provider = create_provider(
+                resolve_provider_config(self.access.connection.provider_config_ref, self.client.global_config_dict)
+            )
+        except (ValueError, TypeError) as error:
+            # The backend's reply or the sandbox configuration is at fault, not the task: retryable, not a 422.
+            raise RuntimeError(f"{self.server_name} lent no usable sandbox: {error}") from error
         await self._bind(
             self.access.connection.descriptor,
-            resolve_provider_config(self.access.connection.provider_config_ref, self.client.global_config_dict),
             workdir=self.row.get("workdir") or self.access.workdir,
             user=self.row.get("agent_user"),
         )

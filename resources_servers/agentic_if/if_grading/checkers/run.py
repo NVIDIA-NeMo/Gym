@@ -75,8 +75,8 @@ TOOL_NAMES = {
     "plan": ["todowrite"],
     "ask": ["question"],
 }
-# argument names that mean the same thing across tool profiles; the model's own arguments are kept beside the native
-# ones, so a profile's name for an argument can be what a call carries
+# argument names that mean the same thing across tool profiles; the model's own arguments are kept beside the built-in
+# tool's, so a profile's name for an argument can be what a call carries
 ARG_ALIASES = {
     "path": ["path", "file_path", "filepath", "filename", "target_file", "file", "absolute_path", "notebook_path"],
     "command": ["command", "cmd", "script"],

@@ -86,7 +86,9 @@ class Judge:
         self._pending: dict[str, Future] = {}
         self._lock = threading.Lock()
 
-    def prompt(self, rubric: str, context: str, evidence: str, instruction: InstructionContext | None = None) -> str:
+    def prompt(
+        self, *, rubric: str, context: str, evidence: str, instruction: InstructionContext | None = None
+    ) -> str:
         """The judge's whole question: with the instruction the model was given when it is known."""
         if instruction is not None:
             return self.config["instruction_prompt"].format(
@@ -172,7 +174,7 @@ class Judge:
     ) -> JudgeDecision:
         """One decision from the context's votes, by majority; any vote without a verdict makes it an error."""
         instruction = InstructionContext.model_validate(instruction) if instruction is not None else None
-        prompt = self.prompt(rubric, context, evidence, instruction)
+        prompt = self.prompt(rubric=rubric, context=context, evidence=evidence, instruction=instruction)
         votes = [self._vote(prompt, vote, instruction) for vote in range(votes_for(self.config, context, n_steps))]
         error = next((decision for decision in votes if decision.status == "error"), None)
         status = (
