@@ -767,7 +767,7 @@ def _to_result(payload: Any):
 
 def session_token_serializer(server: Any) -> URLSafeSerializer:
     """The serializer that signs and verifies this server's MCP session tokens."""
-    return mcp_session_token_serializer(server.get_session_middleware_key())
+    return mcp_session_token_serializer(server.get_session_secret())
 
 
 def maybe_auto_expose(server: Any, app: FastAPI) -> Optional[dict[str, MCPTool]]:
