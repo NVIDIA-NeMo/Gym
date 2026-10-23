@@ -100,17 +100,3 @@ Inspect the answers, judgments, and invalid-score count, then stop the
 servers with Ctrl+C. Remove `--limit 3` to evaluate the prepared split.
 Both candidate and judge default to 4,096 output tokens in this preset;
 candidate request overrides do not change the judge's token limit.
-
-## Validation status
-
-The integration is experimental (`verified: false`). Local tests and
-example-data validation have passed; a fresh live-model smoke and
-inspection of authentic example rollouts remain pending endpoint credentials.
-
-```bash
-pytest tests/unit_tests/test_indic_arena_hard_v2.py
-gym env test +entrypoint=resources_servers/indic_arena_judge
-
-# After generating and inspecting data/example_rollouts.jsonl
-gym env test +entrypoint=resources_servers/indic_arena_judge +should_validate_data=true
-```

@@ -90,6 +90,3 @@ Evaluate each language separately for per-language pairwise scores.
 Pointwise rubric scores are not Arena Hard win rates. Pairwise results
 also depend on the translated prompts and chosen baselines, so they are
 not directly comparable to the original English benchmark.
-
-This integration is experimental (`verified: false`); see
-[validation status](usage.md#validation-status).

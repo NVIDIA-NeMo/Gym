@@ -108,7 +108,3 @@ category breakdowns, invalid verdict counts, and win/tie/loss metrics.
 See the [Arena judge metrics](../arena_judge/README.md#metrics) for details.
 Pairwise aggregation is by category; run each language separately for
 per-language scores.
-
-The server remains `verified: false`. See the benchmark's
-[validation status](../../benchmarks/indic/indic-arena-hard-v2/usage.md#validation-status)
-for the outstanding live smoke check.
