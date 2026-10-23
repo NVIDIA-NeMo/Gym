@@ -751,7 +751,7 @@ async def test_a_retired_episode_stops_everywhere_and_leaves_nothing_behind(depl
     assert after_retire["policy_model"]["report"]["counts"]["inflight"] == 0
     # Only the rollout's refusal remains, one entry per server, until the controller forgets it.
     assert {name: status["retired_rollouts"] for name, status in after_retire.items()} == dict.fromkeys(servers, 1)
-    assert "stale_attempt" in late.text
+    assert "checkpoint_stale_attempt" in late.text
     assert {name: status["retired_rollouts"] for name, status in after_forget.items()} == dict.fromkeys(servers, 0)
     assert after_forget["resources"]["retired_sessions"] == 0
     # The checkpoint retire also retired the attempt's capture ledger.

@@ -69,7 +69,7 @@ class AgentSessionRecord(CheckpointRecord):
 class ActivationOutOfOrderError(ControlError):
     """An activation index that is neither the session's last completed activation nor the next one."""
 
-    code = "activation_out_of_order"
+    code = "checkpoint_activation_out_of_order"
 
 
 class LegacyRun:

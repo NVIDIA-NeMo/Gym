@@ -83,7 +83,7 @@ async def restore(client: httpx.AsyncClient, checkpoint_dir: Path, episode: dict
 
 
 def refused(response: httpx.Response) -> bool:
-    return response.status_code == 409 and response.json()["error"]["code"] == "stale_attempt"
+    return response.status_code == 409 and response.json()["error"]["code"] == "checkpoint_stale_attempt"
 
 
 async def increment(client: httpx.AsyncClient, token: str) -> httpx.Response:
@@ -272,6 +272,6 @@ async def test_a_late_tool_call_over_mcp_for_a_retired_attempt_is_refused_until_
         late = await increment(client, token)
         await client.post("/ng-control/v1/checkpoint/forget", json=control("forget", rollout_ids=["r"]), headers=AUTH)
 
-    assert late.status_code == 409 and late.json()["error"]["code"] == "stale_attempt"
+    assert late.status_code == 409 and late.json()["error"]["code"] == "checkpoint_stale_attempt"
     # Nothing was recreated for the retired session.
     assert server.counters == {}
