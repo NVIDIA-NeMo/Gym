@@ -116,15 +116,20 @@ without `resume_trajectory`: a fresh agent session per turn, with the step's
 `steps/<name>/instruction.md` as its only input and the step's `[steps.agent].timeout_sec` (else the task's)
 as its budget. The task's top-level `instruction.md` is never sent; a multi-step task may keep material there
 the agent must not see. After each turn the shared verifier runs the task's `tests/` with
-`steps/<name>/tests/` on top, under the step's verifier timeout, user and environment over the task's. A turn whose failed response the
-harness classified goes through `agent_outcome_policy` first, like a single-step task's: a retry or fail cause
-ends the episode at that turn, ungraded. Before
-every turn after the first, `/tests` and `/logs/verifier` are emptied and the server's `/logs/agent/trajectory.json`
-removed, so the next agent does not open beside the previous turn's tests, reward or transcript; a failure to clear
-them fails the episode before the next agent session opens. Harbor 0.22.0 clears them only before each step's
-verifier (Harbor main clears them before the step, which this follows); Harbor also empties (or, for a bind-mounted
-`/logs/agent`, moves away) the whole `/logs/agent` before each non-resumed step, here the agent's own files there
-stay. A step's
+`steps/<name>/tests/` on top, under the step's verifier user and environment over the task's and the step's own
+`[steps.verifier].timeout_sec`, else Harbor's step default of 600 s, never the task's `[verifier].timeout_sec`
+(Harbor's `StepConfig.verifier` is a full `VerifierConfig` with that default, so the task's figure never reaches a
+step; the loader warns about a task whose `[verifier].timeout_sec` differs and whose steps name none). A turn
+whose failed response the harness classified goes through `agent_outcome_policy` first, like a single-step
+task's: a retry or fail cause ends the episode at that turn, ungraded. Before
+every turn that follows a turn verified in the agent's sandbox (a shared turn), `/tests` and `/logs/verifier` are
+emptied and the server's `/logs/agent/trajectory.json` removed, so the next agent does not open beside the previous
+turn's tests, reward or transcript; a failure to clear them fails the episode before the next agent session opens.
+After a turn verified in a sandbox of its own nothing is reset, since nothing was graded in the agent's sandbox
+(Harbor 0.22.0's separate mode never touches its `/tests`). Harbor 0.22.0 clears them only before each step's
+shared verifier (Harbor main clears them before the step when the previous step ran a shared verifier there, which
+this follows); Harbor also empties (or, for a bind-mounted `/logs/agent`, moves away) the whole `/logs/agent` before
+each non-resumed step, here the agent's own files there stay. A step's
 `[steps.verifier].user` or `[steps.agent].user` that names a group (`name:group`, `uid:gid`) is refused at seed
 on every provider but Docker, as the task's own users are, naming the step, before any sandbox exists. Each turn's
 agent runs as the step's `[steps.agent].user` (else the task's `[agent].user`, else the image's `USER`), as Harbor
@@ -134,7 +139,84 @@ and switch back for a later step that sets a different one; the verifier keeps i
 step's own `steps/<name>/solution/` at `/solution` before each turn (falling back to the task's top-level
 `solution/`), as Harbor's oracle resolves each step's solution, so `gym dataset validate` runs a task whose
 solutions are per step; such a task counts as validatable when every step has a solution (its own or the task's),
-and is listed unvalidated otherwise.
+and is listed unvalidated otherwise. A step's `steps/<name>/workdir/` is merged into the working directory before
+its turn (an upload over what the previous turns left, as root with the folder's own modes, the digest's ignored
+names left out; a symbolic link a previous turn's agent planted at a shipped name is removed as root right before
+the extraction, so BusyBox tar, which would follow it and write the shipped files through it, lands the merge where
+GNU tar and Harbor's `docker cp` do) and its `steps/<name>/workdir/setup.sh`, when the folder ships one, is then run as
+`bash <workdir>/setup.sh` from the working directory as the turn's agent user, within `step_setup_timeout_s` (unset
+by default: the step's own agent budget, `[steps.agent].timeout_sec` else `[agent].timeout_sec`; Harbor bounds the
+script by nothing but the trial's timeout), a bound the episode budget counts for every step that ships the script:
+Harbor 0.22.0's `_prepare_step` order (`_upload_step_workdir`, `_run_step_setup`), under the step's agent user,
+before the oracle's solution is placed and the agent session opens. A `setup.sh` that exits non-zero (or runs past
+that bound) is the step's failure, as Harbor records it in the step's `exception_info`: the turn is recorded
+with `failure_kind: harbor:step_setup_failed`, no response and no verifier result, no agent session or verifier
+runs for it, and the episode stops after it; under `mean` the turns before it are averaged, under `final` the
+episode is masked with that kind, since Harbor's trial then has no reward at all (an episode whose first
+turn fails there has no rollout at all and is a terminal agent-stage failure with that kind). An entry of
+`workdir/` the sandbox refuses to unpack over what the previous turns left (a non-empty directory at the name of a
+shipped file, which the previous turn's agent can plant in the working directory it owns) is the step's failure as
+well, `failure_kind: harbor:step_workdir_failed` (Harbor's `docker cp` refuses the same mismatch and its trial
+errors; the sandbox is sound, so it is not an outage to retry). Nothing stops what an earlier turn left running
+before the script runs: a process it left behind can replace the uploaded `setup.sh` in the working directory it
+owned, so a step whose agent is root after a step whose agent was not must not rely on `setup.sh` to undo what the
+earlier step did (Harbor runs it the same way; the loader warns about such a task). A `setup.sh` beside
+`instruction.md` instead of inside `workdir/` is not a Harbor file: the loader warns and nothing runs it. A step's
+`[steps.healthcheck]` is then polled to a pass (after the setup, not after a failed one; Harbor's
+`_run_step_healthcheck`), from the working directory as the turn's agent user, with the same Docker-style timing as
+the seed's checks (`start_period_sec` of uncounted attempts every `start_interval_sec`, then `retries` consecutive
+failures every `interval_sec` fail it; an attempt killed at its `timeout_sec` plus the 5 s exec grace counts as one
+failed attempt, as Docker's `HEALTHCHECK` counts it, where Harbor 0.22.0 errors the whole trial on the first attempt
+that overruns, since its Docker exec raises and no caller of `run_healthcheck` catches it); the task's
+`[environment.healthcheck]` ran at seed and is not run again per
+step, as Harbor runs it once at environment start. A check that never passes is the step's failure too:
+`failure_kind: harbor:step_healthcheck_failed`, the same failed turn and early stop as a failed `setup.sh`; a
+sandbox that cannot run the command (stopped, a provider error) is an outage, retried as a failed `setup.sh` exec is.
+The episode budget counts the check's worst case for every step that declares one (the start period, one attempt
+that may start just inside it and its `start_interval_sec` sleep, then `retries` counted attempts with an
+`interval_sec` sleep between them, each attempt `timeout_sec` plus the 5 s exec grace).
+After each turn's agent session and before its verifier, Harbor's per-step collection pass runs, in shared mode too
+(0.22.0 `_collect_step_artifacts`: the trial collects before the step's verifier, whatever `StepConfig.artifacts`'s
+description says about "after"): the task's `[[verifier.collect]]` hooks and then the step's own
+`[[steps.verifier.collect]]` hooks for `main` (Harbor's `_collect_hooks_for`: the task's, then the step's), then
+`/logs/artifacts`, the task's `artifacts` and the step's own `[[steps]] artifacts` entries from `main`, then the
+sidecars' hooks and entries, each staged under its numbered root in that turn's verifier logs folder
+(`artifacts/NN/<destination>`,
+the same layout as a separate verifier's staging) with the pass recorded in `artifacts/manifest.json` (one entry per
+declared artifact: `source`, `service`, where it was declared as `origin`, its `destination`, its `type` and a
+`status` of `ok`, `absent`, `link`, `failed` or `skipped`); the archives a shared turn does not restore are
+removed once the pass ends. Nothing is stopped between turns: the sandbox and its sidecars keep running for the
+turns that follow, except on the last turn of a task whose last step verifies separately, where the agent's
+container is stopped before the sidecar pass and the whole agent side before the verifier, as Harbor's `_run_step`
+does on the last step of a separate-mode task. The hooks run once per turn, in that pass, not again inside the
+shared verifier.
+A collection the sandbox cannot serve masks the turn as an outage; an artifact the agent's tree defeats only warns,
+as for a single-turn task. A single-turn task in shared mode still collects nothing (Harbor collects its task-level
+artifacts there too; a follow-up).
+
+Each step's verifier mode is its own, as Harbor's `resolve_step_verifier_mode` resolves it: the step's explicit
+`[steps.verifier].environment_mode`, else `separate` when the step declares a `[steps.verifier.environment]`, else
+the task's mode; steps of one task may mix (each turn reports its `verifier_mode`, the episode's is the one they
+shared or `mixed`). A turn that verifies separately runs its `test.sh` in a verifier sandbox of its own, created and
+stopped around that turn's verification under the episode's verifier key, the single-step machinery on a per-turn
+view of the task: the sandbox comes from the step's effective environment (`[steps.verifier.environment]`, else
+`[verifier.environment]`, else a copy of `[environment]`, Harbor's `resolve_effective_verifier_env_config` with a
+step), so a declared image runs as it is, a copy of `[environment]` with a `docker_image` runs the task's own image
+(overlay and all), and without an image the turn's verifier is the image prepare built from `tests/Dockerfile`
+(Harbor starts a step's verifier from `steps/<name>/tests/` when that folder exists, else from `tests/`; prepare
+builds `tests/Dockerfile` only, so a step that would be built from its own folder is refused by the loader, naming the
+image to declare, and a step built from `tests/` plans that build whatever the task's own mode). The verifier sandbox
+receives exactly what Harbor gives it: the turn's collected archives restored at their own paths (`/logs/artifacts`,
+the task's and the step's artifacts, as collected from `main` after the agent), the task's `tests/` with
+`steps/<name>/tests/` over it unless the image ships `/tests/test.sh`, and the transcript; nothing else from the
+agent's sandbox, which no turn's verification stops but the last separate one, since the next turn's agent session
+opens on it (Harbor stops the agent environment before the verifier only on the last step of a separate-mode task,
+and so does the server). The step's `[steps.verifier]` user, env and timeout
+apply over the task's as in shared mode; `separate_verifier_for_artifacts` forces, per turn, the turns whose task or
+step declares artifacts into the task image's fresh sandbox. The episode budget counts one verifier sandbox start
+(and the overlay build when it applies) per separate turn. A `[verifier]` network restriction needs every step to
+verify separately (a shared turn cannot be restricted); per-step `[steps.verifier]` network restrictions stay
+refused.
 
 The episode stops after a turn that is masked, writes no valid reward file, or misses the step's
 `min_reward` (a number gates `reward`, a table gates each named key). `multi_step_reward_strategy` rolls the
@@ -144,9 +226,7 @@ MemoryArena adapters write) are read as Harbor 0.22.0 reads them: `version` is `
 `multi_step_reward_mode = "aggregate"` is dropped and the task rolls up with the default `mean` (or its own
 `multi_step_reward_strategy`), as under Harbor, which has no such field; any other value of that key is dropped
 too, with a warning naming it, never read as a strategy. The result lists every turn under `turns`; its
-`response` and `ng_agent_observations` are the last turn's. Per-step `workdir/`, `setup.sh`, healthchecks,
-artifacts and separate verification are refused by the loader, and `separate_verifier_for_artifacts`
-is refused at seed for such a task. Each turn is seeded with its step's agent budget and hands the verifier an
+`response` and `ng_agent_observations` are the last turn's whose agent ran. Each turn is seeded with its step's agent budget and hands the verifier an
 ATIF transcript of its own request; with `enforce_task_timeouts` the task deadline sums every turn's harness
 setup, agent budget, hooks and verifier time. A long task's turns can budget more than
 `default_episode_timeout_seconds`. The seed sizes three figures per episode: what the steps need once the sandbox
@@ -460,14 +540,14 @@ it is, the other providers cannot run commands as it.
 | Setting or feature | Behavior in this layer |
 | --- | --- |
 | Image | Prebuilt `environment.docker_image`; a pull-mode Dockerfile (`FROM` plus `WORKDIR`, `ENV`, `USER`, `LABEL`), started from the base image; an overlay-mode Dockerfile (the same plus `RUN` lines, run in the pulled base image at seed, no build); any other Dockerfile (`COPY`, `ADD`, heredocs, BuildKit flags, multi-stage) is built at prepare with buildah, podman or docker as `hb__<hash>` and the task runs from the built image, Compose sidecars with `build:` as `hb__<hash>-<service>`; with `builds.enabled: false` or no record such a task is skipped at prepare. The separate verifier's `tests/Dockerfile` is built the same way as `hb__<tests hash>-verifier`, whatever it holds (see "Dockerfile builds"). |
-| Verification | Single-step verification, shared or separate. A separate verifier grades in `[verifier.environment].docker_image` when the task declares one, else in the task's own `[environment].docker_image` (Harbor's effective verifier environment is a copy of `[environment]`), else in the image prepare built from `tests/Dockerfile`, for the episode-sized sandbox lifetime; a declared or inherited image is never rebuilt from `tests/Dockerfile`, as Harbor's `should_use_prebuilt_docker_image` decides. A separate-mode task with neither is refused as Harbor refuses it; one whose `tests/Dockerfile` has no recorded build is left out at prepare and refused at seed. A `tests/docker-compose.yaml` may declare `main` only. |
+| Verification | Shared or separate verification, per step for a multi-step task (see Multi-step tasks). A separate verifier grades in `[verifier.environment].docker_image` when the task declares one, else in the task's own `[environment].docker_image` (Harbor's effective verifier environment is a copy of `[environment]`), else in the image prepare built from `tests/Dockerfile`, for the episode-sized sandbox lifetime; a declared or inherited image is never rebuilt from `tests/Dockerfile`, as Harbor's `should_use_prebuilt_docker_image` decides. A separate-mode task with neither is refused as Harbor refuses it; one whose `tests/Dockerfile` has no recorded build is left out at prepare and refused at seed. A `tests/docker-compose.yaml` may declare `main` only. |
 | Users | The image's default user and `verifier.user` are supported. Explicit `agent.user` and Dockerfile `USER` overrides are rejected at seed because sandbox access cannot yet carry the agent user. This layer has no oracle-specific exemption. |
 | Environment variables | Whole-value `${VAR}` and `${VAR:-default}` templates in environment and verifier variables resolve from the server's host environment at use time. Missing required values fail the episode before provisioning. Resolved values are not added to dataset rows, task snapshots, or the episode result. A task can still print its own environment into verifier logs. |
 | Prebuilt-image input files | `environment/` contents are uploaded to the workdir when the task has a prebuilt image and no `Dockerfile` or Compose definition. File modes are preserved. |
 | Network restrictions | `[verifier].network_mode` is enforced for separate-mode tasks on OpenSandbox: `no-network`, or `allowlist` with `allowed_hosts` of host names, `*.domain` wildcards and bare IP literals, spelled as Harbor's `normalize_allowed_hosts` admits them (no brackets or zone ids on an IPv6 literal, no wildcard over an IP literal). The separate verifier's sandbox is created under that egress policy (deny by default, the allowed hosts as allow rules in order), which replaces the deployment's `sandbox_provider_options.network_policy` for that sandbox as Harbor's explicit phase policy replaces the environment baseline; the result's `verifier_network` reports the mode. The window is wider than Harbor's: Harbor applies the `[verifier]` policy around `verifier.verify()` only and starts the separate verifier environment under its baseline, whereas here the verifier sandbox lives its whole life under the policy, so the verifier image's `ENTRYPOINT` and `HEALTHCHECK` (see the Image ENTRYPOINT row) and the artifact staging run restricted too; a verifier image that needs the network when it starts passes under Harbor's `no-network` but masks as `harbor:entrypoint_failed` here, so such a task must name those hosts in `allowed_hosts`. OpenSandbox cannot switch a running sandbox from public to restricted (its egress API changes rules, never the default action; see the OpenSandbox provider page), so Harbor's `_phase_network_policy` switch has no equivalent in shared mode: the loader refuses a `[verifier]` restriction on a shared-mode task, naming the fix, and `[environment]`, `[agent]`, `[verifier.environment]` and step restrictions stay refused rather than silently ignored. A provider other than OpenSandbox, or an `allowed_hosts` entry the policy cannot express or Harbor would refuse (a CIDR range, a bracketed or zoned IPv6 literal, a `*.` wildcard over an IP literal), is refused at seed, before the rollout. |
 | Artifacts and hooks | Verifier logs are downloaded. `[[verifier.collect]]` hooks run in both modes, each in the service it names (a non-zero exit or a hook that runs past its `timeout_sec` warns, a hook the sandbox cannot run masks). In separate mode `/logs/artifacts` and the `artifacts` entries are copied into the verifier, each under its own staging root, with their `exclude` rules applied as Harbor passes them to `tar --exclude` (unanchored: `node_modules` at any depth), replacing what the verifier image ships at those paths. The verifier receives each artifact as the archive the agent's sandbox packed, so read-only, world-writable and set-id modes arrive as the agent left them; the host copy under the staging root is unpacked through a filter (widened owner modes, links kept, nothing that escapes and no device nodes) and is the gate the archive must pass plus a diagnostic, and the archive is removed once restored. A probe the sandbox cannot answer masks rather than counting as an absent artifact. |
 | Image ENTRYPOINT | Runs for a plain (non-Compose) task whose image configuration is recorded: a built image, or a pull or overlay Dockerfile whose base image is recorded, unless the Dockerfile says `ENTRYPOINT []`. The sandbox starts with the provider's keepalive; the seed then starts `ENTRYPOINT + sh -c "sleep infinity"` beside it (what Harbor's Compose `command` leaves it with) as the image's `User` in its `WorkingDir` (created for a resolved Dockerfile when the task's workdir is another), after the working directory and `/logs` exist. It then waits as `up --wait` and Harbor's `run_healthcheck()` do: the image `HEALTHCHECK` first, then `[environment.healthcheck]`, both as the image's user (the image check in its `WorkingDir`, the task check in the task workdir; a `CMD-SHELL` check runs through the image's recorded `Shell`, `/bin/sh -c` when it sets none, as the daemon runs it, so `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` fails `false | true` here too), probing the entrypoint's exit status before every attempt and once more before the hand-over. Exit non-zero before the hand-over fails the seed as a task error (terminal, with the output tail), as does a launcher whose own shell fails for the image's user or directory; a provider that cannot run the launcher is retried. Exit zero logs a warning once and the episode continues on the keepalive. At verification the status is read again: in the separate verifier's fresh sandbox a non-zero exit masks the sample as `harbor:entrypoint_failed` (under Harbor the container would have died and the trial errored); in the agent's sandbox it masks only when the exec holding the entrypoint returned on its own with that status, because the runtime folder is world-writable and the agent had the sandbox; otherwise it is recorded as `entrypoint-exit.txt` with an error in the log and the sample is scored. The holding exec lives as long as the provider allows (docker caps it at `exec.default_timeout_s`, OpenSandbox without `operations.background_exec` at `connection.request_timeout_s`); past that the entrypoint is untracked, logged once, and OpenSandbox deployments need `background_exec` for long-lived launchers. An entrypoint that is one `sleep` or `tail` command is not started. A separate verifier that runs in the task image gets that image's entrypoint and `HEALTHCHECK` because Harbor's effective verifier environment is then a copy of `[environment]` (its prebuilt verifier), never the task's healthcheck. A declared `[verifier.environment].docker_image` starts the same way when `compose-images.json` records it, which it does when that image is the base of a task's Dockerfile (this task's own, in pull or overlay mode, or another task's): its own `ENTRYPOINT` as its own `User` in its own `WorkingDir`, its own `HEALTHCHECK`, none of the Dockerfile's `RUN` lines, `USER` or `WORKDIR`, as Harbor's `up --wait` of the declared image leaves it. The separate verifier's sandbox is a plain one whatever the agent's environment: under a Compose task too, the verifier image's entrypoint runs there and its `HEALTHCHECK` gates `test.sh`, as Harbor's `up --wait` of the verifier image does. The output is kept as `entrypoint-stdout.txt` (and `verifier-entrypoint-stdout.txt`) next to the verifier logs. A prebuilt `docker_image` has no recorded configuration yet, so its entrypoint still does not run. |
-| Other features | Windows and TPU environments are unsupported. Multi-step tasks run as turns (see above). |
+| Other features | Windows and TPU environments are unsupported. Multi-step tasks run as turns (see above). A task that ships Harbor's seed trajectory (`trajectory.json` beside `instruction.md`, or `steps/<first step>/trajectory.json` for a multi-step task: the prior context Harbor 0.22.0 loads into the agent's session before its first turn, as `--load-trajectory` does, for every agent but the oracle and nop) loads for the oracle alone: no harness here can be seeded with it yet, so `gym dataset validate` runs the task as Harbor's oracle does (which skips the file too) and the environment server refuses it at seed, terminally, for any other agent, naming the file; the loader warns about it, and the file stays in the task's digest and package hash, so a fetched task still verifies. |
 
 Upgrading from the pre-build layer (#4566): before Dockerfile builds, a separate verifier with no declared
 image always ran in the task image, and a task shipping `tests/Dockerfile` was rejected at seed. Now the task

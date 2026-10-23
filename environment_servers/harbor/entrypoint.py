@@ -19,14 +19,14 @@ import posixpath
 import re
 import shlex
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from environment_servers.harbor.overlay import OVERLAY_OUTPUT_TAIL, _output_tail, overlay_workdir_command
 from environment_servers.harbor.users import _exec_as_root_user, _is_root
-from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 from nemo_gym.sandbox.transfer import download_path, exec_as_root
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.dockerfile import DEFAULT_SHELL
@@ -187,6 +187,12 @@ def _launch_returned(launch: EntrypointLaunch) -> bool:
     if not process.done() or process.cancelled() or process.exception() is not None:
         return False
     return process.result().error_type is None
+
+
+class HealthcheckFailed(RuntimeError):
+    """A healthcheck that ran and never passed: ``retries`` consecutive failures after its start period, Harbor's
+    ``HealthcheckError``. A sandbox that could not run the command raises its own error instead, never this one, so
+    a caller that scores the check as the task's own failure catches this type alone."""
 
 
 class HarborEntrypointMixin:
@@ -460,18 +466,11 @@ class HarborEntrypointMixin:
             checks.append((" (the image HEALTHCHECK)", image_check, task.entrypoint_workdir or "/"))
         if task_check and task.config.environment.healthcheck is not None:
             checks.append(("", task.config.environment.healthcheck, None))
-        loop = asyncio.get_running_loop()
         for label, check, cwd in checks:
-            grace_until = loop.time() + check.start_period_sec
-            failures = 0
-            while True:
-                # Decided before the attempt, as Harbor does: a check that starts inside the start period and
-                # fails after it has ended is still a start-period attempt, not a counted failure.
-                in_grace = loop.time() < grace_until
-                if entrypoint is not None:
-                    await self._check_entrypoint(sandbox, task, entrypoint)
+
+            async def attempt(check: HarborHealthcheck = check, cwd: str | None = cwd) -> SandboxExecResult:
                 if _is_root(user):
-                    result = await _exec_as_root_user(
+                    return await _exec_as_root_user(
                         sandbox,
                         check.command,
                         configured_user=task.sandbox_user,
@@ -479,20 +478,49 @@ class HarborEntrypointMixin:
                         cwd=cwd,
                         timeout_s=check.timeout_sec + 5,
                     )
-                else:
-                    result = await sandbox.exec(check.command, cwd=cwd, timeout_s=check.timeout_sec + 5, user=user)
-                if result.return_code == 0:
-                    break
-                if not in_grace:
-                    failures += 1
-                    if failures >= check.retries:
-                        ended = ""
-                        if entrypoint is not None and entrypoint.noticed:
-                            ended = f" after the exec holding the entrypoint ended ({_launch_outcome(entrypoint)})"
-                        raise RuntimeError(
-                            f"Healthcheck failed {check.retries} times: {check.command!r}{label}{ended}"
-                        )
-                await asyncio.sleep(check.start_interval_sec if in_grace else check.interval_sec)
+                return await sandbox.exec(check.command, cwd=cwd, timeout_s=check.timeout_sec + 5, user=user)
+
+            await self._poll_healthcheck(sandbox, task, check, attempt, label=label, entrypoint=entrypoint)
+
+    async def _poll_healthcheck(
+        self,
+        sandbox: AsyncSandbox,
+        task: HarborTask,
+        check: HarborHealthcheck,
+        attempt: Callable[[], Awaitable[SandboxExecResult]],
+        *,
+        label: str = "",
+        entrypoint: EntrypointLaunch | None = None,
+    ) -> None:
+        """One healthcheck polled to a pass with Harbor's ``run_healthcheck`` semantics (Docker's): attempts
+        every ``start_interval_sec`` inside the start period, where a failure counts for nothing, then every
+        ``interval_sec``, where ``retries`` consecutive failures fail the check. ``attempt`` runs the command once
+        (the seed's image and task checks run it as the image's user, a step's check as the turn's agent user).
+        With ``entrypoint``, the seed's launch is probed before every attempt so a dead entrypoint fails fast.
+        Raises :class:`HealthcheckFailed` naming the command (and ``label``) when the check never passes; what
+        ``attempt`` raises (a stopped sandbox, a provider error) propagates as it is."""
+        loop = asyncio.get_running_loop()
+        grace_until = loop.time() + check.start_period_sec
+        failures = 0
+        while True:
+            # Decided before the attempt, as Harbor does: a check that starts inside the start period and
+            # fails after it has ended is still a start-period attempt, not a counted failure.
+            in_grace = loop.time() < grace_until
+            if entrypoint is not None:
+                await self._check_entrypoint(sandbox, task, entrypoint)
+            result = await attempt()
+            if result.return_code == 0:
+                return
+            if not in_grace:
+                failures += 1
+                if failures >= check.retries:
+                    ended = ""
+                    if entrypoint is not None and entrypoint.noticed:
+                        ended = f" after the exec holding the entrypoint ended ({_launch_outcome(entrypoint)})"
+                    raise HealthcheckFailed(
+                        f"Healthcheck failed {check.retries} times: {check.command!r}{label}{ended}"
+                    )
+            await asyncio.sleep(check.start_interval_sec if in_grace else check.interval_sec)
 
     async def _collect_entrypoint_log(self, sandbox: AsyncSandbox, task: HarborTask, target: Path) -> None:
         """Keep the entrypoint's output with the verification's logs; best effort, never a masked sample."""

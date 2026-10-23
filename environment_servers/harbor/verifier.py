@@ -64,7 +64,7 @@ from nemo_gym.sandbox.transfer import (
 )
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.digest import is_ignored
-from nemo_gym.tasks.harbor.models import HarborArtifact
+from nemo_gym.tasks.harbor.models import HarborArtifact, HarborTaskStep, HarborVerifier
 from nemo_gym.tasks.harbor.python_verifier import VerifierShim, write_shim
 from nemo_gym.tasks.harbor.task import HarborTurn
 
@@ -318,12 +318,26 @@ def _is_main_service(name: str | None) -> bool:
     return name in (None, "main")
 
 
-def _collected_artifacts(task: HarborTask) -> list[HarborArtifact]:
-    """``/logs/artifacts`` first, then the task's own ``artifacts`` entries."""
-    entries = list(task.config.artifacts)
-    if not any(a.source.rstrip("/") == ARTIFACTS_DIR and a.service in (None, "main") for a in entries):
-        entries.insert(0, HarborArtifact(source=ARTIFACTS_DIR))
+# The record of one collection pass, written beside the staged artifacts as Harbor's artifact handler writes its own.
+ARTIFACT_MANIFEST_NAME = "manifest.json"
+
+
+def _collected_artifacts(task: HarborTask, step: HarborTaskStep | None = None) -> list[tuple[HarborArtifact, str]]:
+    """The artifacts one collection pass reads, each with where it was declared (``convention``, ``task`` or
+    ``step``): ``/logs/artifacts`` first, then the task's own ``artifacts`` entries, then the step's for a turn of a
+    multi-step task. Harbor's ``with_convention_entry([*task artifacts, *step artifacts])``: the implicit
+    ``/logs/artifacts`` entry is prepended unless the task or the step declares that path for ``main`` itself."""
+    entries = [(artifact, "task") for artifact in task.config.artifacts]
+    if step is not None:
+        entries += [(artifact, "step") for artifact in step.artifacts]
+    if not any(a.source.rstrip("/") == ARTIFACTS_DIR and a.service in (None, "main") for a, _ in entries):
+        entries.insert(0, (HarborArtifact(source=ARTIFACTS_DIR), "convention"))
     return entries
+
+
+def _numbered_artifacts(task: HarborTask, step: HarborTaskStep | None = None) -> list[tuple[int, HarborArtifact, str]]:
+    """:func:`_collected_artifacts` with each entry's staging number (its ``NN/`` root under ``artifacts/``)."""
+    return [(index, artifact, origin) for index, (artifact, origin) in enumerate(_collected_artifacts(task, step))]
 
 
 def _stdout_tail(logs_dir: Path, limit: int = 600) -> str:
@@ -364,7 +378,8 @@ COLLECT_HOOK_GRACE_S = 30
 class VerifierSettings:
     """The verifier settings one ``test.sh`` run uses: the task's, or a step's over the task's.
 
-    ``collect`` is the task's ``[[verifier.collect]]`` hooks, which every turn's verifier runs as in Harbor.
+    ``collect`` is the task's ``[[verifier.collect]]`` hooks, with a step's own ``[[steps.verifier.collect]]`` hooks
+    after them for a turn, as Harbor runs them for every step's collection pass.
     """
 
     timeout_sec: float
@@ -565,17 +580,16 @@ class HarborVerificationMixin:
                 f"Could not create verifier logs under {self._artifacts_dir}: {type(exc).__name__}: {exc}",
             )
         artifacts_dir = logs_dir / "artifacts"
-        verifier: AsyncSandbox | None = None
-        verifier_entrypoint: EntrypointLaunch | None = None
         try:
             main_hooks = [hook for hook in settings.collect if _is_main_service(hook.service)]
             sidecar_hooks = [hook for hook in settings.collect if not _is_main_service(hook.service)]
             # Each artifact stages under its own numbered root (see ``_download_artifacts``), across both phases.
-            artifacts = list(enumerate(_collected_artifacts(task)))
-            main_artifacts = [(index, artifact) for index, artifact in artifacts if _is_main_service(artifact.service)]
-            sidecar_artifacts = [(i, artifact) for i, artifact in artifacts if not _is_main_service(artifact.service)]
+            artifacts = _numbered_artifacts(task)
+            main_artifacts = [entry for entry in artifacts if _is_main_service(entry[1].service)]
+            sidecar_artifacts = [entry for entry in artifacts if not _is_main_service(entry[1].service)]
+            manifest: list[dict[str, Any]] = []
             await self._run_collect_hooks(session, main_hooks)
-            restored = await self._download_artifacts(session, main_artifacts, artifacts_dir)
+            restored = await self._download_artifacts(session, main_artifacts, artifacts_dir, manifest)
             died = None
             if session.entrypoint is not None:
                 await self._collect_entrypoint_log(session.sandbox, task, logs_dir / ENTRYPOINT_LOG_NAME)
@@ -584,14 +598,50 @@ class HarborVerificationMixin:
             # run and their artifacts are read, so no agent process can change a sidecar's state meanwhile.
             await session.stop_main()
             await self._run_collect_hooks(session, sidecar_hooks)
-            restored += await self._download_artifacts(session, sidecar_artifacts, artifacts_dir)
+            restored += await self._download_artifacts(session, sidecar_artifacts, artifacts_dir, manifest)
+            self._write_artifact_manifest(artifacts_dir, manifest)
             # Harbor stops the agent's containers before the verifier starts; nothing may keep running.
             # The episode key stays reserved until the episode's final cleanup, which releases it without
             # stopping the agent side again.
             await session.stop_agent_side()
             if died is not None:
                 return self._masked(ENTRYPOINT_FAILED_KIND, died) | {"verifier_logs_dir": str(logs_dir.resolve())}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            LOGGER.exception(f"Separate verification infrastructure failed for {task.task_id}")
+            return self._masked(failure_kinds.PROVIDER_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
+        return await self._verify_separately(
+            session, task, settings, trajectory, logs_dir, restored, started=started, response=response
+        )
 
+    async def _verify_separately(
+        self,
+        session: HarborSession,
+        task: HarborTask,
+        settings: Any,
+        trajectory: bytes,
+        logs_dir: Path,
+        restored: list[tuple[Path, str, str]],
+        *,
+        started: float,
+        test_dirs: tuple[Path, ...] | None = None,
+        response: NeMoGymResponse | None = None,
+    ) -> dict[str, Any]:
+        """Grade in a fresh sandbox what was collected from the agent's: the second half of Harbor's separate mode.
+
+        ``task`` is the task whose verifier settings and image apply: the session's own for a single-step task, or
+        a turn's view of it (:meth:`_turn_verifier_view`) for a step of a multi-step task that verifies separately;
+        ``settings`` is its ``[verifier]`` table or the turn's :class:`VerifierSettings`. The verifier sandbox is
+        created from that, receives the ``restored`` archives at their own paths, the tests (``test_dirs`` in order,
+        a step's over the task's, when given; the task's ``tests/`` otherwise, unless the image ships its own) and
+        the transcript, runs ``test.sh`` and is stopped, whatever happened. Nothing else reaches it from the agent's
+        sandbox, which this method never touches: a multi-step task's agent sandbox keeps running across turns, so
+        each turn's verifier sandbox lives only around that turn's verification, under the episode's verifier key.
+        """
+        verifier: AsyncSandbox | None = None
+        verifier_entrypoint: EntrypointLaunch | None = None
+        try:
             verifier = await self._create_verifier_sandbox(task, episode_key=session.session_id)
             names: dict[str, str] = {}
             if _verifier_gets_overlay(task, True):
@@ -640,7 +690,12 @@ class HarborVerificationMixin:
                         task.verifier_image,
                         TESTS_DIR,
                     )
-                if task.python_verifier is None or (task.path / "tests").is_dir():
+                if test_dirs is not None:
+                    # A turn's layers: the task's tests/ then the step's, each over the last, absent ones skipped.
+                    for tests in test_dirs:
+                        if tests.is_dir():
+                            await upload_dir(verifier, tests, TESTS_DIR, ignore=is_ignored)
+                elif task.python_verifier is None or (task.path / "tests").is_dir():
                     await upload_dir(verifier, task.path / "tests", TESTS_DIR, ignore=is_ignored)
             await self._upload_verifier_shim(verifier, session, response)
             for archive, kind, source in restored:
@@ -769,11 +824,34 @@ class HarborVerificationMixin:
             if result.return_code:
                 LOGGER.warning(f"{task.task_id}: collect hook exited {result.return_code}: {hook.command!r}")
 
+    @staticmethod
+    def _write_artifact_manifest(artifacts_dir: Path, entries: list[dict[str, Any]]) -> None:
+        """Record one collection pass as ``artifacts/manifest.json``, one entry per declared artifact in staging
+        order, as Harbor's artifact handler writes its manifest beside what it collected: the ``source`` and
+        ``service`` as declared, where the entry was declared (``origin``: ``convention``, ``task`` or ``step``), its
+        staging folder (``destination``, relative to the verifier logs folder), what the sandbox held there (``type``:
+        ``directory``, ``file`` or ``null``) and the outcome (``status``: ``ok`` when staged and kept for a restore,
+        ``absent`` when the sandbox had nothing at the path, ``link`` for a symbolic link that is not restored,
+        ``failed`` when the agent's tree could not be collected, ``skipped`` when the entry names a service the task
+        has not got). Best effort, like the collection itself: a manifest that cannot be written is logged.
+        """
+        if not entries:
+            return
+        try:
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            (artifacts_dir / ARTIFACT_MANIFEST_NAME).write_text(json.dumps(entries, indent=2) + "\n")
+        except OSError:
+            LOGGER.warning("Could not write %s under %s", ARTIFACT_MANIFEST_NAME, artifacts_dir, exc_info=True)
+
     async def _download_artifacts(
-        self, session: HarborSession, artifacts: list[tuple[int, HarborArtifact]], artifacts_dir: Path
+        self,
+        session: HarborSession,
+        artifacts: list[tuple[int, HarborArtifact, str]],
+        artifacts_dir: Path,
+        manifest: list[dict[str, Any]] | None = None,
     ) -> list[tuple[Path, str, str]]:
         """Pull the numbered ``artifacts`` out of their services; returns ``(archive, kind, sandbox path)`` for the
-        ones found.
+        ones found, and appends one record per entry to ``manifest`` (:meth:`_write_artifact_manifest`).
 
         Each artifact stages under its own numbered root, and the archive its sandbox packed is kept beside
         that root (``NN.tar.gz``) for the restore: the staged copy went through the host's filter and carries
@@ -783,14 +861,26 @@ class HarborVerificationMixin:
         """
         task = session.task
         restored: list[tuple[Path, str, str]] = []
-        for index, artifact in artifacts:
+        records = manifest if manifest is not None else []
+        for index, artifact, origin in artifacts:
+            host = artifacts_dir / f"{index:02d}" / artifact.host_path
+            archive = artifacts_dir / f"{index:02d}.tar.gz"
+            record: dict[str, Any] = {
+                "index": index,
+                "source": artifact.source,
+                "service": artifact.service,
+                "origin": origin,
+                "destination": f"artifacts/{index:02d}/{artifact.host_path.as_posix()}",
+                "type": None,
+                "status": "failed",
+            }
+            records.append(record)
             try:
                 sandbox = session.service(artifact.service)
             except KeyError as exc:
                 LOGGER.warning(f"{task.task_id}: artifact {artifact.source!r} skipped: {exc}")
+                record["status"] = "skipped"
                 continue
-            host = artifacts_dir / f"{index:02d}" / artifact.host_path
-            archive = artifacts_dir / f"{index:02d}.tar.gz"
             # Best effort per artifact, as Harbor collects them: what the agent left behind (an
             # unreadable tree, a link that escapes the folder, a device node, a file where a folder was
             # expected, a path too long for this host) cannot mask the sample. Symbolic links travel as
@@ -822,13 +912,48 @@ class HarborVerificationMixin:
                     raise
                 LOGGER.warning(f"{task.task_id}: artifact {artifact.source!r} not collected: {exc}")
                 continue
-            if kind is not None and host.is_symlink():
+            record["type"] = {"dir": "directory", "file": "file"}.get(kind)
+            if kind is None:
+                record["status"] = "absent"
+                continue
+            if host.is_symlink():
                 # The artifact itself is a link: nothing to restore without following it on this host.
                 LOGGER.warning(f"{task.task_id}: artifact {artifact.source!r} is a symbolic link, not restored")
                 archive.unlink(missing_ok=True)
+                record["status"] = "link"
                 continue
-            if kind is not None:
-                restored.append((archive, kind, artifact.source))
+            record["status"] = "ok"
+            restored.append((archive, kind, artifact.source))
+        return restored
+
+    async def _collect_turn_artifacts(
+        self, session: HarborSession, turn: HarborTurn, artifacts_dir: Path, *, stop_main: bool = False
+    ) -> list[tuple[Path, str, str]]:
+        """Harbor's per-step collection pass (``_collect_step_artifacts`` of its multi-step trial, 0.22.0), after the
+        turn's agent and before its verifier, in shared mode too: the task's ``[[verifier.collect]]`` hooks and then
+        the step's own ``[[steps.verifier.collect]]`` hooks for ``main`` (Harbor's ``_collect_hooks_for``: the task's,
+        then the step's) and the ``main`` entries of ``/logs/artifacts``, the task's ``artifacts`` and the step's own
+        (:func:`_collected_artifacts`), then the sidecars' hooks and entries, each staged under its numbered root in
+        ``artifacts_dir`` with the pass recorded in its manifest (:meth:`_download_artifacts`,
+        :meth:`_write_artifact_manifest`). Nothing is stopped unless ``stop_main`` says so: the agent's sandbox and its
+        sidecars keep running for the turns that follow. With ``stop_main`` (the last turn of a task whose last step
+        verifies separately, Harbor's ``stop_main_before_sidecars``) the agent's own container is stopped between the
+        main pass and the sidecars' hooks, so nothing it left running can change a sidecar's state while it is read,
+        as the single-step separate path does. Returns the archives a separate verifier of this turn restores.
+        """
+        task = session.task
+        hooks = [*task.config.verifier.collect, *turn.config.verifier.collect]
+        artifacts = _numbered_artifacts(task, turn.config)
+        manifest: list[dict[str, Any]] = []
+        await self._run_collect_hooks(session, [hook for hook in hooks if _is_main_service(hook.service)])
+        main = [entry for entry in artifacts if _is_main_service(entry[1].service)]
+        restored = await self._download_artifacts(session, main, artifacts_dir, manifest)
+        if stop_main:
+            await session.stop_main()
+        await self._run_collect_hooks(session, [hook for hook in hooks if not _is_main_service(hook.service)])
+        sidecars = [entry for entry in artifacts if not _is_main_service(entry[1].service)]
+        restored += await self._download_artifacts(session, sidecars, artifacts_dir, manifest)
+        self._write_artifact_manifest(artifacts_dir, manifest)
         return restored
 
     async def _run_shared_verifier(
@@ -839,6 +964,8 @@ class HarborVerificationMixin:
         settings: VerifierSettings | None = None,
         test_dirs: tuple[Path, ...] | None = None,
         response: NeMoGymResponse | None = None,
+        logs_dir: Path | None = None,
+        collect_hooks: bool = True,
     ) -> dict[str, Any]:
         """Run ``test.sh`` in the agent's sandbox and read the reward it wrote.
 
@@ -849,6 +976,8 @@ class HarborVerificationMixin:
 
         ``test_dirs`` are uploaded to ``/tests`` in order, each over the last (a step's ``tests/`` over the
         task's); missing folders are skipped. By default the task's ``tests/`` and ``[verifier]`` apply.
+        ``logs_dir`` is the verification's host folder when the caller reserved it already (a turn's collection
+        pass staged its artifacts there first), and ``collect_hooks=False`` says that pass ran the hooks.
         """
         task = session.task
         sandbox = session.sandbox
@@ -870,21 +999,23 @@ class HarborVerificationMixin:
                 (task.path / "tests",) if task.python_verifier is None or (task.path / "tests").is_dir() else ()
             )
         started = asyncio.get_running_loop().time()
-        try:
-            logs_dir = self._reserve_logs_dir()
-        except (OSError, RuntimeError) as exc:
-            LOGGER.exception("Could not create verifier logs under %s", self._artifacts_dir)
-            return self._masked(
-                failure_kinds.PERSISTENCE_FAILED,
-                f"Could not create verifier logs under {self._artifacts_dir}: {type(exc).__name__}: {exc}",
-            )
+        if logs_dir is None:
+            try:
+                logs_dir = self._reserve_logs_dir()
+            except (OSError, RuntimeError) as exc:
+                LOGGER.exception("Could not create verifier logs under %s", self._artifacts_dir)
+                return self._masked(
+                    failure_kinds.PERSISTENCE_FAILED,
+                    f"Could not create verifier logs under {self._artifacts_dir}: {type(exc).__name__}: {exc}",
+                )
         try:
             if session.entrypoint is not None:
                 died = await self._entrypoint_died_during_rollout(sandbox, task, session.entrypoint, logs_dir)
                 if died is not None:
                     await self._collect_entrypoint_log(sandbox, task, logs_dir / ENTRYPOINT_LOG_NAME)
                     return self._masked(ENTRYPOINT_FAILED_KIND, died) | {"verifier_logs_dir": str(logs_dir.resolve())}
-            await self._run_collect_hooks(session, settings.collect)
+            if collect_hooks:
+                await self._run_collect_hooks(session, settings.collect)
             await self._reset_shared_verifier_dirs(sandbox)
             for tests in test_dirs:
                 if optional_tests and not tests.is_dir():
@@ -1008,7 +1139,11 @@ class HarborVerificationMixin:
             self._refuse_unsupported_group(task, task.entrypoint_user)
         self._refuse_unsupported_group(task, _verifier_user(task))
         for turn in task.turns:
-            self._refuse_unsupported_group(task, turn.config.verifier.user, where=f" step {turn.name!r}")
+            where = f" step {turn.name!r}"
+            self._refuse_unsupported_group(task, turn.config.verifier.user, where=where)
+            if self._turn_separate(task, turn) and _verifier_runs_task_image(self._turn_verifier_view(task, turn)):
+                # The turn's own verifier sandbox in the task image installs the image's USER as its default.
+                self._refuse_unsupported_group(task, task.entrypoint_user, where=where)
 
     @staticmethod
     def _measured(reward: float, kind: str, reason: str) -> dict[str, Any]:
@@ -1019,9 +1154,51 @@ class HarborVerificationMixin:
         return {"reward": 0.0, "mask_sample": True, "failure_kind": kind, "failure_reason": reason[:2000]}
 
     def _separate_verifier(self, task: HarborTask) -> bool:
-        """Whether this episode verifies in a fresh sandbox: the task's mode, or forced for tasks with artifacts."""
+        """Whether this episode verifies in a fresh sandbox: the task's mode, or forced for tasks with artifacts.
+
+        For a multi-step task the question is per turn (:meth:`_turn_separate`); this is whether any turn does.
+        """
+        if task.turns:
+            return any(self._turn_separate(task, turn) for turn in task.turns)
         return not task.config.is_shared_verifier or (
             self.config.separate_verifier_for_artifacts and bool(task.config.artifacts)
+        )
+
+    def _turn_separate(self, task: HarborTask, turn: HarborTurn) -> bool:
+        """Whether a turn verifies in a fresh sandbox: the step's own mode as Harbor resolves it
+        (:attr:`HarborTurn.verifier_mode`: the step's explicit mode, else ``separate`` with a
+        ``[steps.verifier.environment]``, else the task's), or forced by ``separate_verifier_for_artifacts`` when the
+        task or the step declares artifacts, as a single-step task with artifacts is forced."""
+        if turn.verifier_mode == "separate":
+            return True
+        return self.config.separate_verifier_for_artifacts and bool(task.config.artifacts or turn.config.artifacts)
+
+    @staticmethod
+    def _turn_verifier_view(task: HarborTask, turn: HarborTurn) -> HarborTask:
+        """``task`` as a turn's separate verifier sees it: the step's ``[steps.verifier]`` over the task's
+        ``[verifier]`` (user, env and environment, Harbor's step-over-task resolution; the timeout is the step's own
+        or Harbor's 600 s step default, never the task's), in separate mode,
+        with the turn's verifier image and its recorded configuration in place of the task's. Everything the
+        separate-mode machinery reads off a task (:func:`_verifier_image`, :func:`_verifier_runs_task_image`,
+        :func:`_verifier_user`, the sandbox spec, the network policy) then answers for the turn, and a step without
+        its own ``[steps.verifier.environment]`` inherits the task's or runs the task image, as in Harbor."""
+        step = turn.config.verifier
+        base = task.config.verifier
+        verifier = HarborVerifier(
+            timeout_sec=task.config.step_verifier_timeout_sec(turn.config),
+            user=step.user if step.user is not None else base.user,
+            env=base.env | step.env,
+            environment_mode="separate",
+            environment=step.environment if step.environment is not None else base.environment,
+            collect=[*base.collect, *step.collect],
+            network_mode=step.network_mode if step.network_mode is not None else base.network_mode,
+            allowed_hosts=step.allowed_hosts if step.allowed_hosts is not None else base.allowed_hosts,
+        )
+        return replace(
+            task,
+            config=task.config.model_copy(update={"verifier": verifier}),
+            verifier_image=turn.verifier_image,
+            verifier_image_config=turn.verifier_image_config,
         )
 
     def _verifier_env(self, settings: Any) -> dict[str, str]:
@@ -1085,12 +1262,13 @@ class HarborVerificationMixin:
 
     @staticmethod
     def _turn_verifier_settings(task: HarborTask, turn: HarborTurn) -> VerifierSettings:
-        """A step's verifier settings over the task's, as Harbor resolves them."""
+        """A step's verifier settings over the task's, as Harbor resolves them (its hooks after the task's; the
+        timeout is the step's own or Harbor's 600 s step default, :meth:`HarborTaskConfig.step_verifier_timeout_sec`)."""
         step = turn.config.verifier
         return VerifierSettings(
             timeout_sec=task.config.step_verifier_timeout_sec(turn.config),
             env=task.config.verifier.env | step.env,
             user=step.user if step.user is not None else task.config.verifier.user,
-            collect=task.config.verifier.collect,
+            collect=[*task.config.verifier.collect, *step.collect],
             network_mode=step.network_mode if step.network_mode is not None else task.config.verifier.network_mode,
         )

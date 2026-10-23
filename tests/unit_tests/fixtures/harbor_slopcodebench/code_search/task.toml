@@ -1,0 +1,126 @@
+schema_version = "1.1"
+
+artifacts = []
+
+[task]
+name = "gabeorlanski/code_search"
+description = "Multi-language code search tool (inspired by ast-grep) that finds patterns and applies refactorings. Starts with regex search in Python, adds AST-based pattern matching with metavariables, then auto-fix with conflict resolution. Supports Python, JS, C++, Rust, Java, Go, and Haskell."
+authors = [{ name = "Gabriel Orlanski" }]
+keywords = [
+  "cli-tools",
+  "ast-parsing",
+  "multi-language",
+  "pattern-matching",
+  "metavariables",
+  "code-transformation",
+  "refactoring",
+  "static-analysis",
+  "regex",
+  "code-search",
+  "scb-problem",
+  "multi-step",
+  "pytest",
+]
+
+[metadata]
+difficulty = "easy"
+category = "developer-tools"
+tags = [
+  "cli-tools",
+  "ast-parsing",
+  "multi-language",
+  "pattern-matching",
+  "metavariables",
+  "code-transformation",
+  "refactoring",
+  "static-analysis",
+  "regex",
+  "code-search",
+]
+source = "scb-problems"
+source_problem = "code_search"
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+allow_internet = true
+workdir = "/app"
+
+[environment.env]
+COLUMNS = "240"
+LINES = "60"
+PYTHONUNBUFFERED = "1"
+TERM = "xterm"
+
+[agent]
+timeout_sec = 7200.0
+
+[verifier]
+timeout_sec = 600.0
+
+[[steps]]
+name = "checkpoint_1"
+artifacts = [
+  { source = "/app", destination = "app", exclude = [".venv", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".git", "node_modules", "target", "dist", "build"] },
+]
+min_reward = { core_pass_rate = 0.0, strict_pass_rate = 0.0 }
+
+[steps.agent]
+timeout_sec = 7200.0
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[[steps]]
+name = "checkpoint_2"
+artifacts = [
+  { source = "/app", destination = "app", exclude = [".venv", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".git", "node_modules", "target", "dist", "build"] },
+]
+min_reward = { core_pass_rate = 0.0, strict_pass_rate = 0.0 }
+
+[steps.agent]
+timeout_sec = 7200.0
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[[steps]]
+name = "checkpoint_3"
+artifacts = [
+  { source = "/app", destination = "app", exclude = [".venv", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".git", "node_modules", "target", "dist", "build"] },
+]
+min_reward = { core_pass_rate = 0.0, strict_pass_rate = 0.0 }
+
+[steps.agent]
+timeout_sec = 7200.0
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[[steps]]
+name = "checkpoint_4"
+artifacts = [
+  { source = "/app", destination = "app", exclude = [".venv", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".git", "node_modules", "target", "dist", "build"] },
+]
+min_reward = { core_pass_rate = 0.0, strict_pass_rate = 0.0 }
+
+[steps.agent]
+timeout_sec = 7200.0
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[[steps]]
+name = "checkpoint_5"
+artifacts = [
+  { source = "/app", destination = "app", exclude = [".venv", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".git", "node_modules", "target", "dist", "build"] },
+]
+min_reward = { core_pass_rate = 0.0, strict_pass_rate = 0.0 }
+
+[steps.agent]
+timeout_sec = 7200.0
+
+[steps.verifier]
+timeout_sec = 600.0
