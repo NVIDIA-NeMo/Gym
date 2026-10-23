@@ -45,6 +45,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
+from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.base_responses_api_model import (
     await_model_call_capture_quiescence,
@@ -233,6 +234,8 @@ _NO_RESULT_FAILURE_CLASSES = frozenset(
     }
 )
 NG_TRAJECTORY_KEY = "ng_trajectory"
+# Stateless; maps Anthropic Messages calls onto Responses items for trajectory turns.
+_ANTHROPIC_CONVERTER = AnthropicConverter()
 NG_PERF_KEY = "ng_perf"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
@@ -488,20 +491,58 @@ def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
 
 
 def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
-    task_id = next(
-        (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
-        str(row[TASK_INDEX_KEY_NAME]),
-    )
     rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
+    task_id = next((str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None), None)
+    if task_id is None:
+        # A framework dispatching its own rows through run_examples need not stamp the task
+        # index; its explicit rollout id still names the trajectory.
+        task_id = str(row[TASK_INDEX_KEY_NAME]) if TASK_INDEX_KEY_NAME in row else rollout_id
     return task_id, rollout_id
+
+
+def _is_anthropic_message(response: Any) -> bool:
+    return (
+        isinstance(response, dict) and response.get("type") == "message" and isinstance(response.get("content"), list)
+    )
+
+
+def _anthropic_turn_content(request: dict[str, Any], response: dict[str, Any]) -> tuple[Any, Any, Any, int]:
+    """Map one Anthropic Messages call onto the Responses items every other dialect's turns use.
+
+    Falls back to the raw Anthropic blocks when the converter rejects a block type, so an
+    unfamiliar block loses its normalization rather than the whole turn.
+    """
+    question: Any = request.get("messages")
+    try:
+        params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(request)
+        items = [item if isinstance(item, dict) else item.model_dump(mode="json") for item in params.input]
+        if params.instructions:
+            items.insert(0, {"type": "message", "role": "system", "content": params.instructions})
+        question = items
+        output = [
+            item if isinstance(item, dict) else item.model_dump(mode="json")
+            for item in _ANTHROPIC_CONVERTER.anthropic_to_responses(
+                response, request_body=params, model=str(response.get("model") or "")
+            ).output
+        ]
+    except Exception:
+        output = [block for block in response["content"] if isinstance(block, dict)]
+        reasoning = [block for block in output if block.get("type") in ("thinking", "redacted_thinking")] or None
+        answer = [block for block in output if block.get("type") not in ("thinking", "redacted_thinking")]
+        return question, answer, reasoning, sum(1 for block in answer if block.get("type") == "tool_use")
+    reasoning = [item for item in output if item.get("type") == "reasoning"] or None
+    answer = [item for item in output if item.get("type") != "reasoning"]
+    return question, answer, reasoning, sum(1 for item in answer if item.get("type") == "function_call")
 
 
 def _turn_content(request: Any, response: Any) -> tuple[Any, Any, Any, int]:
     """Split one captured model call into the turn's question, answer, reasoning, and tool-call count.
 
-    Handles Responses API output items and chat-completions messages, the two dialects the Model
-    Server captures.
+    Handles the three dialects the Model Server captures: Responses API output items,
+    chat-completions messages, and Anthropic Messages (mapped onto Responses items).
     """
+    if isinstance(request, dict) and _is_anthropic_message(response):
+        return _anthropic_turn_content(request, response)
     question = request.get("input", request.get("messages")) if isinstance(request, dict) else request
     if isinstance(request, dict) and isinstance(request.get("input"), list):
         # Responses API input messages may omit `type`, which defaults to "message"; turns state it.
@@ -959,6 +1000,65 @@ def _attach_ng_perf(
         return
     if ng_perf is not None:
         result[NG_PERF_KEY] = ng_perf
+
+
+async def enrich_run_result(
+    row: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    capture_dirs: list[Path],
+    observability_enabled: bool,
+    include_payloads: bool = True,
+    rollout_latency_ms: Optional[float] = None,
+    delete_capture: bool = False,
+) -> dict[str, Any]:
+    """Attach a finished rollout's collected evidence to its ``/run`` result, in place.
+
+    These are the per-rollout steps ``ng_collect_rollouts`` runs, exposed so a framework that
+    dispatches through ``run_examples`` records the same thing:
+
+    1. wait for the model server's in-flight capture writes for this rollout,
+    2. merge the captured model calls (``ng_model_call_capture``) and join the agent's
+       observations to them,
+    3. project the standardized ``ng_trajectory``,
+    4. assemble ``ng_perf`` when observability is enabled.
+
+    The row's rollout identity is copied onto the result first, because the capture key is read
+    from the record. Harness output and reward are never modified. ``include_payloads=False``
+    keeps call metadata only; the bodies stay in the capture store. ``delete_capture`` removes
+    the rollout's capture file once it has been merged.
+    """
+    if not isinstance(result, dict):
+        return result
+    for key in (ROLLOUT_ID_KEY_NAME, TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, ATTEMPT_INDEX_KEY_NAME):
+        if key in row and key not in result:
+            result[key] = row[key]
+
+    failure_class = result.get(NG_FAILURE_CLASS_KEY)
+    no_result = failure_class in _NO_RESULT_FAILURE_CLASSES or bool(result.get(NG_DISPATCH_DRAINED_KEY))
+    # A failed episode that returned agent evidence made model calls worth joining.
+    merged = False
+    if capture_dirs and (not no_result or NG_AGENT_OBSERVATIONS_KEY in result):
+        # A cancelled call's capture write runs detached, so drain the claims this
+        # rollout still holds before snapshotting; otherwise a late row is lost.
+        rollout_id = maybe_rollout_id_from_run_body(result)
+        if rollout_id is not None:
+            await await_model_call_capture_quiescence(rollout_id, capture_dirs)
+        merge_model_call_capture_into_record(
+            result,
+            capture_dirs,
+            include_payloads=include_payloads and not _has_observation_gap(result, "multimodal_history_redacted"),
+        )
+        merged = True
+
+    if "ng_model_call_capture" in result or NG_AGENT_OBSERVATIONS_KEY in result or NG_TRAJECTORY_KEY in result:
+        _attach_trajectory_record(row, result)
+
+    _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
+
+    if delete_capture and merged:
+        clear_model_call_captures_for_rollouts([result], capture_dirs)
+    return result
 
 
 def _drop_truncated_tail(fpath: Path) -> None:
@@ -3289,30 +3389,14 @@ class RolloutCollectionHelper(BaseModel):
                 no_result = failure_class in _NO_RESULT_FAILURE_CLASSES or bool(result.get(NG_DISPATCH_DRAINED_KEY))
 
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
-                # when capture is off). Never alters the harness output/reward already in `result`.
-                # A failed episode that returned agent evidence made model calls worth joining.
-                if capture_dirs and (not no_result or NG_AGENT_OBSERVATIONS_KEY in result):
-                    # A cancelled call's capture write runs detached, so drain the claims this
-                    # rollout still holds before snapshotting; otherwise a late row is lost.
-                    rollout_id_for_capture = maybe_rollout_id_from_run_body(result)
-                    if rollout_id_for_capture is not None:
-                        await await_model_call_capture_quiescence(rollout_id_for_capture, capture_dirs)
-                    merge_model_call_capture_into_record(
-                        result,
-                        capture_dirs,
-                        include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
-                    )
-
-                if (
-                    "ng_model_call_capture" in result
-                    or NG_AGENT_OBSERVATIONS_KEY in result
-                    or NG_TRAJECTORY_KEY in result
-                ):
-                    _attach_trajectory_record(row, result)
-
-                # Assembles ng_perf from ng_trajectory when observability is enabled.
-                _attach_ng_perf(
-                    result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms
+                # when capture is off), project ng_trajectory and assemble ng_perf. Never alters the
+                # harness output/reward already in `result`.
+                await enrich_run_result(
+                    row,
+                    result,
+                    capture_dirs=capture_dirs,
+                    observability_enabled=observability_enabled,
+                    rollout_latency_ms=rollout_latency_ms,
                 )
 
                 # Freeze and rebuild tokens only for participating agents.
@@ -4289,6 +4373,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
+        enrich_results: bool = False,
+        include_model_call_payloads: bool = True,
+        delete_model_call_capture: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -4318,10 +4405,34 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         by the dispatch budget gets ``_ng_failure_class="cancelled"`` with the ``_ng_dispatch_drained``
         and ``_ng_no_persist`` markers, and a failed `/run` under ``route_failures_to_sidecar`` gets a
         failure row with ``_ng_failure_*`` fields.
+
+        ``enrich_results`` runs ``enrich_run_result`` on each result before it is returned, so the
+        caller receives what ``ng_collect_rollouts`` records: the row's rollout identity, the
+        captured model calls (``ng_model_call_capture``, with request/response bodies unless
+        ``include_model_call_payloads`` is false), the standardized ``ng_trajectory`` and
+        ``ng_perf``. Model calls are only captured when the global config enables
+        ``observability_enabled``. ``delete_model_call_capture`` removes each rollout's capture
+        file after it is merged.
         """
+        capture_dirs: list[Path] = []
+        observability_enabled = False
+        if enrich_results:
+            global_config_dict = self.setup_server_client(head_server_config).global_config_dict
+            capture_dirs = model_call_capture_dirs_from_config(global_config_dict)
+            observability_enabled = observability_enabled_from_config(global_config_dict)
 
         async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:
             completed = await future
+            if enrich_results:
+                await enrich_run_result(
+                    completed.row,
+                    completed.result,
+                    capture_dirs=capture_dirs,
+                    observability_enabled=observability_enabled,
+                    include_payloads=include_model_call_payloads,
+                    rollout_latency_ms=completed.rollout_latency_ms,
+                    delete_capture=delete_model_call_capture,
+                )
             return completed.row, completed.result
 
         return map(

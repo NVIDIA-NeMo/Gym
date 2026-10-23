@@ -10045,3 +10045,197 @@ class TestLiveHealthEvaluation:
         # The row was saved and the progress accounting for it had already run when the await was reached.
         assert len(Path(tmp_path / "output.jsonl").read_bytes().splitlines()) >= 1
         assert "rollouts for `my_agent`" in seen_at_await[0]
+
+
+class TestEnrichRunResult:
+    """``enrich_run_result`` records what ``ng_collect_rollouts`` records, for ``run_examples`` callers."""
+
+    @staticmethod
+    def _row(rollout_id: str = "g1_g0_a0") -> dict:
+        from nemo_gym.global_config import ROLLOUT_ID_KEY_NAME
+
+        return {
+            "responses_create_params": {"input": []},
+            AGENT_REF_KEY_NAME: {"name": "agent"},
+            TASK_INDEX_KEY_NAME: 3,
+            ROLLOUT_INDEX_KEY_NAME: 1,
+            ROLLOUT_ID_KEY_NAME: rollout_id,
+        }
+
+    @staticmethod
+    def _store_call(capture_dir: Path, rollout_id: str, call_id: str, text: str) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+
+        message = {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}
+        CaptureStore(capture_dir).record(
+            rollout_id,
+            {
+                "model_call_id": call_id,
+                "dialect": "responses",
+                "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                "request": {"input": [{"role": "user", "content": "hi"}]},
+                "response": {"id": f"resp-{call_id}", "output": [message], "usage": {"input_tokens": 5}},
+                "status_code": 200,
+            },
+        )
+
+    async def test_merges_every_captured_call_without_touching_reward_or_response(self, tmp_path: Path) -> None:
+        from nemo_gym.global_config import ROLLOUT_ID_KEY_NAME
+        from nemo_gym.rollout_collection import enrich_run_result
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        self._store_call(tmp_path, "g1_g0_a0", "c2", "second")
+        result = {"response": {"output": [{"type": "message"}]}, "reward": 1.0}
+
+        await enrich_run_result(self._row(), result, capture_dirs=[tmp_path], observability_enabled=True)
+
+        assert result["reward"] == 1.0 and result["response"] == {"output": [{"type": "message"}]}
+        assert result[ROLLOUT_ID_KEY_NAME] == "g1_g0_a0"
+        assert [call["model_call_id"] for call in result["ng_model_call_capture"]["calls"]] == ["c1", "c2"]
+        trajectory_calls = result["ng_trajectory"]["model_calls"]
+        assert [call["response"]["output"][0]["content"][0]["text"] for call in trajectory_calls] == [
+            "first",
+            "second",
+        ]
+        # Payloads live in ng_trajectory once projected, not twice.
+        assert "request" not in result["ng_model_call_capture"]["calls"][0]
+
+    async def test_metadata_only_and_capture_deletion(self, tmp_path: Path) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+        from nemo_gym.rollout_collection import enrich_run_result
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        result = {"response": {"output": []}, "reward": 0.0}
+
+        await enrich_run_result(
+            self._row(),
+            result,
+            capture_dirs=[tmp_path],
+            observability_enabled=True,
+            include_payloads=False,
+            delete_capture=True,
+        )
+
+        [call] = result["ng_trajectory"]["model_calls"]
+        assert call["model_call_id"] == "c1"
+        assert call["request"] is None and call["response"] is None
+        assert not CaptureStore(tmp_path).path_for("g1_g0_a0").exists()
+
+    async def test_without_capture_only_identity_is_added(self) -> None:
+        from nemo_gym.global_config import ROLLOUT_ID_KEY_NAME
+        from nemo_gym.rollout_collection import enrich_run_result
+
+        result = {"response": {"output": []}, "reward": 0.5}
+
+        await enrich_run_result(self._row(), result, capture_dirs=[], observability_enabled=False)
+
+        assert result == {
+            "response": {"output": []},
+            "reward": 0.5,
+            ROLLOUT_ID_KEY_NAME: "g1_g0_a0",
+            TASK_INDEX_KEY_NAME: 3,
+            ROLLOUT_INDEX_KEY_NAME: 1,
+        }
+
+    async def test_a_row_without_task_index_is_named_by_its_rollout_id(self, tmp_path: Path) -> None:
+        from nemo_gym.global_config import ROLLOUT_ID_KEY_NAME
+        from nemo_gym.rollout_collection import enrich_run_result
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        row = {AGENT_REF_KEY_NAME: {"name": "agent"}, ROLLOUT_ID_KEY_NAME: "g1_g0_a0"}
+        result = {"response": {"output": []}, "reward": 1.0}
+
+        await enrich_run_result(row, result, capture_dirs=[tmp_path], observability_enabled=True)
+
+        assert result["ng_trajectory"]["task_id"] == "g1_g0_a0"
+        assert [call["model_call_id"] for call in result["ng_trajectory"]["model_calls"]] == ["c1"]
+
+    async def test_run_examples_enriches_only_when_asked(self, tmp_path: Path) -> None:
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        global_config = {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict=global_config)
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                [example] = examples
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(row=example, result={"response": {"output": []}}, rollout_latency_ms=7.0)
+                )
+                return [future]
+
+        [plain] = Helper().run_examples([self._row()])
+        _, plain_result = await plain
+        assert plain_result == {"response": {"output": []}}
+
+        [enriched] = Helper().run_examples([self._row()], enrich_results=True)
+        _, enriched_result = await enriched
+        assert [call["model_call_id"] for call in enriched_result["ng_model_call_capture"]["calls"]] == ["c1"]
+        assert enriched_result["_ng_rollout_id"] == "g1_g0_a0"
+
+
+class TestAnthropicTurns:
+    """Anthropic Messages calls become turns in the same Responses item shape as other dialects."""
+
+    @staticmethod
+    def _turns(request: dict, response: dict):
+        from nemo_gym.rollout_observability import AgentInvocation, TrajectoryModelCall
+
+        call = TrajectoryModelCall.model_validate(
+            {
+                "model_call_id": "c1",
+                "started_at": 1.0,
+                "request": request,
+                "response": response,
+                "response_metadata": {"model_ref": {"type": "responses_api_models", "name": "policy_model"}},
+            }
+        )
+        invocation = AgentInvocation.model_validate(
+            {"invocation_id": "root", "model_calls": [{"model_call_id": "c1"}]}
+        )
+        return nemo_gym.rollout_collection._turns_from_model_calls("task", "rollout", [invocation], [call], None)
+
+    def test_tool_use_and_thinking_are_split_like_responses_items(self) -> None:
+        request = {
+            "model": "policy",
+            "max_tokens": 64,
+            "system": "You are Claude Code.",
+            "messages": [{"role": "user", "content": "Fix utils.py"}],
+        }
+        response = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "policy",
+            "content": [
+                {"type": "thinking", "thinking": "read it first", "signature": "s"},
+                {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "utils.py"}},
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 10, "output_tokens": 4},
+        }
+
+        [turn] = self._turns(request, response)
+
+        assert turn.question[0] == {"type": "message", "role": "system", "content": "You are Claude Code."}
+        assert turn.question[-1]["content"] == "Fix utils.py"
+        [tool_call] = turn.answer
+        assert tool_call["type"] == "function_call" and tool_call["name"] == "Read"
+        assert json.loads(tool_call["arguments"]) == {"file_path": "utils.py"}
+        [reasoning] = turn.reasoning_content
+        assert reasoning["summary"][0]["text"] == "read it first"
+
+    def test_unsupported_block_keeps_the_raw_blocks(self) -> None:
+        request = {"model": "policy", "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]}
+        response = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "redacted_thinking", "data": "x"}, {"type": "text", "text": "hello"}],
+        }
+
+        [turn] = self._turns(request, response)
+
+        assert turn.answer == [{"type": "text", "text": "hello"}]
+        assert turn.reasoning_content == [{"type": "redacted_thinking", "data": "x"}]
