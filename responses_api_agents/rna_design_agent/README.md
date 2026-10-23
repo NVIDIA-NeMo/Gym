@@ -7,6 +7,8 @@ the suite's own metric and gates.
 
 Eight suites, built on first start from the published [RNAInvBench](https://github.com/COLA-Laboratory/RNAInvBench)
 sets: Eterna100 v1 and v2, Rfam learn and Taneda, ArchiveII, and three anta sets (1,694 targets in all).
+No dataset is redistributed here and each carries its publisher's terms, ArchiveII's unstated — see
+[LICENSE-third-party](LICENSE-third-party). The build needs network access on first start.
 
 ## Setup
 

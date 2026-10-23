@@ -17,7 +17,20 @@ components below rather than vendoring them. No model weights are in this direct
 
 ## Data
 
-| File | Source | Licence |
+No dataset is redistributed here. `prepare.ensure_suites()` reads two published files from
+[RNAInvBench](https://github.com/COLA-Laboratory/RNAInvBench) (MIT) at a pinned commit, checks each
+against its SHA-256, and writes the suites locally. RNAInvBench collates sets that were published
+separately, and their own terms govern use. Only structures and pinned bases are read from them; no
+designed sequence from any of these sets is used.
+
+| Set | Origin | Terms |
 |---|---|---|
-| `suites/` (built on first start, not in the repository) | target structures collated by [RNAInvBench](https://github.com/COLA-Laboratory/RNAInvBench) from Eterna100 v1/v2, Rfam-learn, Rfam-taneda, antaRNA and ArchiveII, read from its published files at a pinned commit | MIT. Structures and pinned bases only, no sequences from those sets. |
-| `data/example.jsonl` and `resources_servers/rna_design/data/` | five Eterna100 v1 targets from the same files | MIT |
+| Eterna100 v1 | Anderson-Lee et al. 2016, [eterna100-benchmarking](https://github.com/eternagame/eterna100-benchmarking) | MIT |
+| Eterna100 v2 | Koodli et al. 2021, same repository | MIT |
+| rfam_learn-test | Runge et al. 2019 (LEARNA), built on [Rfam](https://rfam.org) | Rfam is CC0 |
+| rfam_taneda-test | Taneda 2011 (MODENA), built on Rfam | Rfam is CC0 |
+| anta_rfam / anta_strand / anta_pseudo | Kleinkauf et al. 2015 (antaRNA) | stated by the authors |
+| ArchiveII-test | Mathews lab, [rna.urmc.rochester.edu](https://rna.urmc.rochester.edu/) | **no licence is stated by the authors.** Not redistributed here; refer to that site before using it |
+
+`data/example.jsonl` and `resources_servers/rna_design/data/` hold five Eterna100 v1 targets, read
+from the same files (MIT).
