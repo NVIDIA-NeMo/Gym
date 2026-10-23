@@ -18,9 +18,21 @@ from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
     active_sessions,
     capture_observations,
     close_body,
+    rejected_events,
     seed,
     setup,  # noqa: F401
 )
+
+
+@pytest.mark.parametrize("version,warn", [("1.17.11", False), ("1.18.0", True)])
+def test_session_warns_about_untested_opencode_version(setup, caplog, version, warn):
+    agent, sandbox = setup
+    agent.config.opencode_version = version
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+    assert ("error classification is validated on 1.17.11" in caplog.text) == warn
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -106,8 +118,12 @@ def test_observation_parse_failure_preserves_response(setup, caplog):
 
 
 @pytest.mark.parametrize("failure", ["provider_timeout", "missing_export", "snapshot"])
-def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp_path, failure):
+@pytest.mark.parametrize("model_rejected", [False, True])
+def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp_path, failure, model_rejected):
     agent, sandbox = setup
+    if model_rejected:
+        sandbox.events = rejected_events(after_work=True)
+        sandbox.result["return_code"] = 1
     capture_observations(sandbox, tmp_path)
     execute = sandbox.run_exec
     download = sandbox.download

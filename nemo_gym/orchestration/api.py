@@ -507,10 +507,12 @@ class OtelConfig(_StrictModel):
     """An OpenTelemetry collector beside every benchmark job: scrapes each model service's
     Prometheus `/metrics`, receives OTLP from the job's own processes on :4317/:4318, and ships
     both to an OTLP/HTTP backend while keeping a copy under `<job dir>/otel/`. On by default, so
-    a run is observable unless it opts out; `endpoint` and `service_name` come from the
-    deployment's own config (a cluster fragment, typically) and are required while enabled."""
+    a run is observable unless it opts out. Remote export needs `endpoint`, `service_name` and
+    a token from the submitting shell; without the token, only the local copies are written."""
 
     enabled: bool = True
+    # Keep local JSONL collection when remote export is off. A missing token forces this false.
+    remote_export: bool = True
     # Collector binary: a path on the compute nodes (the release tarball's static `otelcol-contrib`
     # on shared storage) when `container` is unset, else a path inside `container`.
     binary: str = "otelcol-contrib"

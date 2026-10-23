@@ -50,7 +50,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
+from nemo_gym.failure_kinds import MODEL_CONTEXT_LIMIT, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -99,6 +99,9 @@ from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
+_TESTED_OUTCOME_VERSION = "1.17.11"
+_API_ERROR = "APIError"
+_CONTEXT_OVERFLOW_ERROR = "ContextOverflowError"
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -217,14 +220,42 @@ class OpenCodeAgentVerifyResponse(BaseVerifyResponse):
 class OpenCodeAgent(SimpleResponsesAPIAgent):
     """Run OpenCode locally or in a borrowed or agent-owned sandbox session."""
 
+    @staticmethod
+    def _reported_model_error(native_result: Mapping[str, Any], cleanup: dict | None) -> bool:
+        """Recognize a completed API error or context limit; tested on OpenCode 1.17.11.
+
+        Independent worker failures, cleanup errors and timeouts are not provider reports.
+        """
+        finishes = {_API_ERROR: None, _CONTEXT_OVERFLOW_ERROR: "error"}
+        name = (native_result.get("error") or {}).get("name")
+        return (
+            cleanup is not None
+            and cleanup["return_code"] == 1
+            and not cleanup["timed_out"]
+            and not cleanup["error"]
+            and name in finishes
+            and native_result.get("finish") == finishes[name]
+            and bool(native_result.get("time", {}).get("completed"))
+        )
+
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Read OpenCode 1.17.11's native assistant APIError; tested on that version."""
+        """Read native APIError status or transport retry marker; tested on OpenCode 1.17.11.
+
+        OpenCode marks connection resets, header timeouts, decompression failures and
+        interrupted streams retryable without an HTTP status. Preserve that evidence;
+        the Environment Server still decides whether to retry the episode.
+        """
         error = native_result.get("error") or {}
-        if error.get("name") != "APIError":
+        if error.get("name") == _CONTEXT_OVERFLOW_ERROR:
+            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
+        if error.get("name") != _API_ERROR:
             return AgentOutcome(failure_kind="unknown")
-        status = (error.get("data") or {}).get("statusCode")
+        data = error.get("data") or {}
+        status = data.get("statusCode")
         if type(status) is int and 400 <= status <= 599:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        if status is None and data.get("isRetryable") is True:
+            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
         return AgentOutcome(failure_kind="unknown")
 
     config: OpenCodeAgentConfig
@@ -652,6 +683,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             r"\d+\.\d+\.\d+", self.config.opencode_version
         ):
             raise HTTPException(422, "OpenCode sandbox execution requires an exact opencode_version")
+        if self.config.opencode_version != _TESTED_OUTCOME_VERSION:
+            LOG.warning(
+                "OpenCode %s is untested: error classification is validated on %s",
+                self.config.opencode_version,
+                _TESTED_OUTCOME_VERSION,
+            )
         if self.config.context_window <= 0 or self.config.timeout <= 0:
             raise HTTPException(422, "OpenCode context window and execution timeout must be positive")
         if not 0 < self.config.max_output_tokens <= self.config.context_window:
@@ -695,6 +732,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     raise RuntimeError(
                         f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
+            state.sandbox_id = sandbox.sandbox_id
             command = _sandbox_prepare_command(workdir, directory, runtime)
             result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
@@ -1162,17 +1200,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         result = state.session.cleanup
         assistants = [m["info"] for m in export.get("messages", []) if m["info"].get("role") == "assistant"]
         native_result = assistants[-1] if assistants else {}
-        reported_error = (
-            error is None
-            and failure is None
-            and result is not None
-            and result["return_code"] == 1
-            and not result["timed_out"]
-            and not result["error"]
-            and (native_result.get("error") or {}).get("name") == "APIError"
-            and native_result.get("finish") is None
-            and bool(native_result.get("time", {}).get("completed"))
-        )
+        reported_error = error is None and failure is None and self._reported_model_error(native_result, result)
+        context_limit = reported_error and (native_result.get("error") or {}).get("name") == _CONTEXT_OVERFLOW_ERROR
         runtime = state.runtime_info
         if runtime is None:
             observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
@@ -1187,8 +1216,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             continuation=state.is_continuation,
         )
         error = error or outcome.error
+        if context_limit:
+            outcome = OpenCodeRunOutcome(status="incomplete")
         status = outcome.status
-        if error or failure:
+        if (error or failure) and not context_limit:
             status = "failed"
         # Artifact message completion records a model turn, not the entire invocation.
         for record in observations.records:
@@ -1196,10 +1227,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 record.status = "incomplete" if isinstance(failure, asyncio.CancelledError) else status
                 if state.is_continuation:
                     record.duration_ms = (monotonic() - started) * 1000
-                    record.stop_reason = outcome.error_type
+                    record.stop_reason = "context_limit" if context_limit else outcome.error_type
                 record.error_type = outcome.error_type
                 if isinstance(failure, asyncio.CancelledError):
                     record.error_type = "cancelled"
+                elif context_limit:
+                    record.error_type = "context_limit"
+                elif reported_error:
+                    record.error_type = "provider_error"
                 elif error or failure:
                     record.error_type = "server_error"
         if result is not None:
@@ -1211,13 +1246,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         if state.session.owns_sandbox
                         else state.request.sandbox_access.connection.provider_config_ref
                     ),
-                    sandbox_id=(
-                        None
-                        if state.session.owns_sandbox
-                        else str(state.request.sandbox_access.connection.descriptor.get("sandbox_id", "unknown"))
-                    ),
+                    sandbox_id=state.sandbox_id,
                     outcome="timeout" if result["timed_out"] else "failed" if error or failure else "completed",
                     exit_code=result["return_code"],
+                    error_type="process_exit" if reported_error else None,
                 )
             )
         observations.gaps.append(
@@ -1231,7 +1263,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if error and not reported_error:
             raise HTTPException(502, format_error_message(error, stderr=state.stderr))
         reported_message = None
-        if reported_error:
+        if reported_error and not context_limit:
             error_data = native_result["error"].get("data") or {}
             reported_message = error_data.get("message")
             if not isinstance(reported_message, str) or not reported_message:

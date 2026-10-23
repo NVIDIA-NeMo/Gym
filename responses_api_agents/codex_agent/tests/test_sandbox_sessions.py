@@ -46,6 +46,17 @@ def seed() -> AgentSeedSessionRequest:
     )
 
 
+@pytest.mark.parametrize("version,warn", [("0.144.4", False), ("0.145.0", True)])
+def test_session_warns_about_untested_codex_version(setup, caplog, version, warn):
+    agent, sandbox = setup
+    agent.config.codex_version = version
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+    assert ("error classification and transcript parsing are validated on 0.144.4" in caplog.text) == warn
+
+
 def events(*, stop_reason="stop") -> str:
     items = [
         {"type": "item.completed", "item": {"id": "think-1", "type": "reasoning", "text": "Inspect the repository"}},
@@ -183,6 +194,8 @@ def test_http_agent_session_flow_runs_codex_in_borrowed_sandbox(setup):
             assert f"{directory}/process_supervisor.py" not in sandbox.files
             installer = f"{directory}/install_codex_runtime.sh"
             assert installer in sandbox.files
+            for filename in ("sandbox_runner.py", "sandbox_transport.py"):
+                assert sandbox.files[f"{directory}/{filename}"] == (Path(__file__).parents[1] / filename).read_text()
             assert agent.config.resources_server is None
             assert not sandbox.launch.called
             assert not any(path.startswith("/app/") for path in sandbox.files)
@@ -2027,3 +2040,374 @@ async def test_native_failure_without_http_status_reports_unknown(setup):
     assert response.error.message == message
     assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+def native_transcript(items):
+    return "\n".join(
+        json.dumps({"type": "response_item", "timestamp": f"2026-10-19T12:00:0{index}Z", "payload": item})
+        for index, item in enumerate(items)
+    )
+
+
+@pytest.mark.parametrize("custom", [False, True])
+def test_session_uses_native_call_identity_arguments_and_results(setup, custom):
+    agent, sandbox = setup
+    native_output = "Process exited with code 7\nOutput:\noriginal result"
+    transcript = native_transcript(
+        [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]},
+            {
+                "type": "custom_tool_call" if custom else "function_call",
+                "call_id": "provider-call",
+                "name": "apply_patch" if custom else "exec_command",
+                ("input" if custom else "arguments"): "*** Begin Patch\n*** End Patch"
+                if custom
+                else '{"cmd":"exit 7"}',
+            },
+            {
+                "type": "custom_tool_call_output" if custom else "function_call_output",
+                "call_id": "provider-call",
+                "output": native_output,
+            },
+        ]
+    )
+    if custom:
+        transcript += "\n" + json.dumps(
+            {"type": "event_msg", "payload": {"type": "patch_apply_end", "call_id": "provider-call", "success": False}}
+        )
+    original_publish = sandbox.publish
+
+    def publish():
+        original_publish()
+        sandbox.files[f"{sandbox.directory}/native_session.jsonl"] = transcript
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = '{"status":200}\n'
+
+    sandbox.publish = publish
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        assert "--ephemeral" not in payload["command"]
+        assert payload["invocation_id"] == "codex-smoke-a2"
+        assert payload["model_base_url"] == "http://model.example:9000/ng-rollout/codex-smoke-a2/v1"
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+        assert config["model_providers"]["gym"]["http_headers"] == {"x-session-id": "codex-smoke-a2"}
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
+    bundle = closed["agent_observations"]
+    invocation, tool = bundle["records"]
+    assert invocation["conversation"][1]["call_id"] == tool["tool_call_id"] == "provider-call"
+    assert invocation["conversation"][1]["input" if custom else "arguments"] == (
+        "*** Begin Patch\n*** End Patch" if custom else '{"cmd":"exit 7"}'
+    )
+    assert invocation["conversation"][2]["output"] == native_output
+    assert tool["status"] == "failed" and tool["error_type"] == ("tool_error" if custom else "nonzero_exit")
+    assert not any(gap["code"] == "model_call_join_key_unavailable" for gap in bundle["gaps"])
+
+
+@pytest.mark.parametrize(
+    "statuses,timed_out,returncode,worker_error,extra_error,accepted",
+    [
+        ([400], False, 1, None, None, True),
+        ([200, 400], False, 1, None, None, True),
+        ([429, 400], False, 1, None, None, True),
+        ([400, 200], False, 1, None, None, True),
+        ([401], False, 1, None, None, True),
+        ([403], False, 1, None, None, True),
+        ([429, 429, 429], False, 1, None, None, True),
+        ([500], False, 1, None, None, True),
+        ([], False, 1, None, None, True),
+        ([429, None], False, 1, None, None, True),
+        ([400], True, 1, None, None, False),
+        ([400], False, None, None, None, False),
+        ([400], False, 0, None, None, False),
+        ([400], False, 7, None, None, False),
+        ([400], False, 1, "worker failed", None, False),
+        ([400], False, 1, None, "sandbox state lost", False),
+    ],
+)
+def test_terminal_model_error_preserves_provider_and_worker_error_boundary(
+    setup, statuses, timed_out, returncode, worker_error, extra_error, accepted
+):
+    agent, sandbox = setup
+    sandbox.result.update(return_code=returncode, timed_out=timed_out, error=worker_error)
+    records = [
+        {"type": "turn.started"},
+        {"type": "turn.failed", "error": {"message": "model rejected request"}},
+    ]
+    if extra_error:
+        records.insert(1, {"type": "item.completed", "item": {"type": "error", "message": extra_error}})
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(records))
+    original_publish = sandbox.publish
+
+    def publish():
+        original_publish()
+        sandbox.files[f"{sandbox.directory}/native_session.jsonl"] = native_transcript(
+            [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]}]
+        )
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = "\n".join(
+            json.dumps({"status": status}) for status in statuses
+        )
+
+    sandbox.publish = publish
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == (200 if accepted else 502), response.text
+        if accepted:
+            body = response.json()
+            assert body["status"] == "failed"
+            assert body["error"] == {
+                "code": "rate_limit_exceeded" if statuses and statuses[-1] == 429 else "server_error",
+                "message": "model rejected request",
+            }
+            assert body["output"] == []
+            outcome = json.loads(body["metadata"]["ng_agent_outcome"])
+            if statuses and statuses[-1] is None:
+                assert outcome == {"failure_kind": "model_transport_error"}
+            elif statuses and statuses[-1] >= 400:
+                assert outcome == {"failure_kind": "model_request_error", "status_code": statuses[-1]}
+            else:
+                assert outcome == {"failure_kind": "unknown"}
+            if 200 in statuses or not statuses:
+                assert body["usage"] is None
+            else:
+                assert body["usage"]["total_tokens"] == 0
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
+        invocation = closed["agent_observations"]["records"][0]
+        assert invocation["status"] == "failed"
+        if accepted:
+            assert invocation["error_type"] == "provider_error"
+        assert all(item.get("role") == "user" for item in invocation["conversation"])
+
+
+@pytest.mark.parametrize("usage_source", ["native", "cli", "missing"])
+def test_later_rejection_preserves_real_tool_output_and_available_usage(setup, usage_source):
+    agent, sandbox = setup
+    sandbox.result["return_code"] = 1
+    # Pinned 0.144.4 emits this shape after a successful tool call then HTTP 400:
+    # no turn.completed, but the native token_count retains the completed call's usage.
+    rejection = '{"error":{"message":"controlled model failure","type":"conformance_error","code":"400"}}'
+    tool = {"id": "item_1", "type": "command_execution", "command": "printf retained", "status": "in_progress"}
+    records = [
+        {"type": "turn.started"},
+        {"type": "item.started", "item": tool},
+        {
+            "type": "item.completed",
+            "item": tool | {"status": "completed", "exit_code": 0, "aggregated_output": "retained"},
+        },
+        {"type": "error", "message": rejection},
+        {"type": "turn.failed", "error": {"message": rejection}},
+    ]
+    if usage_source == "cli":
+        records.insert(-2, {"type": "turn.completed", "usage": {"input_tokens": 17, "output_tokens": 5}})
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(records))
+    native_output = "Process exited with code 0\nOutput:\nretained"
+    transcript = native_transcript(
+        [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]},
+            {
+                "type": "function_call",
+                "call_id": "provider-call",
+                "name": "exec_command",
+                "arguments": '{"cmd":"printf retained"}',
+            },
+            {"type": "function_call_output", "call_id": "provider-call", "output": native_output},
+        ]
+    )
+    if usage_source != "missing":
+        transcript += "\n" + json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 20,
+                            "output_tokens": 8,
+                            "total_tokens": 28,
+                            "cached_input_tokens": 3,
+                            "reasoning_output_tokens": 2,
+                        }
+                    },
+                },
+            }
+        )
+    original_publish = sandbox.publish
+
+    def publish():
+        original_publish()
+        sandbox.files[f"{sandbox.directory}/native_session.jsonl"] = transcript
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = '{"status":200}\n{"status":400}\n'
+
+    sandbox.publish = publish
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "failed"
+        assert body["error"] == {"code": "server_error", "message": rejection}
+        assert [item["type"] for item in body["output"]] == ["function_call", "function_call_output"]
+        assert body["output"][1]["output"] == "retained"
+        if usage_source == "native":
+            assert body["usage"] == {
+                "input_tokens": 20,
+                "output_tokens": 8,
+                "total_tokens": 28,
+                "input_tokens_details": {"cached_tokens": 3},
+                "output_tokens_details": {"reasoning_tokens": 2},
+            }
+        elif usage_source == "cli":
+            assert body["usage"]["input_tokens"] == 17
+            assert body["usage"]["output_tokens"] == 5
+            assert body["usage"]["total_tokens"] == 22
+        else:
+            assert body["usage"] is None
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
+        invocation, observed_tool = closed["agent_observations"]["records"]
+        assert invocation["status"] == "failed"
+        assert observed_tool["status"] == "completed"
+        assert invocation["conversation"][1]["call_id"] == observed_tool["tool_call_id"] == "provider-call"
+        assert invocation["conversation"][2]["output"] == native_output
+
+
+async def test_activation_failure_takes_precedence_over_recorded_rejection(setup):
+    agent, sandbox = setup
+    state = await agent._seed_agent_session_state(seed())
+    state.session.cleanup = sandbox.result | {"return_code": 1}
+    state.session.artifacts = json.dumps(
+        [1.0, {"type": "turn.failed", "error": {"message": "model rejected request"}}]
+    )
+    state.model_attempts = [{"status": 200}, {"status": 400}]
+    with patch.object(state, "execute", AsyncMock(side_effect=RuntimeError("sandbox connection lost"))):
+        with pytest.raises(RuntimeError, match="sandbox connection lost"):
+            await agent._sandbox_response(
+                state, NeMoGymResponseCreateParamsNonStreaming(input="task"), prompt="task", system=""
+            )
+    assert state.observations.records[0].status == "incomplete"
+
+
+@pytest.mark.asyncio
+async def test_failed_native_snapshot_preserves_collected_cli_events(setup):
+    agent, sandbox = setup
+    state = await agent._seed_agent_session_state(seed())
+    original_execute = sandbox.execute
+
+    async def execute(command, **kwargs):
+        if "--snapshot" in command:
+            raise OSError("snapshot transport failed")
+        return await original_execute(command, **kwargs)
+
+    sandbox.exec.side_effect = execute
+    try:
+        response = await agent._sandbox_response(
+            state, NeMoGymResponseCreateParamsNonStreaming(input="task"), prompt="task", system=""
+        )
+        assert response.output[-1].content[0].text == "Fixed"
+        assert state.observations.records[0].conversation[-1].content[0].text == "Fixed"
+        assert any(gap.code == "model_call_join_key_unavailable" for gap in state.observations.gaps)
+    finally:
+        await state.close(1)
+
+
+@pytest.mark.parametrize("transport_error", ["timed out", "IncompleteRead(0 bytes read, 20 more expected)", None])
+def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
+    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
+    from nemo_gym.openai_utils import NeMoGymResponse
+
+    agent, sandbox = setup
+    sandbox.result["return_code"] = 1
+    records = [
+        {"type": "turn.started"},
+        {"type": "turn.failed", "error": {"message": "stream disconnected before completion: server error"}},
+    ]
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(records))
+    original_publish = sandbox.publish
+
+    def publish():
+        original_publish()
+        attempt = {"status": 200}
+        if transport_error is not None:
+            attempt["transport_error"] = transport_error
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = json.dumps(attempt) + "\n"
+
+    sandbox.publish = publish
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "failed"
+        assert body["usage"] is None
+        outcome = json.loads(body["metadata"]["ng_agent_outcome"])
+        assert outcome == {"failure_kind": "model_transport_error" if transport_error is not None else "unknown"}
+        policy = agent_outcome_policy(NeMoGymResponse.model_validate(body))
+        assert policy == OutcomeAction.RETRY
+        client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()
+
+
+# Native Display strings from codex-rs/protocol/src/error.rs at rust-v0.144.4.
+@pytest.mark.parametrize(
+    "attempt,message,expected",
+    [
+        (
+            {"status": 400},
+            '{"error":{"message":"invalid input","code":"bad_request"}}',
+            {"failure_kind": "model_request_error", "status_code": 400},
+        ),
+        (
+            {"status": 429},
+            "exceeded retry limit, last status: 429 Too Many Requests",
+            {"failure_kind": "model_request_error", "status_code": 429},
+        ),
+        (
+            {"status": 500},
+            "We're currently experiencing high demand, which may cause temporary errors.",
+            {"failure_kind": "model_request_error", "status_code": 500},
+        ),
+        (
+            {"status": 503},
+            "Selected model is at capacity. Please try a different model.",
+            {"failure_kind": "model_request_error", "status_code": 503},
+        ),
+        ({"status": None, "error": "timed out"}, "request timed out", {"failure_kind": "model_transport_error"}),
+        (
+            {"status": 429, "transport_error": "timed out"},
+            "request timed out",
+            {"failure_kind": "model_transport_error"},
+        ),
+        (
+            {"status": 200, "transport_error": "timed out"},
+            "request timed out",
+            {"failure_kind": "model_transport_error"},
+        ),
+    ],
+)
+def test_native_errors_use_captured_attempt_facts(setup, attempt, message, expected):
+    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
+    from nemo_gym.openai_utils import NeMoGymResponse
+
+    agent, sandbox = setup
+    sandbox.result["return_code"] = 1
+    sandbox.events = json.dumps([1.0, {"type": "turn.failed", "error": {"message": message}}])
+    original_publish = sandbox.publish
+
+    def publish():
+        original_publish()
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = json.dumps(attempt) + "\n"
+
+    sandbox.publish = publish
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200
+        result = NeMoGymResponse.model_validate(response.json())
+        assert result.status == "failed"
+        assert result.error.message == message
+        assert result.error.code == ("rate_limit_exceeded" if expected.get("status_code") == 429 else "server_error")
+        assert json.loads(result.metadata["ng_agent_outcome"]) == expected
+        assert agent_outcome_policy(result) == (
+            OutcomeAction.VERIFY if attempt["status"] == 400 else OutcomeAction.RETRY
+        )
+        client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()

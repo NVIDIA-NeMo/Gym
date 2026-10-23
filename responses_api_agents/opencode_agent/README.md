@@ -120,7 +120,7 @@ Session `opencode_config` permits only `permission` and `tools`, preserving Gym 
 
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation
-gaps. Runtime/model errors fail before verification; explicit limits can retain
+gaps. Reported API errors retain their classified cause for the Environment Server to decide grading and retries; worker and cleanup failures remain execution errors; explicit limits can retain
 gradable partial output. This path is eval-only; working inference does not establish
 training token-ID/logprob support or benchmark accuracy.
 
