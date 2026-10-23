@@ -3,6 +3,7 @@
 1. Environment: This is a tool use - multi step agentic environment involving math problems. 
 2. Domain: Math
 3. Example prompt: Get me the values for sin(2.0), (1.0 / 1.0), (8.0 + 3.0), (2.0 - 5.0), and (8.0 * 0.0).
+4. Verification: reward is 1.0 only if both hold, otherwise 0.0: (a) every expected value is exactly equal to the `solution` of some `function_call_output` item in the trajectory; (b) the final assistant message states the expected values, in order, as its last N answers (N = number of expected values), to about three significant figures. The answer of each line, list item or clause is its last number, ignoring text in parentheses, so restated expressions such as `sin(5.0)` and values that are quoted and then replaced do not count.
 
 Commands - 
 Spin up server:
