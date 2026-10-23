@@ -317,3 +317,59 @@ def test_sse_replay_terminal_and_native_rejection(tmp_path):
     path.write_text(event({"tool_calls": [{"name": "forbidden"}]}, "tool_calls"))
     with pytest.raises(ValueError, match="Native"):
         replay_sse(path)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [("reasoning_content",), ("reasoning",), ("reasoning_content", "reasoning")],
+)
+def test_sse_reasoning_aliases_preserve_raw_bytes_and_judge_fields(tmp_path, fields):
+    from resources_servers.agentic_if_realworld.benchmark.transport import replay_sse, verified_response
+
+    chunks = [
+        {"choices": [{"index": 0, "delta": dict.fromkeys(fields, text), "finish_reason": None}]}
+        for text in ["Synthetic plan: ", "return OK."]
+    ]
+    chunks.append({"choices": [{"index": 0, "delta": {"content": "OK."}, "finish_reason": "stop"}]})
+    raw = ("".join("data: " + json.dumps(chunk) + "\n\n" for chunk in chunks) + "data: [DONE]\n\n").encode()
+    path = tmp_path / "synthetic.http"
+    path.write_bytes(raw)
+    response = replay_sse(path)
+    receipt = {
+        "status": "generated",
+        "content_type": "text/event-stream",
+        "response": response,
+        "raw_attempts": [{"path": str(path), "sha256": digest(path)}],
+    }
+    message = delivered(verified_response(receipt))["message"]
+    assert message == {"role": "assistant", "content": "OK.", "reasoning_content": "Synthetic plan: return OK."}
+    assert judge.response_fields(message)["reasoning_content"] == "Synthetic plan: return OK."
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize(
+    "delta",
+    [
+        {"reasoning": "one", "reasoning_content": "two"},
+        {"reasoning": "", "reasoning_content": "two"},
+        {"reasoning": ["not text"]},
+        {"reasoning_content": ["not text"]},
+        {"reasoning": 0, "reasoning_content": False},
+    ],
+)
+def test_sse_reasoning_rejects_conflicting_or_nontext_fields(delta):
+    from resources_servers.agentic_if_realworld.benchmark.transport import SSE
+
+    with pytest.raises(ValueError):
+        SSE().event(json.dumps({"choices": [{"delta": delta}]}))
+
+
+@pytest.mark.parametrize("field", ["reasoning", "reasoning_content"])
+def test_sse_null_reasoning_alias_is_absent(field):
+    from resources_servers.agentic_if_realworld.benchmark.transport import SSE
+
+    other = "reasoning_content" if field == "reasoning" else "reasoning"
+    parser = SSE()
+    parser.event(json.dumps({"choices": [{"delta": {field: None, other: "Synthetic plan."}}]}))
+    parser.event(json.dumps({"choices": [{"delta": {"content": "OK."}, "finish_reason": "stop"}]}))
+    assert delivered(parser.response())["message"]["reasoning_content"] == "Synthetic plan."

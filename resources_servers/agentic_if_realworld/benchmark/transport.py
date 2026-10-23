@@ -15,7 +15,7 @@ from .core import digest, judge, read, write
 
 
 class SSE:
-    """Frozen historical field-concatenation decoder."""
+    """Concatenate historical fields and normalize modern reasoning deltas."""
 
     def __init__(self):
         self.meta, self.message, self.finish, self.usage = (
@@ -47,6 +47,13 @@ class SSE:
                 raise ValueError("Unexpected streamed role")
             if delta.get("tool_calls") or delta.get("function_call"):
                 raise ValueError("Native call in text-only delivery")
+            reasoning = delta.get("reasoning")
+            if reasoning is not None:
+                if not isinstance(reasoning, str):
+                    raise ValueError("Unsupported stream field")
+                if delta.get("reasoning_content") is not None and delta["reasoning_content"] != reasoning:
+                    raise ValueError("Contradictory reasoning fields")
+                delta = {**delta, "reasoning_content": reasoning}
             for key in ["content", "reasoning_content", "refusal"]:
                 part = delta.get(key)
                 if part is not None:
