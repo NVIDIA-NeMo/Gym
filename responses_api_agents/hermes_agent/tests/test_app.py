@@ -45,6 +45,7 @@ from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.sandbox import SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.hermes_agent.app import (
     HermesAgent,
@@ -397,6 +398,26 @@ class TestSanity:
         # Hermes exposes an MCP server as a toolset of the same name, so it cannot shadow a built-in toolset.
         with pytest.raises(ValueError, match="collide with Hermes toolsets: terminal"):
             await hermes.seed_agent_session(SimpleNamespace(session={}), seed("terminal"))
+
+    @pytest.mark.parametrize(
+        ("unsupported", "reason"),
+        [
+            ({"tool_accesses": [_mcp_access("terminal")]}, "MCP tool grants collide with Hermes toolsets: terminal"),
+            # No sandbox_access, and this config names no sandbox_provider either.
+            ({}, "Hermes requires sandbox_access or a configured sandbox_provider for an episode session"),
+        ],
+    )
+    def test_unsupported_seed_is_refused_with_a_final_422(self, unsupported: dict, reason: str) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        seed = AgentSeedSessionRequest(
+            agent_session_id="session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="test", task_id="task"),
+            **unsupported,
+        )
+
+        assert check_agent_seed_rejected(hermes.setup_webserver(), seed) == reason
+        assert not hermes._session_records
 
     @staticmethod
     def _sandbox_session(

@@ -1,0 +1,538 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import asyncio
+import json
+from time import monotonic
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from environment_servers.swe_together import app, evaluation
+from environment_servers.swe_together.app import Episode, SWETConfig, SWETEnvironmentServer, memory_mib
+from environment_servers.swe_together.schemas import CandidateTurn, SWETRequest, UserTurn, episode_response
+from environment_servers.swe_together.simulator import UserAgent
+from environment_servers.swe_together.task import TaskData
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseUsage
+from nemo_gym.rollout_collection import _episode_record
+
+
+def activation(index=0, **kwargs):
+    return CandidateTurn(
+        activation_id=index + 1,
+        response=NeMoGymResponse(
+            id="r",
+            object="response",
+            created_at=1,
+            model="test",
+            output=[],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+            status="completed",
+        ),
+        **kwargs,
+    )
+
+
+def request():
+    task = TaskData(task_id="task", image="image", image_digest="sha256:" + "1" * 64)
+    return SWETRequest(
+        episode_id={"rollout_id": "one"},
+        task={"task_id": {"taskset": "swet", "task_id": "task"}, "task_input": {"task_data": task}},
+    )
+
+
+def test_episode_usage_covers_all_activations_and_preserves_unknown_counts():
+    turns = [activation(index) for index in range(2)]
+    for index, turn in enumerate(turns):
+        turn.response.usage = NeMoGymResponseUsage(
+            input_tokens=10 + index,
+            output_tokens=2,
+            total_tokens=12 + index,
+            input_tokens_details={"cached_tokens": None if index else 1},
+            output_tokens_details={"reasoning_tokens": 1},
+        )
+    combined = episode_response(turns)
+    assert combined.usage.input_tokens == 21
+    assert combined.usage.output_tokens == 4
+    assert combined.usage.total_tokens == 25
+    assert combined.usage.input_tokens_details.cached_tokens is None
+    assert turns[-1].response.usage.input_tokens == 11
+    turns[-1].response.usage = None
+    assert episode_response(turns).usage is None
+
+
+def server(tmp_path, **updates):
+    config = SWETConfig(
+        name="swet",
+        host="localhost",
+        port=1234,
+        entrypoint="app.py",
+        asset_root=str(tmp_path),
+        artifact_root=str(tmp_path),
+        runtime_manifest_path="unused",
+        agent_server={"type": "responses_api_agents", "name": "policy"},
+        judge_agent={"type": "responses_api_agents", "name": "judge"},
+        simulator_model={"type": "responses_api_models", "name": "sim"},
+        interaction_model={"type": "responses_api_models", "name": "metrics"},
+        **updates,
+    )
+    return SWETEnvironmentServer.model_construct(config=config)
+
+
+def state(tmp_path, decisions):
+    req = request()
+    value = Episode(req, req.task.task_input.task_data, tmp_path, tmp_path)
+    value.snapshots = SimpleNamespace(capture=AsyncMock(return_value="diff"))
+    llm = SimpleNamespace(
+        call=AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    content="", tool_calls=[{"function": {"name": action, "arguments": json.dumps({"content": text})}}]
+                )
+                for action, text in decisions
+            ]
+        )
+    )
+    value.simulator = UserAgent(llm, original_user_messages=["original"])
+    value.simulator_model = SimpleNamespace(calls=[])
+    value.interaction_started = monotonic()
+    value.interaction_deadline = monotonic() + 30
+    return value, llm
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [("4G", 4096), ("8GiB", 8192), ("512M", 512), ("1.5G", 1536), ("1024K", 1)]
+)
+def test_memory_declarations(value, expected):
+    assert memory_mib(value) == expected
+
+
+@pytest.mark.parametrize("value", ["large", "0G", "-1G", "4", "4P"])
+def test_invalid_memory_is_not_silently_changed(value):
+    with pytest.raises(ValueError):
+        memory_mib(value)
+
+
+@pytest.mark.asyncio
+async def test_simulator_one_call_even_on_noop_text(tmp_path):
+    value, llm = state(tmp_path, [])
+    llm.call.side_effect = None
+    llm.call.return_value = SimpleNamespace(content="no-op", tool_calls=[])
+    result = await server(tmp_path)._next_user_turn(value, activation())
+    assert result.synthetic and result.responses_create_params.input[0].content == "continue"
+    assert llm.call.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_accepted_feedback_and_noop_stop(tmp_path):
+    value, llm = state(tmp_path, [("redirect", "Fix tests")] + [("no-op", "")] * 4)
+    environment = server(tmp_path)
+    results = [await environment._next_user_turn(value, activation(i)) for i in range(5)]
+    assert results[-1].stop_reason == "consecutive_noops"
+    assert value.messages == [{"trial_idx": 1, "turn": 1, "action": "redirect", "text": "Fix tests"}]
+    assert value.simulator.get_stats()["ground_truth_consumed"] == 1 and llm.call.await_count == 5
+
+
+@pytest.mark.asyncio
+async def test_already_expired_budget_stops_without_snapshot_or_simulator(tmp_path):
+    value, llm = state(tmp_path, [])
+    value.interaction_started = monotonic() - 60
+    value.interaction_deadline = monotonic() - 1
+    result = await server(tmp_path)._next_user_turn(value, activation())
+    assert result.kind == "stop" and result.stop_reason == "session_budget_exhausted"
+    value.snapshots.capture.assert_not_awaited()
+    llm.call.assert_not_awaited()
+    assert value.messages == []
+
+
+@pytest.mark.asyncio
+async def test_provider_timeout_is_not_an_interaction_budget_stop(tmp_path):
+    value, _ = state(tmp_path, [])
+    value.snapshots.capture.side_effect = TimeoutError("command status GET exceeded 10s")
+    with pytest.raises(TimeoutError, match="status GET"):
+        await server(tmp_path)._next_user_turn(value, activation())
+
+
+@pytest.mark.asyncio
+async def test_late_simulator_message_is_discarded(tmp_path):
+    value, llm = state(tmp_path, [])
+    value.interaction_started = monotonic()
+    value.interaction_deadline = monotonic() + 0.03
+
+    async def delayed(**kwargs):
+        await asyncio.sleep(0.1)
+        return SimpleNamespace(content="late feedback", tool_calls=[])
+
+    llm.call.side_effect = delayed
+    result = await server(tmp_path)._next_user_turn(value, activation())
+    assert result.stop_reason == "session_budget_exhausted" and value.messages == []
+    assert value.simulator._messages == []
+    assert json.loads((tmp_path / "turn-0-simulator.json").read_text())["discarded"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_structured_error", [True, False])
+async def test_refusal_preserves_semantic_outcome_and_close_before_verdict(
+    tmp_path, monkeypatch, has_structured_error
+):
+    monkeypatch.setattr(evaluation, "uuid4", lambda: SimpleNamespace(hex="test"))
+    monkeypatch.setattr(evaluation, "stage_judge", AsyncMock(return_value="judge"))
+    monkeypatch.setattr(evaluation, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(
+        evaluation,
+        "get_response_json",
+        AsyncMock(
+            side_effect=[
+                {},
+                {
+                    "status": "failed",
+                    "error": {"message": "Usage Policy refusal"} if has_structured_error else None,
+                    "metadata": {"stop_reason": "refusal"} if has_structured_error else None,
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": "Reading the rubric."}],
+                        },
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": "Usage Policy refusal"}],
+                        },
+                    ],
+                },
+                {
+                    "agent_session_id": "judge-test",
+                    "agent_observations": {"source": "claude_code"},
+                    "cleanup_confirmed": True,
+                },
+            ]
+        ),
+    )
+    read = AsyncMock(side_effect=FileNotFoundError("no verdict"))
+    monkeypatch.setattr(evaluation, "read_text", read)
+    client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(cookies={})))
+    evidence = {}
+    req = request()
+    with pytest.raises(RuntimeError, match="Usage Policy refusal"):
+        await evaluation.run_judge(
+            client=client,
+            agent=SimpleNamespace(name="judge"),
+            sandbox=SimpleNamespace(serialize=AsyncMock(return_value={})),
+            provider="sandbox",
+            task_dir=tmp_path,
+            patch="patch",
+            workdir="/workspace",
+            episode=req.episode_id,
+            task_id=req.task.task_id,
+            timeout=100,
+            cookies={},
+            artifact_dir=tmp_path,
+            evidence=evidence,
+        )
+    read.assert_awaited_once()
+    seed = client.post.await_args_list[0].kwargs["json"]
+    assert seed.sandbox_access.workdir == "/tmp/judge_inputs"
+    assert evidence["judge_close"]["agent_observations"]["source"] == "claude_code"
+    assert evidence["judge_close"]["cleanup_confirmed"] is True
+    assert evidence["judge_outcome"]["metadata"] == ({"stop_reason": "refusal"} if has_structured_error else None)
+    assert evidence["judge_outcome"]["terminal_text"] == "Usage Policy refusal"
+    assert (tmp_path / "judge-close.json").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_phase", ["request", "response_body"])
+async def test_saved_judge_verdict_survives_lost_response(tmp_path, monkeypatch, failure_phase):
+    from aiohttp import ClientConnectionError
+
+    monkeypatch.setattr(evaluation, "uuid4", lambda: SimpleNamespace(hex="test"))
+    monkeypatch.setattr(evaluation, "stage_judge", AsyncMock(return_value="judge"))
+    monkeypatch.setattr(evaluation, "raise_for_status", AsyncMock())
+    lost_response = ClientConnectionError("judge response lost")
+    close = {"agent_session_id": "judge-test", "cleanup_confirmed": True}
+    response = SimpleNamespace(cookies={})
+    post = AsyncMock(side_effect=[response, lost_response if failure_phase == "request" else response, response])
+    payloads = [{}, close] if failure_phase == "request" else [{}, lost_response, close]
+    monkeypatch.setattr(evaluation, "get_response_json", AsyncMock(side_effect=payloads))
+    raw = json.dumps({"goal_results": [{"id": "goal", "met": False}]})
+
+    async def read(sandbox, *, path):
+        assert post.await_args_list[-1].args[1] == "/v1/agent_sessions/close"
+        assert path == "/tmp/judge_inputs/verdict.json"
+        return raw
+
+    monkeypatch.setattr(evaluation, "read_text", read)
+    monkeypatch.setattr(evaluation, "read_test_reward", AsyncMock(return_value={"test_reward_raw": None}))
+    (tmp_path / "canonical_goals.json").write_text(json.dumps({"completeness_goals": [{"id": "goal", "weight": 1}]}))
+    req = request()
+    evidence = {}
+    verdict = await evaluation.run_judge(
+        client=SimpleNamespace(post=post),
+        agent=SimpleNamespace(name="judge"),
+        sandbox=SimpleNamespace(serialize=AsyncMock(return_value={})),
+        provider="sandbox",
+        task_dir=tmp_path,
+        patch="patch",
+        workdir="/workspace",
+        episode=req.episode_id,
+        task_id=req.task.task_id,
+        timeout=100,
+        cookies={},
+        artifact_dir=tmp_path,
+        evidence=evidence,
+    )
+    assert verdict["judge_score"] == 0
+    assert verdict["judge_runtime"] is None
+    assert verdict["judge_close"]["cleanup_confirmed"] is True
+    assert evidence["judge_transport_error"] == "ClientConnectionError: judge response lost"
+    assert (tmp_path / "judge-verdict-raw.json").read_text() == raw
+
+
+@pytest.mark.asyncio
+async def test_webserver_lifespan_closes_runtime_helper(tmp_path):
+    environment = server(tmp_path)
+    environment.server_client = SimpleNamespace(global_config_dict={})
+    runtime = SimpleNamespace(close=AsyncMock())
+    environment._runtime = runtime
+    webserver = environment.setup_webserver()
+    async with webserver.router.lifespan_context(webserver):
+        runtime.close.assert_not_awaited()
+    runtime.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("activation_error", [False, True])
+async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, monkeypatch, activation_error):
+    environment = server(tmp_path)
+    order = []
+    sandbox = SimpleNamespace(serialize=AsyncMock(return_value={}))
+    candidate_trajectory = {
+        "task_id": "task",
+        "rollout_id": "one",
+        "turns": [
+            {
+                "invocation_id": "root",
+                "task_id": "task",
+                "rollout_id": "one",
+                "turn_no": 1,
+                "timestamp": 1.0,
+                "step_count": 0,
+                "answer": "candidate decision",
+            }
+        ],
+    }
+
+    async def prepare(self, value):
+        value.sandbox = sandbox
+        value.task_metadata = {"agent_kwargs": {}}
+        value.prompt = "first instruction"
+        order.append("prepare")
+
+    async def stop(self, value, role):
+        order.append(role + " sandbox close")
+        value.cleanup_receipts[role + "_sandbox"] = {"cleanup_confirmed": True}
+
+    async def verify(self, value, initial, activations):
+        assert order[-1] == "agent close"
+        order.append("verify")
+        return {
+            "responses_create_params": initial,
+            "response": activations[-1].response,
+            "reward": 1,
+            "judge_score": 1,
+            "task_id": "task",
+        }
+
+    async def post(name, path, *, json, cookies, headers=None, _control=False):
+        if path == "/v1/agent_sessions":
+            order.append("seed")
+            data = {
+                "agent_session_id": json.agent_session_id,
+                "capabilities": {"mode": "resume_harness_session", "observations": ["trajectory", "timing"]},
+            }
+        elif path == "/v1/agent_sessions/close":
+            assert _control
+            order.append("agent close")
+            data = {
+                "agent_session_id": json.agent_session_id,
+                "cleanup_confirmed": True,
+                "trajectory": candidate_trajectory,
+            }
+        else:
+            order.append("activate")
+            if activation_error:
+                raise RuntimeError("native startup failed before provider inference")
+            data = activation().response.model_dump(mode="json")
+            assert json.input[0].content == "first instruction"
+            assert headers == {"x-ng-agent-activation": "1"}
+            assert 0 < float(json.metadata["agent_timeout_sec"]) <= environment.config.activation_timeout_seconds
+        return SimpleNamespace(cookies={"agent_session_id": SimpleNamespace(value="cookie")}, payload=data)
+
+    monkeypatch.setattr(SWETEnvironmentServer, "_prepare", prepare)
+    monkeypatch.setattr(SWETEnvironmentServer, "_stop_owned_sandbox", stop)
+    monkeypatch.setattr(SWETEnvironmentServer, "_verify", verify)
+    monkeypatch.setattr(SWETEnvironmentServer, "_activation_path", lambda self, req: "/v1/responses")
+    monkeypatch.setattr(
+        SWETEnvironmentServer, "_next_user_turn", AsyncMock(return_value=UserTurn(activation_id=0, kind="stop"))
+    )
+    monkeypatch.setattr(app, "raise_for_status", AsyncMock())
+
+    async def payload(response):
+        return response.payload
+
+    monkeypatch.setattr(app, "get_response_json", payload)
+    environment.server_client = SimpleNamespace(post=post)
+    req = request()
+    result = await environment.run_request(req)
+    collected = _episode_record(result.model_dump(mode="json"))
+    collector_task_id = "{'taskset': 'swet', 'task_id': 'task'}"
+    assert collected["ng_trajectory"]["task_id"] == collector_task_id
+    assert collected["ng_trajectory"]["turns"][0]["task_id"] == collector_task_id
+    assert collected["ng_trajectory"]["turns"][0]["answer"] == "candidate decision"
+    raw_close = json.loads((tmp_path / "one" / "candidate-agent-close.json").read_text())
+    assert raw_close["trajectory"]["task_id"] == "task"
+    assert raw_close["trajectory"]["turns"][0]["task_id"] == "task"
+    if activation_error:
+        assert result.result is None and result.failure.terminal
+        assert result.failure.agent_close.cleanup_confirmed is True
+        final = json.loads((tmp_path / "one" / "failure.json").read_text())
+        assert final["agent_close"]["cleanup_confirmed"] is True
+        assert final["agent_close"]["trajectory"]["task_id"] == "task"
+        assert final["trajectory"]["task_id"] == collector_task_id
+        assert final["cleanup_receipts"]["candidate_sandbox"]["cleanup_confirmed"] is True
+        assert collected["ng_trajectory"]["rollout_id"] == "one"
+        assert (tmp_path / "one" / "candidate-agent-close.json").exists()
+        return
+    assert result.result and result.result.reward == 1
+    assert collected["reward"] == 1
+    assert result.result.ng_agent_close.trajectory.task_id == "task"
+    assert result.result.ng_trajectory.rollout_id == "one"
+    assert collected["ng_trajectory"]["rollout_id"] == "one"
+    assert "ng_agent_observations" in collected
+    assert order == [
+        "prepare",
+        "seed",
+        "activate",
+        "agent close",
+        "verify",
+        "judge sandbox close",
+        "candidate sandbox close",
+    ]
+    assert result.result.cleanup_receipts["candidate_sandbox"]["cleanup_confirmed"]
+
+
+@pytest.mark.parametrize(
+    "native_outcome,confirmed",
+    [("interrupted", True), ("not_started", True), ("failed", True), ("interrupted", False)],
+)
+async def test_interaction_deadline_closes_remote_work_before_grading(
+    tmp_path, monkeypatch, native_outcome, confirmed
+):
+    environment = server(tmp_path, interaction_timeout_seconds=0.03, cleanup_timeout_seconds=1)
+    remote = None
+    close_count = 0
+    verified = False
+    late_work = False
+
+    async def work():
+        nonlocal late_work
+        await asyncio.sleep(0.1)
+        late_work = True
+
+    async def prepare(self, value):
+        value.sandbox = SimpleNamespace(serialize=AsyncMock(return_value={}))
+        value.prompt = "instruction"
+
+    async def stop(self, value, role):
+        value.cleanup_receipts[role + "_sandbox"] = {"cleanup_confirmed": True}
+
+    async def verify(self, value, initial, activations):
+        nonlocal verified
+        verified = True
+        assert close_count == 1 and remote.cancelled()
+        turn = activations[-1]
+        assert turn.response_source == "session_close"
+        assert turn.response.status == "incomplete"
+        assert turn.response.output == [] and turn.response.usage is None
+        assert turn.response.metadata["harness_session_id"] == "native-one"
+        return {
+            "responses_create_params": initial,
+            "response": turn.response,
+            "reward": 0,
+            "judge_score": 0,
+            "task_id": "task",
+        }
+
+    async def post(name, path, *, json, cookies, **kwargs):
+        nonlocal remote, close_count
+        if path == "/v1/agent_sessions":
+            data = {
+                "agent_session_id": json.agent_session_id,
+                "capabilities": {"mode": "resume_harness_session", "observations": ["trajectory", "timing"]},
+            }
+        elif path == "/v1/agent_sessions/close":
+            assert kwargs["_control"] is True
+            close_count += 1
+            remote.cancel()
+            await asyncio.gather(remote, return_exceptions=True)
+            records = (
+                [
+                    {
+                        "kind": "agent_invocation",
+                        "invocation_id": "native-one:1",
+                        "activation_id": 1,
+                        "harness_session_id": "native-one",
+                        "status": "failed" if native_outcome == "failed" else "incomplete",
+                        "error_type": "server_error" if native_outcome == "failed" else "cancelled",
+                    }
+                ]
+                if native_outcome != "not_started"
+                else []
+            )
+            data = {
+                "agent_session_id": json.agent_session_id,
+                "cleanup_confirmed": confirmed,
+                "agent_observations": {"source": "opencode", "records": records},
+            }
+        else:
+            # The real operation ledger keeps execution alive after an HTTP
+            # waiter disconnects. Only explicit session close cancels that work.
+            remote = asyncio.create_task(work())
+            await asyncio.shield(remote)
+            pytest.fail("A reply after the interaction deadline must not enter grading")
+        return SimpleNamespace(cookies={"agent_session_id": SimpleNamespace(value="cookie")}, payload=data)
+
+    monkeypatch.setattr(SWETEnvironmentServer, "_prepare", prepare)
+    monkeypatch.setattr(SWETEnvironmentServer, "_stop_owned_sandbox", stop)
+    monkeypatch.setattr(SWETEnvironmentServer, "_verify", verify)
+    monkeypatch.setattr(SWETEnvironmentServer, "_activation_path", lambda self, req: "/v1/responses")
+    simulator = AsyncMock()
+    monkeypatch.setattr(SWETEnvironmentServer, "_next_user_turn", simulator)
+    monkeypatch.setattr(app, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app, "get_response_json", AsyncMock(side_effect=lambda response: response.payload))
+    environment.server_client = SimpleNamespace(post=post)
+    result = await environment.run_request(request())
+    assert remote.cancelled() and not late_work
+    simulator.assert_not_awaited()
+    if native_outcome == "interrupted" and confirmed:
+        assert verified and result.result.reward == 0
+        assert result.result.ng_steps[-1].stop_reason == "session_budget_exhausted"
+        assert close_count == 1
+    else:
+        assert not verified and result.failure.terminal and result.result is None
+
+
+@pytest.mark.parametrize("transient", [True, False])
+async def test_setup_failures_preserve_retry_classification_and_evidence(tmp_path, monkeypatch, transient):
+    from aiohttp import ClientConnectionError
+
+    environment = server(tmp_path)
+    error = ClientConnectionError("transport unavailable") if transient else ValueError("asset digest mismatch")
+    monkeypatch.setattr(SWETEnvironmentServer, "_prepare", AsyncMock(side_effect=error))
+    result = await environment.run_request(request())
+    assert result.result is None
+    assert result.failure.terminal is (not transient)
+    assert result.failure.dependency_error["message"] == str(error)
+    saved = json.loads((tmp_path / "one" / "failure.json").read_text())
+    assert saved["failure_reason"].endswith(str(error))
