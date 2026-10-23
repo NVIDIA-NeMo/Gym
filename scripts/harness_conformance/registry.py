@@ -8,6 +8,7 @@ HARNESSES = {
     "pi": "PiAgent",
     "codex": "CodexAgent",
     "hermes": "HermesAgent",
+    "kilocode": "KiloCodeAgent",
     "stirrup": "StirrupAgentWrapper",
     "nooa": "NOOAAgent",
 }

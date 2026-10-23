@@ -575,6 +575,8 @@ async def test_swallowed_infrastructure_failure_never_becomes_gradable(source: s
         )
     assert caught.value.__cause__ is failure
     assert caught.value.result.termination_reason is None
+    root = caught.value.result.trajectory.invocations[0]
+    assert root.status == "failed" and root.error_type == "ConnectionError"
 
 
 @pytest.mark.asyncio
@@ -591,6 +593,7 @@ async def test_real_codeact_output_limit_is_gradable_and_preserves_model_evidenc
         )
     )
     assert result.termination_reason is NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED
+    assert result.trajectory.invocations[0].status == "incomplete"
     assert runner._server_client.post.await_count == 3
     assert len(result.trajectory.turns) == 3
     assert all(turn.model_calls[0].response_id == "truncated" for turn in result.trajectory.turns)
@@ -952,3 +955,47 @@ async def test_benchagent_cleanup_failure_overrides_model_rejection(
     assert solve_errors[0].nooa_cleanup_errors == expected
     for error in expected:
         assert str(error) in str(caught.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["model", "resource"])
+async def test_fatal_transport_then_policy_stop_finalizes_root_as_failed(source: str) -> None:
+    from responses_api_agents.nooa_agent.gym_llm import PolicyCallBudgetExceeded
+
+    runner, _ = make_runner()
+    failure = ConnectionError("transport unavailable")
+    runner._max_policy_calls = 1
+
+    async def fail_then_exhaust(agent, request):
+        try:
+            if source == "model":
+                await agent.llm.acall([{"role": "user", "content": "first"}])
+            else:
+                await agent.get_weather(city="Paris")
+        except ConnectionError:
+            pass
+        if source == "resource":
+            await agent.llm.acall([{"role": "user", "content": "first"}])
+        return await agent.llm.acall([{"role": "user", "content": "over budget"}])
+
+    runner._invocation_adapter = fail_then_exhaust
+    if source == "model":
+        runner._server_client.post = AsyncMock(side_effect=failure)
+    else:
+        resource_tools.request.side_effect = failure
+        runner._server_client.post = AsyncMock(return_value=FakeHTTPResponse(model_response()))
+    with pytest.raises(NOOARunFailure) as caught:
+        await runner.run(
+            NOOARunRequest(
+                responses_create_params=responses_create_params("Paris"),
+                model_url_path="/v1/responses",
+                tool_access=grant(),
+            )
+        )
+    result = caught.value.result
+    assert result.termination_reason is None
+    root = result.trajectory.invocations[0]
+    assert root.status == "failed"
+    assert root.error_type == ("PolicyCallBudgetExceeded" if source == "model" else "ConnectionError")
+    assert isinstance(caught.value.__cause__, PolicyCallBudgetExceeded if source == "model" else ConnectionError)
+    assert runner._server_client.post.await_count == 1

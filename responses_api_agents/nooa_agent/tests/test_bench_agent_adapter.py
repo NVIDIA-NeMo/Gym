@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import ast
 import asyncio
 import json
 import os
+import re
 import shlex
 import signal
 import sys
@@ -40,7 +42,7 @@ async def test_adapter_restores_task_cwd_and_always_drains_cleanup(tmp_path, mon
     agent.shell.close.assert_awaited_once()
     agent._install_python_tools.assert_called_once_with(str(tmp_path))
     agent._solve_task.assert_awaited_once_with("unchanged canonical prompt")
-    agent.context.set.assert_called_once_with("benchmark_task", "unchanged canonical prompt", prefix=True)
+    agent.context.set.assert_not_called()
     agent.aclose.assert_awaited_once()
 
 
@@ -63,7 +65,7 @@ async def test_cleanup_failure_preserves_the_original_invocation_exception(tmp_p
     assert caught.value is expected
     agent.aclose.assert_awaited_once()
     if terminal is not None:
-        assert "BenchAgent cleanup failed during invocation failure" in caplog.text
+        assert "BenchAgent cleanup failed" in caplog.text
         assert "cleanup also failed" in caplog.text
 
 
@@ -111,6 +113,99 @@ async def test_sequential_cleanup_preserves_all_errors_and_original_exception(
         assert terminal.__cause__ is cause
         assert terminal.__context__ is context
     agent.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["entry", "adoption", "cwd"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_setup_failures_still_close_agent_and_remain_setup_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, cleanup_fails: bool
+) -> None:
+    from responses_api_agents.nooa_agent import bench_agent_adapter
+    from responses_api_agents.nooa_agent.termination import cleanup_errors
+
+    setup_error = AttributeError("invalid shell setup")
+    cleanup_error = ConnectionError("close after setup failed")
+    scope_closed = []
+
+    def adopt(session):
+        if stage == "adoption":
+            raise setup_error
+
+    @asynccontextmanager
+    async def scope():
+        if stage == "entry":
+            raise setup_error
+        try:
+            yield SimpleNamespace(adopt=adopt)
+        finally:
+            scope_closed.append(True)
+
+    monkeypatch.setattr(bench_agent_adapter, "preserve_background_services", scope)
+    agent = SimpleNamespace(
+        shell=SimpleNamespace(cwd="/wrong", session=object(), close=AsyncMock(side_effect=setup_error)),
+        _solve_task=AsyncMock(),
+        aclose=AsyncMock(side_effect=cleanup_error if cleanup_fails else None),
+    )
+    with pytest.raises(AttributeError) as caught:
+        await invoke_bench_agent(agent, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert caught.value is setup_error
+    assert cleanup_errors(setup_error) == ((cleanup_error,) if cleanup_fails else ())
+    agent.aclose.assert_awaited_once()
+    agent._solve_task.assert_not_awaited()
+    assert scope_closed == ([] if stage == "entry" else [True])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["agent", "scope"])
+@pytest.mark.parametrize("prior", ["success", "task", "setup"])
+async def test_cleanup_cancellation_preserves_original_failure_and_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, boundary: str, prior: str
+) -> None:
+    from responses_api_agents.nooa_agent import bench_agent_adapter
+    from responses_api_agents.nooa_agent.termination import cleanup_errors
+
+    monkeypatch.chdir(tmp_path)
+    original = ValueError("original task or setup failure") if prior != "success" else None
+    original_cause = RuntimeError("underlying cause")
+    if original is not None:
+        original.__cause__ = original_cause
+    scope_closed = []
+
+    async def cancel_cleanup():
+        deadline.reschedule(asyncio.get_running_loop().time())
+        await asyncio.Event().wait()
+
+    def adopt(session):
+        if prior == "setup":
+            raise original
+
+    @asynccontextmanager
+    async def scope():
+        yield SimpleNamespace(adopt=adopt)
+        scope_closed.append(True)
+        if boundary == "scope":
+            await cancel_cleanup()
+
+    monkeypatch.setattr(bench_agent_adapter, "preserve_background_services", scope)
+    agent = SimpleNamespace(
+        shell=SimpleNamespace(cwd=str(tmp_path), session=object()),
+        _solve_task=AsyncMock(return_value="done", side_effect=original if prior == "task" else None),
+        aclose=AsyncMock(side_effect=cancel_cleanup if boundary == "agent" else None),
+    )
+    with pytest.raises(TimeoutError) as caught:
+        async with asyncio.timeout(None) as deadline:
+            await invoke_bench_agent(agent, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    cancelled = caught.value.__cause__
+    assert isinstance(cancelled, asyncio.CancelledError)
+    assert cancelled.__cause__ is original
+    assert cleanup_errors(cancelled) == (cancelled,)
+    if original is not None:
+        assert original.__cause__ is original_cause
+        assert str(original) in caplog.text
+        assert str(original_cause) in caplog.text
+    agent.aclose.assert_awaited_once()
+    assert scope_closed == [True]
 
 
 @pytest.mark.asyncio
@@ -330,7 +425,7 @@ async def test_scope_cleanup_preserves_original_exception(tmp_path, monkeypatch,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("boundary", ["agent", "scope"])
 @pytest.mark.parametrize("cleanup_fails", [False, True])
-@pytest.mark.parametrize("terminal", ["policy_budget", "output_limit"])
+@pytest.mark.parametrize("terminal", ["success", "policy_budget", "output_limit"])
 async def test_real_cleanup_failure_remains_ungradable(tmp_path, monkeypatch, boundary, cleanup_fails, terminal):
     from nooa.tools._bash_session import BashSession
 
@@ -372,6 +467,22 @@ async def test_real_cleanup_failure_remains_ungradable(tmp_path, monkeypatch, bo
                 raise cleanup_error
 
     async def post(**kwargs):
+        if terminal == "success":
+            return FakeHTTPResponse(
+                model_response(
+                    NeMoGymResponseFunctionToolCall(
+                        id="done",
+                        call_id="done",
+                        name="python_cell",
+                        arguments=json.dumps(
+                            {
+                                "code": "return_result(TaskResult(solution_description='done', "
+                                "evidence='completed', how_to_verify='fixture'))"
+                            }
+                        ),
+                    )
+                )
+            )
         response = model_response(response_id="truncated")
         response.update(status="incomplete", incomplete_details={"reason": "max_output_tokens"})
         return FakeHTTPResponse(response)
@@ -395,15 +506,22 @@ async def test_real_cleanup_failure_remains_ungradable(tmp_path, monkeypatch, bo
     if cleanup_fails:
         with pytest.raises(NOOARunFailure) as caught:
             await runner.run(request)
-        assert caught.value.__cause__ is solve_errors[0]
+        assert caught.value.__cause__ is (cleanup_error if terminal == "success" else solve_errors[0])
+        if terminal == "success":
+            assert str(caught.value) == "Cleanup failed: RuntimeError: injected cleanup failure"
         result = caught.value.result
         assert result.termination_reason is None
     else:
         result = await runner.run(request)
-        expected = "policy_budget_exceeded" if terminal == "policy_budget" else "max_output_tokens_exceeded"
+        expected = {
+            "success": None,
+            "policy_budget": "policy_budget_exceeded",
+            "output_limit": "max_output_tokens_exceeded",
+        }[terminal]
         assert result.termination_reason == expected
         response, _ = finalize_run_result(result)
-        assert response.status == "incomplete" and response.error is None
+        assert response.status == ("completed" if terminal == "success" else "incomplete")
+        assert response.error is None
     if terminal == "policy_budget":
         solve_invocations = [
             invocation
@@ -412,7 +530,11 @@ async def test_real_cleanup_failure_remains_ungradable(tmp_path, monkeypatch, bo
         ]
         assert len(solve_invocations) == 1
         assert solve_invocations[0].status == ("failed" if cleanup_fails else "incomplete")
-    assert len(cleanup_attempts) == len(solve_errors) == 1
+    assert result.trajectory.invocations[0].status == (
+        "failed" if cleanup_fails else "completed" if terminal == "success" else "incomplete"
+    )
+    assert len(cleanup_attempts) == 1
+    assert len(solve_errors) == (0 if terminal == "success" else 1)
 
 
 @pytest.mark.asyncio
@@ -514,6 +636,7 @@ async def test_real_benchagent_loop_guard_preserves_gradable_evidence(tmp_path, 
         )
     )
     assert result.termination_reason == "loop_detected"
+    assert result.trajectory.invocations[0].status == "incomplete"
     assert len(calls) == len(result.trajectory.turns) == 8
     response, observations = finalize_run_result(result)
     assert response.status == "incomplete" and response.error is None
@@ -649,7 +772,7 @@ async def test_cleanup_failure_retry_and_diagnostic_cross_runtime_boundaries(
     assert len(calls) == len(solve_errors) == 1
     expected_errors = (cleanup_error, scope_error) if cleanup_boundary == "both" else (cleanup_error,)
     assert solve_errors[0].nooa_cleanup_errors == expected_errors
-    assert solve_errors[0].nooa_cleanup_error is expected_errors[-1]
+    assert not hasattr(solve_errors[0], "nooa_cleanup_error")
     assert str(solve_errors[0]) in diagnostic
     for error in expected_errors:
         detail = str(error)[:100] if cleanup_boundary == "both" else str(error)
@@ -673,6 +796,7 @@ async def test_real_benchagent_preserves_full_task_across_model_calls(
     middle = "MIDDLE_REQUIREMENT: preserve use_netrc and finish tool instructions."
     task = (
         "  Original task\n"
+        + "Both delimiters: \"\"\" and '''\n"
         + ("context α 'quoted' \\ path\n" * 1500)
         + middle
         + ("\nremaining context" * 2000)
@@ -715,7 +839,18 @@ async def test_real_benchagent_preserves_full_task_across_model_calls(
     assert len(calls) == 2
     for call in calls:
         # These are the actual requests after native argument/context rendering.
-        assert middle in (call.instructions or "")
-        assert task in (call.instructions or "")
+        instructions = call.instructions or ""
+        assert middle in instructions
+        assert instructions.count(middle) == 1
+        assert call.model_dump_json().count(middle) == 1
+        task_blocks = re.findall(r"<task(?: [^>]*)?>\n(.*?)\n</task>", instructions, flags=re.DOTALL)
+        assert len(task_blocks) == 1
+        parameters = {
+            node.targets[0].id: ast.literal_eval(node.value)
+            for node in ast.parse(task_blocks[0]).body
+            if isinstance(node, ast.Assign)
+        }
+        assert parameters["description"] == task
+        assert "<benchmark_task>" not in instructions
         assert (volatile in call.model_dump_json()) == (context_limit is None)
-    assert agent.context["benchmark_task"] == task
+    assert "benchmark_task" not in agent.context

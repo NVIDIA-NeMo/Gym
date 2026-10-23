@@ -10,7 +10,7 @@ from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.rollout_observability import AgentObservationBundle
 from responses_api_agents.nooa_agent.observability import ensure_verifier_final_message, finalize_observation_gaps
 from responses_api_agents.nooa_agent.runner import NOOARunResult
-from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason, cleanup_errors
 
 
 def set_response_lifecycle(
@@ -67,10 +67,7 @@ def is_transient_infrastructure_error(error: BaseException) -> bool:
         if id(error) in seen:
             continue
         seen.add(id(error))
-        pending.extend(getattr(error, "nooa_cleanup_errors", ()))
-        cleanup_error = getattr(error, "nooa_cleanup_error", None)
-        if isinstance(cleanup_error, Exception):
-            pending.append(cleanup_error)
+        pending.extend(cleanup_errors(error))
         if isinstance(
             error, (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError, TimeoutError, ConnectionError)
         ):

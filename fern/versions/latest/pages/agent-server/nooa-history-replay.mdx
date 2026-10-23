@@ -1,0 +1,110 @@
+---
+title: "NOOA history replay and training metadata"
+description: "Understand exact Gym replay, portable history, and the measured cost of durable training metadata."
+position: 8
+---
+
+# NOOA history replay and training metadata
+
+Gym's NOOA adapter stores ordered assistant parts alongside the complete Responses
+output items. An unchanged turn can therefore survive a NOOA snapshot or SQLite
+round trip and replay the same text blocks, reasoning, tool calls, token IDs,
+log probabilities, and routed experts. The captured model response remains separate
+execution evidence. This is a durable replay contract, including training arrays.
+
+## When replay is exact
+
+Native replay requires an explicit, non-null scope matching the configured Gym
+model-server name and model alias. The rollout URL is excluded because it changes
+on restore. Public text, readable reasoning, and tool-call IDs, names, and arguments
+must also agree with their captured native items. NOOA normally discards native
+metadata when public fields are edited; Gym additionally checks archives rebuilt
+with `LLMResponse.model_validate`, which can retain stale native metadata.
+
+A turn with an incompatible scope, missing metadata, or disagreeing public fields
+uses its ordered public text and function calls. It records
+`foreign_turn_projected_portable`. A public assistant dictionary records
+`public_assistant_metadata_unavailable`: its shape cannot distinguish an edited
+policy turn from a caller-authored example. Neither diagnostic claims that training
+metadata originally existed. Identical diagnostics are collected once per rollout;
+the gap list is a set of diagnostic conditions, not a count of affected turns.
+
+Structured responses are parsed from exactly the concatenated assistant text that
+NOOA persists as `content`. This permits callers to reparse the same JSON after
+restore, when `parsed` is absent. A refusal fails structured-output validation,
+even if the response also contains valid JSON. Unsupported client-executed calls
+(`custom_tool_call`, `local_shell_call`, `shell_call`, `apply_patch_call`, and
+`computer_call`) fail after Gym captures the response, before NOOA can continue
+with an unanswered call. Supported hosted outputs remain available for replay.
+Malformed request history is recorded as a preparation failure before charging a
+policy call; an unrecovered preparation failure remains ungradable.
+
+## Why the adapter owns capture and projection
+
+NOOA's `response_parts.capture_parts` and `project_turn` are not drop-in replacements
+for Gym's adapter. Their native projection accepts OpenAI and Azure provider scopes;
+Gym scopes identify a model-server route and alias. NOOA moves public text and tool
+arguments out of native items, records text-block lengths, then restores those
+fields during projection. Gym's existing archives instead contain complete wire
+items. Substituting the helpers would require an archive migration as well as a
+provider-scope extension.
+
+The output policies also differ. Gym retains supported hosted output items and
+unstructured refusals exactly, and displays reasoning `content` when available,
+falling back to `summary`. NOOA's helpers capture readable reasoning from summaries
+and may demote unsupported output sequences to portable text. At NOOA revision
+`051472343211914222e24ce36d8752f4e86bbe43`, summary-only reasoning without encrypted
+content is portable. At `19caab169b018476ac433d040f6ae3f06aeff101`, it can remain native
+when encryption is not required and summary text exists. Gym's compatibility tests
+cover both revisions; their differences should be checked again when updating the
+runtime pin. Sharing helpers would need to preserve Gym's scope, output, and archive
+contracts first.
+
+## Measured persistence cost
+
+Run the reproducible synthetic benchmark from a checkout with the NOOA agent's
+requirements installed:
+
+```bash
+python -m responses_api_agents.nooa_agent.benchmarks.measure_replay \
+  --turns 1 8 32 --prompt-tokens 2048 --generated-tokens 512 \
+  --layers 64 --top-k 8 --repeats 3
+```
+
+Each turn has one assistant output item with 2,048 prompt IDs, 512 generation IDs
+and log probabilities, and `routed_experts` shaped `[512, 64, 8]`, with IDs spanning
+256 experts. Nested containers are distinct; immutable integer leaves may be
+shared by Python. This models 262,144 expert IDs per turn and 8,388,608 over 32 turns.
+The script checks that snapshot restoration and replay preserve every field.
+
+The following results were measured on macOS 26.7.1 arm64, Python 3.13.14, with NOOA
+`0514723`. Times are medians of three local runs. Allocation peaks come from a
+separate `tracemalloc` run for each operation, excluding pre-existing responses,
+history, and restored history. MiB means 1,048,576 bytes.
+
+| Turns | Compact history JSON (MiB) | Capture (s) | Snapshot (s) | Restore (s) | Replay (s) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.99 | 0.076 | 0.060 | 0.108 | 0.048 |
+| 8 | 7.91 | 0.663 | 0.549 | 0.915 | 0.511 |
+| 32 | 31.62 | 2.707 | 2.843 | 3.717 | 1.949 |
+
+| Turns | Capture peak (MiB) | Snapshot peak (MiB) | Restore peak (MiB) | Replay peak (MiB) |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 7.61 | 8.13 | 11.75 | 8.13 |
+| 8 | 32.45 | 41.77 | 65.60 | 36.60 |
+| 32 | 117.64 | 165.32 | 250.22 | 134.23 |
+
+At 32 turns, captured parts retain about 113.59 MiB of additional Python allocation
+beside the original responses. A text-only comparison fixture serializes to
+0.29 MiB; it excludes all native metadata and is not an interchangeable archive.
+Writing one compact full-history checkpoint after each turn would write 521.80 MiB
+of these history envelopes in total. That cumulative size is calculated from the
+measured individual envelopes, not timed disk writes.
+
+These measurements exclude network transport, model inference, filesystem and
+SQLite writes, complete agent checkpoints, concurrent rollouts, and additional
+reasoning or tool items. They do not predict production throughput or total process
+RSS. Replaying every prefix and rewriting full-history checkpoints both accumulate
+cost as the history grows. The adapter currently preserves all training fields;
+removing arrays or replacing them with external references would change the durable
+replay contract and requires a separate design and migration.

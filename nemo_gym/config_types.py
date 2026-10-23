@@ -224,6 +224,11 @@ class HeadServerUnreachableError(ConfigError, ValueError):
     from it (the head server is not running, or `head_server.host` / `head_server.port` point elsewhere)."""
 
 
+class PromptConfigMalformedError(ConfigError, ValueError):
+    """A prompt config file is not valid YAML, or is not a mapping with a `user` template (and an optional `system`
+    one)."""
+
+
 ########################################
 # Dataset configs for handling and upload/download
 ########################################
