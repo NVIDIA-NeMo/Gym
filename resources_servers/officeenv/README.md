@@ -141,6 +141,80 @@ the row, so these episodes need rows in the `tools` exposure with the default to
 separator; a seed whose tools differ from what the endpoint serves fails with 400
 (`unsupported_exposure`).
 
+## Sandboxed harnesses
+
+Sandbox support is opt-in: without `sandbox_provider` the server runs as above.
+`configs/officeenv_sandbox.yaml` runs OfficeEnv episodes for Pi in agent-session mode behind the
+`single_agent_turn_legacy` Environment Server, with the tools over MCP as above. Each episode also:
+
+1. borrows a sandbox: the seed starts one from `sandbox_config.image` (built from
+   `sandbox/Dockerfile`) with Gym's sandbox provider named by `sandbox_provider`, and lends it to
+   the harness as `SandboxAccess`. Seeding the episode again lends the same sandbox;
+   `/close_session` stops it, and so does shutting the server down;
+2. moves file content between the workspace and Google Drive without passing it through the
+   model: the sandbox gets `OFFICEENV_API_URL` and `OFFICEENV_API_TOKEN`, and `OFFICEENV.md` in
+   the workspace documents the file API (`GET`/`PUT /officeenv/files/{app}/{file_id}`,
+   `POST /officeenv/files?app=&name=&parent=&mime_type=`). Text and binary files (an XLSX
+   workbook, say) move byte for byte; uploads are limited to 20 MB;
+3. ends when Pi's run ends: `finish_tool_names: [user_complete_task]`, its timeout, or the model
+   stopping. Verification grades the world as for any row.
+
+The instance name (`oe`) is the grant name Pi prefixes to each tool, so it stays short (the
+longest tool name is 56 characters). Rows come from OfficeEnv's sandbox example tasks:
+`sandbox/prepare_rows.py` writes `data/sandbox_pilot.jsonl` with the OfficeEnv it imports (its five
+sandbox tasks). A row holds a system and a user message and the TaskSpec, and no tool
+list, since the harness takes its tools from the MCP grant.
+
+A sandbox can reach this server, so sandbox mode guards it:
+
+- seeding, closing, verification, `GET /officeenv/apps` and the tool routes answer only callers
+  from this node and from `trusted_networks` (CIDR, empty by default) and refuse others with 403.
+  Sandboxes keep the MCP endpoint and the file API, whose tokens name their episode. When Gym's
+  other servers call this one from other nodes, list their network in `trusted_networks`;
+- session cookies and MCP tokens are signed with a secret drawn when the server starts
+  (`get_session_secret`), not with Gym's default key, which anyone can derive from the server's
+  name, so code in a sandbox cannot sign a token for another episode or for more tools. The secret
+  lives in one process, so sandbox mode runs one worker (`num_workers: 1`).
+
+The sandbox must reach this server and the model server. On a workstation the servers bind
+loopback, which a container cannot reach (and a host firewall may drop connections to the host's
+other addresses): set `sandbox_config.host_relay` to a host alias that reaches the host's
+loopback (colima: `host.lima.internal`; Docker Desktop: `host.docker.internal`), and each sandbox
+runs `sandbox/relay.py`, which forwards this server's and the model servers' ports. Relayed
+connections arrive from the host's loopback, so the caller check above admits them; the signed
+tokens still apply. Use the relay on a workstation only.
+
+```bash
+docker build -t officeenv-sandbox:pilot resources_servers/officeenv/sandbox
+gym env start --config resources_servers/officeenv/configs/officeenv_sandbox.yaml \
+  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
+  --model-type inference_provider --model <model> --model-url <url> '+policy_api_key=...' \
+  ++oe.resources_servers.officeenv.sandbox_config.host_relay=host.lima.internal
+gym eval run --no-serve <the same --config, --model and ++ arguments> --agent pi_agent \
+  --input resources_servers/officeenv/data/sandbox_pilot.jsonl --output results/sandbox_rollouts.jsonl
+```
+
+On a cluster, `configs/officeenv_opensandbox.yaml` composes the same episodes with the OpenSandbox
+provider, as Gym's SWE-bench and Terminal-Bench runs use it: the servers run on a cluster node,
+the sandboxes on the OpenSandbox cell, and `use_absolute_ip` with
+`absolute_ip_server_types: [responses_api_models, resources_servers]` advertises the node's address
+for the two servers a sandbox calls (the head server stays on loopback; no relay). Credentials go
+in `env.yaml` under `sandbox.opensandbox.connection`. Until `sandbox/Dockerfile`'s image is
+published to a registry the cell pulls from, the config uses a stock `python:3.12-bookworm` image
+(pinned by digest) and installs pandas and openpyxl in the provider's setup commands.
+
+Before the first run on a cell, `sandbox/probe_opensandbox.py` checks it from the node that will
+host Gym's servers: it starts one sandbox as the config would and reports the setup time, the task
+tools, a call back to the node with the source address the node sees (keep that address out of
+`trusted_networks`), internet egress and the time Pi's install takes. Its docstring has the
+command.
+
+Known limits: Pi installs Node and its own package in every sandbox at session start (network
+access to nodejs.org and npm); token-ID capture through Pi needs a vLLM model server and is not
+validated here; the file API serves Google Drive only; OpenCode's sandbox sessions refuse MCP
+tool grants, so Pi is the harness these episodes run. The caller check is not a network boundary:
+a gateway that exposes only MCP and the file API to sandboxes would be one.
+
 ## Verification
 
 `/verify` grades the final state of the rollout's session and frees it. Besides `reward` (a

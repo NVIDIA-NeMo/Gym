@@ -1,0 +1,47 @@
+# OfficeEnv sandbox episodes on OpenSandbox, the way the SWE-bench and Terminal-Bench runs use it: Gym's servers
+# run on a cluster node, each episode's sandbox runs on the OpenSandbox cell, and Pi inside the sandbox calls back to
+# the node for the model, OfficeEnv's MCP tools and the episode's file API. Compose with a model server:
+#
+#   gym env start \
+#     --config resources_servers/officeenv/configs/officeenv_opensandbox.yaml \
+#     --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml ...
+#
+# Credentials: `sandbox.opensandbox.connection` in env.yaml (domain, protocol, api_key, tls_verify), or
+# OPENSANDBOX_DOMAIN and OPENSANDBOX_API_KEY in the environment.
+config_paths:
+  - resources_servers/officeenv/configs/officeenv_sandbox.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+# A sandbox calls the model server and this resources server, so those two advertise the node's address. The head
+# server (whose config endpoint returns the merged config) and the other servers stay on loopback.
+use_absolute_ip: true
+absolute_ip_server_types: [responses_api_models, resources_servers]
+
+oe:
+  resources_servers:
+    officeenv:
+      verified: false
+      sandbox_config:
+        # Stopgap until sandbox/Dockerfile's image is published to a registry the cell pulls from: a public image
+        # (bash, curl, tar, gzip, python3), pinned by digest, with the task tools installed by the setup below. Pi's
+        # runtime (Node and Pi) is installed by the agent at each episode's start.
+        image: python:3.12-bookworm@sha256:14a4933e6cef421424f7a66d89a3f4eafcbd0d90e0a822251f298e05132dc735
+        ttl_s: 7200
+        resources:
+          cpu: 2
+          memory_mib: 4096
+        env:
+          # A short exec response grace, as Gym's other OpenSandbox configs set (see the provider's polling notes).
+          EXECD_API_GRACE_SHUTDOWN: 50ms
+        metadata:
+          # As Terminal-Bench's sandboxes on the same cell: honour the resources above.
+          nemo.nvidia.com/resources: custom
+
+sandbox:
+  opensandbox:
+    setup:
+      # Run as root in every new sandbox before it is lent to the episode, and before OFFICEENV.md is written to the
+      # workspace (sandbox_config.workdir, which the stock image lacks).
+      commands:
+        - mkdir -p /workspace
+        - python3 -m pip install --no-cache-dir --root-user-action=ignore pandas==2.2.3 openpyxl==3.1.5
