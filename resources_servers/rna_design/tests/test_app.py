@@ -323,6 +323,7 @@ def test_a_temp_run_dir_is_removed_after_scoring(tmp_path: Path, monkeypatch: py
     assert len(list(tmp_path.glob("run_*"))) == 1
 
 
+@needs_eternafold
 def test_a_tool_called_without_target_uses_the_campaign(tmp_path: Path) -> None:
     pytest.importorskip("mcp")
     with _client(tmp_path) as client:

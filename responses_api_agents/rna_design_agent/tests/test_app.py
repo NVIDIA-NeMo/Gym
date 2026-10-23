@@ -634,6 +634,7 @@ class TestToolArguments:
         with pytest.raises(TypeError, match=r"code\.run: missing required argument\(s\) code"):
             get("code.run").call(purpose="no code at all")
 
+    @needs_eternafold
     def test_the_engine_is_named_not_spelled(self) -> None:
         from responses_api_agents.rna_design_agent.rds.registry import dispatch
 
