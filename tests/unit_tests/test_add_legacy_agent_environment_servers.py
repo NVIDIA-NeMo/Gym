@@ -811,3 +811,170 @@ def test_switch_keeps_a_relay_whose_resources_server_cannot_take_a_typed_seed(
     assert list(servers) == (["single_agent_turn_legacy"] if switches else ["legacy_agent"])
     if not switches:
         assert "resources server mcqa seeds only the legacy body" in capsys.readouterr().out
+
+
+HARNESS_OVERRIDE = """\
+config_paths:
+  - {base}
+my_harness_agent:
+  responses_api_agents:
+    tool_simulation_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: my_resources
+my_simple_agent: null
+my_environment_server:
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: my_harness_agent
+"""
+
+
+def test_switch_keeps_a_relay_that_another_config_merges_with_a_legacy_agent_server(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A harness variant points the same server at an agent without sessions, so it must stay a relay.
+    base = tmp_path / "base.yaml"
+    base.write_text(AGENT_CONFIG + RELAY)
+    variant = tmp_path / "variant.yaml"
+    variant.write_text(HARNESS_OVERRIDE.format(base=base))
+    monkeypatch.setattr(migration, "repo_config_files", lambda: [variant])
+
+    assert migration.main(["--switch-simple-agent", str(base)]) == 0
+
+    assert base.read_text() == AGENT_CONFIG + RELAY
+    resolved = _parse(variant, strict=True)
+    assert list(resolved["my_environment_server"]["environment_servers"]) == ["legacy_agent"]
+    assert f"stays on the relay: my_environment_server in {base}: {variant} merges it with a legacy_agent server" in (
+        capsys.readouterr().out
+    )
+
+
+def test_switch_refuses_a_child_relay_another_config_merges_with_a_legacy_agent_server(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The child cannot stay a relay while its parent switches, so the variant has to declare its own server.
+    base, child = _parent_and_child(tmp_path)
+    variant = tmp_path / "variant.yaml"
+    variant.write_text(
+        HARNESS_OVERRIDE.format(base=child)
+        .replace("my_simple_agent: null", "child_agent: null")
+        .replace("my_environment_server:", "child_environment_server:")
+    )
+    monkeypatch.setattr(migration, "repo_config_files", lambda: [variant])
+    before = (base.read_text(), child.read_text())
+
+    assert migration.main(["--switch-simple-agent", str(base), str(child)]) == 2
+
+    assert (base.read_text(), child.read_text()) == before
+    error = capsys.readouterr().err
+    assert "child_environment_server in a run of" in error and "my_environment_server, which switches" in error
+
+
+def test_a_harness_with_its_own_relay_lets_the_benchmark_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The variant removes the benchmark's servers and fronts its harness with a relay of its own.
+    base, child = _parent_and_child(tmp_path)
+    variant = tmp_path / "variant.yaml"
+    harness = (
+        HARNESS_OVERRIDE.format(base=child)
+        .split("my_simple_agent: null\n")[0]
+        .replace("name: my_resources", "name: child_resources")
+    )
+    variant.write_text(
+        harness
+        + "my_simple_agent: null\nchild_agent: null\nmy_environment_server: null\nchild_environment_server: null\n"
+        + _server_fronting("my_harness_agent", name="my_harness_environment_server", server_type="legacy_agent")
+    )
+    monkeypatch.setattr(migration, "repo_config_files", lambda: [variant])
+
+    assert migration.main(["--switch-simple-agent", str(base), str(child)]) == 0
+
+    benchmark = _parse(child, strict=True)
+    assert list(benchmark["child_environment_server"]["environment_servers"]) == ["single_agent_turn_legacy"]
+    assert _environment_servers_by_agent(_parse(variant, strict=True)) == {
+        "my_harness_agent": ["my_harness_environment_server"]
+    }
+
+
+def test_switch_keeps_a_relay_inheriting_one_that_stays(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # The child has no environment_servers of its own, so only the merged run shows it is a relay.
+    base = tmp_path / "base.yaml"
+    base.write_text(AGENT_CONFIG + RELAY)
+    child = tmp_path / "child.yaml"
+    child.write_text(f"config_paths:\n  - {base}\nchild_environment_server:\n  _inherit_from: my_environment_server\n")
+    before = child.read_text()
+
+    assert migration.main(["--switch-simple-agent", str(child)]) == 0
+
+    assert child.read_text() == before
+    assert "stays on the relay: child_environment_server" in capsys.readouterr().out
+
+
+def test_switch_keeps_a_relay_with_settings_the_switched_server_would_drop(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "my_run.yaml"
+    config.write_text(
+        AGENT_CONFIG + RELAY.replace("      entrypoint: app.py\n", "      entrypoint: app.py\n      port: 8000\n")
+    )
+    before = config.read_text()
+
+    assert migration.main(["--switch-simple-agent", str(config)]) == 0
+
+    assert config.read_text() == before
+    assert "the relay sets legacy_agent.port, which the switched server would not keep" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("source", "reason"),
+    [
+        (
+            "class Verify(BaseModel):\n    rollout_index: int = Field(alias=ROLLOUT_INDEX_KEY_NAME)\n",
+            "resources server mcqa reads the row's rollout coordinates, which are not forwarded",
+        ),
+        (None, "cannot find resources server mcqa under"),
+    ],
+    ids=["rollout-coordinates", "missing-implementation"],
+)
+def test_switch_keeps_a_relay_whose_resources_server_it_cannot_drive(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    source: str | None,
+    reason: str,
+) -> None:
+    if source is not None:
+        server = tmp_path / "servers" / "mcqa"
+        server.mkdir(parents=True)
+        server.joinpath("app.py").write_text(source)
+    monkeypatch.setattr(migration, "RESOURCES_SERVERS_ROOT", tmp_path / "servers")
+    config = tmp_path / "my_run.yaml"
+    config.write_text(AGENT_CONFIG + RELAY)
+
+    assert migration.main(["--switch-simple-agent", str(config)]) == 0
+
+    assert config.read_text() == AGENT_CONFIG + RELAY
+    assert reason in capsys.readouterr().out
+
+
+def test_switch_writes_nothing_when_a_relay_cannot_be_rewritten(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first = tmp_path / "a_first.yaml"
+    first.write_text(AGENT_CONFIG + RELAY)
+    # A quoted key parses to the same name, but its stanza cannot be found by name.
+    second = tmp_path / "b_second.yaml"
+    second.write_text(
+        AGENT_CONFIG.replace("my_", "other_")
+        + RELAY.replace("my_", "other_").replace("other_environment_server:", '"other_environment_server":')
+    )
+    before = (first.read_text(), second.read_text())
+
+    assert migration.main(["--switch-simple-agent", str(first), str(second)]) == 2
+
+    assert (first.read_text(), second.read_text()) == before
+    assert "cannot find the line that starts 'other_environment_server'" in capsys.readouterr().err
