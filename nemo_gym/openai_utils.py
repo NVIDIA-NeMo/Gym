@@ -287,6 +287,16 @@ class NeMoGymResponseReasoningItem(BaseModel):
     # status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
 
 
+class NeMoGymResponseReasoningInputItem(NeMoGymResponseReasoningItem):
+    """A reasoning item replayed as request input without its id, as the Codex CLI sends it.
+
+    Providers bind ``encrypted_content`` to the id of the item that produced it and reject a replay
+    under any other id, so a missing id must stay missing rather than be filled in.
+    """
+
+    id: Optional[str] = None
+
+
 class NeMoGymLogprobTopLogprob(TypedDict, total=False):
     """Copy of openai.types.responses.response_output_text_param.LogprobTopLogprob with List in place of Iterable."""
 
@@ -789,7 +799,10 @@ def _discriminate_response_input_item(value: Any) -> Optional[str]:
         tag = _discriminate_untyped_input_item(value)
     else:
         return None
-    return _training_variant_tag(tag, value)
+    tag = _training_variant_tag(tag, value)
+    if tag == "reasoning" and "id" not in value:
+        return "reasoning_input"
+    return tag
 
 
 def _discriminate_response_output_item(value: Any) -> Optional[str]:
@@ -823,6 +836,7 @@ NeMoGymResponseInputItem = Annotated[
         Annotated[NeMoGymResponseFunctionToolCall, Tag("function_call")],
         Annotated[NeMoGymFunctionCallOutput, Tag("function_call_output")],
         Annotated[NeMoGymResponseReasoningItem, Tag("reasoning")],
+        Annotated[NeMoGymResponseReasoningInputItem, Tag("reasoning_input")],
         Annotated[NeMoGymResponseMcpCall, Tag("mcp_call")],
         Annotated[NeMoGymResponseMcpListTools, Tag("mcp_list_tools")],
         Annotated[NeMoGymResponseMcpApprovalRequest, Tag("mcp_approval_request")],
