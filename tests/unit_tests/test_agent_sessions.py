@@ -9,10 +9,14 @@ from pydantic import ValidationError
 
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
+    AgentCloseSessionResponse,
     AgentSeedSessionRequest,
+    AgentSeedSessionResponse,
+    AgentSessionState,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.rollout_observability import TrajectoryRecord, TrajectoryTurn
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 
 
@@ -89,6 +93,45 @@ def test_base_agent_exposes_unimplemented_session_routes() -> None:
     paths = agent.setup_webserver().openapi()["paths"]
     assert "/v1/agent_sessions" in paths
     assert "/v1/agent_sessions/close" in paths
+
+
+def test_close_response_carries_the_harness_trajectory() -> None:
+    """The close returns the harness's own turns next to its observations; an older harness's reply still validates."""
+    trajectory = TrajectoryRecord(
+        task_id="task",
+        rollout_id="rollout",
+        turns=[
+            TrajectoryTurn(
+                invocation_id="root", task_id="task", rollout_id="rollout", turn_no=1, timestamp=1.0, step_count=2
+            )
+        ],
+    )
+    close = AgentCloseSessionResponse(agent_session_id="agent-session", trajectory=trajectory)
+    wire = close.model_dump(mode="json")
+    assert wire["trajectory"]["turns"][0]["step_count"] == 2
+    assert AgentCloseSessionResponse.model_validate(wire) == close
+    assert AgentCloseSessionResponse.model_validate({"agent_session_id": "agent-session"}).trajectory is None
+
+
+def test_seed_response_carries_the_harness_task_tool_context_declaration() -> None:
+    """The environment server refuses a task with MCP servers or skills to a harness that answers False here."""
+
+    class _Seeded(_Agent):
+        async def _seed_agent_session_state(self, body):
+            return AgentSessionState(request=body)
+
+    class _ReadsTaskTools(_Seeded):
+        def supports_task_tool_context(self) -> bool:
+            return True
+
+    for agent_cls, declared in ((_Seeded, False), (_ReadsTaskTools, True)):
+        agent = agent_cls.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+        response = asyncio.run(agent.seed_agent_session(MagicMock(session={}), _seed_request()))
+        assert response == AgentSeedSessionResponse(
+            agent_session_id="agent-session", supports_task_tool_context=declared
+        )
+    # The field has a default so an older harness's reply still validates, as not supporting it.
+    assert AgentSeedSessionResponse.model_validate({"agent_session_id": "x"}).supports_task_tool_context is False
 
 
 def test_agent_session_seed_carries_the_tasks_agent_timeout() -> None:

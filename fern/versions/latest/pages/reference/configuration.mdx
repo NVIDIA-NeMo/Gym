@@ -38,6 +38,19 @@ Servers that pre-staged setup trees next to the package (the layout before `cach
 |-----|---------|-------------|
 | `uv_lock_timeout_seconds` | `UV_LOCK_TIMEOUT` if already exported, else `1800` | Seconds a server install waits for uv's cache lock. Servers start together and share one `uv_cache_dir`, so the rest wait while one of them does a cold install; uv's own default of 300 can be too short for that. Exported as `UV_LOCK_TIMEOUT` to the Gym process and to every server, test, and venv-setup subprocess it launches. Set it to `null` to leave `UV_LOCK_TIMEOUT` as inherited. |
 
+#### Per-server runtime files
+
+A server directory can carry two standard uv files:
+
+- **`.python-version`** selects the Python for that server's venv. If the request admits the Python that runs `gym` (for example `>=3.13.14,<3.14`), the venv uses exactly that version, because Ray refuses to connect processes on different patch releases. A request that excludes it (for example `3.12`) is passed to uv unchanged; a server built that way cannot join the parent's Ray cluster.
+- **`uv.toml`** is passed to `uv venv` and `uv pip install` with `--config-file`. Its resolver settings (for example `[pip] torch-backend = "cpu"`) apply to that venv only, and an enclosing uv workspace contributes none of its own.
+
+Every server venv also installs the packages the parent pins, such as its `openai` version (unless `allow_openai_version_skew` is set) and any telemetry or plugin packages, as ordinary requirements. A server that pins a conflicting version therefore fails setup rather than running with a mismatched client, unless the server's own `overrides.txt` replaces that package on purpose. The parent's Ray version is applied as both a constraint and an override: a server gets Ray only if its dependencies need it, and then at exactly the parent's version, even when a dependency pins another one.
+
+#### Restricting server locations (`NEMO_GYM_ALLOWED_COMPONENT_ROOTS`)
+
+Set `NEMO_GYM_ALLOWED_COMPONENT_ROOTS` to one or more directories, separated by `:`, to make Gym refuse to start any server whose directory is outside them. A scheduler that stages a pinned Gym checkout can set it so that a server resolved from another copy, such as one baked into the container image, fails at startup instead of running stale code. When the variable is unset, servers start from wherever they resolve.
+
 ---
 
 ## Path Resolution and External Roots
