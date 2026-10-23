@@ -358,6 +358,49 @@ async def test_resource_sandbox_survives_until_verification():
     assert json.loads(uploaded["/work/agent_config.json"])["repo_dir"] == "/testbed"
 
 
+async def test_mcp_tools_of_the_seed_reach_the_in_box_claude_code():
+    """The resources server serves its tools over MCP. The box gets this rollout's session, at a host it reaches."""
+    agent = _make_agent(agent="claude_code", forward_mcp_tools=True)
+    agent._gym_tar = None
+    agent._provider.create = AsyncMock(return_value=MagicMock(provider_name="opensandbox"))
+    agent._provider.exec = AsyncMock(
+        # mkdir, the model reachability probe, the runner, its log tail
+        side_effect=[SandboxExecResult("", "", 0)] * 3 + [SandboxExecResult("RUNNER_DONE", "", 0)]
+    )
+    uploaded = {}
+
+    async def upload(_, source, target):
+        uploaded[target] = source.read_text()
+
+    agent._provider.upload_file = AsyncMock(side_effect=upload)
+    agent._provider.close = AsyncMock()
+    agent._provider.download_file = AsyncMock(side_effect=lambda _, __, path: path.write_text(json.dumps(_response())))
+    seed = {"mcp": {"url_path": "/mcp", "transport": "http", "headers": {"X-NeMo-Gym-Session-Token": "tok-1"}}}
+    with patch("responses_api_agents.harness_agent.app.sandbox_server_url", return_value="http://10.0.0.5:9000"):
+        token = _RUN_CONTEXT.set({"mcp": agent._mcp_server_entry(seed)})
+    try:
+        with patch.object(agent, "_sandbox_model_url", return_value="http://10.0.0.5:8000"):
+            await agent.responses(MagicMock(), NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+    finally:
+        _RUN_CONTEXT.reset(token)
+    assert json.loads(uploaded["/work/mcp.json"]) == {
+        "mcpServers": {
+            "rs": {
+                "type": "http",
+                "url": "http://10.0.0.5:9000/mcp",
+                "headers": {"X-NeMo-Gym-Session-Token": "tok-1"},
+            }
+        }
+    }
+    assert json.loads(uploaded["/work/agent_config.json"])["mcp_config"] == "__WORK_DIR__/mcp.json"
+
+
+def test_forwarding_mcp_tools_needs_a_server_that_serves_them():
+    agent = _make_agent(agent="claude_code", forward_mcp_tools=True)
+    with pytest.raises(ValueError, match="serve its tools over MCP"):
+        agent._mcp_server_entry({})
+
+
 async def test_resource_sandbox_requires_connectable_provider(tmp_path):
     agent = _make_agent()
     agent._provider = LocalProvider(workspace_root=str(tmp_path))
