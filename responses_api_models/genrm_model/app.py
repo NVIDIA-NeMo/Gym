@@ -70,6 +70,7 @@ class GenRMModelMixin:
         if self.config.supports_principle_role and principle:
             messages.append({"role": "principle", "content": principle})
 
+        # Candidate responses currently support text only; the user message may contain images.
         if response_1 is not None:
             messages.append({"role": "response_1", "content": response_1})
 
