@@ -92,13 +92,16 @@ The Environment Server seeds the resources server, opens an agent session, runs 
 session, and then calls `/verify`. The agent's side of that contract:
 
 - **Seed** refuses a sandbox and any *required* tool grant with HTTP 422, because the graph runs only its own
-  tools; an optional grant is skipped. Keep `resources_tool_transports: []`.
+  tools; an optional grant is skipped. Keep `resources_tool_transports: []`, including on a
+  `single_agent_turn_legacy` Environment Server you swap this agent into with `--agent-type`.
 - **Close** returns no resources cookie jar, so `/verify` receives the seed's cookies unchanged. It returns an
   observation bundle with the gaps `agent_transcript_unavailable` and `model_call_ownership_unavailable`
   (see [Open gaps](#open-gapslimitations)).
 - **`execute_tools: false`** is rejected when the config loads: the graph always runs its own tools.
 - **Checkpointing** restarts an unfinished rollout from its input. The graph's state lives inside one
   `ainvoke()` call and cannot be exported.
+- **`skip_verification`** does not apply on this path yet: the Environment Server always calls `/verify`, so a
+  generation-only run gets verifier rewards (and the Tavily config calls its judge).
 
 ## Tool ownership: agent vs. resources server
 

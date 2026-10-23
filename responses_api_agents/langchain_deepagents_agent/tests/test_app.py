@@ -579,7 +579,11 @@ def test_session_skips_an_optional_grant_and_runs_the_graph_without_mirroring_co
     seed = client.post(
         "/v1/agent_sessions",
         json=_seed_body(
-            tool_accesses=[DirectHTTPToolAccess(name="resources", required=False, base_url="http://r:8000")]
+            tool_accesses=[
+                DirectHTTPToolAccess(
+                    name="resources", required=False, base_url="http://r:8000", cookies={"resources_cookie": "grant"}
+                )
+            ]
         ).model_dump(mode="json"),
     )
     assert seed.status_code == 200
@@ -595,6 +599,16 @@ def test_session_skips_an_optional_grant_and_runs_the_graph_without_mirroring_co
     assert agent.agent.ainvoke.await_count == 1
     # The Environment Server owns the Resources cookies on the session path; the agent sends none back.
     assert "resources_cookie" not in result.cookies
+
+    close = client.post(
+        "/v1/agent_sessions/close",
+        json=AgentCloseSessionRequest(
+            agent_session_id="agent-session", episode_id=EpisodeId(rollout_id="rollout", attempt=0)
+        ).model_dump(mode="json"),
+    )
+    # The skipped grant's cookies never become the jar, which would replace the seed cookies /verify uses.
+    assert close.status_code == 200
+    assert close.json()["resources_cookies"] is None
 
 
 def test_session_close_reports_observation_gaps_and_no_resources_cookie_jar():
