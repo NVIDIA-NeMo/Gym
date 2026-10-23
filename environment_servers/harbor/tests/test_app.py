@@ -3856,6 +3856,7 @@ def test_server_config_holds_only_deployment_settings():
         "image_pull_retries",
         "separate_verifier_for_artifacts",
         "task_mcp_grants",
+        "turn_sessions",
         "compose_variables",
         "compose_overlay",
     }

@@ -229,6 +229,180 @@ async def test_a_turn_whose_failure_the_harness_classified_ends_the_episode_ungr
     assert sandbox.stopped
 
 
+CONTINUES = {"mode": "resume_harness_session", "observations": ["trajectory", "timing"]}
+
+
+async def test_continue_runs_every_step_as_an_activation_of_one_session(tmp_path, monkeypatch):
+    """``turn_sessions: continue`` is Harbor's ``--resume-trajectory``: step 1 opens the session, every later step
+    resumes it (here: activation k of one continuation session), each step is still verified on its own, and the
+    harness's observations and cumulative trajectory arrive once, at the close after the last step."""
+    server, task, sandbox, created = multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        THREE_STEPS,
+        {"plan": "Agree on a plan.", "build": "Build it.", "check": "Hand off."},
+        turn_sessions="continue",
+    )
+    server.server_client.continuation_capabilities = CONTINUES
+    server.server_client.observations = {"source": "harness", "records": [], "gaps": []}
+    server.server_client.trajectory = {"task_id": "hello", "rollout_id": "r1", "turns": []}
+    rewards_per_turn(server, sandbox, ["1", "1", "0"])
+
+    response = await server.run_request(request_for(task))
+
+    result = response.result
+    assert [turn.reward for turn in result.turns] == [1.0, 1.0, 0.0]
+    assert (result.reward, result.turn_sessions) == (2 / 3, "continue")
+    # One sandbox; one session, asked for continuation, seeded with the first step's budget; one close at the end.
+    assert len(created) == 1
+    seeds = server.server_client.seed_bodies()
+    assert len(seeds) == 1 and seeds[0]["continuation"] == CONTINUES and seeds[0]["agent_timeout_sec"] == 60.0
+    paths = server.server_client.paths()
+    assert paths.count("/v1/agent_sessions/close") == 1
+    assert paths.index("/v1/agent_sessions/close") > max(i for i, p in enumerate(paths) if p.endswith("/v1/responses"))
+    # Each step is the next activation of that session, with its own instruction and budget.
+    assert server.server_client.activation_headers() == ["1", "2", "3"]
+    turns = [
+        call[2]["json"].model_dump(mode="json", exclude_unset=True)
+        for call in server.server_client.calls
+        if call[1].endswith("/v1/responses")
+    ]
+    assert [turn["input"][0]["content"] for turn in turns] == ["Agree on a plan.", "Build it.", "Hand off."]
+    assert [turn["metadata"]["agent_timeout_sec"] for turn in turns] == ["60.0", "300.0", "300.0"]
+    # Every step was still graded in turn, between activations, with the previous step's grading files cleared.
+    assert len([e for e in sandbox.execs if "test.sh" in e["command"] and "timeout" in e["command"]]) == 3
+    # The session's evidence is the episode's, not any one turn's.
+    assert result.ng_agent_observations is not None and result.ng_trajectory is not None
+    assert all(turn.agent_observations is None and turn.trajectory is None for turn in result.turns)
+    # The capabilities were asked before the sandbox was created, once.
+    assert paths[0] == "/v1/agent_sessions/capabilities" and paths.count("/v1/agent_sessions/capabilities") == 1
+
+
+@pytest.mark.parametrize("status", [200, 404], ids=["declares-none", "no-route"])
+async def test_continue_is_refused_before_any_sandbox_for_a_harness_without_continuation(
+    tmp_path, monkeypatch, status
+):
+    """Harbor's MultiStepTrial fails ``resume_trajectory`` fast for an agent without SUPPORTS_RESUME, before any
+    environment spend; so does the server, naming the setting, for a harness that declares no continuation and for
+    an agent server built before the capabilities route."""
+    server, task, sandbox, created = multi_turn_server(
+        tmp_path, monkeypatch, THREE_STEPS, {"plan": "a", "build": "b", "check": "c"}, turn_sessions="continue"
+    )
+    server.server_client.capabilities_status = status
+
+    response = await server.run_request(request_for(task))
+
+    assert response.result is None
+    assert (response.failure.stage, response.failure.terminal) == ("seed", True)
+    assert "turn_sessions: continue" in response.failure.failure_reason
+    assert "the agent 'agent' does not declare" in response.failure.failure_reason
+    assert created == [] and server.server_client.seed_bodies() == []
+
+
+async def test_the_capabilities_are_asked_once_per_process(tmp_path, monkeypatch):
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path, monkeypatch, THREE_STEPS, {"plan": "a", "build": "b", "check": "c"}, turn_sessions="continue"
+    )
+    server.server_client.continuation_capabilities = CONTINUES
+    rewards_per_turn(server, sandbox, ["1", "1", "1", "1", "1", "1"])
+
+    await server.run_request(request_for(task, "r1"))
+    await server.run_request(request_for(task, "r2"))
+
+    assert server.server_client.paths().count("/v1/agent_sessions/capabilities") == 1
+
+
+async def test_continue_leaves_a_single_step_task_and_fresh_mode_alone(tmp_path, monkeypatch):
+    """A single step could never resume (Harbor: the flag is a no-op below two steps), so nothing is asked."""
+    server, task, sandbox, _ = make_server(tmp_path, monkeypatch, turn_sessions="continue")
+    sandbox.verifier_files = {"reward.txt": "1"}
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None and response.result.turn_sessions is None
+    assert "/v1/agent_sessions/capabilities" not in server.server_client.paths()
+    assert server.server_client.seed_bodies()[0].get("continuation") is None
+
+
+async def test_an_early_stop_closes_the_continued_session_before_the_result(tmp_path, monkeypatch):
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        THREE_STEPS,
+        {"plan": "a", "build": "b", "check": "c"},
+        head="",
+        turn_sessions="continue",
+    )
+    server.server_client.continuation_capabilities = CONTINUES
+    # The second step's min_reward gate: THREE_STEPS has none, so make the second turn produce no reward file.
+    rewards_per_turn(server, sandbox, ["1", "", "1"])
+
+    def no_reward_on_the_second_turn():
+        if sandbox.verifier_files == {"reward.txt": ""}:
+            sandbox.verifier_files = {}
+
+    server.server_client.turn_hooks.append(no_reward_on_the_second_turn)
+
+    response = await server.run_request(request_for(task))
+
+    result = response.result
+    assert [turn.name for turn in result.turns] == ["plan", "build"] and result.stopped_after_turn == "build"
+    assert server.server_client.activation_headers() == ["1", "2"]
+    assert server.server_client.paths().count("/v1/agent_sessions/close") == 1
+    assert sandbox.stopped
+
+
+async def test_a_task_whose_steps_switch_the_agent_user_cannot_continue(tmp_path, monkeypatch):
+    """The continued session runs as the user it was seeded with; Harbor's resumed agent is relaunched as each
+    step's user, which a live harness session cannot follow, so the task is refused up front, naming the fix."""
+    steps = """
+[[steps]]
+name = "one"
+[[steps]]
+name = "two"
+[steps.agent]
+user = "app"
+"""
+    server, task, sandbox, created = multi_turn_server(
+        tmp_path, monkeypatch, steps, {"one": "a", "two": "b"}, turn_sessions="continue"
+    )
+    server.server_client.continuation_capabilities = CONTINUES
+
+    response = await server.run_request(request_for(task))
+
+    assert (response.failure.stage, response.failure.terminal) == ("seed", True)
+    assert "switches the agent user" in response.failure.failure_reason and "app" in response.failure.failure_reason
+    assert server.server_client.seed_bodies() == []
+
+
+async def test_a_classified_failure_of_a_continued_turn_ends_the_episode_with_the_sessions_evidence(
+    tmp_path, monkeypatch
+):
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path, monkeypatch, THREE_STEPS, {"plan": "a", "build": "b", "check": "c"}, turn_sessions="continue"
+    )
+    server.server_client.continuation_capabilities = CONTINUES
+    server.server_client.observations = {"source": "harness", "records": [], "gaps": []}
+    rewards_per_turn(server, sandbox, ["1", "1", "1"])
+    failed = agent_response().model_dump(mode="json")
+    failed.update(
+        status="failed",
+        error={"code": "server_error", "message": "stream disconnected"},
+        metadata={AGENT_OUTCOME_METADATA_KEY: '{"failure_kind":"unknown"}'},
+    )
+    activations = iter([None, failed, None])
+    server.server_client.turn_hooks.append(lambda: setattr(server.server_client, "turn_response", next(activations)))
+
+    response = await server.run_request(request_for(task))
+
+    failure = response.failure
+    assert (failure.stage, failure.terminal, failure.failure_reason) == ("agent", False, "stream disconnected")
+    # The session was closed for its evidence before the failure was raised, and the third step never ran.
+    assert failure.agent_observations is not None
+    assert server.server_client.paths().count("/v1/agent_sessions/close") == 1
+    assert server.server_client.activation_headers() == ["1", "2"]
+
+
 async def test_mean_averages_the_turns_that_produced_a_result(tmp_path, monkeypatch):
     steps = '[[steps]]\nname = "a"\n[[steps]]\nname = "b"\n'
     server, task, sandbox, _ = multi_turn_server(tmp_path, monkeypatch, steps, {"a": "A", "b": "B"})
