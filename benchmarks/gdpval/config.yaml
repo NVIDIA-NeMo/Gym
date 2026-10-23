@@ -38,10 +38,14 @@ rollout_collection_driver: resources_servers.gdpval.multistage_orchestrator:run_
 
 # Judge endpoints throttle in bursts (429/502/503). Retries and timeouts stack:
 # - Each judge proxy below retries upstream 404/408/429/500/502/503/504/520
-#   responses 0.5 s apart, up to max_http_attempts (Gym's default is 3). 1800
-#   rides out roughly 15 minutes of throttling per request. A persistent error in
-#   that set (e.g. a 404 for an unknown model route) also retries for the whole
-#   window; a spent quota or invalid key (by error code) stops immediately.
+#   responses up to max_http_attempts times (Gym's default is 3);
+#   max_rate_limit_wait_seconds: 0 keeps 429 and 503 on that count instead of
+#   Gym's default 3600 s wait budget. Each wait is
+#   random up to 1 s, doubling per try and capped at 60 s, or the answer's
+#   Retry-After within that cap. 36 rides out about 15 minutes of throttling per
+#   request on average (at most about 30). A persistent error in that set (e.g. a
+#   404 for an unknown model route) also retries for the whole window; a spent
+#   quota or invalid key (by error code) stops immediately.
 # - The GDPVal server waits GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS per judge call:
 #   300 s in comparison mode and 1800 s in rubric mode. A comparison call that
 #   times out is not retried (its reference matchup is dropped), and time spent
@@ -52,8 +56,8 @@ rollout_collection_driver: resources_servers.gdpval.multistage_orchestrator:run_
 #   rubric_structured_formatting_retries (3) attempts per trial, shared with
 #   unparseable replies, with backoff doubling from 5 s, and also retries an
 #   error whose message contains "timeout".
-# Lower the window per proxy with, e.g.,
-# ++gdpval_gpt55_judge_model.responses_api_models.openai_model.max_http_attempts=60
+# Lower the window per proxy, e.g. to about 30 s on average:
+# ++gdpval_gpt55_judge_model.responses_api_models.openai_model.max_http_attempts=7
 
 # Preserve the configurable single-judge endpoint for existing overlays.
 gdpval_judge_model:
@@ -63,7 +67,8 @@ gdpval_judge_model:
       openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
       openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
       openai_model: ${oc.env:JUDGE_MODEL_NAME,gcp/google/gemini-3.1-pro-preview}
-      max_http_attempts: 1800
+      max_http_attempts: 36
+      max_rate_limit_wait_seconds: 0
 
 # Each OpenAI proxy fixes the upstream model ID, so panel members use separate
 # proxies even when they share one OpenAI-compatible endpoint (JUDGE_BASE_URL).
@@ -74,7 +79,8 @@ gdpval_gpt55_judge_model:
       openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
       openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
       openai_model: ${oc.env:JUDGE_GPT_MODEL,openai/openai/gpt-5.5}
-      max_http_attempts: 1800
+      max_http_attempts: 36
+      max_rate_limit_wait_seconds: 0
 
 gdpval_gemini31_judge_model:
   responses_api_models:
@@ -83,7 +89,8 @@ gdpval_gemini31_judge_model:
       openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
       openai_api_key: ${oc.env:JUDGE_GEMINI_API_KEY,${oc.env:JUDGE_API_KEY,dummy}}
       openai_model: ${oc.env:JUDGE_GEMINI_MODEL,gcp/google/gemini-3.1-pro-preview}
-      max_http_attempts: 1800
+      max_http_attempts: 36
+      max_rate_limit_wait_seconds: 0
       extra_body: {reasoning_effort: high}
       max_concurrent_requests: ${oc.env:GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS,2}
 
@@ -94,7 +101,8 @@ gdpval_claude48_judge_model:
       openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
       openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
       openai_model: ${oc.env:JUDGE_CLAUDE_MODEL,aws/anthropic/bedrock-claude-opus-4-8}
-      max_http_attempts: 1800
+      max_http_attempts: 36
+      max_rate_limit_wait_seconds: 0
       # `timeout` / `request_timeout` are gateway-side keys (LiteLLM-style) that
       # let one adaptive-thinking Claude call run up to 900 s at the default
       # JUDGE_BASE_URL gateway. They are sent in every request body; remove them
@@ -182,7 +190,7 @@ gdpval_resources_server:
       # identity, still stable per task).
       judge_sampling_seed: ${oc.env:JUDGE_SAMPLING_SEED,null}
       tavily_api_key: ${oc.env:TAVILY_API_KEY}
-      persist_deliverables_dir: ${oc.env:PERSIST_DELIVERABLES_DIR,output/gdpval/deliverables}
+      persist_deliverables_dir: ${oc.env:PERSIST_DELIVERABLES_DIR}
       # Names a top-level provider block such as nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml.
       sandbox_provider: sandbox
       sandbox_config:
