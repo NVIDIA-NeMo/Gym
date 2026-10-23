@@ -207,7 +207,10 @@ confirmation. A final negative termination receipt fails the activation and skip
 verification; close releases the borrowed connection with `cleanup_confirmed: false`.
 The task sandbox remains available to its owner for verification or teardown.
 
-Ordinary single-turn sessions keep their existing protocol and evidence shape.
+Ordinary single-turn sessions keep their existing protocol. Their close also returns the
+session's trajectory (one turn per saved assistant reply, compaction summaries excluded),
+so rollout collection joins captured calls to those turns and the summary call stays on
+the compaction record instead of becoming a turn.
 
 ### Offline sandbox runtimes and native model identity
 

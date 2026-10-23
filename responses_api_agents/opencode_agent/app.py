@@ -1029,15 +1029,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
         # A capture that close finished after the activation returned reports its export failure here.
         observations.gaps.extend(state.take_export_gaps())
-        if state.is_continuation:
-            return AgentCloseSessionResponse(
-                agent_session_id=state.request.agent_session_id,
-                agent_observations=observations,
-                trajectory=state.trajectory,
-                cleanup_confirmed=state.session.cleanup_confirmed,
-            )
+        # The session's own turns leave out compaction summaries. Without them, rollout
+        # collection rebuilds one turn per captured call, the summary call included.
         return AgentCloseSessionResponse(
-            agent_session_id=state.request.agent_session_id, agent_observations=observations
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=observations,
+            trajectory=state.trajectory,
+            cleanup_confirmed=state.session.cleanup_confirmed if state.is_continuation else None,
         )
 
     def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:

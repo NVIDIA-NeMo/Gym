@@ -402,6 +402,7 @@ class OpenCodeSandboxSession(AgentSessionState):
                     self.activation_trajectory = trajectory
                 else:
                     self.observations = observations
+                    self.trajectory = trajectory
         except Exception:
             LOG.exception("Failed to parse OpenCode observations")
             observations = AgentObservationBundle(
