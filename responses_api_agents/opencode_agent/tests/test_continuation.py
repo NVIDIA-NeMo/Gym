@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from nemo_gym.agent_activation_types import AgentContinuationRequirements
 from nemo_gym.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AgentCloseSessionRequest
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.testing.rollout_sampling import assert_model_sampling
+from nemo_gym.testing.rollout_correlation import assert_model_sampling
 from responses_api_agents.opencode_agent.continuation import classify_opencode_run
 from responses_api_agents.opencode_agent.sandbox_runner import snapshot
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401

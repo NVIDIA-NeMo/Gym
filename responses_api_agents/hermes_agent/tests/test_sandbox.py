@@ -26,7 +26,7 @@ from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
-from nemo_gym.testing.rollout_sampling import assert_model_sampling
+from nemo_gym.testing.rollout_correlation import assert_model_sampling
 from responses_api_agents.hermes_agent import sandbox as hermes_sandbox
 from responses_api_agents.hermes_agent.app import (
     AGENT_TIMEOUT_METADATA_KEY,
