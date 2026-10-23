@@ -136,7 +136,11 @@ class HarborEpisodeResponse(BaseEpisodeResponse[HarborEpisodeResult]):
 
 
 class HarborTasksetConfig(BaseModel):
-    """Where one taskset's folders live and which digest each task was materialized with."""
+    """Where one taskset's folders live and which digest each task was materialized with.
+
+    ``dataset_digest`` and ``dataset_toml_digest`` are the dataset's identity as prepare recorded it
+    (``manifest.toml``'s ``[dataset]`` digests), so the run config says which dataset ran.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -144,6 +148,8 @@ class HarborTasksetConfig(BaseModel):
     tasks: dict[str, str]
     # Tasks found below the first level of the folder: task_id -> path relative to `folder`.
     paths: dict[str, str] = Field(default_factory=dict)
+    dataset_digest: str | None = None
+    dataset_toml_digest: str | None = None
 
 
 class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
