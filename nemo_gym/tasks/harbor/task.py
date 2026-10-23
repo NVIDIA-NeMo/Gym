@@ -30,7 +30,7 @@ from nemo_gym.tasks.harbor.dockerfile import (
     resolve_dockerfile,
 )
 from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.models import HARBOR_STEP_VERIFIER_TIMEOUT_SEC, HarborStep, HarborTaskConfig
+from nemo_gym.tasks.harbor.models import HARBOR_STEP_VERIFIER_TIMEOUT_SEC, HarborTaskConfig, HarborTaskStep
 from nemo_gym.tasks.harbor.python_verifier import VERIFIER_FILE, python_verifier_for
 from nemo_gym.tasks.harbor.records import (
     BUILT_IMAGES_FILE,
@@ -91,7 +91,12 @@ MAX_DISCOVERY_DEPTH = 6
 
 @dataclass(frozen=True)
 class HarborTurn:
-    """One ``[[steps]]`` entry read from disk: the instruction the agent gets for that turn.
+    """One task step loaded with its ``steps/<name>/`` folder, which the harbor server runs as one agent turn.
+
+    ``config`` is the step as ``task.toml`` writes it (:class:`HarborTaskStep`) and ``instruction`` is
+    ``steps/<name>/instruction.md``, so ``HarborTaskStep`` is to ``HarborTurn`` what ``HarborTaskConfig`` is to
+    ``HarborTask``. One turn per task step is this server's choice, as in Harbor's multi-step trial, not something
+    a task step implies: Harbor's simulated-user trials run many turns of the agent under test inside one step.
 
     ``verifier_mode`` is the step's own, as Harbor's ``resolve_step_verifier_mode`` resolves it (the step's explicit
     mode, else ``separate`` when it declares a ``[steps.verifier.environment]``, else the task's). ``verifier_image``
@@ -101,12 +106,15 @@ class HarborTurn:
     configuration when there is one.
     """
 
-    name: str
     instruction: str
-    config: HarborStep
+    config: HarborTaskStep
     verifier_mode: str = "shared"
     verifier_image: str | None = None
     verifier_image_config: BaseImageConfig | None = None
+
+    @property
+    def name(self) -> str:
+        return self.config.name
 
     @property
     def tests_dir(self) -> Path:
@@ -837,8 +845,8 @@ def _load_turns(path: Path, config: HarborTaskConfig) -> tuple[HarborTurn, ...]:
     the working directory's owner and the harness's user to it for that turn (and refuses a ``name:group``
     pair at seed on a provider that switches user by name only, as it refuses the task's own). A step's
     ``workdir/``, ``workdir/setup.sh``, ``[steps.healthcheck]`` and ``artifacts`` are read by the server per turn
-    (:attr:`HarborTurn.workdir_dir`, :attr:`HarborTurn.setup_script`, ``HarborStep.healthcheck`` and
-    ``HarborStep.artifacts``, collected after the turn's agent with the task's); a ``setup.sh``
+    (:attr:`HarborTurn.workdir_dir`, :attr:`HarborTurn.setup_script`, ``HarborTaskStep.healthcheck`` and
+    ``HarborTaskStep.artifacts``, collected after the turn's agent with the task's); a ``setup.sh``
     beside ``instruction.md`` instead of inside ``workdir/`` is not a Harbor file and is warned about, since Harbor
     0.22.0 runs ``steps/<name>/workdir/setup.sh`` only. A step without its own ``[steps.verifier].timeout_sec`` is
     graded within Harbor's step default of 600 s (times the dataset's ``timeout_multiplier``, like every budget),
@@ -900,11 +908,7 @@ def _load_turns(path: Path, config: HarborTaskConfig) -> tuple[HarborTurn, ...]:
             instruction = read_instruction(instruction_path)
         except (OSError, UnicodeDecodeError) as exc:
             raise HarborTaskError(f"{instruction_path}: {exc}") from exc
-        turns.append(
-            HarborTurn(
-                name=step.name, instruction=instruction, config=step, verifier_mode=step_verifier_mode(config, step)
-            )
-        )
+        turns.append(HarborTurn(instruction=instruction, config=step, verifier_mode=step_verifier_mode(config, step)))
     if default_timeout_steps:
         logger.warning(
             "%s: step(s) %s name no [steps.verifier].timeout_sec and are graded within Harbor's step default of %gs%s, "

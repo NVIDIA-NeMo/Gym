@@ -64,7 +64,7 @@ from nemo_gym.sandbox.transfer import (
 )
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.digest import is_ignored
-from nemo_gym.tasks.harbor.models import HarborArtifact, HarborStep, HarborVerifier
+from nemo_gym.tasks.harbor.models import HarborArtifact, HarborTaskStep, HarborVerifier
 from nemo_gym.tasks.harbor.python_verifier import VerifierShim, write_shim
 from nemo_gym.tasks.harbor.task import HarborTurn
 
@@ -334,7 +334,7 @@ def _is_main_service(name: str | None) -> bool:
 ARTIFACT_MANIFEST_NAME = "manifest.json"
 
 
-def _collected_artifacts(task: HarborTask, step: HarborStep | None = None) -> list[tuple[HarborArtifact, str]]:
+def _collected_artifacts(task: HarborTask, step: HarborTaskStep | None = None) -> list[tuple[HarborArtifact, str]]:
     """The artifacts one collection pass reads, each with where it was declared (``convention``, ``task`` or
     ``step``): ``/logs/artifacts`` first, then the task's own ``artifacts`` entries, then the step's for a turn of a
     multi-step task. Harbor's ``with_convention_entry([*task artifacts, *step artifacts])``: the implicit
@@ -347,7 +347,7 @@ def _collected_artifacts(task: HarborTask, step: HarborStep | None = None) -> li
     return entries
 
 
-def _numbered_artifacts(task: HarborTask, step: HarborStep | None = None) -> list[tuple[int, HarborArtifact, str]]:
+def _numbered_artifacts(task: HarborTask, step: HarborTaskStep | None = None) -> list[tuple[int, HarborArtifact, str]]:
     """:func:`_collected_artifacts` with each entry's staging number (its ``NN/`` root under ``artifacts/``)."""
     return [(index, artifact, origin) for index, (artifact, origin) in enumerate(_collected_artifacts(task, step))]
 
