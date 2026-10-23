@@ -292,6 +292,15 @@ class SupportsSandboxCheckpointPolling(Protocol):
 
 
 @runtime_checkable
+class SupportsSandboxParkedPolling(Protocol):
+    """Optional scoped hold of command completion checks while a harness launch is paused for a checkpoint."""
+
+    def parked_exec_polling(self, handle: SandboxHandle) -> AbstractContextManager[None]:
+        """Hold pending command polls without asking the sandbox, and ask again once the scope exits."""
+        ...
+
+
+@runtime_checkable
 class SupportsSandboxBackgroundServices(Protocol):
     """Optional execution override for services needed by a later command."""
 

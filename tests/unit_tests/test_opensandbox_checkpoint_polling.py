@@ -3,6 +3,7 @@
 """Checkpoint polling wakes existing commands and stays local to the stopping sandbox."""
 
 import asyncio
+import logging
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
@@ -199,3 +200,166 @@ def test_provider_without_checkpoint_polling_keeps_existing_behavior() -> None:
 def test_checkpoint_poll_interval_must_be_positive(interval: float) -> None:
     with pytest.raises(ValueError, match="checkpoint_background_poll_interval_s"):
         opensandbox_provider.OpenSandboxProvider(operations={"checkpoint_background_poll_interval_s": interval})
+
+
+class ScriptedStatus(Commands):
+    """Each status request runs the next scripted step; ``asked`` is set once a request has started."""
+
+    def __init__(self, *steps: Any) -> None:
+        super().__init__()
+        self.steps = list(steps)
+        self.asked = asyncio.Event()
+
+    async def get_command_status(self, execution_id: str) -> Any:
+        self.status_calls += 1
+        self.asked.set()
+        return await self.steps.pop(0)()
+
+
+async def running() -> Any:
+    return SimpleNamespace(running=True, exit_code=None, error=None)
+
+
+async def finished() -> Any:
+    return SimpleNamespace(running=False, exit_code=0, error=None)
+
+
+async def unanswered() -> Any:
+    """A sandbox that does not answer, as one being snapshotted: the provider's status timeout ends the request."""
+    await asyncio.Event().wait()
+
+
+def make_parked_provider(monkeypatch: pytest.MonkeyPatch) -> opensandbox_provider.OpenSandboxProvider:
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, SimpleNamespace, object, object)
+    )
+    return opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={
+            "background_exec": True,
+            "background_poll_initial_s": 30,
+            "background_poll_interval_s": 30,
+            "status_poll_timeout_s": 0.05,
+            "retries": 0,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_parked_sandbox_is_not_asked_until_the_park_ends_and_then_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: asyncio.Queue[asyncio.Event] = asyncio.Queue()
+
+    async def sleep(delay: float) -> None:
+        release = asyncio.Event()
+        sleeps.put_nowait(release)
+        await release.wait()
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    provider = make_parked_provider(monkeypatch)
+    commands = ScriptedStatus(running, finished)
+    sandbox_handle = handle("parked", commands)
+    task = asyncio.create_task(provider.exec(sandbox_handle, "work", timeout_s=300))
+    try:
+        backoff = await asyncio.wait_for(sleeps.get(), 1)
+        with provider.parked_exec_polling(sandbox_handle):
+            # Every poll interval that passes while parked holds the poll again instead of asking.
+            for _ in range(3):
+                backoff.set()
+                backoff = await asyncio.wait_for(sleeps.get(), 1)
+            assert commands.status_calls == 1
+        result = await asyncio.wait_for(task, 1)
+        assert result.return_code == 0
+        assert commands.status_calls == 2, "asked once, right after the park, without waiting out the interval"
+        assert not backoff.is_set()
+        assert provider._command_polls == {} and provider._parked_poll_scopes == {}
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_status_timeout_during_a_park_does_not_fail_the_command(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider = make_parked_provider(monkeypatch)
+    commands = ScriptedStatus(unanswered, finished)
+    sandbox_handle = handle("snapshotted", commands)
+    with caplog.at_level(logging.INFO, logger=opensandbox_provider.__name__):
+        task = asyncio.create_task(provider.exec(sandbox_handle, "work", timeout_s=300))
+        try:
+            await asyncio.wait_for(commands.asked.wait(), 1)
+            # The park begins while the request is unanswered, as when a snapshot freezes the sandbox mid-poll.
+            with provider.parked_exec_polling(sandbox_handle):
+                await asyncio.sleep(0.3)  # well past the 0.05 s status timeout
+                assert not task.done(), "the timed-out request was forgiven and the poll is held"
+                assert commands.status_calls == 1
+            result = await asyncio.wait_for(task, 1)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert result.return_code == 0
+    assert commands.status_calls == 2
+    [forgiven] = [record for record in caplog.records if "Forgave" in record.getMessage()]
+    assert "'snapshotted'" in forgiven.getMessage()
+    assert "Timed out during OpenSandbox command status" in forgiven.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_a_status_request_that_outlasts_the_park_is_asked_again_with_a_fresh_allowance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = make_parked_provider(monkeypatch)
+    commands = ScriptedStatus(unanswered, finished)
+    sandbox_handle = handle("slow-to-recover", commands)
+    task = asyncio.create_task(provider.exec(sandbox_handle, "work", timeout_s=300))
+    try:
+        await asyncio.wait_for(commands.asked.wait(), 1)
+        # The park opens and closes while the request is still unanswered; it then times out after the park.
+        with provider.parked_exec_polling(sandbox_handle):
+            pass
+        result = await asyncio.wait_for(task, 1)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert result.return_code == 0
+    assert commands.status_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_a_status_timeout_without_a_park_still_fails_the_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = make_parked_provider(monkeypatch)
+    commands = ScriptedStatus(unanswered)
+    with pytest.raises(TimeoutError, match="Timed out during OpenSandbox command status after 0.05s"):
+        await asyncio.wait_for(provider.exec(handle("lost", commands), "work", timeout_s=300), 1)
+    assert commands.status_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_park_forgives_one_failed_request_and_a_sandbox_still_lost_afterwards_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = make_parked_provider(monkeypatch)
+    commands = ScriptedStatus(unanswered, unanswered)
+    sandbox_handle = handle("lost-after-park", commands)
+    task = asyncio.create_task(provider.exec(sandbox_handle, "work", timeout_s=300))
+    try:
+        await asyncio.wait_for(commands.asked.wait(), 1)
+        with provider.parked_exec_polling(sandbox_handle):
+            await asyncio.sleep(0.2)
+        with pytest.raises(TimeoutError, match="command status"):
+            await asyncio.wait_for(task, 1)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert commands.status_calls == 2
+    assert provider._command_polls == {} and provider._parked_poll_scopes == {}
+
+
+def test_provider_without_parked_polling_gets_a_no_op_scope() -> None:
+    sandbox = AsyncSandbox(provider=SimpleNamespace())
+    sandbox._handle = handle("plain", Commands())
+    sandbox._stopped = False
+    assert isinstance(sandbox.parked_exec_polling(), nullcontext)

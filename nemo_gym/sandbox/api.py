@@ -41,6 +41,7 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxBackgroundServices,
     SupportsSandboxCheckpointPolling,
     SupportsSandboxEndpoint,
+    SupportsSandboxParkedPolling,
     SupportsSandboxPauseResume,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
@@ -450,6 +451,18 @@ class AsyncSandbox:
         handle = self._require_handle()
         if isinstance(self._provider, SupportsSandboxCheckpointPolling):
             return self._provider.checkpoint_exec_polling(handle)
+        return nullcontext()
+
+    def parked_exec_polling(self) -> AbstractContextManager[None]:
+        """Hold completion checks for this sandbox while a harness launch in it is paused for a checkpoint.
+
+        A provider that polls command status stops asking a sandbox that a snapshot may leave unresponsive, and
+        asks again once the scope exits; other providers use a no-op scope. Do not wait in the scope for a command
+        of this sandbox.
+        """
+        handle = self._require_handle()
+        if isinstance(self._provider, SupportsSandboxParkedPolling):
+            return self._provider.parked_exec_polling(handle)
         return nullcontext()
 
     async def start(

@@ -357,7 +357,10 @@ async def run_until_park_requested(
             if park is None or await _pause(sandbox, launch, label=label) != "paused":
                 return await _stop(sandbox, launch, exec_task)
             try:
-                await park()
+                # The snapshot taken while the launch is paused may leave the sandbox unresponsive for minutes:
+                # the launch's command polls wait for the park to end instead of timing out against it.
+                with _parked_polling(sandbox):
+                    await park()
             except Exception:
                 await _kill(sandbox, launch)
                 exec_task.cancel()
@@ -486,6 +489,11 @@ async def _stop(
 
 def _checkpoint_polling(sandbox: AsyncSandbox) -> AbstractContextManager[None]:
     polling = getattr(sandbox, "checkpoint_exec_polling", None)
+    return polling() if callable(polling) else nullcontext()
+
+
+def _parked_polling(sandbox: AsyncSandbox) -> AbstractContextManager[None]:
+    polling = getattr(sandbox, "parked_exec_polling", None)
     return polling() if callable(polling) else nullcontext()
 
 

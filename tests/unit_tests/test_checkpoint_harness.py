@@ -498,6 +498,92 @@ async def test_a_pause_does_not_enter_the_polling_scope() -> None:
     assert result.stdout == "done\n" and shell.scopes == [], "a paused launch is not ending: no fast polling"
 
 
+class ParkedPollingShell(LocalShell):
+    """A sandbox with a parked polling scope; records the scope and any command started while it is open."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.scopes: list[str] = []
+        self.parked = False
+        self.started_while_parked: list[str] = []
+
+    @contextmanager
+    def parked_exec_polling(self) -> Iterator[None]:
+        self.scopes.append("enter")
+        self.parked = True
+        try:
+            yield
+        finally:
+            self.parked = False
+            self.scopes.append("exit")
+
+    async def exec(self, command: str, *, timeout_s: Optional[float] = None) -> SandboxExecResult:
+        if self.parked:
+            self.started_while_parked.append(command)
+        return await super().exec(command, timeout_s=timeout_s)
+
+
+class ScopeCheckingParker(Parker):
+    def __init__(self, park: ParkRequest, shell: ParkedPollingShell, **kwargs: Optional[Exception]) -> None:
+        super().__init__(park, **kwargs)
+        self.shell = shell
+        self.inside_scope: list[bool] = []
+
+    async def __call__(self) -> None:
+        self.inside_scope.append(self.shell.parked)
+        await super().__call__()
+
+
+async def test_a_paused_launch_parks_inside_the_parked_polling_scope_and_continues_after_it() -> None:
+    shell, park = ParkedPollingShell(), ParkRequest()
+    parker = ScopeCheckingParker(park, shell)
+    run = run_pausing(shell, "sleep 1 && echo done", park, parker, timeout_s=60)
+    await asyncio.sleep(0.3)
+    park.requested.set()
+    await asyncio.wait_for(parker.parked.wait(), 10)
+    assert shell.scopes == ["enter"], "the scope is open while the run is parked"
+    parker.opened.set()
+
+    result = await asyncio.wait_for(run, 30)
+
+    assert result.stdout == "done\n"
+    assert parker.inside_scope == [True]
+    assert shell.scopes == ["enter", "exit"]
+    # The pause and the continue are sandbox commands, whose polls the scope would hold: both run outside it.
+    assert shell.started_while_parked == []
+
+
+async def test_a_park_that_fails_closes_the_parked_polling_scope_before_the_kill() -> None:
+    shell, park = ParkedPollingShell(), ParkRequest()
+    parker = ScopeCheckingParker(park, shell, error=RuntimeError("the bookmark could not be recorded"))
+    run = run_pausing(shell, "sleep 300", park, parker, timeout_s=600)
+    await asyncio.sleep(0.5)
+
+    park.requested.set()
+    with pytest.raises(RuntimeError, match="could not be recorded"):
+        await asyncio.wait_for(run, timeout=60)
+
+    assert parker.inside_scope == [True] and shell.scopes == ["enter", "exit"]
+    assert shell.started_while_parked == [], "the kill runs after the scope closed"
+    assert not launch_states(launch_id(shell)), "no paused process is left behind"
+
+
+async def test_cancelling_a_parked_run_closes_the_parked_polling_scope() -> None:
+    shell, park = ParkedPollingShell(), ParkRequest()
+    parker = ScopeCheckingParker(park, shell)
+    run = run_pausing(shell, "sleep 300", park, parker, timeout_s=600)
+    await asyncio.sleep(0.5)
+    park.requested.set()
+    await asyncio.wait_for(parker.parked.wait(), 10)
+
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(run, timeout=60)
+
+    assert shell.scopes == ["enter", "exit"]
+    assert shell.started_while_parked == [], "the kill runs after the scope closed"
+    assert not launch_states(launch_id(shell)), "no process is left"
+
 
 # -- pause diagnostics and retry ----------------------------------------------------------------------------------
 

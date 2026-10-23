@@ -60,6 +60,9 @@ class _BackgroundCommandPoll:
     """Give each command its own wakeup when checkpoint polling scopes change."""
 
     wakeup: asyncio.Event = field(default_factory=asyncio.Event)
+    # Set when a parked scope opens for the sandbox, cleared before each status request: a request that fails
+    # with this set overlapped a checkpoint, while the sandbox may not answer.
+    parked: bool = False
 
 
 class _MissingSandboxTerminateFilter(logging.Filter):
@@ -817,6 +820,34 @@ class OpenSandboxProvider:
         self._renewals: dict[str, asyncio.Task[None]] = {}
         self._command_polls: dict[str, set[_BackgroundCommandPoll]] = {}
         self._checkpoint_poll_scopes: dict[str, int] = {}
+        self._parked_poll_scopes: dict[str, int] = {}
+
+    @contextmanager
+    def parked_exec_polling(self, handle: SandboxHandle) -> Iterator[None]:
+        """Hold the command polls of this sandbox, without asking it, until the scope exits.
+
+        For a harness launch paused for a checkpoint: the sandbox is being snapshotted and may not answer for
+        minutes. A status request that fails after the scope opened is asked again once it exits, with a fresh
+        retry allowance. Do not wait in the scope for a command of this sandbox, since its polls are held too.
+        """
+        sandbox_id = handle.sandbox_id
+        self._parked_poll_scopes[sandbox_id] = self._parked_poll_scopes.get(sandbox_id, 0) + 1
+        for poll in self._command_polls.get(sandbox_id, ()):
+            poll.parked = True
+        try:
+            yield
+        finally:
+            remaining = self._parked_poll_scopes[sandbox_id] - 1
+            if remaining:
+                self._parked_poll_scopes[sandbox_id] = remaining
+            else:
+                del self._parked_poll_scopes[sandbox_id]
+            for poll in self._command_polls.get(sandbox_id, ()):
+                poll.wakeup.set()
+
+    async def _wait_while_parked(self, sandbox_id: str, poll: _BackgroundCommandPoll) -> None:
+        while sandbox_id in self._parked_poll_scopes:
+            await self._wait_command_poll(poll, interval_s=self._operations.background_poll_interval_s)
 
     @contextmanager
     def checkpoint_exec_polling(self, handle: SandboxHandle) -> Iterator[None]:
@@ -2076,14 +2107,33 @@ class OpenSandboxProvider:
         # detected promptly, then back off so long ones do not spam requests.
         poll_interval = min(self._operations.background_poll_initial_s, self._operations.background_poll_interval_s)
         while True:
-            status = await self._await_sdk_operation(
-                lambda: handle.raw.commands.get_command_status(execution_id),
-                operation="command status",
-                sandbox_id=handle.sandbox_id,
-                timeout_s=status_timeout_s,
-                retries=self._operations.retries,
-                is_retryable=_command_read_is_retryable,
-            )
+            # A parked sandbox is being snapshotted and may not answer: ask once the park ends.
+            await self._wait_while_parked(handle.sandbox_id, poll)
+            poll.parked = False
+            started = loop.time()
+            try:
+                status = await self._await_sdk_operation(
+                    lambda: handle.raw.commands.get_command_status(execution_id),
+                    operation="command status",
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=status_timeout_s,
+                    retries=self._operations.retries,
+                    is_retryable=_command_read_is_retryable,
+                )
+            except Exception as error:
+                if not poll.parked:
+                    raise
+                # A park began while this request was retrying, so the sandbox may have been unresponsive for
+                # the checkpoint rather than lost: ask again once the park ends, with a fresh retry allowance.
+                LOGGER.warning(
+                    "Forgave a failed OpenSandbox command status during a checkpoint park after %.1fs; "
+                    "sandbox_id=%r, execution_id=%r: %s",
+                    loop.time() - started,
+                    handle.sandbox_id,
+                    execution_id,
+                    error,
+                )
+                continue
             # A renamed SDK field must not degrade silently: a missing `running`
             # would end the poll at once, a missing `exit_code` would score a
             # failed command as a success.
