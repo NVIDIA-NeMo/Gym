@@ -18,6 +18,7 @@ import platform
 import re
 import shlex
 import sys
+import tomllib
 from os import environ
 from pathlib import Path
 from subprocess import Popen
@@ -26,6 +27,7 @@ from typing import IO, Any, Mapping
 
 from omegaconf import DictConfig
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
@@ -140,6 +142,21 @@ def _local_nemo_gym_extras(requirements_fpath: Path) -> str:
             if extra and extra not in extras:
                 extras.append(extra)
     return f"[{','.join(extras)}]" if extras else ""
+
+
+def is_gym_checkout(root: Path) -> bool:
+    """Whether ``root`` is a NeMo Gym source checkout, not just any project with a ``pyproject.toml``.
+
+    A server directory two levels below a Gym checkout installs Gym from that checkout. An external
+    repository that keeps its own servers in ``resources_servers/<name>`` has a ``pyproject.toml`` of its
+    own and must install Gym as a package instead.
+    """
+    try:
+        with open(root / "pyproject.toml", "rb") as f:
+            name = tomllib.load(f).get("project", {}).get("name")
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    return isinstance(name, str) and canonicalize_name(name) == "nemo-gym"
 
 
 def _get_nemo_gym_version_spec(is_editable_install: bool) -> str:
@@ -280,7 +297,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     # into sibling server venvs through process-wide UV_* variables.
     server_uv_flags = f"{uv_config_flag}{parent_override_flag}"
 
-    is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
+    is_editable_install = is_gym_checkout(dir_path.resolve().parent.parent)
 
     try:
         has_pyproject_toml = (dir_path / "pyproject.toml").exists()

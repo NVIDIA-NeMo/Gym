@@ -37,6 +37,7 @@ from nemo_gym.cli.setup_command import (
     _local_nemo_gym_extras,
     _python_request_admits,
     get_venv_path,
+    is_gym_checkout,
     run_command,
     setup_env_command,
 )
@@ -72,7 +73,7 @@ class TestCLISetupCommandSetupEnvCommand:
         server_dir = tmp_path / "first_level" / "second_level"
         server_dir.mkdir(parents=True)
         (server_dir / "requirements.txt").write_text("pytest\n")
-        (tmp_path / "pyproject.toml").write_text("")
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "nemo-gym"\n')
 
         return server_dir.absolute()
 
@@ -986,3 +987,45 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
+
+
+class TestIsGymCheckout:
+    """NVIDIA-NeMo/Gym#4725: an external repository with its own pyproject.toml is not a Gym checkout."""
+
+    @pytest.mark.parametrize(
+        ("pyproject", "expected"),
+        [
+            ('[project]\nname = "nemo-gym"\n', True),
+            ('[project]\nname = "NeMo_Gym"\n', True),
+            ('[project]\nname = "auto-ontology-eval"\n', False),
+            ("", False),
+            ("not = [valid toml", False),
+            (None, False),
+        ],
+    )
+    def test_only_the_nemo_gym_project_counts(self, tmp_path: Path, pyproject, expected) -> None:
+        if pyproject is not None:
+            (tmp_path / "pyproject.toml").write_text(pyproject)
+        assert is_gym_checkout(tmp_path) is expected
+
+    def test_an_external_repository_installs_gym_as_a_package(self, tmp_path: Path) -> None:
+        server_dir = tmp_path / "resources_servers" / "my_server"
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text("pytest\n")
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "auto-ontology-eval"\n')
+
+        def install_command() -> str:
+            args = shlex.split(
+                setup_env_command(
+                    dir_path=server_dir.absolute(),
+                    global_config_dict=_TestGlobalConfig._default_global_config_dict_values.fget(None)
+                    | {UV_VENV_DIR_KEY_NAME: str(tmp_path)},
+                    prefix="my server name",
+                )
+            )
+            return args[args.index("--command") + 1]
+
+        assert "grep -v -F '../..' requirements.txt" in install_command()
+
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "nemo-gym"\n')
+        assert "grep -v -F '../..' requirements.txt" not in install_command()

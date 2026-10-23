@@ -355,10 +355,28 @@ def _resolve_server_dir(rel_path: Path) -> Path:
     install root (``PARENT_DIR``) where built-in servers live in both editable and wheel installs. A
     directory counts as a server only if it ships an install marker for one of our two venv setups. This
     lets ``gym env test`` find and run built-in (and plugin) servers from any cwd, not just a repo checkout.
+
+    A directory at a higher-priority root that contains server code but no install marker is refused rather
+    than skipped, so a local server is never silently replaced by an installed server of the same name. A
+    directory without code, such as a local copy of a server's data, is still skipped.
     """
-    return _resolve_under_cwd_or_install(
-        rel_path, validator=lambda d: (d / "requirements.txt").exists() or (d / "pyproject.toml").exists()
-    )
+
+    def has_install_marker(d: Path) -> bool:
+        return (d / "requirements.txt").exists() or (d / "pyproject.toml").exists()
+
+    resolved = _resolve_under_cwd_or_install(rel_path, validator=has_install_marker)
+    if not rel_path.is_absolute():
+        for root in component_search_roots():
+            candidate = root / rel_path
+            if candidate == resolved:
+                break
+            if candidate.is_dir() and any(candidate.glob("*.py")):
+                raise ConfigError(
+                    f"Server directory {candidate} contains server code but no requirements.txt or pyproject.toml, "
+                    f"so Gym would use {resolved} instead. Add one of them to {candidate} (it lists the server's "
+                    "dependencies, including nemo-gym), or rename the directory to use the installed server."
+                )
+    return resolved
 
 
 class _ConfiguredServer(NamedTuple):

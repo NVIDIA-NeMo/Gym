@@ -89,6 +89,38 @@ gym eval run --benchmark my_bench --model-type vllm_model
 
 The variable is inherited by the servers Gym spawns, so plugin components resolve inside them too.
 
+### Servers in your own repository
+
+A repository that keeps its own servers next to its code, for example `resources_servers/my_env/`, works
+with an installed Gym (`pip install nemo-gym` or `uv add nemo-gym`). Four rules apply:
+
+1. **Each server directory needs an install marker.** Give every server directory a `requirements.txt` or a
+   `pyproject.toml` listing its dependencies. Gym builds each server's virtual environment from it. If a
+   directory with server code but without one has the same name as a built-in server, Gym stops with an
+   error naming both paths rather than silently using the built-in one. A directory holding only data, such
+   as a local copy of a built-in server's `data/`, is not treated as a server.
+2. **Your repository's own `pyproject.toml` is fine.** Gym treats the directory two levels above a server as a
+   Gym source checkout only if its `pyproject.toml` declares the `nemo-gym` project. Otherwise each server
+   venv installs Gym as a package, at the version installed in your environment.
+3. **`--agent` takes the agent instance name**, the top-level key in your config (for example
+   `my_env_simple_agent`), not the agent server type under `responses_api_agents` (for example
+   `simple_agent`). An unknown name lists the agent instances in the run.
+4. **Pick a split your configs declare.** `--split benchmark` needs a dataset of type `benchmark` in the loaded
+   configs, which benchmarks get from their preparation script and prompt config. A resources server that only
+   ships `validation` data runs with `--split validation`; `example` data runs with `--no-serve --input`.
+
+```bash
+gym eval run --config resources_servers/<my_env>/configs/<my_env>.yaml \
+    --agent <my_env>_simple_agent --split validation \
+    --model-type openai_model --model <model> --model-url <url> --search-dir .
+```
+
+**External state.** If your resources server reads a database or another service, prepare it before the run:
+provision access and credentials in your environment, load or ingest the data, and build anything derived from
+it. Then check readiness with the server's own check (for example a script that runs one representative query)
+before `gym eval run`. Gym does not provision external state; a resources server that finds it missing should
+fail at startup with a clear message rather than score tasks against an empty store.
+
 ### `--search-dir`
 
 `--search-dir DIR` (repeatable) is the per-invocation equivalent: Gym sets `NEMO_GYM_EXTRA_ROOTS` to its value for the duration of that command, then restores it. Use it for one-off runs instead of exporting the variable.
