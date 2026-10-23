@@ -1125,3 +1125,21 @@ def test_switch_writes_nothing_when_a_relay_cannot_be_rewritten(
 
     assert (first.read_text(), second.read_text()) == before
     assert "cannot find the line that starts 'other_environment_server'" in capsys.readouterr().err
+
+
+def test_repository_non_executing_simple_agents_run_in_sessions_without_tool_access() -> None:
+    # simple_agent refuses /run when execute_tools is false, so no relay may front it. A tool grant would let an
+    # agent swapped in by composition, which does not keep execute_tools, call tools against a single-call verifier.
+    loaded: dict[Path, dict | None] = {}
+    fronting: dict[tuple[str, str], tuple[str, list | None]] = {}
+    for path in migration.repo_config_files():
+        instances = migration.resolved_instances([document for _, document in migration.run_documents(path, loaded)])
+        for name, instance in instances.items():
+            for server_type, server in (instance.get("environment_servers") or {}).items():
+                agent = ((server or {}).get("agent_server") or {}).get("name")
+                body = ((instances.get(agent) or {}).get("responses_api_agents") or {}).get("simple_agent") or {}
+                if body.get("execute_tools") is False:
+                    fronting[(name, agent)] = (server_type, server.get("resources_tool_transports"))
+
+    assert ("swe_pivot_environment_server", "swe_pivot_tool_simulation_agent") in fronting
+    assert {key: value for key, value in fronting.items() if value[0] == "legacy_agent" or value[1]} == {}
