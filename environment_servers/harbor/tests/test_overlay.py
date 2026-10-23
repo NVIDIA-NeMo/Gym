@@ -437,7 +437,7 @@ class TestOverlay:
         specs: dict[str, SandboxSpec] = {}
 
         class CapturingCompose(FakeCompose):
-            def __init__(self, provider_config, path, *, service_specs, timeout_s):
+            def __init__(self, provider_config, path, *, service_specs, timeout_s, **kwargs):
                 super().__init__({"main": sandbox, "api": FakeSandbox(), "kafka": FakeSandbox()})
                 specs.update(service_specs)
                 # What a provider does with the spec's workdir: it exists, root-owned, before anything runs.
