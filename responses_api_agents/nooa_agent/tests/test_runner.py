@@ -871,7 +871,7 @@ async def test_cleanup_marker_anywhere_in_trusted_model_chain_vetoes_grading(mar
             return await original_adapter(agent, request)
         except GenerationError as error:
             target = error if marked_error == "wrapper" else error.__cause__
-            target.nooa_cleanup_error = ConnectionError("cleanup failed")
+            target.nooa_cleanup_errors = (ConnectionError("cleanup failed"),)
             raise
 
     runner._invocation_adapter = invoke

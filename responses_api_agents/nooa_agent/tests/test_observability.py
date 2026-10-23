@@ -219,7 +219,7 @@ async def test_native_codeact_history_keeps_prefills_and_actual_cell_feedback(fa
             assert "controlled bad cell" in tools["call-1"].output
         # The final cell never reaches another request: preserve its captured result.
         assert json.loads(tools["call-final"].output)["stdout"] == "final marker\n"
-        assert trajectory.gaps == []
+        assert [gap.code for gap in trajectory.gaps] == ["public_assistant_metadata_unavailable"]
         persisted = _build_trajectory_record(
             {"task_id": "task", "_ng_task_index": 0, "_ng_rollout_index": 0},
             {"ng_agent_observations": episode.observations.model_dump(mode="json")},
@@ -316,7 +316,7 @@ async def test_native_feedback_keeps_latest_captured_render_after_mutation(
         )
         assert before == [call.request.model_dump_json() for call in state.calls]
         assert next(tool.output for tool in trajectory.tool_calls if tool.tool_call_id == "call-1") == captured[-1]
-        assert trajectory.gaps == []
+        assert [gap.code for gap in trajectory.gaps] == ["public_assistant_metadata_unavailable"]
         persisted = _build_trajectory_record(
             {"task_id": "task", "_ng_task_index": 0, "_ng_rollout_index": 0},
             {"ng_agent_observations": episode.observations.model_dump(mode="json")},
@@ -371,7 +371,9 @@ def _record_native_cell(
 
 
 def _record_request(trace: GymTraceHooks, state: RolloutLLMState, messages: list[object]) -> None:
-    items, instructions = _responses_input(messages)
+    items, instructions = _responses_input(
+        messages, gaps=state.gaps, replay_scope="nemo-gym/responses/v1:test-observability"
+    )
     call = GymModelCall(
         model_ref=ModelServerRef(type="responses_api_models", name="policy"),
         request=NeMoGymResponseCreateParamsNonStreaming(input=items, instructions=instructions),
@@ -461,7 +463,10 @@ def test_unmatched_native_feedback_retains_receipt_and_reports_gap() -> None:
         rollout_id="rollout",
     )
     assert trajectory.tool_calls[0].output == "status: accepted"
-    assert [gap.code for gap in trajectory.gaps] == ["python_output_projection_unavailable"]
+    assert [gap.code for gap in trajectory.gaps] == [
+        "public_assistant_metadata_unavailable",
+        "python_output_projection_unavailable",
+    ]
 
 
 def test_later_context_filtering_does_not_erase_verified_native_feedback() -> None:
@@ -484,7 +489,7 @@ def test_later_context_filtering_does_not_erase_verified_native_feedback() -> No
         rollout_id="rollout",
     )
     assert trajectory.tool_calls[0].output == visible
-    assert trajectory.gaps == []
+    assert [gap.code for gap in trajectory.gaps] == ["public_assistant_metadata_unavailable"]
 
 
 def test_uncaptured_return_to_an_older_render_does_not_replace_latest_capture() -> None:
@@ -509,7 +514,7 @@ def test_uncaptured_return_to_an_older_render_does_not_replace_latest_capture() 
         rollout_id="rollout",
     )
     assert trajectory.tool_calls[0].output == captured[-1]
-    assert trajectory.gaps == []
+    assert [gap.code for gap in trajectory.gaps] == ["public_assistant_metadata_unavailable"]
 
 
 @pytest.mark.parametrize("has_later_model_call", [False, True])
