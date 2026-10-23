@@ -2622,8 +2622,13 @@ class TestConfigLoadErrors:
 
         assert missing_path in str(error.value)
 
-    @mark.parametrize("resources_server", ["reasoning_gym", "tavily_search"])
-    def test_langchain_deepagents_configs_have_environment_servers(self, resources_server: str) -> None:
+    @mark.parametrize(
+        ("resources_server", "resources_instance"),
+        [("reasoning_gym", "reasoning_gym"), ("tavily_search", "tavily_search_resources_server")],
+    )
+    def test_langchain_deepagents_configs_have_environment_servers(
+        self, resources_server: str, resources_instance: str
+    ) -> None:
         agent_name = f"{resources_server}_langchain_deepagents_agent_model_server"
         config_path = (
             Path(__file__).resolve().parents[2]
@@ -2653,9 +2658,13 @@ class TestConfigLoadErrors:
             )
         )
 
-        environment = resolved[f"{agent_name}_environment_server"]["environment_servers"]["legacy_agent"]
+        environment = resolved[f"{agent_name}_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
         assert environment["entrypoint"] == "app.py"
         assert environment["agent_server"] == {"type": "responses_api_agents", "name": agent_name}
+        # single_agent_turn_legacy requires the Resources Server it seeds and verifies against.
+        assert environment["resources_server"] == {"type": "resources_servers", "name": resources_instance}
+        # The deepagents graph runs only its own tools, so the session sends it no grant.
+        assert environment["resources_tool_transports"] == []
 
     def test_multi_agent_environment_server_satisfies_agent_routing(self) -> None:
         parser = GlobalConfigDictParser()
