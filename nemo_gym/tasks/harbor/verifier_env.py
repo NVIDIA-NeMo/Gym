@@ -16,7 +16,7 @@ from typing import Any
 import yaml
 
 from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.models import HarborEnvironment, HarborStep, HarborTaskConfig
+from nemo_gym.tasks.harbor.models import HarborEnvironment, HarborTaskConfig, HarborTaskStep
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, MAIN_SERVICE
 
 
@@ -42,7 +42,7 @@ def effective_verifier_environment(config: HarborTaskConfig) -> HarborEnvironmen
     return config.environment.model_copy(deep=True)
 
 
-def step_verifier_mode(config: HarborTaskConfig, step: HarborStep) -> str:
+def step_verifier_mode(config: HarborTaskConfig, step: HarborTaskStep) -> str:
     """``"separate"`` or ``"shared"`` for one step, as Harbor's ``resolve_step_verifier_mode`` (verifier_mode.py at
     v0.22.0) resolves it: the step's explicit ``[steps.verifier].environment_mode``, else ``separate`` when the step
     declares a ``[steps.verifier.environment]``, else the task's own mode (:attr:`HarborTaskConfig.is_shared_verifier`).
@@ -54,7 +54,7 @@ def step_verifier_mode(config: HarborTaskConfig, step: HarborStep) -> str:
     return "shared" if config.is_shared_verifier else "separate"
 
 
-def step_verifier_environment(config: HarborTaskConfig, step: HarborStep) -> HarborEnvironment | None:
+def step_verifier_environment(config: HarborTaskConfig, step: HarborTaskStep) -> HarborEnvironment | None:
     """The environment a step's separate verifier runs in, as Harbor's ``resolve_effective_verifier_env_config``
     resolves it with a step: ``[steps.verifier.environment]``, else ``[verifier.environment]``, else a copy of
     ``[environment]``; ``None`` when the step verifies in shared mode."""
@@ -67,7 +67,7 @@ def step_verifier_environment(config: HarborTaskConfig, step: HarborStep) -> Har
     return config.environment.model_copy(deep=True)
 
 
-def step_verifier_build_context(task_folder: Path, step: HarborStep) -> Path:
+def step_verifier_build_context(task_folder: Path, step: HarborTaskStep) -> Path:
     """The folder Harbor starts a step's separate verifier environment from (``_verifier_env_build_context`` with a
     step in trial.py at v0.22.0): ``steps/<name>/tests/`` when that folder exists, else the task's ``tests/``."""
     step_tests = Path(task_folder) / "steps" / step.name / "tests"
