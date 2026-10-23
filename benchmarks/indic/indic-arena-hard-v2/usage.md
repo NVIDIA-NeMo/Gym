@@ -16,8 +16,8 @@ python benchmarks/indic/indic-arena-hard-v2/prepare.py \
 
 Omit `--dataset-dir` to use the pinned Hub revision. Omit `--languages` to
 include all available languages, including the English control; use
-`--languages en` for English only. Local mode also accepts the older
-`data/<language>/test.parquet` layout and does not enforce the Hub revision.
+`--languages en` for English only. Local mode also accepts
+`data/<language>/test.parquet` and does not enforce the Hub revision.
 Blank selected translations fail preparation; English is never substituted.
 
 The local source can also be passed through Gym:
@@ -30,7 +30,7 @@ gym eval prepare --benchmark indic/indic-arena-hard-v2 \
 Preparation preserves `row_id`, `row_index`, `category`, and `subcategory`.
 It writes `language_name` as the full name and `language`, `language_code`,
 and `subset_for_metrics` as the language code. Unused translation columns
-are omitted. Older local inputs retain any translation-review metadata.
+are omitted. Translation-review metadata is retained when present.
 
 ## Pairwise evaluation
 
@@ -101,20 +101,6 @@ servers with Ctrl+C. Remove `--limit 3` to evaluate the prepared split.
 Both candidate and judge default to 4,096 output tokens in this preset;
 candidate request overrides do not change the judge's token limit.
 
-## Migration
-
-- Benchmark key: `indic_arena_hard` → `indic/indic-arena-hard-v2`.
-- Benchmark directory: `benchmarks/indic_arena_hard/` →
-  `benchmarks/indic/indic-arena-hard-v2/`. Regenerate data at the new path.
-- Agent: `indic_arena_hard_v2_simple_agent`; mode setting:
-  `indic_arena_hard_v2_judge_mode`.
-- Indic judge variables: `INDIC_ARENA_JUDGE_*`. English runs retain
-  their existing `ARENA_JUDGE_*` variables.
-- `gemini_pointwise.yaml` → `pointwise_smoke.yaml`, with explicit
-  endpoint, model, and credential settings.
-- Runs that previously relied on implicit pairwise scoring must now
-  request it explicitly. Label results with their evaluation mode.
-
 ## Validation status
 
 The integration is experimental (`verified: false`). Local tests and
@@ -128,9 +114,3 @@ gym env test +entrypoint=resources_servers/indic_arena_judge
 # After generating and inspecting data/example_rollouts.jsonl
 gym env test +entrypoint=resources_servers/indic_arena_judge +should_validate_data=true
 ```
-
-Historical evidence: a September 23, 2026 smoke used an earlier dataset
-source and three Hindi prompts, with Gemini generating and judging each
-answer. All three produced valid 100/100 self-judgments within 4,096 tokens;
-trajectory capture was disabled. This predates the AI4Bharat migration and
-is not validation of the current configuration or benchmark quality.
