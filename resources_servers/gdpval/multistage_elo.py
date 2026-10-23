@@ -17,7 +17,7 @@ Instead of comparing the evaluated model against every reference model on all
 tasks, multi-stage ELO runs a sequence of *stages*. Each stage:
 
 1. Samples ``T`` tasks from a task-distribution JSON file (see
-   ``responses_api_agents.stirrup_agent.task_distribution``); ``T`` is
+   ``resources_servers.gdpval.task_distribution``); ``T`` is
    configurable per stage and **defaults to the full task set**,
 2. Includes a set of ``M`` reference models and assigns **each task a single
    reference** from that set — an independent uniform draw by default, with an
@@ -48,7 +48,7 @@ import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from resources_servers.gdpval.comparison import calculate_mle_elo
 
@@ -67,8 +67,8 @@ class PartialStagePolicy:
     stage. ``min_per_reference_success_fraction`` and
     ``min_successful_rows_per_reference`` apply independently to every selected
     reference model, so an anchor cannot disappear entirely from a partial fit.
-    ``waivable_failure_classes`` lists the persisted failure classes that may be
-    newly waived; it defaults to task timeouts only. Rows already resolved by the standard terminal/max-attempt rules
+    Retryable environment-server failures (timeouts, dependency outages) may be
+    newly waived. Rows already resolved by the standard terminal/max-attempt rules
     remain eligible, but every omission still counts against the configured
     coverage floors. Drained/no-persist and missing rows keep the stage open.
 
@@ -94,7 +94,6 @@ class PartialStagePolicy:
     min_success_fraction: float = 1.0
     min_per_reference_success_fraction: float = 1.0
     min_successful_rows_per_reference: int = 1
-    waivable_failure_classes: Tuple[str, ...] = ("timeout_exceeded",)
     tolerate_unresolved: bool = False
 
 
@@ -249,7 +248,7 @@ def plan_stage_task_ids(
     exactly proportional per stage, with nesting guaranteed. A single shared RNG
     is used (per-stage ``seed`` only applies to independent sampling).
     """
-    from responses_api_agents.stirrup_agent.task_distribution import sample_task_ids
+    from resources_servers.gdpval.task_distribution import sample_task_ids
 
     base_rng = rng or random.Random()
     total = len(all_task_ids(distribution))
@@ -378,7 +377,7 @@ def ensure_distribution(
     if distribution_path is not None and Path(distribution_path).is_file():
         return load_distribution(distribution_path), Path(distribution_path)
 
-    from responses_api_agents.stirrup_agent.task_distribution import (
+    from resources_servers.gdpval.task_distribution import (
         build_distribution_from_dataset,
         resolve_default_dataset,
     )

@@ -21,10 +21,12 @@ breakdown layered on top is exercised here).
 """
 
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from pytest import approx, fixture, raises
+from starlette.testclient import TestClient
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError
@@ -359,6 +361,62 @@ class TestComputeMetrics:
         metrics = server.compute_metrics(tasks)
         # No domain keys (the dispatch is gated on at least one task having a `domain`).
         assert not any("/" in k and not k.startswith("pass@") and not k.startswith("majority@") for k in metrics)
+
+
+class TestDomainThroughVerify:
+    """`domain` must survive the real /verify route, since compute_metrics reads it from verify rows."""
+
+    @fixture
+    def client(self, config: PhysicsJudgeResourcesServerConfig) -> TestClient:
+        # Symbolic-only, so the gold answer scores without a judge call.
+        server = PhysicsJudgeResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False}),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        with TestClient(server.setup_webserver()) as client:
+            yield client
+
+    def _verify_all(self, client: TestClient, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        verified = []
+        for task_index, row in enumerate(rows):
+            body = {**row, "response": _make_text_response(row["expected_answer"])}
+            response = client.post("/verify", json=body)
+            assert response.status_code == 200, response.text
+            verified.append({**response.json(), "_ng_task_index": task_index, "_ng_rollout_index": 0})
+        return verified
+
+    def test_shipped_rows_keep_domain_and_get_per_domain_metrics(self, client: TestClient) -> None:
+        example = Path(__file__).parents[1] / "data" / "example.jsonl"
+        rows = [json.loads(line) for line in example.read_text().splitlines()]
+        domains = [row["domain"] for row in rows]
+        assert len(set(domains)) == 5
+
+        verified = self._verify_all(client, rows)
+        assert [row.get("domain") for row in verified] == domains
+
+        response = client.post("/aggregate_metrics", json={"verify_responses": verified})
+        assert response.status_code == 200, response.text
+        metrics = response.json()["agent_metrics"]
+        assert metrics["mean/reward"] == approx(1.0)
+        for domain in domains:
+            assert metrics[f"{domain}/pass@1/symbolic_accuracy"] == approx(100.0)
+            assert metrics[f"{domain}/pass@1/no_answer"] == approx(0.0)
+
+    def test_row_without_domain_gets_no_subset_metrics(self, client: TestClient) -> None:
+        row = {
+            "responses_create_params": {"input": [{"role": "user", "content": "What is 2+2?"}]},
+            "question": "What is 2+2?",
+            "expected_answer": r"\boxed{4}",
+        }
+        verified = self._verify_all(client, [row])
+        assert verified[0].get("domain") is None
+
+        # A null `domain` must add nothing over a row that has no `domain` key at all.
+        without_key = [{k: v for k, v in verified[0].items() if k != "domain"}]
+        metrics = client.post("/aggregate_metrics", json={"verify_responses": verified}).json()["agent_metrics"]
+        baseline = client.post("/aggregate_metrics", json={"verify_responses": without_key}).json()["agent_metrics"]
+        assert metrics["mean/reward"] == approx(1.0)
+        assert metrics.keys() == baseline.keys()
 
 
 class TestGetKeyMetrics:

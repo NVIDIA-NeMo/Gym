@@ -19,6 +19,11 @@ def failures_path_for(output_fpath: Path) -> Path:
     return output_fpath.with_name(output_fpath.stem + "_failures.jsonl")
 
 
+def resubmit_offset_path_for(output_fpath: Path) -> Path:
+    """Where `gym eval resubmit` records the failures sidecar's line count; failures before it no longer count."""
+    return output_fpath.with_name(output_fpath.stem + "_resubmit_offset")
+
+
 def materialized_path_for(output_fpath: Path) -> Path:
     """`results/rollouts.jsonl` -> `results/rollouts_materialized_inputs.jsonl`."""
     return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")

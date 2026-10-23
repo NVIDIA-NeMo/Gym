@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 
-from nemo_gym.base_responses_api_model import _cache_signal
+from nemo_gym.observability.model_calls import _cache_signal
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -53,11 +53,48 @@ from nemo_gym.responses_converter import (
     VLLMConverter,
     VLLMConverterResponsesToChatCompletionsState,
     _usage_detail,
+    chat_completion_usage_to_response_usage,
     split_responses_input_output_items,
 )
 
 
 FIXED_UUID = "123"
+
+
+@pytest.mark.parametrize(
+    "metrics",
+    [
+        None,
+        {"speculative_decoding": None},
+        {
+            "speculative_decoding": {
+                "num_spec_steps": 4,
+                "num_draft_tokens": 12,
+                "num_accepted_draft_tokens": 9,
+                "num_spec_tokens": 3,
+                "acceptance_histogram": [1, 0, 0, 3],
+                "per_step_accepted": [0, 3, 3, 3],
+                "per_step_drafted": [3, 3, 3, 3],
+            },
+            "time_to_first_token": 0.5,
+        },
+    ],
+)
+def test_provider_metrics_survive_response_conversion(converter, metrics):
+    completion = NeMoGymChatCompletion.model_validate(
+        {
+            "id": "chatcmpl-metrics",
+            "created": 123,
+            "model": "test",
+            "object": "chat.completion",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            "metrics": metrics,
+        }
+    )
+    response = converter.chat_completion_to_response(
+        NeMoGymResponseCreateParamsNonStreaming(input="test", model="test"), completion
+    )
+    assert NeMoGymResponse.model_validate_json(response.model_dump_json()).metrics == metrics
 
 
 class FakeUUID:
@@ -88,6 +125,29 @@ def test_usage_detail_ignores_ambiguous_top_level_names():
     usage = {"cached_tokens": 99, "cached_input_tokens": 7, "reasoning_tokens": 88, "reasoning_output_tokens": 3}
     assert _usage_detail(usage, "prompt_tokens_details", "cached_tokens", "cached_input_tokens") == 7
     assert _usage_detail(usage, "completion_tokens_details", "reasoning_tokens", "reasoning_output_tokens") == 3
+
+
+def test_chat_completion_usage_to_response_usage():
+    assert chat_completion_usage_to_response_usage(None) is None
+
+    usage = chat_completion_usage_to_response_usage(
+        CompletionUsage(
+            prompt_tokens=300,
+            completion_tokens=1400,
+            total_tokens=1701,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=100),
+            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=1200),
+        )
+    )
+
+    # The provider total is kept as reported, not recomputed from prompt + completion.
+    assert usage.model_dump() == {
+        "input_tokens": 300,
+        "input_tokens_details": {"cached_tokens": 100},
+        "output_tokens": 1400,
+        "output_tokens_details": {"reasoning_tokens": 1200},
+        "total_tokens": 1701,
+    }
 
 
 def test_usage_detail_prefers_nested_details_in_mappings():
@@ -1458,6 +1518,28 @@ def test_chat_structured_tool_text_to_responses_preserves_parts(converter: Respo
     assert items[0].model_dump()["output"] == [
         {"type": "input_text", "text": "first"},
         {"type": "input_text", "text": "second"},
+    ]
+
+
+def test_chat_tool_image_to_responses_becomes_input_image(converter: ResponsesConverter):
+    items = converter.chat_completions_messages_to_responses_items(
+        [
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": [
+                    {"type": "text", "text": "Image loaded."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "high"}},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}},
+                ],
+            }
+        ]
+    )
+
+    assert items[0].model_dump()["output"] == [
+        {"type": "input_text", "text": "Image loaded."},
+        {"type": "input_image", "image_url": "data:image/png;base64,YWJj", "detail": "high"},
+        {"type": "input_image", "image_url": "https://example.com/image.png", "detail": "auto"},
     ]
 
 

@@ -66,6 +66,19 @@ uncommitted. Rows are trusted controller inputs: grading files live in `files`,
 not `responses_create_params.input`, and are not shown to the agent. There is no
 task store, file-checksum manifest or legacy fingerprint-only row loader.
 
+## Task layouts beyond the public set
+
+Rows may declare `workdir` as `/app` (the public DeepSWE layout) or `/workspace/repo`; every git check, the patch
+collection and the verifier's `test.sh` run in the row's workdir. The setup checks compare real paths, so an image
+whose `/app` is a symlink to the actual clone passes. Each task's own `test.sh` and `grader.py` already target the
+same path, so nothing is rewritten in the grading files.
+
+`grader_applies_model_patch` (default `true`) records which grader generation a row ships. DeepSWE v1.0 graders apply
+`/logs/artifacts/model.patch` themselves in `prepare`; v1.1 graders grade the working tree as-is and never apply it.
+For rows with `false`, the server applies the collected candidate patch in the verifier's workdir before `test.sh`
+runs. A patch that does not apply at the base commit is graded as such (the base tree fails FAIL_TO_PASS), which is
+the same outcome a v1.0 grader gives a non-applying `model.patch`; nothing is masked.
+
 ## Verification contract
 
 Tasks use `/app` as both workdir and Git capture scope. The original task prompt

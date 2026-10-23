@@ -37,6 +37,13 @@ class VerifierTestCounts(BaseModel):
     num_tests_skipped: int | None = Field(default=None, ge=0, strict=True)
 
 
+class SandboxResourceLimit(BaseModel):
+    """Provider evidence that the agent sandbox exceeded its allocated resources."""
+
+    resource: Literal["memory", "storage"]
+    detail: str
+
+
 class SandboxedVerifyResponse(BaseVerifyResponse, VerifierTestCounts):
     model_config = ConfigDict(extra="allow")
 
@@ -44,6 +51,7 @@ class SandboxedVerifyResponse(BaseVerifyResponse, VerifierTestCounts):
     evaluation_completed: bool
     termination: AgentTermination
     infrastructure_error: str | None = None
+    sandbox_resource_limit: SandboxResourceLimit | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
     timings: dict[str, Any] = Field(default_factory=dict)
 

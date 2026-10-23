@@ -7,3 +7,18 @@ Data: N/A
 
 Dependencies
 - nemo_gym: Apache 2.0
+
+# Partial-rollout checkpointing
+
+With Gym checkpointing enabled, the legacy `/run` route can resume its resource
+seed, model wait, verification, or completed result. The model participant owns
+any saved generation prefix; this agent saves the boundary that reissues the
+matching call after recovery. A model reply already sent to `/run` is retained
+until the next boundary, so restoring in that window does not generate again.
+
+The single-step argument-comparison verifier is stateless and its verification
+can be replayed. Other resources servers report their own capabilities at seed:
+a restart-only resource still makes the rollout restart-only. This change does
+not add the native agent-session API, execute tools, or change verifier rewards.
+Direct `/v1/responses` calls without an owning `/run` remain restart-only.
+Checkpointing remains opt-in; existing non-checkpointed calls keep their contract.
