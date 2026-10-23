@@ -497,6 +497,7 @@ def _write_metrics(
 
 def _write_config(config_path: Path, out_path: Path, agent_ref: str) -> None:
     resource_server_name = agent_ref.replace("_agent", "_resources_server")
+    environment_server_name = agent_ref.replace("_agent", "_environment_server")
     config_text = f"""{resource_server_name}:
   resources_servers:
     single_step_tool_use_with_argument_comparison:
@@ -508,8 +509,10 @@ def _write_config(config_path: Path, out_path: Path, agent_ref: str) -> None:
       description: Generic message pivot dataset for single-step tool-use argument comparison.
 {agent_ref}:
   responses_api_agents:
-    tool_simulation_agent:
+    simple_agent:
       entrypoint: app.py
+      # One model call; its tool calls go to the verifier unexecuted.
+      execute_tools: false
       resources_server:
         type: resources_servers
         name: {resource_server_name}
@@ -522,6 +525,15 @@ def _write_config(config_path: Path, out_path: Path, agent_ref: str) -> None:
         jsonl_fpath: {out_path}
         num_repeats: 1
         license: TBD
+{environment_server_name}:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: {agent_ref}
+      default_episode_timeout_seconds: 21600
+      cleanup_timeout_seconds: 180
 """
     config_path.write_text(config_text)
 

@@ -8,8 +8,10 @@ directly at the generated JSONL:
 ```yaml
 example_single_step_tool_use_with_argument_comparison_agent:
   responses_api_agents:
-    tool_simulation_agent:
+    simple_agent:
       entrypoint: app.py
+      # One model call; its tool calls go to the verifier unexecuted.
+      execute_tools: false
       resources_server:
         type: resources_servers
         name: example_single_step_tool_use_with_argument_comparison_resources_server
@@ -22,7 +24,21 @@ example_single_step_tool_use_with_argument_comparison_agent:
         jsonl_fpath: /path/to/pivot.jsonl
         num_repeats: 1
         license: TBD
+
+example_single_step_tool_use_with_argument_comparison_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: example_single_step_tool_use_with_argument_comparison_agent
+      default_episode_timeout_seconds: 21600
+      cleanup_timeout_seconds: 180
 ```
+
+`simple_agent` with `execute_tools: false` runs only in agent sessions, so the config declares a
+`single_agent_turn_legacy` Environment Server for it; it binds the agent's resources server.
+`tool_simulation_agent` did the same job behind the `legacy_agent` relay and is deprecated.
 
 Place the config beside the generated pivot dataset when the user asks for a self-contained pivot
 bundle.
