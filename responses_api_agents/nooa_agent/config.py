@@ -76,13 +76,6 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         description="Budget in seconds for each sandbox close phase and for joining the remaining activation.",
     )
 
-    @field_validator("num_workers")
-    @classmethod
-    def require_single_worker(cls, value: int | None) -> int | None:
-        if value not in (None, 1):
-            raise ValueError("NOOA sessions require num_workers=1")
-        return value
-
     @field_validator("runtime_wheelhouse")
     @classmethod
     def normalize_runtime_wheelhouse(cls, value: Path | None) -> Path | None:

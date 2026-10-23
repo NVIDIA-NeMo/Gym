@@ -27,6 +27,7 @@ import pytest
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch, raises
 
+import nemo_gym.cli.dataset
 import nemo_gym.cli.env
 import nemo_gym.global_config
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
@@ -55,8 +56,14 @@ from nemo_gym.cli.env import (
     test_environment_manifest as run_manifest_test,
 )
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
-from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
+from nemo_gym.config_types import (
+    ConfigError,
+    ConfigPathNotFoundError,
+    NoServerInstancesError,
+    ResourcesServerInstanceConfig,
+)
 from nemo_gym.environment.scaffold import ScaffoldError
+from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
 from nemo_gym.registry import EnvironmentCatalogEntry
 
 
@@ -380,6 +387,63 @@ class TestRunHelperDryRunSpinup:
         runner = RunHelper()
         runner._processes = processes
         return runner
+
+    @pytest.mark.parametrize("source_checkout", [True, False], ids=["source-checkout", "wheel-install"])
+    def test_server_process_uses_resolved_component_root(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, source_checkout: bool
+    ) -> None:
+        server_dir = tmp_path / "responses_api_agents" / "example"
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text("nemo-gym\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        # A source checkout has pyproject.toml beside nemo_gym/; a wheel install's PARENT_DIR is
+        # site-packages, whose component root must not be put ahead of a server venv's own packages.
+        parent_dir = tmp_path / "gym-install"
+        parent_dir.mkdir()
+        if source_checkout:
+            (parent_dir / "pyproject.toml").write_text("[project]\nname = 'nemo-gym'\n", encoding="utf-8")
+        monkeypatch.setattr(nemo_gym.cli.env, "PARENT_DIR", parent_dir)
+
+        process = MagicMock(pid=123)
+        process.poll.return_value = 0
+        run = MagicMock(return_value=process)
+        server_client = MagicMock()
+        server_client.poll_for_status.return_value = "success"
+        server_client_cls = MagicMock(return_value=server_client)
+        server_client_cls.load_head_server_config.return_value = MagicMock()
+        config = OmegaConf.create(
+            {
+                "example": {
+                    "responses_api_agents": {
+                        "example": {
+                            "entrypoint": "app.py",
+                            "host": "127.0.0.1",
+                            "port": 5001,
+                        }
+                    }
+                },
+                "dry_run": True,
+                "uv_venv_dir": str(tmp_path),
+            }
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "run_command", run)
+        monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", lambda *_: "setup")
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", MagicMock(return_value=config))
+        monkeypatch.setattr(nemo_gym.cli.env, "initialize_ray", MagicMock())
+        monkeypatch.setattr(nemo_gym.cli.env, "ServerClient", server_client_cls)
+        monkeypatch.setattr(
+            nemo_gym.cli.env.HeadServer,
+            "run_webserver",
+            MagicMock(return_value=(MagicMock(), MagicMock(), MagicMock())),
+        )
+
+        runner = RunHelper()
+        runner.start(MagicMock())
+
+        assert run.call_args.kwargs["project_root"] == (tmp_path if source_checkout else None)
+        extra_env = run.call_args.kwargs["extra_env"]
+        assert extra_env[NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME] == "example"
+        assert OmegaConf.create(extra_env[NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME]) == config
 
     def _process(self, returncodes: list) -> MagicMock:
         process = MagicMock()
@@ -1012,6 +1076,18 @@ class TestExitCleanlyOnConfigError:
         status,
         pip_list,
     ]
+    # The `gym dataset` entrypoints read the config through their own module's `get_global_config_dict`, so they are
+    # listed (and patched) separately.
+    DECORATED_DATASET_COMMANDS = [
+        nemo_gym.cli.dataset.upload_jsonl_dataset_cli,
+        nemo_gym.cli.dataset.download_jsonl_dataset_cli,
+        nemo_gym.cli.dataset.upload_jsonl_dataset_to_hf_cli,
+        nemo_gym.cli.dataset.download_jsonl_dataset_from_hf_cli,
+        nemo_gym.cli.dataset.delete_jsonl_dataset_from_gitlab_cli,
+        nemo_gym.cli.dataset.upload_jsonl_dataset_to_hf_and_delete_gitlab_cli,
+        nemo_gym.cli.dataset.materialize_prompts_cli,
+        nemo_gym.cli.dataset.prepare_data,
+    ]
 
     def test_config_error_becomes_clean_exit(self) -> None:
         @exit_cleanly_on_config_error
@@ -1067,6 +1143,27 @@ class TestExitCleanlyOnConfigError:
 
         monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", _raise)
         monkeypatch.setattr(nemo_gym.cli.env, "_command_overrides", _raise)
+
+        with raises(RuntimeError, match="unexpected"):
+            command()
+
+    @pytest.mark.parametrize("command", DECORATED_DATASET_COMMANDS)
+    def test_dataset_command_exits_cleanly_on_config_error(self, monkeypatch: MonkeyPatch, command) -> None:
+        def _raise(*args, **kwargs):
+            raise ConfigPathNotFoundError("config_paths entry 'missing.yaml' was not found.")
+
+        monkeypatch.setattr(nemo_gym.cli.dataset, "get_global_config_dict", _raise)
+
+        with raises(SystemExit) as exc_info:
+            command()
+        assert exc_info.value.code == 1
+
+    @pytest.mark.parametrize("command", DECORATED_DATASET_COMMANDS)
+    def test_dataset_command_propagates_non_config_error(self, monkeypatch: MonkeyPatch, command) -> None:
+        def _raise(*args, **kwargs):
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(nemo_gym.cli.dataset, "get_global_config_dict", _raise)
 
         with raises(RuntimeError, match="unexpected"):
             command()

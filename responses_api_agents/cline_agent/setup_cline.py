@@ -38,7 +38,10 @@ _LOCAL_PREFIX = Path(__file__).parent / ".cline_node"
 
 
 def _cline_version(cline_bin: str) -> str | None:
-    result = subprocess.run([cline_bin, "--version"], capture_output=True, text=True)
+    # Without the opt-out, even `--version` ends by spawning a detached `npm update -g cline` that
+    # replaces the pinned install; see ClineAgent._env.
+    env = {**os.environ, "CLINE_NO_AUTO_UPDATE": "1"}
+    result = subprocess.run([cline_bin, "--version"], capture_output=True, text=True, env=env)
     if result.returncode != 0:
         return None
     match = re.search(r"\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b", result.stdout + result.stderr)
