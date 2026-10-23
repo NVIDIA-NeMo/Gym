@@ -76,7 +76,7 @@ jobs:
     name: Test
     needs: detect
     if: needs.detect.outputs.run_full == 'true' || needs.detect.outputs.run_servers == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - name: Checkout repository
@@ -103,6 +103,24 @@ jobs:
             echo "apt-get attempt $i/4 failed or timed out after 5m; retrying"
           done
           exit 1
+
+      # uutils 0.10.0 on Ubuntu 26.04 can let two non-recursive mkdir calls both succeed.
+      # The fix is in 0.11.0: https://github.com/uutils/coreutils/pull/13986.
+      - name: Install fixed uutils mkdir
+        run: |
+          version=0.11.0
+          archive="coreutils-${version}-x86_64-unknown-linux-musl.tar.gz"
+          install_dir="${RUNNER_TEMP}/uutils-${version}"
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://github.com/uutils/coreutils/releases/download/${version}/${archive}" \
+            --output "${RUNNER_TEMP}/${archive}"
+          echo "ac8e24885abf9062b80e8e86990d5727c186939c02fee777b1723e5c85293ca9  ${RUNNER_TEMP}/${archive}" | sha256sum --check
+          mkdir -p "${install_dir}/bin"
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${install_dir}" --strip-components=1
+          # Override only mkdir; keep every other system utility unchanged.
+          ln -s "${install_dir}/coreutils" "${install_dir}/bin/mkdir"
+          "${install_dir}/bin/mkdir" --version
+          echo "${install_dir}/bin" >> "${GITHUB_PATH}"
 
       # Unconditional (not gated on run_full) and merged into one step, matching
       # full-test-suite.yml's "Test" step, so the coverage gate below runs on every PR.
