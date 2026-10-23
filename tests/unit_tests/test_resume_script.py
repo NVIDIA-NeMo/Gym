@@ -143,12 +143,12 @@ def _run_prologue(
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 def test_max_retries_allows_exactly_that_many_retries(tmp_path):
     resume = ResumeConfig(max_retries=3)
-    for _ in range(3):
-        result = _run_prologue(tmp_path, resume, "FAILED")
+    for prev_job_id in ("100", "101", "102"):
+        result = _run_prologue(tmp_path, resume, "FAILED", prev_job_id=prev_job_id)
         assert result.returncode == 0, result.stdout
         assert "REACHED_WORK" in result.stdout
 
-    result = _run_prologue(tmp_path, resume, "FAILED")
+    result = _run_prologue(tmp_path, resume, "FAILED", prev_job_id="103")
     assert result.returncode == 1
     assert "REACHED_WORK" not in result.stdout
 
@@ -257,3 +257,28 @@ def test_a_chain_that_continues_clears_an_earlier_incomplete_marker(tmp_path):
     assert result.returncode == 0, result.stdout
     assert "REACHED_WORK" in result.stdout
     assert not (tmp_path / INCOMPLETE_MARKER_NAME).exists()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_requeued_job_counts_the_previous_jobs_walltime_once(tmp_path):
+    resume = ResumeConfig(max_walltime="00:02:30")
+    _run_prologue(tmp_path, resume, "TIMEOUT", prev_job_id="100")
+    # Slurm requeued the job: same job id, same previous job, so the script runs again with the same argument.
+    requeued = _run_prologue(tmp_path, resume, "TIMEOUT", prev_job_id="100")
+
+    assert (tmp_path / ".gym_accumulated_walltime").read_text().strip() == "60"
+    assert "REACHED_WORK" in requeued.stdout
+
+    _run_prologue(tmp_path, resume, "TIMEOUT", prev_job_id="101")
+    assert (tmp_path / ".gym_accumulated_walltime").read_text().strip() == "120"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_requeued_job_spends_one_infra_retry(tmp_path):
+    resume = ResumeConfig(max_retries=1)
+    _run_prologue(tmp_path, resume, "FAILED", prev_job_id="100")
+    requeued = _run_prologue(tmp_path, resume, "FAILED", prev_job_id="100")
+
+    assert requeued.returncode == 0, requeued.stdout
+    assert "REACHED_WORK" in requeued.stdout
+    assert (tmp_path / ".gym_infra_retries").read_text().strip() == "1"
