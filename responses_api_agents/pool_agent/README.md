@@ -119,8 +119,16 @@ failure remains an error even if the supervisor also reports a timeout.
 Gym's `agent_timeout_sec` request metadata can shorten the execution budget but
 cannot exceed either the configured timeout or the seeded task budget. Invalid
 budget values use that ceiling. Other request metadata remains unsupported.
-Runner hostname/PID are included in response metadata when available, and activation
-failures log a bounded tail of the captured stderr.
+Runner identity is included as `runner_hostname` and `runner_pid` in response metadata
+when available. The PID identifies the Python wrapper that launches Pool.
+Activation failures log a bounded tail of the captured stderr and save available raw
+trajectory, stdout, stderr, exit status, and cleanup diagnostics in a private JSON file
+under `failure_artifacts_dir` (default: `results/pool-agent-failures`) on the agent host.
+The log records the file path. These files survive sandbox cleanup; manage their
+retention on the host, and use persistent storage if the host is ephemeral. Raw output
+can contain task data. Set `failure_artifacts_dir: null` to disable saving. Missing
+artifacts cannot be recovered, and a write failure is logged without replacing the
+original execution error or preventing cleanup.
 
 Trajectory conversion preserves tool-call IDs and out-of-order results. Persisted
 thought events become reasoning items. Synthetic exit calls are omitted. Missing

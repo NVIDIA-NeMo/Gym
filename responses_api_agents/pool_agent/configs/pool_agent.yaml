@@ -13,5 +13,6 @@ pool_agent:
       setup_timeout: 900
       timeout: 900
       session_close_timeout_seconds: 60
+      failure_artifacts_dir: results/pool-agent-failures
       sandbox_provider: null
       sandbox_config: {}

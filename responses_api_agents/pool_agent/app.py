@@ -7,6 +7,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from shlex import quote
 from time import time
 from typing import ClassVar
@@ -56,6 +57,7 @@ class PoolAgentConfig(BaseResponsesAPIAgentConfig):
     setup_timeout: float = Field(default=900, gt=0, allow_inf_nan=False)
     timeout: float = Field(default=900, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    failure_artifacts_dir: Path | None = Path("results/pool-agent-failures")
     sandbox_provider: str | None = None
     sandbox_config: dict[str, JsonValue] = Field(default_factory=dict)
 
@@ -291,11 +293,27 @@ class PoolAgent(SimpleResponsesAPIAgent):
         if not isinstance(state, PoolSession):
             raise TypeError("Expected PoolSession")
         await state.close(timeout=self.config.session_close_timeout_seconds)
+        await self._preserve_failure(state)
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
             agent_observations=self._observations(state),
             cleanup_confirmed=state.session.cleanup_confirmed,
         )
+
+    async def _preserve_failure(self, state: PoolSession) -> None:
+        if state.failure and state.session.artifacts is not None and self.config.failure_artifacts_dir is not None:
+            try:
+                if state.failure_artifact_task is None:
+                    state.failure_artifact_task = asyncio.create_task(
+                        asyncio.to_thread(state.save_failure_artifacts, self.config.failure_artifacts_dir)
+                    )
+                await asyncio.wait_for(
+                    asyncio.shield(state.failure_artifact_task), timeout=self.config.session_close_timeout_seconds
+                )
+            except Exception:
+                if state.failure_artifact_task.done():
+                    state.failure_artifact_task = None
+                LOG.exception("Could not preserve Pool failure artifacts")
 
     async def _activate(self, state: PoolSession, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         timeout = resolve_agent_timeout(
@@ -352,8 +370,8 @@ class PoolAgent(SimpleResponsesAPIAgent):
                 metadata={
                     "harness_execution": "sandbox",
                     "pool_version": self.config.pool_version,
-                    **({"harness_hostname": artifacts.runner_hostname} if artifacts.runner_hostname else {}),
-                    **({"harness_pid": str(artifacts.runner_pid)} if artifacts.runner_pid is not None else {}),
+                    **({"runner_hostname": artifacts.runner_hostname} if artifacts.runner_hostname else {}),
+                    **({"runner_pid": str(artifacts.runner_pid)} if artifacts.runner_pid is not None else {}),
                 },
             )
         except BaseException as error:
@@ -361,6 +379,7 @@ class PoolAgent(SimpleResponsesAPIAgent):
             if artifacts is not None and artifacts.stderr:
                 LOG.error("Pool activation failed; stderr tail: %s", artifacts.stderr[-4096:])
             state.failure = type(error).__name__
+            await self._preserve_failure(state)
             raise
 
     async def responses(

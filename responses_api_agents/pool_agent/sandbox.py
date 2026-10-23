@@ -5,7 +5,9 @@
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+import os
+import tempfile
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from shlex import quote
 
@@ -42,6 +44,30 @@ class PoolSession(AgentSessionState):
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     failure: str | None = None
     installation_task: asyncio.Task[None] | None = None
+    failure_artifact_path: Path | None = None
+    failure_artifact_task: asyncio.Task[None] | None = None
+
+    def save_failure_artifacts(self, directory: Path) -> None:
+        """Keep captured failure evidence on the agent host after sandbox teardown."""
+        if self.failure_artifact_path is not None or self.session.artifacts is None:
+            return
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        payload = {
+            "agent_session_id": self.request.agent_session_id,
+            "failure": self.failure,
+            "cleanup": self.session.cleanup,
+            "artifacts": asdict(self.session.artifacts),
+        }
+        fd, name = tempfile.mkstemp(prefix="pool-", suffix=".json", dir=directory)
+        path = Path(name)
+        try:
+            with os.fdopen(fd, "w") as output:
+                json.dump(payload, output)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        self.failure_artifact_path = path
+        LOG.warning("Pool failure artifacts saved to %s", path)
 
     async def install(self, *, version: str, timeout: float) -> None:
         """Retain installation when a seed caller disconnects; close joins it before releasing the sandbox."""

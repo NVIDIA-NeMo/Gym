@@ -26,6 +26,7 @@ APP = "responses_api_agents.pool_agent.app"
 
 
 def agent(**kwargs) -> PoolAgent:
+    kwargs.setdefault("failure_artifacts_dir", None)
     return PoolAgent(
         config=PoolAgentConfig(
             host="localhost",
@@ -332,7 +333,7 @@ async def test_disconnected_waiter_does_not_cancel_shared_activation():
 
     async def activate(*args):
         started.set()
-        await release.wait()
+        await asyncio.wait_for(release.wait(), timeout=5)
         return MagicMock()
 
     with (
@@ -342,10 +343,10 @@ async def test_disconnected_waiter_does_not_cancel_shared_activation():
         waiter = asyncio.create_task(
             server.responses(request(), NeMoGymResponseCreateParamsNonStreaming(input="task"))
         )
-        await started.wait()
+        await asyncio.wait_for(started.wait(), timeout=5)
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await waiter
+            await asyncio.wait_for(waiter, timeout=5)
         assert not session.task.done()
         release.set()
         await session.task
@@ -536,7 +537,7 @@ async def test_cancelled_installer_waiter_does_not_release_or_duplicate_installa
 
     async def install(**kwargs):
         started.set()
-        await release.wait()
+        await asyncio.wait_for(release.wait(), timeout=5)
 
     with (
         patch.object(PoolSession, "_install", side_effect=install) as installer,
@@ -546,7 +547,7 @@ async def test_cancelled_installer_waiter_does_not_release_or_duplicate_installa
         await asyncio.wait_for(started.wait(), timeout=1)
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await waiter
+            await asyncio.wait_for(waiter, timeout=5)
         with pytest.raises(TimeoutError):
             await session.close(timeout=0.01)
         close.assert_not_awaited()
@@ -649,20 +650,20 @@ async def test_shutdown_waits_for_setup_and_closes_late_session():
 
     async def setup(body):
         entered.set()
-        await release.wait()
+        await asyncio.wait_for(release.wait(), timeout=5)
         return session
 
     with patch.object(PoolAgent, "_seed_agent_session_state", side_effect=setup):
         seed_task = asyncio.create_task(server.seed_agent_session(fresh_request(), session.request))
-        await entered.wait()
+        await asyncio.wait_for(entered.wait(), timeout=5)
         shutdown = asyncio.create_task(server._shutdown_sessions())
         await asyncio.sleep(0)
         assert not shutdown.done()
         release.set()
         with pytest.raises(HTTPException) as error:
-            await seed_task
+            await asyncio.wait_for(seed_task, timeout=5)
         assert error.value.status_code == 503
-        await shutdown
+        await asyncio.wait_for(shutdown, timeout=5)
     session.session.sandbox.stop.assert_awaited_once()
 
 
@@ -732,8 +733,8 @@ async def test_collect_and_response_preserve_runner_identity():
         patch.object(SandboxSession, "execute", return_value=artifacts),
     ):
         response = await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    assert response.metadata["harness_hostname"] == "sandbox-worker"
-    assert response.metadata["harness_pid"] == "123"
+    assert response.metadata["runner_hostname"] == "sandbox-worker"
+    assert response.metadata["runner_pid"] == "123"
 
 
 @pytest.mark.asyncio
@@ -766,7 +767,7 @@ async def test_shutdown_during_installation_joins_before_stopping_sandbox():
 
     async def install(*args, **kwargs):
         entered.set()
-        await release.wait()
+        await asyncio.wait_for(release.wait(), timeout=5)
 
     with (
         patch(APP + ".get_global_config_dict", return_value={}),
@@ -777,14 +778,14 @@ async def test_shutdown_during_installation_joins_before_stopping_sandbox():
         patch.object(PoolSession, "_install", side_effect=install),
     ):
         seeding = asyncio.create_task(server.seed_agent_session(fresh_request(), seed(borrowed=False)))
-        await entered.wait()
+        await asyncio.wait_for(entered.wait(), timeout=5)
         shutdown = asyncio.create_task(server._shutdown_sessions())
         await asyncio.sleep(0)
         sandbox.stop.assert_not_awaited()
         release.set()
         with pytest.raises(HTTPException, match="shut down"):
-            await seeding
-        await shutdown
+            await asyncio.wait_for(seeding, timeout=5)
+        await asyncio.wait_for(shutdown, timeout=5)
     sandbox.stop.assert_awaited_once()
 
 
@@ -799,7 +800,7 @@ async def test_shutdown_setup_deadline_retains_installation_for_later_close():
 
     async def install(*args, **kwargs):
         entered.set()
-        await release.wait()
+        await asyncio.wait_for(release.wait(), timeout=5)
 
     async def setup(body):
         try:
@@ -813,14 +814,14 @@ async def test_shutdown_setup_deadline_retains_installation_for_later_close():
         patch.object(PoolAgent, "_seed_agent_session_state", side_effect=setup),
     ):
         seeding = asyncio.create_task(server.seed_agent_session(fresh_request(), session.request))
-        await entered.wait()
+        await asyncio.wait_for(entered.wait(), timeout=5)
         await asyncio.wait_for(server._shutdown_sessions(), timeout=1)
         with pytest.raises(asyncio.CancelledError):
-            await seeding
+            await asyncio.wait_for(seeding, timeout=5)
         session.session.sandbox.stop.assert_not_awaited()
         assert server._session_records[session.request.agent_session_id].state is session
         release.set()
-        await session.installation_task
+        await asyncio.wait_for(session.installation_task, timeout=5)
         await server.close_agent_session(
             fresh_request(),
             AgentCloseSessionRequest(
@@ -828,3 +829,59 @@ async def test_shutdown_setup_deadline_retains_installation_for_later_close():
             ),
         )
     session.session.sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failure_artifacts_survive_close_without_duplicate_files(tmp_path):
+    server, session = agent(failure_artifacts_dir=tmp_path), state()
+    session.session.cleanup = receipt(timed_out=True, return_code=-15)
+    raw = events(event("session.exit", reason="model_next_tool_call_http_error"))
+    session.session.artifacts = PoolArtifacts(raw, "raw stdout", "HTTP 503", None)
+    with (
+        patch.object(PoolAgent, "model_endpoint", return_value=MagicMock(base_url="http://model/v1")),
+        patch.object(SandboxSession, "execute", return_value=session.session.artifacts),
+        pytest.raises(RuntimeError, match="model request failed"),
+    ):
+        await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    with patch.object(PoolSession, "close"):
+        await server._close_agent_session_state(session)
+    files = list(tmp_path.iterdir())
+    assert len(files) == 1
+    saved = json.loads(files[0].read_text())
+    assert saved["artifacts"]["trajectory"] == raw
+    assert saved["artifacts"]["stdout"] == "raw stdout"
+    assert saved["artifacts"]["stderr"] == "HTTP 503"
+    assert saved["failure"] == "RuntimeError"
+    assert saved["cleanup"]["timed_out"] is True
+    assert files[0].stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.asyncio
+async def test_failure_artifact_write_error_keeps_original_error_and_can_retry(tmp_path, caplog):
+    server, session = agent(failure_artifacts_dir=tmp_path), state()
+    session.session.artifacts = PoolArtifacts("partial", "", "", None)
+    with (
+        patch.object(PoolAgent, "model_endpoint", return_value=MagicMock(base_url="http://model/v1")),
+        patch.object(SandboxSession, "execute", side_effect=RuntimeError("original failure")),
+        patch.object(PoolSession, "save_failure_artifacts", side_effect=OSError("disk full")),
+        pytest.raises(RuntimeError, match="original failure"),
+    ):
+        await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert "Could not preserve Pool failure artifacts" in caplog.text
+    assert session.failure_artifact_task is None
+    with patch.object(PoolSession, "close"):
+        await server._close_agent_session_state(session)
+    assert json.loads(session.failure_artifact_path.read_text())["artifacts"]["trajectory"] == "partial"
+
+
+@pytest.mark.asyncio
+async def test_close_preserves_artifacts_collected_after_activation_failure(tmp_path):
+    server, session = agent(failure_artifacts_dir=tmp_path), state()
+    session.failure = "CancelledError"
+    await server._preserve_failure(session)
+    assert not list(tmp_path.iterdir())
+    # Close can collect output that was unavailable when activation was cancelled.
+    session.session.artifacts = PoolArtifacts("late output", "", "", None)
+    with patch.object(PoolSession, "close"):
+        await server._close_agent_session_state(session)
+    assert json.loads(session.failure_artifact_path.read_text())["artifacts"]["trajectory"] == "late output"
