@@ -8,16 +8,6 @@ set -euo pipefail
 # PROFILE_PREFILL=1 captures 20 worker steps, 300 seconds after API readiness.
 # PREFILL_PROFILE_STEPS, PREFILL_PROFILE_DELAY_SECONDS (or manual), and
 # PREFILL_PROFILE_DIR (default: results/nsys under SLURM_SUBMIT_DIR) override this.
-# PREFILL_PROFILE_TOOL=ncu selects kernel counters instead of the default nsys.
-# NCU captures up to PREFILL_NCU_LAUNCH_COUNT=3 matching launches per process
-# within the same worker-step window; PREFILL_NCU_LAUNCH_SKIP=0 skips matches.
-# PREFILL_NCU_KERNEL_REGEX='nvjet.*' selects compute kernels (use names from nsys).
-# PREFILL_NCU_SET=basic can be changed to detailed for additional counters.
-# NCU reports go to results/ncu unless PREFILL_PROFILE_DIR is set. Collection
-# continues serving after the limit; let the job exit orderly to finalize reports.
-# Example in VLLM_CONFIG: export PROFILE_PREFILL=1 PREFILL_PROFILE_TOOL=ncu
-# Do not select NCCL/NVSHMEM or other kernels requiring concurrent execution:
-# kernel replay serializes launches and can deadlock distributed communication.
 # Detailed tracing adds overhead; use separate runs for throughput measurements.
 # API-triggered captures exclude startup/graph construction. For those call sites,
 # enable cuBLAS logging before launch or collect a separate startup trace.
@@ -451,38 +441,26 @@ trigger_prefill_profile() {
     fi
 }
 
-ensure_prefill_profiler() {
-    local tool="\${PREFILL_PROFILE_TOOL:-nsys}" package title binary
-    case "\$tool" in
-        (nsys) package=nsight-systems-cli; title='Nsight Systems' ;;
-        (ncu) package=nsight-compute; title='Nsight Compute' ;;
-        (*) echo "ERROR: PREFILL_PROFILE_TOOL must be nsys or ncu." >&2; return 1 ;;
-    esac
-    if command -v "\$tool" >/dev/null 2>&1; then return; fi
-    # CUDA images sometimes include ncu without putting it on PATH.
-    if [[ "\$tool" == ncu ]]; then
-        for binary in /usr/local/cuda/bin/ncu /opt/nvidia/nsight-compute/*/ncu; do
-            if [[ -x "\$binary" ]]; then export PATH="\${binary%/*}:\$PATH"; return; fi
-        done
-    fi
+ensure_nsys() {
+    if command -v nsys >/dev/null 2>&1; then return; fi
     if [[ \$(id -u) != 0 ]] || ! command -v apt-get >/dev/null 2>&1; then
-        echo "ERROR: Installing \$title requires root inside an Ubuntu container; otherwise preinstall \$tool in the image." >&2
+        echo "ERROR: Installing Nsight Systems requires root inside an Ubuntu container; otherwise preinstall nsys in the image." >&2
         return 1
     fi
     local ID="" VERSION_ID="" arch
     source /etc/os-release
     if [[ "\$ID" != ubuntu ]]; then
-        echo "ERROR: Automatic \$title installation supports Ubuntu; preinstall \$tool for \$ID." >&2
+        echo "ERROR: Automatic Nsight Systems installation supports Ubuntu; preinstall nsys for \$ID." >&2
         return 1
     fi
     arch=\$(dpkg --print-architecture)
     if [[ "\$arch" != arm64 && "\$arch" != amd64 ]]; then
-        echo "ERROR: Unsupported \$title architecture: \$arch." >&2
+        echo "ERROR: Unsupported Nsight Systems architecture: \$arch." >&2
         return 1
     fi
-    echo "Prefill profiling: installing \$title for Ubuntu \$VERSION_ID / \$arch." >&2
+    echo "Prefill profiling: installing Nsight Systems CLI for Ubuntu \$VERSION_ID / \$arch." >&2
     # NVIDIA's devtools repository provides both the Arm SBSA and x86 CLI.
-    # Install only in this worker's container; existing installations are reused.
+    # Install only in this worker's container; existing nsys installations are reused.
     if ! (
         export DEBIAN_FRONTEND=noninteractive
         apt-get update &&
@@ -494,22 +472,17 @@ ensure_prefill_profiler() {
         printf '%s\\n' "deb [signed-by=/usr/share/keyrings/nvidia-devtools-keyring.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu\${VERSION_ID//./}/\$arch/ /" \
             | tee /etc/apt/sources.list.d/nvidia-devtools.list >/dev/null &&
         apt-get update &&
-        apt-get install -y --no-install-recommends "\$package" curl
+        apt-get install -y --no-install-recommends nsight-systems-cli curl
     ); then
-        echo "ERROR: \$title installation failed; check container write permissions and access to the Ubuntu/NVIDIA package repositories." >&2
+        echo "ERROR: Nsight Systems installation failed; check container write permissions and access to the Ubuntu/NVIDIA package repositories." >&2
         return 1
     fi
     hash -r
-    if [[ "\$tool" == ncu ]] && ! command -v ncu >/dev/null 2>&1; then
-        for binary in /opt/nvidia/nsight-compute/*/ncu; do
-            if [[ -x "\$binary" ]]; then export PATH="\${binary%/*}:\$PATH"; break; fi
-        done
-    fi
-    if ! command -v "\$tool" >/dev/null 2>&1; then
-        echo "ERROR: \$title installation completed but \$tool is still missing from PATH." >&2
+    if ! command -v nsys >/dev/null 2>&1; then
+        echo "ERROR: Nsight Systems installation completed but nsys is still missing from PATH." >&2
         return 1
     fi
-    "\$tool" --version
+    nsys --version
 }
 
 serve_prefill() {
@@ -533,25 +506,12 @@ serve_prefill() {
     for arg in "\$@"; do
         if [[ "\$arg" == --headless ]]; then api_worker=0; fi
     done
-    local profile_tool="\${PREFILL_PROFILE_TOOL:-nsys}"
-    local ncu_count="\${PREFILL_NCU_LAUNCH_COUNT:-3}" ncu_skip="\${PREFILL_NCU_LAUNCH_SKIP:-0}"
-    local ncu_regex="\${PREFILL_NCU_KERNEL_REGEX-nvjet.*}" ncu_set="\${PREFILL_NCU_SET:-basic}"
-    if [[ "\$profile_tool" == ncu ]]; then
-        if [[ ! "\$ncu_count" =~ ^[1-9][0-9]*\$ || ! "\$ncu_skip" =~ ^[0-9]+\$ ]]; then
-            echo "ERROR: PREFILL_NCU_LAUNCH_COUNT must be positive and PREFILL_NCU_LAUNCH_SKIP nonnegative integers." >&2
-            return 1
-        fi
-        if [[ -z "\$ncu_regex" ]]; then
-            echo "ERROR: PREFILL_NCU_KERNEL_REGEX must select compute kernels; an empty filter is unsafe for communication kernels." >&2
-            return 1
-        fi
-    fi
-    ensure_prefill_profiler || return 1
+    ensure_nsys || return 1
     if [[ "\$profile_delay" != manual ]] && (( api_worker )) && ! command -v curl >/dev/null 2>&1; then
         echo "ERROR: Automatic prefill profiling requires curl in the vLLM container." >&2
         return 1
     fi
-    local profile_dir="\${PREFILL_PROFILE_DIR:-\${SLURM_SUBMIT_DIR:-\$PWD}/results/\$profile_tool}"
+    local profile_dir="\${PREFILL_PROFILE_DIR:-\${SLURM_SUBMIT_DIR:-\$PWD}/results/nsys}"
     mkdir -p "\$profile_dir"
     # Background coupled heads and independent engines own their profiler/trigger.
     # The parent shell owns router and Mooncake cleanup.
@@ -560,30 +520,17 @@ serve_prefill() {
         trap 'exit 130' INT
         trap 'exit 143' TERM
     fi
-    local -a profiler_command
-    if [[ "\$profile_tool" == ncu ]]; then
-        # Profile individual compute kernels, including CUDA graph nodes. Never
-        # replay the whole server: incoming requests and distributed state change.
-        profiler_command=(ncu --target-processes all --profile-from-start off
-            --replay-mode kernel --graph-profiling node --kernel-name-base demangled
-            --kernel-name "regex:\$ncu_regex" --launch-count "\$ncu_count" --launch-skip "\$ncu_skip"
-            --set "\$ncu_set" --clock-control none --kill no --forward-signals
-            --export "\$profile_dir/prefill-\$SLURM_JOB_ID-\$this_node_hostname-port\$profile_port-%p")
-        echo "Prefill NCU: regex=\$ncu_regex set=\$ncu_set count=\$ncu_count skip=\$ncu_skip output=\$profile_dir" >&2
-        echo "Prefill NCU: kernel replay can slow serving substantially; use this run for kernel analysis, not throughput." >&2
-    else
-        # 'stop' ends collection without shutting down the serving process.
-        profiler_command=(nsys profile \
-            --trace=cuda,nvtx,osrt,nccl,cublas,cublas-verbose \
-            --nccl-trace=all --pytorch=functions-trace-shapes \
-            --gpu-metrics-devices=all \
-            --sample=process-tree --cpuctxsw=none \
-            --cudabacktrace=all --python-backtrace=cuda --python-sampling=true \
-            --trace-fork-before-exec=true --cuda-graph-trace=node \
-            --capture-range=cudaProfilerApi --capture-range-end=stop \
-            --output "\$profile_dir/prefill-\$SLURM_JOB_ID-\$this_node_hostname-port\$profile_port-%p")
-    fi
-    VLLM_WORKER_MULTIPROC_METHOD=spawn "\${profiler_command[@]}" \
+    # Trace graph nodes and child TP workers. 'stop' ends collection without
+    # shutting down the serving process; this captures one window per launch.
+    VLLM_WORKER_MULTIPROC_METHOD=spawn nsys profile \
+        --trace=cuda,nvtx,osrt,nccl,cublas,cublas-verbose \
+        --nccl-trace=all --pytorch=functions-trace-shapes \
+        --gpu-metrics-devices=all \
+        --sample=process-tree --cpuctxsw=none \
+        --cudabacktrace=all --python-backtrace=cuda --python-sampling=true \
+        --trace-fork-before-exec=true --cuda-graph-trace=node \
+        --capture-range=cudaProfilerApi --capture-range-end=stop \
+        --output "\$profile_dir/prefill-\$SLURM_JOB_ID-\$this_node_hostname-port\$profile_port-%p" \
         vllm serve "\$@" \
         --profiler-config "{\"profiler\":\"cuda\",\"max_iterations\":\$steps}" &
     profiler_pid=\$!
@@ -943,7 +890,7 @@ else
         # Install once before concurrent engines can race on the package manager.
         if [[ "$VLLM_MODE" == pd && "\${PROFILE_PREFILL:-0}" == 1 ]] && \
             (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
-            ensure_prefill_profiler || return 1
+            ensure_nsys || return 1
         fi
         for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
             worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))

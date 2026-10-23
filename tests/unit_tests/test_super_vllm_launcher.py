@@ -8,7 +8,6 @@ import shutil
 import signal
 import subprocess
 import unittest
-from itertools import product
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -1019,83 +1018,6 @@ nsys() {
                             config = json.loads(args[args.index("--profiler-config") + 1])
                             self.assertEqual(config, {"profiler": "cuda", "max_iterations": 7})
 
-    def test_prefill_ncu_wraps_only_prefill_and_preserves_filters(self) -> None:
-        recipe = str(SCRIPT.parent / "vllm_configs/nemotron_3.5_super.sh")
-        capture = Path(self.workdir) / "ncu_args"
-        stubs = r"""
-ncu() {
-    printf '%s\0' "$VLLM_WORKER_MULTIPROC_METHOD" "$@" > "$TEST_NCU_ARGS"
-    while [[ "$1" != vllm ]]; do shift; done
-    "$@"
-}
-nsys() { echo 'unexpected nsys' >&2; return 99; }
-"""
-        for mode, enabled, rank in product(("independent", "coupled", "aggregated"), ("0", "1"), (0, 1, 4)):
-            with self.subTest(mode=mode, enabled=enabled, rank=rank):
-                env = {
-                    "VLLM_CONFIG": recipe,
-                    "VLLM_MODE": "aggregated" if mode == "aggregated" else "pd",
-                    "VLLM_PD_DEPLOYMENT_MODE": "coupled" if mode == "coupled" else "independent",
-                    "PROFILE_PREFILL": enabled,
-                    "PREFILL_PROFILE_TOOL": "ncu",
-                    "PREFILL_PROFILE_DELAY_SECONDS": "manual",
-                    "PREFILL_NCU_KERNEL_REGEX": "nvjet.*|void gemm<float>",
-                    "PREFILL_NCU_LAUNCH_COUNT": "2",
-                    "PREFILL_NCU_LAUNCH_SKIP": "4",
-                    "PREFILL_NCU_SET": "detailed",
-                    "SLURM_SUBMIT_DIR": str(Path(self.workdir) / "with spaces"),
-                    "TEST_NCU_ARGS": str(capture),
-                }
-                capture.unlink(missing_ok=True)
-                _, command = self.generate_commands(env=env)
-                _, _, args, _ = self.serving_arguments(
-                    stubs + command, rank=rank, coupled_head=mode == "coupled" and rank == 0, env=env
-                )
-                should_profile = enabled == "1" and rank < 4 and mode != "aggregated"
-                self.assertEqual(capture.exists(), should_profile)
-                self.assertEqual("--profiler-config" in args, should_profile)
-                if not should_profile:
-                    continue
-                invocation = capture.read_text().removesuffix("\0").split("\0")
-                self.assertEqual(invocation[0], "spawn")
-                for flag, value in {
-                    "--target-processes": "all",
-                    "--profile-from-start": "off",
-                    "--replay-mode": "kernel",
-                    "--graph-profiling": "node",
-                    "--kernel-name-base": "demangled",
-                    "--kernel-name": "regex:nvjet.*|void gemm<float>",
-                    "--launch-count": "2",
-                    "--launch-skip": "4",
-                    "--set": "detailed",
-                    "--clock-control": "none",
-                    "--kill": "no",
-                    "--export": f"{env['SLURM_SUBMIT_DIR']}/results/ncu/prefill-12345-node{rank}-port8001-%p",
-                }.items():
-                    self.assertEqual(invocation[invocation.index(flag) + 1], value)
-                self.assertIn("--forward-signals", invocation)
-                self.assertEqual(json.loads(args[args.index("--profiler-config") + 1])["max_iterations"], 20)
-
-    def test_prefill_ncu_rejects_invalid_configuration_before_launch(self) -> None:
-        _, command = self.generate_commands()
-        setup = command.split('\nmooncake_pid=""', 1)[0]
-        stubs = "\nncu() { echo unexpected-launch; }\nvllm() { echo unexpected-launch; }\n"
-        for setting, value in (
-            ("PREFILL_PROFILE_TOOL", "typo"),
-            ("PREFILL_NCU_LAUNCH_COUNT", "0"),
-            ("PREFILL_NCU_LAUNCH_COUNT", "abc"),
-            ("PREFILL_NCU_LAUNCH_SKIP", "-1"),
-            ("PREFILL_NCU_KERNEL_REGEX", ""),
-        ):
-            with self.subTest(setting=setting, value=value):
-                status, stdout, stderr = self.run_shell(
-                    setup + stubs + "\nserve_prefill 8001 /test/model\n",
-                    env={"PROFILE_PREFILL": "1", "PREFILL_PROFILE_TOOL": "ncu", setting: value},
-                )
-                self.assertNotEqual(status, 0)
-                self.assertIn(setting, stderr)
-                self.assertNotIn("unexpected-launch", stdout)
-
     def test_prefill_profile_automatically_waits_for_health_and_warmup(self) -> None:
         _, command = self.generate_commands()
         setup = command.split('\nmooncake_pid=""', 1)[0]
@@ -1141,15 +1063,14 @@ curl() {
     if [[ "${*: -1}" == */start_profile ]]; then touch posted; fi
 }
 """
-        stubs += '\nncu() { nsys "$@"; }\n'
-        for tool, (delay, headless) in product(("nsys", "ncu"), (("0", False), ("0", True), ("manual", False))):
-            with self.subTest(tool=tool, delay=delay, headless=headless):
+        for delay, headless in (("0", False), ("0", True), ("manual", False)):
+            with self.subTest(delay=delay, headless=headless):
                 for name in ("posted", "urls"):
                     (Path(self.workdir) / name).unlink(missing_ok=True)
                 status, _, stderr = self.run_shell(
                     stubs + setup + '\nserve_prefill 8001 /test/model "$@"\n',
                     *(["--headless"] if headless else []),
-                    env={"PROFILE_PREFILL": "1", "PREFILL_PROFILE_TOOL": tool, "PREFILL_PROFILE_DELAY_SECONDS": delay},
+                    env={"PROFILE_PREFILL": "1", "PREFILL_PROFILE_DELAY_SECONDS": delay},
                 )
                 self.assertEqual(status, 0, stderr)
                 urls = Path(self.workdir) / "urls"
@@ -1184,13 +1105,13 @@ vllm() { echo 'unexpected server launch'; }
                 self.assertNotIn("unexpected server launch", stdout)
                 self.assertIn(expected, stderr)
 
-    def test_prefill_profile_installs_selected_tool_for_container_architecture(self) -> None:
+    def test_prefill_profile_installs_nsys_for_container_architecture(self) -> None:
         _, command = self.generate_commands()
         setup = command.split('\nmooncake_pid=""', 1)[0]
         # Stub every system mutation: installation must never touch the test host.
         stubs = r"""
 command() {
-    if [[ "$*" == "-v $PREFILL_PROFILE_TOOL" ]]; then [[ -f installed ]]; else builtin command "$@"; fi
+    if [[ "$*" == '-v nsys' ]]; then [[ -f installed ]]; else builtin command "$@"; fi
 }
 source() {
     if [[ "$1" == /etc/os-release ]]; then ID=ubuntu; VERSION_ID=24.04; else builtin source "$@"; fi
@@ -1200,30 +1121,27 @@ dpkg() { echo "$TEST_ARCH"; }
 apt-get() {
     echo "$*" >> apt_calls
     if [[ "$TEST_FAILURE" == apt ]]; then return 42; fi
-    if [[ " $* " == *" $TEST_PACKAGE "* && "$TEST_FAILURE" != missing ]]; then touch installed; fi
+    if [[ " $* " == *' nsight-systems-cli '* && "$TEST_FAILURE" != missing ]]; then touch installed; fi
 }
 mkdir() { [[ "$*" == '-p /usr/share/keyrings' ]]; }
 wget() { echo public-key; }
 gpg() { cat > key; [[ "$TEST_FAILURE" != key ]]; }
 tee() { cat > repository; }
 nsys() { echo "$*" >> nsys_calls; }
-ncu() { nsys "$@"; }
 """
-        for (tool, package), (arch, failure) in product(
-            (("nsys", "nsight-systems-cli"), ("ncu", "nsight-compute")),
-            (("arm64", "none"), ("amd64", "none"), ("arm64", "apt"), ("arm64", "key"), ("arm64", "missing")),
+        for arch, failure in (
+            ("arm64", "none"),
+            ("amd64", "none"),
+            ("arm64", "apt"),
+            ("arm64", "key"),
+            ("arm64", "missing"),
         ):
-            with self.subTest(tool=tool, arch=arch, failure=failure):
+            with self.subTest(arch=arch, failure=failure):
                 for name in ("installed", "apt_calls", "repository", "key", "nsys_calls"):
                     (Path(self.workdir) / name).unlink(missing_ok=True)
                 status, _, stderr = self.run_shell(
-                    stubs + setup + "\nensure_prefill_profiler\nensure_prefill_profiler\n",
-                    env={
-                        "TEST_ARCH": arch,
-                        "TEST_FAILURE": failure,
-                        "PREFILL_PROFILE_TOOL": tool,
-                        "TEST_PACKAGE": package,
-                    },
+                    stubs + setup + "\nensure_nsys\nensure_nsys\n",
+                    env={"TEST_ARCH": arch, "TEST_FAILURE": failure},
                 )
                 apt_calls = (Path(self.workdir) / "apt_calls").read_text().splitlines()
                 if failure == "none":
@@ -1234,7 +1152,7 @@ ncu() { nsys "$@"; }
                             "update",
                             "install -y --no-install-recommends wget gnupg ca-certificates",
                             "update",
-                            f"install -y --no-install-recommends {package} curl",
+                            "install -y --no-install-recommends nsight-systems-cli curl",
                         ],
                     )
                     self.assertEqual(
