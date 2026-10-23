@@ -14,11 +14,13 @@
 # limitations under the License.
 
 import json
+import os
 
 import pytest
 import yaml
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR, _resolve_under_cwd_or_install
+from nemo_gym.config_types import ConfigPathNotFoundError, PromptConfigMalformedError
 from nemo_gym.prompt import (
     PromptConfig,
     apply_prompt_to_row,
@@ -55,14 +57,45 @@ class TestLoadPromptConfig:
     def test_missing_user_key_raises(self, tmp_path):
         config_path = tmp_path / "prompt.yaml"
         config_path.write_text(yaml.dump({"system": "Hello"}))
-        with pytest.raises(Exception):
+        with pytest.raises(PromptConfigMalformedError, match=r"must be a mapping with a `user` template.*user: Field"):
             load_prompt_config(str(config_path))
 
     def test_non_mapping_yaml_raises(self, tmp_path):
         config_path = tmp_path / "prompt.yaml"
         config_path.write_text("- item1\n- item2\n")
-        with pytest.raises(Exception):
+        with pytest.raises(PromptConfigMalformedError, match="must be a mapping with a `user` template"):
             load_prompt_config(str(config_path))
+
+    def test_invalid_yaml_raises(self, tmp_path):
+        config_path = tmp_path / "prompt.yaml"
+        config_path.write_text("user: [unclosed\n")
+        with pytest.raises(PromptConfigMalformedError, match="is not valid YAML") as exc_info:
+            load_prompt_config(str(config_path))
+        assert str(config_path) in str(exc_info.value)
+
+    def test_missing_file_raises(self, tmp_path):
+        config_path = tmp_path / "missing.yaml"
+        with pytest.raises(ConfigPathNotFoundError, match="Prompt config '.*missing.yaml' was not found"):
+            load_prompt_config(str(config_path))
+
+    def test_errors_keep_their_builtin_bases(self, tmp_path):
+        # Callers such as environment/validation.py catch OSError / ValueError around this loader.
+        with pytest.raises(FileNotFoundError):
+            load_prompt_config(str(tmp_path / "missing.yaml"))
+        config_path = tmp_path / "prompt.yaml"
+        config_path.write_text(yaml.dump({"system": "Hello"}))
+        with pytest.raises(ValueError):
+            load_prompt_config(str(config_path))
+
+    def test_reads_a_pipe(self):
+        # `--prompt-config <(...)` passes a /dev/fd path, which exists but is not a regular file.
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, b'user: "{question}"\n')
+        os.close(write_fd)
+        try:
+            assert load_prompt_config(f"/dev/fd/{read_fd}").user == "{question}"
+        finally:
+            os.close(read_fd)
 
     def test_caching(self, tmp_path):
         config_path = tmp_path / "prompt.yaml"
@@ -285,3 +318,29 @@ class TestMaterializePrompts:
             materialize_prompts(str(input_path), str(prompt_path), str(output_path))
         # No partial output file should be written
         assert not output_path.exists()
+
+    def test_missing_input_raises_before_creating_output_dir(self, tmp_path):
+        prompt_path = tmp_path / "prompt.yaml"
+        prompt_path.write_text(yaml.dump({"user": "{question}"}))
+        output_path = tmp_path / "nested" / "output.jsonl"
+
+        with pytest.raises(ConfigPathNotFoundError, match=r"Input file not found: '.*missing.jsonl' \(--input\)"):
+            materialize_prompts(str(tmp_path / "missing.jsonl"), str(prompt_path), str(output_path))
+        assert not output_path.parent.exists()
+
+    def test_reads_input_from_a_pipe(self, tmp_path):
+        # `-i <(...)` and `-i /dev/stdin` pass a pipe, which exists but is not a regular file.
+        prompt_path = tmp_path / "prompt.yaml"
+        prompt_path.write_text(yaml.dump({"user": "{question}"}))
+        output_path = tmp_path / "output.jsonl"
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, (json.dumps({"question": "1+1?"}) + "\n").encode())
+        os.close(write_fd)
+        try:
+            materialize_prompts(f"/dev/fd/{read_fd}", str(prompt_path), str(output_path))
+        finally:
+            os.close(read_fd)
+
+        assert json.loads(output_path.read_text())["responses_create_params"]["input"] == [
+            {"role": "user", "content": "1+1?"}
+        ]
