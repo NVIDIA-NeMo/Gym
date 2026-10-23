@@ -65,6 +65,38 @@ def test_unknown_trajectory_kind_is_a_capture_error():
     assert result.trajectory_error
 
 
+def test_a_long_tool_output_keeps_its_start_and_end_and_says_how_much_is_left_out():
+    from resources_servers.partner_if.swe_app import TOOL_OUTPUT_LIMIT, shorten_tool_output
+
+    assert shorten_tool_output("x" * TOOL_OUTPUT_LIMIT) == "x" * TOOL_OUTPUT_LIMIT
+    start, marker, end = shorten_tool_output("A" * 300 + "B" * 1000 + "C" * 300).split("\n")
+    assert (start, end) == ("A" * (TOOL_OUTPUT_LIMIT // 2), "C" * (TOOL_OUTPUT_LIMIT // 2))
+    assert marker == f"[… {1600 - TOOL_OUTPUT_LIMIT:,} characters omitted …]"
+
+
+def test_swe_evidence_shortens_only_tool_outputs_and_answers_with_the_final_message():
+    from resources_servers.partner_if.swe_app import TOOL_OUTPUT_LIMIT, build_swe_evidence
+
+    # The SWE rubrics grade the agent's messages and tool calls, so those stay whole however long.
+    long = "x" * (TOOL_OUTPUT_LIMIT * 4)
+    bundle = build_swe_evidence(
+        context=[{"role": "user", "content": "Fix it"}],
+        system_prompt="Rules",
+        output=[
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": long}]},
+            {"type": "function_call", "call_id": "a", "name": "bash", "arguments": json.dumps({"command": long})},
+            {"type": "function_call_output", "call_id": "a", "output": long},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done"}]},
+        ],
+    )
+    message, call, result, final = bundle.trajectory
+    assert message.text == long and call.arguments == {"command": long}
+    start, marker, end = result.text.split("\n")
+    assert start == end == "x" * (TOOL_OUTPUT_LIMIT // 2) and "characters omitted" in marker
+    # Every message stays in the trajectory, so the answer need not repeat them.
+    assert (final.text, bundle.answer) == ("Done", "Done")
+
+
 def swe_server(**config):
     from resources_servers.partner_if.swe_app import SWEIFConfig
 

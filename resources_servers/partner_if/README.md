@@ -64,9 +64,10 @@ answer's own structure:
   of the first item that could not be scored or, for a row masked as a whole (such as an
   unsigned contract, unsupported input or output, a missing `verification_input` or a
   provider error), the row's own reason:
-  - `judge_unparseable` (Gym's kind): the judge replied, but its reply is incomplete or fails
-    the verdict protocol or validation for an item that gates reward. Unknown keys inside a
-    reference are dropped rather than rejected;
+  - `judge_unparseable` (Gym's kind): the judge replied twice, and both replies are incomplete or
+    fail the verdict protocol or validation for an item that gates reward. A reply that fails is
+    asked for again once, and the row keeps it, with its reason, in `judge_rejected_responses`.
+    Unknown keys inside a reference are dropped rather than rejected;
   - `partner_if:unscorable`: an IF item, or a prerequisite an IF item depends on, is
     unscorable: a capture the item needs is
     missing or failed, a live agent's trajectory is incomplete or does not match its tool
@@ -148,6 +149,10 @@ Running the sandboxed mode outside `gym` needs Gym's `sandbox` extra (`uv sync -
   - The contract carries the judge's copies of what the harness gives the actor: `actor_system_prompt`, which is
     required, and `tool_description_additions`, by tool ID. A contract without the prompt, or one that is not
     `live_agent`, is refused with HTTP 422 at seed and at verify.
+  - The judge sees every public message and tool call in order, with the arguments in full, and the tool outputs,
+    never reasoning. A tool output longer than `TOOL_OUTPUT_LIMIT` (500 characters) keeps its first and last 250,
+    with a `[… N characters omitted …]` marker between them, so that a long agent run fits the judge's input. The
+    answer is the agent's final message.
   - Verify extracts the actor's patch, stops its sandbox and runs Scale-SWE's native tests as a diagnostic, kept
     in `task_outcome`. That takes up to two more sandboxes of up to `evaluation_timeout` (1200 s) each, since an
     inconclusive result is retried once on a fresh sandbox. The native verdict never changes the reward.

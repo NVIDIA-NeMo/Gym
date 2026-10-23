@@ -40,7 +40,10 @@ task checks whether the model follows its instructions, graded against versioned
     deny-list and without the web, subagent and skill tools.
   - Set `context_window` on `partner_if_swe_agent` (262144 by default) to the policy model's: OpenCode compacts
     the conversation as it nears it.
-  - The judge grades the visible trajectory: tool calls, tool results and messages, never reasoning.
+  - The judge grades the visible trajectory, never reasoning: every agent message and tool call in order, with
+    the arguments in full, and the tool outputs. An output longer than 500 characters keeps its first and last 250,
+    with a `[… N characters omitted …]` marker between them. The SWE rubrics grade the agent's messages and tool
+    calls, and with whole outputs a long agent run would not fit the judge's input.
 - **Sandbox:** the tool and SWE tasks need OpenSandbox as configured: a provider with service endpoints and
   network policies.
   - Each tool rollout gets a fresh sandbox that holds only the row's tool backend: `python:3.13-slim`, one CPU
@@ -96,6 +99,8 @@ task checks whether the model follows its instructions, graded against versioned
   - A missing or truncated answer scores 0.
   - Infrastructure, capture and judge failures are masked, with `failure_kind` and `failure_reason`, and
     leave the score. So is an OpenCode run that `opencode_agent` reports as stopped by its deadline or failed.
+  - A judge reply that fails validation is asked for again once. If the second reply fails too, the row is masked
+    as `judge_unparseable`.
   - A SWE task whose setup fails, its row's own setup commands included, fails its seed: its sandbox stops and
     the rollout goes to the failures file.
   - Run with `route_failures_to_sidecar: true`, so a failed `/run` lands in `<output>_failures.jsonl` instead
@@ -135,4 +140,5 @@ For the exit-check evidence, turn on model-call capture with `++observability_en
 ++model_call_capture_dir=<absolute dir>`, then run `gym eval health-check <run dir>`. With OpenTelemetry on,
 add `sandbox` to the span groups to trace the tool and SWE sandboxes. The judge grades a rollout but is not part
 of it, so its calls stay out of the model-call capture: each row keeps the judge's request and reply in
-`judge_request` and `judge_response`, and checks on the judge's calls read them there.
+`judge_request` and `judge_response`, and any reply it asked for again in `judge_rejected_responses`. Checks on the
+judge's calls read them there.

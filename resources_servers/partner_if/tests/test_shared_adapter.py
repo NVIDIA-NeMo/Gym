@@ -110,6 +110,48 @@ async def test_invalid_shared_judge_output_preserves_receipts_and_remains_unscor
     assert result.grading_result.dimensions["if"].partial_score is None
 
 
+async def test_an_invalid_judge_reply_is_asked_again_once_and_the_second_reply_grades():
+    from resources_servers.partner_if.tests.test_shared_judge import verdict
+
+    invalid, valid = response('{"items": "not a verdict"}'), response(json.dumps(verdict(id="semantic")))
+    with patch(
+        "resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock, side_effect=[invalid, valid]
+    ) as call:
+        result = await server().verify(shared_request())
+    assert call.await_count == 2
+    assert call.await_args_list[0].kwargs["json"] == call.await_args_list[1].kwargs["json"]
+    assert not result.mask_sample and result.reward == 1
+    assert result.judge_response == valid
+    # The row keeps the rejected reply and why it was rejected.
+    [rejection] = result.judge_rejected_responses
+    assert rejection.response == invalid and rejection.reason
+
+
+async def test_a_second_invalid_judge_reply_is_unscorable_and_the_row_keeps_both_replies():
+    first, second = response('{"items": "not a verdict"}'), response('{"items": []}')
+    with patch(
+        "resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock, side_effect=[first, second]
+    ) as call:
+        result = await server().verify(shared_request())
+    assert call.await_count == 2
+    assert result.mask_sample and result.failure_kind == "judge_unparseable"
+    assert result.judge_response == second
+    assert [rejection.response for rejection in result.judge_rejected_responses] == [first]
+
+
+async def test_a_valid_judge_reply_is_not_asked_again_and_adds_no_rejections():
+    from resources_servers.partner_if.tests.test_shared_judge import verdict
+
+    raw = response(json.dumps(verdict(id="semantic")))
+    with patch(
+        "resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock, return_value=raw
+    ) as call:
+        result = await server().verify(shared_request())
+    assert call.await_count == 1
+    assert not result.mask_sample
+    assert "judge_rejected_responses" not in result.model_dump(mode="json")
+
+
 async def test_completion_protocol_error_keeps_independent_if_score_and_original_receipt():
     from resources_servers.partner_if.tests.test_shared_judge import verdict
 

@@ -84,22 +84,40 @@ def actor_contract(contract: GradingContract) -> GradingContract:
     return contract
 
 
+# A tool output longer than this keeps only its start and end. A long agent run's evidence must fit the judge's
+# input, and the SWE rubrics grade the agent's messages and tool calls, which stay whole.
+TOOL_OUTPUT_LIMIT = 500
+
+
+def shorten_tool_output(text: str, limit: int = TOOL_OUTPUT_LIMIT) -> str:
+    """The start and end of a tool output longer than `limit` characters, with a marker for what is left out."""
+    if len(text) <= limit:
+        return text
+    keep = limit // 2
+    return f"{text[:keep]}\n[… {len(text) - 2 * keep:,} characters omitted …]\n{text[-keep:]}"
+
+
 def build_swe_evidence(
     *,
     context: list[dict[str, JsonValue]],
     system_prompt: str,
     output: list[dict[str, JsonValue]],
 ) -> EvidenceBundle:
-    """Keep tool calls/results and public messages, never private reasoning."""
+    """Keep every public message and tool call in order, and the start and end of long tool outputs; never private
+    reasoning. The answer is the agent's final message, which the trajectory also holds."""
     bundle = EvidenceBundle(context=context, instructions=system_prompt)
     try:
-        bundle.trajectory = visible_events(output)
+        events = visible_events(output)
     except ValueError as error:
         bundle.trajectory_error = str(error)
         return bundle
-    if not bundle.trajectory:
+    if not events:
         raise NoAnswer(NO_ANSWER, "The trajectory has no visible events")
-    bundle.answer = "\n".join(event.text for event in bundle.trajectory if event.kind == "assistant")
+    bundle.trajectory = [
+        event.model_copy(update={"text": shorten_tool_output(event.text)}) if event.kind == "tool_result" else event
+        for event in events
+    ]
+    bundle.answer = next((event.text for event in reversed(bundle.trajectory) if event.kind == "assistant"), "")
     return bundle
 
 
