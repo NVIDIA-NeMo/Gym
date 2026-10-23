@@ -73,11 +73,17 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         [[ -n "$_prev_state" ]] && break
         sleep 10
     done
-    _prev_elapsed=$(sacct -j $_prev_slurm_job_id -P -n -o ElapsedRaw | head -n 1)
-    _prev_elapsed=${{_prev_elapsed:-0}}
+    # A requeued job keeps its job id and runs this script again with the same previous job.
+    # Count that job's walltime and retry once, on the first start. mkdir is atomic on shared filesystems.
+    _first_look=0
+    mkdir "$OUTPUT_DIR/.gym_prev_job_counted.$_prev_slurm_job_id" 2>/dev/null && _first_look=1
     _gym_accumulated=$(cat "$_walltime_file" 2>/dev/null || echo 0)
-    _gym_accumulated=$((_gym_accumulated + _prev_elapsed))
-    echo $_gym_accumulated > "$_walltime_file"
+    if [[ $_first_look == 1 ]]; then
+        _prev_elapsed=$(sacct -j $_prev_slurm_job_id -P -n -o ElapsedRaw | head -n 1)
+        _prev_elapsed=${{_prev_elapsed:-0}}
+        _gym_accumulated=$((_gym_accumulated + _prev_elapsed))
+        echo $_gym_accumulated > "$_walltime_file"
+    fi
 
     if [[ -z "$_prev_state" ]]; then
         # Accounting lag: the state is unknown, so resume without spending an infra retry.
@@ -92,8 +98,10 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
 {max_walltime_check}
     else
         _retries=$(cat "$_retry_file" 2>/dev/null || echo 0)
-        _retries=$((_retries + 1))
-        echo $_retries > "$_retry_file"
+        if [[ $_first_look == 1 ]]; then
+            _retries=$((_retries + 1))
+            echo $_retries > "$_retry_file"
+        fi
         if [[ $_retries -gt {max_retries} ]]; then
             echo "Infra retry limit ({max_retries}) reached after $_prev_state. Stopping."
             exit 1
