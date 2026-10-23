@@ -29,7 +29,7 @@ class AtifExporter(Exporter):
         config = self.config.model_copy(update={"rollouts_jsonl_fpath": artifacts.rollouts_jsonl_fpath})
         try:
             result = export_rollouts_to_atif(config)
-        except AtifExportError as exc:
+        except (AtifExportError, OSError) as exc:
             return ExportResult.failed(str(exc))
         return ExportResult.succeeded(
             output_dirpath=str(result.output_dirpath),

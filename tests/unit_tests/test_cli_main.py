@@ -307,6 +307,41 @@ class TestEvalExportExporterArgument:
 
         assert overrides == ["+exporter=atif", "+a=1", "+meta.k=v"]
 
+    def test_a_captured_override_follows_the_translated_flags_for_the_default_exporter(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            ["eval", "export", "++session_id=override", "--session-id", "original", "--rollouts", "r.jsonl"],
+        )
+
+        assert overrides.index("+session_id='original'") < overrides.index("++session_id=override")
+        assert overrides[0] == "+exporter=atif"
+
+    def test_hydra_settings_and_explicit_operators_are_left_alone(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "eval",
+                "export",
+                "atif",
+                "hydra.run.dir=/tmp/log",
+                "++a=1",
+                "~b",
+                "rollouts_jsonl_fpath=r.jsonl",
+                "meta.k=v",
+            ],
+        )
+
+        assert overrides == [
+            "+exporter=atif",
+            "hydra.run.dir=/tmp/log",
+            "++a=1",
+            "~b",
+            "+rollouts_jsonl_fpath=r.jsonl",
+            "+meta.k=v",
+        ]
+
     def test_positional_exporter_is_passed_as_an_override(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(monkeypatch, ["eval", "export", "atif", "rollouts_jsonl_fpath=r.jsonl"])
 
