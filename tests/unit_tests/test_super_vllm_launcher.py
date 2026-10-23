@@ -1039,7 +1039,7 @@ nsys() { echo 'unexpected nsys' >&2; return 99; }
                     "PROFILE_PREFILL": enabled,
                     "PREFILL_PROFILE_TOOL": "ncu",
                     "PREFILL_PROFILE_DELAY_SECONDS": "manual",
-                    "PREFILL_NCU_KERNEL_REGEX": "nvjet.*|void gemm<float>/100%",
+                    "PREFILL_NCU_KERNEL_REGEX": "nvjet.*|void gemm<float>",
                     "PREFILL_NCU_LAUNCH_COUNT": "2",
                     "PREFILL_NCU_LAUNCH_SKIP": "4",
                     "PREFILL_NCU_SET": "detailed",
@@ -1064,16 +1064,13 @@ nsys() { echo 'unexpected nsys' >&2; return 99; }
                     "--replay-mode": "kernel",
                     "--graph-profiling": "node",
                     "--kernel-name-base": "demangled",
-                    "--kernel-name": "regex:nvjet.*|void gemm<float>/100%",
+                    "--kernel-name": "regex:nvjet.*|void gemm<float>",
                     "--launch-count": "2",
                     "--launch-skip": "4",
                     "--set": "detailed",
                     "--clock-control": "none",
                     "--kill": "no",
-                    "--export": (
-                        f"{env['SLURM_SUBMIT_DIR']}/results/ncu/"
-                        f"prefill-12345-node{rank}-port8001-kernel-nvjet.__void_gemm_float__100_-%p"
-                    ),
+                    "--export": f"{env['SLURM_SUBMIT_DIR']}/results/ncu/prefill-12345-node{rank}-port8001-%p",
                 }.items():
                     self.assertEqual(invocation[invocation.index(flag) + 1], value)
                 self.assertIn("--forward-signals", invocation)
