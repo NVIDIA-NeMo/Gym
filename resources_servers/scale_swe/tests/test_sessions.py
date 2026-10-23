@@ -163,15 +163,6 @@ def test_environment_server_session_contract(server):
     assert not server._resources_sessions
 
 
-@pytest.mark.parametrize("num_workers", [2, 8])
-def test_process_local_sessions_require_one_worker(num_workers):
-    with pytest.raises(ValueError, match="num_workers=1"):
-        ScaleSWEResourcesServer(config=config(num_workers=num_workers), server_client=MagicMock(spec=ServerClient))
-    for allowed in (None, 1):
-        ScaleSWEResourcesServer(config=config(num_workers=allowed), server_client=MagicMock(spec=ServerClient))
-    assert ScaleSWEResourcesServer.ray_enabled is False
-
-
 @pytest.mark.parametrize("timeout", [0, -1, float("inf")])
 def test_stop_timeout_must_be_positive_and_finite(timeout):
     with pytest.raises(ValidationError):

@@ -125,7 +125,6 @@ names the session for `/verify`, and `/close_session` ends it.
 - **Stops.** The server waits up to `sandbox_stop_timeout_seconds` (default 120) for each stop, but never cuts
   a stop short. A stop that is still running, or that failed, leaves the sandbox with the session. Close then
   raises so the caller can retry, and a retried close or shutdown waits for that stop again or starts it again.
-- **One worker.** Sessions live in process memory, so the server refuses `num_workers` other than 1.
 - **Shutdown.** When the server shuts down, it stops every sandbox it still holds, for Environment Server
   sessions and cookie sessions alike, with the same bounded wait per stop. A session with a request still in
   progress gets that long to finish, and then its sandboxes are stopped anyway. A stop that fails is logged,

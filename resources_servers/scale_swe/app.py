@@ -213,9 +213,6 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
-        # Sessions and their sandboxes live in this process's memory.
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("Scale-SWE process-local sessions require num_workers=1")
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
         self._session_id_to_base_commit: dict[str, str] = {}

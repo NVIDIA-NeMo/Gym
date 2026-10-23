@@ -7,8 +7,6 @@ scale_swe_resources_server:
   resources_servers:
     scale_swe:
       allowed_agents: [opencode_sandboxed_agent]
-      # Sessions and their sandboxes live in one process; the server refuses more workers.
-      num_workers: 1
       entrypoint: app.py
       domain: coding
       verified: false
@@ -51,8 +49,6 @@ scale_swe_resources_server:
 scale_swe_golden_patch_resources_server:
   resources_servers:
     scale_swe:
-      # Sessions and their sandboxes live in one process; the server refuses more workers.
-      num_workers: 1
       entrypoint: app.py
       domain: coding
       verified: false
