@@ -403,8 +403,8 @@ async def test_an_agent_without_session_hooks_reports_its_rollouts_as_restarts_t
 
     assert prepared.json()["phase"] == "prepared"
     assert prepared.json()["report"]["restarts"] == ["r"] and prepared.json()["report"]["blockers"] == []
-    assert unattributed.json()["error"]["code"] == "rollout_id_required"
-    assert refused.json()["error"]["code"] == "restart_in_scope"
+    assert unattributed.json()["error"]["code"] == "checkpoint_rollout_id_required"
+    assert refused.json()["error"]["code"] == "checkpoint_restart_in_scope"
     assert committed.status_code == 200
     assert running and stopped
     assert await agent._restart_only.export(None) == []
@@ -995,7 +995,7 @@ async def test_a_retire_waits_for_a_seed_in_progress_which_frees_what_it_built()
 
     assert not done
     assert retired.status_code == 200
-    assert seeded.status_code == 409 and seeded.json()["error"]["code"] == "stale_attempt"
+    assert seeded.status_code == 409 and seeded.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert agent.events == ["freed s", "retire replied"]
     assert "s" not in agent._session_records and not participant.has_session("s") and participant.ready()
 
@@ -1038,7 +1038,7 @@ async def test_an_agent_that_builds_its_own_app_still_reports_its_runs_as_restar
 
     assert prepared.json()["phase"] == "prepared"
     assert prepared.json()["report"]["restarts"] == ["r"] and prepared.json()["report"]["blockers"] == []
-    assert unattributed.json()["error"]["code"] == "rollout_id_required"
+    assert unattributed.json()["error"]["code"] == "checkpoint_rollout_id_required"
     assert stopped
 
 
@@ -1108,7 +1108,7 @@ async def test_a_restart_only_seed_that_arrives_after_its_rollout_was_retired_is
         seeded = await http.post("/v1/agent_sessions", json=_SEED)
 
     assert retired.status_code == 200
-    assert seeded.status_code == 409 and seeded.json()["error"]["code"] == "stale_attempt"
+    assert seeded.status_code == 409 and seeded.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert "s" not in agent._session_records
 
 
@@ -1168,7 +1168,7 @@ async def test_a_restart_only_retire_frees_its_rollout_s_sessions_and_waits_for_
     assert live.status_code == other.status_code == 200
     assert not done
     assert retired.status_code == 200
-    assert seeded.status_code == 409 and seeded.json()["error"]["code"] == "stale_attempt"
+    assert seeded.status_code == 409 and seeded.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert sorted(agent.events[:2]) == ["stopped live", "stopped slow"] and agent.events[2:] == ["retire replied"]
     assert set(agent._session_records) == {"other"}
 

@@ -212,7 +212,7 @@ class _Channel:
                     {
                         "reply_to": message["id"],
                         "ok": False,
-                        "error": {"status": 422, "code": "invalid_checkpoint_state", "detail": str(error)},
+                        "error": {"status": 422, "code": "checkpoint_invalid_state", "detail": str(error)},
                     }
                 )
         except (ConnectionError, RuntimeError):

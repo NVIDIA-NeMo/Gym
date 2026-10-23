@@ -2221,9 +2221,9 @@ class TestCheckpointAcrossModelCalls:
         assert first.status_code == again.status_code == 200
         assert again.json() == first.json()
         assert calls_after_again == 1 and unchanged
-        assert ahead.status_code == 409 and ahead.json()["error"]["code"] == "activation_out_of_order"
+        assert ahead.status_code == 409 and ahead.json()["error"]["code"] == "checkpoint_activation_out_of_order"
         assert second.status_code == 200 and second.json()["id"] == "resp-2"
-        assert behind.status_code == 409 and behind.json()["error"]["code"] == "activation_out_of_order"
+        assert behind.status_code == 409 and behind.json()["error"]["code"] == "checkpoint_activation_out_of_order"
         # Without the header every invocation is a new activation, as before.
         assert unnumbered.status_code == 200 and unnumbered.json()["id"] == "resp-3"
 
@@ -2491,7 +2491,7 @@ async def test_an_activation_without_a_rollout_prefix_is_refused_only_with_check
 
     assert prefixed.status_code == 200, prefixed.json()
     if checkpointing:
-        assert unprefixed.status_code == 400 and unprefixed.json()["error"]["code"] == "rollout_id_required"
+        assert unprefixed.status_code == 400 and unprefixed.json()["error"]["code"] == "checkpoint_rollout_id_required"
         # The refused call started nothing, so the prefixed call is still activation 1.
         assert model_calls_after_unprefixed == 0 and server_client.post.await_count == 1
     else:
@@ -2533,8 +2533,8 @@ async def test_a_direct_responses_call_is_a_restart_and_one_without_a_rollout_is
 
     assert prepared.json()["phase"] == "prepared"
     assert prepared.json()["report"]["restarts"] == ["direct-1"] and prepared.json()["report"]["blockers"] == []
-    assert unattributed.status_code == 400 and unattributed.json()["error"]["code"] == "rollout_id_required"
-    assert refused.json()["error"]["code"] == "restart_in_scope"
+    assert unattributed.status_code == 400 and unattributed.json()["error"]["code"] == "checkpoint_rollout_id_required"
+    assert refused.json()["error"]["code"] == "checkpoint_restart_in_scope"
     assert retired.status_code == 200 and stopped
     assert len(calls) == 1
 

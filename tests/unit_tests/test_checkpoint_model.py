@@ -311,7 +311,7 @@ async def test_a_call_waiting_for_admission_is_refused_once_its_attempt_is_retir
         await participant.retire(EpisodeId(rollout_id="r"))
         refused = await asyncio.wait_for(waiting, timeout=5)
 
-    assert refused.status_code == 409 and refused.json()["error"]["code"] == "stale_attempt"
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_stale_attempt"
 
 
 async def test_a_call_waiting_at_closed_admission_stays_refused_after_its_retire_returns_and_the_rollout_is_forgotten() -> (
@@ -331,7 +331,7 @@ async def test_a_call_waiting_at_closed_admission_stays_refused_after_its_retire
         await participant.open_admission()
         refused = await asyncio.wait_for(waiting, timeout=5)
 
-    assert refused.status_code == 409 and refused.json()["error"]["code"] == "stale_attempt"
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert not participant.gate.served
 
 
@@ -349,8 +349,8 @@ async def test_a_call_waiting_at_closed_admission_stays_refused_after_a_retire_c
         await participant.open_admission()
         refused = await asyncio.wait_for(waiting, timeout=5)
 
-    assert retired.json()["error"]["code"] == "deadline_exceeded"
-    assert refused.status_code == 409 and refused.json()["error"]["code"] == "stale_attempt"
+    assert retired.json()["error"]["code"] == "checkpoint_deadline_exceeded"
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert not participant.gate.served
 
 
@@ -1160,7 +1160,7 @@ async def test_untagged_calls_neither_break_a_retire_nor_survive_as_untyped_erro
     for malformed in ("bad!id", "-a1"):
         with pytest.raises(ControlError) as refused:
             await participant.gate.admit(malformed)
-        assert refused.value.status_code == 400 and refused.value.code == "invalid_rollout_id"
+        assert refused.value.status_code == 400 and refused.value.code == "checkpoint_invalid_rollout_id"
 
 
 async def test_a_ticket_leaving_is_reported_even_if_giving_back_its_cut_fails() -> None:
@@ -1212,7 +1212,7 @@ async def test_after_a_restore_a_late_call_of_the_replaced_attempt_is_refused(tm
         replacement = await client.post("/ng-rollout/r-a1/v1/responses")
 
     assert restored.status_code == 200
-    assert late.status_code == 409 and late.json()["error"]["code"] == "stale_attempt"
+    assert late.status_code == 409 and late.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert replacement.status_code == 200
 
 
