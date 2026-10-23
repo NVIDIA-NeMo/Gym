@@ -15,6 +15,7 @@
 import asyncio
 import json
 import os
+import re
 import shlex
 import shutil
 import sqlite3
@@ -656,6 +657,209 @@ class TestOpenCodeSandboxedAgent:
         config = await server._create_opencode_config(request)
 
         assert config["provider"]["nemo_gym"]["options"]["baseURL"] == expected_base_url
+
+    async def test_create_opencode_config_merges_recursively(self, monkeypatch: MonkeyPatch) -> None:
+        """A nested override must not blow away its siblings in the generated config.
+
+        The old top-level dict spread meant `opencode_config.provider` dropped baseURL/apiKey and
+        `opencode_config.agent` dropped the generated title-disable, which is exactly what made
+        model.limit.input (the compaction trigger) unreachable from a benchmark yaml.
+        """
+        config_obj = self._create_config()
+        config_obj.opencode_max_context_window = 262144
+        config_obj.opencode_config = {
+            "agent": {"build": {"prompt": "You are a General Agent."}},
+            "provider": {"nemo_gym": {"models": {"dummy_model": {"limit": {"input": 65000}}}}},
+            "compaction": {"prune": False},
+        }
+        server = OpenCodeSandboxedAgent(config=config_obj, server_client=MagicMock(spec=ServerClient))
+        # Patch BOTH resolvers. get_server_url alone is not enough: the base URL goes through
+        # sandbox_server_url, which calls nemo_gym's own get_server_url via its module, so
+        # patching only this module's copy leaves the real lookup running against a config that
+        # has no registered servers -- ConfigKeyError on an empty key, from inside app code that
+        # is upstream and correct.
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.get_server_url",
+            lambda _name: "http://model-server",
+        )
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.sandbox_server_url",
+            lambda _name, **_kwargs: "http://model-server",
+        )
+        request = MagicMock()
+        request.json = AsyncMock(return_value={"responses_create_params": {"input": "solve"}})
+
+        config = await server._create_opencode_config(request)
+
+        nemo_gym = config["provider"]["nemo_gym"]
+        assert nemo_gym["options"]["baseURL"] == "http://model-server/v1"
+        assert nemo_gym["options"]["apiKey"] == "dummy_key"  # pragma: allowlist secret
+        # The one overridden leaf changes; its siblings keep the generated window.
+        assert nemo_gym["models"]["dummy_model"]["limit"] == {"context": 262144, "input": 65000, "output": 262144}
+        # `agent` is NOT part of the generated config, so there are no siblings to preserve and
+        # the override lands whole. This used to assert a generated {"title": {"disable": true}},
+        # which no version of _create_opencode_config has ever emitted -- the run title is a CLI
+        # flag (`opencode run --title`), not config. The assertion could not fail for the right
+        # reason, only pass for a wrong one.
+        assert config["agent"]["build"]["prompt"] == "You are a General Agent."
+        # A nested override of a key with no generated counterpart still merges rather than being
+        # skipped, and `false` survives: only None and "" mean "not set", because false and 0 are
+        # meaningful opencode values.
+        assert config["compaction"] == {"prune": False}
+        assert config["compaction"] == {"prune": False}
+
+    def test_resolve_opencode_env_picks_a_stable_key_per_question(self) -> None:
+        config = self._create_config()
+        config.opencode_env = {"OPENCODE_ENABLE_EXA": "true", "EXA_API_KEYS": "k0:k1, k2\nk3"}
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        first = server._resolve_opencode_env("who invented the thing?")
+        # The pool itself never reaches the sandbox, only the single resolved key.
+        assert "EXA_API_KEYS" not in first
+        assert first["OPENCODE_ENABLE_EXA"] == "true"
+        assert first["EXA_API_KEY"] in {"k0", "k1", "k2", "k3"}
+        # Same question -> same key, so retries do not hop keys.
+        assert server._resolve_opencode_env("who invented the thing?") == first
+        # Different questions spread over the pool rather than all landing on one key.
+        assert len({server._resolve_opencode_env(f"question {i}")["EXA_API_KEY"] for i in range(50)}) == 4
+
+    def test_resolve_opencode_env_edge_cases(self) -> None:
+        config = self._create_config()
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        # No pool configured -> nothing invented.
+        config.opencode_env = {"OPENCODE_ENABLE_EXA": "true"}
+        assert server._resolve_opencode_env("q") == {"OPENCODE_ENABLE_EXA": "true"}
+        # An explicit single key wins over the pool.
+        config.opencode_env = {"EXA_API_KEY": "pinned", "EXA_API_KEYS": "k0:k1"}
+        assert server._resolve_opencode_env("q") == {"EXA_API_KEY": "pinned"}
+        # An empty pool is not a key.
+        config.opencode_env = {"EXA_API_KEYS": "  "}
+        assert server._resolve_opencode_env("q") == {}
+
+    @mark.parametrize("via_stdin", [False, True], ids=("argv", "stdin"))
+    async def test_responses_builds_opencode_command(
+        self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch, via_stdin: bool
+    ) -> None:
+        """The `opencode run` command carries opencode_env, and stdin mode delivers the query verbatim.
+
+        The question below is shaped like a real BrowseComp row: it starts with a quoted proper
+        noun, which argv mode mangles because run.ts re-wraps any space-bearing argv in double
+        quotes and backslash-escapes the inner ones.
+        """
+        question = 'Which "Company A" was founded after 2002? Say "unknown" if unsure.'
+        config = self._create_config()
+        config.opencode_env = {"OPENCODE_ENABLE_EXA": "true", "EXA_API_KEYS": "k0:k1"}
+        config.opencode_query_via_stdin = via_stdin
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        sandbox_mock = MagicMock()
+
+        # Dispatch on the command rather than a fixed side_effect list. The export path issues
+        # several execs (install, session list, export, pwd) and a positional list silently
+        # mis-feeds them the moment that sequence changes -- which is how `session list` came to
+        # be handed "" and died in json.loads, surfacing as an unrelated assertion about
+        # await_args further down.
+        async def _exec(command: str = "", **_kwargs: Any) -> SimpleNamespace:
+            if "session list" in command:
+                return SimpleNamespace(
+                    stdout=json.dumps([{"id": "ses_123"}]), stderr="", return_code=0, error_type=None
+                )
+            if "pwd" in command:
+                return SimpleNamespace(stdout="my dir", stderr="", return_code=0, error_type=None)
+            return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+
+        sandbox_mock.exec = AsyncMock(side_effect=_exec)
+        sandbox_mock.download = AsyncMock()
+        # Maps sandbox_id -> sandbox. responses() runs opencode through `sandbox.exec`, so every
+        # command -- install, the run itself, `session list`, `export` -- lands on the same mock
+        # and is told apart by its text. An earlier version of this test stored a
+        # (sandbox, pty) tuple and asserted against a `pty.exec`, which no longer exists on this
+        # path; both made the run look like it never happened.
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+        # responses() also resolves the model/tool server URLs for the MCP wiring, independently
+        # of _create_opencode_config above. Without this the real lookup raises, responses()
+        # converts it into a failed response, pty.exec is never awaited, and the assertion below
+        # fails on await_args being None -- which reads like a command-building bug and is not.
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.sandbox_server_url",
+            lambda _name, **_kwargs: "http://model-server",
+        )
+        # The export path also snapshots opencode's SQLite database to pick up subagent messages.
+        # That is a real file open, which Path.exists/read_text below cannot stand in for, and
+        # this test is about the COMMAND rather than observations -- those are covered by
+        # test_run_builds_observations_from_live_wal_snapshot, which builds an actual database.
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app._read_opencode_child_messages",
+            lambda _db_path, _root_session_id: [],
+        )
+        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.Path.exists", lambda self: True)
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.Path.read_text",
+            lambda self: json.dumps(opencode_export_test_data),
+        )
+
+        await server.responses(
+            request=MagicMock(session={SESSION_ID_KEY: "s"}, cookies={"sandbox_id": ""}, path_params={}),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": question}]),
+        )
+
+        # Pick the `opencode run` exec out of the several the export path issues, rather than
+        # assuming a position. `next` raises StopIteration if the run never happened, which is a
+        # clearer failure than indexing into None.
+        run_commands = [
+            call.kwargs["command"]
+            for call in sandbox_mock.exec.await_args_list
+            if "opencode run" in (call.kwargs.get("command") or "")
+        ]
+        assert len(run_commands) == 1, f"expected exactly one `opencode run` exec, got {len(run_commands)}"
+        command = run_commands[0]
+        # The pool is resolved away; exactly one key is exported.
+        assert "OPENCODE_ENABLE_EXA=true" in command
+        assert "EXA_API_KEYS" not in command
+        assert re.search(r"EXA_API_KEY=k[01]\b", command)
+
+        # Recover the argv the sandbox shell would build. shlex is the right lexer here (a
+        # BrowseComp question contains both spaces and newlines, so neither splitlines nor a naive
+        # split survives it); `&&` separates the chained commands.
+        def chain(tokens: list[str]) -> list[list[str]]:
+            out: list[list[str]] = [[]]
+            for token in tokens:
+                if token == "&&":
+                    out.append([])
+                else:
+                    out[-1].append(token)
+            return out
+
+        commands = chain(shlex.split(command))
+
+        def run_argv(chained: list[list[str]]) -> list[str]:
+            # The run is prefixed by VAR=value assignments in the same chain entry, so slice from
+            # the binary rather than expecting it first.
+            for entry in chained:
+                for i in range(len(entry) - 1):
+                    if entry[i] == "opencode" and entry[i + 1] == "run":
+                        return entry[i:]
+            raise AssertionError(f"no `opencode run` in command: {command}")
+
+        argv = run_argv(commands)
+
+        if via_stdin:
+            # No positional message at all, so run.ts's `message` is "" and resolveRunInput returns
+            # the piped text untouched. A bare "--" would put us back on the quote-rewrapping path.
+            assert "--" not in argv, argv
+            assert argv[-2] == "<", argv
+            query_file = argv[-1]
+
+            # printf '%s' <question> > <query_file>, seeded before the run in the same && chain.
+            seed = next(c for c in commands if c and c[0] == "printf")
+            assert seed[seed.index("%s") + 1] == question
+            assert seed[-1] == query_file
+        else:
+            assert "<" not in argv, argv
+            assert argv[-2] == "--", argv
+            assert argv[-1] == question, argv
 
     @mark.parametrize(
         "database_name,snapshot_failure",
