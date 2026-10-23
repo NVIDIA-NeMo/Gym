@@ -852,6 +852,32 @@ def test_switch_keeps_a_relay_that_another_config_merges_with_a_legacy_agent_ser
     )
 
 
+def test_switch_keeps_every_declaration_of_a_relay_another_config_merges_with_a_legacy_agent_server(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A middle config overrides the relay under its own name, so two files declare the one instance.
+    base = tmp_path / "base.yaml"
+    base.write_text(AGENT_CONFIG + RELAY)
+    middle = tmp_path / "middle.yaml"
+    middle.write_text(
+        f"config_paths:\n  - {base}\n"
+        "my_environment_server:\n  environment_servers:\n    legacy_agent:\n      agent_server:\n"
+        "        name: my_simple_agent\n"
+    )
+    variant = tmp_path / "variant.yaml"
+    variant.write_text(HARNESS_OVERRIDE.format(base=middle))
+    monkeypatch.setattr(migration, "repo_config_files", lambda: [variant])
+    before = (base.read_text(), middle.read_text())
+
+    assert migration.main(["--switch-simple-agent", str(base), str(middle)]) == 0
+
+    assert (base.read_text(), middle.read_text()) == before
+    out = capsys.readouterr().out
+    assert f"stays on the relay: my_environment_server in {base}: {variant} merges it" in out
+    assert f"stays on the relay: my_environment_server in {middle}: {variant} merges it" in out
+    assert list(_parse(variant, strict=True)["my_environment_server"]["environment_servers"]) == ["legacy_agent"]
+
+
 def test_switch_refuses_a_child_relay_another_config_merges_with_a_legacy_agent_server(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
