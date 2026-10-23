@@ -359,6 +359,6 @@ def test_environment_servers_retain_locked_local_gym_dependencies() -> None:
         assert component["source"] == {"virtual": "."}
         gym = next(dependency for dependency in component["dependencies"] if dependency["name"] == "nemo-gym")
         assert "dev" in gym["extra"]
-        if project.name == "harbor":
+        if project.name in ("harbor", "swe_together"):
             assert "sandbox" in gym["extra"]
             assert {"tenacity", "opensandbox", "daytona", "e2b", "boto3"} <= packages.keys()
