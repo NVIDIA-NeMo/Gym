@@ -14,6 +14,7 @@ package imports from here.
 import base64
 import hashlib
 import json
+import logging
 import re
 import time
 import urllib.error
@@ -137,6 +138,50 @@ def parse_image_ref(reference: str) -> ImageRef:
     if not repository:
         raise ImageConfigError(f"Not an image reference: {reference!r}")
     return ImageRef(registry=registry, repository=repository, tag=tag or None, digest=digest or None)
+
+
+def credentials_for_image_prefixes(auth: Any, where: str = "images.auth") -> dict[str, tuple[str, str]]:
+    """:class:`RegistryClient` credentials from a sandbox provider's image-prefix auth map.
+
+    OpenSandbox's ``images.auth`` maps an image prefix (``registry.example.com:5005/``, ``docker.io/org/``)
+    to ``{username, password}``; the registry client keys credentials by registry host, so each prefix's host is
+    taken the way Docker reads a reference (:func:`parse_image_ref`: the first component is a host when it has a
+    dot, a colon or is ``localhost``, else the prefix names a Docker Hub repository). Several prefixes of one
+    host with the same credentials are one entry; with different ones the shortest prefix (the host's broadest
+    rule) wins and the others are named in a warning. ``auth`` that is not a mapping of such entries raises
+    :class:`ValueError` naming ``where``.
+    """
+    if auth is None:
+        return {}
+    if not isinstance(auth, dict):
+        raise ValueError(f"`{where}` must map an image prefix to {{username, password}}")
+    chosen: dict[str, tuple[str, str]] = {}
+    chosen_prefix: dict[str, str] = {}
+    for prefix in sorted(auth, key=lambda value: (len(str(value)), str(value))):
+        entry = auth[prefix]
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("username"), str)
+            or not isinstance(entry.get("password"), str)
+        ):
+            raise ValueError(f"`{where}.{prefix}` must hold a `username` and a `password` string")
+        try:
+            registry = parse_image_ref(str(prefix).rstrip("/") + "/x").registry
+        except ImageConfigError as exc:
+            raise ValueError(f"`{where}.{prefix}` is not an image prefix: {exc}") from exc
+        credentials = (entry["username"], entry["password"])
+        if registry not in chosen:
+            chosen[registry], chosen_prefix[registry] = credentials, str(prefix)
+        elif chosen[registry] != credentials:
+            logging.getLogger(__name__).warning(
+                "%s: prefixes %r and %r name registry %s with different credentials; prepare reads that registry "
+                "with the shorter prefix's (the sandbox provider still applies each prefix's own at pull)",
+                where,
+                chosen_prefix[registry],
+                prefix,
+                registry,
+            )
+    return chosen
 
 
 class _RedirectHandler(urllib.request.HTTPRedirectHandler):

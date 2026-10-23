@@ -147,9 +147,49 @@ class TestTaskConfig:
         with pytest.raises(ValueError, match="Conflicting"):
             HarborTaskConfig.model_validate({"environment": {"memory": "1G", "memory_mb": 512}})
 
-    def test_multi_step_is_rejected_for_now(self):
-        with pytest.raises(ValueError, match="Multi-step"):
-            HarborTaskConfig.model_validate({"steps": [{"name": "a"}]})
+    def test_steps_are_parsed_with_harbor_fallbacks(self):
+        config = HarborTaskConfig.model_validate(
+            {
+                "agent": {"timeout_sec": 600},
+                "verifier": {"timeout_sec": 120},
+                "multi_step_reward_strategy": "final",
+                "steps": [
+                    {"name": "plan", "agent": {"timeout_sec": 30}, "min_reward": 0.5},
+                    {"name": "build", "verifier": {"timeout_sec": 900, "env": {"K": "v"}}},
+                ],
+            }
+        )
+        plan, build = config.steps
+        assert config.is_multi_turn and config.multi_step_reward_strategy == "final"
+        assert (config.step_agent_timeout_sec(plan), config.step_verifier_timeout_sec(plan)) == (30, 120)
+        assert (config.step_agent_timeout_sec(build), config.step_verifier_timeout_sec(build)) == (600, 900)
+        assert plan.min_reward == 0.5 and build.verifier.env == {"K": "v"}
+        assert HarborTaskConfig.model_validate({}).multi_step_reward_strategy == "mean"
+
+    def test_legacy_multi_step_reward_mode_is_read_as_harbor_reads_it(self):
+        """Harbor 0.22.0 has no `multi_step_reward_mode` field: `TaskConfig` drops the key as unknown and a multi-step
+        task rolls up with its default, `mean`. The mirror accepts the old spelling and drops it to the same outcome;
+        what it adds is that the key is known, so the loader does not report it."""
+        steps = [{"name": "a"}, {"name": "b"}]
+        legacy = HarborTaskConfig.model_validate(
+            {"version": "1.0", "multi_step_reward_mode": "aggregate", "steps": steps}
+        )
+        assert (legacy.schema_version, legacy.multi_step_reward_strategy) == ("1.0", "mean")
+        # Known, so the loader does not report it as an unknown key.
+        assert HarborTaskConfig.unknown_keys({"version": "1.0", "multi_step_reward_mode": "aggregate"}) == []
+        # The current key beside it wins, as under Harbor, which never reads the legacy one.
+        both = HarborTaskConfig.model_validate(
+            {"multi_step_reward_mode": "aggregate", "multi_step_reward_strategy": "final", "steps": steps}
+        )
+        assert both.multi_step_reward_strategy == "final"
+        # A value Harbor would drop is dropped here too, never read as a strategy.
+        dropped = HarborTaskConfig.model_validate({"multi_step_reward_mode": "final", "steps": steps})
+        assert dropped.multi_step_reward_strategy == "mean"
+
+    @pytest.mark.parametrize("steps", [[{"name": "a"}, {"name": "a"}], [{"name": "../up"}]])
+    def test_step_names_are_unique_portable_folders(self, steps):
+        with pytest.raises(ValueError, match="Step name"):
+            HarborTaskConfig.model_validate({"steps": steps})
 
     def test_docker_image_is_optional(self):
         assert HarborTaskConfig.model_validate({}).environment.docker_image is None
@@ -856,6 +896,186 @@ class TestMaterialize:
         assert "resources_servers" not in " ".join(config)
 
 
+MULTI_STEP_TOML = (
+    'multi_step_reward_strategy = "final"\n'
+    + HELLO_TOML
+    + """
+[[steps]]
+name = "01_plan"
+[steps.agent]
+timeout_sec = 2400.0
+
+[[steps]]
+name = "02_implement"
+"""
+)
+
+
+def write_multi_step_task(root: Path, *, hidden_spec: str = "The full spec only the simulated user may read.") -> Path:
+    write_task(root, toml=MULTI_STEP_TOML)
+    (root / "instruction.md").write_text(hidden_spec)
+    for name, instruction in (("01_plan", "Agree on a plan with the maintainer."), ("02_implement", "Implement it.")):
+        (root / "steps" / name / "tests").mkdir(parents=True)
+        (root / "steps" / name / "instruction.md").write_text(instruction)
+        (root / "steps" / name / "tests" / "test.sh").write_text("#!/bin/bash\necho 1 > /logs/verifier/reward.txt\n")
+    return root
+
+
+# The shape of one task of the memory team's MemoryArenaBundledShopping dataset (round 24): its task.toml, Dockerfile
+# and Compose file as the adapter writes them (with a placeholder sidecar image), and per step a one-line
+# instruction.md and stub solve.sh / test.sh in place of the dataset's own scripts, which the loader never reads.
+MEMORY_ARENA_TASK = Path(__file__).parent / "fixtures" / "harbor_memory_arena_bundled_shopping" / "0000-baking-item-0"
+MEMORY_ARENA_STEPS = [
+    "01-select-cake-base",
+    "02-select-frosting",
+    "03-select-coloring-base",
+    "04-select-sprinkles",
+    "05-select-theme-topper",
+    "06-select-candles",
+]
+
+
+class TestMultiStepTasks:
+    def test_memory_arena_bundled_shopping_loads_as_harbor_reads_it(self, tmp_path, caplog):
+        """The MemoryArenaBundledShopping shape: legacy `version = "1.0"` and `multi_step_reward_mode = "aggregate"`,
+        a streamable-http MCP sidecar declared in a Compose file, six `[[steps]]` with their own agent and verifier
+        budgets, each with instruction.md, solution/solve.sh and tests/test.sh, and no top-level instruction, tests or
+        solution. Harbor 0.22.0 reads it as schema 1.0 with the `mean` roll-up, without a word about the old keys."""
+        dataset = tmp_path / "MemoryArenaBundledShopping"
+        shutil.copytree(MEMORY_ARENA_TASK, dataset / MEMORY_ARENA_TASK.name)
+        # The overlay-mode Dockerfile (RUN lines on python:3.12-slim) needs the base image's recorded configuration.
+        write_image_config(dataset, "python:3.12-slim", Env=[f"PATH={IMAGE_PATH}"], WorkingDir="")
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+            task = load_task(dataset / MEMORY_ARENA_TASK.name)
+        assert "unknown key" not in caplog.text and "legacy key" not in caplog.text
+
+        config = task.config
+        assert (config.schema_version, config.multi_step_reward_strategy) == ("1.0", "mean")
+        assert config.is_multi_turn and config.is_shared_verifier
+        assert [turn.name for turn in task.turns] == MEMORY_ARENA_STEPS
+        budgets = {
+            (config.step_agent_timeout_sec(t.config), config.step_verifier_timeout_sec(t.config)) for t in task.turns
+        }
+        assert budgets == {(1800.0, 1800.0)}
+        assert all(turn.instruction.startswith("# MemoryArena Bundled Shopping") for turn in task.turns)
+        assert all((task.path / turn.tests_dir / "test.sh").is_file() for turn in task.turns)
+        assert all((task.path / "steps" / turn.name / "solution" / "solve.sh").is_file() for turn in task.turns)
+        # No top-level instruction, tests or solution: the steps carry them, so the task is validatable through its
+        # steps' own solutions, each resolved per turn as Harbor's oracle resolves them (`turn_solution_dir`).
+        assert task.instruction == "" and not (task.path / "tests").exists() and not (task.path / "solution").exists()
+        assert task.has_solution
+        assert [task.turn_solution_dir(turn) for turn in task.turns] == [
+            task.path / "steps" / name / "solution" for name in MEMORY_ARENA_STEPS
+        ]
+        [mcp] = config.environment.mcp_servers
+        assert (mcp.name, mcp.transport, mcp.url) == ("webshop", "streamable-http", "http://mcp-server:8000/mcp")
+        env = config.environment
+        assert (env.cpus, env.memory_mb, env.storage_mb, env.gpus) == (4, 16384, 65536, 0)
+        assert (env.network_mode, env.build_timeout_sec) == ("public", 7200.0)  # allow_internet = true
+        assert task.needs_compose and task.image == "python:3.12-slim" and task.workdir == "/app"
+        assert len(task.overlay) == 1 and task.user is None
+        # The rows carry one input per step, in order.
+        row = materialize_task(task, "ds").model_dump(mode="json", exclude_unset=True)
+        assert [turn["name"] for turn in row["task_input"]["turns"]] == MEMORY_ARENA_STEPS
+
+    def test_a_legacy_reward_mode_harbor_would_drop_is_dropped_with_a_warning(self, tmp_path, caplog):
+        root = write_multi_step_task(tmp_path / "t")
+        toml = MULTI_STEP_TOML.replace('multi_step_reward_strategy = "final"\n', 'multi_step_reward_mode = "final"\n')
+        (root / "task.toml").write_text(toml)
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+            task = load_task(root)
+        assert task.config.multi_step_reward_strategy == "mean"
+        messages = [record.getMessage() for record in caplog.records]
+        assert [m for m in messages if "ignoring legacy key `multi_step_reward_mode = 'final'`" in m]
+        assert not [m for m in messages if "unknown key" in m]
+
+    def test_steps_load_as_turns_with_their_own_instructions(self, tmp_path):
+        task = load_task(write_multi_step_task(tmp_path / "t"))
+        assert [(turn.name, turn.instruction) for turn in task.turns] == [
+            ("01_plan", "Agree on a plan with the maintainer."),
+            ("02_implement", "Implement it."),
+        ]
+        assert task.config.multi_step_reward_strategy == "final"
+
+    def test_rows_carry_one_input_per_turn_and_never_the_top_level_instruction(self, tmp_path):
+        hidden = "The full spec only the simulated user may read."
+        task = load_task(write_multi_step_task(tmp_path / "t", hidden_spec=hidden))
+        row = materialize_task(task, "ds").model_dump(mode="json", exclude_unset=True)
+        assert hidden not in json.dumps(row)
+        assert "responses_create_params" not in row["task_input"]
+        turns = row["task_input"]["turns"]
+        assert [turn["name"] for turn in turns] == ["01_plan", "02_implement"]
+        assert [turn["responses_create_params"]["metadata"] for turn in turns] == [
+            {"agent_timeout_sec": "2400.0", "harbor_step": "01_plan"},
+            # A step without its own budget falls back to the task's [agent].timeout_sec.
+            {"agent_timeout_sec": "120.0", "harbor_step": "02_implement"},
+        ]
+
+    def test_top_level_instruction_and_tests_are_optional_for_steps(self, tmp_path):
+        root = write_multi_step_task(tmp_path / "t")
+        (root / "instruction.md").unlink()
+        (root / "tests" / "test.sh").unlink()
+        (root / "tests").rmdir()
+        assert [turn.name for turn in load_task(root).turns] == ["01_plan", "02_implement"]
+
+    @pytest.mark.parametrize(
+        ("change", "message"),
+        [
+            (lambda root: (root / "steps" / "01_plan" / "setup.sh").write_text("true\n"), "setup.sh"),
+            (lambda root: (root / "steps" / "01_plan" / "workdir").mkdir(), "workdir"),
+            (lambda root: (root / "steps" / "02_implement" / "instruction.md").unlink(), "instruction.md"),
+        ],
+    )
+    def test_unsupported_or_incomplete_steps_are_refused_by_name(self, tmp_path, change, message):
+        root = write_multi_step_task(tmp_path / "t")
+        change(root)
+        with pytest.raises(HarborTaskError, match=message):
+            load_task(root)
+
+    def test_a_step_agent_user_loads_as_written_for_the_server_to_apply_per_turn(self, tmp_path):
+        """Harbor runs each step as its own `[steps.agent].user` (else the task's); the loader used to refuse a step
+        that named one (G7 round 24, item 1b). The server now switches the sandbox to it for that turn, so the
+        loader reads it as written, a numeric uid included, and leaves the other steps' user unset (the task's)."""
+        root = write_multi_step_task(tmp_path / "t")
+        (root / "task.toml").write_text((root / "task.toml").read_text() + '[steps.agent]\nuser = "tester"\n')
+        task = load_task(root)
+        assert [turn.config.agent.user for turn in task.turns] == [None, "tester"]
+        (root / "task.toml").write_text((root / "task.toml").read_text().replace('user = "tester"', "user = 1000"))
+        assert [turn.config.agent.user for turn in load_task(root).turns] == [None, 1000]
+
+    def test_a_task_has_a_solution_when_every_step_has_one_of_its_own_or_the_tasks(self, tmp_path):
+        """`gym dataset validate` keeps a task whose solutions are per step (the MemoryArena shape: no top-level
+        `solution/`), as Harbor's oracle runs `steps/<name>/solution/solve.sh` per step and falls back to the task's
+        `solution/` for a step without one; a step with neither leaves the task unvalidated, and a step folder that
+        exists without a `solve.sh` is that step's (missing) answer, never the task's script, as in Harbor."""
+        root = write_multi_step_task(tmp_path / "t")
+        shutil.rmtree(root / "solution")
+        plan, implement = (root / "steps" / name / "solution" for name in ("01_plan", "02_implement"))
+        assert not load_task(root).has_solution
+        plan.mkdir()
+        (plan / "solve.sh").write_text("#!/bin/bash\necho plan\n")
+        task = load_task(root)
+        assert not task.has_solution and task.turn_solution_dir(task.turns[1]) == root / "solution"
+        # The task's top-level solution stands in for the step without one.
+        (root / "solution").mkdir()
+        (root / "solution" / "solve.sh").write_text("#!/bin/bash\necho task\n")
+        task = load_task(root)
+        assert task.has_solution
+        assert [task.turn_solution_dir(turn) for turn in task.turns] == [plan, root / "solution"]
+        # A step folder of its own without solve.sh is not covered by the task's script.
+        implement.mkdir()
+        task = load_task(root)
+        assert not task.has_solution and task.turn_solution_dir(task.turns[1]) == implement
+
+    def test_a_step_needs_a_test_script_of_its_own_or_the_tasks(self, tmp_path):
+        root = write_multi_step_task(tmp_path / "t")
+        (root / "steps" / "01_plan" / "tests" / "test.sh").unlink()
+        assert load_task(root).turns  # the task's tests/test.sh stands in
+        (root / "tests" / "test.sh").unlink()
+        with pytest.raises(HarborTaskError, match="no test.sh"):
+            load_task(root)
+
+
 class TestTasksetMapping:
     def test_single_task_folder_maps_to_its_parent(self, tmp_path):
         from nemo_gym.tasks.harbor.materialize import taskset_mapping
@@ -1355,7 +1575,7 @@ class TestCli:
             prepared = prepare_target(str(folder), output_root=tmp_path / "out")
         assert [t.task_id for t in prepared.tasks] == ["a"]
         assert list(prepared.skipped) == ["bad"]
-        assert "Multi-step" in prepared.skipped["bad"]
+        assert "step 'x'" in prepared.skipped["bad"]
         assert any("Skipping task bad" in r.getMessage() for r in caplog.records)
         assert len(prepared.rows_path.read_text().splitlines()) == 1
 
@@ -3074,6 +3294,62 @@ class TestComposeVolumeSourcesAtPrepare:
                 ],
             )
         assert seen == [({"pgdata": "datasets/pgdata"}, None), ({"pgdata": "pg"}, {"pgdata": "gpu/pg"})]
+
+    def test_registry_credentials_come_from_the_sandbox_image_auth(self, tmp_path, monkeypatch):
+        """G7 round 24: prepare read registries anonymously, so a private Compose sidecar (registry.example.com...) stopped
+        it with HTTP 403 though the sandbox block's `images.auth` would pull it. Prepare reads the same block's
+        `images.auth`, resolved (so `${gitlab_registry_password}` comes from env.yaml), and records images with it."""
+        import nemo_gym.tasks.harbor.build_options as build_options
+        import nemo_gym.tasks.harbor.cli as harbor_cli
+
+        dotenv = tmp_path / "env.yaml"
+        dotenv.write_text("gitlab_registry_username: bot\ngitlab_registry_password: secret\n")
+        monkeypatch.setattr(build_options, "_resolve_under_cwd_or_install", lambda rel: tmp_path / rel)
+        provider = tmp_path / "provider.yaml"
+        provider.write_text(
+            "sandbox:\n  opensandbox:\n    images:\n      auth:\n"
+            '        "registry.example.com:5005/":\n'
+            "          username: ${gitlab_registry_username}\n"
+            "          password: ${gitlab_registry_password}\n"
+        )
+        monkeypatch.setattr(harbor_cli, "resolve_sandbox_config", lambda name: provider)
+
+        from nemo_gym.tasks.harbor.cli import registry_credentials_from_overrides
+
+        # No block names a provider: anonymous, as before.
+        assert registry_credentials_from_overrides([], None) == {}
+        assert registry_credentials_from_overrides([], "opensandbox") == {
+            "registry.example.com:5005": ("bot", "secret")
+        }
+
+    def test_run_and_validate_hand_registry_credentials_to_prepare(self, tmp_path, monkeypatch, sources):
+        import argparse
+
+        import nemo_gym.tasks.harbor.cli as harbor_cli
+
+        # The `sources` fixture's provider.yaml has no images.auth, so credentials are empty; a block with one is
+        # covered above. This asserts both entry points read them and pass them on.
+        seen = []
+
+        def fake_prepare(target, **kwargs):
+            seen.append(kwargs["registry_credentials"])
+            raise harbor_cli.HubError("stop here")
+
+        def fail(message):
+            raise SystemExit(message)
+
+        monkeypatch.setattr(harbor_cli, "prepare_target", fake_prepare)
+        monkeypatch.setattr(
+            harbor_cli, "resolve_agent", lambda name: harbor_cli.AgentSelection(Path("a.yaml"), name, name)
+        )
+        args = argparse.Namespace(
+            target=str(tmp_path), agent="a", sandbox="opensandbox", _parser=argparse.Namespace(error=fail)
+        )
+        with pytest.raises(SystemExit, match="stop here"):
+            harbor_cli.run_target(args, [])
+        with pytest.raises(SystemExit, match="stop here"):
+            harbor_cli.validate_target(args, [])
+        assert seen == [{}, {}]
 
     def test_prepare_fails_naming_an_unmapped_external_volume(self, tmp_path, fake_registry):
         folder = tmp_path / "ds"

@@ -170,6 +170,15 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         app.post("/aggregate_metrics", response_model=AggregateMetrics)(aggregate_metrics_endpoint)
         return app
 
+    async def episode_timeout_seconds(self, request: EpisodeRequestT) -> float | None:
+        """The wall-clock bound of this episode: ``default_episode_timeout_seconds`` (``None`` is no bound).
+
+        A protocol whose tasks carry their own budgets may derive a longer one per episode (the Harbor server
+        does for a multi-step task whose steps add up to more than the default); it must never raise here, as
+        nothing of the episode has started yet.
+        """
+        return self.config.default_episode_timeout_seconds
+
     async def run_request(self, request: EpisodeRequestT) -> EpisodeResponseT:
         acquired = False
         if self._admission is not None:
@@ -199,7 +208,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         # A begin refused as a duplicate or a retired attempt owns nothing,
         # so it must not end the live episode with the same key.
         begun = False
-        deadline = asyncio.timeout(self.config.default_episode_timeout_seconds)
+        deadline = asyncio.timeout(await self.episode_timeout_seconds(request))
         # Every downstream call of this episode, including final cleanup, carries its attempt-qualified
         # rollout id, so Resources and Model Server calls stay correlated with the rollout.
         with rollout_context(request.episode_id.capture_key):

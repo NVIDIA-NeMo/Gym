@@ -2565,7 +2565,7 @@ async def test_failed_native_snapshot_preserves_collected_cli_events(setup):
 
 @pytest.mark.parametrize("transport_error", ["timed out", "IncompleteRead(0 bytes read, 20 more expected)", None])
 def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
-    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
+    from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
     from nemo_gym.openai_utils import NeMoGymResponse
 
     agent, sandbox = setup
@@ -2637,7 +2637,7 @@ def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
     ],
 )
 def test_native_errors_use_captured_attempt_facts(setup, attempt, message, expected):
-    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
+    from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
     from nemo_gym.openai_utils import NeMoGymResponse
 
     agent, sandbox = setup

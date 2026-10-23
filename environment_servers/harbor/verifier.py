@@ -22,7 +22,7 @@ import posixpath
 import shlex
 import tarfile
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
@@ -47,6 +47,7 @@ from environment_servers.harbor.session import (
 )
 from nemo_gym import __version__, failure_kinds
 from nemo_gym.atif_export import encode_atif_trajectory, transcript_to_atif
+from nemo_gym.episode_types import BaseEpisodeRequest
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 from nemo_gym.sandbox.transfer import (
@@ -60,10 +61,10 @@ from nemo_gym.sandbox.transfer import (
     upload_dir,
     upload_path,
 )
-from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.digest import is_ignored
 from nemo_gym.tasks.harbor.models import HarborArtifact
+from nemo_gym.tasks.harbor.task import HarborTurn
 
 
 LOGGER = logging.getLogger(__name__)
@@ -324,6 +325,21 @@ def _restores_under(source: str, path: str) -> bool:
 # Extra seconds the provider exec of a `[[verifier.collect]]` hook waits beyond the hook's own `timeout_sec`;
 # counted in the episode budget, so the task deadline cannot cut off a hook within its declared limit.
 COLLECT_HOOK_GRACE_S = 30
+
+
+@dataclass(frozen=True)
+class VerifierSettings:
+    """The verifier settings one ``test.sh`` run uses: the task's, or a step's over the task's.
+
+    ``collect`` is the task's ``[[verifier.collect]]`` hooks, which every turn's verifier runs as in Harbor.
+    """
+
+    timeout_sec: float
+    env: dict[str, str]
+    user: str | int | None
+    collect: list[Any] = field(default_factory=list)
+    # The task's `[verifier].network_mode` (a step's over it), reported as `verifier_network`.
+    network_mode: str | None = None
 
 
 class HarborVerificationMixin:
@@ -617,6 +633,42 @@ class HarborVerificationMixin:
             task, settings, result, logs_dir, started, timed_out=timed_out, rewards=rewards, problem=problem
         )
 
+    async def _reset_shared_verifier_dirs(self, sandbox: AsyncSandbox) -> None:
+        """Empty ``/tests`` and ``/logs/verifier`` and remove the server's ``/logs/agent/trajectory.json`` in the
+        agent's own sandbox, as root. Raises :class:`RuntimeError` when the sandbox could not.
+
+        The shared verifier does this before it uploads its tests, as Harbor 0.22.0's
+        ``_reset_shared_step_verifier_dirs`` does, and a multi-step episode again before every turn after the
+        first, as Harbor main's ``_prepare_step`` does (0.22.0 does not, so its next step's agent sees the previous
+        step's tests): the previous turn's verifier left its tests (hidden ones included), its reward and the
+        agent's transcript where the next turn's fresh agent would read them. Agent-planted directory links at the
+        roots go first:
+        find does not follow its starting symlink, while tar does. /logs is unlinked without touching its former
+        target. The reserved trajectory.json destination goes too (`rm -rf` removes a link itself, or a planted
+        directory), so the agent cannot plant an entry the upload would follow or fail on; the rest of
+        /logs/agent is the agent's and is kept.
+        """
+        roots = (str(Path(VERIFIER_LOGS_DIR).parent), TESTS_DIR, VERIFIER_LOGS_DIR, AGENT_LOGS_DIR)
+        unlink_roots = [f"if test -L {shlex.quote(path)}; then rm -- {shlex.quote(path)}; fi" for path in roots]
+        result = await exec_as_root(
+            sandbox,
+            " && ".join(
+                unlink_roots
+                + [
+                    f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
+                    f"rm -rf -- {AGENT_LOGS_DIR}/{TRAJECTORY_FILE_NAME}",
+                    f"find {TESTS_DIR} {VERIFIER_LOGS_DIR} -mindepth 1 -delete",
+                    f"chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
+                ]
+            ),
+            timeout_s=60,
+        )
+        if result.return_code != 0:
+            raise RuntimeError(
+                f"Could not clear /tests, /logs/verifier and the transcript in the agent's sandbox: "
+                f"{result.stderr or result.stdout}"
+            )
+
     async def _run_collect_hooks(self, session: HarborSession, hooks: list[Any]) -> None:
         """Run ``[[verifier.collect]]`` hooks in their services, before anything is collected from them.
 
@@ -708,17 +760,40 @@ class HarborVerificationMixin:
                 restored.append((archive, kind, artifact.source))
         return restored
 
-    async def _run_shared_verifier(self, session: HarborSession, trajectory: bytes) -> dict[str, Any]:
-        """Run ``tests/test.sh`` in the agent's sandbox and read the reward it wrote.
+    async def _run_shared_verifier(
+        self,
+        session: HarborSession,
+        trajectory: bytes,
+        *,
+        settings: VerifierSettings | None = None,
+        test_dirs: tuple[Path, ...] | None = None,
+    ) -> dict[str, Any]:
+        """Run ``test.sh`` in the agent's sandbox and read the reward it wrote.
 
         ``[[verifier.collect]]`` hooks run first, as in Harbor: what they produce under ``/logs/artifacts``
         is there for ``test.sh``, and for the run's logs. ``/logs/agent`` is left as the agent wrote it,
         except for ``trajectory.json``: whatever the agent left at that reserved path (a link, a directory)
         is removed and the server writes the transcript there, so verifiers that read it find it.
+
+        ``test_dirs`` are uploaded to ``/tests`` in order, each over the last (a step's ``tests/`` over the
+        task's); missing folders are skipped. By default the task's ``tests/`` and ``[verifier]`` apply.
         """
         task = session.task
         sandbox = session.sandbox
-        settings = task.config.verifier
+        if settings is None:
+            verifier = task.config.verifier
+            settings = VerifierSettings(
+                timeout_sec=verifier.timeout_sec,
+                env=verifier.env,
+                user=verifier.user,
+                collect=verifier.collect,
+                network_mode=verifier.network_mode,
+            )
+        # A step's tests/ (and a multi-step task's top-level tests/) may be absent; a single-turn task's tests/ is
+        # uploaded whatever the host says, so a snapshot removed under the episode fails the upload and masks.
+        optional_tests = test_dirs is not None
+        if test_dirs is None:
+            test_dirs = (task.path / "tests",)
         started = asyncio.get_running_loop().time()
         try:
             logs_dir = self._reserve_logs_dir()
@@ -735,29 +810,11 @@ class HarborVerificationMixin:
                     await self._collect_entrypoint_log(sandbox, task, logs_dir / ENTRYPOINT_LOG_NAME)
                     return self._masked(ENTRYPOINT_FAILED_KIND, died) | {"verifier_logs_dir": str(logs_dir.resolve())}
             await self._run_collect_hooks(session, settings.collect)
-            # Replace agent-planted directory links before cleanup: find does not follow its starting
-            # symlink, while tar does. Unlink /logs first without touching its former target. The reserved
-            # trajectory.json destination goes too (`rm -rf` removes a link itself, or a planted directory),
-            # so the agent cannot plant an entry the upload would follow or fail on; the rest of /logs/agent
-            # is kept.
-            roots = (str(Path(VERIFIER_LOGS_DIR).parent), TESTS_DIR, VERIFIER_LOGS_DIR, AGENT_LOGS_DIR)
-            unlink_roots = [f"if test -L {shlex.quote(path)}; then rm -- {shlex.quote(path)}; fi" for path in roots]
-            prepare = await exec_as_root(
-                sandbox,
-                " && ".join(
-                    unlink_roots
-                    + [
-                        f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
-                        f"rm -rf -- {AGENT_LOGS_DIR}/{TRAJECTORY_FILE_NAME}",
-                        f"find {TESTS_DIR} {VERIFIER_LOGS_DIR} -mindepth 1 -delete",
-                        f"chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
-                    ]
-                ),
-                timeout_s=60,
-            )
-            if prepare.return_code != 0:
-                raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
-            await upload_dir(sandbox, task.path / "tests", TESTS_DIR, ignore=is_ignored)
+            await self._reset_shared_verifier_dirs(sandbox)
+            for tests in test_dirs:
+                if optional_tests and not tests.is_dir():
+                    continue
+                await upload_dir(sandbox, tests, TESTS_DIR, ignore=is_ignored)
             await _make_test_script_executable(sandbox)
             await self._upload_trajectory(sandbox, trajectory, logs_dir)
             # One plain exec for the whole run. The provider keeps it alive for as long as
@@ -773,7 +830,7 @@ class HarborVerificationMixin:
                 cwd=session.workdir,
                 env=self._verifier_env(settings),
                 timeout_s=settings.timeout_sec + self.config.verifier_grace_s,
-                user=_verifier_user(task),
+                user=settings.user if settings.user is not None else _verifier_user(task),
             )
             if result.error_type not in (None, "timeout"):
                 return self._masked(failure_kinds.VERIFIER_ERROR, f"test.sh could not run: {result.error_type}")
@@ -851,11 +908,16 @@ class HarborVerificationMixin:
         installs as its default (:meth:`HarborUsersMixin._set_default_user` with ``role="verifier"``). Only
         Docker applies a group. Refused here, the episode fails as a seed failure instead of paying the whole
         rollout and failing at verification; a verifier in another image keeps that image's default untouched
-        and names no user.
+        and names no user. A multi-step task's turn grades as its step's own ``[steps.verifier].user`` when the
+        step sets one (:meth:`_turn_verifier_settings` dispatches the pair as written), which is as static as the
+        task's: every step's pair is refused here the same way, before the first turn runs, with the step named
+        (``<task_id> step 'build': user ...``), as the loader names the step in its own per-step refusals.
         """
         if _verifier_runs_task_image(task):
             self._refuse_unsupported_group(task, task.entrypoint_user)
         self._refuse_unsupported_group(task, _verifier_user(task))
+        for turn in task.turns:
+            self._refuse_unsupported_group(task, turn.config.verifier.user, where=f" step {turn.name!r}")
 
     @staticmethod
     def _measured(reward: float, kind: str, reason: str) -> dict[str, Any]:
@@ -904,13 +966,19 @@ class HarborVerificationMixin:
                 raise RuntimeError(f"Could not clear the restored {target}: {clear.stderr or clear.stdout}")
         await upload_path(sandbox, host, target)
 
-    def _export_trajectory(self, request: SingleAgentTurnRequest, agent_response: NeMoGymResponse) -> bytes:
+    def _export_trajectory(
+        self, request: BaseEpisodeRequest[Any], agent_response: NeMoGymResponse, responses_create_params: Any = None
+    ) -> bytes:
         """The agent's transcript as ATIF v1.7 JSON, for ``/logs/agent/trajectory.json``.
 
         Exported from the Gym transcript (the task's input and the harness's output); raises
         :class:`AtifExportError` for anything the converter cannot represent, which masks the turn.
+        ``responses_create_params`` is the request the turn was sent when it is not the row's own (a
+        multi-step task's turn); by default the row's ``responses_create_params`` is the input.
         """
         params: Any = request.task.task_input.responses_create_params
+        if responses_create_params is not None:
+            params = responses_create_params
         input_items = params.get("input") if isinstance(params, Mapping) else getattr(params, "input", None)
         usage = agent_response.usage.model_dump(mode="json") if agent_response.usage is not None else None
         trajectory = transcript_to_atif(
@@ -923,3 +991,15 @@ class HarborVerificationMixin:
             usage=usage,
         )
         return encode_atif_trajectory(trajectory)
+
+    @staticmethod
+    def _turn_verifier_settings(task: HarborTask, turn: HarborTurn) -> VerifierSettings:
+        """A step's verifier settings over the task's, as Harbor resolves them."""
+        step = turn.config.verifier
+        return VerifierSettings(
+            timeout_sec=task.config.step_verifier_timeout_sec(turn.config),
+            env=task.config.verifier.env | step.env,
+            user=step.user if step.user is not None else task.config.verifier.user,
+            collect=task.config.verifier.collect,
+            network_mode=step.network_mode if step.network_mode is not None else task.config.verifier.network_mode,
+        )

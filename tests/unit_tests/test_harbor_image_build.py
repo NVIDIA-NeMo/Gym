@@ -439,6 +439,10 @@ class TestBuildOptions:
             BuildOptions.from_config({"builds": {"tool": "kaniko"}})
         with pytest.raises(ValueError, match="`builds.enabled` must be true or false; got 'no'"):
             BuildOptions.from_config({"builds": {"enabled": "no"}})
+        with pytest.raises(ValueError, match="`builds.force` must be true or false; got 'yes'"):
+            BuildOptions.from_config({"builds": {"force": "yes"}})
+        assert BuildOptions.from_config({"builds": {"force": True}}).force is True
+        assert BuildOptions.from_config({}).force is False
         with pytest.raises(ValueError, match="`builds.platform` must be a string; got 1"):
             BuildOptions.from_config({"builds": {"platform": 1}})
         with pytest.raises(ValueError, match="`builds` must be a mapping of tool, repository, platform, enabled"):
@@ -1016,6 +1020,7 @@ class TestSandboxProviderAtPrepare:
         monkeypatch.setattr(harbor_cli, "gpu_volume_sources_from_overrides", lambda overrides, sandbox: None)
         monkeypatch.setattr(harbor_cli, "shared_storage_from_overrides", lambda overrides, sandbox: None)
         monkeypatch.setattr(harbor_cli, "gpu_shared_storage_from_overrides", lambda overrides, sandbox: None)
+        monkeypatch.setattr(harbor_cli, "registry_credentials_from_overrides", lambda overrides, sandbox: None)
         # The rows file is scoped to the agent, so the stub has to name one.
         monkeypatch.setattr(
             harbor_cli, "resolve_agent", lambda name: harbor_cli.AgentSelection(Path("a.yaml"), name, name)
