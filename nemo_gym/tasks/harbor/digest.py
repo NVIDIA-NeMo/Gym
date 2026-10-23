@@ -32,7 +32,7 @@ from nemo_gym.tasks.harbor.harbor_compat import environment_content_hash
 DIGEST_KEY = "_ng_digest"
 DATASET_DIGEST_KEY = "_ng_dataset_digest"
 
-_SINGLE_FILES = ("task.toml", "instruction.md", "README.md", "trajectory.json")
+_SINGLE_FILES = ("task.toml", "instruction.md", "README.md", "trajectory.json", "task_data.json")
 _DIRECTORIES = ("environment", "tests", "solution", "steps")
 _IGNORED = ("__pycache__", "*.pyc", ".DS_Store", "*.swp", "*.swo", "*~")
 
