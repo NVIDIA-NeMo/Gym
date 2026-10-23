@@ -35,6 +35,7 @@ from nemo_gym.tasks.harbor.manifest import (
     dataset_digest,
     dataset_files_digest,
     dataset_toml_digest,
+    refresh_gym_layer,
     task_differences,
 )
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
@@ -364,6 +365,37 @@ class TestCheckManifest:
         assert after.dataset_toml_digest != before.dataset_toml_digest and after.digest != before.digest
         assert after.tasks["a"]["digest"] == before.tasks["a"]["digest"]
         assert "dataset.toml changed" in capsys.readouterr().out
+
+    def test_refresh_gym_layer_follows_dataset_toml_and_keeps_the_task_record(self, tmp_path, capsys):
+        """A pull that fetched nothing brings the manifest's Gym-layer digests up to date without hashing a task: an
+        edited task folder keeps its recorded digest (check_manifest, which rehashes, still refuses it), a pin without
+        a digest stays one, and a manifest with pins only or none at all is left to check_manifest."""
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        pins = {
+            name: {"git_url": "https://example.test/tasks.git", "git_commit_id": "a" * 40, "path": f"tasks/{name}"}
+            for name in ("a", "b")
+        }
+        before = Manifest.build(folder, source="harbor-registry", pins=pins, names=["a"])
+        before.write(folder)
+        assert before.tasks["b"] == pins["b"]  # pinned, not landed: no digest
+        assert refresh_gym_layer(tmp_path / "none") is None
+        assert refresh_gym_layer(folder) == before and (folder / MANIFEST_FILE).read_text() == before.text()
+        (folder / "dataset.toml").write_text('[gym.tasks."a".environment]\nenv = { X = "1" }\n')
+        (folder / "a" / "instruction.md").write_text("edited by hand\n")
+        after = refresh_gym_layer(folder)
+        assert after.dataset_toml_digest == dataset_toml_digest(folder) != before.dataset_toml_digest
+        assert after.tasks == before.tasks and after.digest != before.digest and after.source == before.source
+        # The rewrite is announced as check_manifest announces it (round 3): the identity changed.
+        assert Manifest.read(folder) == after and capsys.readouterr().out == (
+            f"Rewrote {folder / MANIFEST_FILE}: dataset.toml changed; dataset digest "
+            f"{before.digest[:12]} -> {after.digest[:12]}\n"
+        )
+        with pytest.raises(ManifestError, match="interrupted"):
+            check_manifest(folder)  # the pin without a digest is still the fetch's unfinished business
+        (folder / MANIFEST_FILE).write_text('[dataset]\nsource = "harbor-registry"\n[tasks."a"]\npath = "tasks/a"\n')
+        text = (folder / MANIFEST_FILE).read_text()
+        assert not refresh_gym_layer(folder).records_content and (folder / MANIFEST_FILE).read_text() == text
 
     def test_a_task_that_cannot_be_hashed_is_recorded_by_name_without_a_digest(self, tmp_path, capsys, caplog):
         folder = tmp_path / "ds"

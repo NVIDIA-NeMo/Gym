@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``gym eval run <folder | harbor:dataset> --agent <name>``: prepare a taskset and run it.
+"""``gym eval run <folder | harbor:dataset | entry> --agent <name>``: prepare a taskset and run it.
 
-Preparation writes, under ``results/harbor/<taskset>/``:
+A target is a task folder, a folder of task folders, a ``harbor:`` reference (fetched first) or the name of a
+committed entry under ``environments/harbor/`` (resolved to the folder its pull filled, never fetched here;
+``gym dataset pull``, :func:`pull_dataset`, is the fetch). Preparation writes, under ``results/harbor/<taskset>/``:
 
 - ``tasks.jsonl``: one materialized row per loadable task;
 - ``skipped.json``: omitted task IDs and reasons (empty when all tasks load);
@@ -21,6 +23,7 @@ import argparse
 import fnmatch
 import json
 import logging
+import shlex
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -49,8 +52,18 @@ from nemo_gym.tasks.harbor.build_plan import (
 )
 from nemo_gym.tasks.harbor.compose_overlay import HarborComposeOverlay
 from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE, GymDatasetConfig, read_dataset_config
+from nemo_gym.tasks.harbor.entries import DatasetEntry, PullPlan, entry_target, plan_pull, prepare_destination
 from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.hub import HubError, datasets_dir, fetch_ref, is_hub_ref
+from nemo_gym.tasks.harbor.hub import (
+    REGISTRY_SOURCE,
+    HubError,
+    HubRef,
+    datasets_dir,
+    expected_folder,
+    fetch_ref,
+    is_hub_ref,
+    resolved_folder,
+)
 from nemo_gym.tasks.harbor.image_configs import (
     load_compose_document,
     record_base_images,
@@ -65,6 +78,9 @@ from nemo_gym.tasks.harbor.manifest import (
     dataset_digest,
     dataset_files_digest,
     dataset_toml_digest,
+    gym_layer_change,
+    refresh_gym_layer,
+    report_rewrite,
 )
 from nemo_gym.tasks.harbor.materialize import (
     ENVIRONMENT_SERVER_IMPL,
@@ -72,6 +88,7 @@ from nemo_gym.tasks.harbor.materialize import (
     run_config,
     write_rows,
 )
+from nemo_gym.tasks.harbor.package_store import PACKAGE_STORE_SOURCE
 from nemo_gym.tasks.harbor.parameterized import is_template_folder, render_template_folder
 from nemo_gym.tasks.harbor.prepare_builds import _build_dockerfiles
 from nemo_gym.tasks.harbor.records import read_image_configs
@@ -421,9 +438,15 @@ def prepare_target(
     which neither ``gym eval run`` nor ``gym dataset validate`` runs.
     """
     build = build or BuildOptions()
+    entry: DatasetEntry | None = None
     if is_hub_ref(target):
-        folder = fetch_ref(target, refresh_registry=refresh_registry)
-        print(f"Fetched {target} into {folder}")
+        pulled = pull_dataset(target, refresh_registry=refresh_registry)
+        print(pulled.fetched_line())
+        if pulled.superseded is not None:
+            print(pulled.superseded_line())
+        folder, entry = pulled.folder, pulled.plan.entry
+    elif (entry := entry_target(target)) is not None:
+        folder = entry_folder(entry)
     else:
         folder = Path(target).expanduser().resolve()
     taskset = folder.name
@@ -449,7 +472,10 @@ def prepare_target(
     # The refusal of a hand-edited fetched dataset comes first, so no image of unverified content is
     # built, pushed or recorded. A single task folder has no manifest of its own (see _dataset_identity).
     digests: dict[str, str] = {}
-    identity = check_manifest(folder, digests=digests) if folder.is_dir() and not is_task_folder(folder) else None
+    try:
+        identity = check_manifest(folder, digests=digests) if folder.is_dir() and not is_task_folder(folder) else None
+    except ManifestError as exc:
+        raise with_entry_hint(exc, entry, folder) from exc
     # The dataset's TaskData (task_data.py beside dataset.toml) is imported once here, before any image is
     # recorded or built: a module that does not import refuses the dataset now, and so does a task folder whose
     # task_data.json the model refuses (the fields need no loaded task, and a dataset refused as a whole should not
@@ -581,6 +607,220 @@ def prepare_target(
         task_source=task_source,
         dataset_source=identity.source,
     )
+
+
+def entry_folder(entry: DatasetEntry) -> Path:
+    """The folder a committed entry's target resolves to: where its pull landed (:attr:`DatasetEntry.destination`).
+
+    Nothing is fetched here: ``gym dataset validate <entry>`` and ``gym eval run <entry>`` read what
+    ``gym dataset pull <entry>`` left, and the manifest check that follows refuses a folder that no longer
+    matches that pull. For an entry that declares a source, the folder must hold that pull's record: task folders
+    with no ``manifest.toml``, or with one that records another source (``local``, or the other hub fetcher's), are
+    refused with the pull to run, never run as a local dataset under the entry's name, since nothing then ties them
+    to the declared reference (the pull of a package-store entry keeps and records the folders that still match the
+    store; the registry fetch says in its own words what to move aside). Under ``NEMO_GYM_DATASETS_DIR`` the copy of
+    the entry's Gym layer beside the tasks is brought up to date, or refused, exactly as the pull would
+    (:func:`~nemo_gym.tasks.harbor.entries.prepare_destination`), so the two commands never disagree about one
+    folder. A folder without a pulled task names the pull to run (or, for an entry that declares no source, says the
+    task folder path is the target).
+    """
+    folder = prepare_destination(entry, create=False)
+    if folder.is_dir() and any(is_task_folder(child) for child in folder.iterdir() if child.is_dir()):
+        if entry.source is not None:
+            _check_fetch_record(entry, folder)
+        return folder
+    if entry.source is None:
+        raise HarborTaskError(
+            f"Entry {entry.name} has no task folders in {folder} and declares no [gym] source in "
+            f"{entry.folder / DATASET_FILE} to pull; pass the folder that holds its tasks instead"
+        )
+    raise HarborTaskError(
+        f"Entry {entry.name} has no task folders in {folder} yet; run `gym dataset pull {entry.name}` "
+        f"to fetch {entry.source}"
+    )
+
+
+def _check_fetch_record(entry: DatasetEntry, folder: Path) -> None:
+    """Refuse ``folder``'s task folders as ``entry``'s pull unless its manifest records a fetch of the entry's source."""
+    try:
+        recorded = Manifest.read(folder)
+    except ManifestError:
+        # Malformed, or written by a newer Gym: the manifest check that follows refuses it in its own words.
+        return
+    if recorded is None:
+        raise HarborTaskError(
+            f"Entry {entry.name}'s folder {folder} holds task folders but no fetch record ({MANIFEST_FILE}), so they "
+            f"cannot be run as its pull of {entry.source}; run `gym dataset pull {entry.name}` to fetch it"
+        )
+    expected = PACKAGE_STORE_SOURCE if HubRef.parse(entry.source).is_package else REGISTRY_SOURCE
+    if recorded.source != expected:
+        raise HarborTaskError(
+            f"Entry {entry.name}'s folder {folder} holds task folders whose {MANIFEST_FILE} records source "
+            f"{recorded.source!r}, not a fetch of {entry.source} ({expected}); delete, or move aside, the task folders "
+            f"and {MANIFEST_FILE} there and run `gym dataset pull {entry.name}`"
+        )
+
+
+# How check_manifest's refusal of an interrupted fetch ends (nemo_gym.tasks.harbor.manifest).
+_FETCH_AGAIN = "run the fetch again"
+
+
+def with_entry_hint(exc: Exception, entry: DatasetEntry | None, folder: Path) -> Exception:
+    """The fetchers' and the manifest check's refusals name the dataset folder and say to delete it, or move it aside,
+    and run again. When that folder is a committed entry's own (not the hub's folder, nor the entry's folder under a
+    moved ``NEMO_GYM_DATASETS_DIR``, which hold nothing git tracks), the same refusal says what to delete there: the
+    pulled task folders and ``manifest.toml``, not the README, YAML files and ``dataset.toml`` the entry commits,
+    and that another version is pulled by changing ``source`` in that ``dataset.toml``. The manifest check's refusal
+    of an interrupted fetch (``run the fetch again``) names the pull to run again instead, wherever the folder is:
+    the fetch finishes it, and deleting what it landed would throw the partial fetch away. Returns ``exc`` itself for
+    every other folder, and when the message does not name the folder."""
+    if entry is None or str(folder) not in str(exc):
+        return exc
+    if str(exc).endswith(_FETCH_AGAIN):
+        return type(exc)(f"{str(exc).removesuffix(_FETCH_AGAIN)}run `gym dataset pull {entry.name}` again")
+    if folder != entry.folder:
+        return exc
+    return type(exc)(
+        f"{exc}. {folder} is the committed entry {entry.name}'s own folder: delete, or move aside, only the pulled "
+        f"task folders and {MANIFEST_FILE} in it; its README, YAML files and {DATASET_FILE} are the entry's and stay "
+        f"(to pull another version, change `source` in that {DATASET_FILE})"
+    )
+
+
+@dataclass(frozen=True)
+class PulledDataset:
+    """What ``gym dataset pull`` fetched: the reference, where it landed and the manifest left there, current."""
+
+    target: str
+    plan: PullPlan
+    folder: Path
+    manifest: Manifest
+    # The folder's manifest read the same before the fetch: nothing was downloaded, replaced or rewritten.
+    unchanged: bool
+    # The hub's own folder for the reference (``terminal-bench-4.0.0/``), still present beside the entry the
+    # reference now lands in: a fetch from before the entry declared it, which nothing reads any more.
+    superseded: Path | None = None
+
+    @property
+    def entry(self) -> str | None:
+        return self.plan.entry.name if self.plan.entry is not None else None
+
+    @property
+    def task_count(self) -> int:
+        return len(self.manifest.tasks)
+
+    def fetched_line(self) -> str:
+        where = f" (entry {self.entry})" if self.entry is not None else ""
+        return f"Fetched {self.plan.ref} into {self.folder}{where}"
+
+    def superseded_line(self) -> str:
+        return (
+            f"Note: {self.superseded} holds an earlier fetch of {self.plan.ref}; fetches of it now land in "
+            f"{self.folder} and nothing reads the old folder, so it can be moved aside or deleted"
+        )
+
+    def text(self) -> str:
+        """The command's report: where the dataset landed, how many tasks, its digest and the next command."""
+        suffix = ", unchanged since the last pull" if self.unchanged else ""
+        next_target = self.entry if self.entry is not None else shlex.quote(str(self.folder))
+        lines = [
+            self.fetched_line().replace("Fetched", "Pulled", 1),
+            f"{self.task_count} task(s), dataset digest {self.manifest.digest} ({self.manifest.source}){suffix}",
+        ]
+        if self.superseded is not None:
+            lines.append(self.superseded_line())
+        lines.append(f"Next: gym dataset validate {next_target} --sandbox <provider>")
+        return "\n".join(lines)
+
+
+def pull_dataset(target: str, *, refresh_registry: bool = False) -> PulledDataset:
+    """Fetch ``target`` (a ``harbor:`` reference or a committed entry's name) and report where it landed.
+
+    The destination comes from :func:`~nemo_gym.tasks.harbor.entries.plan_pull`: the entry that declares the
+    reference as its source (its own folder, with its ``dataset.toml`` placed first when ``NEMO_GYM_DATASETS_DIR``
+    moved the destination), else the hub's own folder under the datasets dir. The fetch is the one every
+    ``gym eval run harbor:...`` makes, so a stale, edited or foreign folder is refused in the same words (a refusal
+    naming a committed entry's own folder says what to delete there, :func:`with_entry_hint`); nothing is prepared,
+    built or run. The manifest left after the fetch gives the task count and the dataset digest; its Gym-layer
+    digests are first brought up to date with the folder (:func:`~nemo_gym.tasks.harbor.manifest.refresh_gym_layer`),
+    since a fetch that downloads nothing rewrites nothing and would otherwise report the digest of a ``dataset.toml``
+    that changed since the last pull, which the next prepare would then rewrite. ``unchanged`` compares the manifest
+    on disk before anything was touched with the one reported; a registry reference whose version the registry picks
+    is resolved first (:func:`~nemo_gym.tasks.harbor.hub.resolved_folder`) so that folder is known. When the Gym
+    layer's digests moved while the task record stayed (the entry's ``dataset.toml`` changed, or one written by hand
+    into a hub folder), the rewrite is announced in the manifest check's words whichever step applied it: the
+    refresh above, or the fetch itself, which rewrites the manifest without a word when every folder is in place
+    (the package store's does). A hub folder the reference landed in before an entry declared it
+    (``terminal-bench-4.0.0/`` beside ``terminal_bench_4/``) is left alone and named in the report, since nothing
+    reads it any more. ``refresh_registry`` downloads the registry again instead of reading
+    ``.harbor/registry.json``; it is :func:`prepare_target`'s pass-through, and deleting that cache file does the
+    same for the command.
+    """
+    plan = plan_pull(target)
+    if plan is None:
+        raise HubError(
+            f"{target!r} is neither a `harbor:` reference nor a committed entry under environments/harbor/; "
+            "pass `harbor:<org>/<name>[@<tag> | @sha256:<digest>]`, `harbor:<dataset>[@<version>]` or an entry name"
+        )
+    hub_folder = expected_folder(plan.ref)
+    if hub_folder is None:
+        # The registry picks the version: resolve it now, against the cache the fetch reads (refreshed here when
+        # asked, once), so the folder's manifest can be read before the fetch.
+        hub_folder = resolved_folder(plan.ref, refresh_registry=refresh_registry)
+        refresh_registry = False
+    target_folder = plan.folder if plan.folder is not None else hub_folder
+    before = _manifest_before(target_folder)
+    # prepare_destination announces the refresh it makes itself; the fetch is measured from what it found.
+    folder = prepare_destination(plan.entry) if plan.entry is not None else None
+    staged = _manifest_before(target_folder)
+    try:
+        fetched = fetch_ref(plan.ref, folder=folder, refresh_registry=refresh_registry)
+    except (HubError, ManifestError) as exc:
+        raise with_entry_hint(exc, plan.entry, folder) from exc
+    landed = _manifest_before(fetched)
+    manifest = refresh_gym_layer(fetched)
+    if manifest is None:
+        raise HubError(f"{fetched} has no {MANIFEST_FILE} after the fetch; run the pull again")
+    if (
+        staged is not None
+        and landed is not None
+        and landed.text() == manifest.text()
+        and staged.text() != landed.text()
+        and (staged.source, staged.tasks) == (landed.source, landed.tasks)
+    ):
+        # The fetch rewrote the manifest with the same task record: only the Gym layer moved, and the refresh above
+        # found nothing left to do, so it is announced here.
+        report_rewrite(fetched, staged, landed, gym_layer_change(staged, landed))
+    superseded = hub_folder if plan.entry is not None and hub_folder.is_dir() else None
+    return PulledDataset(
+        target=target,
+        plan=plan,
+        folder=fetched,
+        manifest=manifest,
+        unchanged=before is not None and before.text() == manifest.text(),
+        superseded=superseded if superseded != fetched else None,
+    )
+
+
+def _manifest_before(folder: Path | None) -> Manifest | None:
+    """The manifest in ``folder`` as it stands, or ``None``; the fetch itself reports an unreadable one."""
+    if folder is None or not folder.is_dir():
+        return None
+    try:
+        return Manifest.read(folder)
+    except ManifestError:
+        return None
+
+
+def pull_target(args: argparse.Namespace, overrides: list[str]) -> None:
+    """Entry point for ``gym dataset pull <target>``."""
+    if overrides:
+        args._parser.error(f"`gym dataset pull` takes no configuration overrides: {' '.join(overrides)}")
+    try:
+        pulled = pull_dataset(args.target)
+    except (HubError, ManifestError, HarborTaskError, ValueError, OSError) as exc:
+        args._parser.error(str(exc))
+    print(pulled.text())
 
 
 def _dataset_label(folder: Path, dataset_root: Path) -> str:

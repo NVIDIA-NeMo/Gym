@@ -68,7 +68,10 @@ def datasets_dir() -> Path:
     """Where pulled datasets live: ``$NEMO_GYM_DATASETS_DIR``, else ``environments/harbor/`` in the Gym checkout.
 
     Each fetched dataset is one folder under it (``environments/harbor/<dataset>/``), gitignored there
-    next to the committed per-dataset entries, which keep only their README and YAML files.
+    next to the committed per-dataset entries, which keep only their README, YAML files and ``dataset.toml``.
+    An entry that declares a ``[gym] source`` is pulled into its own folder, wherever the search root that commits
+    it lives, unless ``NEMO_GYM_DATASETS_DIR`` is set, then into ``<datasets dir>/<entry>/``
+    (:mod:`nemo_gym.tasks.harbor.entries`).
     """
     return Path(os.environ.get(DATASETS_DIR_ENV) or PARENT_DIR / "environments" / "harbor").expanduser().resolve()
 
@@ -414,7 +417,7 @@ def _check_kept_folders(folder: Path, kept: list[str], previous: Manifest | None
             )
 
 
-def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
+def fetch_dataset(dataset: RegistryDataset, root: Path, *, folder: Path | None = None) -> Path:
     """Fetch tasks, retaining the recorded source pins of existing folders.
 
     Publish a pin after each task, so a later failure leaves completed tasks reusable.
@@ -422,6 +425,11 @@ def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
     is refused; the user can move it aside and retry without losing local edits. The
     manifest records each folder's digest beside its pin; when a fetch adds tasks to an
     existing folder, the kept folders must still match their recorded digests.
+
+    The tasks land in ``root/<name>-<version>/`` (:attr:`RegistryDataset.folder_name`) unless ``folder``
+    names the dataset folder itself: a committed entry under ``environments/harbor/`` whose ``dataset.toml``
+    declares this dataset as its ``[gym] source`` (:mod:`nemo_gym.tasks.harbor.entries`). The folder's other
+    files (the entry's README, YAML overlays and ``dataset.toml``) are not task folders and stay as they are.
     """
     if not _NAME.fullmatch(dataset.name):
         raise HubError(f"Unsafe Harbor dataset name {dataset.name!r}")
@@ -432,7 +440,7 @@ def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
         if task.name in names:
             raise HubError(f"Duplicate Harbor task name {task.name!r}")
         names.add(task.name)
-    folder = Path(root).resolve() / dataset.folder_name
+    folder = Path(folder).resolve() if folder is not None else Path(root).resolve() / dataset.folder_name
     if folder.is_symlink():
         raise HubError(f"Dataset folder must not be a symlink: {folder}")
     folder.mkdir(parents=True, exist_ok=True)
@@ -502,8 +510,52 @@ def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
     return folder
 
 
-def fetch_ref(target: str, root: Path | None = None, *, refresh_registry: bool = False) -> Path:
+def expected_folder(target: str, root: Path | None = None) -> Path | None:
+    """Where a fetch of ``target`` lands when that follows from the reference alone, without resolving it.
+
+    A package-store dataset's folder is named from its reference (``<name>`` for ``latest``, ``<name>-<tag>``,
+    ``<name>-<12 digest chars>`` for a digest pin, :meth:`PackageRef.folder_name`), and a registry dataset's from
+    its name and version; ``None`` for a registry reference whose version the registry picks. ``gym dataset pull``
+    reads the folder's manifest here before the fetch to report an unchanged dataset.
+    """
+    root = Path(root) if root is not None else datasets_dir()
+    ref = HubRef.parse(target)
+    if ref.is_package:
+        from nemo_gym.tasks.harbor.package_store import PackageRef
+
+        org, _, name = ref.name.partition("/")
+        package = PackageRef(org=org, name=name, ref=ref.version or "latest")
+        return root / package.folder_name(package.digest or "")
+    if ref.version is None:
+        return None
+    return root / RegistryDataset(name=ref.name, version=ref.version, description="", tasks=()).folder_name
+
+
+def resolved_folder(target: str, root: Path | None = None, *, refresh_registry: bool = False) -> Path:
+    """Where a fetch of ``target`` lands, resolving a registry reference whose version the registry picks.
+
+    :func:`expected_folder` names the folder when the reference alone does; for ``harbor:<dataset>`` without a
+    version the registry's cache under ``root/.harbor/`` (downloaded, or refreshed when ``refresh_registry``) is
+    read and the version it picks names the folder, as :func:`fetch_ref` will. ``gym dataset pull`` resolves such a
+    reference here, before the fetch, so it can read the folder's manifest and report an unchanged dataset.
+    """
+    root = Path(root) if root is not None else datasets_dir()
+    folder = expected_folder(target, root)
+    if folder is not None:
+        return folder
+    registry = load_registry(root / ".harbor", refresh=refresh_registry)
+    return root / resolve_dataset(HubRef.parse(target), registry).folder_name
+
+
+def fetch_ref(
+    target: str, root: Path | None = None, *, refresh_registry: bool = False, folder: Path | None = None
+) -> Path:
     """Resolve and fetch a ``harbor:`` reference; return the dataset folder.
+
+    The dataset lands in its own folder under ``root`` (:func:`datasets_dir` unless given), named after the
+    dataset and its version, or in ``folder`` when a caller names the destination: the folder of a committed
+    entry that declares the reference as its ``[gym] source`` (:func:`nemo_gym.tasks.harbor.entries.plan_pull`
+    decides that; this function does not read entries). The registry cache stays under ``root/.harbor/``.
 
     A package-store fetch refuses a task folder whose content no longer matches the store
     (see :func:`nemo_gym.tasks.harbor.package_store.fetch_package_dataset`). Whatever the store fetch
@@ -517,8 +569,10 @@ def fetch_ref(target: str, root: Path | None = None, *, refresh_registry: bool =
 
         org, _, name = ref.name.partition("/")
         try:
-            return fetch_package_dataset(PackageRef(org=org, name=name, ref=ref.version or "latest"), root)
+            return fetch_package_dataset(
+                PackageRef(org=org, name=name, ref=ref.version or "latest"), root, folder=folder
+            )
         except PackageStoreError as exc:
             raise HubError(str(exc)) from exc
     registry = load_registry(root / ".harbor", refresh=refresh_registry)
-    return fetch_dataset(resolve_dataset(ref, registry), root)
+    return fetch_dataset(resolve_dataset(ref, registry), root, folder=folder)

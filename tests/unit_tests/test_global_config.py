@@ -1162,6 +1162,25 @@ contested: second_inner
         """
         parser.parse(parse_config)
 
+    def test_cli_parse_restores_hydras_args_parser_instead_of_nesting_wrappers(self, monkeypatch: MonkeyPatch) -> None:
+        """Each CLI parse patches hydra's ``get_args_parser`` to swallow ``--help``; the patch must not outlive the
+        call, or every parse wraps the previous wrapper and a process that parses many commands (a test session
+        driving ``main()`` hundreds of times) ends in a RecursionError inside hydra's argument parsing."""
+        from importlib import import_module
+
+        hydra_main_module = import_module("hydra.main")  # `hydra.main` the attribute is the decorator, not the module
+        original = hydra_main_module.get_args_parser
+        monkeypatch.setattr(sys, "argv", ["gym"])
+        parse_config = GlobalConfigDictParserConfig(skip_load_from_cli=False, skip_load_from_dotenv=True)
+        for _ in range(3):
+            GlobalConfigDictParser().parse(parse_config)
+            assert hydra_main_module.get_args_parser is original
+        # Restored on the way out of a failed parse too.
+        monkeypatch.setattr(sys, "argv", ["gym", "not=valid=override="])
+        with raises(SystemExit):
+            GlobalConfigDictParser().parse(parse_config)
+        assert hydra_main_module.get_args_parser is original
+
     def test_copy_of_missing_leaf_is_reported_not_opaque_error(self) -> None:
         # `${copy:source.model}` where source.model is unset must not raise an opaque "path does not
         # exist" error; the copy propagates MISSING so both the target and source are reported.

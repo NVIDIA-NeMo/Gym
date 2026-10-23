@@ -477,12 +477,50 @@ def check_manifest(folder: Path, *, digests: dict[str, str] | None = None) -> Ma
         why = "it recorded pins only"
     elif differences is not None:
         why = f"task folders changed ({differences})"
-    elif previous.dataset_files_digest != fresh.dataset_files_digest:
-        why = f"a dataset-level {' or '.join(DATASET_FILES)} changed"
     else:
-        why = f"{DATASET_FILE} changed"
+        why = gym_layer_change(previous, fresh)
     if _write_or_warn(fresh, folder):
-        print(
-            f"Rewrote {folder / MANIFEST_FILE}: {why}; dataset digest {previous.digest[:12] or '-'} -> {fresh.digest[:12]}"
-        )
+        report_rewrite(folder, previous, fresh, why)
+    return fresh
+
+
+def gym_layer_change(previous: "Manifest", fresh: "Manifest") -> str:
+    """Which part of the Gym layer differs between two manifests of one task set, for a rewrite notice."""
+    if previous.dataset_files_digest != fresh.dataset_files_digest:
+        return f"a dataset-level {' or '.join(DATASET_FILES)} changed"
+    return f"{DATASET_FILE} changed"
+
+
+def report_rewrite(folder: Path, previous: "Manifest", fresh: "Manifest", why: str) -> None:
+    """The one-line notice that ``folder``'s manifest was rewritten, and how the dataset digest moved."""
+    print(
+        f"Rewrote {Path(folder) / MANIFEST_FILE}: {why}; dataset digest {previous.digest[:12] or '-'} -> {fresh.digest[:12]}"
+    )
+
+
+def refresh_gym_layer(folder: Path) -> Manifest | None:
+    """Bring a fetched manifest's Gym-layer digests up to date with ``folder`` without touching its task records.
+
+    A fetch records ``dataset.toml`` and the dataset-level Gym files as it found them, and
+    rewrites the manifest only when it fetches something: a registry fetch with every folder in place, or a
+    pull that only replaced the copy of an entry's ``dataset.toml`` beside the tasks
+    (:func:`nemo_gym.tasks.harbor.entries.prepare_destination`), leaves ``dataset_toml_digest`` and the dataset
+    digest describing a file that is no longer there. This recomputes those digests from disk and keeps every
+    task's recorded digest and pin as it is (nothing is hashed, so a hand-edited folder is still caught by
+    :func:`check_manifest`, which rehashes), then writes the manifest when its text changed, with the notice
+    ``check_manifest`` prints for the same rewrite (``Rewrote ...; dataset digest <old> -> <new>``), so a change of
+    the dataset's identity is announced whichever function applies it. Returns the manifest now on disk: ``None``
+    without one, and the old one untouched when it records pins only (``check_manifest`` upgrades those) or names a
+    source this Gym does not know (``check_manifest`` refuses those).
+    """
+    folder = Path(folder)
+    previous = Manifest.read(folder)
+    if previous is None or not previous.records_content or previous.source not in SOURCES:
+        return previous
+    digests = {name: digest for name, digest in previous.task_digests.items() if digest is not None}
+    fresh = Manifest.build(folder, source=previous.source, pins=previous.pins, digests=digests, names=list(digests))
+    if fresh.text() == previous.text():
+        return previous
+    if _write_or_warn(fresh, folder):
+        report_rewrite(folder, previous, fresh, gym_layer_change(previous, fresh))
     return fresh

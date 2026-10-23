@@ -58,6 +58,9 @@ allowed_agents = ["terminus_2_sandboxed_agent", "hermes_agent"]
 # with the values named), and whether the rewards were baselined and reviewed (false unless declared).
 domain = "coding"
 verified = false
+# A committed entry under environments/harbor/ names the hub dataset `gym dataset pull <entry>` fetches into its
+# folder (see below). An authored dataset, whose task folders are its own, leaves it unset.
+# source = "harbor:terminal-bench/terminal-bench@4.0.0"
 
 [gym.defaults]
 # Rollouts per task for an evaluation. `+num_repeats=` on the command line replaces it; it never enters a task's digest.
@@ -76,7 +79,8 @@ env = { EXAMPLE = "1" }
 memory_mb = 4096
 ```
 
-The generated run config's `datasets:` entry carries `type`, `license`, `domain`, `verified` and `allowed_agents`
+`source` is provenance for a committed entry and shapes no task (it does not enter the `datasets:` entry; the
+dataset digest covers the file that holds it). The generated run config's `datasets:` entry carries `type`, `license`, `domain`, `verified` and `allowed_agents`
 as declared, its top-level `num_repeats` is `[gym.defaults].num_repeats`, and `gym eval run` starts from that split
 and repeat count (`+split=` and `+num_repeats=` on the command line replace them); `gym dataset validate` plays each
 reference solution once unless `+num_repeats=` says otherwise. None of these keys enters a task's `_ng_digest`; only
@@ -327,6 +331,68 @@ gym dataset init acme/my-dataset --root ~/work --image ubuntu:24.04   # ~/work/m
 | `--image IMAGE` | The task's prebuilt image (default: `python:3.12-slim`). |
 | `--parameterized` | Scaffold a template folder (`task.toml`, `instruction.template.md`, `tasks.jsonl`, `task_data.py`, a Python verifier, the reference answer as `solution/answer.template.md`) instead of one task. |
 
+## `gym dataset pull` and committed entries
+
+`gym dataset pull TARGET` fetches a Harbor dataset into `environments/harbor/` of the Gym checkout
+(`$NEMO_GYM_DATASETS_DIR` when set) and prints where it landed, its task count and its dataset digest. It is the
+fetch `gym eval run` and `gym dataset validate` make for a `harbor:` target, on its own: nothing is prepared,
+built or run, a folder that was edited by hand, left by an interrupted fetch of another version, or written for
+another package is refused in the same words, and a second pull of an unchanged dataset downloads nothing and says
+so.
+
+```bash
+gym dataset pull terminal_bench_4                                  # the entry's source, into environments/harbor/terminal_bench_4/
+gym dataset pull harbor:terminal-bench/terminal-bench@4.0.0        # the same folder: the entry declares this reference
+gym dataset pull harbor:terminal-bench/terminal-bench-2-1          # no entry declares `latest`: environments/harbor/terminal-bench-2-1/
+gym dataset pull harbor:terminal-bench@2.0                         # a registry dataset (registry.json cached under environments/harbor/.harbor/)
+```
+
+| Option | Description |
+| --- | --- |
+| `TARGET` | `harbor:<org>/<name>[@<tag> \| @sha256:<digest>]` (a package-store dataset), `harbor:<dataset>[@<version>]` (a registry dataset), or the name of a committed entry. |
+
+A **committed entry** is a folder `environments/harbor/<entry>/` the checkout keeps for one dataset: a README,
+deployment YAML overlays and a `dataset.toml` whose `[gym]` table declares `source`, the hub reference its task
+folders come from. `terminal_bench_4` declares `harbor:terminal-bench/terminal-bench@4.0.0`; `terminal_bench_2_1`
+pins the store's Terminal-Bench 2.1 by content hash, since the store tags it `latest` only. The pulled task
+folders and `manifest.toml` are gitignored next to the committed files, and a pull of the declared reference
+itself lands in the same folder, so one dataset never lives in two sibling folders. The match is exact:
+`harbor:terminal-bench/terminal-bench` (the store's `latest`) is another reference and lands in
+`environments/harbor/terminal-bench/`, as any reference no entry declares does. The entry's `dataset.toml` is the
+dataset's: its other `[gym]` keys apply as on any dataset and the dataset digest covers it. An entry is pulled into
+its own folder wherever the search root that commits it lives (the checkout, a `NEMO_GYM_EXTRA_ROOTS` root or the
+working directory). `gym dataset validate <entry>` and `gym eval run <entry>` read what the pull left and refuse
+task folders in the entry's folder that carry no fetch record (no `manifest.toml`, or one of another source), with
+the pull to run, instead of running them as a local dataset under the entry's name. With `NEMO_GYM_DATASETS_DIR`
+set, an entry's tasks live in `<datasets dir>/<entry>/` with a copy of the entry's Gym layer beside them, its
+`dataset.toml` and whatever dataset-level `task_data.py` or `verifier.py` it commits, placed before
+the first task lands and replaced when the entry's files change (by the next pull, validate or run alike, which
+brings the manifest beside the tasks up to date with the copies at once and announces the digest change; a copy
+edited in place is refused, never overwritten: edit the entry's files).
+
+A checkout that fetched `harbor:terminal-bench/terminal-bench@4.0.0` before the entry declared it still holds
+`environments/harbor/terminal-bench-4.0.0/`: the reference now lands in `terminal_bench_4/` (fetched afresh; no
+folder is moved), the pull and a run of the reference name the old folder while it is there, and it can be moved
+aside or deleted. Runs of that reference now carry the entry's name as the taskset, as the rows' `task_source` and in
+the `results/harbor/terminal_bench_4/` path, and a dataset digest that covers the entry's `dataset.toml`, so they
+differ from runs of the same reference made before the entry declared it. `dataset.toml` is not gitignored in any
+folder under `environments/harbor/`, pulled hub folders included, so one written into such a folder by hand (the
+`nextjs-performance` override an earlier TB4 README placed in `terminal-bench-4.0.0/`) now shows as untracked: move
+its keys into the entry's `dataset.toml` and delete it.
+
+To move an entry to another version, change `source` in its `dataset.toml`, delete (or move aside) only the pulled
+task folders and `manifest.toml` in the entry's folder, and pull again; the README, YAML files and `dataset.toml`
+stay. A fetch refused because the folder was written for another version of the dataset, or because a task folder no
+longer matches the store, says so in the fetcher's words and, when the folder is a committed entry's own, adds what
+to delete there. A pull whose fetch downloaded nothing still brings the manifest's digest of `dataset.toml` up to
+date, so the digest it reports after an edit of the entry's table is the one the next run carries.
+
+`gym dataset validate <entry>` and `gym eval run <entry> ...` resolve the bare name to that folder without
+fetching: an entry not pulled yet names the pull to run, and an existing folder of the same name in the working
+directory, or an explicit path, keeps meaning the path for these two commands, which take paths (`gym dataset pull
+<entry>` takes none and finds the entry from any working directory). Publishing a dataset to the hub is not part of
+this command.
+
 ## `gym dataset validate`
 
 Runs each task's reference solution (`solution/solve.sh`) through the task's verifier with an oracle harness and
@@ -337,11 +403,12 @@ evaluation run.
 ```bash
 gym dataset validate my-dataset --sandbox opensandbox
 gym dataset validate harbor:terminal-bench/terminal-bench@4.0.0 --sandbox opensandbox --only-tasks 'hello-*'
+gym dataset validate terminal_bench_4 --sandbox opensandbox      # the committed entry, after `gym dataset pull terminal_bench_4`
 ```
 
 | Option | Description |
 | --- | --- |
-| `TARGET` | A task folder, a folder of task folders, or a `harbor:<dataset>[@<version>]` hub reference. |
+| `TARGET` | A task folder, a folder of task folders, a `harbor:<dataset>[@<version>]` hub reference, or the name of a committed entry under `environments/harbor/` after `gym dataset pull`. |
 | `--sandbox PROVIDER` | Sandbox provider for the task containers (for example `opensandbox`, `docker`). |
 | `--config PATH` | Extra config file to load. Repeatable. |
 | `--only-tasks PATTERNS` | Comma-separated task names or globs; only matching tasks are validated. |
@@ -366,7 +433,7 @@ gym eval run harbor:terminal-bench/terminal-bench@4.0.0 --agent hermes_agent --s
 
 | Option | Description |
 | --- | --- |
-| `TARGET` | A task folder, a folder of task folders, or `harbor:<dataset>[@<version>]`. `harbor:<org>/<name>[@<tag>]` fetches a package-store dataset. Fetched datasets land in `$NEMO_GYM_DATASETS_DIR` (default `environments/harbor/` in the Gym checkout); the fetch stages its clone in a hidden `.nemo-gym-harbor-*` directory there, which discovery skips. An unhidden `nemo-gym-harbor-*` directory left by a fetch interrupted under a `main` build from before this change is refused as a duplicate task ID: delete it once. |
+| `TARGET` | A task folder, a folder of task folders, `harbor:<dataset>[@<version>]`, or the name of a committed entry under `environments/harbor/` after `gym dataset pull` (for example `terminal_bench_4`). `harbor:<org>/<name>[@<tag>]` fetches a package-store dataset. Fetched datasets land in `$NEMO_GYM_DATASETS_DIR` (default `environments/harbor/` in the Gym checkout), in the folder of the entry that declares the reference as its `[gym] source` when one does; the fetch stages its clone in a hidden `.nemo-gym-harbor-*` directory there, which discovery skips. An unhidden `nemo-gym-harbor-*` directory left by a fetch interrupted under a `main` build from before this change is refused as a duplicate task ID: delete it once. |
 | `--agent`, `-a` | The harness that works in the task sandbox. It must accept `sandbox_access` in its session seed, and the dataset's `[gym] allowed_agents`, when set, must name it; otherwise the run stops before any image is built or server started. |
 | `--sandbox PROVIDER` | Sandbox provider for the task containers. |
 | `--only-tasks`, `--exclude-tasks` | Select tasks by name or glob. Left-out tasks are listed on stdout. |
