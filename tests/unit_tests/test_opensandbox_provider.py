@@ -17,6 +17,7 @@ import asyncio
 import builtins
 import gc
 import logging
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -2757,6 +2758,81 @@ async def test_a_snapshot_lookup_error_raises(monkeypatch: pytest.MonkeyPatch) -
     _management(monkeypatch, [_ManagementResponse(500, {})])
     with pytest.raises(RuntimeError, match="lookup failed -> HTTP 500"):
         await _snapshot_provider().wait_snapshot_ready("snap-1")
+
+
+async def test_a_snapshot_the_api_does_not_know_yet_is_waited_out_until_it_appears(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls = _management(
+        monkeypatch,
+        [
+            _ManagementResponse(404, {"code": "SNAPSHOT::NOT_FOUND"}),
+            _ManagementResponse(404, {"code": "SNAPSHOT::NOT_FOUND"}),
+            _ManagementResponse(200, {"id": "snap-1", "status": {"state": "Creating"}}),
+            _ManagementResponse(200, {"id": "snap-1", "status": {"state": "Ready"}}),
+        ],
+    )
+
+    with caplog.at_level(logging.INFO, logger=opensandbox_provider.__name__):
+        await _snapshot_provider(snapshot_timeout_s=5).wait_snapshot_ready("snap-1")
+
+    assert len(calls) == 4
+    [record] = [record for record in caplog.records if "appeared" in record.getMessage()]
+    assert "'snap-1'" in record.getMessage() and "2 earlier lookups got 404" in record.getMessage()
+
+
+async def test_a_snapshot_still_unknown_after_the_grace_fails_before_the_snapshot_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _management(monkeypatch, [_ManagementResponse(404, {"code": "SNAPSHOT::NOT_FOUND"})])
+    started = time.monotonic()
+
+    with pytest.raises(RuntimeError, match=r"lookup failed -> HTTP 404 \(\d+ lookups over"):
+        await _snapshot_provider(snapshot_timeout_s=30, snapshot_lookup_grace_s=0.05).wait_snapshot_ready("snap-1")
+
+    assert len(calls) > 1, "the 404s within the grace were retried"
+    assert time.monotonic() - started < 5, "the grace, not the snapshot timeout, ended the wait"
+
+
+async def test_a_404_after_the_snapshot_appeared_fails_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _management(
+        monkeypatch,
+        [
+            _ManagementResponse(200, {"id": "snap-1", "status": {"state": "Creating"}}),
+            _ManagementResponse(404, {"code": "SNAPSHOT::NOT_FOUND"}),
+            _ManagementResponse(200, {"id": "snap-1", "status": {"state": "Ready"}}),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match=r"lookup failed -> HTTP 404$"):
+        await _snapshot_provider(snapshot_timeout_s=5, snapshot_lookup_grace_s=60).wait_snapshot_ready("snap-1")
+
+    assert len(calls) == 2
+
+
+async def test_no_lookup_grace_fails_on_the_first_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _management(monkeypatch, [_ManagementResponse(404, {"code": "SNAPSHOT::NOT_FOUND"})])
+
+    with pytest.raises(RuntimeError, match=r"lookup failed -> HTTP 404$"):
+        await _snapshot_provider(snapshot_timeout_s=5, snapshot_lookup_grace_s=0).wait_snapshot_ready("snap-1")
+
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("status", [403, 500])
+async def test_lookup_errors_other_than_404_are_not_waited_out(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    calls = _management(monkeypatch, [_ManagementResponse(status, {})])
+
+    with pytest.raises(RuntimeError, match=rf"lookup failed -> HTTP {status}$"):
+        await _snapshot_provider(snapshot_timeout_s=5, snapshot_lookup_grace_s=60).wait_snapshot_ready("snap-1")
+
+    assert len(calls) == 1
+
+
+def test_snapshot_lookup_grace_is_validated() -> None:
+    with pytest.raises(ValueError, match="operations.snapshot_lookup_grace_s must be >= 0"):
+        _snapshot_provider(snapshot_lookup_grace_s=-1)
+    assert opensandbox_provider.OpenSandboxOperationConfig().snapshot_lookup_grace_s == 60.0
 
 
 class _TextResponse(_ManagementResponse):

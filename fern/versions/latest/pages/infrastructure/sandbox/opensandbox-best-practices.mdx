@@ -232,6 +232,7 @@ Things to know:
 | --- | --- | --- |
 | `No such file or directory` for a file that is in the image (`/testbed`, `/tests/test.sh`, exit 127 on a present binary) during a large create burst | Lazy-loading image flake; the negative lookup got cached. The image is fine. | Retry after ≥60 s; if it fails twice, recreate the sandbox. |
 | Bursts of `502` on `/proxy/.../ping` right after create | Exec daemon not listening yet in a new pod. Self-healing. | Nothing. If it persists for minutes, the cluster is overloaded. |
+| Snapshot lookup → `404` right after the snapshot was taken | The management API briefly does not know a snapshot it has just created. | Nothing; the snapshot wait retries a 404 for `operations.snapshot_lookup_grace_s` (default 60 s) until the snapshot first appears, and logs how long it took. A 404 after that, or after it appeared, fails the wait. |
 | `DELETE` → `404` / "Failed to terminate sandbox" | Already gone (TTL or earlier stop). | Nothing; the provider treats it as success. |
 | Status poll → `404 unknown execution` on a live sandbox | Stale sandbox→IP routing during create/delete storms. | Treat as a lost execution and recreate; do not tear down other sandboxes. |
 | `Server disconnected` / `Connection reset by peer` on a long stream | Load-balancer idle timeout or a server worker restart. | `background_exec: true`; keep `keepalive_expiry_s` below the server's idle timeout. |

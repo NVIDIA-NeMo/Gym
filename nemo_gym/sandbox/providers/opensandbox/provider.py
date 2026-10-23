@@ -625,6 +625,9 @@ class OpenSandboxOperationConfig:
     # the controller's default commit deadline (300 s), so a slow push fails the export with a typed error
     # instead of running into the deadline.
     snapshot_timeout_s: float = 240.0
+    # The management API can answer 404 for a snapshot it has only just created. Until a lookup first finds it, a
+    # 404 is waited out for this long, within snapshot_timeout_s; 0 fails on the first 404 like any lookup error.
+    snapshot_lookup_grace_s: float = 60.0
     # Poll short status/log requests instead of holding one SSE stream open for
     # the whole command. Set this behind a load balancer that caps stream
     # duration, which would otherwise drop the stream and hang the client.
@@ -653,6 +656,8 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.pause_resume_timeout_s must be > 0")
         if self.snapshot_timeout_s <= 0:
             raise ValueError("operations.snapshot_timeout_s must be > 0")
+        if self.snapshot_lookup_grace_s < 0:
+            raise ValueError("operations.snapshot_lookup_grace_s must be >= 0")
         if self.background_poll_interval_s <= 0:
             raise ValueError("operations.background_poll_interval_s must be > 0")
         if self.background_poll_initial_s <= 0:
@@ -1107,16 +1112,40 @@ class OpenSandboxProvider:
     async def wait_snapshot_ready(self, snapshot_id: str) -> None:
         """Poll the management API until the snapshot is ``Ready``, within ``operations.snapshot_timeout_s``.
 
-        A snapshot that fails, or is not ready in time, raises.
+        A snapshot that fails, or is not ready in time, raises. The management API can answer 404 for a snapshot it
+        has only just created, so a 404 before the first successful lookup is waited out for
+        ``operations.snapshot_lookup_grace_s``; any other lookup error, or a 404 after that, raises.
         """
         timeout_s = self._operations.snapshot_timeout_s
+        grace_s = self._operations.snapshot_lookup_grace_s
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        found = False
+        not_found = 0
         lifecycle_timeout = asyncio.timeout(timeout_s)
         try:
             async with lifecycle_timeout:
                 while True:
                     status, payload = await self._management_request("GET", f"/v1/snapshots/{snapshot_id}")
+                    if status == 404 and not found and loop.time() - started < grace_s:
+                        not_found += 1
+                        await asyncio.sleep(self._create.connect_poll_s)
+                        continue
                     if status >= 400:
-                        raise RuntimeError(f"OpenSandbox snapshot {snapshot_id!r} lookup failed -> HTTP {status}")
+                        detail = ""
+                        if status == 404 and not_found and not found:
+                            detail = f" ({not_found + 1} lookups over {loop.time() - started:.1f}s)"
+                        raise RuntimeError(
+                            f"OpenSandbox snapshot {snapshot_id!r} lookup failed -> HTTP {status}{detail}"
+                        )
+                    if not found and not_found:
+                        LOGGER.warning(
+                            "OpenSandbox snapshot %r appeared %.1fs into its wait; %d earlier lookups got 404",
+                            snapshot_id,
+                            loop.time() - started,
+                            not_found,
+                        )
+                    found = True
                     state = str(((payload.get("status") or {}).get("state")) or payload.get("state") or "").lower()
                     if state == "ready":
                         return
