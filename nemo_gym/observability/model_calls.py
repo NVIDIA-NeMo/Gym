@@ -53,11 +53,8 @@ def _usage_detail_token(
 def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
     """Normalize token totals across Responses, Chat Completions, and Anthropic Messages usage.
 
-    For native Anthropic ``/v1/messages`` with prompt caching, ``input_tokens`` is only the uncached
-    remainder, so cache-read + cache-creation tokens are folded into ``tokens_in`` to reflect the true
-    prompt size (and cache-creation is surfaced separately as ``cache_creation_tokens``). OpenAI /
-    Responses usage already includes cached tokens in ``input_tokens`` / ``prompt_tokens`` (where
-    ``cached_tokens`` is a subset), so it is left untouched -- no double counting.
+    ``tokens_in`` is the whole prompt size (see ``_prompt_size``); cache creation is also reported
+    separately as ``cache_creation_tokens``. A count the provider did not report stays ``None``, never 0.
 
     ``tokens_in`` is a prompt-*size* metric, not a cost proxy: providers price cache-read (~0.1x) and
     cache-creation (~1.25x) differently from base input, so cost-accurate consumers should weight
@@ -71,20 +68,11 @@ def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
             "tokens_total": None,
             "cache_creation_tokens": None,
         }
-    tokens_in = _token_count(usage.get("input_tokens"))
-    if tokens_in is None:
-        tokens_in = _token_count(usage.get("prompt_tokens"))
+    tokens_in = _prompt_size(usage)
     tokens_out = _token_count(usage.get("output_tokens"))
     if tokens_out is None:
         tokens_out = _token_count(usage.get("completion_tokens"))
-    # Anthropic-native shape: top-level cache_* keys mean input_tokens excludes cached tokens.
-    cache_read = _token_count(usage.get("cache_read_input_tokens"))
     cache_creation = _token_count(usage.get("cache_creation_input_tokens"))
-    if cache_read is not None or cache_creation is not None:
-        cache_total = (cache_read or 0) + (cache_creation or 0)
-        # Zero cache fields alone do not establish a missing prompt count.
-        if tokens_in is not None or cache_total > 0:
-            tokens_in = (tokens_in or 0) + cache_total
     tokens_total = _token_count(usage.get("total_tokens"))
     if tokens_total is None and tokens_in is not None and tokens_out is not None:
         tokens_total = tokens_in + tokens_out
@@ -544,3 +532,29 @@ def merge_model_call_capture_into_record(
         capture["gaps"] = [gap.model_dump(mode="json", exclude_none=True) for gap in gaps]
     record["ng_model_call_capture"] = capture
     return record
+
+
+def _prompt_size(usage: Mapping[str, Any]) -> Optional[int]:
+    """Return the whole prompt size, with cached tokens counted exactly once.
+
+    Usage formats disagree on whether the prompt count includes the cache:
+
+    - ``prompt_tokens`` (Chat Completions) includes it. It wins whenever present, also when a gateway
+      adds Anthropic-style ``cache_*`` fields beside it.
+    - ``input_tokens`` with top-level ``cache_read_input_tokens`` or ``cache_creation_input_tokens``
+      (Anthropic Messages) excludes it, so the cache counts are added.
+    - ``input_tokens`` alone (Responses) includes it.
+    """
+    prompt_tokens = _token_count(usage.get("prompt_tokens"))
+    if prompt_tokens is not None:
+        return prompt_tokens
+    input_tokens = _token_count(usage.get("input_tokens"))
+    cache_read = _token_count(usage.get("cache_read_input_tokens"))
+    cache_creation = _token_count(usage.get("cache_creation_input_tokens"))
+    if cache_read is None and cache_creation is None:
+        return input_tokens
+    cache_total = (cache_read or 0) + (cache_creation or 0)
+    # A fully cached Anthropic response may omit input_tokens; zero cache counts alone prove no prompt size.
+    if input_tokens is None and cache_total == 0:
+        return None
+    return (input_tokens or 0) + cache_total
