@@ -16,11 +16,12 @@ import asyncio
 import json
 import logging
 import math
+import random
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Awaitable
+from typing import Any
 
 import yaml
 
@@ -36,7 +37,7 @@ from nemo_gym.sandbox.compose_config import (
     sandbox_platform,
 )
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S
+from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, SandboxCreateError
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.errors import HarborTaskError
@@ -81,6 +82,52 @@ def _needs_gpu(task: HarborTask) -> bool:
     return bool(task.config.environment.gpus or (verifier_environment is not None and verifier_environment.gpus))
 
 
+# Image pull failures the server retries itself before it reports a retryable seed failure.
+IMAGE_PULL_FAILURE_MARKERS = (
+    "errimagepull",
+    "imagepullbackoff",
+    "failed to pull",
+    "error pulling",
+    "image pull",
+    "pulling image",
+)
+# Retried starts queue behind this gate so a registry hiccup cannot turn into a pull storm.
+PULL_RETRY_CONCURRENCY = 4
+PULL_RETRY_BASE_DELAY_S = 5.0
+PULL_RETRY_MAX_DELAY_S = 60.0
+
+
+def _is_image_pull_failure(error: BaseException) -> bool:
+    """Whether a failed sandbox start names an image pull as its cause.
+
+    Walks the cause/context chain and the members of exception groups: a Compose group whose cleanup
+    after a failed pull failed too surfaces as an ``ExceptionGroup`` of the cleanup errors, raised while
+    the pull failure was being handled.
+    """
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        message = str(current).lower()
+        if any(marker in message for marker in IMAGE_PULL_FAILURE_MARKERS):
+            return True
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+        chained = current.__cause__ or current.__context__
+        if chained is not None:
+            pending.append(chained)
+    return False
+
+
+def _pull_retry_delay(attempt: int) -> float:
+    """Exponential backoff with jitter before retrying a failed image pull; ``attempt`` is the one that failed."""
+    base = min(PULL_RETRY_MAX_DELAY_S, PULL_RETRY_BASE_DELAY_S * 2 ** (attempt - 1))
+    return base * random.uniform(0.5, 1.5)
+
+
 class HarborSandboxMixin:
     """Provision the sandboxes an episode runs in.
 
@@ -118,11 +165,7 @@ class HarborSandboxMixin:
             | {"nemo_gym_environment_server": self.config.name, "harbor_task": task.task_id[:63], "harbor_role": role}
         )
         if ttl is None:
-            ttl = (
-                self.config.default_episode_timeout_seconds
-                + self.config.cleanup_timeout_seconds
-                + self.config.sandbox_ttl_slack_s
-            )
+            ttl = self._episode_budget_s(task) + self.config.cleanup_timeout_seconds + self.config.sandbox_ttl_slack_s
         # The override replaces only the keys it names, so a GPU task routed to the GPU provider keeps `gpu`.
         resources = _sandbox_resources(environment, request_gpu_type=self.config.request_gpu_type) | (
             self.config.sandbox_resources_override or {}
@@ -206,11 +249,16 @@ class HarborSandboxMixin:
         return getattr(provider_config, "name", None)
 
     async def _create_sandbox(self, task: HarborTask, workdir: str | None, *, episode_key: str) -> AsyncSandbox:
+        """Start the agent's sandbox, with the in-server image pull retries."""
         provider_config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
-        sandbox = AsyncSandbox(provider_config)
-        self._sandboxes[episode_key] = sandbox
-        await sandbox.start(self._sandbox_spec(task, workdir))
-        return sandbox
+        spec = self._sandbox_spec(task, workdir)
+        return await self._start_with_pull_retries(
+            task,
+            key=episode_key,
+            what=repr(task.image),
+            make=lambda: AsyncSandbox(provider_config),
+            start=lambda sandbox: sandbox.start(spec),
+        )
 
     async def _create_sandbox_within_deadline(self, task: HarborTask, episode_key: str) -> AsyncSandbox:
         """The agent's ``_create_sandbox`` under the ready deadline; the timeout is a seed failure, retried.
@@ -351,16 +399,19 @@ class HarborSandboxMixin:
             main_spec,
             env={**main_spec.env, **compose_env, **resolve_env_templates(task.config.environment.env or {})},
         )
-        compose = AsyncSandboxCompose(
-            resolve_provider_config(self._provider_ref(task), get_global_config_dict()),
-            path,
-            service_specs={name: main_spec if name == "main" else sidecar_spec for name in document["services"]},
-            timeout_s=self.config.sandbox_ready_timeout_s,
+        provider_config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
+        service_specs = {name: main_spec if name == "main" else sidecar_spec for name in document["services"]}
+        # Ownership starts before start(): a group that fails half-way is still stopped whole, and a pull
+        # failure of any service is retried with a fresh group, like a single sandbox's.
+        return await self._start_with_pull_retries(
+            task,
+            key=episode_key,
+            what="Compose group",
+            make=lambda: AsyncSandboxCompose(
+                provider_config, path, service_specs=service_specs, timeout_s=self.config.sandbox_ready_timeout_s
+            ),
+            start=lambda compose: compose.start(),
         )
-        # Ownership starts before start(): a group that fails half-way is still stopped whole.
-        self._sandboxes[episode_key] = compose
-        await compose.start()
-        return compose
 
     async def _create_verifier_sandbox(self, task: HarborTask, *, episode_key: str | None = None) -> AsyncSandbox:
         """A separate verifier runs in its own sandbox, sized by ``[verifier.environment]``.
@@ -373,7 +424,7 @@ class HarborSandboxMixin:
         with its grace and hand back the reward, and a provider's renew interval must fit under it.
         """
         environment = task.config.verifier.environment
-        if _verifier_runs_task_image(task):
+        if _verifier_runs_task_image(task, True):
             # The task image keeps the task's working directory, as the agent had it, and the agent's resolved
             # environment (Dockerfile ENV under task.toml's). An overlay task starts without it, as the agent's
             # sandbox does: the overlay's WORKDIR step makes the directory owned by the user in effect, where a
@@ -387,11 +438,66 @@ class HarborSandboxMixin:
         else:
             # An explicit verifier image starts in its `[verifier.environment].workdir`, else its own WORKDIR.
             workdir = environment.workdir
-        spec = self._sandbox_spec(task, workdir, environment=environment, image=_verifier_image(task), role="verifier")
+        spec = self._sandbox_spec(
+            task, workdir, environment=environment, image=_verifier_image(task, True), role="verifier"
+        )
         provider_config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
-        sandbox = AsyncSandbox(provider_config)
-        if episode_key is not None:
-            # Owned from before start(), like the agent's sandbox, so a failed or interrupted stop is retried.
-            self._sandboxes[_verifier_key(episode_key)] = sandbox
-        await self._within_ready_deadline(sandbox.start(spec))
-        return sandbox
+        if episode_key is None:
+            sandbox = AsyncSandbox(provider_config)
+            await self._within_ready_deadline(sandbox.start(spec))
+            return sandbox
+        # Owned from before start(), like the agent's sandbox, so a failed or interrupted stop is retried;
+        # a start that failed on an image pull is retried like the agent's, under the same ready deadline.
+        return await self._within_ready_deadline(
+            self._start_with_pull_retries(
+                task,
+                key=_verifier_key(episode_key),
+                what=f"verifier {spec.image!r}",
+                make=lambda: AsyncSandbox(provider_config),
+                start=lambda sandbox: sandbox.start(spec),
+            )
+        )
+
+    async def _start_with_pull_retries(
+        self,
+        task: HarborTask,
+        *,
+        key: str,
+        what: str,
+        make: Callable[[], Any],
+        start: Callable[[Any], Awaitable[None]],
+    ) -> Any:
+        """Start a sandbox or Compose group, retrying a start that failed on an image pull `image_pull_retries` times.
+
+        ``make`` builds a fresh object (neither accepts a second ``start``), owned under ``key`` from before
+        ``start`` so that a failed or half-started one is stopped whole. Only pull failures are retried here
+        (a provider that rejects the request, or a sandbox that never becomes ready, is reported at once);
+        the retries back off with jitter and queue behind a per-server gate, so one registry hiccup cannot
+        multiply into a pull storm.
+        """
+        attempts = self.config.image_pull_retries + 1
+        for attempt in range(1, attempts + 1):
+            sandbox = make()
+            self._sandboxes[key] = sandbox
+            try:
+                if attempt == 1:
+                    await start(sandbox)
+                else:
+                    async with self._pull_retry_gate:
+                        await start(sandbox)
+                return sandbox
+            except (SandboxCreateError, RuntimeError, OSError, ExceptionGroup) as exc:
+                # A Compose group whose cleanup failed too raises an ExceptionGroup over the pull failure.
+                if attempt >= attempts or not _is_image_pull_failure(exc):
+                    raise
+                LOGGER.warning(
+                    f"{task.task_id}: image pull failed starting {what} (attempt {attempt}/{attempts}): {exc}"
+                )
+                try:
+                    await self._stop_sandbox(key)
+                except Exception:
+                    # Still owned: shutdown retries the stop. Do not start a second sandbox under the same key.
+                    LOGGER.exception(f"{task.task_id}: could not stop the {what} of a failed image pull")
+                    raise exc from None
+                await asyncio.sleep(_pull_retry_delay(attempt))
+        raise AssertionError("unreachable")  # pragma: no cover

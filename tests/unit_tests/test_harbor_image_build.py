@@ -72,7 +72,14 @@ class TestLoaderBuildMode:
         write_task(folder / "a")
         with pytest.raises(HarborTaskError, match=r"needs a build \(COPY\).*built-images.json.*`builds:`") as info:
             load_task(folder / "a")
-        assert "docker_image" in str(info.value)
+        assert "docker_image" in str(info.value) and str(folder / BUILT_IMAGES_FILE) in str(info.value)
+        # A task discovered deeper is read against the dataset root, and the message names that record, not one
+        # next to the group folder.
+        write_task(folder / "group" / "b")
+        with pytest.raises(HarborTaskError, match=r"needs a build \(COPY\)") as nested:
+            load_task(folder / "group" / "b", root=folder)
+        assert str(folder / BUILT_IMAGES_FILE) in str(nested.value)
+        assert str(folder / "group" / BUILT_IMAGES_FILE) not in str(nested.value)
 
     def test_a_changed_context_needs_a_new_build(self, tmp_path):
         folder = tmp_path / "ds"
@@ -671,6 +678,19 @@ class TestSeparateVerifierImage:
         (rebuilt,) = build_images(folder, builder=builder, log=lambda _: None)
         assert rebuilt.service == "verifier" and rebuilt.digest != verifier.digest
         assert load_task(folder / "a").verifier_image == rebuilt.image
+
+    def test_an_unbuilt_verifier_of_a_nested_task_names_the_record_at_the_dataset_root(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_separate_task(folder / "group" / "a", dockerfile=PULL_DOCKERFILE)
+        write_base_record(folder)
+        with pytest.raises(HarborTaskError) as info:
+            load_task(folder / "group" / "a", root=folder)
+        message = str(info.value)
+        assert message.startswith(
+            f"{folder / 'group' / 'a' / 'tests' / 'Dockerfile'} is the separate verifier's image"
+        )
+        assert str(folder / BUILT_IMAGES_FILE) in message
+        assert str(folder / "group" / BUILT_IMAGES_FILE) not in message
 
     def test_a_declared_verifier_image_is_the_loaders_verifier_image_without_a_build(self, tmp_path):
         folder = tmp_path / "ds"

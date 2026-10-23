@@ -108,13 +108,19 @@ class HarborSession:
 _ENV_TEMPLATE = re.compile(r"\$\{([^}:]+)(?::-(.*))?\}")
 
 
-def resolve_env_templates(env: dict[str, str]) -> dict[str, str]:
-    """Resolve Harbor's whole-value host templates without changing the stored task."""
+def resolve_env_templates(env: dict[str, str], secrets: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Resolve Harbor's whole-value host templates without changing the stored task.
+
+    ``secrets`` (the server's operator secrets) are consulted before the process environment; they are
+    passed only when resolving the verifier process's environment.
+    """
     resolved: dict[str, str] = {}
     for key, value in env.items():
         match = _ENV_TEMPLATE.fullmatch(value)
         if match is None:
             resolved[key] = value
+        elif secrets and match.group(1) in secrets:
+            resolved[key] = secrets[match.group(1)]
         elif match.group(1) in os.environ:
             resolved[key] = os.environ[match.group(1)]
         elif match.group(2) is not None:
