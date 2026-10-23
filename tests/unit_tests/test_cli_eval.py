@@ -295,3 +295,17 @@ class TestEvalRunNoServeWithoutHeadServer:
         assert "Start it with: `gym env start`." in captured.out
         assert "Traceback" not in captured.out + captured.err
         assert "ValueError" not in captured.out + captured.err
+
+
+def test_a_run_that_checkpointed_and_stopped_exits_as_a_sigterm_kill(monkeypatch: MonkeyPatch, capsys) -> None:
+    from nemo_gym._checkpoint.collection import CollectionStopped
+
+    monkeypatch.setattr(cli_eval, "_terminated", False)
+
+    cli_eval._stopped_after_checkpoint(CollectionStopped(Path("/ckpt")))
+    with pytest.raises(SystemExit) as exit_info:
+        cli_eval._exit_if_terminated()
+
+    # A stopped run must not look successful to a scheduler that requeues it: it has rows left to continue.
+    assert exit_info.value.code == 128 + 15
+    assert "rerun with resume_from_cache" in capsys.readouterr().out

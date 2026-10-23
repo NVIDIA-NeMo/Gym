@@ -33,6 +33,7 @@ from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR
+from nemo_gym._checkpoint.collection import CollectionStopped
 from nemo_gym.benchmarks import (
     BenchmarkConfig,
     discover_benchmarks,
@@ -636,6 +637,8 @@ def e2e_rollout_collection():  # pragma: no cover
             asyncio.run(driver_fn(rollout_collection_config, resolved_config))
         else:
             asyncio.run(rch.run_from_config(rollout_collection_config))
+    except CollectionStopped as stopped:
+        _stopped_after_checkpoint(stopped)
     except KeyboardInterrupt:
         if rollout_collection_config.require_complete:
             raise RuntimeError("EVAL FAILED: rollout collection interrupted; partial artifacts retained.") from None
@@ -669,6 +672,13 @@ def _interrupt_on_sigterm() -> None:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _on_sigterm)
+
+
+def _stopped_after_checkpoint(stopped: Exception) -> None:
+    """A run that checkpointed and stopped on SIGTERM exits as a SIGTERM kill would, as an uncheckpointed one does."""
+    global _terminated
+    _terminated = True
+    print(f"{stopped}", flush=True)
 
 
 def _exit_if_terminated() -> None:
@@ -743,6 +753,8 @@ def collect_rollouts():  # pragma: no cover
     _interrupt_on_sigterm()
     try:
         asyncio.run(rch.run_from_config(config))
+    except CollectionStopped as stopped:
+        _stopped_after_checkpoint(stopped)
     except KeyboardInterrupt:
         if not _terminated:
             raise
