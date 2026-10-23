@@ -13,6 +13,7 @@ prepare Gym task rows, run the agent, and score its answers through the
 | `vtcbench.yaml` | VTCBench TSV and images | Rule matching with LLM fallback |
 | `agentx.yaml` | Agent-X source data or prepared bundle | GoalAcc on 605 non-generative tasks |
 | `babyvision.yaml` | BabyVision TSV and images | LLM answer verification |
+| `zerobench.yaml` | Official main-split Parquet with embedded images | Case-insensitive exact answer accuracy |
 
 ## Prepare data
 
@@ -54,6 +55,21 @@ python -m benchmarks.opencode_multimodal_benchmarks.bundle_agentx \
 Use a new destination directory. The bundle contains `agentx.jsonl`, `media/`, and
 `provenance.json`. To load it, supply `prepare_kwargs.dataset`, `sha256`, and
 `media_root` instead of `source_root`.
+
+### ZeroBench
+
+Accept the access conditions on the [official dataset page](https://huggingface.co/datasets/jonathan-roberts1/zerobench).
+Download `data/zerobench-00000-of-00001.parquet` at revision
+`8fcdfd9138c802cac52b774b36946e70f738f500` and supply its path as
+`prepare_kwargs.parquet`. Preparation validates the file checksum and all 100
+question IDs, preserves image bytes, and keeps answers outside policy input.
+Do not check the gated dataset or its answers into source control.
+
+Compose `zerobench.yaml` with `opencode_eval_agent.yaml` for evaluation without a
+judge. The public question suffix requests a final answer in curly braces. The
+scorer follows the [public example](https://github.com/jonathan-roberts1/zerobench#code),
+including last-brace extraction and whitespace behavior. A single repeat reports
+single-attempt accuracy; it does not measure pass@5 or five-attempt reliability.
 
 ## Configure a run
 

@@ -1,15 +1,16 @@
 # Visual benchmark verification
 
-This resources server scores VStar, HRBench8K, VTCBench, Agent-X and BabyVision
+This resources server scores VStar, HRBench8K, VTCBench, Agent-X, BabyVision and ZeroBench
 responses. Dataset preparation produces Gym task rows with reference labels in
 `verifier_metadata`, separate from model inputs and the episode sandbox.
 
 VStar and HRBench8K use multiple-choice extraction with a reference-blind judge
 fallback. VTCBench uses the public rule matcher followed by an LLM judge for rule-negative answers. Agent-X uses its Goal
 Accuracy rubric and retains fractional subjective scores. BabyVision uses
-LLM answer verification. Empty answers score zero.
+LLM answer verification. ZeroBench uses the public last-curly-brace extraction
+and case-insensitive exact comparison, without a judge. Empty answers score zero.
 
-Supply `judge_model` and either `judge_server` or `judge_endpoint` explicitly.
+For judge-based benchmarks, supply `judge_model` and either `judge_server` or `judge_endpoint` explicitly.
 There is no built-in deployment endpoint or model route. Configure `judge_server`
 to route judge calls through a Gym model server with
 rollout correlation and capture. Judge failures remain errors that require

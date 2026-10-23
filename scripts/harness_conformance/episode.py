@@ -97,7 +97,9 @@ def _config(
     agent.update({key: value for key, value in defaults.items() if key.endswith("_version")})
     if harness == "opencode_multimodal":
         root = Path(__file__).resolve().parents[2]
-        profile = yaml.safe_load((root / "benchmarks/opencode_multimodal_benchmarks/opencode_eval.yaml").read_text())
+        profile = yaml.safe_load(
+            (root / "benchmarks/opencode_multimodal_benchmarks/opencode_eval_agent.yaml").read_text()
+        )
         budget = yaml.safe_load(
             (root / "responses_api_agents/opencode_multimodal_agent/configs/eval_55_grace10.yaml").read_text()
         )

@@ -69,6 +69,8 @@ def benchmark_report(benchmark, rows):
     """Return VLMEvalKit report columns and units as JSON-compatible records."""
     if not rows:
         return []
+    if benchmark == "ZeroBench":
+        return [{"split": "zerobench", "count": len(rows), "accuracy": accuracy(rows)}]
     if benchmark == "HRBench8K":
         return cycle_report(rows)
     if benchmark == "VTCBench":

@@ -29,6 +29,7 @@ from resources_servers.opencode_multimodal_benchmarks.metrics import average_rep
 from resources_servers.opencode_multimodal_benchmarks.reporting import benchmark_report
 from resources_servers.opencode_multimodal_benchmarks.scoring import BABYVISION_JUDGE_PROMPT, boxed_answer
 from resources_servers.opencode_multimodal_benchmarks.vtcbench import judge_prompt, judge_score, rule_score
+from resources_servers.opencode_multimodal_benchmarks.zerobench import score as zerobench_score
 from responses_api_agents.opencode_multimodal_agent.media import final_answer
 
 
@@ -133,6 +134,14 @@ class VisualBenchmarksServer(SimpleResourcesServer):
         benchmark = task["benchmark"]
         if not prediction.strip():
             scored = {"hit": 0, "extracted": "", "scorer": "empty-answer-v1"}
+        elif benchmark == "ZeroBench":
+            extracted, hit = zerobench_score(prediction, task["answer"])
+            scored = {
+                "hit": int(hit),
+                "extracted": extracted,
+                "scorer": "zerobench-public-exact-v1",
+                "extraction_method": "last-curly-brace",
+            }
         elif benchmark == "VTCBench":
             scored = {
                 "hit": rule_score(task, prediction),
