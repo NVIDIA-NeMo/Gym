@@ -4,28 +4,44 @@
 """Dockerfile builds (image mode three): planning, building through a tool, recording, and the loader."""
 
 import json
+from pathlib import Path
 
 import pytest
+import yaml
 
 import nemo_gym.tasks.harbor.build_options as build_options
 import nemo_gym.tasks.harbor.prepare_builds as prepare_builds
+from nemo_gym.tasks.harbor.build_compose import (
+    compose_build_env,
+    harbor_compose_document,
+)
+from nemo_gym.tasks.harbor.build_plan import BuildError, needs_build, plan_builds
 from nemo_gym.tasks.harbor.build_tools import ImageBuilder
+from nemo_gym.tasks.harbor.digest import context_digest
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.image_build import build_images
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
-from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.tasks.harbor.task import built_service_images, load_task
+from nemo_gym.tasks.harbor.verifier_env import verifier_compose_sidecars
 from tests.unit_tests.harbor_build_helpers import (
+    BUILD_DOCKERFILE,
     PULL_DOCKERFILE,
+    REPO,
     TOML,
+    UBUNTU_RECORD,
     FakeTool,
+    HeredocTool,
     harbor_hash,
     local_docker,
+    main_record,
+    settled,
     tagged_buildah,
     task_inputs_digest,
     write_base_record,
     write_task,
 )
+from tests.unit_tests.test_harbor_build_plan import TestPlan as PlanCases
 
 
 class TestLoaderBuildMode:
@@ -115,6 +131,130 @@ class TestPrepareBuilds:
         )
         assert "Built image recorded for a, b" in capsys.readouterr().out
 
+    def test_a_sidecar_named_verifier_is_built_like_any_service_and_not_refused_before_the_build(
+        self, tmp_path, fake_builder, monkeypatch
+    ):
+        """kumo's shape (PlanCases.SIDECAR_FILES): main, world and an ordinary sidecar named ``verifier``, every one
+        with a ``build:`` section, in shared verifier mode. The plan entry of that sidecar has ``verifier=False`` (the
+        separate verifier's image is the only entry with the flag), so the preflight filter treats its ``build:`` as
+        built like world's, nothing is refused before the builder runs, and the task prepares with all three recorded."""
+        from nemo_gym.tasks.harbor import image_configs
+        from nemo_gym.tasks.harbor.build_options import BuildOptions
+        from nemo_gym.tasks.harbor.cli import prepare_target
+        from nemo_gym.tasks.harbor.prepare_builds import refused_before_build
+
+        class NoRegistry:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("the registry was consulted")
+
+        monkeypatch.setattr(image_configs, "RegistryClient", NoRegistry)
+        folder = tmp_path / "ds"
+        write_task(folder / "k", extra=PlanCases.SIDECAR_FILES)
+        write_base_record(folder, "redis:7")  # the pulled sidecar `cache`, recorded as prepare would have
+        plan = plan_builds(folder)
+        assert [(entry.service, entry.verifier) for entry in plan] == [
+            ("main", False),
+            ("world", False),
+            ("verifier", False),
+        ]
+        assert refused_before_build(plan) == {}
+
+        prepared = prepare_target(
+            str(folder), output_root=tmp_path / "out", build=BuildOptions(tool="podman", repository="reg.example/r")
+        )
+
+        assert prepared.skipped == {}
+        (task,) = prepared.tasks
+        digest = harbor_hash(folder / "k" / "environment")
+        assert built_service_images(task.path) == {
+            "main": f"reg.example/r/hb__{digest}@sha256:pushed01",
+            "world": f"reg.example/r/hb__{digest}-world@sha256:pushed01",
+            "verifier": f"reg.example/r/hb__{digest}-verifier@sha256:pushed01",
+        }
+        assert task.image == f"reg.example/r/hb__{digest}@sha256:pushed01" and task.verifier_image is None
+
+    def test_a_verifier_context_shared_with_a_refused_task_is_still_built_for_the_eligible_one(
+        self, tmp_path, fake_builder, monkeypatch
+    ):
+        """Review (M24): tasks a and b in separate verifier mode ship a byte-identical ``tests/`` (one plan entry with
+        tasks (a, b)) and distinct ``environment/`` Dockerfiles; a's Compose file carries a key the adapter refuses.
+        The preflight used to drop every entry a refused task was on, the shared verifier entry included, so b's main
+        was built but its verifier image never recorded and b failed to load. The plan is now made again without the
+        refused tasks: b's main and the shared verifier are built, the verifier entry narrowed to b, only a left out."""
+        from nemo_gym.tasks.harbor.build_options import BuildOptions
+        from nemo_gym.tasks.harbor.cli import prepare_target
+
+        folder = tmp_path / "ds"
+        refused_compose = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n    privileged: true\n"
+        write_separate_task(folder / "a", extra={"docker-compose.yaml": refused_compose})
+        write_separate_task(folder / "b", dockerfile=BUILD_DOCKERFILE + "ENV B=1\n")
+        write_base_record(folder)
+        tests = (folder / "a" / "tests" / "Dockerfile").read_bytes()
+        assert tests == (folder / "b" / "tests" / "Dockerfile").read_bytes()
+        tests_digest = harbor_hash(folder / "b" / "tests")
+        shared = next(entry for entry in plan_builds(folder) if entry.verifier)
+        assert shared.tasks == ("a", "b") and shared.digest == tests_digest == harbor_hash(folder / "a" / "tests")
+        handed: list = []
+        build_many = ImageBuilder.build_many
+
+        def recording(self, entries, **kwargs):
+            handed.extend(entries)
+            return build_many(self, entries, **kwargs)
+
+        monkeypatch.setattr(ImageBuilder, "build_many", recording)
+        build = BuildOptions(tool="podman", repository="reg.example/r")
+
+        refused = prepare_builds._build_dockerfiles(folder, build, select=None)
+
+        assert list(refused) == ["a"]
+        assert "Service 'main': unsupported Compose fields ['privileged']" in refused["a"]
+        # b's main and the shared verifier were handed to the builder, the verifier entry for b alone; not a's main.
+        assert {(entry.digest, entry.service, entry.tasks, entry.verifier) for entry in handed} == {
+            (harbor_hash(folder / "b" / "environment"), "main", ("b",), False),
+            (tests_digest, "verifier", ("b",), True),
+        }
+        recorded = json.loads((folder / BUILT_IMAGES_FILE).read_text())
+        assert recorded[tests_digest]["tasks"] == ["b"]
+        assert recorded[tests_digest]["services"]["verifier"]["image"] == (
+            f"reg.example/r/hb__{tests_digest}-verifier@sha256:pushed01"
+        )
+
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", build=build)
+
+        assert list(prepared.skipped) == ["a"] and "unsupported Compose fields ['privileged']" in prepared.skipped["a"]
+        (b,) = prepared.tasks
+        assert b.task_id == "b"
+        assert b.image == f"reg.example/r/hb__{harbor_hash(folder / 'b' / 'environment')}@sha256:pushed01"
+        assert b.verifier_image == f"reg.example/r/hb__{tests_digest}-verifier@sha256:pushed01"
+
+    def test_prepare_records_a_sidecar_and_makes_no_registry_call_for_it(self, tmp_path, fake_builder, monkeypatch):
+        from nemo_gym.tasks.harbor import image_configs
+        from nemo_gym.tasks.harbor.build_options import BuildOptions
+        from nemo_gym.tasks.harbor.cli import prepare_target
+        from nemo_gym.tasks.harbor.image_configs import compose_image_references
+
+        class NoRegistry:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("the registry was consulted for a built image")
+
+        monkeypatch.setattr(image_configs, "RegistryClient", NoRegistry)
+        folder = tmp_path / "ds"
+        compose = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n  db:\n    build: ./db\n    expose: ['5432']\n"
+        write_task(folder / "a", extra={"docker-compose.yaml": compose, "db/Dockerfile": "FROM postgres:16\n"})
+        prepared = prepare_target(
+            str(folder), output_root=tmp_path / "out", build=BuildOptions(tool="podman", repository="reg.example/r")
+        )
+        (task,) = prepared.tasks
+        digest = harbor_hash(folder / "a" / "environment")
+        main = f"reg.example/r/hb__{digest}@sha256:pushed01"
+        db = f"reg.example/r/hb__{digest}-db@sha256:pushed01"
+        assert task.image == main and built_service_images(task.path) == {"main": main, "db": db}
+        # The loader hands the recorded sidecar image to the Compose readers; its configuration was recorded by the
+        # build, so record_compose_images resolved nothing (NoRegistry would have raised).
+        assert compose_image_references(task) == [main, db]
+        assert json.loads((folder / IMAGE_CONFIGS_FILE).read_text())[db]["config"]["WorkingDir"] == "/srv"
+        assert prepared.skipped == {}
+
     def test_builds_disabled_leaves_the_tasks_out_with_the_loader_message(self, tmp_path, fake_builder, capsys):
         from nemo_gym.tasks.harbor.build_options import BuildOptions
         from nemo_gym.tasks.harbor.cli import prepare_target
@@ -135,6 +275,50 @@ class TestPrepareBuilds:
         build_images(folder, builder=local_docker()[0], log=lambda _: None)
         prepared = prepare_target(str(folder), output_root=tmp_path / "out", build=BuildOptions(enabled=False))
         assert [t.task_id for t in prepared.tasks] == ["a", "c"]
+        assert "Skipping Dockerfile builds" not in capsys.readouterr().out
+
+    @pytest.mark.parametrize("shape", ["legacy", "main-only", "sidecar-only"])
+    def test_builds_disabled_names_a_task_whose_context_is_only_partly_recorded(
+        self, tmp_path, fake_builder, capsys, shape
+    ):
+        from nemo_gym.tasks.harbor.build_options import BuildOptions
+        from nemo_gym.tasks.harbor.cli import prepare_target
+
+        folder = tmp_path / "ds"
+        compose = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n  world:\n    build: ./world\n"
+        files = {"docker-compose.yaml": compose, "world/Dockerfile": "FROM python:3.12\n", "tools/setup.sh": "true\n"}
+        write_task(folder / "a", extra=files)
+        write_task(folder / "c", dockerfile=PULL_DOCKERFILE)
+        digest = harbor_hash(folder / "a" / "environment")
+        main_image = f"reg.example/r/hb__{digest}@sha256:aa"
+        world_image = f"reg.example/r/hb__{digest}-world@sha256:bb"
+        write_base_record(folder)
+        # The built images' records carry the digest of their inputs as they are now, as the build writes them.
+        write_base_record(folder, main_image, inputs_digest=task_inputs_digest(folder / "a"))
+        write_base_record(folder, world_image, inputs_digest=task_inputs_digest(folder / "a", service="world"))
+        # A record of a pre-sidecar Gym, a prepare interrupted after main, and one interrupted after the sidecar.
+        entries = {
+            "legacy": {"image": main_image, "tasks": ["a"], "tool": "buildah", "pushed": True},
+            "main-only": main_record(main_image, ["a"], "buildah", True),
+            "sidecar-only": {"tasks": ["a"], "tool": "buildah", "pushed": True, "services": {"world": world_image}},
+        }
+        (folder / BUILT_IMAGES_FILE).write_text(json.dumps({digest: entries[shape]}))
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", build=BuildOptions(enabled=False))
+        # The task is left out by the loader (no main) or by the Compose reader (no world), and the digest is
+        # present, but a planned service of it has no record: the notice still names the task.
+        reason = "needs a build" if shape == "sidecar-only" else "has a build section and prepare recorded no build"
+        assert [t.task_id for t in prepared.tasks] == ["c"] and reason in prepared.skipped["a"]
+        assert fake_builder == []
+        assert (
+            "Skipping Dockerfile builds (builds.enabled is false); tasks that need one are left out: a"
+            in capsys.readouterr().out
+        )
+        # Every planned service recorded: the task loads from the records and nothing is said.
+        complete = {**main_record(main_image, ["a"], "buildah", True)}
+        complete["services"] = {**complete["services"], "world": {"image": world_image}}
+        (folder / BUILT_IMAGES_FILE).write_text(json.dumps({digest: complete}))
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", build=BuildOptions(enabled=False))
+        assert [t.task_id for t in prepared.tasks] == ["a", "c"] and prepared.tasks[0].image == main_image
         assert "Skipping Dockerfile builds" not in capsys.readouterr().out
 
     def test_builds_disabled_leaves_out_a_record_that_does_not_fit_the_run(self, tmp_path, fake_builder, capsys):
@@ -325,3 +509,417 @@ class TestBuildOptions:
             build_options.BuildOptions(enabled=False, tool="podman", repository="env.example/r"),
             build_options.BuildOptions(tool="podman", repository="env.example/r", platform="linux/arm64"),
         ]
+
+
+SEPARATE_TOML = TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+# tb3-preview-v2's shape: a FROM plus RUN file (overlay-kind on environment/), built here because Harbor builds it.
+TESTS_DOCKERFILE = "FROM python:3.13-slim-bookworm\nRUN pip install pytest==8.4.1\nCOPY . /tests/\n"
+TESTS_OVERLAY_DOCKERFILE = "FROM python:3.13-slim-bookworm\nRUN pip install pytest==8.4.1\n"
+
+
+def write_separate_task(
+    root: Path, *, toml: str = SEPARATE_TOML, tests_dockerfile: str | None = TESTS_DOCKERFILE, **kwargs
+) -> Path:
+    """A separate-mode task whose ``tests/`` folder holds a Dockerfile (``None`` for none), the verifier's build context."""
+    write_task(root, toml=toml, **kwargs)
+    if tests_dockerfile is not None:
+        (root / "tests" / "Dockerfile").write_text(tests_dockerfile)
+    return root
+
+
+class TestSeparateVerifierImage:
+    """D1: the separate verifier's image is built from ``tests/Dockerfile``, as Harbor builds it."""
+
+    def test_plan_adds_a_verifier_entry_for_the_tests_context_after_the_tasks_own(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_separate_task(folder / "a")
+        context = (folder / "a" / "environment").resolve()
+        tests = (folder / "a" / "tests").resolve()
+        main, verifier = plan_builds(folder)
+        assert (main.service, main.is_main, main.verifier) == ("main", True, False)
+        assert main.context == context and main.digest == harbor_hash(context)
+        # The verifier entry: service `verifier`, tests/ as context and hash root (Harbor's environment_id of its
+        # verifier env hashes that dir), building Harbor's template service main of it.
+        assert (verifier.service, verifier.is_main, verifier.verifier) == ("verifier", False, True)
+        assert verifier.compose_service == "main" and verifier.tasks == ("a",)
+        assert verifier.context == tests and verifier.digest == harbor_hash(tests) == context_digest(tests)
+        assert verifier.digest != main.digest
+        assert verifier.build_dir == tests and verifier.dockerfile_path == tests / "Dockerfile"
+        # The effective verifier environment is a copy of [environment]: its resources, and no env without a
+        # tests/docker-compose.yaml, as Harbor resolves env for Compose environments only.
+        assert (verifier.cpus, verifier.memory_mb, verifier.env) == (1, 2048, {})
+        builder, _ = tagged_buildah(tmp_path)
+        assert builder.tag_for(verifier) == f"{REPO}/hb__{verifier.digest}-verifier"
+        assert builder.tag_for(main) == f"{REPO}/hb__{main.digest}"
+        # Harbor's environment for the build: MAIN_IMAGE_NAME is hb__<tests hash>, CONTEXT_DIR the tests folder.
+        env = compose_build_env(verifier, builder.tag_name(verifier.digest), None)
+        assert env["MAIN_IMAGE_NAME"] == f"{REPO}/hb__{verifier.digest}" and env["CONTEXT_DIR"] == str(tests)
+        assert env["COMPOSE_PROJECT_NAME"] == f"hb__{verifier.digest}"
+
+    def test_the_verifier_environment_block_gives_the_entry_its_settings_and_compose_env(self, tmp_path):
+        folder = tmp_path / "ds"
+        toml = (
+            TOML.replace("[verifier]\n", "[verifier]\n")
+            + '\n[verifier.environment]\ncpus = 4\nmemory_mb = 8192\n\n[verifier.environment.env]\nMODE = "grade"\n'
+            + '\n[environment.env]\nMODE = "agent"\n'
+        )
+        write_separate_task(folder / "a", toml=toml, dockerfile=PULL_DOCKERFILE)
+        (folder / "a" / "tests" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n"
+        )
+        write_base_record(folder)
+        # A pull-mode main plans nothing of its own; the verifier block (no docker_image) still plans the build.
+        (verifier,) = plan_builds(folder)
+        assert verifier.verifier and (verifier.cpus, verifier.memory_mb) == (4, 8192)
+        assert verifier.env == {"MODE": "grade"}
+        assert settled(verifier, f"hb__{verifier.digest}").dockerfile_path == verifier.context / "Dockerfile"
+
+    def test_an_overlay_kind_tests_dockerfile_is_built_not_overlaid(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_separate_task(folder / "a", dockerfile=PULL_DOCKERFILE, tests_dockerfile=TESTS_OVERLAY_DOCKERFILE)
+        write_base_record(folder)
+        assert not needs_build(TESTS_OVERLAY_DOCKERFILE, {"python:3.13-slim-bookworm": UBUNTU_RECORD})
+        (verifier,) = plan_builds(folder)
+        assert verifier.verifier and verifier.dockerfile_path.read_text() == TESTS_OVERLAY_DOCKERFILE
+
+    @pytest.mark.parametrize(
+        "shape",
+        ["shared", "shared_explicit", "declared_verifier_image", "inherited_docker_image", "no_tests_dockerfile"],
+    )
+    def test_no_verifier_entry_when_harbor_builds_none(self, tmp_path, shape):
+        folder = tmp_path / "ds"
+        toml = {
+            "shared": TOML,
+            "shared_explicit": TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "shared"\n'),
+            "declared_verifier_image": TOML + '\n[verifier.environment]\ndocker_image = "org/verifier:1"\n',
+            # No block and a prebuilt main: Harbor's copy of [environment] carries the image, so prebuilt verifier.
+            "inherited_docker_image": SEPARATE_TOML + 'docker_image = "org/prebuilt:1"\n',
+            "no_tests_dockerfile": SEPARATE_TOML,
+        }[shape]
+        tests_dockerfile = None if shape == "no_tests_dockerfile" else TESTS_DOCKERFILE
+        write_separate_task(folder / "a", toml=toml, tests_dockerfile=tests_dockerfile)
+        plan = plan_builds(folder)
+        assert not any(entry.verifier for entry in plan), plan
+        assert [entry.service for entry in plan] == ([] if shape == "inherited_docker_image" else ["main"])
+        # A dataset override that pins the task's image is Harbor's prebuilt verifier too.
+        if shape == "no_tests_dockerfile":
+            (folder / "a" / "tests" / "Dockerfile").write_text(TESTS_DOCKERFILE)
+            assert [entry.service for entry in plan_builds(folder)] == ["main", "verifier"]
+            (folder / "dataset.toml").write_text('[gym.tasks."a".environment]\ndocker_image = "org/pinned:2"\n')
+            assert plan_builds(folder) == []
+
+    def test_two_tasks_sharing_tests_share_the_verifier_image_and_a_compose_verifier_sidecar_is_not_it(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_separate_task(folder / "a")
+        write_separate_task(folder / "b", extra={"tools/setup.sh": "#!/bin/sh\necho other\n"})
+        # kumo's shape beside it: a sidecar named `verifier` in environment/docker-compose.yaml, shared mode.
+        write_task(folder / "k", extra=PlanCases.SIDECAR_FILES)
+        plan = plan_builds(folder)
+        by_task = [(entry.service, entry.tasks, entry.verifier) for entry in plan]
+        tests_digest = harbor_hash(folder / "a" / "tests")
+        assert by_task == [
+            ("main", ("a",), False),
+            ("verifier", ("a", "b"), True),
+            ("main", ("b",), False),
+            ("main", ("k",), False),
+            ("world", ("k",), False),
+            ("verifier", ("k",), False),
+        ]
+        assert plan[1].digest == tests_digest and plan[5].digest == harbor_hash(folder / "k" / "environment")
+        assert plan[5].compose_service == "verifier" and plan[1].compose_service == "main"
+
+    def test_buildah_builds_records_and_the_loader_exposes_the_verifier_image(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_separate_task(folder / "a", dockerfile=PULL_DOCKERFILE)
+        write_base_record(folder)
+        tests = (folder / "a" / "tests").resolve()
+        # Before the build: the loader refuses the task the way it refuses an unrecorded environment/ build, naming
+        # the file, the record and the two remedies (Harbor grades in that image; nothing else is a stand-in).
+        with pytest.raises(HarborTaskError) as info:
+            load_task(folder / "a")
+        message = str(info.value)
+        assert message.startswith(f"{folder / 'a' / 'tests' / 'Dockerfile'} is the separate verifier's image")
+        assert str(folder / BUILT_IMAGES_FILE) in message and "`builds:` block" in message
+        assert "declare [verifier.environment].docker_image" in message
+        (folder / "a" / "environment" / "Dockerfile").write_text(BUILD_DOCKERFILE)
+        fake = FakeTool("buildah")
+        builder = ImageBuilder(tool="buildah", repository=REPO, storage_root=tmp_path / "store", run=fake)
+        main, verifier = build_images(folder, builder=builder, log=lambda _: None)
+        assert verifier.service == "verifier" and verifier.tag == f"{REPO}/hb__{verifier.digest}-verifier"
+        assert verifier.digest == harbor_hash(tests) and verifier.image == f"{verifier.tag}@sha256:pushed01"
+        bud = next(call for call in fake.calls if "bud" in call and verifier.tag in call)
+        assert bud[-3:] == ["-f", str(tests / "Dockerfile"), str(tests)]
+        # Recorded under the tests/ digest as service verifier, no main there, its configuration beside it.
+        built = json.loads((folder / BUILT_IMAGES_FILE).read_text())
+        assert set(built) == {main.digest, verifier.digest}
+        entry = built[verifier.digest]
+        assert "image" not in entry and entry["tasks"] == ["a"]
+        assert entry["services"] == {"verifier": {"image": verifier.image, "tool": "buildah", "pushed": True}}
+        assert json.loads((folder / IMAGE_CONFIGS_FILE).read_text())[verifier.image]["config"]["User"] == "app"
+        assert built_service_images(folder / "a") == {"main": main.image}  # environment/'s record is main's alone
+        task = load_task(folder / "a")
+        assert task.image == main.image and task.built_images == {"main": main.image}
+        assert task.verifier_image == verifier.image
+        # A second run finds both recorded; a changed tests/ folder is a new verifier build and main is kept.
+        lines: list[str] = []
+        assert build_images(folder, builder=builder, log=lines.append) == []
+        assert lines == [
+            f"Built image recorded for a: {main.image}",
+            f"Built image recorded for a (verifier): {verifier.image}",
+        ]
+        (folder / "a" / "tests" / "test.sh").write_text("#!/bin/bash\necho 0 > /logs/verifier/reward.txt\n")
+        (rebuilt,) = build_images(folder, builder=builder, log=lambda _: None)
+        assert rebuilt.service == "verifier" and rebuilt.digest != verifier.digest
+        assert load_task(folder / "a").verifier_image == rebuilt.image
+
+    def test_a_declared_verifier_image_is_the_loaders_verifier_image_without_a_build(self, tmp_path):
+        folder = tmp_path / "ds"
+        toml = TOML + '\n[verifier.environment]\ndocker_image = "org/verifier:1"\n'
+        write_separate_task(folder / "a", toml=toml, dockerfile=PULL_DOCKERFILE)
+        write_base_record(folder)
+        assert plan_builds(folder) == []
+        assert load_task(folder / "a").verifier_image == "org/verifier:1"
+        # Harbor's prebuilt verifier by inheritance: no block, [environment].docker_image, no tests/Dockerfile. The
+        # verifier runs in the task's own image, so there is nothing to expose and nothing to plan.
+        write_separate_task(
+            folder / "b", toml=SEPARATE_TOML + 'docker_image = "org/prebuilt:1"\n', tests_dockerfile=None
+        )
+        assert plan_builds(folder) == [] and load_task(folder / "b").verifier_image is None
+
+    @pytest.mark.parametrize("shape", ["no_block", "block_without_image"])
+    def test_no_tests_dockerfile_and_no_image_is_refused_as_harbor_refuses_it(self, tmp_path, shape):
+        """Harbor's verifier environment dir is always tests/ (no fallback to environment/): without a Dockerfile
+        there and without a docker_image its environment validation fails, so the loader refuses the task with that
+        wording, with or without a [verifier.environment] block."""
+        folder = tmp_path / "ds"
+        toml = SEPARATE_TOML if shape == "no_block" else TOML + "\n[verifier.environment]\ncpus = 2\n"
+        write_separate_task(folder / "a", toml=toml, dockerfile=PULL_DOCKERFILE, tests_dockerfile=None)
+        write_base_record(folder)
+        assert plan_builds(folder) == []  # nothing to build: preparing with builds enabled changes nothing
+        with pytest.raises(HarborTaskError) as info:
+            load_task(folder / "a")
+        message = str(info.value)
+        assert message.startswith(f"Task environment directory {folder / 'a' / 'tests'} has no environment definition")
+        assert "require_agent_environment_definition" in message
+        assert "Set [verifier.environment].docker_image or add tests/Dockerfile" in message
+        assert "prepare" not in message  # no remedy that cannot help
+        # A tests/docker-compose.yaml alone is a Harbor Compose build this server does not plan: refused as such.
+        write_separate_task(folder / "b", toml=toml, dockerfile=PULL_DOCKERFILE, tests_dockerfile=None)
+        (folder / "b" / "tests" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    build:\n      dockerfile: Dockerfile.verifier\n"
+        )
+        assert plan_builds(folder) == []
+        with pytest.raises(HarborTaskError, match="this server builds it from tests/Dockerfile only"):
+            load_task(folder / "b")
+
+    def test_builds_disabled_leaves_a_task_whose_verifier_image_is_unbuilt_out(self, tmp_path, capsys):
+        """A pull-mode main needs no build; the verifier's tests/Dockerfile does. With builds disabled the task is
+        left out, in skipped.json and in prepare's message, as a task with an unrecorded environment/ build is."""
+        from nemo_gym.tasks.harbor.build_options import BuildOptions
+        from nemo_gym.tasks.harbor.cli import prepare_target
+
+        folder = tmp_path / "ds"
+        write_separate_task(folder / "a", dockerfile=PULL_DOCKERFILE)
+        write_task(folder / "c", dockerfile=PULL_DOCKERFILE)
+        write_base_record(folder)
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", build=BuildOptions(enabled=False))
+        assert [t.task_id for t in prepared.tasks] == ["c"]
+        assert list(prepared.skipped) == ["a"] and "is the separate verifier's image" in prepared.skipped["a"]
+        assert json.loads((prepared.output_dir / "skipped.json").read_text()) == prepared.skipped
+        assert (
+            "Skipping Dockerfile builds (builds.enabled is false); tasks that need one are left out: a"
+            in capsys.readouterr().out
+        )
+        # Built and recorded, the task prepares with its verifier image and a disabled build says nothing.
+        fake = FakeTool("buildah")
+        builder = ImageBuilder(tool="buildah", repository=REPO, storage_root=tmp_path / "store", run=fake)
+        (verifier,) = build_images(folder, builder=builder, log=lambda _: None)
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", build=BuildOptions(enabled=False))
+        assert [t.task_id for t in prepared.tasks] == ["a", "c"] and prepared.skipped == {}
+        assert prepared.tasks[0].verifier_image == verifier.image
+        assert "Skipping Dockerfile builds" not in capsys.readouterr().out
+
+    def test_a_tests_compose_file_with_a_sidecar_is_refused_by_the_loader_and_before_any_build(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Harbor builds and starts every service of tests/docker-compose.yaml as the verifier's Compose project;
+        this server starts one verifier sandbox, so such a task is refused, built image or declared one."""
+        from nemo_gym.tasks.harbor.cli import prepare_target
+
+        folder = tmp_path / "ds"
+        write_separate_task(folder / "a", dockerfile=PULL_DOCKERFILE)
+        write_separate_task(folder / "b", dockerfile=PULL_DOCKERFILE, extra={"tools/setup.sh": "#!/bin/sh\necho b\n"})
+        write_base_record(folder)
+        (folder / "a" / "tests" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n  db:\n    image: postgres:16\n"
+        )
+        # b: the main-only shape (cadir, arc-crm-6) is read for main's build section and nothing else.
+        (folder / "b" / "tests" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n"
+        )
+        assert verifier_compose_sidecars(folder / "a") == ["db"] and verifier_compose_sidecars(folder / "b") == []
+        with pytest.raises(HarborTaskError, match=r"declares service\(s\) db beside main"):
+            load_task(folder / "a")
+        # A declared verifier image changes nothing: Harbor stacks the file on its prebuilt template too.
+        write_separate_task(
+            folder / "c",
+            toml=TOML + '\n[verifier.environment]\ndocker_image = "org/verifier:1"\n',
+            dockerfile=PULL_DOCKERFILE,
+            tests_dockerfile=None,
+        )
+        (folder / "c" / "tests" / "docker-compose.yaml").write_text("services:\n  db:\n    image: postgres:16\n")
+        with pytest.raises(HarborTaskError, match=r"declares service\(s\) db beside main"):
+            load_task(folder / "c")
+        fake = FakeTool("buildah")
+        monkeypatch.setattr(
+            prepare_builds,
+            "ImageBuilder",
+            lambda **kw: ImageBuilder(tool="buildah", repository=REPO, storage_root=tmp_path / "store", run=fake),
+        )
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out")
+        assert [t.task_id for t in prepared.tasks] == ["b"] and sorted(prepared.skipped) == ["a", "c"]
+        assert prepared.skipped["a"].startswith("Could not build the Dockerfile image(s) for task(s) a: ")
+        assert "declares service(s) db beside main" in prepared.skipped["a"]
+        assert "declares service(s) db beside main" in prepared.skipped["c"]  # the loader's refusal, no build planned
+        # Nothing was built for a: no command named its tests/ context and no record was written for it.
+        a_tests = str((folder / "a" / "tests").resolve())
+        assert not any(a_tests in call for call in fake.calls)
+        assert harbor_hash(folder / "a" / "tests") not in json.loads((folder / BUILT_IMAGES_FILE).read_text())
+        assert (
+            prepared.tasks[0].verifier_image
+            == f"{REPO}/hb__{harbor_hash(folder / 'b' / 'tests')}-verifier@sha256:pushed01"
+        )
+        assert "Built 1 image(s) with buildah, pushed 1" in capsys.readouterr().out
+
+    def test_a_heredoc_tests_dockerfile_is_refused_by_the_preflight_naming_the_verifiers_file(
+        self, tmp_path, monkeypatch
+    ):
+        """tests/Dockerfile takes main's validate and refusal path: the heredoc preflight here."""
+        monkeypatch.delenv("CONTAINERS_CONF_OVERRIDE", raising=False)
+        monkeypatch.delenv("CONTAINERS_REGISTRIES_CONF", raising=False)
+        folder = tmp_path / "ds"
+        heredoc = "FROM python:3.13-slim-bookworm\nRUN <<EOF\npip install pytest==8.4.1\nEOF\nCOPY . /tests/\n"
+        write_separate_task(folder / "a", dockerfile=PULL_DOCKERFILE, tests_dockerfile=heredoc)
+        write_base_record(folder)
+        runner = HeredocTool("buildah", heredocs=False)
+        builder = ImageBuilder(tool="buildah", repository=REPO, storage_root=tmp_path / "store", run=runner)
+        with pytest.raises(BuildError) as info:
+            build_images(folder, builder=builder, log=lambda _: None)
+        message = str(info.value)
+        assert message.startswith(str((folder / "a" / "tests" / "Dockerfile").resolve()))
+        assert "this host's buildah cannot build one" in message
+        assert [call for call in runner.calls if any("hb__" in arg for arg in call)] == []
+
+    def test_dockerfile_inline_in_tests_compose_is_refused_on_the_direct_path_for_the_verifiers_main(self, tmp_path):
+        """The verifier entry builds Harbor's main of the tests/ context, so main's Compose-only keys are refused."""
+        folder = tmp_path / "ds"
+        write_separate_task(folder / "a", dockerfile=PULL_DOCKERFILE)
+        write_base_record(folder)
+        (folder / "a" / "tests" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n    build:\n      context: ${CONTEXT_DIR}\n"
+            "      dockerfile_inline: |\n        FROM python:3.13\n        RUN pip install pytest\n"
+        )
+        (verifier,) = plan_builds(folder)
+        assert verifier.verifier and verifier.compose_service == "main"
+        fake = FakeTool("buildah")
+        builder = ImageBuilder(tool="buildah", repository=REPO, storage_root=tmp_path / "store", run=fake)
+        with pytest.raises(
+            BuildError, match=r"services\.main\.build\.dockerfile_inline is not supported by the direct buildah build"
+        ):
+            build_images(folder, builder=builder, log=lambda _: None)
+        assert not any("bud" in call for call in fake.calls)
+
+    def test_a_context_of_tasks_already_out_is_not_built(self, tmp_path, monkeypatch, capsys):
+        """a and b share tests/ (one verifier context) but own distinct environment/ folders; the shared verifier
+        build fails after a's environment/ is built and before b's. b's environment/ is then skipped: b is already
+        out, and a build for it alone would be wasted and recorded against a skipped task."""
+        from nemo_gym.tasks.harbor.cli import prepare_target
+
+        folder = tmp_path / "ds"
+        write_separate_task(folder / "a", extra={"tools/setup.sh": "#!/bin/sh\necho a\n"})
+        write_separate_task(folder / "b", extra={"tools/setup.sh": "#!/bin/sh\necho b\n"})
+        write_task(folder / "c", extra={"tools/setup.sh": "#!/bin/sh\necho c\n"})  # shared mode: main alone
+        shared_tests = (folder / "a" / "tests").resolve()
+        assert harbor_hash(shared_tests) == harbor_hash(folder / "b" / "tests")
+        # Plan order: a's environment/, the shared tests/ (a, b), b's environment/, c's environment/.
+        assert [(e.service, e.tasks) for e in plan_builds(folder)] == [
+            ("main", ("a",)),
+            ("verifier", ("a", "b")),
+            ("main", ("b",)),
+            ("main", ("c",)),
+        ]
+        fake = FakeTool("buildah", fail=str(shared_tests))
+        monkeypatch.setattr(
+            prepare_builds,
+            "ImageBuilder",
+            lambda **kw: ImageBuilder(tool="buildah", repository=REPO, storage_root=tmp_path / "store", run=fake),
+        )
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out")
+        assert [t.task_id for t in prepared.tasks] == ["c"]
+        assert sorted(prepared.skipped) == ["a", "b"]
+        assert prepared.skipped["b"].startswith("Could not build the Dockerfile image(s) for task(s) a, b: Building")
+        built = json.loads((folder / BUILT_IMAGES_FILE).read_text())
+        assert harbor_hash(folder / "a" / "environment") in built  # built before the shared verifier failed
+        assert harbor_hash(folder / "b" / "environment") not in built  # never built: b was already out
+        assert harbor_hash(shared_tests) not in built
+        assert len([call for call in fake.calls if "bud" in call]) == 3  # a main, the failed verifier, c main
+        assert "Built 2 image(s) with buildah, pushed 2" in capsys.readouterr().out
+
+    def test_docker_builds_the_verifier_as_harbors_main_of_the_tests_context(self, tmp_path, monkeypatch):
+        folder = tmp_path / "ds"
+        write_separate_task(folder / "a", dockerfile=PULL_DOCKERFILE)
+        write_base_record(folder)
+        tests = (folder / "a" / "tests").resolve()
+        compose_files: list[tuple[dict, dict]] = []
+
+        def docker(argv, env=None):
+            if argv[:2] == ["docker", "compose"] and "build" in argv:
+                files = [Path(argv[i + 1]) for i, arg in enumerate(argv) if arg == "-f"]
+                compose_files.append(tuple(yaml.safe_load(path.read_text()) for path in files))
+                compose_files.append(({"argv": argv}, {"env": env}))
+            return FakeTool("docker")(argv, env)
+
+        (verifier,) = build_images(folder, builder=ImageBuilder(tool="docker", run=docker), log=lambda _: None)
+        assert verifier.tag == f"hb__{verifier.digest}-verifier"
+        (template, images), (meta, call_env) = compose_files
+        # Harbor's template for the tests/ context; Gym's override tags its main with the verifier's name.
+        assert template == harbor_compose_document(tests, f"hb__{verifier.digest}")
+        assert images == {"services": {"main": {"image": verifier.tag}}}
+        argv = meta["argv"]
+        assert argv[argv.index("--project-directory") + 1] == str(tests)
+        assert argv[argv.index("--project-name") + 1] == f"hb__{verifier.digest}"
+        assert argv[-1] == "build"  # the whole project: the entry is its main
+        assert call_env["env"]["CONTEXT_DIR"] == str(tests)
+        assert call_env["env"]["MAIN_IMAGE_NAME"] == f"hb__{verifier.digest}"
+        task = load_task(folder / "a")
+        assert task.image == "ubuntu:24.04" and task.verifier_image == verifier.tag
+
+    def test_a_failed_verifier_build_leaves_its_task_out_and_the_others_prepare(self, tmp_path, monkeypatch, capsys):
+        from nemo_gym.tasks.harbor.cli import prepare_target
+
+        folder = tmp_path / "ds"
+        write_separate_task(folder / "ok")
+        write_separate_task(folder / "bad", tests_dockerfile="FROM python:3.13\nRUN false\n")
+        failing = str((folder / "bad" / "tests").resolve())
+        fake = FakeTool("buildah", fail=failing)
+        monkeypatch.setattr(
+            prepare_builds,
+            "ImageBuilder",
+            lambda **kw: ImageBuilder(tool="buildah", repository=REPO, storage_root=tmp_path / "store", run=fake),
+        )
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out")
+        assert [t.task_id for t in prepared.tasks] == ["ok"]
+        (ok,) = prepared.tasks
+        assert ok.verifier_image == f"{REPO}/hb__{harbor_hash(folder / 'ok' / 'tests')}-verifier@sha256:pushed01"
+        assert ok.image == f"{REPO}/hb__{harbor_hash(folder / 'ok' / 'environment')}@sha256:pushed01"
+        assert list(prepared.skipped) == ["bad"]
+        assert prepared.skipped["bad"].startswith("Could not build the Dockerfile image(s) for task(s) bad: Building")
+        assert f"hb__{harbor_hash(folder / 'bad' / 'tests')}-verifier" in prepared.skipped["bad"]
+        assert json.loads((prepared.output_dir / "skipped.json").read_text()) == prepared.skipped
+        # bad's main was built and recorded before its verifier failed; the failed build was attempted once.
+        built = json.loads((folder / BUILT_IMAGES_FILE).read_text())
+        assert harbor_hash(folder / "bad" / "environment") in built
+        assert harbor_hash(folder / "bad" / "tests") not in built
+        assert len([call for call in fake.calls if "bud" in call and failing in call]) == 1
+        # The shared environment/ image and ok's verifier: bad's failed verifier build is not counted.
+        assert "Built 2 image(s) with buildah, pushed 2" in capsys.readouterr().out

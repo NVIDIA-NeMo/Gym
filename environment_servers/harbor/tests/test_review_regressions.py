@@ -621,10 +621,13 @@ async def test_separate_verifier_spec_follows_the_task_image_or_the_explicit_env
     """Built through ``_create_verifier_sandbox`` itself, not a test double of it."""
     monkeypatch.setenv("HARBOR_TEST_TOKEN", "secret")
     explicit = mode != "task_image"
+    # The task image: Harbor's effective verifier environment is a copy of [environment], so the task must declare
+    # the image there (without one and without tests/Dockerfile the loader refuses the task, as Harbor does).
     toml = (
         SEPARATE_TOML
         if explicit
-        else SEPARATE_IN_TASK_IMAGE_TOML + '\n[environment.env]\nAPP_MODE = "${HARBOR_TEST_TOKEN}"\n'
+        else SEPARATE_IN_TASK_IMAGE_TOML.replace("[environment]\n", '[environment]\ndocker_image = "org/agent:1"\n')
+        + '\n[environment.env]\nAPP_MODE = "${HARBOR_TEST_TOKEN}"\n'
     )
     if mode == "explicit_workdir":
         toml = toml.replace(

@@ -8,7 +8,12 @@ import pytest
 import yaml
 
 from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
-from nemo_gym.sandbox.compose_config import adapt_non_root_sidecars, opensandbox_shm_labels, resolve_compose
+from nemo_gym.sandbox.compose_config import (
+    adapt_non_root_sidecars,
+    opensandbox_shm_labels,
+    resolve_compose,
+    sandbox_platform,
+)
 from tests.unit_tests.compose_testing import IMAGE_CONFIGS, MAIN, OVERLAY, SIDECAR
 
 
@@ -46,6 +51,40 @@ def test_resolve_compose_rejects_unknown_images_and_substitutions():
         resolve_compose({"services": {"x": {"image": "unknown:1"}}}, MAIN, IMAGE_CONFIGS)
     with pytest.raises(ValueError, match="substitutions"):
         resolve_compose({"services": {"main": {"environment": ["A=${HOME}"]}}}, MAIN, IMAGE_CONFIGS)
+
+
+ARM64_IMAGE_CONFIGS = {image: {**record, "architecture": "arm64"} for image, record in IMAGE_CONFIGS.items()}
+
+
+def test_resolve_compose_accepts_images_recorded_for_the_requested_sandbox_platform():
+    # arm64 pods (OpenSandbox ``platform: {os: linux, arch: arm64}``) run images prepare built for linux/arm64.
+    document = resolve_compose(OVERLAY, MAIN, ARM64_IMAGE_CONFIGS, platform=("linux", "arm64"))
+    assert set(document["services"]) == {"main", "browser", "workspace"}
+    assert document["services"]["browser"]["image"] == ARM64_IMAGE_CONFIGS[SIDECAR]["image"]
+    # The default deployment platform stays linux/amd64, with amd64 records accepted as before.
+    assert resolve_compose(OVERLAY, MAIN, IMAGE_CONFIGS)["services"]["main"]["image"] == IMAGE_CONFIGS[MAIN]["image"]
+
+
+def test_resolve_compose_refuses_an_image_recorded_for_another_platform_naming_both():
+    with pytest.raises(ValueError, match=r"Service 'main': the recorded image .* is linux/arm64, not linux/amd64"):
+        resolve_compose(OVERLAY, MAIN, ARM64_IMAGE_CONFIGS)
+    with pytest.raises(ValueError, match=r"Service 'main': the recorded image .* is linux/amd64, not linux/arm64"):
+        resolve_compose(OVERLAY, MAIN, IMAGE_CONFIGS, platform=("linux", "arm64"))
+    # A sidecar of the wrong platform is named by its service, not hidden behind main.
+    mixed = {**IMAGE_CONFIGS, SIDECAR: ARM64_IMAGE_CONFIGS[SIDECAR]}
+    with pytest.raises(ValueError, match=r"Service 'browser': the recorded image .* is linux/arm64, not linux/amd64"):
+        resolve_compose(OVERLAY, MAIN, mixed)
+
+
+def test_sandbox_platform_reads_the_opensandbox_platform_option_and_defaults_to_linux_amd64():
+    assert sandbox_platform(None) == ("linux", "amd64")
+    assert sandbox_platform({}) == ("linux", "amd64")
+    assert sandbox_platform({"resource_requests": "limits"}) == ("linux", "amd64")
+    assert sandbox_platform({"platform": {"os": "linux", "arch": "arm64"}}) == ("linux", "arm64")
+    assert sandbox_platform({"platform": {"arch": "ARM64"}}) == ("linux", "arm64")
+    assert sandbox_platform({"platform": "linux/arm64"}) == ("linux", "amd64"), (
+        "not a mapping: the provider refuses it"
+    )
 
 
 # environment/docker-compose.yaml as published by rounakbende10/rh-swe-bench (337 tasks): ``main:`` with
