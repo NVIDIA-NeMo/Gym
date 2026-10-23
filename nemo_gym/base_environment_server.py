@@ -32,8 +32,6 @@ from nemo_gym.server_utils import SimpleServer, format_exception_with_response_b
 LOGGER = logging.getLogger(__name__)
 # An environment server either records boundaries or restarts its episodes; it has no stateless mode.
 _ENVIRONMENT_CHECKPOINT_MODES = ("restart_only", "exported")
-# The name checkpoint_mode replaced; a subclass that still declares it would silently be restart_only.
-_OLD_ENVIRONMENT_CHECKPOINT_DECLARATION = "checkpoint_boundaries"
 
 EpisodeRequestT = TypeVar("EpisodeRequestT", bound=BaseEpisodeRequest[Any])
 EpisodeResponseT = TypeVar("EpisodeResponseT", bound=BaseEpisodeResponse[Any])
@@ -331,11 +329,6 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         which never hold up a checkpoint and start over from their input after a crash.
         Call this from any ``setup_webserver`` that builds its own app.
         """
-        if hasattr(type(self), _OLD_ENVIRONMENT_CHECKPOINT_DECLARATION):
-            raise ValueError(
-                f"{type(self).__name__} declares {_OLD_ENVIRONMENT_CHECKPOINT_DECLARATION}; "
-                'declare checkpoint_mode = "exported" or "restart_only" instead'
-            )
         # The declaration is a class attribute nothing else checks: a typo would act as a mode of its own.
         if self.checkpoint_mode not in _ENVIRONMENT_CHECKPOINT_MODES:
             raise ValueError(
