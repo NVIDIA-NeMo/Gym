@@ -554,6 +554,34 @@ async def test_top_p_alone_leaves_the_temperature_capability_unset(setup):
     assert "temperature" not in config["provider"]["nemo_gym"]["models"]["dummy_model"]
 
 
+async def test_request_temperature_marks_the_native_model_entry(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_model_id = "gpt-5.5"
+    response, _ = await episode(agent, sandbox, temperature=0.6)
+    assert response.status == "completed"
+    _, config = launch_config(sandbox)
+    assert set(config["provider"]["nemo_gym"]["models"]) == {"gpt-5.5"}
+    assert config["provider"]["nemo_gym"]["models"]["gpt-5.5"]["temperature"] is True
+    assert config["agent"] == {name: {"temperature": 0.6} for name in BUILTIN_AGENTS}
+
+
+@pytest.mark.parametrize("sampling", [{"temperature": 0.6}, {"top_p": 0.9}])
+def test_request_sampling_is_refused_for_an_opencode_version_without_a_known_agent_list(setup, sampling):
+    agent, sandbox = setup
+    agent.config.opencode_version = "1.15.13"
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        path = "/ng-rollout/opencode-smoke-a2/v1/responses"
+        refused = client.post(path, json={"input": "task", **sampling})
+        assert refused.status_code == 422
+        assert f"applies request {next(iter(sampling))} only with OpenCode 1.17.11" in refused.json()["detail"]
+        sandbox.launch.assert_not_awaited()
+        accepted = client.post(path, json={"input": "task"})
+        assert accepted.status_code == 200, accepted.text
+    _, config = launch_config(sandbox)
+    assert "agent" not in config
+
+
 @pytest.mark.parametrize("value", [float("nan"), float("inf")])
 def test_non_finite_sampling_is_rejected_without_a_launch(setup, value):
     agent, sandbox = setup

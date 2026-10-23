@@ -205,9 +205,10 @@ _CHECK_EXPORT_DIR = (
 )
 
 
-# OpenCode 1.17.11's built-in agents. Each sets its own sampling (``title`` fixes temperature 0.5) and none inherits
-# from ``build``, so request sampling goes to all of them. A name OpenCode does not define would add an agent.
-_OPENCODE_AGENTS = ("build", "plan", "general", "explore", "compaction", "title", "summary")
+# Built-in agents by OpenCode version. Each sets its own sampling (1.17.11's ``title`` fixes temperature 0.5) and none
+# inherits from ``build``, so request sampling goes to all of them. A name OpenCode does not define would add an
+# agent, so other versions refuse request sampling, as the adapter did before it applied any.
+_OPENCODE_AGENTS = {"1.17.11": ("build", "plan", "general", "explore", "compaction", "title", "summary")}
 # Isolation shared by every OpenCode process of a session: run, export and import.
 _OPENCODE_ISOLATION = {
     "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
@@ -1042,10 +1043,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
         # Sampling is applied to every OpenCode agent (see _session_response); other controls are rejected.
         supported = {"input", "instructions", "model", "temperature", "top_p"}
-        for name in ("temperature", "top_p"):
-            value = getattr(body, name)
-            if value is not None and not math.isfinite(value):
+        sampled = [name for name in ("temperature", "top_p") if getattr(body, name) is not None]
+        for name in sampled:
+            if not math.isfinite(getattr(body, name)):
                 raise HTTPException(422, f"OpenCode sandbox execution requires a finite {name}")
+        if sampled and self.config.opencode_version not in _OPENCODE_AGENTS:
+            raise HTTPException(
+                422,
+                f"OpenCode sandbox execution applies request {' and '.join(sampled)} only with OpenCode "
+                f"{', '.join(_OPENCODE_AGENTS)}, whose built-in agents it knows; configure Gym model sampling",
+            )
         for key, field in type(body).model_fields.items():
             if key in supported:
                 continue
@@ -1361,7 +1368,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         }
         sampling = {name: value for name in ("temperature", "top_p") if (value := getattr(body, name)) is not None}
         if sampling:
-            config["agent"] = {agent: dict(sampling) for agent in _OPENCODE_AGENTS}
+            config["agent"] = {agent: dict(sampling) for agent in _OPENCODE_AGENTS[self.config.opencode_version]}
             if "temperature" in sampling:
                 # OpenCode sends temperature only for models that declare the capability.
                 config["provider"]["nemo_gym"]["models"][self.config.sandbox_model_id]["temperature"] = True

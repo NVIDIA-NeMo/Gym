@@ -154,7 +154,7 @@ stricter, single-activation contract described above. The intentional difference
 | System text | Prepended to the user prompt; request `instructions` is not applied | Config/system/developer text and request `instructions` form an instructions file |
 | Provider name | `nemo` | `nemo_gym` (internal alias for the same Gym model server) |
 | `env`, `extra_args`, custom `command` | Applied | Rejected at seed, not silently ignored |
-| Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied; other controls rejected explicitly |
+| Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied with OpenCode 1.17.11; other controls rejected explicitly |
 
 Both paths honor configured `thinking` and declare interleaved `reasoning_content`.
 Different prompt placement can affect results; this integration does not establish
@@ -241,7 +241,9 @@ A request's `temperature` and `top_p` reach every model call OpenCode makes for 
 activation. OpenCode 1.17.11 gives each agent its own sampling and none inherits from
 `build` (`title` fixes temperature 0.5), so the adapter sets both on all built-in agents:
 `build`, `plan`, `general`, `explore`, `compaction`, `title` and `summary`. An agent
-name OpenCode does not define would add an agent, so the list is version-specific.
+name OpenCode does not define would add an agent, so the list is version-specific: with
+another `opencode_version` (swe_together pins 1.15.13), a request `temperature` or `top_p`
+returns 422, as it did before the adapter applied request sampling.
 OpenCode sends `temperature` only for models that declare the capability, so a request
 temperature also sets `temperature: true` on the adapter's model entry. Without these
 fields the generated configuration is unchanged. Non-finite values return 422.
