@@ -180,7 +180,9 @@ async def test_transfer_works_with_busybox_tar_which_has_no_no_overwrite_dir_opt
             shutil.copyfile(local, remote)
 
         async def exec(self, command, *, cwd, timeout_s, user):
-            return await busybox_sh(command)
+            assert user == "root"
+            # Match root's tar extraction even when this fixture runs as an unprivileged user.
+            return await busybox_sh(f"umask 0; {command}")
 
     probe = await busybox_sh("tar --no-overwrite-dir --help >/dev/null 2>&1 && echo gnu || echo busybox")
     assert probe.stdout.strip() == "busybox", "the symlinked tar must be BusyBox's for this test to mean anything"
