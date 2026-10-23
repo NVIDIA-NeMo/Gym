@@ -76,7 +76,7 @@ jobs:
     name: Test
     needs: detect
     if: needs.detect.outputs.run_full == 'true' || needs.detect.outputs.run_servers == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - name: Checkout repository
