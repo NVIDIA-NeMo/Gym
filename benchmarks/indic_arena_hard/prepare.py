@@ -11,9 +11,41 @@ import datasets
 import pyarrow.parquet as pq
 
 
-HF_DATASET = "anushakamathofficial/indic_arena_hard"
-HF_REVISION = "cc08e98842cd04d659092dc8b13cf00a848b435c"
+HF_DATASET = "ai4bharat/indic-arena-hard-v2"
+HF_REVISION = "aebdc931858cb6df854f16a0513e184fc38a3b1e"
 OUTPUT_FPATH = Path(__file__).parent / "data" / "indic_arena_hard_benchmark.jsonl"
+LANGUAGE_NAMES = {
+    "en": "English",
+    "as": "Assamese",
+    "bn": "Bengali",
+    "gu": "Gujarati",
+    "hi": "Hindi",
+    "kn": "Kannada",
+    "ml": "Malayalam",
+    "mr": "Marathi",
+    "ne": "Nepali",
+    "or": "Odia",
+    "pa": "Punjabi",
+    "sa": "Sanskrit",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "ur": "Urdu",
+}
+
+
+def _prompt_column(language: str) -> str:
+    return "prompt" if language == "en" else f"prompt_{LANGUAGE_NAMES[language]}_translation"
+
+
+def _language_row(row: dict, language: str, row_index: int) -> dict:
+    """Select one language from the published dataset's translation columns."""
+    return {key: value for key, value in row.items() if not key.endswith("_translation")} | {
+        "row_id": row["uid"],
+        "row_index": row_index,
+        "prompt": row[_prompt_column(language)],
+        "language": LANGUAGE_NAMES[language],
+        "language_code": language,
+    }
 
 
 def _format_entry(row: dict, language: str) -> dict:
@@ -28,7 +60,7 @@ def _format_entry(row: dict, language: str) -> dict:
     # Translations share row_id; use a distinct task ID for each language.
     entry["uid"] = f"{language}:{row['row_id']}"
     entry["subset_for_metrics"] = language
-    entry["category"] = "hard_prompt"
+    entry["category"] = row.get("category", "hard_prompt")
     entry["baseline_answer"] = ""
     return entry
 
@@ -53,19 +85,31 @@ def prepare(
 ) -> Path:
     """Load local or pinned HF test splits, optionally join baselines, and write Gym JSONL.
 
-    By default include all language configurations, including English. Without a
+    By default include all available languages, including English. Without a
     baseline file the output supports pointwise scoring or prompt generation;
     pairwise scoring requires baselines. Baseline rows contain language, row_id, generation.
-    dataset_dir points to a downloaded repository with data/<language>/test.parquet;
-    when supplied, preparation reads those files without accessing the Hub.
+    dataset_dir points to a downloaded repository with test.parquet, or the older
+    data/<language>/test.parquet layout; local preparation does not access the Hub.
     """
     local_dir = Path(dataset_dir).expanduser() if dataset_dir is not None else None
+    wide_rows: list[dict] | None = None
     if local_dir is not None:
-        supported = sorted(path.parent.name for path in local_dir.glob("data/*/test.parquet") if path.is_file())
-        if not supported:
-            raise FileNotFoundError(f"No data/<language>/test.parquet files found under {local_dir}")
+        if (local_dir / "test.parquet").is_file():
+            wide_rows = pq.read_table(local_dir / "test.parquet").to_pylist()
+        else:
+            supported = sorted(path.parent.name for path in local_dir.glob("data/*/test.parquet") if path.is_file())
+            if not supported:
+                raise FileNotFoundError(
+                    f"No data/<language>/test.parquet files or test.parquet found under {local_dir}"
+                )
     else:
         supported = datasets.get_dataset_config_names(HF_DATASET, revision=HF_REVISION)
+        if supported == ["default"]:
+            wide_rows = list(datasets.load_dataset(HF_DATASET, name="default", split="test", revision=HF_REVISION))
+    if wide_rows is not None:
+        if not wide_rows:
+            raise ValueError("No test rows found in the dataset.")
+        supported = [language for language in LANGUAGE_NAMES if _prompt_column(language) in wide_rows[0]]
     languages = supported if languages is None else list(dict.fromkeys(languages))
     if not languages:
         raise ValueError("Select at least one language.")
@@ -84,7 +128,9 @@ def prepare(
     entries: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for language in languages:
-        if local_dir is not None:
+        if wide_rows is not None:
+            dataset = [_language_row(row, language, index) for index, row in enumerate(wide_rows)]
+        elif local_dir is not None:
             path = local_dir / "data" / language / "test.parquet"
             print(f"Loading {path} ...")
             dataset = pq.read_table(path).to_pylist()
@@ -116,10 +162,12 @@ def prepare(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--languages", nargs="+", help="HF language configs to include (default: all, including en).")
+    parser.add_argument("--languages", nargs="+", help="Language codes to include (default: all, including en).")
     parser.add_argument(
         "--baseline-file", help="JSONL with language (code), row_id, generation; required for pairwise judging."
     )
-    parser.add_argument("--dataset-dir", help="Local dataset repository containing data/<language>/test.parquet.")
+    parser.add_argument(
+        "--dataset-dir", help="Local repository containing test.parquet or data/<language>/test.parquet."
+    )
     args = parser.parse_args()
     prepare(languages=args.languages, baseline_file=args.baseline_file, dataset_dir=args.dataset_dir)

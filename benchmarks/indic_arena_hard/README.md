@@ -1,24 +1,33 @@
 # Indic Arena Hard
 
-Integrates [anushakamathofficial/indic_arena_hard](https://huggingface.co/datasets/anushakamathofficial/indic_arena_hard)
+Integrates [ai4bharat/indic-arena-hard-v2](https://huggingface.co/datasets/ai4bharat/indic-arena-hard-v2)
 using the same `arena_judge`, `simple_agent`, `policy_model`, and generic prompt
-as the [English Arena Hard benchmark](../arena_hard/README.md). Judge prompts,
+as the [Arena Hard v2 benchmark](../arena_hard_v2/README.md). Judge prompts,
 sampling settings (temperature 0, maximum 4096 tokens), side-swapped comparisons,
 and scoring come from the shared English configuration.
 
 ## Data
 
-Hub preparation pins dataset revision `cc08e98842cd04d659092dc8b13cf00a848b435c`.
-By default it includes all 15 configurations: `en`, `as`, `bn`, `gu`, `hi`, `kn`,
-`ml`, `mr`, `ne`, `or`, `pa`, `sa`, `ta`, `te`, and `ur`. There are 504 English
-rows and 7,055 translated rows (503 Urdu rows, 504 in each other language).
-No missing translations are synthesized and no review-status filtering is applied.
+Hub preparation pins dataset revision `aebdc931858cb6df854f16a0513e184fc38a3b1e`.
+The dataset has one `default` configuration with a `test` split stored in
+`test.parquet`. Each of its 504 rows contains the original English `prompt` and
+14 translated columns such as `prompt_Hindi_translation`.
 
-`prompt` becomes `question`; `uid` is `<language_code>:<row_id>` so translations
-remain distinct tasks. The original `row_id`, `row_index`, `language_code`, and
-all translation-review fields are preserved. The full language name is retained
-as `language_name`; `language` and `subset_for_metrics` hold the language code.
-Every task uses the standard `hard_prompt` judge category.
+By default preparation includes the English control and all translations:
+`en`, `as`, `bn`, `gu`, `hi`, `kn`, `ml`, `mr`, `ne`, `or`, `pa`, `sa`, `ta`, `te`,
+and `ur`. Each language has 504 prompts, yielding 7,560 prepared tasks, including
+7,056 translated tasks. Blank selected translations fail preparation; English
+text is never substituted for a missing translation.
+
+The selected prompt becomes `question`; the source `uid` becomes `row_id`, and
+the output `uid` is `<language_code>:<row_id>` so translations remain distinct
+tasks. `row_index` records the source row position. `language_name` holds the full
+target-language name, while `language`, `language_code`, and `subset_for_metrics`
+hold its code. Source `category` and `subcategory` are preserved: each language
+has 363 `hard_prompt` tasks and 141 `creative_writing` tasks, which select their
+respective judge prompts in pairwise mode. Unused translation columns are omitted
+from prepared rows. The published snapshot contains no translation-review fields;
+such fields are retained when present in older local inputs.
 
 ## Evaluation modes
 
@@ -42,23 +51,24 @@ judge API calls go to Gym's failures sidecar rather than being scored as answers
 
 Data is read from a local download or downloaded at runtime; generated JSONL is
 ignored by Git. Pass `--dataset-dir` to the downloaded dataset repository containing
-`data/<language>/test.parquet` to prepare entirely offline, without a token.
-Local mode uses the files as supplied and discovers the languages present on disk;
-it does not enforce the Hub revision pin. For Hub downloads, use an existing
-Hugging Face login (`hf auth login`) or set `HF_HOME` to your Hugging Face cache
-directory. Tokens belong in the private local credential store, never in configs.
+`test.parquet` to prepare entirely offline, without a token. The older local layout,
+`data/<language>/test.parquet`, remains supported. Local mode uses the supplied files
+and discovers languages from their columns or language directories;
+it does not enforce the Hub revision pin. The Hub dataset is public and needs no
+token. Set `HF_HOME` to choose a Hugging Face cache directory.
 
 ## Baseline answers
 
-This dataset contains **no baseline answers**. Its 504-row English split differs
-from the upstream 500-question Arena Hard v0.1 evaluation set.
+This dataset contains **no baseline answers**. Its 504 English prompts form the
+English subset of Arena Hard v2's 750 prompts; it is also distinct from the
+500-question Arena Hard v0.1 evaluation set.
 Supply answers generated for these exact prompts in each
 language; the prepare script does not substitute English answers for translations.
 
 The baseline JSONL format is:
 
 ```json
-{"language": "hi", "row_id": "<source row_id>", "generation": "<baseline answer>"}
+{"language": "hi", "row_id": "<source uid>", "generation": "<baseline answer>"}
 ```
 
 Rows are joined by `(language, row_id)`. Missing, duplicate, and empty baseline
@@ -73,7 +83,7 @@ Run from the repository root with the same Gym environment as the English benchm
 
 ```bash
 # Prepare an existing local download (no network or token needed).
-DATASET_DIR=/path/to/huggingface_datasets/anushakamathofficial/indic_arena_hard
+DATASET_DIR=/path/to/huggingface_datasets/ai4bharat/indic-arena-hard-v2
 python benchmarks/indic_arena_hard/prepare.py --dataset-dir "$DATASET_DIR"
 
 # The same local source can be passed through Gym.
@@ -101,7 +111,7 @@ gym eval run --no-serve \
     --prompt-config benchmarks/prompts/generic/default.yaml
 ```
 
-Omit `--languages` to prepare every configuration, including English, with a
+Omit `--languages` to prepare every language, including English, with a
 complete baseline file. Use `--languages en` for the dataset's English control.
 Re-running preparation without baselines replaces the output with prompts only.
 
@@ -159,8 +169,9 @@ scores. Scores for this dataset are not directly comparable to the original
 This integration is experimental and inherits `verified: false`. Both modes require
 configured policy/judge endpoints; only pairwise mode requires baseline answers.
 
-A live smoke test on September 23, 2026 used three Hindi prompts with the Gemini
-preset above, one repeat, and concurrency one. All three answers completed within
+A live smoke test on September 23, 2026 used the earlier dataset source and three
+Hindi prompts with the Gemini preset above, one repeat, and concurrency one. This
+predates the AI4Bharat source migration. All three answers completed within
 the 4,096-token limit and produced valid pointwise judgments with no failed
 rollouts. The self-judge assigned 100/100 to each; this validates the workflow,
 not benchmark quality or comparability with Arena Hard win rates. Trajectory
