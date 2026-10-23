@@ -7,9 +7,9 @@ kind: benchmark
 integration_profile: external-agent-loop
 domain: instruction_following
 description: Internal tasks built from instruction-following failures seen in production agent
-  deployments, run on the policy model as text, search-tool and build-tool episodes. Binary
-  all-IF reward from code checks and a shared LLM judge. The rows are internal and download
-  from Gym's GitLab dataset registry.
+  deployments, run on the policy model as text, search-tool and build-tool episodes and as
+  OpenCode episodes on Scale-SWE repositories. Binary all-IF reward from code checks and a
+  shared LLM judge. The rows are internal and download from Gym's GitLab dataset registry.
 modality: text
 licensing: internal
 authors:

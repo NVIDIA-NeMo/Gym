@@ -68,10 +68,15 @@ def test_prepare_refuses_content_other_than_the_pinned_release(prepared, content
     assert not prepare_module.is_prepared_data_current(prepared / "partner_if_benchmark.jsonl")
 
 
+# The release's task IDs; there is no pif_023.
+RELEASE_TASK_IDS = [f"pif_{index:03d}" for index in (*range(1, 23), *range(24, 27))]
+
+
 def test_routes_cover_the_release_and_name_its_environments():
     config = yaml.safe_load((prepare_module.BENCHMARK_DIR / "config.yaml").read_text())
     routes = config["partner_if_dispatcher"]["responses_api_agents"]["partner_if_dispatcher"]["task_routes"]
-    assert list(routes) == [f"pif_{index:03d}" for index in range(1, prepare_module.ROW_COUNT + 1)]
+    assert list(routes) == RELEASE_TASK_IDS
+    assert len(RELEASE_TASK_IDS) == prepare_module.ROW_COUNT
     environments = {
         name for name, server in config.items() if isinstance(server, dict) and "environment_servers" in server
     }
@@ -79,6 +84,32 @@ def test_routes_cover_the_release_and_name_its_environments():
     # The tool environments' server loads the rows that prepare.py splits off for it.
     tools = config["partner_if_tools"]["resources_servers"]["partner_if"]
     assert tools["tasks_path"] == f"benchmarks/partner_if/data/{prepare_module.TOOLS_FPATH.name}"
+    # The SWE tasks run OpenCode in the sandbox the SWE resources server starts.
+    swe = config[routes["pif_024"]["name"]]["environment_servers"]["single_agent_turn_legacy"]
+    assert {routes[task]["name"] for task in ("pif_024", "pif_025", "pif_026")} == {routes["pif_024"]["name"]}
+    assert config[swe["resources_server"]["name"]]["resources_servers"]["partner_if"]["entrypoint"] == "swe_app.py"
+    assert config[swe["agent_server"]["name"]]["_inherit_from"] == "opencode_agent"
+
+
+def test_every_agent_calls_the_policy_copy_that_pins_the_benchmarks_sampling():
+    config = yaml.safe_load((prepare_module.BENCHMARK_DIR / "config.yaml").read_text())
+    pinned = config["partner_if_policy_model"]
+    assert pinned["_copy"] == "policy_model"
+    assert pinned["responses_api_models"]["vllm_model"]["sampling_overrides"] == {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "max_tokens": None,
+        "max_completion_tokens": None,
+    }
+    agents = [
+        agent
+        for server in config.values()
+        if isinstance(server, dict)
+        for agent in (server.get("responses_api_agents") or {}).values()
+        if "model_server" in agent
+    ]
+    assert len(agents) == 4
+    assert {agent["model_server"]["name"] for agent in agents} == {"partner_if_policy_model"}
 
 
 def test_rows_split_on_newlines_only():

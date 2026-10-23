@@ -139,16 +139,26 @@ Running the sandboxed mode outside `gym` needs Gym's `sandbox` extra (`uv sync -
   `partner_if:tool_backend_failed`. The verify response adds `tool_calls`, `environment_receipts` (the
   backend's records) and, in sandboxed mode, `tool_sandbox_id`. Episodes live in the server's memory, so it
   requires `num_workers: 1`.
-- `swe_app.py` (Scale-SWE with an OpenCode agent) also captures `live_agent` evidence.
-  Set `actor_system_prompt` and `tool_description_additions` to what the agent's own
-  config gives the actor; the judge reads them. OpenCode reports a status only for a run
-  the output-token cap cut off, so a run counts as finished when its trajectory ends in an
-  assistant message. Any other run, such as one whose transcript export failed, is masked
-  as `partner_if:unscorable`. Leave OpenCode's `execution_failure_reward_zero` off: it
-  requires an unmasked 0 for a failed run, which this server masks, so such a run fails its
-  request instead.
-  `configs/swe.yaml` validates, but it runs only with a sandbox provider and Scale-SWE
-  rows that carry a `live_agent` contract, which Gym does not ship.
+- `swe_app.py` runs a `live_agent` episode with OpenCode (`opencode_agent`) in the row's Scale-SWE sandbox:
+  - An Environment Server seeds each rollout. The server starts the row's image and runs the row's
+    `pre_commands`, which also set up the agent's harness, such as OpenCode's system prompt. It then runs
+    Scale-SWE's own setup (git, anti-cheat, committer identity) and hands the sandbox to the agent as
+    `sandbox_access`. A failed setup step stops the sandbox and fails the seed, since that sandbox does not hold
+    the task its contract grades.
+  - The contract carries the judge's copies of what the harness gives the actor: `actor_system_prompt`, which is
+    required, and `tool_description_additions`, by tool ID. A contract without the prompt, or one that is not
+    `live_agent`, is refused with HTTP 422 at seed and at verify.
+  - Verify extracts the actor's patch, stops its sandbox and runs Scale-SWE's native tests as a diagnostic, kept
+    in `task_outcome`. That takes up to two more sandboxes of up to `evaluation_timeout` (1200 s) each, since an
+    inconclusive result is retried once on a fresh sandbox. The native verdict never changes the reward.
+  - A run `opencode_agent` reports as `completed` is graded. One its deadline stopped (`incomplete`) or that
+    broke (`failed`) is masked as `partner_if:unscorable`.
+  - Close, retire and shutdown stop any sandbox that verify did not, and `sandbox_config.ttl_s` is the backstop.
+    Sandboxes live in the server's memory, so it requires `num_workers: 1`.
+  - `VERIFIER_FIXTURE` grades `tests/swe_verifier_cases.jsonl` through `grade_if`, without the native tests.
+    `configs/swe.yaml` validates, but it runs only with a sandbox provider and Scale-SWE rows that carry such a
+    contract, which Gym does not ship. OpenCode calls the model from inside the sandbox, so run it with
+    `++use_absolute_ip=true`.
 - An agent that runs a `live_agent` episode itself sends what it captured to this server's
   `/verify` as `verification_input` (`native_evidence.LiveAgentCapture`: the input the
   actor was given, its documents and artifact capture receipts). With
