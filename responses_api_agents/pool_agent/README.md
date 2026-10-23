@@ -104,12 +104,23 @@ The supervisor stops the harness and confirms termination before collecting its
 trajectory. Pool is configured to leave background shell services available to the
 task environment. Identical activation retries share the same task. A disconnected
 caller does not cancel activation or installation. Close waits for installation;
-failed cleanup retains the session so a later close can retry.
+failed cleanup retains the session so a later close can retry. Server shutdown
+rejects new seeds and activations, waits up to `setup_timeout` for pending seeds,
+and drains retained sessions through the same ownership-aware close path. Shutdown
+close attempts are bounded by `session_close_timeout_seconds`; failed cleanup is
+logged and retained for retry, with provider TTL as the final fallback.
 
 A confirmed execution timeout returns an `incomplete` response with available
 trajectory events and can proceed to verification. Startup, supervision, model,
 and artifact-collection failures propagate as errors. Pool's explicit task-failure
-exit code remains gradable when its trajectory is complete.
+exit code remains gradable when its trajectory is complete. A recorded model HTTP
+failure remains an error even if the supervisor also reports a timeout.
+
+Gym's `agent_timeout_sec` request metadata can shorten the execution budget but
+cannot exceed either the configured timeout or the seeded task budget. Invalid
+budget values use that ceiling. Other request metadata remains unsupported.
+Runner hostname/PID are included in response metadata when available, and activation
+failures log a bounded tail of the captured stderr.
 
 Trajectory conversion preserves tool-call IDs and out-of-order results. Persisted
 thought events become reasoning items. Synthetic exit calls are omitted. Missing

@@ -565,3 +565,266 @@ def test_child_observations_are_explicitly_unknown():
     observations = agent()._observations(session)
     assert len([r for r in observations.records if r.kind == "agent_invocation"]) == 1
     assert "child_invocations_unavailable" in {g.code for g in observations.gaps}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("budget,expected", [("12", 12), ("120", 60), ("nan", 60), ("0", 60), ("bad", 60)])
+async def test_materialized_budget_caps_execution_and_model_requests(budget, expected):
+    server, session = agent(), state()
+    session.request.agent_timeout_sec = 60
+    session.session.cleanup = receipt()
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={"agent_timeout_sec": budget})
+    assert prompt_from_request(body) == "task"
+
+    async def execute(**kwargs):
+        await kwargs["stage_activation"]()
+        return PoolArtifacts(complete(), "", "", 0)
+
+    with (
+        patch.object(PoolAgent, "model_endpoint", return_value=MagicMock(base_url="http://model/v1")),
+        patch.object(SandboxSession, "execute", side_effect=execute) as run,
+        patch.object(PoolSession, "stage", new_callable=AsyncMock) as stage,
+    ):
+        await server._activate(session, body)
+    assert run.call_args.kwargs["timeout"] == expected
+    assert float(json.loads(stage.call_args.kwargs["config"])["http_timeout"][:-1]) == expected
+
+
+def test_custom_metadata_stays_unsupported():
+    with pytest.raises(HTTPException, match="metadata"):
+        prompt_from_request(NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={"custom": "x"}))
+
+
+@pytest.mark.asyncio
+async def test_recorded_model_failure_overrides_timeout_and_preserves_diagnostics(caplog):
+    server, session = agent(), state()
+    session.session.cleanup = receipt(timed_out=True, return_code=-15)
+    artifacts = PoolArtifacts(
+        events(event("session.exit", reason="model_next_tool_call_http_error")), "", "upstream HTTP 503", None
+    )
+    session.session.artifacts = artifacts
+    with (
+        patch.object(PoolAgent, "model_endpoint", return_value=MagicMock(base_url="http://model/v1")),
+        patch.object(SandboxSession, "execute", return_value=artifacts),
+        pytest.raises(RuntimeError, match="model request failed"),
+    ):
+        await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert session.failure == "RuntimeError"
+    assert "upstream HTTP 503" in caplog.text
+
+
+def fresh_request():
+    req = request()
+    req.scope["session"] = {}
+    return req
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owned", [False, True])
+async def test_lifespan_closes_sessions_using_their_ownership(owned):
+    server, session = agent(), state()
+    session.session.owns_sandbox = owned
+    session.session.sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
+    app = server.setup_webserver()
+    with patch.object(PoolAgent, "_seed_agent_session_state", return_value=session):
+        async with app.router.lifespan_context(app):
+            await server.seed_agent_session(fresh_request(), session.request)
+    assert session.session.sandbox.stop.await_count == int(owned)
+    assert session.session.sandbox.disconnect.await_count == int(not owned)
+    with pytest.raises(HTTPException):
+        server._require_agent_session(session.request.agent_session_id)
+    with pytest.raises(HTTPException) as error:
+        await server.seed_agent_session(fresh_request(), seed())
+    assert error.value.status_code == 503
+    with pytest.raises(HTTPException) as error:
+        await server.responses(request(), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert error.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_setup_and_closes_late_session():
+    server, session = agent(), state()
+    session.session.owns_sandbox = True
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def setup(body):
+        entered.set()
+        await release.wait()
+        return session
+
+    with patch.object(PoolAgent, "_seed_agent_session_state", side_effect=setup):
+        seed_task = asyncio.create_task(server.seed_agent_session(fresh_request(), session.request))
+        await entered.wait()
+        shutdown = asyncio.create_task(server._shutdown_sessions())
+        await asyncio.sleep(0)
+        assert not shutdown.done()
+        release.set()
+        with pytest.raises(HTTPException) as error:
+            await seed_task
+        assert error.value.status_code == 503
+        await shutdown
+    session.session.sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_continues_after_failed_close_and_retains_retry_state():
+    from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest
+
+    server = agent()
+    failed, healthy = state(), state()
+    failed.session.owns_sandbox = healthy.session.owns_sandbox = True
+    healthy.request.agent_session_id = "session-2"
+    failed.session.sandbox.stop.side_effect = [RuntimeError("stop unavailable"), None]
+    with patch.object(PoolAgent, "_seed_agent_session_state", side_effect=[failed, healthy]):
+        await server.seed_agent_session(fresh_request(), failed.request)
+        await server.seed_agent_session(fresh_request(), healthy.request)
+    await server._shutdown_sessions()
+    healthy.session.sandbox.stop.assert_awaited_once()
+    assert server._session_records[failed.request.agent_session_id].state is failed
+    await server.close_agent_session(
+        fresh_request(),
+        AgentCloseSessionRequest(
+            agent_session_id=failed.request.agent_session_id, episode_id=failed.request.episode_id
+        ),
+    )
+    assert failed.session.sandbox.stop.await_count == 2
+    assert server._session_records[failed.request.agent_session_id].state is None
+
+
+def test_harbor_materialized_request_passes_validation():
+    from types import SimpleNamespace
+
+    from nemo_gym.tasks.harbor.materialize import materialize_task
+
+    task = SimpleNamespace(
+        task_id="task",
+        instruction="Inspect the repository.",
+        digest="a" * 64,
+        config=SimpleNamespace(agent=SimpleNamespace(timeout_sec=12)),
+    )
+    row = materialize_task(task, "test")
+    body = NeMoGymResponseCreateParamsNonStreaming.model_validate(row.task_input.responses_create_params)
+    assert prompt_from_request(body) == task.instruction
+    assert body.metadata == {"agent_timeout_sec": "12"}
+
+
+@pytest.mark.asyncio
+async def test_collect_and_response_preserve_runner_identity():
+    server, session = agent(), state()
+    files = {
+        "stdout.jsonl": "output",
+        "stderr.log": "diagnostic",
+        "exit.json": "0",
+        "runtime.json": '{"hostname":"sandbox-worker","pid":123}',
+        "trajectory.ndjson": complete(),
+    }
+
+    async def read(sandbox, *, path):
+        return files[path.rsplit("/", 1)[-1]]
+
+    session.session.sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
+    with patch("responses_api_agents.pool_agent.sandbox.read_text", side_effect=read):
+        artifacts = await session.collect()
+    assert artifacts.stderr == "diagnostic"
+    session.session.cleanup = receipt()
+    with (
+        patch.object(PoolAgent, "model_endpoint", return_value=MagicMock(base_url="http://model/v1")),
+        patch.object(SandboxSession, "execute", return_value=artifacts),
+    ):
+        response = await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert response.metadata["harness_hostname"] == "sandbox-worker"
+    assert response.metadata["harness_pid"] == "123"
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drains_failed_setup_state():
+    server, session = agent(), state()
+    session.session.owns_sandbox = True
+    with (
+        patch.object(
+            PoolAgent,
+            "_seed_agent_session_state",
+            side_effect=AgentSessionSetupError(session, error=RuntimeError("installation failed")),
+        ),
+        pytest.raises(RuntimeError, match="installation failed"),
+    ):
+        await server.seed_agent_session(fresh_request(), session.request)
+    await server._shutdown_sessions()
+    session.session.sandbox.stop.assert_awaited_once()
+    assert server._session_records[session.request.agent_session_id].state is None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_during_installation_joins_before_stopping_sandbox():
+    server = agent(sandbox_provider="sandbox", sandbox_config={"image": "test", "workdir": "/repo"})
+    sandbox = AsyncMock()
+    sandbox.sandbox_id = "owned"
+    sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
+    provider = MagicMock()
+    provider.name = "docker"
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def install(*args, **kwargs):
+        entered.set()
+        await release.wait()
+
+    with (
+        patch(APP + ".get_global_config_dict", return_value={}),
+        patch(APP + ".resolve_provider_config"),
+        patch(APP + ".resolve_provider_metadata", return_value={}),
+        patch(APP + ".create_provider", return_value=provider),
+        patch(APP + ".AsyncSandbox", return_value=sandbox),
+        patch.object(PoolSession, "_install", side_effect=install),
+    ):
+        seeding = asyncio.create_task(server.seed_agent_session(fresh_request(), seed(borrowed=False)))
+        await entered.wait()
+        shutdown = asyncio.create_task(server._shutdown_sessions())
+        await asyncio.sleep(0)
+        sandbox.stop.assert_not_awaited()
+        release.set()
+        with pytest.raises(HTTPException, match="shut down"):
+            await seeding
+        await shutdown
+    sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_setup_deadline_retains_installation_for_later_close():
+    from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest
+
+    server = agent(setup_timeout=0.01, session_close_timeout_seconds=0.01)
+    session = state()
+    session.session.owns_sandbox = True
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def install(*args, **kwargs):
+        entered.set()
+        await release.wait()
+
+    async def setup(body):
+        try:
+            await session.install(version="v1.0.16", timeout=1)
+        except BaseException as error:
+            raise AgentSessionSetupError(session, error=error) from error
+        return session
+
+    with (
+        patch.object(PoolSession, "_install", side_effect=install),
+        patch.object(PoolAgent, "_seed_agent_session_state", side_effect=setup),
+    ):
+        seeding = asyncio.create_task(server.seed_agent_session(fresh_request(), session.request))
+        await entered.wait()
+        await asyncio.wait_for(server._shutdown_sessions(), timeout=1)
+        with pytest.raises(asyncio.CancelledError):
+            await seeding
+        session.session.sandbox.stop.assert_not_awaited()
+        assert server._session_records[session.request.agent_session_id].state is session
+        release.set()
+        await session.installation_task
+        await server.close_agent_session(
+            fresh_request(),
+            AgentCloseSessionRequest(
+                agent_session_id=session.request.agent_session_id, episode_id=session.request.episode_id
+            ),
+        )
+    session.session.sandbox.stop.assert_awaited_once()

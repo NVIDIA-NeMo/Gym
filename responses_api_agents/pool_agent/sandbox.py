@@ -27,6 +27,8 @@ class PoolArtifacts:
     stderr: str
     exit_code: int | None
     trajectory_error: str | None = None
+    runner_hostname: str | None = None
+    runner_pid: int | None = None
 
 
 @dataclass
@@ -112,6 +114,12 @@ class PoolSession(AgentSessionState):
             exit_code = None
         if type(exit_code) is not int:
             exit_code = None
+        try:
+            runtime = json.loads(await optional("runtime.json"))
+        except ValueError:
+            runtime = {}
+        hostname = runtime.get("hostname") if isinstance(runtime, dict) else None
+        pid = runtime.get("pid") if isinstance(runtime, dict) else None
         trajectory, trajectory_error = "", None
         try:
             result = await self.session.sandbox.exec(
@@ -125,7 +133,15 @@ class PoolSession(AgentSessionState):
         except Exception:
             trajectory_error = "trajectory_unavailable"
             LOG.warning("Pool trajectory unavailable after cleanup", exc_info=True)
-        return PoolArtifacts(trajectory, stdout, stderr, exit_code, trajectory_error)
+        return PoolArtifacts(
+            trajectory,
+            stdout,
+            stderr,
+            exit_code,
+            trajectory_error,
+            runner_hostname=hostname if isinstance(hostname, str) and hostname else None,
+            runner_pid=pid if type(pid) is int and pid > 0 else None,
+        )
 
     async def close(self, *, timeout: float) -> None:
         """Capture artifacts and release the sandbox before cancelling the shared HTTP task."""

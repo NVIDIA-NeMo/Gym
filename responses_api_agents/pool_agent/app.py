@@ -5,19 +5,24 @@
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from shlex import quote
 from time import time
 from typing import ClassVar
 from uuid import uuid4
 
-from fastapi import HTTPException, Request
-from pydantic import Field, JsonValue
+from fastapi import FastAPI, HTTPException, Request, Response
+from pydantic import Field, JsonValue, PrivateAttr
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
+    AgentSeedSessionResponse,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -57,7 +62,11 @@ class PoolAgentConfig(BaseResponsesAPIAgentConfig):
 
 def prompt_from_request(body: NeMoGymResponseCreateParamsNonStreaming) -> str:
     """Accept one text instruction and an optional system/developer prefix without dropping controls."""
-    unsupported = body.model_dump(exclude_defaults=True, exclude_none=True).keys() - {"input", "instructions", "model"}
+    params = body.model_dump(exclude_defaults=True, exclude_none=True)
+    metadata = params.get("metadata")
+    if isinstance(metadata, dict) and set(metadata) <= {AGENT_TIMEOUT_METADATA_KEY}:
+        params.pop("metadata")
+    unsupported = params.keys() - {"input", "instructions", "model"}
     if unsupported:
         raise HTTPException(422, "Unsupported Pool request fields: " + ", ".join(sorted(unsupported)))
     parts = [body.instructions] if body.instructions else []
@@ -88,6 +97,72 @@ class PoolAgent(SimpleResponsesAPIAgent):
 
     config: PoolAgentConfig
     calls_model_from_sandbox: ClassVar[bool] = True
+
+    _shutting_down: bool = PrivateAttr(default=False)
+    _seed_tasks: set[asyncio.Task] = PrivateAttr(default_factory=set)
+
+    def setup_webserver(self) -> FastAPI:
+        """Drain sessions before the inherited application lifespan exits."""
+        app = super().setup_webserver()
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(application: FastAPI) -> AsyncIterator[object]:
+            async with parent_lifespan(application) as state:
+                try:
+                    yield state
+                finally:
+                    await self._shutdown_sessions()
+
+        app.router.lifespan_context = lifespan
+        return app
+
+    async def seed_agent_session(
+        self, request: Request, body: AgentSeedSessionRequest, response: Response = None
+    ) -> AgentSeedSessionResponse:
+        """Fence shutdown and track setup until its shared session record is settled."""
+        if self._shutting_down:
+            raise HTTPException(503, "Pool server is shutting down")
+        task = asyncio.current_task()
+        assert task is not None
+        self._seed_tasks.add(task)
+        try:
+            result = await super().seed_agent_session(request, body, response)
+            if self._shutting_down:
+                raise HTTPException(503, "Pool server shut down during session setup")
+            return result
+        finally:
+            try:
+                # A late setup must release its state even if the shutdown wait expired.
+                if self._shutting_down:
+                    await self._close_for_shutdown(body)
+            finally:
+                self._seed_tasks.discard(task)
+
+    async def _close_for_shutdown(self, seed: AgentSeedSessionRequest) -> None:
+        try:
+            async with asyncio.timeout(self.config.session_close_timeout_seconds):
+                await self.close_agent_session(
+                    Request({"type": "http", "session": {}}),
+                    AgentCloseSessionRequest(agent_session_id=seed.agent_session_id, episode_id=seed.episode_id),
+                )
+        except Exception:
+            # The shared close endpoint retains failed cleanup for retry.
+            LOG.exception("Pool shutdown could not close session %s", seed.agent_session_id)
+
+    async def _shutdown_sessions(self) -> None:
+        self._shutting_down = True
+        if self._seed_tasks:
+            _, pending = await asyncio.wait(self._seed_tasks, timeout=self.config.setup_timeout)
+            for task in pending:
+                task.cancel()
+            if pending:
+                _, pending = await asyncio.wait(pending, timeout=self.config.session_close_timeout_seconds)
+                if pending:
+                    LOG.error("Pool shutdown still has %s pending session setups", len(pending))
+        # Use shared bookkeeping and the public close path, including failed seeds.
+        seeds = [record.state.request for record in self._session_records.values() if record.state is not None]
+        await asyncio.gather(*(self._close_for_shutdown(seed) for seed in seeds))
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> PoolSession:
         if any(access.required for access in self.effective_tool_accesses(body)):
@@ -223,19 +298,22 @@ class PoolAgent(SimpleResponsesAPIAgent):
         )
 
     async def _activate(self, state: PoolSession, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        timeout = resolve_agent_timeout(
+            body.metadata, ceiling=min(self.config.timeout, state.request.agent_timeout_sec or self.config.timeout)
+        )
         config = pool_config(
             base_url=self.model_endpoint(
                 model_server=self.config.model_server, rollout_id=state.request.episode_id.capture_key
             ).base_url,
             model=self.config.model,
             context_window=self.config.context_window,
-            timeout=min(self.config.timeout, state.request.agent_timeout_sec or self.config.timeout),
+            timeout=timeout,
         )
         try:
             artifacts = await state.session.execute(
                 stage_activation=lambda: state.stage(prompt=prompt_from_request(body), config=json.dumps(config)),
                 collect=state.collect,
-                timeout=min(self.config.timeout, state.request.agent_timeout_sec or self.config.timeout),
+                timeout=timeout,
                 close_timeout=self.config.session_close_timeout_seconds,
             )
             if artifacts.trajectory_error:
@@ -248,6 +326,8 @@ class PoolAgent(SimpleResponsesAPIAgent):
                 raise RuntimeError(f"Pool supervision failed: {cleanup['error']}")
             if parsed.errors:
                 raise RuntimeError("Pool session failed: " + "; ".join(parsed.errors))
+            if parsed.exit_reason == "model_next_tool_call_http_error":
+                raise RuntimeError("Pool model request failed: " + parsed.exit_reason)
             timed_out = cleanup["timed_out"]
             if not timed_out:
                 if cleanup["return_code"] not in (0, 4) or artifacts.exit_code not in (0, 4):
@@ -269,9 +349,17 @@ class PoolAgent(SimpleResponsesAPIAgent):
                 tools=body.tools,
                 tool_choice=body.tool_choice,
                 parallel_tool_calls=body.parallel_tool_calls,
-                metadata={"harness_execution": "sandbox", "pool_version": self.config.pool_version},
+                metadata={
+                    "harness_execution": "sandbox",
+                    "pool_version": self.config.pool_version,
+                    **({"harness_hostname": artifacts.runner_hostname} if artifacts.runner_hostname else {}),
+                    **({"harness_pid": str(artifacts.runner_pid)} if artifacts.runner_pid is not None else {}),
+                },
             )
         except BaseException as error:
+            artifacts = state.session.artifacts
+            if artifacts is not None and artifacts.stderr:
+                LOG.error("Pool activation failed; stderr tail: %s", artifacts.stderr[-4096:])
             state.failure = type(error).__name__
             raise
 
@@ -280,6 +368,8 @@ class PoolAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        if self._shutting_down:
+            raise HTTPException(503, "Pool server is shutting down")
         prompt_from_request(body)
         if body.model is not None and body.model != self.config.model:
             raise HTTPException(422, "Pool request model must match the configured model")
