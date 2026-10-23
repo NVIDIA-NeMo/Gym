@@ -66,6 +66,9 @@ task checks whether the model follows its instructions, graded against versioned
   - An endpoint that applies a small default when the cap is null (some hosted OpenAI-compatible APIs default to
     4096) would cut replies short. Give it an explicit cap the size of the context window:
     `++partner_if_policy_model.responses_api_models.vllm_model.sampling_overrides.max_tokens=<window>`.
+  - An endpoint that ends long requests needs a longer per-request timeout, since a reply at maximum reasoning
+    effort can take more than 6 minutes. Some hosted gateways stop a request at 360 s unless its body sets
+    `timeout`. The reference runs set `extra_body.timeout: 3600` on the policy and judge model servers.
   - Runs set no request parameters, such as `--temperature`, `--top-p`, `--max-output-tokens` or a reasoning
     effort: `opencode_agent` refuses them, so every SWE task would fail. Set model settings such as reasoning
     effort on the policy model server instead.
@@ -85,13 +88,12 @@ task checks whether the model follows its instructions, graded against versioned
     with equal weight.
   - Also `if_partial`, the passed fraction of IF items.
   - `coverage/*` counts masked rollouts.
-- **Reference score:** not yet measured on 2.1.0. Release 2.0.0's 22 tasks scored 62.12 on
-  `pass@1[avg-of-3]/all_if_pass`, tolerance ±7.7 points (95%).
+- **Reference score:** 61.33 on `pass@1[avg-of-3]/all_if_pass`, tolerance ±8.5 points (95%), on dataset 2.1.0.
   - Policy and judge: GLM 5.3 (`nvidia/zai-org/glm-5.3`).
-  - Policy settings: temperature 1.0, top_p 1.0, 16384 output tokens, no reasoning-effort setting, 16 rollouts
-    in parallel.
-  - The tolerance is t(0.975, 6) × the pooled `std_dev_across_runs` (3.83) × √(2/3). Two more runs with the same
-    settings scored 65.15 and 63.64.
+  - Policy settings, all on the model server: temperature 1.0 and top_p 1.0 (the benchmark's pin), maximum
+    reasoning effort, 262,144 output tokens, 16 rollouts in parallel.
+  - The tolerance is t(0.975, 6) × the pooled `std_dev_across_runs` (4.24) × √(2/3). Two more runs with the same
+    settings scored 58.67 and 57.33.
 - **Judge:** `nvidia/zai-org/glm-5.3` by default, at temperature 0, with 32768 output tokens. Each of the
   three resources servers allows 2 concurrent judge calls, so a run makes at most 6. Set `judge_base_url` and
   `judge_api_key`. A different judge makes the scores incomparable.
