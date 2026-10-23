@@ -299,6 +299,24 @@ class AgentSessionState:
     request: AgentSeedSessionRequest
 
 
+class AgentSeedRejectedError(HTTPException, ValueError):
+    """Refuse an agent session seed this agent cannot serve, such as a grant or sandbox it does not support.
+
+    FastAPI answers it with HTTP 422, which an Environment Server treats as terminal, so a configuration error
+    fails the episode once with this message instead of being retried as if it were transient. It is also a
+    ``ValueError``, so code that validates a seed outside a request (a checkpoint restore, a direct call in a test)
+    keeps catching it as before.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(422, detail)
+
+
+def _log_seed_refusal(agent_session_id: str, error: AgentSeedRejectedError) -> None:
+    # FastAPI answers an HTTPException inside the router, so no exception middleware logs the refusal.
+    LOG.warning("Refused agent session seed %s: %s", agent_session_id, error.detail)
+
+
 class AgentSessionSetupError(Exception):
     """Retain incomplete setup for close while propagating the original setup error."""
 
@@ -626,6 +644,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         response: Response = None,
     ) -> AgentSeedSessionResponse:
         """Seed once per caller ID; identical retries reuse the same harness state."""
+        if type(self)._seed_agent_session_state is SimpleResponsesAPIAgent._seed_agent_session_state:
+            error = AgentSeedRejectedError("This agent does not implement episode sessions")
+            _log_seed_refusal(body.agent_session_id, error)
+            raise error
         if self._restart_only is not None and response is not None:
             # This agent cannot capture the session, so the episode that seeds it starts over after a crash.
             response.headers[CHECKPOINT_RESTART_HEADER] = "1"
@@ -661,6 +683,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     record.state = error.state
                     self._keep_failed_seed(body.agent_session_id, record)
                     raise error.error from None
+                except AgentSeedRejectedError as error:
+                    _log_seed_refusal(body.agent_session_id, error)
+                    raise
                 try:
                     if participant is not None:
                         participant.open_session(body.agent_session_id, body.episode_id, seed=True)
@@ -865,6 +890,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
         """Validate grants and initialize harness state.
 
+        Raise AgentSeedRejectedError for a seed this agent cannot serve, such as a sandbox or a required grant it
+        does not support: the seed answers a final 422 and binds nothing. An HTTPException keeps its explicit status;
+        any other, unexpected exception answers 500, which an Environment Server retries as transient.
         If setup fails and cleanup cannot finish, raise AgentSessionSetupError with the
         partial state and original error. The base retains it for close, never activation.
         """
@@ -936,7 +964,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     def base_url_for_run(self, base_url: str, body: Any) -> str:
         """Apply this run's capture path to a model-server root URL.
 
-        Append the API-version suffix after this method returns.
+        Append the API-version suffix after this method returns. While traces export, the URL also
+        names this run's current span, so the model server parents calls that arrive without a
+        ``traceparent`` header (a harness in a sandbox) to it.
         """
         return apply_rollout_prefix(
             base_url,
@@ -957,11 +987,19 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         token_capture = f"/{TOKEN_CAPTURE_PATH_SEGMENT}/" in request_path
         return f"{rollout_path_prefix(rollout_id, token_capture=token_capture)}{url_path}"
 
-    def resolve_model_base_url(self, model_server_name: str, rollout_id: Optional[str] = None) -> str:
-        """Resolve a model-server URL with an optional rollout prefix."""
+    def resolve_model_base_url(
+        self, model_server_name: str, rollout_id: Optional[str] = None, *, trace_context: bool = True
+    ) -> str:
+        """Resolve a model-server URL with an optional rollout prefix (and trace context, as ``base_url_for_run``).
+
+        Pass ``trace_context=False`` for a URL that a client cached across rollouts will keep using.
+        """
         server_config = get_first_server_config_dict(self.server_client.global_config_dict, model_server_name)
         base_url = self.server_client._build_server_base_url(server_config)
-        return f"{apply_rollout_prefix(base_url, rollout_id, token_capture=self._token_id_capture_enabled())}/v1"
+        prefixed = apply_rollout_prefix(
+            base_url, rollout_id, token_capture=self._token_id_capture_enabled(), trace_context=trace_context
+        )
+        return f"{prefixed}/v1"
 
     def model_endpoint(
         self,

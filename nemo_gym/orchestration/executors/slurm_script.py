@@ -731,7 +731,7 @@ def _render_collector_service(
         obs.container,
         command,
         env={
-            obs.token_env: f"{RUNTIME_ENV_PREFIX}{obs.token_env}",
+            **({obs.token_env: f"{RUNTIME_ENV_PREFIX}{obs.token_env}"} if obs.remote_export else {}),
             "SLURM_JOB_ID": f"{RUNTIME_ENV_PREFIX}SLURM_JOB_ID",
         },
         single_node=is_multi_node,

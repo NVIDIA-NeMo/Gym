@@ -19,7 +19,11 @@ import subprocess
 import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig
-from nemo_gym.orchestration.executors.resume_script import _walltime_to_seconds, render_resume_prologue
+from nemo_gym.orchestration.executors.resume_script import (
+    INCOMPLETE_MARKER_NAME,
+    _walltime_to_seconds,
+    render_resume_prologue,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -103,12 +107,20 @@ elif [[ "$*" == *ExitCode* ]]; then echo "${FAKE_EXIT:-1:0}"; else echo "${FAKE_
 """
 _FAKE_SBATCH = """#!/bin/bash
 echo "$*" >> "$FAKE_LOG_DIR/sbatch_calls"
+if [[ -n "${FAKE_SBATCH_FAILS:-}" ]]; then echo "sbatch: error: Socket timed out"; exit 1; fi
 echo "Submitted batch job 999"
 """
 
 
 def _run_prologue(
-    tmp_path, resume: ResumeConfig, prev_state: str | None, *, exit_code: str = "1:0"
+    tmp_path,
+    resume: ResumeConfig,
+    prev_state: str | None,
+    *,
+    exit_code: str = "1:0",
+    job_id: str = "200",
+    prev_job_id: str = "100",
+    sbatch_fails: bool = False,
 ) -> subprocess.CompletedProcess:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -118,14 +130,15 @@ def _run_prologue(
         tool.chmod(0o755)
     script = tmp_path / "job.sh"
     script.write_text(render_resume_prologue(resume) + "\necho REACHED_WORK\n")
-    args = ["bash", str(script)] + ([] if prev_state is None else ["100"])
+    args = ["bash", str(script)] + ([] if prev_state is None else [prev_job_id])
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",
-        "SLURM_JOB_ID": "200",
+        "SLURM_JOB_ID": job_id,
         "FAKE_LOG_DIR": str(tmp_path),
         "FAKE_STATE": prev_state or "",
         "FAKE_EXIT": exit_code,
         "FAKE_ELAPSED": "60" if prev_state else "",
+        **({"FAKE_SBATCH_FAILS": "1"} if sbatch_fails else {}),
     }
     return subprocess.run(args, cwd=tmp_path, env=env, capture_output=True, text=True)
 
@@ -175,6 +188,91 @@ def test_incomplete_evaluation_chain_obeys_retryability(tmp_path, exit_code, con
 
 def test_retryable_evaluation_still_obeys_walltime_cap(tmp_path):
     result = _run_prologue(tmp_path, ResumeConfig(max_walltime="00:01:00"), "FAILED", exit_code="75:0")
-    assert result.returncode == 0
+    assert result.returncode == 1
     assert "REACHED_WORK" not in result.stdout
     assert not (tmp_path / "sbatch_calls").exists()
+
+
+def _sbatch_calls(tmp_path) -> list[str]:
+    calls = tmp_path / "sbatch_calls"
+    return calls.read_text().splitlines() if calls.exists() else []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("prev_state", [None, "TIMEOUT"])
+def test_a_requeued_job_does_not_queue_a_second_follow_up(tmp_path, prev_state):
+    """Slurm reruns job.sh under the same job id on a requeue (node failure, preemption with --requeue)."""
+    first = _run_prologue(tmp_path, ResumeConfig(), prev_state)
+    requeued = _run_prologue(tmp_path, ResumeConfig(), prev_state)
+
+    assert "REACHED_WORK" in first.stdout and "REACHED_WORK" in requeued.stdout
+    assert _sbatch_calls(tmp_path) == [_sbatch_calls(tmp_path)[0]]
+    assert "--dependency=afternotok:200" in _sbatch_calls(tmp_path)[0]
+    assert "already queued" in requeued.stdout
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_each_resumed_segment_still_queues_its_own_follow_up(tmp_path):
+    _run_prologue(tmp_path, ResumeConfig(), None, job_id="200")
+    _run_prologue(tmp_path, ResumeConfig(), None, job_id="200")  # requeue of the first segment
+    resumed = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", job_id="999", prev_job_id="200")
+
+    assert "REACHED_WORK" in resumed.stdout
+    assert [call.split()[0] for call in _sbatch_calls(tmp_path)] == [
+        "--dependency=afternotok:200",
+        "--dependency=afternotok:999",
+    ]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_requeue_retries_a_follow_up_that_failed_to_submit(tmp_path):
+    failed = _run_prologue(tmp_path, ResumeConfig(), None, sbatch_fails=True)
+    requeued = _run_prologue(tmp_path, ResumeConfig(), None)
+
+    assert "Failed to submit auto-resume follow-up" in failed.stdout
+    assert "Auto-resume follow-up queued: 999" in requeued.stdout
+    assert len(_sbatch_calls(tmp_path)) == 2
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_chain_stopped_at_the_walltime_cap_exits_non_zero_and_marks_the_run_incomplete(tmp_path):
+    (tmp_path / ".gym_accumulated_walltime").write_text("3590")
+
+    result = _run_prologue(tmp_path, ResumeConfig(max_walltime="01:00:00"), "TIMEOUT")
+
+    assert result.returncode == 1, result.stdout
+    assert "REACHED_WORK" not in result.stdout
+    assert "walltime cap with rollouts missing; resubmit to continue" in result.stdout
+    assert "walltime cap" in (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
+    assert not (tmp_path / "sbatch_calls").exists()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("state", ["CANCELLED", "CANCELLED by 1234"])
+def test_a_chain_stopped_after_a_cancel_exits_non_zero_and_marks_the_run_incomplete(tmp_path, state):
+    result = _run_prologue(tmp_path, ResumeConfig(), state)
+
+    assert result.returncode == 1, result.stdout
+    assert "REACHED_WORK" not in result.stdout
+    assert "was cancelled. Chain stopped with rollouts missing; resubmit to continue." in result.stdout
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).exists()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_chain_whose_previous_job_completed_still_exits_zero(tmp_path):
+    result = _run_prologue(tmp_path, ResumeConfig(max_walltime="01:00:00"), "COMPLETED")
+
+    assert result.returncode == 0, result.stdout
+    assert "REACHED_WORK" not in result.stdout
+    assert not (tmp_path / INCOMPLETE_MARKER_NAME).exists()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_chain_that_continues_clears_an_earlier_incomplete_marker(tmp_path):
+    (tmp_path / INCOMPLETE_MARKER_NAME).write_text("stopped earlier")
+
+    result = _run_prologue(tmp_path, ResumeConfig(max_walltime="10:00:00"), "TIMEOUT")
+
+    assert result.returncode == 0, result.stdout
+    assert "REACHED_WORK" in result.stdout
+    assert not (tmp_path / INCOMPLETE_MARKER_NAME).exists()
