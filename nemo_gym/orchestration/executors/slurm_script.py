@@ -701,7 +701,9 @@ def _with_vllm_traces(
     A service whose single API server runs on the collector's node exports to `localhost`; one on
     another node exports to the collector's node, whose hostname the script exports as
     `GYM_OTEL_COLLECTOR_HOST` (see `_render_otel_hosts`). A service answering on several nodes is
-    left alone: its command builders do not place the flag on every server.
+    left alone: its command builders do not place the flag on every server. So is a Ray Serve
+    service on another node: the gateway splits `--extra-args` into an argv without a shell, so the
+    variable would reach vLLM unexpanded.
     """
     if not (otel_active(config) and config.otel.vllm_traces and isinstance(service, VllmServiceConfig)):
         return service
@@ -709,7 +711,13 @@ def _with_vllm_traces(
     api_node = _vllm_api_node(service, compute, driver_node, total_nodes)
     if api_node is None:
         return service
-    host = LOCALHOST if api_node == _collector_node(driver_node) else f"${COLLECTOR_HOST_VAR}"
+    if api_node == _collector_node(driver_node):
+        host = LOCALHOST
+    else:
+        gpus_per_node_values = [p.gpus_per_node for p in compute.node_pools.values() if p.gpus_per_node is not None]
+        if effective_ray_serve(service, _service_nodes(service, compute, total_nodes), gpus_per_node_values):
+            return service
+        host = f"${COLLECTOR_HOST_VAR}"
     extra_args = f"{service.extra_args} {vllm_traces_flag(host)}".strip()
     env = {**vllm_traces_env(config.otel.component, name), **service.env}
     return service.model_copy(update={"extra_args": extra_args, "env": env})
@@ -783,6 +791,11 @@ def render_job_collector_config(
         scrape_hosts=_scrape_hosts(config, compute, driver_node),
         node_hosts=[_scrape_host(node, driver_node) for node in range(total_nodes)],
     )
+
+
+# The first line `_render_otel_hosts` writes. A job.sh without it predates the hostname exports, so a
+# collector config refreshed for it must not refer to them (see `SlurmExecutor.resubmit`).
+NODE_HOST_EXPORTS_MARKER = f'export {node_host_var(0)}="'
 
 
 def _render_otel_hosts(config: SubmitConfig, total_nodes: int, driver_node: int | None) -> str:

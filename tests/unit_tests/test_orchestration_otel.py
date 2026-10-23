@@ -799,6 +799,31 @@ def test_vllm_traces_from_another_node_go_to_the_collectors_host():
     assert 'export GYM_OTEL_COLLECTOR_HOST="${gym_nodes[0]}"' in script
 
 
+def test_vllm_traces_skip_a_ray_serve_service_on_another_node():
+    """The gateway hands `--extra-args` to vLLM as an argv without a shell, so `$GYM_OTEL_COLLECTOR_HOST`
+    would arrive unexpanded; beside the collector the literal `localhost` still works."""
+    remote = _config(
+        services={"policy": _vllm(node_pool="gpu"), "scorer": _vllm(node_pool="gpu2", use_ray_serve=True)},
+        compute={
+            "cluster-a": {
+                "type": "slurm",
+                "account": "acct",
+                "hostname": None,
+                "node_pools": _one_node_pools("gpu", "gpu2"),
+            }
+        },
+        otel={"vllm_traces": True},
+    )
+    script = _script(remote)
+    scorer = next(line for line in script.splitlines() if "--output=logs/scorer-" in line)
+    assert "--otlp-traces-endpoint" not in scorer
+    assert "$GYM_OTEL_COLLECTOR_HOST" not in scorer
+    assert f"--otlp-traces-endpoint http://localhost:{OTLP_HTTP_PORT}/v1/traces" in _policy_line(script)
+
+    local = _script(_config(services={"policy": _vllm(use_ray_serve=True)}, otel={"vllm_traces": True}))
+    assert f"--otlp-traces-endpoint http://localhost:{OTLP_HTTP_PORT}/v1/traces" in _policy_line(local)
+
+
 def test_vllm_traces_skip_a_tier_with_a_server_on_every_node():
     """Its command builder starts one server per node; none of them is handed the flag."""
     script = _script(_pd_config(nodes_per_pool=2, server_per_node=True))
