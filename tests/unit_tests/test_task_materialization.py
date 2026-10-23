@@ -121,7 +121,7 @@ def test_collation_routes_declared_taskset_without_rewriting_shared_source(tmp_p
         dataset["prepare_script"] = "benchmarks/swebench/pro/prepare.py"
     global_config = OmegaConf.create(
         {
-            "native": {
+            "materialized": {
                 "resources_servers": {
                     "test": {
                         "entrypoint": "app.py",
@@ -139,11 +139,11 @@ def test_collation_routes_declared_taskset_without_rewriting_shared_source(tmp_p
     assert len(configs) == 2
     with pytest.warns(DeprecationWarning, match="stripped legacy agent_ref"):
         paths = TrainDataProcessor()._collate_samples_single_type(dataset["type"], configs, task_data_validation="off")
-    native, flat = ([json.loads(line) for line in path.read_text().splitlines()] for path in paths)
-    assert len(native) == len(flat) == 4
-    assert native[0] == native[1]
-    assert native[2] == native[3]
-    assert native[2]["task_id"]["task_id"] == "1"
+    materialized, flat = ([json.loads(line) for line in path.read_text().splitlines()] for path in paths)
+    assert len(materialized) == len(flat) == 4
+    assert materialized[0] == materialized[1]
+    assert materialized[2] == materialized[3]
+    assert materialized[2]["task_id"]["task_id"] == "1"
     assert "task_input" not in flat[0]
     assert flat[0]["task_source"] == "flat"
     assert source.read_bytes() == original
@@ -153,8 +153,8 @@ def test_collation_routes_declared_taskset_without_rewriting_shared_source(tmp_p
         environment_routing_mode="taskset",
         environment_server_routes={"swe:test": "swe-environment"},
     )
-    assert _environment_server_for_config_row(native[0], routing) == "swe-environment"
-    assert native[0]["task_input"]["run_script"] == "verifier\nscript\n"
+    assert _environment_server_for_config_row(materialized[0], routing) == "swe-environment"
+    assert materialized[0]["task_input"]["run_script"] == "verifier\nscript\n"
     # Exercise the preparation and file-loading path used by gym eval run, not only the converter.
     output = tmp_path / "collated"
     global_config.update(
@@ -169,7 +169,7 @@ def test_collation_routes_declared_taskset_without_rewriting_shared_source(tmp_p
                     "single_agent_turn": {
                         "entrypoint": "app.py",
                         "agent_server": {"type": "responses_api_agents", "name": "agent"},
-                        "resources_server": {"type": "resources_servers", "name": "native"},
+                        "resources_server": {"type": "resources_servers", "name": "materialized"},
                     }
                 }
             },
@@ -313,7 +313,7 @@ def test_flat_and_taskset_declarations_share_metrics_sidecar(tmp_path):
     dataset = {"name": "d", "type": "example", "jsonl_fpath": str(source)}
     configs = GlobalConfigDictParser().filter_for_server_instance_configs(
         OmegaConf.create(
-            {**_resources_server("flat", [dataset]), **_resources_server("native", [dict(dataset, taskset="t")])}
+            {**_resources_server("flat", [dataset]), **_resources_server("materialized", [dict(dataset, taskset="t")])}
         )
     )
     TrainDataProcessor().validate_samples_and_aggregate_metrics(configs, overwrite_metrics_conflicts=False)

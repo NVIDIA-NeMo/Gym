@@ -2,12 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schema for the physics_judge server.
 
-Heir of math_with_judge: physics_judge defines no request model of its own — verify() and the
-wire contract are the inherited ``LibraryJudgeMathVerifyRequest`` (question + expected_answer,
-both required). Committed rows add physics metadata on top: ``domain`` is read defensively at
-metrics-aggregation time (compute_metrics, app.py:240-255) for per-domain subsets, while
-``difficulty``/``answer_type``/``language``/``solution`` are pass-through provenance written by
-benchmarks/physics/prepare.py and never read by server code.
+Heir of math_with_judge: the wire contract is ``PhysicsJudgeVerifyRequest``, the inherited
+question + expected_answer (both required) plus an optional ``domain``, which verify() echoes so
+compute_metrics can build per-domain subsets from the verify rows. ``difficulty``/``answer_type``/
+``language``/``solution`` are pass-through provenance written by benchmarks/physics/prepare.py and
+never read by server code.
 """
 
 from typing import Optional
