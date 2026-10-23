@@ -183,6 +183,9 @@ DELETED_OUTPUT_NOTE = (
     "OpenSandbox could not return this command's output: the output file was deleted, for example "
     "by a command that cleaned the temporary directory. The command's exit status is kept."
 )
+# execd times a command from its own start, not from the timestamps it reports, so a kill at
+# the deadline can measure a little under the timeout.
+EXEC_TIMEOUT_SLACK_S = 0.25
 DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
 IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
@@ -415,6 +418,25 @@ def _execution_outcome(execution: Any) -> tuple[int, str | None, str | None]:
     if execution.complete is not None:
         return 0, None, None
     return 125, "sandbox", "Command ended without a final status: no exit code, error or completion event"
+
+
+def _killed_at_timeout(return_code: int, elapsed_s: float | None, timeout_s: int | float | None) -> bool:
+    """Whether execd killed the command at the timeout the provider passed it.
+
+    execd reports that kill like any other signal death, exit code -1 and "signal: killed",
+    with no timeout flag. Only the elapsed time tells it apart from a command killed before
+    its deadline, e.g. by the OOM killer or by itself. A zero timeout enforces none.
+    """
+    return (
+        bool(timeout_s)
+        and return_code == -1
+        and elapsed_s is not None
+        and elapsed_s >= float(timeout_s) - EXEC_TIMEOUT_SLACK_S
+    )
+
+
+def _timeout_note(timeout_s: int | float) -> str:
+    return f"Command timed out after {timeout_s:g}s; OpenSandbox execd killed it"
 
 
 def _log_create_retry(retry_state: Any) -> None:
@@ -2056,8 +2078,17 @@ class OpenSandboxProvider:
                     retries=effective_retries,
                 )
 
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+
+            def run_command() -> Awaitable[Any]:
+                # A retried submit never reached execd, so time the attempt that ran.
+                nonlocal started
+                started = loop.time()
+                return handle.raw.commands.run(effective_command, opts=RunCommandOpts(**opts_kwargs))
+
             execution = await self._submit_command(
-                lambda: handle.raw.commands.run(effective_command, opts=RunCommandOpts(**opts_kwargs)),
+                run_command,
                 operation="command run",
                 sandbox_id=handle.sandbox_id,
                 timeout_s=sdk_timeout_s,
@@ -2070,6 +2101,10 @@ class OpenSandboxProvider:
             return_code, error_type, note = _execution_outcome(execution)
             if note is not None:
                 stderr_parts.append(note)
+            # The execution carries no start time, so the client's clock times it.
+            if _killed_at_timeout(return_code, loop.time() - started, timeout_s):
+                stderr_parts.append(_timeout_note(timeout_s))
+                return SandboxExecResult(stdout, "\n".join(stderr_parts), 124, error_type="timeout")
             stderr = "\n".join(stderr_parts) or None
 
             return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
@@ -2161,6 +2196,8 @@ class OpenSandboxProvider:
         background_opts = dict(opts_kwargs)
         background_opts["background"] = True
 
+        loop = asyncio.get_running_loop()
+        submitted = loop.time()
         execution = await self._submit_command(
             lambda: handle.raw.commands.run(command, opts=RunCommandOpts(**background_opts)),
             operation="command run (background submit)",
@@ -2172,7 +2209,6 @@ class OpenSandboxProvider:
         if not execution_id:
             raise RuntimeError("OpenSandbox background command did not return an execution id")
 
-        loop = asyncio.get_running_loop()
         # The server enforces the command timeout; leave the client headroom.
         deadline = (loop.time() + float(total_timeout_s) + 60.0) if total_timeout_s is not None else None
         poll_timeout_s = (
@@ -2264,6 +2300,15 @@ class OpenSandboxProvider:
             error_type = "sandbox"
         else:
             return_code = 0
+        # execd's own timestamps time the command; the client's clock is the fallback.
+        started_at, finished_at = getattr(status, "started_at", None), getattr(status, "finished_at", None)
+        if started_at is not None and finished_at is not None:
+            elapsed_s = (finished_at - started_at).total_seconds()
+        else:
+            elapsed_s = loop.time() - submitted
+        if _killed_at_timeout(return_code, elapsed_s, total_timeout_s):
+            note = _timeout_note(total_timeout_s)
+            return SandboxExecResult(stdout, f"{stderr}\n{note}" if stderr else note, 124, error_type="timeout")
 
         return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
 

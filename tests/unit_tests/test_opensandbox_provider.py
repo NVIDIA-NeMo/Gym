@@ -18,7 +18,7 @@ import builtins
 import gc
 import logging
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1288,6 +1288,106 @@ async def test_exec_background_polls_status_and_logs(monkeypatch: pytest.MonkeyP
     assert raw.commands.run_calls[0][1].kwargs["background"] is True
     assert raw.commands.status_calls == ["exec-42", "exec-42"]
     assert raw.commands.log_calls == ["exec-42"]
+
+
+# execd reports the kill at a command's timeout like any signal death: exit code -1, "signal: killed".
+@pytest.mark.parametrize(
+    "exit_code,ran_s,timeout_s,expected",
+    [
+        (-1, 30.0, 30, (124, "timeout")),  # killed at its timeout
+        (-1, 1.0, 30, (-1, None)),  # killed before its deadline, e.g. by the OOM killer
+        (7, 30.0, 30, (7, None)),  # exited on its own at the deadline
+        (-1, 30.0, 0, (-1, None)),  # a zero timeout enforces none
+    ],
+)
+async def test_exec_background_reports_a_kill_at_the_timeout_as_a_timeout(
+    monkeypatch: pytest.MonkeyPatch, exit_code: int, ran_s: float, timeout_s: int, expected: tuple
+) -> None:
+    started_at = datetime(2026, 10, 23, 17, 9, 8, 950131, tzinfo=timezone.utc)
+    error = "signal: killed" if exit_code == -1 else f"exit status {exit_code}"
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            return SimpleNamespace(id="exec-42")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            return SimpleNamespace(
+                running=False,
+                exit_code=exit_code,
+                error=error,
+                started_at=started_at,
+                finished_at=started_at + timedelta(seconds=ran_s, microseconds=646),
+            )
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            return SimpleNamespace(content="partial output", cursor=None)
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5}, probe={"command": None}, operations={"background_exec": True}
+    )
+    handle = opensandbox_provider.SandboxHandle("sandbox-bg", "opensandbox", SimpleNamespace(commands=FakeCommands()))
+
+    result = await provider.exec(handle, "bash solve.sh", timeout_s=timeout_s)
+
+    assert (result.return_code, result.error_type) == expected
+    assert result.stdout == "partial output"
+    if expected[1] == "timeout":
+        assert result.stderr == "signal: killed\nCommand timed out after 30s; OpenSandbox execd killed it"
+    else:
+        assert result.stderr == error
+
+
+@pytest.mark.parametrize(
+    "exit_code,runs_to_timeout,timeout_s,expected",
+    [
+        (-1, True, 0.5, (124, "timeout")),
+        (-1, False, 0.5, (-1, None)),
+        (7, True, 0.5, (7, None)),
+        (-1, True, None, (-1, None)),
+    ],
+)
+async def test_exec_reports_a_kill_at_the_timeout_as_a_timeout(
+    monkeypatch: pytest.MonkeyPatch, exit_code: int, runs_to_timeout: bool, timeout_s: float | None, expected: tuple
+) -> None:
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            # The foreground execution carries no start time, so the provider times it itself.
+            if runs_to_timeout:
+                await asyncio.sleep(0.5)
+            return SimpleNamespace(
+                logs=SimpleNamespace(stdout=[SimpleNamespace(text="partial output")], stderr=[]),
+                error=SimpleNamespace(name="CommandExecError", value=str(exit_code)),
+                exit_code=exit_code,
+                complete=None,
+            )
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 5}, probe={"command": None})
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", SimpleNamespace(commands=FakeCommands()))
+
+    result = await provider.exec(handle, "bash solve.sh", timeout_s=timeout_s)
+
+    assert (result.return_code, result.error_type) == expected
+    assert result.stdout == "partial output"
+    note = "\nCommand timed out after 0.5s; OpenSandbox execd killed it" if expected[1] == "timeout" else ""
+    assert result.stderr == f"CommandExecError: {exit_code}{note}"
 
 
 DELETED_OUTPUT_LOG_ERROR = (
