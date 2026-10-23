@@ -49,8 +49,8 @@ For another mode, swap the config and `--agent` (`rna_design_fixed`, `rna_design
 
 `1.0` if the best design that passes the gates reaches the suite's `pass_threshold` on its primary metric, else
 `0.0`. Most suites need an exact fold (1.0). The pseudoknotted ones (ArchiveII, anta pseudo) need 0.8 of the
-crossing pairs. The response also reports `best`,
-`pool_size`, `rounds`, `tool_calls`, `tool_failures` and token counts.
+crossing pairs. The response also reports `best`, `pool_size`, `rounds`, `tool_calls`, `tool_failures` and token
+counts.
 
 A campaign that could not run (a timeout, a crashed worker, or every tool call failing) is masked, not scored as a
 bad design.
@@ -61,9 +61,7 @@ bad design.
   loop sets process-wide state.
 - gRNAde imports `torch_scatter` and `torch_cluster`, which have no aarch64 wheels. `rds/tools/pyg_shims/` has pure
   PyTorch versions of the one function it uses from each, used only when the real packages are missing.
-- A long target is slow on CPU (about a minute per scoring call at 380 nt). Raise `rollout_timeout_s` or use a GPU.
-- `code.run` lets the model run its own Python. It is on only for a suite with `allow_code: true` (none ship that
-  way) and needs a network-free runtime (`RDS_SANDBOX=docker` or `bwrap`).
+- Long targets are slow on CPU. Raise `rollout_timeout_s` or use a GPU.
 
 ## Third-party components
 
@@ -73,5 +71,5 @@ redistribution.
 ## Tests
 
 ```bash
-python -m pytest responses_api_agents/rna_design_agent/tests
+gym env test +entrypoint=responses_api_agents/rna_design_agent
 ```

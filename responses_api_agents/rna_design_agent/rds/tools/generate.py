@@ -42,8 +42,7 @@ class MutateIn:
     n: int = field("How many candidates to produce")
     target: str = field("Campaign target name")
     parents: list[str] = field(
-        "Sequences to mutate. Empty means start from the wild type; "
-        "or a selector: @all, @unscored, @top:N (the CLI also takes @path to read a file).",
+        "Sequences to mutate. Empty means start from the wild type; or a selector: @all, @unscored, @top:N.",
         default_factory=list,
     )
     n_mutations: int = field("Mutations per candidate", default=8)

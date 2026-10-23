@@ -27,9 +27,7 @@ from ..targets import TARGETS
 
 @dataclass
 class ConstraintsIn:
-    sequences: list[str] = field(
-        "RNA sequences to check, or a selector: @all, @unscored, @top:N (the CLI also takes @path to read a file)."
-    )
+    sequences: list[str] = field("RNA sequences to check, or a selector: @all, @unscored, @top:N.")
     target: str = field("Campaign target name")
 
 

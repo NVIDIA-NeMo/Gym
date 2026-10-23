@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""RNA design agent. There is no resources server: each rollout runs a whole design campaign in a worker
+"""RNA design agent. It needs no resources server: each rollout runs a whole design campaign in a worker
 process (``worker.py``) and the reward comes from re-scoring the designs it produced."""
 
 import asyncio

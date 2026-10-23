@@ -20,4 +20,4 @@ components below rather than vendoring them. No model weights are in this direct
 | File | Source | Licence |
 |---|---|---|
 | `suites/` (built on first start, not in the repository) | target structures collated by [RNAInvBench](https://github.com/COLA-Laboratory/RNAInvBench) from Eterna100 v1/v2, Rfam-learn, Rfam-taneda, antaRNA and ArchiveII, read from its published files at a pinned commit | MIT. Structures and pinned bases only, no sequences from those sets. |
-| `data/example.jsonl` and `resources_servers/rna_design/data/` | five Eterna100 v1 targets from the same files, and their example rollouts | MIT |
+| `data/example.jsonl` and `resources_servers/rna_design/data/` | five Eterna100 v1 targets from the same files | MIT |

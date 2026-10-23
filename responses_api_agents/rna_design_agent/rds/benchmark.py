@@ -102,7 +102,7 @@ def run_one(
                 f"{campaign.name} sets control: handwritten but declares no "
                 f"control_cycle; a hand-written control has to be written"
             )
-        # Fill in the campaign's target for steps that omit it, or they design for the default target.
+        # Fill in the campaign's target for steps that omit it.
         from .campaign import _field_names
 
         cycle = []

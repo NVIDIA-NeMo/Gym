@@ -14,8 +14,8 @@
 # limitations under the License.
 """Let a model write and run its own design code. It returns sequences only, so scoring stays ours.
 
-Scripts run in the `docker/Dockerfile.sandbox` image with no network and only their own directory mounted,
-under docker or bubblewrap. Each result records which sandbox ran it.
+Scripts run in the `$RDS_SANDBOX_IMAGE` image with no network and only their own directory mounted, under docker
+or bubblewrap. Each result records which sandbox ran it.
 """
 
 from __future__ import annotations
@@ -54,10 +54,7 @@ def _sandbox_command(script: Path, argument: str, scratch: Path) -> tuple[list[s
         if not rootfs or not Path(rootfs).is_dir():
             raise RuntimeError(
                 "RDS_SANDBOX=bwrap needs RDS_SANDBOX_ROOTFS pointing at an "
-                f"unpacked image directory; {rootfs or '<unset>'} is not one. "
-                "Build it with `docker build -f docker/Dockerfile.sandbox`, "
-                "`enroot import -o rds-sandbox.sqsh dockerd://rds-sandbox:1` "
-                "then `enroot create --name rds-sandbox rds-sandbox.sqsh`."
+                f"unpacked image directory; {rootfs or '<unset>'} is not one."
             )
         command = [
             "bwrap",
@@ -365,9 +362,8 @@ def code_call(inp: CallCodeIn) -> dict:
                 else "; nothing has been saved yet — use code.run with save_as"
             )
         )
-    # Staged into a work directory of its own, the way code.run does: the toolbox is not necessarily a
-    # path the sandbox can mount -- a harness inside a container bind-mounts its own path and finds
-    # nothing -- and a script has no business reading the other tools in the box.
+    # Staged into its own work directory, as code.run does: a harness inside a container cannot mount the toolbox
+    # path, and a script should not read the other saved tools.
     work = Path(tempfile.mkdtemp(prefix="agent_code_"))
     script = work / saved.name
     body = saved.read_text()

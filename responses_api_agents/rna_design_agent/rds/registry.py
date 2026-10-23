@@ -28,7 +28,7 @@ _REGISTRY: dict[str, ToolSpec] = {}
 def tool(
     name: str, summary: str, cost: Cost, model: type, needs: Iterable[str] = (), steps: Iterable[str] = ()
 ) -> Callable[[Callable], Callable]:
-    """Register a tool. `name` is "group.verb" and becomes `rds <group> <verb>`."""
+    """Register a tool. `name` is "group.verb"."""
     if "." not in name:
         raise ValueError(f"tool name must be 'group.verb', got {name!r}")
 

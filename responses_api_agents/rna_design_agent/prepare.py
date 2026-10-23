@@ -15,7 +15,7 @@
 """Prepare data and the gRNAde environment.
 
 python prepare.py rnainvbench_eterna100_v1 --output data/eterna100_v1.jsonl --limit 20   # builds suites/ on first use
-python prepare.py --setup ~/rna_agent_env      # gRNAde checkout, model weights, and a Python env for it
+python prepare.py --setup ~/rna_env      # gRNAde checkout, model weights, and a Python env for it
 """
 
 import argparse
@@ -146,7 +146,7 @@ GRNADE_PACKAGES = (
 def setup(home: Path) -> None:
     """Check out gRNAde, download the checkpoints it loads (public, no login) and build a Python env for it.
 
-    Afterwards run the agent with `GRNADE_REPO=<home>/geometric-rna-design` and `<home>/venv/bin` first on PATH.
+    Afterwards set `GRNADE_REPO=<home>/geometric-rna-design` and `RNA_WORKER_PYTHON=<home>/venv/bin/python`.
     """
     from huggingface_hub import snapshot_download
 

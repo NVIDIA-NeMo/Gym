@@ -14,7 +14,7 @@
 # limitations under the License.
 """Secondary structure prediction, as an adapter over RibonanzaNet-SS in its own checkout.
 
-No model is imported at module level, so the CLI and tests load without a GPU or weights.
+No model is imported at module level, so the tools and tests load without a GPU or weights.
 """
 
 from __future__ import annotations
@@ -32,9 +32,7 @@ from .paths import resolve as _resolve
 
 @dataclass
 class RNetSSIn:
-    sequences: list[str] = field(
-        "RNA sequences (A/C/G/U), or a selector: @all, @unscored, @top:N (the CLI also takes @path to read a file)."
-    )
+    sequences: list[str] = field("RNA sequences (A/C/G/U), or a selector: @all, @unscored, @top:N.")
     target: str = field("Campaign target to compare against; empty to only predict.", default="")
     batch_size: int = field("Sequences per forward pass", default=8)
 
@@ -80,9 +78,7 @@ def struct_rnet_ss(inp: RNetSSIn) -> dict:
     # the rest of the process, so the original is restored afterwards.
     saved_arniefile = os.environ.get("ARNIEFILE")
     try:
-        # RibonanzaNetSS prints a load banner to stdout, which would land in the
-        # middle of this command's JSON object and break the one-object contract.
-        # Third-party chatter belongs on stderr.
+        # RibonanzaNetSS prints a load banner to stdout, where the worker writes its JSON replies.
         import contextlib
         import sys
 

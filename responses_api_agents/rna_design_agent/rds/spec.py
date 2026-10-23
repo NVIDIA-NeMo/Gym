@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tool specs: one input dataclass yields the CLI subcommand, the LLM tool schema and the dispatch entry.
+"""Tool specs: one input dataclass yields the LLM tool schema and the dispatch entry.
 
 Only the annotation types the tools use are supported. Anything else raises rather than give a wrong schema.
 """
@@ -31,11 +31,10 @@ _JSON_TYPES: dict[Any, str] = {str: "string", int: "integer", float: "number", b
 
 
 class Cost(enum.Enum):
-    """What a call costs, so the budget and the Tier-2 gate need no tool names."""
+    """What a call costs, so the budget needs no tool names."""
 
     CHEAP = "cheap"  # CPU, milliseconds, run on every candidate
     GPU_BATCH = "gpu_batch"  # GPU, batched, budgeted, never per-candidate
-    EXPENSIVE = "expensive"  # GPU, minutes, independent check only
 
 
 def _unwrap_optional(annotation: Any) -> tuple[Any, bool]:
@@ -93,7 +92,7 @@ def json_schema(model: type, for_model: bool = False) -> dict[str, Any]:
 def field(help: str, operator: bool = False, **kwargs: Any) -> Any:
     """`dataclasses.field` carrying the one-line help both projections show.
 
-    `operator=True` marks a deployment knob (a path, a timeout) that stays on the CLI and out of the model's schema.
+    `operator=True` marks a deployment knob (a path, a timeout) kept out of the model's schema.
     """
     metadata = {"help": help}
     if operator:
@@ -120,7 +119,7 @@ def _coerce(model: type, name: str, value: Any) -> Any:
 
 @dataclasses.dataclass(frozen=True)
 class ToolSpec:
-    """One tool, and everything the three projections need to render it."""
+    """One tool, and everything needed to offer and run it."""
 
     name: str  # "fold.eternafold": group.verb, the registry name and, with "_" for ".", the LLM tool name
     summary: str
@@ -154,7 +153,6 @@ class ToolSpec:
         charged = {
             "CHEAP": "cheap",
             "GPU_BATCH": "charges gpu_seconds",
-            "EXPENSIVE": "charges gpu_seconds, minutes per call",
         }
         return {
             "name": self.llm_name,
@@ -173,8 +171,7 @@ class ToolSpec:
             k: _coerce(self.model, k, v) for k, v in kwargs.items() if not (k in optional and v in ("", None, []))
         }
         known = {f.name for f in dataclasses.fields(self.model)}
-        # Omitting `target` used to fall back to one fixed campaign and score against its structure. The
-        # campaign in progress is the default, and naming it on a tool without the field is redundant.
+        # An omitted `target` is the campaign in progress. Naming one on a tool without the field is redundant.
         if "target" in known:
             if not cleaned.get("target") and os.environ.get("RDS_TARGET"):
                 cleaned["target"] = os.environ["RDS_TARGET"]

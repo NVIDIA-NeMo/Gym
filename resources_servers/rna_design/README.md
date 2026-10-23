@@ -14,13 +14,12 @@ export OPENSANDBOX_DOMAIN=https://<your cell> OPENSANDBOX_API_KEY=<key>
 gym env start --config resources_servers/rna_design/configs/rna_design.yaml --model-type vllm_model \
     ++use_absolute_ip=true ++policy_model.responses_api_models.vllm_model.port=$PORT \
     ++rna_design_claude_code_agent.responses_api_agents.harness_agent.sandbox_model_base_url=http://$NODE_IP:$PORT
-gym eval run --no-serve --agent rna_design_claude_code_agent --input rows.jsonl --output rollouts.jsonl \
-    ++head_server.host=$NODE_IP
+gym eval run --no-serve --agent rna_design_claude_code_agent --input resources_servers/rna_design/data/example.jsonl \
+    --output rollouts.jsonl ++head_server.host=$NODE_IP
 ```
 
 The box must reach the Gym node, so Gym binds the node's address (`use_absolute_ip`) and Claude Code calls the
-model through the Gym model server at `$NODE_IP:$PORT`. The default image is public. Any image with Python 3.12+
-and Node.js works.
+model through the Gym model server at `$NODE_IP:$PORT`.
 
 A rollout where the model was never reached, where the model endpoint failed partway (Claude Code's
 `API Error: <status>`) and nothing was solved, or where every tool call failed and nothing was designed, is masked.
@@ -28,5 +27,5 @@ A rollout where the model was never reached, where the model endpoint failed par
 ## Tests
 
 ```bash
-python -m pytest resources_servers/rna_design/tests
+gym env test --resources-server rna_design
 ```
