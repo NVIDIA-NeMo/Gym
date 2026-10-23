@@ -114,7 +114,16 @@ Dockerfiles outside pull and overlay mode are built at prepare, see below.
 A task with `[[steps]]` runs each step as one turn in the same sandbox, as Harbor's multi-step trial does
 without `resume_trajectory`: a fresh agent session per turn, with the step's
 `steps/<name>/instruction.md` as its only input and the step's `[steps.agent].timeout_sec` (else the task's)
-as its budget. The task's top-level `instruction.md` is never sent; a multi-step task may keep material there
+as its budget. `turn_sessions: continue` on the server is Harbor's `--resume-trajectory`: the first turn seeds
+one multi-turn continuation session and every later turn is the next activation of it, so the agent keeps its
+conversation across steps; each step is still verified on its own, the session is closed once after the last
+turn, and its observations and cumulative trajectory are the episode's (`ng_agent_observations`,
+`ng_trajectory`; the per-turn results carry none). The run is refused before any sandbox when the harness
+declares no multi-turn continuation (`GET /v1/agent_sessions/capabilities`; only OpenCode does today), as
+Harbor refuses `resume_trajectory` for an agent without `SUPPORTS_RESUME` before any environment spend, and when
+the task's steps switch the agent user, which a live session cannot follow. The setting is a no-op for a
+single-step task, as in Harbor. One divergence: Harbor's resumed agent has exited between steps, while a
+continued harness session holds the sandbox during each step's verifier. The task's top-level `instruction.md` is never sent; a multi-step task may keep material there
 the agent must not see. After each turn the shared verifier runs the task's `tests/` with
 `steps/<name>/tests/` on top, under the step's verifier user and environment over the task's and the step's own
 `[steps.verifier].timeout_sec`, else Harbor's step default of 600 s, never the task's `[verifier].timeout_sec`
