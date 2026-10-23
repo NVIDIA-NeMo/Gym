@@ -229,6 +229,20 @@ def test_two_concurrent_resubmits_queue_one_job(tmp_path: Path, slurm_bin: Path)
     assert not (job_dir / ".gym_resubmit.lock").exists()
 
 
+def test_held_lock_refuses_a_resubmit_even_when_mkdir_is_not_exclusive(tmp_path: Path, slurm_bin: Path) -> None:
+    job_dir = _staged_run(tmp_path)
+    (job_dir / ".gym_resubmit.lock").touch()
+    # uutils mkdir (Ubuntu 26.04's default) can report success for a directory another process just created.
+    (slurm_bin / "mkdir").write_text("#!/bin/bash\nexit 0\n")
+    (slurm_bin / "mkdir").chmod(0o755)
+
+    with pytest.raises(RuntimeError, match="another resubmit holds"):
+        resubmit(*_handle(job_dir))
+
+    assert not (slurm_bin / "cwd").exists()
+    assert (job_dir / ".gym_resubmit.lock").exists()
+
+
 # --- The resubmit only queues; the job resets its own run state ---------------------------------------------
 
 

@@ -260,10 +260,12 @@ class SlurmExecutor(BaseExecutor):
                     + [
                         'fail() { echo "Error: $*" >&2; exit 1; }',
                         f"cd {shlex.quote(str(job_dir))} || fail 'cannot enter the job dir'",
-                        # mkdir, not flock: it is atomic on shared filesystems that do not support flock.
-                        f'mkdir {_RESUBMIT_LOCK} 2>/dev/null || fail "another resubmit holds $PWD/{_RESUBMIT_LOCK}; '
-                        'remove it if no resubmit is running"',
-                        f"trap 'rmdir {_RESUBMIT_LOCK}' EXIT",
+                        # bash's noclobber creates the lock with O_EXCL, which is atomic on shared filesystems
+                        # that do not support flock. Not mkdir: uutils mkdir (Ubuntu 26.04's default) can
+                        # report success to two concurrent callers.
+                        f'(set -o noclobber; : > {_RESUBMIT_LOCK}) 2>/dev/null || fail "another resubmit holds '
+                        f'$PWD/{_RESUBMIT_LOCK}; remove it if no resubmit is running"',
+                        f"trap 'rm -f {_RESUBMIT_LOCK}' EXIT",
                         "workdirs=$(squeue --me --noheader --format=%Z) || fail 'squeue failed'",
                         'for d in $workdirs; do [ "$d" != "$PWD" ] || '
                         'fail "A job of this run is still pending or running in $PWD."; done',
