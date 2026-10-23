@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
-from aiohttp import ClientResponseError
+from aiohttp import ClientError, ClientResponseError
 from fastapi import Body
 from pydantic import ConfigDict, Field
 
@@ -881,6 +881,9 @@ def _is_scorable_assistant_activation_error(error: _ParticipantActivationError) 
             and original.status not in _RETRYABLE_ACTIVATION_STATUSES
             and not is_retryable_dependency_status(original.status)
         )
+    # InvalidURL is also a ValueError, but a dependency failure is not an assistant mistake.
+    if isinstance(original, ClientError):
+        return False
     return isinstance(original, (AttributeError, TypeError, ValueError))
 
 
