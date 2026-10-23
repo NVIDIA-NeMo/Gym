@@ -59,7 +59,8 @@ Each step is one turn. A turn:
    `steps/<name>/workdir/` into the working directory, runs its `setup.sh` and polls the step's
    `[steps.healthcheck]` to a pass (see below).
 3. Opens a **fresh agent session** on the shared sandbox (Harbor's default, `resume_trajectory = false`): the
-   agent does not carry a conversation across steps, only whatever it left in the environment.
+   agent does not carry a conversation across steps, only whatever it left in the environment. With
+   `turn_sessions: continue` (see below) the first turn opens one session and this turn is its next activation.
 4. Sends the step's own `steps/<name>/instruction.md` as the only input, under the step's
    `[steps.agent].timeout_sec` (else the task's `[agent].timeout_sec`).
 5. Closes the session, collects the turn's artifacts (see below) and runs the step's verifier.
@@ -67,6 +68,35 @@ Each step is one turn. A turn:
 The task's top-level `instruction.md` is **never sent** for a multi-step task. A multi-step task may keep material
 there that the agent must not see (SWE-Interact puts the full hidden specification in the top-level file); each
 turn sees only its step's instruction, and the ATIF transcript the verifier reads holds that turn's request alone.
+
+## Resuming the agent across steps
+
+Harbor's `--resume-trajectory` (a job or trial setting, never `task.toml`) makes each step after the first resume
+the agent's native session instead of starting a fresh conversation, and fails the trial up front for an agent
+without `SUPPORTS_RESUME`. The server's equivalent is `turn_sessions` on the Harbor environment server, set per
+run as a Hydra override:
+
+```bash
+gym eval run ... +harbor_environment_server.turn_sessions=continue
+```
+
+- `fresh` (default): one agent session per step, as above.
+- `continue`: the first turn seeds one multi-turn continuation session (the agent-session contract's
+  `resume_harness_session` mode) and every later turn is the next activation of it, named in the
+  `x-ng-agent-activation` header. Each step keeps its own instruction and `[steps.agent].timeout_sec`, is
+  verified on its own between activations, and stops the episode as in fresh mode (a mask, no verifier result,
+  a missed `min_reward`, a failed step preparation). The session is closed once, after the last turn, and its
+  observations and cumulative trajectory are the episode's `ng_agent_observations` and `ng_trajectory`; the
+  per-turn results carry none. The result reports `turn_sessions`.
+
+Before any sandbox is created, the server asks the agent server `GET /v1/agent_sessions/capabilities` once and
+refuses the run (`stage: seed`, terminal, naming the setting) when the harness declares no continuation; today
+only `opencode_agent` does. A task whose steps switch the agent user is refused too, since the live session runs as
+the user it was seeded with. A single-step task is unaffected, as Harbor's flag is a no-op below two steps.
+
+Divergence from Harbor: Harbor's resumed agent has exited between steps and is relaunched with the next
+instruction, so nothing of it runs while the step's verifier does; a continued harness session stays alive in the
+sandbox during each step's verifier.
 
 ## Per-step working directory and setup script
 
