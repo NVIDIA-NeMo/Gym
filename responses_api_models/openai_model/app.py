@@ -19,7 +19,6 @@ from contextlib import asynccontextmanager, nullcontext
 from typing import Any, Awaitable, Callable, Dict, Literal, Optional, TypeVar
 
 from aiohttp import ClientResponseError
-from openai.types import CreateEmbeddingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from nemo_gym.base_responses_api_model import (
@@ -365,17 +364,10 @@ class SimpleModelServer(SimpleResponsesAPIModel):
 
         return await self._call_upstream(create_and_validate)
 
-    async def embeddings(self, body: dict = Body()) -> CreateEmbeddingResponse:
+    async def embeddings(self, body: dict = Body()) -> dict:
         """Pass an OpenAI-compatible embeddings request through to the provider; the configured model replaces the request's model."""
-        body_dict = self.config.extra_body | body
-        body_dict["model"] = self.config.openai_model
-        # Force float output: this endpoint's response schema is CreateEmbeddingResponse
-        # (embedding: List[float]) and cannot represent base64. OpenAI SDK clients default to
-        # encoding_format="base64" on the wire, which would otherwise fail response validation.
-        body_dict["encoding_format"] = "float"
-        async with self._semaphore:
-            openai_response_dict = await self._client.create_embeddings(**body_dict)
-        return CreateEmbeddingResponse.model_validate(openai_response_dict)
+        body_dict = self.config.extra_body | body | {"model": self.config.openai_model}
+        return await self._call_upstream(lambda: self._client.create_embeddings(**body_dict))
 
 
 if __name__ == "__main__":

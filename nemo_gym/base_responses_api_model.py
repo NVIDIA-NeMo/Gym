@@ -47,7 +47,6 @@ from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from openai.types import CreateEmbeddingResponse
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
 
 from nemo_gym._checkpoint.control import install_control_routes, install_participant
@@ -356,7 +355,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             assistant_message_header=self.server_client.assistant_message_header(self.config.name),
             global_config_dict=self.server_client.global_config_dict,
             num_workers=self.config.num_workers,
+            # Embedding vectors never contain policy-generated text, so an embeddings call under a
+            # rollout's token-capture prefix must not mark that rollout incomplete.
             non_generating_requests=self.non_generating_model_routes
+            | {("POST", "/v1/embeddings")}
             | frozenset(
                 (request.method, request.path) for request in self.config.token_id_capture_non_generating_requests
             ),
@@ -671,11 +673,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         )
         return completion
 
-    async def embeddings(self, body: dict = Body()) -> CreateEmbeddingResponse:
+    async def embeddings(self, body: dict = Body()) -> dict:
         """OpenAI-compatible ``POST /v1/embeddings`` default: 501 unless a server overrides it.
 
         Servers backed by an embeddings-capable provider (e.g. ``openai_model``,
-        ``inference_provider``) override this to pass ``body`` through to the provider.
+        ``inference_provider``) override this to pass ``body`` through to the provider and
+        return the provider's JSON unchanged.
         """
         raise HTTPException(
             status_code=501,

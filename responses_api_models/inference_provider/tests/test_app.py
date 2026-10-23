@@ -134,56 +134,32 @@ class TestInferenceProvider:
         server = _make_server(model="my-embed-model")
         client = TestClient(server.setup_webserver())
 
-        mock_data = {
-            "data": [{"embedding": [0.1, 0.2], "index": 0, "object": "embedding"}],
-            "model": "my-embed-model",
-            "object": "list",
-            "usage": {"prompt_tokens": 2, "total_tokens": 2},
-        }
-        called_kwargs = {}
-
-        async def mock_create_embeddings(**kwargs):
-            nonlocal called_kwargs
-            called_kwargs = kwargs
-            return mock_data
-
+        # A minimal OpenAI-compatible reply: base64 vectors, no usage or object fields.
+        provider_json = {"data": [{"embedding": "AACAPwAAAEA=", "index": 0}], "model": "my-embed-model"}
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
-        server._client.create_embeddings = AsyncMock(side_effect=mock_create_embeddings)
+        server._client.create_embeddings = AsyncMock(return_value=provider_json)
 
-        # encoding_format is forced to "float" even when the caller requests base64 (the OpenAI
-        # SDK's wire default), since CreateEmbeddingResponse can only carry List[float].
         response = client.post("/v1/embeddings", json={"input": "hi", "model": "ignored", "encoding_format": "base64"})
-        assert response.status_code == 200
-        assert response.json()["data"][0]["embedding"] == [0.1, 0.2]
-        # The configured model wins over the request's model.
-        assert called_kwargs["model"] == "my-embed-model"
-        assert called_kwargs["input"] == "hi"
-        assert called_kwargs["encoding_format"] == "float"
 
-    async def test_embeddings_extra_body_merged(self) -> None:
-        server = _make_server(model="my-embed-model", extra_body={"dimensions": 256})
+        assert response.status_code == 200
+        assert response.json() == provider_json
+        server._client.create_embeddings.assert_awaited_once_with(
+            input="hi", model="my-embed-model", encoding_format="base64"
+        )
+
+    async def test_embeddings_extra_body_merge(self) -> None:
+        server = _make_server(model="my-embed-model", extra_body={"dimensions": 256, "user": "config-user"})
         client = TestClient(server.setup_webserver())
-
-        called_kwargs = {}
-
-        async def mock_create_embeddings(**kwargs):
-            nonlocal called_kwargs
-            called_kwargs = kwargs
-            return {
-                "data": [{"embedding": [0.0], "index": 0, "object": "embedding"}],
-                "model": "my-embed-model",
-                "object": "list",
-                "usage": {"prompt_tokens": 1, "total_tokens": 1},
-            }
-
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
-        server._client.create_embeddings = AsyncMock(side_effect=mock_create_embeddings)
+        server._client.create_embeddings = AsyncMock(return_value={"data": []})
 
-        response = client.post("/v1/embeddings", json={"input": "hi"})
+        response = client.post("/v1/embeddings", json={"input": "hi", "user": "request-user"})
+
         assert response.status_code == 200
-        assert called_kwargs["dimensions"] == 256
-        assert called_kwargs["model"] == "my-embed-model"
-        assert called_kwargs["encoding_format"] == "float"
+        server._client.create_embeddings.assert_awaited_once_with(
+            input="hi", user="request-user", dimensions=256, model="my-embed-model"
+        )
+        assert server.config.extra_body == {"dimensions": 256, "user": "config-user"}
 
     async def test_model_default_from_config(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server(model="my-configured-model")
