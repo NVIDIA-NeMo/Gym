@@ -772,8 +772,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
             value = getattr(body, name)
             if name in ("stream", "background") and value is False:
                 continue  # Explicit synchronous, non-streaming execution is supported.
-            if name == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
-                continue  # Task rows carry the agent's wall-clock budget; the activation honours it.
+            if name == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY, "docker_image", "workdir"}:
+                continue  # Resource/harness routing metadata is not a model-endpoint request control.
             if value != field.get_default(call_default_factory=True):
                 raise HTTPException(422, f"Hermes does not support request field {name}")
         body = body.model_copy(deep=True)

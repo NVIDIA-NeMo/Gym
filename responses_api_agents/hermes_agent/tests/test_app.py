@@ -94,6 +94,38 @@ def _mcp_access(name: str, *, required: bool = True) -> MCPToolAccess:
     )
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        None,
+        {"agent_timeout_sec": "900"},
+        {"docker_image": "task-image"},
+        {"workdir": "/app"},
+        {"docker_image": "task-image", "workdir": "/app", "agent_timeout_sec": "900"},
+    ],
+)
+def test_task_metadata_stays_out_of_model_params(metadata: dict[str, str] | None) -> None:
+    agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata=metadata)
+    validated = agent._validate_request(body)
+    assert validated.metadata == metadata
+    expected = agent._conversation_params(agent._validate_request(body.model_copy(update={"metadata": None})))
+    assert agent._conversation_params(validated) == expected
+    assert agent._agent_timeout_sec(validated) == (
+        900 if metadata and "agent_timeout_sec" in metadata else agent.config.sandbox_runner_timeout_seconds
+    )
+
+
+def test_task_metadata_rejects_unknown_controls() -> None:
+    agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input="task", metadata={"docker_image": "task-image", "workdir": "/app", "unknown_control": "value"}
+    )
+    with pytest.raises(HTTPException, match="metadata") as error:
+        agent._validate_request(body)
+    assert error.value.status_code == 422
+
+
 def test_gym_mcp_tool_name_maps_hermes_names_of_granted_servers() -> None:
     assert _gym_mcp_tool_name("mcp_weather_get_weather", ["weather"]) == "mcp__weather__get_weather"
     # Hermes replaced "-" and "." in the server name; the granted name is restored.

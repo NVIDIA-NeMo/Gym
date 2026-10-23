@@ -164,3 +164,7 @@ gym eval run --no-serve \
 
 Example math rollouts are in `environments/hermes_math/data/example_rollouts.jsonl`.
 For the local adapter, terminal provider failures retain their response and observation evidence and reach verification. The returned rollout is always masked (`mask_sample: true`, `failure_kind: agent_request_failed`), even if the verifier awards a positive reward, so provider failures remain excluded from scores. Agent sessions report the failure cause; the Environment Server's `agent_outcome_policy` decides whether to verify, retry, or fail without grading. Worker and cleanup failures remain execution errors. Correlated model requests carry an invocation header through SDK retries, including attempts without a response ID.
+
+Request metadata may include `docker_image`, `workdir`, and `agent_timeout_sec`.
+These fields are kept out of model conversation parameters. Image and working-directory
+metadata do not change the already configured sandbox. Unknown metadata keys remain rejected.
