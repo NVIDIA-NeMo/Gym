@@ -958,6 +958,14 @@ class VLLMModel(SimpleResponsesAPIModel):
         else:
             body_dict = self._apply_prefix_supply(body_dict)
 
+        if body_dict.get("ng_capture") and body_dict.get("top_logprobs") and body_dict.get("logprob_token_ids"):
+            # vLLM ignores top_logprobs when specific IDs are requested. Equal
+            # counts do not guarantee those IDs are the sampler's top-k head.
+            raise HTTPException(
+                status_code=400,
+                detail="Top-k token capture does not support logprob_token_ids; omit it to collect the sampler's top-k.",
+            )
+
         # Normalize after all request overrides and capture controls. vLLM treats
         # null as no logprobs; zero explicitly requests the chosen token only.
         if body_dict.get("top_logprobs") is None:

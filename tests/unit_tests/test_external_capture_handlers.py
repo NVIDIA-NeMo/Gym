@@ -58,6 +58,8 @@ def _transport_payload(**fields: Any) -> dict[str, Any]:
         "generation_token_ids": [12],
         "generation_log_probs": [-0.2],
         "routed_experts": {"data": "unused"},
+        "sampler_topk_token_ids": [[12, 13]],
+        "sampler_topk_logprobs": [[-0.2, -1.8]],
         # Megatron prompt-form echo, absent from vLLM payloads; stripped defensively.
         "compact_prompt_token_ids": [10, 11],
     }
@@ -86,15 +88,18 @@ def _assert_transport_fields_stripped(payload: dict[str, Any]) -> None:
     assert "generation_token_ids" not in message
     assert "generation_log_probs" not in message
     assert "routed_experts" not in message
+    assert "sampler_topk_token_ids" not in message
+    assert "sampler_topk_logprobs" not in message
     assert "compact_prompt_token_ids" not in message
 
 
 @pytest.mark.parametrize(
-    ("handler", "request_payload", "metadata_field", "token_return_field"),
+    ("backend", "handler", "request_payload", "metadata_field", "token_return_field"),
     [
-        (VLLMWorkerCaptureHandler(), {}, None, "return_tokens_as_token_ids"),
-        (MegatronWorkerCaptureHandler(), {}, "offload_params", None),
+        ("vllm", VLLMWorkerCaptureHandler(), {}, None, "return_tokens_as_token_ids"),
+        ("megatron", MegatronWorkerCaptureHandler(), {}, "offload_params", None),
         (
+            "megatron",
             MegatronWorkerCaptureHandler(),
             {"offload_params": {"caller_metadata": "preserved"}},
             "offload_params",
@@ -104,7 +109,7 @@ def _assert_transport_fields_stripped(payload: dict[str, Any]) -> None:
     ids=["vllm", "megatron", "megatron-existing-metadata"],
 )
 def test_handler_prepares_worker_staged_request(
-    handler, request_payload: dict[str, Any], metadata_field, token_return_field
+    backend: str, handler, request_payload: dict[str, Any], metadata_field, token_return_field
 ) -> None:
     store = InMemoryLineageStore()
     context = _root_context(store)
@@ -123,7 +128,7 @@ def test_handler_prepares_worker_staged_request(
         }
         assert "ng_capture" not in payload
     assert payload["logprobs"] is True
-    if metadata_field is None:
+    if backend == "vllm":
         # vLLM request preprocessing owns logprob-count normalization.
         assert "top_logprobs" not in payload
     else:
