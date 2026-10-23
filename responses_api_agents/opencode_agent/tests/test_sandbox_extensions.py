@@ -864,6 +864,39 @@ def test_resolved_export_dir_check_follows_links_in_the_sandbox(tmp_path):
             assert "OpenCode export_dir overlaps the task workdir" in checked.stderr
 
 
+async def test_configured_interpreter_and_path_prefix_reach_every_sandbox_command(setup, tmp_path):
+    agent, sandbox = setup
+    python, prefix = "/opt/gym runtime/python/bin/python3", "/opt/gym runtime/bin"
+    agent.config.sandbox_python_executable = python
+    agent.config.sandbox_path_prefix = [prefix]
+    agent.config.plugins = ["/opt/owner/plugin.mjs"]
+    agent.config.sandbox_ripgrep_path = "/mnt/cache/rg"
+    agent.config.sandbox_ripgrep_sha256 = PIN
+    agent.config.sandbox_plugin_dependencies_path = "/mnt/cache/deps.tar.gz"
+    agent.config.sandbox_plugin_dependencies_sha256 = PIN
+    agent.config.session_import_path = IMPORT_PATH
+    agent.config.export_dir = EXPORT_DIR
+
+    async def nothing_staged(command, **kwargs):
+        return result(stdout="null\n")
+
+    intercept(sandbox, "--import", nothing_staged)
+    capture_observations(sandbox, tmp_path)
+    events = record(sandbox)
+    response, closed = await episode(agent, sandbox)
+    assert response.status == "completed"
+    prepare = shlex.split(events[0])
+    assert prepare[prepare.index(_CHECK_EXPORT_DIR) - 3] == python
+    assert shlex.split(events[index(events, "install_opencode_runtime.sh")])[-2:] == [python, prefix]
+    for marker in ("os.path.isfile", "--stage-executable", "--stage-archive", "--import", "--export", "--snapshot"):
+        assert shlex.split(events[index(events, marker)])[0] == python, marker
+    assert f"exec {shlex.quote(python)} -I " in events[index(events, "--receipt")]
+    directory = sandbox.directory
+    for name in ("input.json", "import.json"):
+        assert json.loads(sandbox.files[f"{directory}/{name}"])["path_prefix"] == [prefix], name
+    assert "export_dir_write_failed" not in gap_codes(closed.agent_observations)
+
+
 async def test_unset_export_dir_adds_no_prepare_check(setup):
     agent, sandbox = setup
     await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())

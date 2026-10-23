@@ -444,6 +444,17 @@ def test_cli_working_directory_overrides_an_inherited_pwd(tmp_path):
     assert Path(cwd).resolve() == workdir.resolve()
 
 
+@pytest.mark.parametrize("plugins", [True, False], ids=["run", "export or import"])
+def test_path_prefix_goes_ahead_of_the_sandbox_path_for_every_cli_process(monkeypatch, plugins):
+    """Run, export and import share one environment builder, so the configured prefix reaches all three."""
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    params = {"cwd": "/app", "env": {"HOME": "/session/home"}, "path_prefix": ["/opt/gym-runtime", "/opt/tools"]}
+    env = sandbox_runner._child_environment(params, plugins=plugins)
+    assert env["PATH"] == "/opt/gym-runtime:/opt/tools:/usr/bin:/bin"
+    assert env["PWD"] == "/app" and env["HOME"] == "/session/home"
+    assert sandbox_runner._child_environment({**params, "path_prefix": []}, plugins=plugins)["PATH"] == "/usr/bin:/bin"
+
+
 def test_export_cli_gets_the_task_directory_as_pwd(tmp_path, monkeypatch):
     session, workdir, _ = export_fixture(tmp_path)
     probe = tmp_path / "pwd-probe"

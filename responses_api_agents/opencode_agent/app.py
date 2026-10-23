@@ -882,8 +882,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             self._check_sandbox_setup(command, result)
             prepared_directory = True
             if self.config.plugins:
-                # The prepare step guarantees python3. Owner-staged plugins are checked before installation.
-                command = f"python3 -I -c {quote(_CHECK_PLUGIN_FILES)} " + " ".join(map(quote, self.config.plugins))
+                # The prepare step guarantees the interpreter. Owner-staged plugins are checked before installation.
+                command = f"{quote(state.python_executable)} -I -c {quote(_CHECK_PLUGIN_FILES)} " + " ".join(
+                    map(quote, self.config.plugins)
+                )
                 result = await sandbox.exec(command, cwd="/", timeout_s=30)
                 if result.return_code == _INPUT_REJECTED and result.error_type is None:
                     raise AgentSeedRejectedError(
@@ -965,7 +967,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     ) -> None:
         """Copy a pinned file into session storage through the runner, which checks the copy's SHA-256 first."""
         command = (
-            f"python3 -I {quote(state.session.session_dir + '/sandbox_runner.py')} {mode} "
+            f"{quote(state.python_executable)} -I {quote(state.session.session_dir + '/sandbox_runner.py')} {mode} "
             f"{quote(pin.sandbox_path)} {pin.digest} {quote(target)}"
         )
         result = await state.session.sandbox.exec(
@@ -987,12 +989,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "command": [f"{state.runtime}/opencode"],
                 "cwd": state.session.workdir,
                 "env": {**_private_directories(state.persistent_directory), **_OPENCODE_ISOLATION},
+                "path_prefix": self.config.sandbox_path_prefix,
             },
         )
         timeout = self.config.sandbox_install_timeout_seconds
         command = (
-            f"python3 -I {quote(directory + '/sandbox_runner.py')} --import {quote(directory + '/import.json')} "
-            f"{quote(self.config.session_import_path)} {timeout}"
+            f"{quote(state.python_executable)} -I {quote(directory + '/sandbox_runner.py')} "
+            f"--import {quote(directory + '/import.json')} {quote(self.config.session_import_path)} {timeout}"
         )
         result = await state.session.sandbox.exec(command, cwd=state.session.workdir, timeout_s=timeout + 30)
         if result.return_code == _INPUT_REJECTED and result.error_type is None:

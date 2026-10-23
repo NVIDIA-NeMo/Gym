@@ -324,8 +324,8 @@ class OpenCodeSandboxSession(AgentSessionState):
             try:
                 async with exec_timeout:
                     result = await self.session.sandbox.exec(
-                        f"python3 -I {quote(self.persistent_directory + '/sandbox_runner.py')} --export "
-                        f"{quote(self.session.session_dir)} {quote(self.persistent_directory)} "
+                        f"{quote(self.python_executable)} -I {quote(self.persistent_directory + '/sandbox_runner.py')} "
+                        f"--export {quote(self.session.session_dir)} {quote(self.persistent_directory)} "
                         f"{quote(self.export_dir)} {runner_budget:.3f}",
                         cwd=self.session.workdir,
                         timeout_s=budget,

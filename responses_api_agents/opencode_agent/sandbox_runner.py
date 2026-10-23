@@ -36,12 +36,16 @@ class Rejected(Exception):
 
 
 def _child_environment(params: dict, *, plugins: bool = True) -> dict:
-    """The CLI's environment: the task's, OpenCode's private directories, and ``PWD`` matching its cwd.
+    """The CLI's environment: the task's, OpenCode's private directories, the ``PATH`` prefix and ``PWD``.
 
     OpenCode takes its directory from ``PWD`` before the process cwd, so an inherited ``PWD`` would bind the
-    session to another directory. Export and import run without the run's configuration, so no plugin loads.
+    session to another directory. Run, export and import put the configured ``path_prefix`` ahead of the
+    sandbox's ``PATH``, so each finds the same tools. Export and import run without the run's configuration,
+    so no plugin loads.
     """
     env = {**os.environ, **params["env"], "PWD": params["cwd"]}
+    if params.get("path_prefix"):
+        env["PATH"] = os.pathsep.join([*params["path_prefix"], os.environ.get("PATH", "")])
     if not plugins:
         env.pop("OPENCODE_CONFIG_CONTENT", None)
     return env
@@ -66,8 +70,6 @@ def run(params: RunnerInput) -> int:
     (directory / "runtime.json").write_text(
         json.dumps({"hostname": os.uname().nodename, "pid": os.getpid(), "python": sys.executable})
     )
-    if params.get("path_prefix"):
-        params["env"]["PATH"] = os.pathsep.join([*params["path_prefix"], os.environ.get("PATH", "")])
     # Never accept an initialization receipt left by an earlier invocation.
     (directory / "task-environment.ready").unlink(missing_ok=True)
     # Save only task-directory variables for the shell.env hook, before CLI overrides.

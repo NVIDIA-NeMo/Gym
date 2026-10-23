@@ -231,7 +231,9 @@ above. Local calls do not use them. Each is general-purpose: the sandbox owner (
 the Resources Server that lends the sandbox) supplies the files, and the adapter stages,
 checks or reads them without any benchmark-specific logic. Seed refuses an unusable
 setting or owner-supplied input with `AgentSeedRejectedError`, a final 422, so the
-episode fails once with the reason; a failure a retry can fix stays a 5xx.
+episode fails once with the reason; a failure a retry can fix stays a 5xx. Their checks,
+staging, import and export run with `sandbox_python_executable`, and OpenCode's `export`
+and `import` get `sandbox_path_prefix` ahead of `PATH`, as `run` does.
 
 ### Request sampling
 
