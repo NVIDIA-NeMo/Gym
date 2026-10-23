@@ -909,17 +909,14 @@ def health_check_rollouts(
 @exit_cleanly_on_config_error
 def export_run() -> None:  # pragma: no cover
     from nemo_gym.artifacts.exporter_registry import DEFAULT_RUN_EXPORTER
-    from nemo_gym.artifacts.exporters import load_run_exporter_class
     from nemo_gym.artifacts.exporters.base import ExportState
-    from nemo_gym.artifacts.run_artifacts import RunArtifacts
-    from nemo_gym.config.config_types import RunExportConfig
+    from nemo_gym.artifacts.exporters.runner import run_export
 
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(skip_exporters=True)
     )
     name = global_config_dict.get("exporter") or DEFAULT_RUN_EXPORTER
-    exporter = load_run_exporter_class(name).from_global_config(global_config_dict)
-    result = exporter.export(RunArtifacts(RunExportConfig.model_validate(global_config_dict).rollouts_jsonl_fpath))
+    result = run_export(name, global_config_dict)
 
     print(f"Export {name}: {result.state.value}")
     for key, value in result.detail.items():

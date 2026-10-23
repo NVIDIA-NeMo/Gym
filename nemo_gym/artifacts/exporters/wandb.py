@@ -23,7 +23,7 @@ from omegaconf import DictConfig, OmegaConf
 from wandb import Run, Table
 
 from nemo_gym.artifacts.exporters.base import BaseExporter
-from nemo_gym.config.config_types import WANDBConfig
+from nemo_gym.config.config_types import RunExportConfig, WANDBConfig, WandbExportConfig
 from nemo_gym.config.global_config import RESULTS_DIR_KEY_NAME
 
 
@@ -38,6 +38,7 @@ class WandbExporter(BaseExporter):
     """
 
     name: ClassVar[str] = "wandb"
+    config_model: ClassVar[type[RunExportConfig]] = WandbExportConfig
 
     ROLLOUTS_TABLE_KEY: ClassVar[str] = "Rollouts"
 

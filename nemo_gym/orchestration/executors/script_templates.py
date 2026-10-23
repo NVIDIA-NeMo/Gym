@@ -16,6 +16,7 @@
 import base64
 import re
 import shlex
+from pathlib import Path
 
 
 _RAY_PRELUDE = """\
@@ -194,6 +195,38 @@ def render_write_file_from_base64(content: str, dest_path: str) -> str:
     return f"printf '%s' '{encoded}' | base64 -d > {shlex.quote(dest_path)}"
 
 
+def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) -> str:
+    """Render the part of the driver script that runs `gym eval run`, then each export of its rollouts.
+
+    `exports` pairs an exporter name with its shell-quoted `gym eval export` arguments. The run is a child, not
+    `exec`'d, so the script can go on to the exports; TERM, which is what the driver gets at the time limit, is
+    passed on to it, so an interrupted run behaves as it did when it was `exec`'d. The run's exit code goes to
+    `<bench_dir>/eval.exit` and is the script's exit code: the exports are reported in their own result files
+    and cannot change it. They run only after a successful run, so a partial run is never exported, and an
+    export that already succeeded is not repeated (`gym eval export` decides that from its result file).
+    """
+    bench = shlex.quote(str(bench_dir))
+    lines = [
+        "set +e",
+        '"$@" &',
+        "gym_run_pid=$!",
+        "trap 'kill -TERM \"$gym_run_pid\" 2>/dev/null' TERM INT",
+        'wait "$gym_run_pid"',
+        "gym_run_rc=$?",
+        "# A signal ends the first wait early; wait again for the exit code of the run itself.",
+        'while kill -0 "$gym_run_pid" 2>/dev/null; do wait "$gym_run_pid"; gym_run_rc=$?; done',
+        "trap - TERM INT",
+        "set -e",
+        f"mkdir -p {bench}/exports",
+        f'echo "$gym_run_rc" > {bench}/eval.exit',
+        'if [ "$gym_run_rc" -eq 0 ]; then',
+        *(f"    gym eval export {shlex.quote(name)} {' '.join(args)} || true" for name, args in exports),
+        "fi",
+        'exit "$gym_run_rc"',
+    ]
+    return "\n".join(lines)
+
+
 def render_driver_entrypoint(
     repo: str | None,
     ref: str | None,
@@ -201,6 +234,7 @@ def render_driver_entrypoint(
     command: str | None = None,
     *,
     extras: tuple[str, ...] = (),
+    export_tail: str | None = None,
 ) -> str:
     """Render the srun entrypoint for the driver step.
 
@@ -216,6 +250,9 @@ def render_driver_entrypoint(
     is where `telemetry` has to be installed for any server to have it. `ray` is
     always added: `gym` needs Ray to start a server that declares `ray_enabled = True`,
     and an extra the checkout does not define only makes uv warn.
+
+    `export_tail` (see `render_export_tail`) takes the place of `exec "$@"`, so the exports run in the same step and
+    container as the run, where `gym` is installed.
     """
     preamble: list[str] = []
     # Double quotes: the whole preamble ends up inside a single-quoted `bash -c` block.
@@ -248,9 +285,9 @@ def render_driver_entrypoint(
         preamble.append(prepare_cmd)
 
     if command is None:
-        if not preamble:
+        if not preamble and export_tail is None:
             return '"${GYM_CMD[@]}"'
-        preamble.append('exec "$@"')
+        preamble.append(export_tail if export_tail is not None else 'exec "$@"')
         body = "\n    ".join(["set -euo pipefail", *preamble])
         body = escape_for_single_quoted_block(body)
         return f"bash -c '\n    {body}\n' -- \"${{GYM_CMD[@]}}\""
