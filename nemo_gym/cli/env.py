@@ -1247,6 +1247,8 @@ def _display_list_of_paths(paths: List[Path]) -> str:  # pragma: no cover
 
 
 def _format_pct(count: int, total: int) -> str:  # pragma: no cover
+    if total == 0:
+        return f"{count} / {total} (N/A)"
     return f"{count} / {total} ({100 * count / total:.2f}%)"
 
 

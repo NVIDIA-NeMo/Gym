@@ -177,6 +177,27 @@ def test_server_suite_exit_status(tmp_path: Path, monkeypatch: MonkeyPatch, capf
         assert "Tests passed 2 / 2" in output.out
 
 
+@pytest.mark.parametrize("setup_only", [False, True])
+def test_server_suite_empty_shard(tmp_path: Path, monkeypatch: MonkeyPatch, capsys, setup_only: bool) -> None:
+    server = tmp_path / "responses_api_models" / "example"
+    server.mkdir(parents=True)
+    (server / "README.md").touch()
+    (server / "requirements.txt").touch()
+    config = OmegaConf.create(
+        {"num_shards": 2, "shard_index": 1, "setup_only": setup_only, "fail_on_total_and_test_mismatch": True}
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda: config)
+    monkeypatch.setattr(nemo_gym.cli.env, "component_search_roots", lambda: [tmp_path])
+
+    nemo_gym.cli.env.test_all()
+
+    output = capsys.readouterr().out
+    assert "Shard 2/2: testing 0 of 1 modules" in output
+    summary = "Server venvs set up" if setup_only else "Tests passed"
+    assert f"{summary} 0 / 0 (N/A)" in output
+
+
 def test_server_suite_setup_only_installs_every_venv_without_running_tests(
     tmp_path: Path, monkeypatch: MonkeyPatch, capfd
 ) -> None:
