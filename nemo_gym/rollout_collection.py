@@ -2720,6 +2720,16 @@ class _BoundedCompletionIterator:
 
 
 class RolloutCollectionHelper(BaseModel):
+    server_client: Optional[ServerClient] = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+        description=(
+            "Optional preconfigured client for repeated dispatch against one server configuration. "
+            "Create a new helper/client when the server configuration changes."
+        ),
+    )
+
     # (task index, rollout index) of every record persisted to the rollouts jsonl, kept current as rows land,
     # so a run stopped by SIGTERM can be accounted for without re-reading that file.
     _landed_keys: set = PrivateAttr(default_factory=set)
@@ -4605,6 +4615,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
     def setup_server_client(
         self, head_server_config: Optional[BaseServerConfig] = None
     ) -> ServerClient:  # pragma: no cover
+        if self.server_client is not None:
+            return setup_server_client_utils(head_server_config, server_client=self.server_client)
         return setup_server_client_utils(head_server_config)
 
 

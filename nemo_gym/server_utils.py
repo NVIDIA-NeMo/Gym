@@ -2195,8 +2195,16 @@ def apply_rollout_prefix(
     return base_url.rstrip("/") + prefix
 
 
-def setup_server_client(head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:  # pragma: no cover
-    server_client = ServerClient.load_from_global_config(head_server_config)
+def setup_server_client(
+    head_server_config: Optional[BaseServerConfig] = None,
+    *,
+    server_client: Optional[ServerClient] = None,
+) -> ServerClient:  # pragma: no cover
+    """Prepare HTTP dispatch, optionally reusing an already-resolved client."""
+    if server_client is None:
+        server_client = ServerClient.load_from_global_config(head_server_config)
+    elif head_server_config is not None and head_server_config != server_client.head_server_config:
+        raise ValueError("The supplied head server does not match the preconfigured rollout client")
 
     # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
     if not is_global_aiohttp_client_setup():

@@ -112,7 +112,7 @@ from nemo_gym.rollout_collection import (
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_reverification import RolloutReverificationConfig
-from nemo_gym.server_utils import ClientDisconnectCancellationMiddleware, ServerClient
+from nemo_gym.server_utils import BaseServerConfig, ClientDisconnectCancellationMiddleware, ServerClient
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
@@ -10879,3 +10879,96 @@ class TestRecordedAttemptCap:
 
     def test_the_recorded_cap_is_not_a_metric_of_a_counted_failure(self) -> None:
         assert NG_FAILURE_MAX_ATTEMPTS_KEY not in _counted_failure_row(self._failure(0, 3))
+
+
+class TestPreconfiguredRolloutClient:
+    @staticmethod
+    def client(port: int = 11000, agent: str = "agent_a") -> ServerClient:
+        return ServerClient(
+            head_server_config=BaseServerConfig(host="127.0.0.1", port=port),
+            global_config_dict=OmegaConf.create(
+                {
+                    "tasks": {"resources_servers": {"impl": {}}},
+                    agent: {"responses_api_agents": {"impl": {"resources_server": {"name": "tasks"}}}},
+                    f"{agent}_environment": {
+                        "environment_servers": {"legacy_agent": {"agent_server": {"name": agent}}}
+                    },
+                }
+            ),
+        )
+
+    def test_default_helper_keeps_loading_current_configuration(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        first, second = self.client(), self.client(agent="agent_b")
+        load = MagicMock(side_effect=[first, second])
+        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", load)
+        helper = RolloutCollectionHelper()
+        assert helper.setup_server_client() is first
+        assert helper.setup_server_client() is second
+        assert load.call_count == 2
+
+    async def test_bound_client_is_reused_and_not_serialized(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = self.client()
+        client.global_config_dict.global_aiohttp_connector_limit = 37
+        client.global_config_dict.global_aiohttp_connector_limit_per_host = 19
+        load = MagicMock(side_effect=AssertionError("Unexpected synchronous configuration fetch"))
+        monkeypatch.setattr(ServerClient, "load_from_global_config", load)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+        monkeypatch.setattr(nemo_gym.server_utils, "get_nemo_gym_fastapi_num_workers", lambda: 1)
+        helper = RolloutCollectionHelper(server_client=client)
+        try:
+            assert helper.setup_server_client() is client
+            session = nemo_gym.server_utils.get_global_aiohttp_client()
+            assert session.connector.limit == 37
+            assert session.connector.limit_per_host == 19
+            assert helper.setup_server_client(client.head_server_config.model_copy()) is client
+            assert nemo_gym.server_utils.get_global_aiohttp_client() is session
+            assert "server_client" not in helper.model_dump()
+        finally:
+            if nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT is not None:
+                await nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT.close()
+        load.assert_not_called()
+
+    @pytest.mark.parametrize("changed", [{"port": 11001}, {"host": "other.invalid"}])
+    def test_different_head_is_rejected(self, changed: dict) -> None:
+        client = self.client()
+        helper = RolloutCollectionHelper(server_client=client)
+        with pytest.raises(ValueError, match="does not match"):
+            helper.run_examples([], head_server_config=client.head_server_config.model_copy(update=changed))
+
+    async def test_concurrent_groups_keep_routes_and_new_helpers_use_new_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        load = MagicMock(side_effect=AssertionError("Unexpected synchronous configuration fetch"))
+        monkeypatch.setattr(ServerClient, "load_from_global_config", load)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_global_aiohttp_client_setup", lambda: True)
+        posted = []
+
+        async def post(client: ServerClient, server_name: str, url_path: str, **kwargs):
+            await asyncio.sleep(0)
+            posted.append((client.head_server_config.port, server_name, kwargs["json"]["index"]))
+            assert url_path == "/run"
+            return FakeResponse(200, {"index": kwargs["json"]["index"]})
+
+        monkeypatch.setattr(ServerClient, "post", post)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "get_response_json", AsyncMock(side_effect=lambda response: response.payload)
+        )
+        clients = [self.client(), self.client(port=11001, agent="agent_b")]
+        helpers = [RolloutCollectionHelper(server_client=client) for client in clients]
+
+        async def group(index: int):
+            helper = helpers[index % 2]
+            row = {"index": index, "task_source": "tasks"}
+            return [await future for future in helper.run_examples([row])]
+
+        results = await asyncio.gather(*(group(index) for index in range(64)))
+        assert sorted(posted) == sorted(
+            (11000 + i % 2, "agent_a_environment" if i % 2 == 0 else "agent_b_environment", i) for i in range(64)
+        )
+        for index, [(row, result)] in enumerate(results):
+            assert result["index"] == row["index"] == index
+            assert row["agent_ref"]["name"] == ("agent_a" if index % 2 == 0 else "agent_b")
+        with pytest.raises(ValueError):
+            helpers[0].run_examples([{"agent_ref": {"name": "agent_b"}}])
+        load.assert_not_called()
