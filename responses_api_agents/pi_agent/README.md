@@ -228,7 +228,10 @@ detail, not a separate endpoint or a setup step users must run.
 Responses retain thinking text, tool calls/results, and Pi-reported usage, including cached
 input tokens. Model limits and timeouts preserve gradable partial work after successful agent close.
 Reported provider errors retain partial output and a classified cause for the Environment Server to decide grading and episode retries; independent runtime failures remain execution errors;
-they must not be reported as incorrect solutions. Close still returns captured observations.
+they must not be reported as incorrect solutions. When Pi's overflow recovery fails on its compaction
+call, the run is reported as a provider error with an `unknown` cause, which makes it eligible for an
+episode retry by default, even when that call itself hit the context limit. Close still returns
+captured observations.
 Pi does not set reward or masking policy.
 
 Response metadata includes `harness_execution: sandbox`, hostname, supervisor PID, and
