@@ -33,6 +33,7 @@ opencode_agent:
       sandbox_plugin_dependencies_sha256: null
       export_dir: null  # absolute sandbox directory outside the workdir; keeps OpenCode session exports after close
       session_import_path: null  # absolute sandbox path of an OpenCode export to continue, if present
+      return_session_trajectory: false  # close also returns an ordinary session's own turns (no compaction summaries)
 
       opencode_config:
         tools:

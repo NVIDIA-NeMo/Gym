@@ -36,14 +36,13 @@ class Rejected(Exception):
 
 
 def _child_environment(params: dict, *, plugins: bool = True) -> dict:
-    """The CLI's environment: the task's, OpenCode's private directories, the ``PATH`` prefix and ``PWD``.
+    """The CLI's environment: the task's, then the adapter's (OpenCode's private directories and, when set,
+    ``PWD``), with the ``PATH`` prefix.
 
-    OpenCode takes its directory from ``PWD`` before the process cwd, so an inherited ``PWD`` would bind the
-    session to another directory. Run, export and import put the configured ``path_prefix`` ahead of the
-    sandbox's ``PATH``, so each finds the same tools. Export and import run without the run's configuration,
-    so no plugin loads.
+    Run, export and import put the configured ``path_prefix`` ahead of the sandbox's ``PATH``, so each finds the
+    same tools. Export and import run without the run's configuration, so no plugin loads.
     """
-    env = {**os.environ, **params["env"], "PWD": params["cwd"]}
+    env = {**os.environ, **params["env"]}
     if params.get("path_prefix"):
         env["PATH"] = os.pathsep.join([*params["path_prefix"], os.environ.get("PATH", "")])
     if not plugins:
@@ -425,8 +424,8 @@ class ImportedSession(TypedDict):
 def import_session(params: dict, export: Path, *, timeout: float) -> ImportedSession | None:
     """Import an owner-staged ``opencode export`` file into the private store; return its session and messages.
 
-    Returns None when nothing is staged at ``export``. The CLI runs from the task directory with ``PWD`` set to
-    it, because OpenCode binds an imported session to the importing process's directory. Only an import that
+    Returns None when nothing is staged at ``export``. The CLI runs from the task directory, with the ``PWD`` the
+    adapter sets to it, because OpenCode binds an imported session to the importing process's directory. Only an import that
     exits with an error, or that leaves other than one root session, is ``Rejected``; a signal (such as the OOM
     killer's), a timeout or an OS error is raised as is, so the setup stays retryable.
     """

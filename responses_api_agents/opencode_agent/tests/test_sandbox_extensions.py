@@ -286,6 +286,8 @@ async def test_exports_follow_capture_and_precede_session_file_removal(setup, tm
     ]
     # The export deadline keeps a tenth of the 1 s collection budget for the capture to return.
     assert 0 < float(argv[7]) <= 0.9
+    # The run, and with it the export that reads its input, binds the session to the task workdir.
+    assert json.loads(sandbox.files[f"{directory}/input.json"])["env"]["PWD"] == "/app"
     assert "export_dir_write_failed" not in gap_codes(closed.agent_observations)
     if not close_during_run:
         assert response.status == "completed"
@@ -729,6 +731,7 @@ async def test_imported_session_is_continued_without_its_prefix(setup, tmp_path)
         assert params["command"] == [f"{RUNTIME}/opencode"]
         directory = argv[2].rsplit("/", 1)[0]
         assert params["env"]["XDG_DATA_HOME"] == f"{directory}/data"
+        assert params["env"]["PWD"] == "/app"
         assert "OPENCODE_CONFIG_CONTENT" not in params["env"]
         return result(stdout=json.dumps(imported))
 

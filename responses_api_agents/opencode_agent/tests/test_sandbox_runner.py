@@ -418,15 +418,16 @@ def test_cut_or_invalid_export_names_its_size_and_leaves_no_partial_file(tmp_pat
     assert not list(exports.glob(".*.tmp"))
 
 
-def test_cli_working_directory_overrides_an_inherited_pwd(tmp_path):
-    """OpenCode reads PWD before its cwd; the runner must not pass on the launcher's directory."""
+@pytest.mark.parametrize("adapter_pwd", [True, False], ids=["owner-exports-or-imports", "default"])
+def test_the_cli_gets_the_adapters_pwd_or_inherits_the_sandboxs(tmp_path, adapter_pwd):
+    """OpenCode reads PWD before its cwd. The adapter sets it only with export_dir or session_import_path."""
     workdir = tmp_path / "task"
     workdir.mkdir()
     params = {
         "directory": str(tmp_path),
         "command": [sys.executable, "-c", "import os, json; print(json.dumps([os.environ['PWD'], os.getcwd()]))"],
         "cwd": str(workdir),
-        "env": {},
+        "env": {"PWD": str(workdir)} if adapter_pwd else {},
         "prompt": "",
     }
     (tmp_path / "input.json").write_text(json.dumps(params))
@@ -440,7 +441,7 @@ def test_cli_working_directory_overrides_an_inherited_pwd(tmp_path):
     )
     assert finished.returncode == 0, finished.stderr
     pwd, cwd = json.loads((tmp_path / "stdout.jsonl").read_text())
-    assert pwd == str(workdir)
+    assert pwd == str(workdir if adapter_pwd else tmp_path)
     assert Path(cwd).resolve() == workdir.resolve()
 
 
@@ -451,11 +452,11 @@ def test_path_prefix_goes_ahead_of_the_sandbox_path_for_every_cli_process(monkey
     params = {"cwd": "/app", "env": {"HOME": "/session/home"}, "path_prefix": ["/opt/gym-runtime", "/opt/tools"]}
     env = sandbox_runner._child_environment(params, plugins=plugins)
     assert env["PATH"] == "/opt/gym-runtime:/opt/tools:/usr/bin:/bin"
-    assert env["PWD"] == "/app" and env["HOME"] == "/session/home"
+    assert env["HOME"] == "/session/home"
     assert sandbox_runner._child_environment({**params, "path_prefix": []}, plugins=plugins)["PATH"] == "/usr/bin:/bin"
 
 
-def test_export_cli_gets_the_task_directory_as_pwd(tmp_path, monkeypatch):
+def test_export_cli_gets_the_pwd_the_adapter_set_for_the_run(tmp_path, monkeypatch):
     session, workdir, _ = export_fixture(tmp_path)
     probe = tmp_path / "pwd-probe"
     probe.write_text(
@@ -464,6 +465,7 @@ def test_export_cli_gets_the_task_directory_as_pwd(tmp_path, monkeypatch):
     probe.chmod(0o755)
     params = json.loads((session / "input.json").read_text())
     params["command"][0] = str(probe)
+    params["env"]["PWD"] = str(workdir)
     (session / "input.json").write_text(json.dumps(params))
     monkeypatch.setenv("PWD", str(tmp_path))
     exports = tmp_path / "exports"
@@ -765,7 +767,7 @@ def import_fixture(tmp_path, *, exit_code=0, roots=1, prelude=""):
     )
     cli.chmod(0o755)
     env = {key: str(session / folder) for key, folder in (("HOME", "home"), ("XDG_DATA_HOME", "data"))}
-    env |= {"XDG_CONFIG_HOME": str(session / "config"), "OPENCODE_CONFIG_CONTENT": "{}"}
+    env |= {"XDG_CONFIG_HOME": str(session / "config"), "OPENCODE_CONFIG_CONTENT": "{}", "PWD": str(workdir)}
     params = {"command": [str(cli)], "cwd": str(workdir), "env": env}
     export = tmp_path / "prefix-export.json"
     export.write_text('{"info": {"id": "ses_prefix"}, "messages": []}')

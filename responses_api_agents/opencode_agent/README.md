@@ -207,10 +207,11 @@ confirmation. A final negative termination receipt fails the activation and skip
 verification; close releases the borrowed connection with `cleanup_confirmed: false`.
 The task sandbox remains available to its owner for verification or teardown.
 
-Ordinary single-turn sessions keep their existing protocol. Their close also returns the
-session's trajectory (one turn per saved assistant reply, compaction summaries excluded),
-so rollout collection joins captured calls to those turns and the summary call stays on
-the compaction record instead of becoming a turn.
+Ordinary single-turn sessions keep their existing protocol. With `return_session_trajectory:
+true`, their close also returns the session's trajectory (one turn per saved assistant reply,
+compaction summaries excluded), so rollout collection joins captured calls to those turns and
+the summary call stays on the compaction record. Without it, collection builds one turn per
+captured call, and the summary call of a compaction is counted as a step too.
 
 ### Offline sandbox runtimes and native model identity
 
@@ -341,6 +342,7 @@ an import that times out or is ended by a signal is a retryable setup error.
 
 ### Working directory
 
-OpenCode takes its directory from `PWD` before the process working directory. The
-runner sets `PWD` to the task workdir for `run`, `export` and `import`, instead of
-inheriting it from the provider's shell.
+OpenCode takes its directory from `PWD` before the process working directory. With
+`export_dir` or `session_import_path`, the adapter sets `PWD` to the task workdir for `run`,
+`export` and `import`, so all three bind the session to the same directory; otherwise they
+inherit `PWD` from the sandbox, as before.

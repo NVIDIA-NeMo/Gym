@@ -745,7 +745,8 @@ def test_ordinary_seed_does_not_add_continuation_capabilities(setup):
         assert "cleanup_confirmed" not in receipt and "trajectory" not in receipt
 
 
-def test_ordinary_close_returns_turns_that_leave_out_the_compaction_call(setup, tmp_path):
+@pytest.mark.parametrize("return_session_trajectory", [False, True])
+def test_returned_session_turns_leave_out_the_compaction_call(setup, tmp_path, return_session_trajectory):
     from nemo_gym.base_responses_api_model import ModelCallRecord
     from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
     from nemo_gym.rollout_collection import _build_trajectory_record
@@ -784,6 +785,7 @@ def test_ordinary_close_returns_turns_that_leave_out_the_compaction_call(setup, 
         ],
     )
     agent, sandbox = setup
+    agent.config.return_session_trajectory = return_session_trajectory
     download = sandbox.download
 
     async def download_database(source, destination):
@@ -800,6 +802,10 @@ def test_ordinary_close_returns_turns_that_leave_out_the_compaction_call(setup, 
         response = client.post(f"/ng-rollout/{request.episode_id.capture_key}/v1/responses", json={"input": "task"})
         assert response.status_code == 200, response.text
         receipt = close(client, request)
+    if not return_session_trajectory:
+        # The default keeps the existing protocol: collection builds the turns from the captured calls.
+        assert "trajectory" not in receipt
+        return
     trajectory = TrajectoryRecord.model_validate(receipt["trajectory"])
     assert [turn.source_message_id for turn in trajectory.turns] == ["m1", "m4"]
 

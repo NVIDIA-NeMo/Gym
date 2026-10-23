@@ -312,6 +312,10 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Sandbox sessions only. Absolute sandbox path of an OpenCode session export staged by the owner. When the file
     # exists at seed, it is imported and the first activation continues that session; its messages stay history.
     session_import_path: str | None = None
+    # Sandbox sessions only. Close also returns an ordinary session's own turns (one per saved assistant reply,
+    # compaction summaries left out), as continuation sessions always do. Without them, rollout collection builds one
+    # turn per captured call, so the summary call of a compaction is counted as a step too.
+    return_session_trajectory: bool = False
 
     @property
     def command_parts(self) -> list[str]:
@@ -989,7 +993,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             {
                 "command": [f"{state.runtime}/opencode"],
                 "cwd": state.session.workdir,
-                "env": {**_private_directories(state.persistent_directory), **_OPENCODE_ISOLATION},
+                "env": {
+                    **_private_directories(state.persistent_directory),
+                    **self._bound_directory(state),
+                    **_OPENCODE_ISOLATION,
+                },
                 "path_prefix": self.config.sandbox_path_prefix,
             },
         )
@@ -1029,14 +1037,23 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
         # A capture that close finished after the activation returned reports its export failure here.
         observations.gaps.extend(state.take_export_gaps())
-        # The session's own turns leave out compaction summaries. Without them, rollout
-        # collection rebuilds one turn per captured call, the summary call included.
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
             agent_observations=observations,
-            trajectory=state.trajectory,
+            trajectory=state.trajectory if state.is_continuation or self.config.return_session_trajectory else None,
             cleanup_confirmed=state.session.cleanup_confirmed if state.is_continuation else None,
         )
+
+    def _bound_directory(self, state: OpenCodeSandboxSession) -> dict[str, str]:
+        """``PWD`` for OpenCode's processes when the owner exports or imports sessions, else nothing.
+
+        OpenCode takes its directory from ``PWD`` before the process cwd and binds its sessions to it, and an
+        imported session runs its tools there. With ``export_dir`` or ``session_import_path`` the run, export and
+        import all get the task workdir; otherwise they inherit ``PWD`` from the sandbox as before.
+        """
+        if self.config.export_dir is None and self.config.session_import_path is None:
+            return {}
+        return {"PWD": state.session.workdir}
 
     def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
         # Sampling is applied to every OpenCode agent (see _session_response); other controls are rejected.
@@ -1395,6 +1412,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             "activation_id": state.activation_id,
             "env": {
                 **_private_directories(state.persistent_directory),
+                **self._bound_directory(state),
                 **({"NEMO_GYM_OPENCODE_ACTIVATION_ID": state.invocation_prefix} if state.is_continuation else {}),
                 "OPENCODE_CONFIG_CONTENT": json.dumps(config),
                 **_OPENCODE_ISOLATION,
