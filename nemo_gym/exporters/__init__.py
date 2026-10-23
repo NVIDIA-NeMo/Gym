@@ -29,9 +29,9 @@ from typing import Any, Optional
 
 from omegaconf import DictConfig
 
-from nemo_gym.config_types import ConfigError, ExporterConfig, MLFlowConfig, WANDBConfig
+from nemo_gym.config_types import ConfigError, ExporterConfig, MLFlowConfig, RunExportConfig, WANDBConfig
 from nemo_gym.exporters.base import BaseExporter, Exporter
-from nemo_gym.run_exporter_registry import RUN_EXPORTERS
+from nemo_gym.run_exporter_registry import RUN_EXPORTER_CONFIGS, RUN_EXPORTERS
 
 
 logger = logging.getLogger(__name__)
@@ -73,6 +73,14 @@ def exporter_extras(config: Any) -> tuple[str, ...]:
 
 def _load_exporter_class(class_path: str) -> type[BaseExporter]:
     module_name, class_name = class_path.split(":")
+    return getattr(import_module(module_name), class_name)
+
+
+def load_run_exporter_config_model(name: str) -> type[RunExportConfig]:
+    """The settings model of the post-run exporter `name`; importing it never loads the exporter's SDK."""
+    if name not in RUN_EXPORTER_CONFIGS:
+        raise ConfigError(f"Unknown exporter {name!r}. Available exporters: {', '.join(RUN_EXPORTER_CONFIGS)}.")
+    module_name, class_name = RUN_EXPORTER_CONFIGS[name].split(":")
     return getattr(import_module(module_name), class_name)
 
 

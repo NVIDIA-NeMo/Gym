@@ -847,6 +847,13 @@ class RunExportConfig(BaseNeMoGymCLIConfig):
     """Settings every `gym eval export` exporter takes; each exporter model adds its own."""
 
     rollouts_jsonl_fpath: Path
+    result_json_fpath: Optional[Path] = Field(
+        default=None,
+        description=(
+            "Write the export's outcome here as JSON. It reads `running` while the export is in progress, so an "
+            "interrupted export is visible, and an export that already succeeded or was skipped is not repeated."
+        ),
+    )
 
 
 class ExporterConfig(BaseModel):
@@ -952,6 +959,14 @@ class MLFlowConfig(ExporterConfig):
             and self.mlflow_run_name
             and self.mlflow_tracking_token != "****"
         )
+
+
+class MLflowExportConfig(RunExportConfig, MLFlowConfig, UploadRolloutsConfigMixin):
+    """Settings of `gym eval export mlflow`."""
+
+
+class WandbExportConfig(RunExportConfig, WANDBConfig, UploadRolloutsConfigMixin):
+    """Settings of `gym eval export wandb`."""
 
 
 ########################################
