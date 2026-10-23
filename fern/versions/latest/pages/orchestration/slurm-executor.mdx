@@ -75,7 +75,7 @@ The staged tree is given mode 0755 so other users can read the run directory, fo
 
 Each service is one background `srun --overlap` step, so services and the driver share the allocation. A step runs in the service's container with `--no-container-mount-home`, applies the service's `env` to that command only, mounts what `mounts` lists, and writes its output to `logs/<name>-$SLURM_JOB_ID.log`. The script records each step's PID so a health check can notice a service that died during startup.
 
-The collector, when enabled, is started first, ahead of the model services, so its scrape covers their startup. It runs as a host process by default rather than in a container.
+The collector, when enabled, is started first, ahead of the model services, so its scrape covers their startup. It runs as a host process by default rather than in a container, on the driver's node. It scrapes each model service's `/metrics`, and the DCGM and node exporters, on the node that runs them: `localhost` for its own node, and for every other node the hostname the script exports as `GYM_OTEL_NODE_<i>` (allocation node `i`). A vLLM service traced with `otel.vllm_traces` from another node sends its spans to the collector's node, exported as `GYM_OTEL_COLLECTOR_HOST`.
 
 ### Health checks
 

@@ -34,13 +34,12 @@ from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_DIR,
     collector_config_path,
     otel_active,
-    render_collector_config,
     resolve_token,
     validate_destination,
     validate_gym_telemetry,
 )
 from nemo_gym.orchestration.executors.resume_script import RESUBMIT_ENV
-from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script, render_job_collector_config
 from nemo_gym.orchestration.jobs import (
     RESOLVED_CONFIG_NAME,
     BenchmarkJob,
@@ -247,7 +246,9 @@ class SlurmExecutor(BaseExecutor):
             # collector config, inside the lock and after refusing any active job in its dir.
             collector_update = []
             if otel_active(config):
-                collector_yaml = render_collector_config(config, benchmark, job_dir)
+                collector_yaml = render_job_collector_config(
+                    config, next(iter(config.compute.values())), benchmark, job_dir
+                )
                 collector_path = shlex.quote(str(collector_config_path(job_dir)))
                 collector_update = [
                     f"printf %s {shlex.quote(collector_yaml)} > {collector_path} || fail 'cannot update collector config'"
@@ -345,7 +346,7 @@ class SlurmExecutor(BaseExecutor):
                 print(f"\n{'=' * 60}")
                 print(f"[dry-run] {COLLECTOR_DIR}/{COLLECTOR_CONFIG_NAME} for benchmark: {name}")
                 print(f"{'=' * 60}")
-                print(render_collector_config(config, name, remote_run_dir / name))
+                print(render_job_collector_config(config, compute, name, remote_run_dir / name))
 
     def _stage(self, config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path, staging: Path) -> Path:
         # rsync -a copies these modes to the cluster. The temp dir is created 0700, which would
@@ -363,6 +364,6 @@ class SlurmExecutor(BaseExecutor):
             if otel_active(config):
                 (bench_dir / COLLECTOR_DIR).mkdir()
                 (bench_dir / COLLECTOR_DIR / COLLECTOR_CONFIG_NAME).write_text(
-                    render_collector_config(config, name, remote_run_dir / name)
+                    render_job_collector_config(config, compute, name, remote_run_dir / name)
                 )
         return staging
