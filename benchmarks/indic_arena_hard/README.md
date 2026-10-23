@@ -1,4 +1,4 @@
-# Indic Arena Hard
+# Indic Arena Hard v2
 
 Integrates [ai4bharat/indic-arena-hard-v2](https://huggingface.co/datasets/ai4bharat/indic-arena-hard-v2)
 using the same `arena_judge`, `simple_agent`, `policy_model`, and generic prompt
@@ -7,6 +7,13 @@ sampling settings (temperature 0, maximum 4096 tokens), side-swapped comparisons
 and scoring come from the shared English configuration.
 
 ## Data
+
+According to the [AI4Bharat dataset card](https://huggingface.co/datasets/ai4bharat/indic-arena-hard-v2/blob/aebdc931858cb6df854f16a0513e184fc38a3b1e/README.md),
+Arena Hard v2 contains 750 source prompts, of which 504 are English. AI4Bharat
+selected those 504 English prompts for translation into 14 Indian languages;
+the remaining 246 prompts, originally written in other languages, are excluded.
+The 504-question count therefore comes from selection by source language.
+Each target language contains translations of the same 504 source questions.
 
 Hub preparation pins dataset revision `aebdc931858cb6df854f16a0513e184fc38a3b1e`.
 The dataset has one `default` configuration with a `test` split stored in
