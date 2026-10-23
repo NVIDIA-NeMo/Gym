@@ -47,7 +47,7 @@ from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, model_validator
 
 from nemo_gym._checkpoint.control import install_control_routes, install_participant
 from nemo_gym._checkpoint.model import (
@@ -269,6 +269,20 @@ def _orjson_dispatch_response(content: Any) -> Any:
     return Response(content=orjson.dumps(content), media_type="application/json")
 
 
+class ModelCheckpointConfig(BaseModel):
+    """A model server instance's ``checkpoint`` block."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Only the policy instance drains during a partial-rollout checkpoint.
+    # Judge and simulator instances keep serving so accepted tool and verifier calls can finish.
+    policy: bool = False
+    # Ask inference workers to stage the prefix of each in-flight call at a checkpoint,
+    # so a restored call continues it instead of regenerating.
+    # Requires external token staging on workers that implement the generation-cut endpoint.
+    generation_cuts: bool = False
+
+
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     # Exact successful routes whose responses cannot contain policy-generated content.
     token_id_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
@@ -291,13 +305,8 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "so a backend with free-form tool support keeps them."
         ),
     )
-    # Only the policy instance drains during a partial-rollout checkpoint.
-    # Judge and simulator instances keep serving so accepted tool and verifier calls can finish.
-    checkpoint_policy: bool = False
-    # Ask inference workers to stage the prefix of each in-flight call at a checkpoint,
-    # so a restored call continues it instead of regenerating.
-    # Requires external token staging on workers that implement the generation-cut endpoint.
-    checkpoint_generation_cuts: bool = False
+    # This instance's part in partial-rollout checkpoints, which the global ``checkpoint`` block turns on.
+    checkpoint: ModelCheckpointConfig = Field(default_factory=ModelCheckpointConfig)
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -389,20 +398,20 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         if settings is not None and capture_ledger is not None:
             # Every model server sharing the run's capture ledger checks, so one outside the gate refuses to start.
             reject_ungated_ledger_writers(global_config_dict)
-        if settings is None or not self.config.checkpoint_policy:
+        if settings is None or not self.config.checkpoint.policy:
             return
         capture_settings = token_id_capture_config(global_config_dict)
         if capture_settings is not None and capture_settings.enabled and capture_ledger is None:
             raise ValueError(
-                "checkpoint_policy with token_id_capture requires external_staging: only the token-free "
+                "checkpoint.policy with token_id_capture requires external_staging: only the token-free "
                 "capture ledger is checkpointed, and the training framework owns the staged tokens"
             )
         if capture_ledger is not None and not isinstance(capture_ledger, CheckpointableLedger):
-            raise ValueError(f"checkpoint_policy requires a checkpointable capture ledger, got {type(capture_ledger)}")
+            raise ValueError(f"checkpoint.policy requires a checkpointable capture ledger, got {type(capture_ledger)}")
         cut_requester = None
-        if self.config.checkpoint_generation_cuts:
+        if self.config.checkpoint.generation_cuts:
             if capture_ledger is None:
-                raise ValueError("checkpoint_generation_cuts requires token_id_capture with external_staging")
+                raise ValueError("checkpoint.generation_cuts requires token_id_capture with external_staging")
             cut_requester = generation_cut_requester(
                 capture_settings.token_id_capture.resolve_control_auth_token(),
                 control_root=self.generation_cut_control_root,
