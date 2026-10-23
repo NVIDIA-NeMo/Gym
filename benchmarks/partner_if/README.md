@@ -7,7 +7,7 @@ task checks whether the model follows its instructions, graded against versioned
 ## Data
 
 - **Source:** NVIDIA-internal rows in Gym's GitLab dataset registry: dataset `partner_if`, version
-  `2.1.0`, file `partner_if.jsonl`. `prepare.py` pins the file's sha256 and refuses any other content. The
+  `2.1.4`, file `partner_if.jsonl`. `prepare.py` pins the file's sha256 and refuses any other content. The
   rows are not in this repository.
 - **License:** internal.
 - **Size:** 25 tasks with 86 IF rubric items, plus 4 completion items: 17 text tasks, 2 search-tool tasks,
@@ -80,7 +80,7 @@ task checks whether the model follows its instructions, graded against versioned
 - **Reward:** a rollout scores 1 when every IF rubric item passes, and 0 otherwise. Code checks
   (partner_if's built-in and fixed checks) and an LLM judge grade the items. Completion items are
   reported but never change the reward.
-- **Provisional rubrics:** 22 of the 25 contracts in 2.1.0 are unsigned (`audit_signoff: false`); the 3 SWE
+- **Provisional rubrics:** 22 of the 25 contracts in 2.1.4 are unsigned (`audit_signoff: false`); the 3 SWE
   contracts are signed. The config sets `allow_provisional_rubrics: true`, so the unsigned rows are scored and
   marked `provisional`.
 - **Metrics:** reported on a 0–100 scale.
@@ -88,7 +88,8 @@ task checks whether the model follows its instructions, graded against versioned
     with equal weight.
   - Also `if_partial`, the passed fraction of IF items.
   - `coverage/*` counts masked rollouts.
-- **Reference score:** 61.33 on `pass@1[avg-of-3]/all_if_pass`, tolerance ±8.5 points (95%), on dataset 2.1.0.
+- **Reference score:** not yet measured on dataset 2.1.4. Dataset 2.1.0 scored 61.33 on
+  `pass@1[avg-of-3]/all_if_pass`, tolerance ±8.5 points (95%).
   - Policy and judge: GLM 5.3 (`nvidia/zai-org/glm-5.3`).
   - Policy settings, all on the model server: temperature 1.0 and top_p 1.0 (the benchmark's pin), maximum
     reasoning effort, 262,144 output tokens, 16 rollouts in parallel.
