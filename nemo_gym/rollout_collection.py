@@ -2720,6 +2720,21 @@ class _BoundedCompletionIterator:
 
 
 class RolloutCollectionHelper(BaseModel):
+    """Collect rollouts, optionally reusing one client for a stable deployment.
+
+    Training integrations can opt in with ``RolloutCollectionHelper(reuse_server_client=True)``.
+    Reload after changing a deployment with ``setup_server_client(refresh=True)``.
+    Without opt-in, each call resolves the current configuration as before.
+    """
+
+    reuse_server_client: bool = Field(
+        default=False,
+        description="Reuse one resolved client/config per helper for a stable deployment. "
+        "Call setup_server_client(refresh=True) after changing that deployment's configuration.",
+    )
+    _cached_server_client: Optional[ServerClient] = PrivateAttr(default=None)
+    _cached_head_server_config: Optional[BaseServerConfig] = PrivateAttr(default=None)
+
     # (task index, rollout index) of every record persisted to the rollouts jsonl, kept current as rows land,
     # so a run stopped by SIGTERM can be accounted for without re-reading that file.
     _landed_keys: set = PrivateAttr(default_factory=set)
@@ -4603,9 +4618,23 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         )
 
     def setup_server_client(
-        self, head_server_config: Optional[BaseServerConfig] = None
-    ) -> ServerClient:  # pragma: no cover
-        return setup_server_client_utils(head_server_config)
+        self, head_server_config: Optional[BaseServerConfig] = None, *, refresh: bool = False
+    ) -> ServerClient:
+        """Resolve a client, optionally reusing a helper-local stable deployment.
+
+        The default keeps the existing per-call reload behavior. Opted-in
+        helpers retain at most one client, invalidate it when the supplied head
+        config changes, and reload explicitly with ``refresh=True``. A failed
+        reload raises without replacing the last successful client.
+        """
+        if not self.reuse_server_client:
+            return setup_server_client_utils(head_server_config)
+        if refresh or self._cached_server_client is None or head_server_config != self._cached_head_server_config:
+            client = setup_server_client_utils(head_server_config)
+            head_snapshot = head_server_config.model_copy(deep=True) if head_server_config is not None else None
+            self._cached_server_client = client
+            self._cached_head_server_config = head_snapshot
+        return self._cached_server_client
 
 
 class RolloutAggregationConfig(RunHealthConfig, BaseNeMoGymCLIConfig):
