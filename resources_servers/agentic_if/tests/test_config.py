@@ -3,17 +3,21 @@
 """The shipped example stack keeps the settings the benchmark's results depend on, and resolves as Gym loads it."""
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
+from aiohttp import ClientConnectionError
 from omegaconf import OmegaConf
 
 from nemo_gym.environment.validation import _resolve_manifest_composition
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.server_utils import ServerClient
 from resources_servers.agentic_if import opencode_bundle
 from resources_servers.agentic_if.app import AgenticIFResourcesServerConfig
 from resources_servers.agentic_if.if_grading.configuration import load_config
 from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
+from responses_api_models.openai_model import app as openai_model
 
 
 GYM = Path(__file__).parents[3]
@@ -50,7 +54,38 @@ def test_the_judge_model_server_serves_the_model_judge_yaml_names():
         "openai_api_key": "${oc.select:judge_api_key,null}",
         "openai_model": "nvidia/zai-org/glm-5.3",
         "upstream_request_timeout_seconds": 600,
+        "upstream_max_num_tries": 1,
+        "upstream_retry_policy": {"max_attempts": 3, "backoff_initial_seconds": 5},
     }
+
+
+@pytest.mark.asyncio
+async def test_a_judge_outage_fails_after_the_bounded_retries(monkeypatch):
+    """A refused connection counts against the retry policy, so an outage ends as a failed call, not a hung episode."""
+    block = CONFIG["agentic_if_judge_model"]["responses_api_models"]["openai_model"]
+    config = openai_model.SimpleModelServerConfig(
+        host="127.0.0.1",
+        port=0,
+        name="agentic_if_judge_model",
+        **(block | {"openai_base_url": "https://judge.invalid/v1", "openai_api_key": "test-key"}),  # pragma: allowlist secret
+    )
+    server = openai_model.SimpleModelServer(
+        config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={})
+    )
+    waits, calls = [], 0
+
+    async def no_wait(seconds):
+        waits.append(seconds)
+
+    async def refused():
+        nonlocal calls
+        calls += 1
+        raise ClientConnectionError("connection refused")
+
+    monkeypatch.setattr(openai_model.asyncio, "sleep", no_wait)
+    with pytest.raises(openai_model.UpstreamRetriesExhaustedError):
+        await server._call_upstream(refused)
+    assert calls == 3 and waits == [5, 10]
 
 
 def test_the_example_stack_composes_upstream_components_around_this_server():

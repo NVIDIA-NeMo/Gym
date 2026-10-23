@@ -59,8 +59,14 @@ agentic_if_judge_model:
       openai_base_url: ${oc.select:judge_base_url,https://inference-api.nvidia.com/v1}
       openai_api_key: ${oc.select:judge_api_key,null}
       openai_model: nvidia/zai-org/glm-5.3
-      # Each attempt of a judge call; a failed call is retried by the model server and then by the grader.
+      # Each attempt of a judge call gets 600 s and one HTTP try; this policy retries it twice more, and the grader
+      # then asks again up to its own attempts (if_grading/data/judge.yaml). A judge outage so ends as judge_failed,
+      # which reverification recovers, instead of holding the episode until its deadline.
       upstream_request_timeout_seconds: 600
+      upstream_max_num_tries: 1
+      upstream_retry_policy:
+        max_attempts: 3
+        backoff_initial_seconds: 5
 
 # The harness. A run that pins the OpenCode binary sets its path and SHA-256 together (opencode_agent ignores a SHA-256
 # without its path and downloads OpenCode); benchmarks/agentic_if/config.yaml also stages ripgrep and the plugin
