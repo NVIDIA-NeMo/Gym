@@ -180,13 +180,27 @@ def test_full_suite_retry_is_bounded_and_reruns_only_failed_jobs() -> None:
 
 
 def test_github_full_test_jobs_reclaim_disk_before_dependency_restore() -> None:
-    for workflow_path, expected_jobs in [(FULL_TEST_WORKFLOW, 2), (UNIT_TEST_WORKFLOW, 2)]:
+    for workflow_path, expected_jobs in [(FULL_TEST_WORKFLOW, 2), (UNIT_TEST_WORKFLOW, 3)]:
         workflow = workflow_path.read_text()
         assert workflow.count("run: ./scripts/ci/reclaim_runner_disk.sh") == expected_jobs
         assert workflow.count("Reclaim runner disk") == expected_jobs
         sections = workflow.split("- name: Reclaim runner disk")
         for section in sections[1:]:
             assert section.index("reclaim_runner_disk.sh") < section.index("Cache uv dependencies")
+
+
+@pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
+def test_core_shard_gate_rejects_unsuccessful_results(result: str) -> None:
+    workflow = yaml.safe_load(UNIT_TEST_WORKFLOW.read_text())
+    gate = next(step for step in workflow["jobs"]["test"]["steps"] if step["name"] == "Check shard results")
+    completed = subprocess.run(
+        ["bash", "-e", "-u", "-o", "pipefail", "-c", gate["run"]],
+        env={**os.environ, "CORE_RESULT": result},
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == (0 if result == "success" else 1)
 
 
 def test_scheduled_cicd_runs_do_not_cancel_in_progress() -> None:
