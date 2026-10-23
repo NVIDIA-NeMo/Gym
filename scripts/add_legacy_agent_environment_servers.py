@@ -35,13 +35,18 @@ It binds the agent's own Resources Server, as the relay did, and grants the agen
 the routes the agent's `/run` called. The server names no Resources Server itself, so it follows an agent rename.
 A relay stays when its agent binds no Resources Server, would get a grant `simple_agent` sessions reject
 (a required MCP tool access, or more than one direct HTTP tool access), or binds a Resources Server whose
-`seed_session` accepts only the legacy body, not the `ResourcesSeedSessionRequest` an Environment Server sends.
+`seed_session` accepts only the legacy body, not the `ResourcesSeedSessionRequest` an Environment Server sends,
+or whose request models read the row's rollout coordinates, which an Environment Server does not forward.
+It also stays when it sets keys the switched server would drop, or when another config merges it with a
+`legacy_agent` server of the same name, unless a relay it inherits switches: it cannot stay alone then, so the
+script refuses (exit 2) and names the config, which should declare its own server instead.
 The script lists each with its reason.
 A relay that inherits another relay keeps inheriting it, and the two must switch in the same run;
-the script refuses to switch either one alone.
+the script refuses to switch either one alone. Pass the configs that declare the parents too,
+such as the resources server configs a benchmark includes, or no paths for this repository's configs.
 
     # Report what would switch and what stays on the relay
-    python scripts/add_legacy_agent_environment_servers.py --switch-simple-agent benchmarks/aime24/ --check
+    python scripts/add_legacy_agent_environment_servers.py --switch-simple-agent --check
 """
 
 from __future__ import annotations
@@ -101,6 +106,17 @@ SWITCHED_CHILD = """\
       agent_server:
         name: {agent}
 """
+# The keys a switched stanza writes; a relay that sets any other key stays, so nothing it configures is dropped.
+SWITCHED_RELAY_KEYS = {"entrypoint", AGENT_SERVER}
+SWITCHED_INSTANCE_KEYS = {"environment_servers", "_inherit_from"}
+# Request-model aliases for the row's rollout coordinates, which an Environment Server does not forward.
+ROLLOUT_COORDINATES = {
+    "ROLLOUT_INDEX_KEY_NAME",
+    "GROUP_ID_KEY_NAME",
+    "'_ng_rollout_index'",
+    "'_ng_group_id'",
+    "'_ng_group_attempt'",
+}
 
 
 class UnreadableConfigError(ValueError):
@@ -356,6 +372,9 @@ def resolved_instances(documents: list[dict]) -> dict[str, dict]:
         for name, instance in document.items():
             if isinstance(instance, dict):
                 raw[name] = _merged(raw.get(name, {}), instance)
+            elif instance is None:
+                # A later file removes an instance by setting it to null.
+                raw.pop(name, None)
 
     resolved: dict[str, dict] = {}
 
@@ -393,30 +412,53 @@ def _seed_overrides(path: Path) -> list[ast.AsyncFunctionDef]:
     return [node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == "seed_session"]
 
 
-def seed_blocker(resources: dict) -> str | None:
-    """Why an Environment Server cannot seed this Resources Server instance, or None when it can.
+def _reads_rollout_coordinates(path: Path) -> bool:
+    """True when a model in ``path`` aliases a field to one of the row's rollout coordinates."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(path.read_text())
+    except (OSError, SyntaxError, ValueError):
+        return False
+    return any(
+        keyword.arg == "alias" and ast.unparse(keyword.value) in ROLLOUT_COORDINATES
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for keyword in node.keywords
+    )
+
+
+def resources_blocker(resources: dict) -> str | None:
+    """Why an Environment Server cannot drive this Resources Server instance, or None when it can.
 
     An Environment Server seeds with a `ResourcesSeedSessionRequest` and expects its `resources_session_id` back.
     The base `seed_session` does that. An override must accept the typed body, or read `resources_session_id`
     from the raw request; one that takes only the legacy body would fail every seed.
-    The check reads the source, so a server passes it once it migrates.
+    It verifies with the task's data, without the row's `_ng_*` rollout coordinates, so a server whose request
+    models read them, such as a cohort comparison, would fail every verify.
+    The checks read the source, so a server passes them once it migrates; a server whose source is not under
+    `resources_servers/` cannot be checked, so it stays.
     """
     servers = resources.get("resources_servers") or {}
     if len(servers) != 1:
         return None
     implementation, config = next(iter(servers.items()))
     directory = RESOURCES_SERVERS_ROOT / str(implementation)
+    if not directory.is_dir():
+        return f"cannot find resources server {implementation} under {display(RESOURCES_SERVERS_ROOT)}"
     entrypoint = directory / str((config or {}).get("entrypoint") or "app.py")
-    overrides = _seed_overrides(entrypoint) or [
-        override
+    sources = [
+        path
         for path in sorted(directory.rglob("*.py"))
         if path != entrypoint and not {"tests", ".venv"} & set(path.parts)
-        for override in _seed_overrides(path)
     ]
+    overrides = _seed_overrides(entrypoint) or [override for path in sources for override in _seed_overrides(path)]
     for override in overrides:
         source = ast.unparse(override)
         if TYPED_SEED not in source and "resources_session_id" not in source:
             return f"resources server {implementation} seeds only the legacy body, not {TYPED_SEED}"
+    if any(_reads_rollout_coordinates(path) for path in [entrypoint, *sources]):
+        return f"resources server {implementation} reads the row's rollout coordinates, which are not forwarded"
     return None
 
 
@@ -431,7 +473,7 @@ def switch_blocker(agent: dict, instances: dict[str, dict]) -> str | None:
     resources = (body.get("resources_server") or {}).get("name")
     if not resources or resources == "???":
         return "the agent binds no resources server"
-    if (blocker := seed_blocker(instances.get(resources, {}))) is not None:
+    if (blocker := resources_blocker(instances.get(resources, {}))) is not None:
         return blocker
     accesses = [access for access in body.get("tool_accesses") or [] if isinstance(access, dict)]
     mcp = [access.get("name") for access in accesses if access.get("kind") == "mcp" and access.get("required")]
@@ -443,6 +485,14 @@ def switch_blocker(agent: dict, instances: dict[str, dict]) -> str | None:
     if len(direct) > 1:
         return f"more than one direct HTTP tool access: {', '.join(sorted(direct))}"
     return None
+
+
+def extra_keys(instance: dict) -> list[str]:
+    """The keys a relay instance sets that its switched stanza would not keep."""
+    relay = (instance.get("environment_servers") or {}).get(RELAY)
+    own = set(instance) - SWITCHED_INSTANCE_KEYS
+    body = {f"{RELAY}.{key}" for key in relay} - {f"{RELAY}.{key}" for key in SWITCHED_RELAY_KEYS} if relay else set()
+    return sorted(own | body)
 
 
 def switch_plan(
@@ -466,7 +516,11 @@ def switch_plan(
             agent = instances.get(agent_name or "", {})
             if agent_name is None or not (missing or SWITCHED_AGENT_TYPE in (agent.get("responses_api_agents") or {})):
                 continue
-            blocker = f"cannot load included config: {', '.join(missing)}" if missing else switch_blocker(agent, instances)
+            blocker = (
+                f"cannot load included config: {', '.join(missing)}" if missing else switch_blocker(agent, instances)
+            )
+            if blocker is None and (keys := extra_keys(document[name] if isinstance(document[name], dict) else {})):
+                blocker = f"the relay sets {', '.join(keys)}, which the switched server would not keep"
             if blocker is not None:
                 kept.append((path, name, blocker))
                 continue
@@ -497,13 +551,84 @@ def unpaired_relays(
     return unpaired
 
 
+def stanza(relay: str, agent: str, parent: str | None) -> str:
+    """The block that replaces a relay, still inheriting its parent when it had one."""
+    return (SWITCHED if parent is None else SWITCHED_CHILD).format(server=relay, agent=agent, parent=parent)
+
+
+def _inheritance(name: str, documents: list[dict]) -> list[str]:
+    """``name`` followed by the instances it inherits, nearest first, as the run's last definition says."""
+    chain = [name]
+    while True:
+        source = next(
+            (
+                document[chain[-1]].get("_inherit_from")
+                for document in reversed(documents)
+                if isinstance(document.get(chain[-1]), dict) and "_inherit_from" in document[chain[-1]]
+            ),
+            None,
+        )
+        if not isinstance(source, str) or source in chain:
+            return chain
+        chain.append(source)
+
+
+def split_servers(
+    planned: dict[tuple[Path, str], tuple[str, str | None]], paths: list[Path], loaded: dict[Path, dict | None]
+) -> tuple[dict[tuple[Path, str], str], list[str]]:
+    """Find the runs where the planned stanzas leave one instance with two environment server types.
+
+    Another config can merge a relay with a `legacy_agent` server of the same name, such as a benchmark
+    variant that points it at another harness, or inherit a switched relay without declaring a server.
+    ``planned`` maps each ``(file, relay)`` to its ``(agent, parent)``.
+    Returns ``(keep, refused)``: each planned relay that can stay on the relay, with the reason, and a message
+    for each split that keeping a relay cannot fix, because a relay the instance inherits switches.
+    """
+    after = dict(loaded)
+    for (file, relay), (agent, parent) in planned.items():
+        document = dict(after.get(file) or {})
+        document.update(yaml.safe_load(stanza(relay, agent, parent)))
+        after[file] = document
+    keep: dict[tuple[Path, str], str] = {}
+    refused: list[str] = []
+    for path in paths:
+        run = run_documents(path, after)
+        files = [file for file, _ in run]
+        if not any((file, relay) in planned for file in files for relay in after.get(file) or {}):
+            continue
+        documents = [document for _, document in run]
+        for name, instance in resolved_instances(documents).items():
+            servers = instance.get("environment_servers")
+            if not isinstance(servers, dict) or len(servers) < 2:
+                continue
+            switching = [
+                (file, ancestor)
+                for ancestor in _inheritance(name, documents)
+                for file in reversed(files)
+                if (file, ancestor) in planned
+            ]
+            if not switching:
+                continue
+            if switching == [(switching[0][0], name)]:
+                keep.setdefault(switching[0], f"{display(path)} merges it with a {RELAY} server")
+            else:
+                inherited = next(ancestor for _, ancestor in switching if ancestor != name)
+                refused.append(
+                    f"{name} in a run of {display(path)} would merge a {RELAY} server with {inherited}, "
+                    f"which switches; declare a server of its own there instead"
+                )
+    return keep, refused
+
+
 def replace_stanza(text: str, name: str, block: str) -> str:
     """Return ``text`` with top-level instance ``name`` replaced by ``block``.
 
     Comments and blank lines after the instance belong to whatever follows, so they stay.
     """
     lines = text.splitlines(keepends=True)
-    start = next(i for i, line in enumerate(lines) if re.match(rf"{re.escape(name)}:\s*(#.*)?$", line))
+    start = next((i for i, line in enumerate(lines) if re.match(rf"{re.escape(name)}:\s*(#.*)?$", line)), None)
+    if start is None:
+        raise ValueError(f"cannot find the line that starts {name!r}")
     end = next((i for i in range(start + 1, len(lines)) if re.match(r"[^\s#]", lines[i])), len(lines))
     while end > start + 1 and (not lines[end - 1].strip() or lines[end - 1].lstrip().startswith("#")):
         end -= 1
@@ -515,24 +640,48 @@ def switch(documents: dict[Path, dict], *, check: bool) -> int:
     loaded: dict[Path, dict | None] = {path.resolve(): document for path, document in documents.items()}
     switches, kept = switch_plan(documents, loaded)
     switched = {(path, relay) for path, replacements in switches.items() for relay, *_ in replacements}
-    unpaired = unpaired_relays(switched, list(dict.fromkeys(repo_config_files() + list(documents))), loaded)
+    paths = list(dict.fromkeys(path.resolve() for path in repo_config_files() + list(documents)))
+    unpaired = unpaired_relays(switched, paths, loaded)
     if unpaired:
         for path, child, parent in unpaired:
             print(f"{child} in {display(path)} inherits {parent}; switch both in one run", file=sys.stderr)
         return 2
 
-    for path, replacements in switches.items():
+    planned = {
+        (path, relay): (agent, parent)
+        for path, replacements in switches.items()
+        for relay, agent, parent in replacements
+    }
+    # Keeping one relay can split a relay that inherits it, so repeat until no run splits.
+    while True:
+        keep, refused = split_servers(planned, paths, loaded)
+        if refused:
+            for message in dict.fromkeys(refused):
+                print(message, file=sys.stderr)
+            return 2
+        if not keep:
+            break
+        for (path, relay), reason in keep.items():
+            del planned[(path, relay)]
+            kept.append((path, relay, reason))
+
+    # Every rewrite is built before any is written, so a failure leaves no file half switched.
+    texts: dict[Path, str] = {}
+    for (path, relay), (agent, parent) in planned.items():
+        try:
+            texts[path] = replace_stanza(texts.get(path) or path.read_text(), relay, stanza(relay, agent, parent))
+        except ValueError as error:
+            print(f"could not rewrite {display(path)}: {error}", file=sys.stderr)
+            return 2
+    for path, text in texts.items():
         if not check:
-            text = path.read_text()
-            for relay, agent, parent in replacements:
-                template = SWITCHED if parent is None else SWITCHED_CHILD
-                text = replace_stanza(text, relay, template.format(server=relay, agent=agent, parent=parent))
             path.write_text(text)
-        print(f"{'would switch' if check else 'switched'} {len(replacements)} in {display(path)}")
+        count = sum(1 for file, _ in planned if file == path)
+        print(f"{'would switch' if check else 'switched'} {count} in {display(path)}")
     for path, relay, reason in kept:
         print(f"stays on the relay: {relay} in {display(path)}: {reason}")
-    print(f"\nfiles touched: {len(switches)}, relays switched: {len(switched)}, staying on the relay: {len(kept)}")
-    return 1 if (check and switches) else 0
+    print(f"\nfiles touched: {len(texts)}, relays switched: {len(planned)}, staying on the relay: {len(kept)}")
+    return 1 if (check and texts) else 0
 
 
 def display(path: Path) -> str:
