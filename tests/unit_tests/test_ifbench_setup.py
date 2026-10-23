@@ -35,6 +35,7 @@ def nltk_mock(monkeypatch, tmp_path):
     nltk = SimpleNamespace(data=MagicMock(), download=MagicMock())
     nltk.data.path = []
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.delenv("NEMO_GYM_TEST_DATA_ROOT", raising=False)
     monkeypatch.setitem(sys.modules, "nltk", nltk)
     monkeypatch.setitem(sys.modules, "regex", ModuleType("regex"))
     return nltk
@@ -44,6 +45,28 @@ def test_cached_nltk_data_does_not_download(nltk_mock):
     setup_ifbench._ensure_nltk_data()
     nltk_mock.download.assert_not_called()
     assert [call.args[0] for call in nltk_mock.data.find.call_args_list] == list(setup_ifbench.NLTK_RESOURCES.values())
+
+
+def test_rejected_mounted_nltk_data_is_copied_privately_without_download(nltk_mock, monkeypatch, tmp_path):
+    root = tmp_path / "mounted"
+    monkeypatch.setenv("NEMO_GYM_TEST_DATA_ROOT", str(root))
+    for resource in setup_ifbench.NLTK_RESOURCES.values():
+        path = root / "nltk_data" / resource
+        path.mkdir(parents=True)
+        (path / "data").write_text("fixture")
+    cache = tmp_path / "nltk_data"
+
+    def find(resource):
+        # NLTK 3.10 rejects the foreign-UID mount, then accepts the private copy.
+        if not (cache / resource / "data").is_file():
+            raise LookupError(resource)
+
+    nltk_mock.data.find.side_effect = find
+    setup_ifbench._ensure_nltk_data()
+    nltk_mock.download.assert_not_called()
+    for resource in setup_ifbench.NLTK_RESOURCES.values():
+        assert (cache / resource / "data").read_text() == "fixture"
+        assert (root / "nltk_data" / resource / "data").read_text() == "fixture"
 
 
 def test_missing_nltk_data_is_downloaded_and_checked(nltk_mock, tmp_path):

@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
 import yaml
-from scripts.ci.check_test_data import IFBENCH_COMMIT, REQUIRED_FILES, check_test_data
+from scripts.ci.check_test_data import IFBENCH_COMMIT, REQUIRED_FILES, check_test_data, prepare_nltk_cache
 
 
 @pytest.fixture
@@ -41,6 +43,19 @@ def test_inventory_rejects_wrong_revision(shared_data):
         check_test_data(shared_data)
 
 
+def test_nltk_cache_copies_shared_data_without_weakening_ownership_checks(shared_data, tmp_path):
+    source = shared_data / "nltk_data"
+    original = {path.relative_to(source): path.read_bytes() for path in source.rglob("*") if path.is_file()}
+    for path in (source, *source.rglob("*")):
+        path.chmod(0o555 if path.is_dir() else 0o444)
+    cache = prepare_nltk_cache(shared_data, tmp_path / "private-cache")
+    assert {path.relative_to(cache): path.read_bytes() for path in cache.rglob("*") if path.is_file()} == original
+    for path in (cache, *cache.rglob("*")):
+        assert path.stat().st_uid == os.getuid()
+        assert stat.S_IMODE(path.stat().st_mode) == (0o700 if path.is_dir() else 0o600)
+    assert {path.relative_to(source): path.read_bytes() for path in source.rglob("*") if path.is_file()} == original
+
+
 @pytest.mark.parametrize(
     ("workflow", "job", "workload"),
     [
@@ -58,7 +73,9 @@ def test_ci_checks_existing_arc_mount_before_native_tests(workflow, job, workloa
     assert config["env"]["NLTK_DATA"] == f"{data}/nltk_data"
     steps = config["steps"]
     inventory = [
-        index for index, step in enumerate(steps) if step.get("run") == "python3 scripts/ci/check_test_data.py"
+        index
+        for index, step in enumerate(steps)
+        if step.get("run", "").startswith("python3 scripts/ci/check_test_data.py --nltk-cache ")
     ]
     native = next(index for index, step in enumerate(steps) if step.get("name", "").startswith(workload))
     assert len(inventory) == 1 and inventory[0] < native

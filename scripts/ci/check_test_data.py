@@ -5,6 +5,8 @@
 
 import argparse
 import os
+import shutil
+import tempfile
 from pathlib import Path
 
 
@@ -40,14 +42,38 @@ def check_test_data(root: Path) -> None:
         raise ValueError(f"IFBench revision mismatch under {root}")
 
 
+def prepare_nltk_cache(root: Path, cache_dir: Path) -> Path:
+    """Copy supplied data into a private, process-owned tree accepted by NLTK."""
+    source = (root / "nltk_data").resolve()
+    cache_dir = cache_dir.resolve()
+    if cache_dir.is_relative_to(source):
+        raise ValueError("NLTK cache must be outside the supplied NLTK tree")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    if cache_dir.stat().st_uid != os.geteuid():
+        raise ValueError("NLTK cache must be owned by the current process user")
+    cache_dir.chmod(0o700)
+    private = Path(tempfile.mkdtemp(prefix="gym-nltk-", dir=cache_dir))
+    target = private / "nltk_data"
+    shutil.copytree(source, target, copy_function=shutil.copyfile)
+    for path in (target, *target.rglob("*")):
+        path.chmod(0o700 if path.is_dir() else 0o600)
+    return target
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", nargs="?", default=os.environ.get("NEMO_GYM_TEST_DATA_ROOT"))
+    parser.add_argument("--nltk-cache", type=Path, help="Prepare a private NLTK copy under this cache directory")
     args = parser.parse_args()
     if not args.root:
         parser.error("pass ROOT or set NEMO_GYM_TEST_DATA_ROOT")
     check_test_data(Path(args.root))
     print(f"Gym test-data inventory passed: {len(REQUIRED_FILES)} files under {args.root}")
+    if args.nltk_cache:
+        target = prepare_nltk_cache(Path(args.root), args.nltk_cache)
+        with Path(os.environ["GITHUB_ENV"]).open("a") as output:
+            output.write(f"NLTK_DATA={target}\n")
+        print(f"Prepared private NLTK cache: {target}")
 
 
 if __name__ == "__main__":

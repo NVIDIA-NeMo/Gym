@@ -48,7 +48,10 @@ GitHub test jobs use the existing `nemo-ci-aws-cpu-4-16` ARC runner pool, which 
 that bucket read-only at `/mnt/s3-data-ro`. Jobs set `NEMO_GYM_TEST_DATA_ROOT` to
 `/mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1`, set `NLTK_DATA` to its `nltk_data` child, and
 run `scripts/ci/check_test_data.py`. The preflight requires 14 nonempty files and the pinned
-IFBench revision before tests start.
+IFBench revision before tests start. Its `--nltk-cache` option copies the NLTK resources into a
+private cache and exports that path for the job: NLTK 3.10 refuses foreign-UID or writable shared
+trees. Missing packages can download into the private cache. Compiler and browser dependencies
+are installed by `install_test_dependencies.sh`; the S3 mount is supplied by ARC.
 
 TF-States owns recurring S3 → GCS → Singapore GCS transfers. Its existing `gpu-datasets-sync`
 CronJob copies the complete `nemo-fw/TestData` parent to the read-only dataset export and verifies

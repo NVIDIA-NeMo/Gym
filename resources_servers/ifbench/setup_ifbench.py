@@ -68,10 +68,19 @@ def _ensure_nltk_data() -> None:
         try:
             nltk.data.find(resource)
         except LookupError:
-            # Supplied NLTK_DATA paths may be read-only. Download missing data
-            # into a private writable cache and leave mounted files untouched.
-            download_dir.mkdir(parents=True, exist_ok=True)
-            nltk.download(kind, download_dir=str(download_dir), quiet=True, raise_on_error=True)
+            # NLTK also rejects mounted data owned by another UID. Preserve its
+            # ownership checks by copying explicit supplied data into our cache.
+            download_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            download_dir.chmod(0o700)
+            data_root = os.environ.get("NEMO_GYM_TEST_DATA_ROOT")
+            supplied = Path(data_root) / "nltk_data" / resource if data_root else None
+            if supplied is not None and supplied.is_dir():
+                target = download_dir / resource
+                shutil.copytree(supplied, target, dirs_exist_ok=True, copy_function=shutil.copyfile)
+                for path in (target, *target.rglob("*")):
+                    path.chmod(0o700 if path.is_dir() else 0o600)
+            else:
+                nltk.download(kind, download_dir=str(download_dir), quiet=True, raise_on_error=True)
             # Do not publish a successful setup marker for incomplete data.
             nltk.data.find(resource)
 
