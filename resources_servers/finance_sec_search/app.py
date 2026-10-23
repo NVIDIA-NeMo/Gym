@@ -583,13 +583,22 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         self._session_start_times.pop(session_id, None)
         self._typed_seeds.pop(session_id, None)
 
-    def _evict_stale_sessions(self) -> None:
+    def _evict_stale_sessions(self, request: Request) -> None:
         # An Agent's legacy /run never closes its session, so one that fails before /verify would otherwise stay.
         cutoff = time.monotonic() - self.config.session_ttl_seconds
+        # Verify and close end a session's checkpoint tracking and routing claim through their routes; an evicted
+        # session has no such request, so end both here. With several workers its claim would otherwise stay open.
+        participant = self.checkpoint_participant
+        app_state = getattr(getattr(request, "app", None), "state", None)
+        lifetimes = getattr(app_state, "nemo_gym_resources_session_lifetimes", None)
         for session_id, started in list(self._session_start_times.items()):
             if started <= cutoff:
                 logger.warning("Discarding session %s: not verified or closed after its TTL", session_id)
                 self._release_session(session_id)
+                if participant is not None:
+                    participant.ended(session_id)
+                if lifetimes is not None:
+                    lifetimes.ended(session_id)
 
     def _check_time_budget(self, session_id: str) -> Optional[str]:
         """Return an error message if the rollout has exceeded its time budget, else None."""
@@ -627,7 +636,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             # An Agent's legacy /run names its session only by its cookie.
             session_id = request.session[SESSION_ID_KEY]
             self._fence.raise_if_closed(session_id)
-            self._start_session(session_id)
+            self._start_session(request, session_id)
             return BaseSeedSessionResponse()
 
         session_id = body.resources_session_id
@@ -638,15 +647,15 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
             if previous is None:
                 self._typed_seeds[session_id] = body.model_copy(deep=True)
-                self._start_session(session_id)
+                self._start_session(request, session_id)
             # The session router already names a typed seed's cookie session by its resources_session_id
             # (see nemo_gym.session_routing). Binding it here keeps the tools on that key in an app served without
             # the router too; only after the checks, so a refused seed's reply carries no cookie for this session.
             request.session[SESSION_ID_KEY] = session_id
         return ResourcesSeedSessionResponse(resources_session_id=session_id)
 
-    def _start_session(self, session_id: str) -> None:
-        self._evict_stale_sessions()
+    def _start_session(self, request: Request, session_id: str) -> None:
+        self._evict_stale_sessions(request)
         self._data_storage[session_id] = {}
         self._session_start_times[session_id] = time.monotonic()
         logger.debug("seed_session: reset data storage for session %s", session_id)

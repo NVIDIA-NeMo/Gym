@@ -17,6 +17,7 @@
 import json
 import logging
 import tempfile
+import time
 import urllib.error
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -38,6 +39,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.session_routing import ResourcesSessionLifetimes
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.finance_sec_search.app import (
     EdgarSearchRequest,
@@ -1723,6 +1725,27 @@ class TestResourcesSessions:
             assert error.value.status_code == 404
             assert error.value.detail["failure_kind"] == "session_lost"
         assert _TEST_SESSION_ID not in server._data_storage
+
+    def test_eviction_ends_the_routing_claim_and_checkpoint_tracking(self, server, temp_cache_dir) -> None:
+        """An evicted session's claim must become releasable; a seed's own route keeps it open forever otherwise."""
+        (Path(temp_cache_dir) / "tickers.json").write_text(json.dumps(TestTickerLoading.MOCK_TICKERS_RAW))
+        app = server.setup_webserver()
+        lifetimes = ResourcesSessionLifetimes(0.01, starts=("/seed_session",), ends=("/close_session", "/verify"))
+        app.state.nemo_gym_resources_session_lifetimes = lifetimes
+        server._checkpoint = MagicMock()
+        TestClient(app).post("/seed_session", json=_typed_seed("abandoned").model_dump(mode="json"))
+        server._session_start_times["abandoned"] -= server.config.session_ttl_seconds + 1
+        for session_id in ("abandoned", "fresh"):
+            # What the session router records for each successful seed.
+            lifetimes.served(session_id, {"path": "/seed_session", "headers": []}, 200)
+
+        TestClient(app).post("/seed_session", json=_typed_seed("fresh").model_dump(mode="json"))
+
+        assert "abandoned" not in server._data_storage and "fresh" in server._data_storage
+        server._checkpoint.ended.assert_called_once_with("abandoned")
+        time.sleep(0.05)
+        assert lifetimes.sweep() == ["abandoned"]
+        assert lifetimes.holds("fresh")
 
     @pytest.mark.asyncio
     async def test_seed_discards_sessions_older_than_ttl(self, server) -> None:
