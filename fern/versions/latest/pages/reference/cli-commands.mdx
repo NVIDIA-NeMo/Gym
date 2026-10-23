@@ -1083,6 +1083,11 @@ gym eval export evalrdl \
     +label=nightly '+tags=[a,b]' +meta.model=qwen
 ```
 
+Every exporter also takes `result_json_fpath=PATH`, which keeps the outcome as JSON (`state`, `exit_code`, `error` and
+`detail`). The file reads `{"state": "running"}` while the export is in progress, so an interrupted export is visible. An
+export whose file already says `succeeded` or `skipped` is not repeated; a failed or interrupted one is retried.
+`gym eval submit` uses it for its [exports](/orchestration/configuration#export).
+
 See the [trajectory capability matrix](/reference/trajectory-capabilities#atif-export) for the initial conversion boundary.
 
 ### `gym eval health-check`
