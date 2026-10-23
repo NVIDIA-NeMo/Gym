@@ -30,15 +30,14 @@ if TYPE_CHECKING:
     # module) and would pull the mcp SDK into agent/model processes that never need it.
     from nemo_gym.mcp_auto_exposure import MCPTool
 
-from nemo_gym._checkpoint.control import install_participant
+from nemo_gym._checkpoint.control import CheckpointMode, install_participant
 from nemo_gym._checkpoint.resources import (
     MCPTokenClaims,
     ResourcesCheckpointMiddleware,
-    ResourcesCheckpointMode,
     ResourcesParticipant,
 )
 from nemo_gym._checkpoint.settings import checkpoint_settings
-from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepMode
+from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import validate_failure_kind
@@ -354,11 +353,11 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     # ResourcesSessionHooks methods.
     # The default fails closed: its sessions' rollouts are restarts, which never hold up a checkpoint,
     # are left out of it, and start over after a crash.
-    checkpoint_mode: ClassVar[ResourcesCheckpointMode] = "restart_only"
+    checkpoint_mode: ClassVar[CheckpointMode] = "restart_only"
     # "replay" declares that /verify is safe to run again after a crash
     # and does not change checkpointed session state, so a checkpoint need not wait for it.
     # Callers learn it from the /seed_session reply.
-    checkpoint_verify: ClassVar[StepMode] = "wait"
+    checkpoint_verify: ClassVar[StepType] = "wait"
     # The routes that start a session for the request's rollout, such as a Gymnasium server's /reset.
     # Each waits out a checkpoint before its handler runs, needs a rollout prefix,
     # and binds the session to that rollout when it succeeds.
@@ -413,7 +412,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
     def setup_resources_checkpoint(self, app: FastAPI) -> None:
         # The declarations are class attributes nothing else checks: a typo would act as a mode of its own.
-        for name, allowed in (("checkpoint_mode", ResourcesCheckpointMode), ("checkpoint_verify", StepMode)):
+        for name, allowed in (("checkpoint_mode", CheckpointMode), ("checkpoint_verify", StepType)):
             if getattr(self, name) not in get_args(allowed):
                 raise ValueError(
                     f"{type(self).__name__} declares {name}={getattr(self, name)!r}; expected one of {get_args(allowed)}"
@@ -437,7 +436,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 raise ValueError(
                     f"{type(self).__name__} declares checkpoint_mode='exported' but does not implement {missing}"
                 )
-        participant = ResourcesParticipant(self, self.checkpoint_mode, verify_mode=self.checkpoint_verify)
+        participant = ResourcesParticipant(self, self.checkpoint_mode, verify_step_type=self.checkpoint_verify)
         self._checkpoint = participant
         install_participant(
             app,

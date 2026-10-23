@@ -187,9 +187,8 @@ class Deployment:
         self.external_inference = inference_url is not None
         self.procs: dict[str, subprocess.Popen] = {}
         self.dirs: dict[str, Path] = {}
-        # The slow server's verify mode is a class attribute on real servers;
-        # this test server reads it from its environment so one scenario can run both modes.
-        self.slow_verify_mode = checkpoint_verify or "wait"
+        # A step type is a constant of the server class, so each step type has its own test server.
+        self.slow_verify_server = "replay_verify_server" if checkpoint_verify == "replay" else "slow_verify_server"
         self.config = self._config(token_capture, generation_cuts)
         self.config.update(extra_config or {})
 
@@ -235,9 +234,8 @@ class Deployment:
                 return_token_id_information=False,
                 uses_reasoning_parser=True,
                 uses_interleaved_reasoning=True,
-                checkpoint_policy=True,
+                checkpoint={"policy": True, "generation_cuts": generation_cuts},
                 num_workers=self.policy_workers,
-                checkpoint_generation_cuts=generation_cuts,
             ),
         )
         if self.topology == "counter":
@@ -257,7 +255,7 @@ class Deployment:
                 verified=False,
                 description="slow verify",
             )
-            add("resources", str(HERE / "slow_verify_server"), resources)
+            add("resources", str(HERE / self.slow_verify_server), resources)
         else:
             resources = _server(
                 "resources_servers", "example_single_tool_call", domain="agent", verified=False, description="weather"
@@ -362,7 +360,6 @@ class Deployment:
             "RAY_TMPDIR": "/tmp",
             "SLOW_VERIFY_FLAG": str(self.slow_verify_flag),
             "SLOW_VERIFY_LOG": str(self.slow_verify_log),
-            "SLOW_VERIFY_MODE": self.slow_verify_mode,
             "PYTHONPATH": str(REPO),
         }
         log = open(self.log_dir / f"{name}.log", "a")

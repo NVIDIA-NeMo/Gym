@@ -48,7 +48,7 @@ from nemo_gym._checkpoint.control import (
     next_attempt,
 )
 from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, RolloutIdRequiredError, StaleAttemptError
-from nemo_gym._checkpoint.steps import Boundary, EpisodeSteps, StepMode
+from nemo_gym._checkpoint.steps import Boundary, EpisodeSteps, StepType
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.rollout_correlation import RolloutContextMiddleware, maybe_rollout_id_from_run_body
 
@@ -69,7 +69,7 @@ class AgentSessionRecord(CheckpointRecord):
 class ActivationOutOfOrderError(ControlError):
     """An activation index that is neither the session's last completed activation nor the next one."""
 
-    code = "activation_out_of_order"
+    code = "checkpoint_activation_out_of_order"
 
 
 class LegacyRun:
@@ -88,8 +88,8 @@ class LegacyRun:
     async def boundary(self, state: Boundary) -> None:
         await self._steps.boundary(self._key, state)
 
-    def step(self, mode: StepMode) -> AbstractAsyncContextManager[None]:
-        return self._steps.step(self._key, mode)
+    def step(self, step_type: StepType) -> AbstractAsyncContextManager[None]:
+        return self._steps.step(self._key, step_type)
 
     async def mark_restart(self) -> None:
         """A server this episode uses cannot capture its part, such as a restart-only resources server:
@@ -138,7 +138,7 @@ class _Session:
     task: Optional[asyncio.Task] = None
     resume: asyncio.Event = field(default_factory=asyncio.Event)
     # Installed by a restore and not activated since: a commit that no longer continues its episode retires it.
-    restored_pending: bool = False
+    unclaimed: bool = False
     # Set by retire, which keeps the session tracked until its activation has stopped.
     retired: bool = False
     # Set by close, which keeps the session tracked until its activation has stopped.
@@ -155,7 +155,7 @@ class Activation:
         self._participant = participant
         self._session = session
         self.continuation, session.continuation = session.continuation, None
-        session.restored_pending = False
+        session.unclaimed = False
 
     async def boundary(self, snapshot: BoundarySnapshot) -> None:
         """Record a complete loop step and park here if a checkpoint asked for it.
@@ -309,7 +309,7 @@ class AgentSessionParticipant(CheckpointParticipant):
         self.open_session(session_key, episode_id)
         session = self._sessions[session_key]
         # This /run claims a restored episode whatever step it continues at, so a commit no longer retires it.
-        session.restored_pending = False
+        session.unclaimed = False
         self.legacy_episodes.begin(session_key, continuation=self._restored_episodes.pop(session_key, None))
         try:
             yield LegacyRun(self.legacy_episodes, session_key)
@@ -336,13 +336,13 @@ class AgentSessionParticipant(CheckpointParticipant):
             raise StaleAttemptError(f"agent session {session_key!r} belongs to {session.episode_id.capture_key}")
         return session
 
-    def replayed(self, session_key: str, episode_id: EpisodeId) -> None:
-        """Check a request answered with a completed activation's reply, and claim a restored session for it.
+    def answered_from_saved_reply(self, session_key: str, episode_id: EpisodeId) -> None:
+        """Check a re-sent activation answered with its saved reply, and claim a restored session for it.
 
         The reply continues the live episode as an activation would,
         so a later commit that leaves the episode out no longer frees the session.
         """
-        self._session_for(session_key, episode_id).restored_pending = False
+        self._session_for(session_key, episode_id).unclaimed = False
 
     async def wait_activation(self, session_key: str, index: int) -> bool:
         """Wait until the session's running activation ends, if it has ``index``; return whether it had.
@@ -612,7 +612,7 @@ class AgentSessionParticipant(CheckpointParticipant):
                     key=session.session_key,
                     episode_id=session.episode_id,
                     continuation=record.boundary,
-                    restored_pending=True,
+                    unclaimed=True,
                 )
             )
             if record.episode is not None:
@@ -621,8 +621,8 @@ class AgentSessionParticipant(CheckpointParticipant):
     def restore_records(self, records: list[CheckpointRecord]) -> None:
         raise NotImplementedError("agent sessions restore through install(), which awaits the agent's hooks")
 
-    async def restored_pending(self) -> list[EpisodeId]:
-        return [session.episode_id for session in self._sessions.values() if session.restored_pending]
+    async def unclaimed(self) -> list[EpisodeId]:
+        return [session.episode_id for session in self._sessions.values() if session.unclaimed]
 
     def commit_reply(self, records: list[CheckpointRecord]) -> dict[str, Any]:
         # An episode an agent's own /run drives belongs to that /run;
