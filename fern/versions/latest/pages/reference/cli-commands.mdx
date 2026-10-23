@@ -34,7 +34,8 @@ gym dataset rm                # delete a dataset from GitLab
 gym dataset migrate           # move a dataset from GitLab to HF
 gym dataset render            # generate a dataset preview (materialize prompts)
 gym dataset collate           # validate and collate a dataset
-gym dataset init <name>       # scaffold a Harbor-format dataset (dataset.toml plus one task)
+gym dataset init <name>       # scaffold a Harbor-format dataset (dataset.toml plus one task; --parameterized for a template)
+gym dataset publish --harbor <target> --output <dir>  # write a Gym-authored dataset as plain Harbor task folders
 gym dataset validate <target> # run each Harbor task's reference solution through its verifier
 
 # Environments
