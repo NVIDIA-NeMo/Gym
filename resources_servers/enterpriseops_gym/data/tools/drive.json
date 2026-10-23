@@ -1,0 +1,3168 @@
+{
+  "gym_name": "gym-google-drive-mcp",
+  "gym_url": "http://localhost:8009",
+  "snapshot_at": "2026-07-07T18:18:29.356956+00:00",
+  "tools": [
+    {
+      "name": "get_operations",
+      "description": "Gets the latest state of a long-running operation. Clients can use this method to poll the operation result at intervals as recommended by the API service. Essential for monitoring export, download, backup, and other long-running operations in Google Drive. Use this to check operation status, retrieve operation results, or monitor operation progress.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The name of the operation resource (required). Format: operations/{operation_id}",
+            "pattern": "^operations/.+",
+            "minLength": 11,
+            "examples": [
+              "operations/download_file_1",
+              "operations/export_file_2",
+              "operations/backup_drive_1"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_drive",
+      "description": "Gets a shared drive's metadata by ID. Use this to retrieve information about a shared drive, such as its name, capabilities, and restrictions.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "driveId": {
+            "type": "string",
+            "description": "The ID of the shared drive.",
+            "minLength": 1,
+            "examples": [
+              "550e8400-e29b-41d4-a716-446655440000"
+            ]
+          },
+          "useDomainAdminAccess": {
+            "type": "boolean",
+            "description": "Issue the request as a domain administrator."
+          }
+        },
+        "required": [
+          "driveId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "hide_drives",
+      "description": "Hides a shared drive from the default view. For more information, see Manage shared drives. This operation makes the drive invisible in the default Drive interface but does not affect access permissions. Only users with organizer role can hide drives.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "driveId": {
+            "type": "string",
+            "description": "The ID of the shared drive to hide.",
+            "minLength": 1,
+            "examples": [
+              "550e8400-e29b-41d4-a716-446655440000"
+            ]
+          }
+        },
+        "required": [
+          "driveId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "unhide_drives",
+      "description": "Restores a shared drive to the default view. For more information, see Manage shared drives. This operation makes a previously hidden drive visible again in the default Drive interface. Only users with organizer role can unhide drives.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "driveId": {
+            "type": "string",
+            "description": "The ID of the shared drive to unhide.",
+            "minLength": 1,
+            "examples": [
+              "550e8400-e29b-41d4-a716-446655440000"
+            ]
+          }
+        },
+        "required": [
+          "driveId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "create_drive",
+      "description": "Creates a shared drive. Note: Restrictions cannot be set during creation - use drives.update to add restrictions after creation. For more information, see Manage shared drives.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "description": "An ID, such as a random UUID, which uniquely identifies this user's request for idempotent creation of a shared drive.",
+            "minLength": 1,
+            "examples": [
+              "550e8400-e29b-41d4-a716-446655440000"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "The name of the shared drive.",
+            "minLength": 1,
+            "examples": [
+              "My Shared Drive"
+            ]
+          },
+          "colorRgb": {
+            "type": "string",
+            "description": "The color of the shared drive as an RGB hex string.",
+            "pattern": "^#[0-9A-Fa-f]{6}$",
+            "examples": [
+              "#FF0000",
+              "#00FF00",
+              "#0000FF"
+            ]
+          },
+          "themeId": {
+            "type": "string",
+            "description": "The ID of the theme from which the background image and color will be set. The set of possible driveThemes can be retrieved from a drive.about.get response. When not specified on a drive.drives.create request, a random theme is chosen from which the background image and color are set. This is a write-only field; it can only be set on requests that don't set colorRgb.",
+            "examples": [
+              "theme_1",
+              "theme_2"
+            ]
+          },
+          "hidden": {
+            "type": "boolean",
+            "description": "Whether the shared drive is hidden from default view.",
+            "default": false
+          }
+        },
+        "required": [
+          "requestId",
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "delete_drive",
+      "description": "Permanently deletes a shared drive for which the user is an organizer. The shared drive cannot contain any untrashed items. For more information, see Manage shared drives.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "driveId": {
+            "type": "string",
+            "description": "The ID of the shared drive.",
+            "minLength": 1,
+            "examples": [
+              "0AOp1234567890abcdef"
+            ]
+          },
+          "useDomainAdminAccess": {
+            "type": "boolean",
+            "description": "Issue the request as a domain administrator; if set to true, then the requester will be granted access if they are an administrator of the domain to which the shared drive belongs.",
+            "default": false
+          },
+          "allowItemDeletion": {
+            "type": "boolean",
+            "description": "Whether any items inside the shared drive should also be deleted. This option is only supported when useDomainAdminAccess is also set to true.",
+            "default": false
+          }
+        },
+        "required": [
+          "driveId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_drives",
+      "description": "Lists the user's shared drives. This method accepts the q parameter, which is a search query combining one or more search terms. For more information, see the Search for shared drives guide.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pageSize": {
+            "type": "integer",
+            "description": "Maximum number of shared drives to return per page.",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 100,
+            "examples": [
+              10,
+              25,
+              50,
+              100
+            ]
+          },
+          "pageToken": {
+            "type": "string",
+            "description": "Page token for shared drives.",
+            "examples": [
+              "0",
+              "100",
+              "200"
+            ]
+          },
+          "q": {
+            "type": "string",
+            "description": "Query string for searching shared drives. For more information, see the Search for shared drives guide.",
+            "examples": [
+              "name contains 'Project'",
+              "hidden = false",
+              "createdTime > '2023-01-01T00:00:00Z'"
+            ]
+          },
+          "useDomainAdminAccess": {
+            "type": "boolean",
+            "description": "Issue the request as a domain administrator; if set to true, then all shared drives of the domain in which the requester is an administrator are returned.",
+            "default": false
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "update_drives",
+      "description": "Updates the metadata for a shared drive. For more information, see Manage shared drives. This method supports patch semantics and allows updating drive properties like name, color, theme, restrictions, and more.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "driveId": {
+            "type": "string",
+            "description": "The ID of the shared drive.",
+            "minLength": 1,
+            "examples": [
+              "0AOp1234567890abcdef"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "The name of the shared drive.",
+            "minLength": 1,
+            "examples": [
+              "My Updated Drive",
+              "Team Collaboration Drive"
+            ]
+          },
+          "colorRgb": {
+            "type": "string",
+            "description": "The color of the shared drive as an RGB hex string.",
+            "pattern": "^#[0-9A-Fa-f]{6}$",
+            "examples": [
+              "#FF0000",
+              "#00FF00",
+              "#0000FF"
+            ]
+          },
+          "themeId": {
+            "type": "string",
+            "description": "The ID of the theme from which the background image and color will be set. The set of possible driveThemes can be retrieved from a drive.about.get response. This is a write-only field; it can only be set on requests that don't set colorRgb or backgroundImageFile.",
+            "examples": [
+              "theme_1",
+              "theme_2"
+            ]
+          },
+          "backgroundImageFile": {
+            "type": "object",
+            "description": "An image file and cropping parameters from which a background image for this shared drive is set. This is a write only field; it can only be set on drive.drives.update requests that don't set themeId. When specified, all fields of the backgroundImageFile must be set.",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "The ID of an image file in Google Drive to use for the background image.",
+                "examples": [
+                  "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
+                ]
+              },
+              "xCoordinate": {
+                "type": "number",
+                "description": "The X coordinate of the upper left corner of the cropping area in the background image. This is a value in the closed range of 0 to 1. This value represents the horizontal distance from the left side of the entire image to the left side of the cropping area divided by the width of the entire image.",
+                "minimum": 0,
+                "maximum": 1,
+                "examples": [
+                  0.1,
+                  0.5,
+                  0.9
+                ]
+              },
+              "yCoordinate": {
+                "type": "number",
+                "description": "The Y coordinate of the upper left corner of the cropping area in the background image. This is a value in the closed range of 0 to 1. This value represents the vertical distance from the top side of the entire image to the top side of the cropping area divided by the height of the entire image.",
+                "minimum": 0,
+                "maximum": 1,
+                "examples": [
+                  0.1,
+                  0.5,
+                  0.9
+                ]
+              },
+              "width": {
+                "type": "number",
+                "description": "The width of the cropped image in the closed range of 0 to 1. This value represents the width of the cropped image divided by the width of the entire image. The height is computed by applying a width to height aspect ratio of 80 to 9. The resulting image must be at least 1280 pixels wide and 144 pixels high.",
+                "minimum": 0,
+                "maximum": 1,
+                "examples": [
+                  0.5,
+                  0.8,
+                  1.0
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "xCoordinate",
+              "yCoordinate",
+              "width"
+            ]
+          },
+          "hidden": {
+            "type": "boolean",
+            "description": "Whether the shared drive is hidden from default view.",
+            "default": false
+          },
+          "restrictions": {
+            "type": "object",
+            "description": "A set of restrictions that apply to this shared drive. These restrictions control sharing and access behavior for the shared drive.",
+            "properties": {
+              "adminManagedRestrictions": {
+                "type": "boolean",
+                "description": "Whether administrative privileges on this shared drive are required to modify restrictions.",
+                "default": false
+              },
+              "copyRequiresWriterPermission": {
+                "type": "boolean",
+                "description": "Whether the options to copy, print, or download files inside this shared drive should be disabled for readers and commenters.",
+                "default": false
+              },
+              "domainUsersOnly": {
+                "type": "boolean",
+                "description": "Whether access to this shared drive and items inside this shared drive is restricted to users of the domain to which this shared drive belongs.",
+                "default": false
+              },
+              "driveMembersOnly": {
+                "type": "boolean",
+                "description": "Whether access to items inside this shared drive is restricted to members of this shared drive.",
+                "default": false
+              }
+            }
+          },
+          "sharingFoldersRequiresOrganizerPermission": {
+            "type": "boolean",
+            "description": "If true, only users with the organizer role can share folders.",
+            "default": false
+          },
+          "downloadRestrictedForReaders": {
+            "type": "boolean",
+            "description": "Whether download is restricted for readers.",
+            "default": false
+          },
+          "downloadRestrictedForWriters": {
+            "type": "boolean",
+            "description": "Whether download is restricted for writers.",
+            "default": false
+          },
+          "useDomainAdminAccess": {
+            "type": "boolean",
+            "description": "Issue the request as a domain administrator; if set to true, then the requester will be granted access if they are an administrator of the domain to which the shared drive belongs.",
+            "default": false
+          }
+        },
+        "required": [
+          "driveId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_comments",
+      "description": "Gets a comment by ID from a Google Drive file. Retrieves detailed information about a specific comment including content, author, creation time, and resolved status. Essential for reading comment discussions and managing file collaboration.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file containing the comment (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "commentId": {
+            "type": "string",
+            "description": "The ID of the comment to retrieve (required)",
+            "minLength": 1,
+            "examples": [
+              "AAAABg8o8Zk",
+              "AAAACgpKm2k"
+            ]
+          },
+          "includeDeleted": {
+            "type": "boolean",
+            "description": "Whether to include deleted comments in the response (optional, default: false)",
+            "default": false
+          }
+        },
+        "required": [
+          "fileId",
+          "commentId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "create_comments",
+      "description": "Creates a new comment on a Google Drive file. Adds a comment with specified content and optional anchor to a specific location in the document. Essential for file collaboration and feedback workflows.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file to comment on (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "content": {
+            "type": "string",
+            "description": "The plain text content of the comment (required)",
+            "minLength": 1,
+            "maxLength": 8192,
+            "examples": [
+              "Please review this section",
+              "Great work on this document!",
+              "Could you clarify this point?"
+            ]
+          },
+          "anchor": {
+            "type": "string",
+            "description": "A region of the document represented as a JSON string (optional). For anchored comments on supported file types.",
+            "examples": [
+              "{\"r\":\"kix.abc123\"}",
+              "{\"line\": {\"startLineNumber\": 5, \"endLineNumber\": 7}}"
+            ]
+          }
+        },
+        "required": [
+          "fileId",
+          "content"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "delete_comments",
+      "description": "Deletes a comment from a Google Drive file. Permanently removes the specified comment and all its replies. Only the comment author or file owner can delete comments. Essential for managing file discussions and removing inappropriate content.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file containing the comment (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "commentId": {
+            "type": "string",
+            "description": "The ID of the comment to delete (required)",
+            "minLength": 1,
+            "examples": [
+              "AAAABg8o8Zk",
+              "AAAACgpKm2k"
+            ]
+          }
+        },
+        "required": [
+          "fileId",
+          "commentId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_comments",
+      "description": "Lists all comments on a Google Drive file. Retrieves a paginated list of comments with their content, authors, timestamps, and replies. Essential for viewing all file discussions and comment threads.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file to list comments for (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "includeDeleted": {
+            "type": "boolean",
+            "description": "Whether to include deleted comments in the response (optional, default: false)",
+            "default": false
+          },
+          "pageSize": {
+            "type": "integer",
+            "description": "The maximum number of comments to return per page (optional, default: 100, max: 100)",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 100
+          },
+          "pageToken": {
+            "type": "string",
+            "description": "The token for continuing a previous list request (optional)",
+            "examples": [
+              "0",
+              "100",
+              "200"
+            ]
+          },
+          "startModifiedTime": {
+            "type": "string",
+            "description": "RFC 3339 date-time to filter comments modified after this time (optional)",
+            "examples": [
+              "2024-01-01T00:00:00Z",
+              "2024-01-15T10:30:00Z"
+            ]
+          }
+        },
+        "required": [
+          "fileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "copy_files",
+      "description": "Creates a copy of a file and applies any requested updates with patch semantics. For more information, see Create and manage files. Essential for duplicating files, creating templates, and file backup workflows.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file to copy (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "The name of the copied file (optional)",
+            "examples": [
+              "Copy of My Document",
+              "Backup - Presentation"
+            ]
+          },
+          "parents": {
+            "type": "array",
+            "description": "A list of parent folder IDs for the copied file (optional)",
+            "items": {
+              "type": "string"
+            },
+            "examples": [
+              [
+                "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
+              ],
+              [
+                "folder1",
+                "folder2"
+              ]
+            ]
+          },
+          "keepRevisionForever": {
+            "type": "boolean",
+            "description": "Whether to set the keepForever field in the new head revision. This is only applicable to files with binary content in Google Drive.",
+            "default": false
+          },
+          "ocrLanguage": {
+            "type": "string",
+            "description": "A language hint for OCR processing during image import (ISO 639-1 code)",
+            "examples": [
+              "en",
+              "es",
+              "fr",
+              "de"
+            ]
+          },
+          "supportsAllDrives": {
+            "type": "boolean",
+            "description": "Whether the requesting application supports both My Drives and shared drives",
+            "default": false
+          },
+          "ignoreDefaultVisibility": {
+            "type": "boolean",
+            "description": "Whether to ignore the domain's default visibility settings for the created file",
+            "default": false
+          },
+          "includePermissionsForView": {
+            "type": "string",
+            "description": "Specifies which additional view's permissions to include in the response. Only 'published' is supported",
+            "enum": [
+              "published"
+            ],
+            "examples": [
+              "published"
+            ]
+          },
+          "includeLabels": {
+            "type": "string",
+            "description": "A comma-separated list of IDs of labels to include in the labelInfo part of the response",
+            "examples": [
+              "label1,label2,label3"
+            ]
+          },
+          "mimeType": {
+            "type": "string",
+            "description": "The MIME type of the file (optional)",
+            "examples": [
+              "application/vnd.google-apps.document",
+              "application/pdf",
+              "text/plain"
+            ]
+          },
+          "starred": {
+            "type": "boolean",
+            "description": "Whether the user has starred the file (optional)",
+            "examples": [
+              true,
+              false
+            ]
+          },
+          "description": {
+            "type": "string",
+            "description": "A short description of the file (optional)",
+            "examples": [
+              "A backup copy of the presentation",
+              "Template document for project planning"
+            ]
+          }
+        },
+        "required": [
+          "fileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "update_comments",
+      "description": "Updates an existing comment on a Google Drive file. Modifies comment content, anchor position, or other properties. Only the comment author can update their comments. Essential for editing comments and correcting mistakes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file containing the comment (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "commentId": {
+            "type": "string",
+            "description": "The ID of the comment to update (required)",
+            "minLength": 1,
+            "examples": [
+              "AAAABg8o8Zk",
+              "AAAACgpKm2k"
+            ]
+          },
+          "content": {
+            "type": "string",
+            "description": "The updated plain text content of the comment (optional)",
+            "minLength": 1,
+            "examples": [
+              "Updated comment content",
+              "This is the revised comment"
+            ]
+          },
+          "anchor": {
+            "type": "string",
+            "description": "A region of the document represented as a JSON string (optional). For anchored comments on supported file types.",
+            "examples": [
+              "{\"r\":\"kix.abc123\"}",
+              "{\"line\": {\"startLineNumber\": 5, \"endLineNumber\": 7}}"
+            ]
+          }
+        },
+        "required": [
+          "fileId",
+          "commentId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "create_permission",
+      "description": "Creates a permission for a file or shared drive. Grants access to users, groups, domains, or anyone on the internet. Essential for sharing files and managing access control in Google Drive.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file or shared drive to grant permission for (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "role": {
+            "type": "string",
+            "description": "The role granted by this permission (required)",
+            "enum": [
+              "owner",
+              "organizer",
+              "fileOrganizer",
+              "writer",
+              "commenter",
+              "reader"
+            ],
+            "examples": [
+              "reader",
+              "writer",
+              "commenter"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "description": "The type of the grantee (required)",
+            "enum": [
+              "user",
+              "group",
+              "domain",
+              "anyone"
+            ],
+            "examples": [
+              "user",
+              "group",
+              "anyone"
+            ]
+          },
+          "emailAddress": {
+            "type": "string",
+            "description": "The email address of the user or group to grant permission to (required for user/group types)",
+            "format": "email",
+            "examples": [
+              "user@example.com",
+              "team@company.com"
+            ]
+          },
+          "domain": {
+            "type": "string",
+            "description": "The domain to grant permission to (required for domain type)",
+            "examples": [
+              "example.com",
+              "company.org"
+            ]
+          },
+          "allowFileDiscovery": {
+            "type": "boolean",
+            "description": "Whether the permission allows the file to be discovered through search (optional, default: false)",
+            "default": false
+          },
+          "sendNotificationEmail": {
+            "type": "boolean",
+            "description": "Whether to send a notification email when sharing to users or groups. This defaults to true for users and groups, and is not allowed for other requests. It must not be disabled for ownership transfers (optional, default: true)",
+            "default": true
+          },
+          "expirationTime": {
+            "type": "string",
+            "description": "The expiration time of the permission (optional)",
+            "examples": [
+              "2024-01-01T00:00:00Z",
+              "2024-01-15T10:30:00Z"
+            ]
+          },
+          "view": {
+            "type": "string",
+            "description": "The view of the permission (optional)",
+            "enum": [
+              "published"
+            ],
+            "examples": [
+              "published"
+            ]
+          },
+          "pendingOwner": {
+            "type": "boolean",
+            "description": "Whether the permission is pending owner (optional, default: false)",
+            "default": false
+          },
+          "inheritedPermissionsDisabled": {
+            "type": "boolean",
+            "description": "Whether the permission is inherited permissions disabled (optional, default: false)",
+            "default": false
+          },
+          "emailMessage": {
+            "type": "string",
+            "description": "A plain text custom message to include in the notification email (optional)",
+            "maxLength": 4096,
+            "examples": [
+              "Please review this document",
+              "Sharing this file with the team"
+            ]
+          },
+          "moveToNewOwnersRoot": {
+            "type": "boolean",
+            "description": "This parameter only takes effect if the item isn't in a shared drive and the request is attempting to transfer the ownership of the item. If set to true, the item is moved to the new owner's My Drive root folder and all prior parents removed. If set to false, parents aren't changed (optional, default: false)",
+            "default": false
+          },
+          "supportsAllDrives": {
+            "type": "boolean",
+            "description": "Whether the requesting application supports both My Drives and shared drives (optional, default: false)",
+            "default": false
+          },
+          "transferOwnership": {
+            "type": "boolean",
+            "description": "Whether to transfer ownership to the specified user and downgrade the current owner to a writer. This parameter is required as an acknowledgement of the side effect (optional, default: false)",
+            "default": false
+          },
+          "useDomainAdminAccess": {
+            "type": "boolean",
+            "description": "Issue the request as a domain administrator. If set to true, and if the following additional conditions are met, the requester is granted access: The file ID parameter refers to a shared drive. The requester is an administrator of the domain to which the shared drive belongs (optional, default: false)",
+            "default": false
+          },
+          "enforceExpansiveAccess": {
+            "type": "boolean",
+            "description": "Whether the request should enforce expansive access rules (optional, default: false)",
+            "default": false
+          }
+        },
+        "required": [
+          "fileId",
+          "role",
+          "type"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "delete_permission",
+      "description": "Deletes a permission from a file or shared drive. Removes access for the specified permission holder. Only the file owner or permission holder can delete permissions.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file or shared drive containing the permission (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "permissionId": {
+            "type": "string",
+            "description": "The ID of the permission to delete (required)",
+            "minLength": 1,
+            "examples": [
+              "anyoneWithLink",
+              "0123456789abcdef",
+              "user:alice@example.com"
+            ]
+          },
+          "supportsAllDrives": {
+            "type": "boolean",
+            "description": "Whether the requesting application supports both My Drives and shared drives (optional, default: false)",
+            "default": false
+          }
+        },
+        "required": [
+          "fileId",
+          "permissionId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_permission",
+      "description": "Gets a specific permission by ID from a file or shared drive. Retrieves detailed information about who has access and what level of access they have.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file or shared drive containing the permission (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "permissionId": {
+            "type": "string",
+            "description": "The ID of the permission to retrieve (required)",
+            "minLength": 1,
+            "examples": [
+              "anyoneWithLink",
+              "0123456789abcdef",
+              "user:alice@example.com"
+            ]
+          },
+          "supportsAllDrives": {
+            "type": "boolean",
+            "description": "Whether the requesting application supports both My Drives and shared drives (optional, default: false)",
+            "default": false
+          }
+        },
+        "required": [
+          "fileId",
+          "permissionId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_permission",
+      "description": "Lists the permissions for a file or shared drive. Returns all users, groups, and domains that have access to the file, along with their permission levels.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file or shared drive to list permissions for (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "includePermissionsForView": {
+            "type": "string",
+            "description": "Specifies which additional view's permissions to include. Only 'published' is supported (optional)",
+            "enum": [
+              "published"
+            ],
+            "examples": [
+              "published"
+            ]
+          },
+          "pageSize": {
+            "type": "integer",
+            "description": "The maximum number of permissions to return per page. When not set for files in a shared drive, at most 100 results will be returned. When not set for files that are not in a shared drive, the entire list will be returned (optional, max: 100)",
+            "minimum": 1,
+            "maximum": 100,
+            "examples": [
+              10,
+              25,
+              50,
+              100
+            ]
+          },
+          "pageToken": {
+            "type": "string",
+            "description": "The token for continuing a previous list request on the next page. This should be set to the value of nextPageToken from the previous response (optional)",
+            "examples": [
+              "CAISBggBEAEYAg",
+              "CAISBggBEAIYAw"
+            ]
+          },
+          "supportsAllDrives": {
+            "type": "boolean",
+            "description": "Whether the requesting application supports both My Drives and shared drives (optional, default: false)",
+            "default": false
+          },
+          "useDomainAdminAccess": {
+            "type": "boolean",
+            "description": "Issue the request as a domain administrator. If set to true, and if the following additional conditions are met, the requester is granted access: The file ID parameter refers to a shared drive. The requester is an administrator of the domain to which the shared drive belongs (optional, default: false)",
+            "default": false
+          }
+        },
+        "required": [
+          "fileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "update_permission",
+      "description": "Updates an existing permission for a file or shared drive. Modifies the role or other settings for an existing permission holder.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file or shared drive containing the permission (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "permissionId": {
+            "type": "string",
+            "description": "The ID of the permission to update (required)",
+            "minLength": 1,
+            "examples": [
+              "anyoneWithLink",
+              "0123456789abcdef",
+              "user:alice@example.com"
+            ]
+          },
+          "role": {
+            "type": "string",
+            "description": "The role granted by this permission (optional, if updating). According to API docs, only 'role' is writable in the request body. Expiration can be removed using the 'removeExpiration' query parameter.",
+            "enum": [
+              "owner",
+              "organizer",
+              "fileOrganizer",
+              "writer",
+              "commenter",
+              "reader"
+            ],
+            "examples": [
+              "reader",
+              "writer",
+              "commenter"
+            ]
+          },
+          "supportsAllDrives": {
+            "type": "boolean",
+            "description": "Whether the requesting application supports both My Drives and shared drives (optional, default: false)",
+            "default": false
+          },
+          "transferOwnership": {
+            "type": "boolean",
+            "description": "Whether to transfer ownership to the specified user and downgrade the current owner to a writer (optional, default: false)",
+            "default": false
+          },
+          "useDomainAdminAccess": {
+            "type": "boolean",
+            "description": "Issue the request as a domain administrator (optional, default: false)",
+            "default": false
+          },
+          "removeExpiration": {
+            "type": "boolean",
+            "description": "Whether to remove the expiration date (optional, default: false)",
+            "default": false
+          },
+          "enforceExpansiveAccess": {
+            "type": "boolean",
+            "description": "Whether the request should enforce expansive access rules (optional, default: false)",
+            "default": false
+          }
+        },
+        "required": [
+          "fileId",
+          "permissionId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_accessproposals",
+      "description": "Retrieves an access proposal by ID. For more information, see Manage pending access proposals.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "Required. The ID of the item the request is on.",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "proposalId": {
+            "type": "string",
+            "description": "Required. The ID of the access proposal to resolve.",
+            "minLength": 1,
+            "examples": [
+              "01JBQM3K8TGHZX9RNVQM5Y2PAZ",
+              "01JBQM3K8TGHZX9RNVQM5Y2PB0"
+            ]
+          }
+        },
+        "required": [
+          "fileId",
+          "proposalId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "resolve_accessproposals",
+      "description": "Approves or denies an access proposal. For more information, see Manage pending access proposals.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "Required. The ID of the item the request is on.",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "proposalId": {
+            "type": "string",
+            "description": "Required. The ID of the access proposal to resolve.",
+            "minLength": 1,
+            "examples": [
+              "01JBQM3K8TGHZX9RNVQM5Y2PAZ",
+              "01JBQM3K8TGHZX9RNVQM5Y2PB0"
+            ]
+          },
+          "action": {
+            "type": "string",
+            "description": "Required. The action to take on the access proposal.",
+            "enum": [
+              "ACTION_UNSPECIFIED",
+              "ACCEPT",
+              "DENY"
+            ],
+            "examples": [
+              "ACCEPT",
+              "DENY"
+            ]
+          },
+          "role": {
+            "type": "array",
+            "description": "Optional. The roles that the approver has allowed, if any. Note: This field is required for the ACCEPT action.",
+            "items": {
+              "type": "string"
+            },
+            "examples": [
+              [
+                "reader"
+              ],
+              [
+                "writer"
+              ],
+              [
+                "commenter"
+              ]
+            ]
+          },
+          "view": {
+            "type": "string",
+            "description": "Optional. Indicates the view for this access proposal. This should only be set when the proposal belongs to a view. Only 'published' is supported.",
+            "examples": [
+              "published"
+            ]
+          },
+          "sendNotification": {
+            "type": "boolean",
+            "description": "Optional. Whether to send an email to the requester when the access proposal is denied or accepted.",
+            "default": true
+          }
+        },
+        "required": [
+          "fileId",
+          "proposalId",
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_accessproposals",
+      "description": "List the access proposals on a file. For more information, see Manage pending access proposals. Note: Only approvers are able to list access proposals on a file. If the user isn't an approver, a 403 error is returned.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "Required. The ID of the item the request is on.",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "pageToken": {
+            "type": "string",
+            "description": "Optional. The continuation token on the list of access requests.",
+            "examples": [
+              "0",
+              "100",
+              "200"
+            ]
+          },
+          "pageSize": {
+            "type": "integer",
+            "description": "Optional. The number of results per page.",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 100,
+            "examples": [
+              10,
+              25,
+              50,
+              100
+            ]
+          }
+        },
+        "required": [
+          "fileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "update_teamdrive",
+      "description": "Deprecated: Use drives.update instead. Updates a Team Drive's metadata. This method supports patch semantics.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "team_drive_id": {
+            "type": "string",
+            "description": "The ID of the Team Drive",
+            "minLength": 1,
+            "examples": [
+              "0AOp1234567890abcdef",
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "The name of this Team Drive.",
+            "minLength": 1,
+            "examples": [
+              "My Team Drive",
+              "Engineering Projects"
+            ]
+          },
+          "color_rgb": {
+            "type": "string",
+            "description": "The color of this Team Drive as an RGB hex string. It can only be set on a drive.teamdrives.update request that does not set theme_id.",
+            "pattern": "^#[0-9A-Fa-f]{6}$",
+            "examples": [
+              "#FF0000",
+              "#00FF00",
+              "#0000FF"
+            ]
+          },
+          "theme_id": {
+            "type": "string",
+            "description": "The ID of the theme from which the background image and color will be set. The set of possible teamDriveThemes can be retrieved from a drive.about.get response. When not specified on a drive.teamdrives.create request, a random theme is chosen from which the background image and color are set. This is a write-only field; it can only be set on requests that don't set color_rgb or background_image_file.",
+            "examples": [
+              "theme_1",
+              "theme_2"
+            ]
+          },
+          "background_image_file": {
+            "type": "object",
+            "description": "An image file and cropping parameters from which a background image for this Team Drive is set. This is a write only field; it can only be set on drive.teamdrives.update requests that don't set theme_id. When specified, all fields of the background_image_file must be set.",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "The ID of an image file in Drive to use for the background image.",
+                "examples": [
+                  "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
+                ]
+              },
+              "x_coordinate": {
+                "type": "number",
+                "description": "The X coordinate of the upper left corner of the cropping area in the background image. This is a value in the closed range of 0 to 1.",
+                "minimum": 0,
+                "maximum": 1,
+                "examples": [
+                  0.1,
+                  0.5,
+                  0.9
+                ]
+              },
+              "y_coordinate": {
+                "type": "number",
+                "description": "The Y coordinate of the upper left corner of the cropping area in the background image. This is a value in the closed range of 0 to 1.",
+                "minimum": 0,
+                "maximum": 1,
+                "examples": [
+                  0.1,
+                  0.5,
+                  0.9
+                ]
+              },
+              "width": {
+                "type": "number",
+                "description": "The width of the cropped image in the closed range of 0 to 1. This value represents the width of the cropped image divided by the width of the entire image.",
+                "minimum": 0,
+                "maximum": 1,
+                "examples": [
+                  0.5,
+                  0.8,
+                  1.0
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "x_coordinate",
+              "y_coordinate",
+              "width"
+            ]
+          },
+          "use_domain_admin_access": {
+            "type": "boolean",
+            "description": "Issue the request as a domain administrator; if set to true, then the requester will be granted access if they are an administrator of the domain to which the Team Drive belongs.",
+            "default": false
+          }
+        },
+        "required": [
+          "team_drive_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_revisions",
+      "description": "Lists a file's revisions in Google Drive. Retrieves all versions and revision history of a file with support for pagination. Essential for version control, reviewing changes, and accessing previous versions of documents.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file to list revisions for (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "pageSize": {
+            "type": "integer",
+            "description": "The maximum number of revisions to return per page (optional, default: 10, max: 1000)",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 10,
+            "examples": [
+              10,
+              25,
+              50,
+              100
+            ]
+          },
+          "pageToken": {
+            "type": "string",
+            "description": "The token for continuing a previous list request on the next page. This should be set to the value of 'nextPageToken' from the previous response (optional)",
+            "examples": [
+              "CAISBggBEAEYAg",
+              "CAISBggBEAIYAw",
+              "nextPageToken123"
+            ]
+          }
+        },
+        "required": [
+          "fileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_revisions",
+      "description": "Retrieves a specific revision by ID for a file in Google Drive. Returns complete revision metadata including version history, publish settings, and export links. Essential for accessing specific versions of documents.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file containing the revision (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "revisionId": {
+            "type": "string",
+            "description": "The ID of the revision to retrieve (required)",
+            "minLength": 1,
+            "examples": [
+              "01JBQM3K8TGHZX9RNVQM5Y2P8V",
+              "01JBQM3K8TGHZX9RNVQM5Y2P8W",
+              "revision_123"
+            ]
+          },
+          "acknowledgeAbuse": {
+            "type": "boolean",
+            "description": "Whether the user is acknowledging the risk of downloading known malware or other abusive files. Only applicable when downloading file content and user is owner or shared drive organizer.",
+            "default": false
+          }
+        },
+        "required": [
+          "fileId",
+          "revisionId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "delete_revisions",
+      "description": "Deletes a specific revision of a file in Google Drive. Uses soft deletion to maintain revision history integrity. Only non-published revisions can be deleted unless specifically overridden.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file containing the revision (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "revisionId": {
+            "type": "string",
+            "description": "The ID of the revision to delete (required)",
+            "minLength": 1,
+            "examples": [
+              "01JBQM3K8TGHZX9RNVQM5Y2P8V",
+              "01JBQM3K8TGHZX9RNVQM5Y2P8W",
+              "revision_123"
+            ]
+          }
+        },
+        "required": [
+          "fileId",
+          "revisionId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "create_teamdrives",
+      "description": "Creates a new shared drive (Team Drive) in Google Drive. Requires a unique requestId for idempotency.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "description": "Unique ID for this request (e.g., UUID). Required for idempotency."
+          },
+          "name": {
+            "type": "string",
+            "description": "The name of the shared drive."
+          },
+          "colorRgb": {
+            "type": "string",
+            "description": "Optional hex color."
+          },
+          "themeId": {
+            "type": "string",
+            "description": "Optional theme ID."
+          },
+          "backgroundImageLink": {
+            "type": "string",
+            "description": "Optional background image link."
+          },
+          "hidden": {
+            "type": "boolean",
+            "description": "Whether the drive is hidden."
+          }
+        },
+        "required": [
+          "requestId",
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "delete_teamdrives",
+      "description": "Deletes a shared drive (Team Drive) permanently in Google Drive. Requires organizer or admin permissions.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "teamDriveId": {
+            "type": "string",
+            "description": "The ID of the shared drive to delete",
+            "examples": [
+              "drive_1",
+              "drive_abc123"
+            ]
+          }
+        },
+        "required": [
+          "teamDriveId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_teamdrives",
+      "description": "Retrieves metadata for a shared drive (Team Drive) by ID in Google Drive. Requires organizer or member access to the drive.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "teamDriveId": {
+            "type": "string",
+            "description": "The ID of the shared drive to retrieve",
+            "examples": [
+              "drive_1",
+              "drive_abc123"
+            ]
+          }
+        },
+        "required": [
+          "teamDriveId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_teamdrives",
+      "description": "Lists shared drives (Team Drives) accessible to the authenticated user. Supports optional pagination and query filters.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pageSize": {
+            "type": "integer",
+            "description": "Maximum number of shared drives to return",
+            "default": 10,
+            "examples": [
+              5,
+              10,
+              20
+            ]
+          },
+          "pageToken": {
+            "type": "string",
+            "description": "Token for retrieving the next page of results"
+          },
+          "q": {
+            "type": "string",
+            "description": "Query string to filter shared drives by name",
+            "examples": [
+              "Team",
+              "Marketing"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "stop_channels",
+      "description": "Stops a notification channel used to watch for changes to a file or folder. Essential for managing push notifications and cleaning up webhook subscriptions in Google Drive. Use this to stop receiving notifications when you no longer need to monitor changes to specific resources.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The UUID or other unique ID of the notification channel being stopped (required)",
+            "minLength": 1,
+            "examples": [
+              "4ba78bf0-6a47-11e2-bcfd-0800200c9a66",
+              "01JCQM3K8TGHZX9RNVQM5Y2PAZ",
+              "channel_12345_abcdef"
+            ]
+          },
+          "resourceId": {
+            "type": "string",
+            "description": "An opaque ID that identifies the resource being watched on this channel (required). This is returned when the channel was created.",
+            "minLength": 1,
+            "examples": [
+              "ret08u3rv24htgh289g",
+              "o-bm5gp5JtLykQGJGuQq5fKkqBLRXBxLRpfaKD_Hg6Vs",
+              "resource_98765_zyxwvu"
+            ]
+          },
+          "token": {
+            "type": "string",
+            "description": "An arbitrary string delivered to the target address with each notification (optional). Used for verification purposes.",
+            "examples": [
+              "my-secret-token",
+              "webhook-verification-123",
+              "user-defined-token"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "resourceId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_files",
+      "description": "Gets a file's metadata or content by ID. To get a file, use the get method on the files resource with the fileId path parameter. The method returns the file as an instance of a files resource. If you provide the URL parameter alt=media, then the response includes the file contents in the response body. Downloading content with alt=media only works if the file is stored in Drive. Essential for retrieving file information, downloading file content, accessing file metadata, and understanding file properties and permissions.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file (required). This is the unique identifier for the file in Google Drive.",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s",
+              "1abc123def456ghi789jkl012mno345pqr678stu901vwx"
+            ]
+          },
+          "acknowledgeAbuse": {
+            "type": "boolean",
+            "description": "Whether the user is acknowledging the risk of downloading known malware or other abusive files. This is only applicable when the alt parameter is set to media and the user is the owner of the file or an organizer of the shared drive in which the file resides (optional, default: false)"
+          },
+          "supportsAllDrives": {
+            "type": "boolean",
+            "description": "Whether the requesting application supports both My Drives and shared drives (optional, default: true)"
+          },
+          "includePermissionsForView": {
+            "type": "string",
+            "description": "Specifies which additional view's permissions to include in the response. Only 'published' is supported (optional)"
+          },
+          "includeLabels": {
+            "type": "string",
+            "description": "A comma-separated list of IDs of labels to include in the labelInfo part of the response (optional)",
+            "examples": [
+              "label_1,label_2,label_3",
+              "important,draft,review"
+            ]
+          },
+          "alt": {
+            "type": "string",
+            "description": "Specifies the format that the API should return for the file. Use 'media' to download file content (optional)",
+            "examples": [
+              "media"
+            ]
+          }
+        },
+        "required": [
+          "fileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_files",
+      "description": "Lists the user's files with comprehensive filtering, pagination, and search capabilities. Supports filtering by corpora (user, domain, drive, allDrives), search queries, ordering, and pagination. Essential for retrieving file listings, searching files, implementing file browsers, and managing file collections. Use this to get file lists, search for specific files, browse user's Drive contents, or implement paginated file navigation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "corpora": {
+            "type": "string",
+            "description": "Bodies of items (files or documents) to which the query applies. Supported values: 'user', 'domain', 'drive', 'allDrives'. Default: 'user'",
+            "examples": [
+              "user",
+              "domain",
+              "drive",
+              "allDrives"
+            ]
+          },
+          "driveId": {
+            "type": "string",
+            "description": "ID of the shared drive to search (optional)",
+            "examples": [
+              "0AOp1234567890abcdef",
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
+            ]
+          },
+          "includeItemsFromAllDrives": {
+            "type": "boolean",
+            "description": "Whether both My Drive and shared drive items should be included in results (optional, default: false)"
+          },
+          "orderBy": {
+            "type": "string",
+            "description": "A comma-separated list of sort keys. Valid keys: 'createdTime', 'folder', 'modifiedByMeTime', 'modifiedTime', 'name', 'name_natural', 'quotaBytesUsed', 'recency', 'sharedWithMeTime', 'starred', 'viewedByMeTime'. Add 'desc' for descending order (optional)",
+            "examples": [
+              "modifiedTime desc,name",
+              "createdTime",
+              "name asc",
+              "starred desc,viewedByMeTime"
+            ]
+          },
+          "pageSize": {
+            "type": "integer",
+            "description": "The maximum number of files to return per page (optional, default: 100, max: 1000)",
+            "minimum": 1,
+            "maximum": 1000,
+            "examples": [
+              10,
+              50,
+              100,
+              200
+            ]
+          },
+          "pageToken": {
+            "type": "string",
+            "description": "The token for continuing a previous list request on the next page (optional)",
+            "examples": [
+              "100",
+              "200",
+              "300"
+            ]
+          },
+          "q": {
+            "type": "string",
+            "description": "A query for filtering the file results. Supports searching by file name, MIME type, and properties (optional)",
+            "examples": [
+              "name contains 'document'",
+              "mimeType = 'application/pdf'",
+              "starred = true",
+              "trashed = false",
+              "modifiedTime > '2024-01-01T00:00:00Z'"
+            ]
+          },
+          "spaces": {
+            "type": "string",
+            "description": "A comma-separated list of spaces to query within the corpora. Supported values: 'drive', 'appDataFolder' (optional, default: 'drive,appDataFolder')",
+            "examples": [
+              "drive",
+              "appDataFolder",
+              "drive,appDataFolder"
+            ]
+          },
+          "supportsAllDrives": {
+            "type": "boolean",
+            "description": "Whether the requesting application supports both My Drives and shared drives (optional, default: true)"
+          },
+          "trashed": {
+            "type": "boolean",
+            "description": "Whether to include trashed files in the results. If not specified, includes both trashed and non-trashed files (optional)",
+            "examples": [
+              true,
+              false
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "update_files",
+      "description": "Updates a file's metadata, content, or both. When calling this method, only populate fields in the request that you want to modify. When updating fields, some fields might be changed automatically, such as modifiedDate. This method supports patch semantics. Essential for modifying file properties, updating file names, changing file descriptions, managing file organization, and updating custom metadata. Use this to rename files, update descriptions, star/unstar files, move files between folders, or update custom properties.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file to update (required). This is the unique identifier for the file in Google Drive.",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s",
+              "1abc123def456ghi789jkl012mno345pqr678stu901vwx"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "The name of the file (optional)",
+            "examples": [
+              "Updated Document Name",
+              "My New File"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "description": "A short description of the file (optional)",
+            "examples": [
+              "Updated description",
+              "This is my updated file"
+            ]
+          },
+          "mimeType": {
+            "type": "string",
+            "description": "The MIME type of the file (optional)",
+            "examples": [
+              "application/vnd.google-apps.document",
+              "application/pdf",
+              "text/plain"
+            ]
+          },
+          "starred": {
+            "type": "boolean",
+            "description": "Whether the user has starred the file (optional)",
+            "examples": [
+              true,
+              false
+            ]
+          },
+          "trashed": {
+            "type": "boolean",
+            "description": "Whether the file has been trashed (optional)",
+            "examples": [
+              true,
+              false
+            ]
+          },
+          "properties": {
+            "type": "object",
+            "description": "A collection of arbitrary key-value pairs which are private to the requesting app (optional)",
+            "examples": [
+              {
+                "custom_field": "custom_value",
+                "priority": "high"
+              },
+              {
+                "department": "engineering",
+                "status": "active"
+              }
+            ]
+          },
+          "appProperties": {
+            "type": "object",
+            "description": "A collection of arbitrary key-value pairs which are visible to all apps (optional)",
+            "examples": [
+              {
+                "app_version": "1.0",
+                "last_sync": "2024-01-16T10:00:00Z"
+              },
+              {
+                "category": "work",
+                "tags": [
+                  "important",
+                  "draft"
+                ]
+              }
+            ]
+          },
+          "addParents": {
+            "type": "string",
+            "description": "A comma-separated list of parent IDs to add (optional)",
+            "examples": [
+              "parent_folder_1",
+              "parent_folder_1,parent_folder_2"
+            ]
+          },
+          "removeParents": {
+            "type": "string",
+            "description": "A comma-separated list of parent IDs to remove (optional)",
+            "examples": [
+              "old_parent_1",
+              "old_parent_1,old_parent_2"
+            ]
+          },
+          "supportsAllDrives": {
+            "type": "boolean",
+            "description": "Whether the requesting application supports both My Drives and shared drives (optional, default: true)"
+          },
+          "includePermissionsForView": {
+            "type": "string",
+            "description": "Specifies which additional view's permissions to include in the response. Only 'published' is supported (optional)"
+          },
+          "includeLabels": {
+            "type": "string",
+            "description": "A comma-separated list of IDs of labels to include in the labelInfo part of the response (optional)",
+            "examples": [
+              "label_1,label_2",
+              "important,draft,review"
+            ]
+          }
+        },
+        "required": [
+          "fileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_files_labels",
+      "description": "Lists the labels on a file. To list the file labels, use the files.listLabels method. The request body must be empty. The method also takes the optional query parameter maxResults to set the maximum number of labels to return per page. If not set, 100 results are returned. Essential for retrieving file label information, understanding file categorization, and managing file metadata through labels.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file to list labels for (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s",
+              "1abc123def456ghi789jkl012mno345pqr678stu901vwx"
+            ]
+          },
+          "maxResults": {
+            "type": "integer",
+            "description": "The maximum number of labels to return per page (optional, default: 100, max: 1000)",
+            "minimum": 1,
+            "maximum": 1000,
+            "examples": [
+              50,
+              100,
+              200
+            ]
+          },
+          "pageToken": {
+            "type": "string",
+            "description": "The token for continuing a previous list request on the next page (optional)",
+            "examples": [
+              "100",
+              "200",
+              "300"
+            ]
+          }
+        },
+        "required": [
+          "fileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "modify_files_labels",
+      "description": "Modifies the set of labels applied to a file using Google Drive API specification. For more information, see Set a label field on a file. Returns a list of the labels that were added or modified. Essential for updating file categorization, managing file metadata, and organizing files through labels. Use this to add new labels to files, update existing label values, or remove labels from files.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file to modify labels for (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s",
+              "1abc123def456ghi789jkl012mno345pqr678stu901vwx"
+            ]
+          },
+          "labelModifications": {
+            "type": "array",
+            "description": "The list of label modifications to apply (required)",
+            "items": {
+              "type": "object",
+              "properties": {
+                "labelId": {
+                  "type": "string",
+                  "description": "The ID of the label to modify"
+                },
+                "fieldModifications": {
+                  "type": "array",
+                  "description": "The list of modifications to this label's fields",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "fieldId": {
+                        "type": "string",
+                        "description": "The ID of the field to be modified"
+                      },
+                      "setDateValues": {
+                        "type": "array",
+                        "description": "Replaces the value of a date field with these new values. The string must be in the RFC 3339 full-date format: YYYY-MM-DD",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "setTextValues": {
+                        "type": "array",
+                        "description": "Sets the value of a text field",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "setSelectionValues": {
+                        "type": "array",
+                        "description": "Replaces a selection field with these new values",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "setIntegerValues": {
+                        "type": "array",
+                        "description": "Replaces the value of an integer field with these new values",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "setUserValues": {
+                        "type": "array",
+                        "description": "Replaces a user field with these new values. The values must be a valid email addresses",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "unsetValues": {
+                        "type": "boolean",
+                        "description": "Unsets the values for this field"
+                      },
+                      "kind": {
+                        "type": "string",
+                        "description": "This is always 'drive#labelFieldModification'",
+                        "default": "drive#labelFieldModification"
+                      }
+                    },
+                    "required": [
+                      "fieldId"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "removeLabel": {
+                  "type": "boolean",
+                  "description": "If true, the label will be removed from the file"
+                },
+                "kind": {
+                  "type": "string",
+                  "description": "This is always 'drive#labelModification'",
+                  "default": "drive#labelModification"
+                }
+              },
+              "required": [
+                "labelId"
+              ],
+              "additionalProperties": false
+            },
+            "examples": [
+              [
+                {
+                  "labelId": "label_123",
+                  "fieldModifications": [
+                    {
+                      "fieldId": "field_456",
+                      "setTextValues": [
+                        "high priority"
+                      ],
+                      "kind": "drive#labelFieldModification"
+                    }
+                  ],
+                  "kind": "drive#labelModification"
+                },
+                {
+                  "labelId": "label_789",
+                  "removeLabel": true,
+                  "kind": "drive#labelModification"
+                }
+              ]
+            ]
+          }
+        },
+        "required": [
+          "fileId",
+          "labelModifications"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "create_file",
+      "description": "Creates a new file in Google Drive (metadata-only version, no binary upload).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ignoreDefaultVisibility": {
+            "type": "boolean",
+            "description": "Ignore the domain's default visibility for the file.",
+            "default": false
+          },
+          "keepRevisionForever": {
+            "type": "boolean",
+            "description": "Whether to set the keepForever field in the new head revision.",
+            "default": false
+          },
+          "ocrLanguage": {
+            "type": "string",
+            "description": "Hint for OCR language (ISO 639-1 code)"
+          },
+          "supportsAllDrives": {
+            "type": "boolean",
+            "description": "Whether the request supports both My Drives and shared drives"
+          },
+          "uploadType": {
+            "type": "string",
+            "enum": [
+              "media",
+              "multipart",
+              "resumable"
+            ],
+            "description": "The type of upload request to the /upload URI.",
+            "default": "media"
+          },
+          "useContentAsIndexableText": {
+            "type": "boolean",
+            "description": "Whether to use the uploaded content as indexable text"
+          },
+          "includePermissionsForView": {
+            "type": "string",
+            "description": "Specifies which additional view's permissions to include in the response. Only 'published' is supported"
+          },
+          "includeLabels": {
+            "type": "string",
+            "description": "A comma-separated list of IDs of labels to include in the labelInfo part of the response"
+          },
+          "parents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The ID of the parent folder containing the file. A file can only have one parent folder; specifying multiple parents isn't supported."
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "The permissions to set for the file."
+          },
+          "properties": {
+            "type": "object",
+            "description": "A collection of arbitrary key-value pairs which are private to the requesting app"
+          },
+          "appProperties": {
+            "type": "object",
+            "description": "A collection of arbitrary key-value pairs which are visible to all apps"
+          },
+          "permissionIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The IDs of the permissions to set for the file."
+          },
+          "contentRestrictions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "readOnly": {
+                  "type": "boolean",
+                  "description": "Whether the content of the file is read-only."
+                },
+                "reason": {
+                  "type": "string",
+                  "description": "The reason for the content restriction."
+                },
+                "ownerRestricted": {
+                  "type": "boolean",
+                  "description": "Whether the content of the file is restricted to the owner."
+                },
+                "systemRestricted": {
+                  "type": "boolean",
+                  "description": "Whether the content of the file is restricted to the system."
+                }
+              }
+            },
+            "description": "Content restriction details"
+          },
+          "copyRequiresWriterPermission": {
+            "type": "boolean",
+            "description": "Whether the options to copy, print, or download this file, should be disabled for readers and commenters"
+          },
+          "contentHints": {
+            "type": "object",
+            "properties": {
+              "indexableText": {
+                "type": "string",
+                "description": "Text to be indexed for the file to improve fullText queries"
+              },
+              "thumbnail": {
+                "type": "object",
+                "description": "Thumbnail image and metadata"
+              }
+            },
+            "description": "Content hints for the file"
+          },
+          "writersCanShare": {
+            "type": "boolean",
+            "description": "Whether writers can share the document with other users"
+          },
+          "mimeType": {
+            "type": "string",
+            "description": "The MIME type of the file",
+            "examples": [
+              "text/plain",
+              "image/jpeg",
+              "application/pdf"
+            ]
+          },
+          "folderColorRgb": {
+            "type": "string",
+            "description": "The color for a folder or a shortcut to a folder"
+          },
+          "name": {
+            "type": "string",
+            "description": "The name of the file",
+            "examples": [
+              "document.txt",
+              "photo.jpg"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "description": "A short description of the file"
+          },
+          "starred": {
+            "type": "boolean",
+            "description": "Whether the user has starred the file"
+          },
+          "trashed": {
+            "type": "boolean",
+            "description": "Whether the file has been trashed"
+          },
+          "createdTime": {
+            "type": "string",
+            "description": "The time at which the file was created"
+          },
+          "modifiedTime": {
+            "type": "string",
+            "description": "The last time the file was modified by anyone"
+          },
+          "originalFilename": {
+            "type": "string",
+            "description": "The original filename of the uploaded file"
+          },
+          "shortcutDetails": {
+            "type": "object",
+            "properties": {
+              "targetId": {
+                "type": "string",
+                "description": "The ID of the file that this shortcut points to"
+              }
+            },
+            "description": "Shortcut file details"
+          },
+          "inheritedPermissionsDisabled": {
+            "type": "boolean",
+            "description": "Whether the permissions of this file are inherited from a parent folder"
+          },
+          "downloadRestrictions": {
+            "type": "object",
+            "properties": {
+              "restricted": {
+                "type": "boolean",
+                "description": "Whether the file is restricted from download"
+              },
+              "reason": {
+                "type": "string",
+                "description": "The reason for the download restriction"
+              }
+            },
+            "description": "Download restrictions metadata"
+          }
+        },
+        "required": [
+          "name",
+          "mimeType"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "delete_files",
+      "description": "Permanently deletes a file owned by the user in Google Drive.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file to delete",
+            "examples": [
+              "file_1",
+              "file_abc123"
+            ]
+          }
+        },
+        "required": [
+          "fileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "empty_files_trash",
+      "description": "Permanently empties the user's trash in Google Drive. Deletes all trashed files owned by the user.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "driveId": {
+            "type": "string",
+            "description": "Optional Drive ID. If set, empties the trash of the specified shared drive.",
+            "examples": [
+              "drive_1"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "export_files",
+      "description": "Exports a Google Workspace file to the requested MIME type.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file to export",
+            "examples": [
+              "file_1",
+              "file_abc123"
+            ]
+          },
+          "mimeType": {
+            "type": "string",
+            "description": "The MIME type to export the file as",
+            "examples": [
+              "application/pdf",
+              "text/plain"
+            ]
+          }
+        },
+        "required": [
+          "fileId",
+          "mimeType"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "generate_files_Ids",
+      "description": "Generates a set of file IDs that can be provided in create or copy requests.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "description": "Number of IDs to generate",
+            "default": 10
+          },
+          "space": {
+            "type": "string",
+            "description": "Space (drive or appDataFolder)",
+            "default": "drive"
+          },
+          "type": {
+            "type": "string",
+            "description": "Type of items (files or shortcuts)",
+            "default": "files"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "create_replies",
+      "description": "Creates a reply to a comment on a Google Drive file. Adds a response to an existing comment thread, enabling collaborative discussions and feedback workflows. Essential for comment-based collaboration and file review processes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file containing the comment (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "commentId": {
+            "type": "string",
+            "description": "The ID of the comment to reply to (required)",
+            "minLength": 1,
+            "examples": [
+              "AAAABg8o8Zk",
+              "AAAACgpKm2k"
+            ]
+          },
+          "content": {
+            "type": "string",
+            "description": "The plain text content of the reply (required)",
+            "minLength": 1,
+            "maxLength": 8192,
+            "examples": [
+              "Thanks for the feedback!",
+              "I'll look into this issue.",
+              "Great suggestion, I'll implement this."
+            ]
+          }
+        },
+        "required": [
+          "fileId",
+          "commentId",
+          "content"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "delete_replies",
+      "description": "Deletes a reply to a comment on a Google Drive file. Removes a reply from a comment thread, useful for cleaning up conversations or removing inappropriate content. Essential for comment moderation and cleanup workflows.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file containing the comment (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "commentId": {
+            "type": "string",
+            "description": "The ID of the comment containing the reply (required)",
+            "minLength": 1,
+            "examples": [
+              "AAAABg8o8Zk",
+              "AAAACgpKm2k"
+            ]
+          },
+          "replyId": {
+            "type": "string",
+            "description": "The ID of the reply to delete (required)",
+            "minLength": 1,
+            "examples": [
+              "AAAABg8o8Zk",
+              "AAAACgpKm2k"
+            ]
+          }
+        },
+        "required": [
+          "fileId",
+          "commentId",
+          "replyId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_replies",
+      "description": "Gets a specific reply to a comment on a Google Drive file. Retrieves detailed information about a single reply, including content, author, timestamps, and metadata. Essential for viewing reply details and building comment interfaces.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file containing the comment (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "commentId": {
+            "type": "string",
+            "description": "The ID of the comment containing the reply (required)",
+            "minLength": 1,
+            "examples": [
+              "AAAABg8o8Zk",
+              "AAAACgpKm2k"
+            ]
+          },
+          "replyId": {
+            "type": "string",
+            "description": "The ID of the reply to retrieve (required)",
+            "minLength": 1,
+            "examples": [
+              "AAAABg8o8Zk",
+              "AAAACgpKm2k"
+            ]
+          },
+          "includeDeleted": {
+            "type": "boolean",
+            "description": "Whether to return deleted replies. Deleted replies will not include their original content.",
+            "default": false
+          }
+        },
+        "required": [
+          "fileId",
+          "commentId",
+          "replyId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_replies",
+      "description": "Lists all replies to a comment on a Google Drive file. Retrieves a paginated list of replies with their content, authors, timestamps, and metadata. Essential for viewing all replies in a comment thread and building comprehensive comment interfaces.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file containing the comment (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "commentId": {
+            "type": "string",
+            "description": "The ID of the comment to list replies for (required)",
+            "minLength": 1,
+            "examples": [
+              "AAAABg8o8Zk",
+              "AAAACgpKm2k"
+            ]
+          },
+          "includeDeleted": {
+            "type": "boolean",
+            "description": "Whether to include deleted replies in the response (optional, default: false). Deleted replies will not include their original content.",
+            "default": false
+          },
+          "pageSize": {
+            "type": "integer",
+            "description": "The maximum number of replies to return per page (optional, default: 10, max: 1000)",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 10,
+            "examples": [
+              10,
+              25,
+              50,
+              100
+            ]
+          },
+          "pageToken": {
+            "type": "string",
+            "description": "The token for continuing a previous list request on the next page. This should be set to the value of 'nextPageToken' from the previous response (optional)",
+            "examples": [
+              "CAISBggBEAEYAg",
+              "CAISBggBEAIYAw",
+              "nextPageToken123"
+            ]
+          }
+        },
+        "required": [
+          "fileId",
+          "commentId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "update_replies",
+      "description": "Updates a reply to a comment on a Google Drive file with patch semantics. Modifies the content of an existing reply, enabling users to edit their responses in comment threads. Essential for comment correction, clarification, and collaborative editing workflows.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file containing the comment (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "commentId": {
+            "type": "string",
+            "description": "The ID of the comment containing the reply (required)",
+            "minLength": 1,
+            "examples": [
+              "AAAABg8o8Zk",
+              "AAAACgpKm2k"
+            ]
+          },
+          "replyId": {
+            "type": "string",
+            "description": "The ID of the reply to update (required)",
+            "minLength": 1,
+            "examples": [
+              "AAAABg8o8Zk",
+              "AAAACgpKm2k"
+            ]
+          },
+          "content": {
+            "type": "string",
+            "description": "The updated plain text content of the reply (required)",
+            "minLength": 1,
+            "maxLength": 8192,
+            "examples": [
+              "Thank you for the clarification!",
+              "I've updated my response based on your feedback.",
+              "Let me correct that information..."
+            ]
+          }
+        },
+        "required": [
+          "fileId",
+          "commentId",
+          "replyId",
+          "content"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "watch_files",
+      "description": "Subscribes to changes to a file in Google Drive. Creates a notification channel that will receive updates when the file is modified, enabling real-time monitoring and synchronization. Essential for building responsive applications that need to react to file changes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file to watch (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "supportsAllDrives": {
+            "type": "boolean",
+            "description": "Whether the requesting application supports both My Drives and shared drives (optional)",
+            "default": false,
+            "examples": [
+              true,
+              false
+            ]
+          },
+          "acknowledgeAbuse": {
+            "type": "boolean",
+            "description": "Whether the user is acknowledging the risk of downloading known malware or other abusive files. This is only applicable when the alt parameter is set to media and the user is the owner of the file or an organizer of the shared drive in which the file resides (optional)",
+            "default": false,
+            "examples": [
+              true,
+              false
+            ]
+          },
+          "includePermissionsForView": {
+            "type": "string",
+            "description": "Specifies which additional view's permissions to include in the response. Only published is supported (optional)",
+            "examples": [
+              "published"
+            ]
+          },
+          "includeLabels": {
+            "type": "string",
+            "description": "A comma-separated list of IDs of labels to include in the labelInfo part of the response (optional)",
+            "examples": [
+              "label1,label2,label3"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "A UUID or similar unique string that identifies this channel (optional)",
+            "examples": [
+              "channel-123",
+              "watch-subscription-456"
+            ]
+          },
+          "token": {
+            "type": "string",
+            "description": "An arbitrary string delivered to the target address with each notification (optional)",
+            "examples": [
+              "notification-token-123",
+              "webhook-secret-456"
+            ]
+          },
+          "expiration": {
+            "type": "string",
+            "description": "Date and time of notification channel expiration (optional)",
+            "examples": [
+              "2024-12-31T23:59:59Z",
+              "2025-01-15T12:00:00Z"
+            ]
+          },
+          "address": {
+            "type": "string",
+            "description": "The address where notifications are delivered for this channel (optional)",
+            "examples": [
+              "https://example.com/notifications",
+              "https://myapp.com/webhook"
+            ]
+          },
+          "payload": {
+            "type": "boolean",
+            "description": "Whether payload is included in notifications (optional)",
+            "default": false
+          },
+          "type": {
+            "type": "string",
+            "description": "The type of delivery mechanism used for this channel (optional)",
+            "default": "web_hook",
+            "examples": [
+              "web_hook",
+              "webhook"
+            ]
+          },
+          "params": {
+            "type": "object",
+            "description": "Additional parameters controlling delivery channel behavior (optional)",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "examples": [
+              {
+                "name": "wrench",
+                "mass": "1.3kg",
+                "count": "3"
+              }
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "description": "Identifies this as a notification channel used to watch for changes to a resource (optional)",
+            "default": "api#channel",
+            "examples": [
+              "api#channel"
+            ]
+          },
+          "resourceId": {
+            "type": "string",
+            "description": "An opaque ID that identifies the resource being watched on this channel. Stable across different API versions (optional)",
+            "examples": [
+              "file_123_channel_456",
+              "resource_789"
+            ]
+          },
+          "resourceUri": {
+            "type": "string",
+            "description": "A version-specific identifier for the watched resource (optional)",
+            "examples": [
+              "https://www.googleapis.com/drive/v3/files/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "https://www.googleapis.com/drive/v3/files/1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          }
+        },
+        "required": [
+          "fileId",
+          "id",
+          "resourceId",
+          "resourceUri",
+          "address"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "download_files",
+      "description": "Downloads the content of a file from Google Drive. Creates a download operation that can be used to retrieve file content in various formats. Essential for accessing file data, exporting documents, and downloading media files. Operations are valid for 24 hours from creation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file to download (required)",
+            "minLength": 1,
+            "examples": [
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1mGSuea-bkBcvWaakJdZnjGpVN3rUw1cBG7XWLXj9M8s"
+            ]
+          },
+          "mimeType": {
+            "type": "string",
+            "description": "The MIME type the file should be downloaded as (optional)",
+            "examples": [
+              "application/pdf",
+              "text/plain",
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ]
+          },
+          "revisionId": {
+            "type": "string",
+            "description": "The revision ID of the file to download (optional)",
+            "examples": [
+              "0BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+              "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
+            ]
+          }
+        },
+        "required": [
+          "fileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_about",
+      "description": "Gets information about the user, the user's Drive, and system capabilities. Essential for retrieving user profile information, storage quota details, drive information, and system capabilities. Use this to get user details, check storage usage, list available drives, and understand system limits and capabilities. Supports Google Drive API fields parameter syntax including nested fields with parentheses.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fields": {
+            "type": "string",
+            "description": "The fields parameter specifies which fields to include in the response. Use * for all fields, specific field names, or nested syntax like storageQuota(limit,usage). If not specified, returns default fields (kind,user,storageQuota).",
+            "examples": [
+              "*",
+              "kind",
+              "user",
+              "storageQuota",
+              "storageQuota(limit,usage)",
+              "user.displayName,user.emailAddress",
+              "kind,user,storageQuota"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_app",
+      "description": "Gets a specific app by ID. Essential for retrieving detailed information about installed Google Drive apps, including their capabilities, supported file types, URLs, and metadata. Use this to get app details, check app capabilities, retrieve app configuration, or understand what apps are available for file operations.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "appId": {
+            "type": "string",
+            "description": "The ID of the app to retrieve (required). This is the unique identifier for the app in Google Drive.",
+            "minLength": 1,
+            "examples": [
+              "felcaaldnbdncclmgdcncolpebgiejap",
+              "aohghmighlieiainnegkcijnfilokake",
+              "nmmhkkegccagdldgiimedpiccmgmieda",
+              "google_docs_app_id"
+            ]
+          }
+        },
+        "required": [
+          "appId"
+        ]
+      }
+    },
+    {
+      "name": "list_apps",
+      "description": "Lists a user's installed apps with optional filtering. Essential for retrieving all installed Google Drive apps, filtering by file extensions or MIME types, and understanding available apps for file operations. Use this to get app listings, find apps that support specific file types, or discover available apps for document creation and editing.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "appFilterExtensions": {
+            "type": "string",
+            "description": "A comma-separated list of file extensions to limit returned results. Apps that can open any of the given file extensions are included in the response.",
+            "examples": [
+              "docx,pptx",
+              ".xlsx,.csv",
+              ".pdf,.doc",
+              "txt,md"
+            ]
+          },
+          "appFilterMimeTypes": {
+            "type": "string",
+            "description": "A comma-separated list of MIME types to limit returned results. Apps that can open any of the given MIME types are included in the response.",
+            "examples": [
+              "application/vnd.google-apps.form,application/vnd.google-apps.site",
+              "application/vnd.google-apps.document,application/vnd.google-apps.spreadsheet",
+              "application/pdf,text/plain",
+              "image/jpeg,image/png"
+            ]
+          },
+          "languageCode": {
+            "type": "string",
+            "description": "A language or locale code, as defined by BCP 47, with some extensions from Unicode's LDML format.",
+            "examples": [
+              "en-us",
+              "fr-ca",
+              "es-es",
+              "de-de"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "get_changes_start_page_token",
+      "description": "Gets the starting pageToken for listing future changes. Essential for change tracking and synchronization in Google Drive. Use this to get a page token that can be used to list changes from a specific point in time, enabling incremental sync and change monitoring across drives.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "driveId": {
+            "type": "string",
+            "description": "The ID of the shared drive for which the starting pageToken for listing future changes from that shared drive will be returned. If not provided, returns token for all drives (global scope).",
+            "examples": [
+              "drive_123",
+              "shared_drive_456",
+              "team_drive_789"
+            ]
+          },
+          "supportsAllDrives": {
+            "type": "boolean",
+            "description": "Whether the requesting application supports both My Drives and shared drives. Set to true if your application can handle both personal and shared drives.",
+            "default": false
+          },
+          "supportsTeamDrives": {
+            "type": "boolean",
+            "description": "Deprecated: Use supportsAllDrives instead. This parameter is kept for backward compatibility."
+          },
+          "teamDriveId": {
+            "type": "string",
+            "description": "Deprecated: Use driveId instead. This parameter is kept for backward compatibility.",
+            "examples": [
+              "team_drive_123",
+              "shared_drive_456"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_changes",
+      "description": "Lists the changes for a user or shared drive. Essential for change tracking, synchronization, and monitoring file modifications in Google Drive. Use this to retrieve paginated lists of changes, track file modifications, implement incremental sync, or monitor drive activity with comprehensive filtering options.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pageToken": {
+            "type": "string",
+            "description": "The token for continuing a previous list request on the next page (required). This should be set to the value of 'nextPageToken' from the previous response or to the response from the getStartPageToken method.",
+            "minLength": 1,
+            "examples": [
+              "token_1234567890abcdef",
+              "next_token_abc123def456",
+              "start_token_xyz789"
+            ]
+          },
+          "driveId": {
+            "type": "string",
+            "description": "The shared drive from which changes will be returned. If specified the change IDs will be reflective of the shared drive.",
+            "examples": [
+              "drive_123",
+              "shared_drive_456",
+              "team_drive_789"
+            ]
+          },
+          "includeCorpusRemovals": {
+            "type": "boolean",
+            "description": "Whether changes should include the file resource if the file is still accessible by the user at the time of the request, even when a file was removed from the list of changes.",
+            "default": false
+          },
+          "includeItemsFromAllDrives": {
+            "type": "boolean",
+            "description": "Whether both My Drive and shared drive items should be included in results.",
+            "default": false
+          },
+          "includeRemoved": {
+            "type": "boolean",
+            "description": "Whether to include changes indicating that items have been removed from the list of changes, for example by deletion or loss of access.",
+            "default": false
+          },
+          "pageSize": {
+            "type": "integer",
+            "description": "The maximum number of changes to return per page (1-1000).",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 100,
+            "examples": [
+              10,
+              50,
+              100,
+              500
+            ]
+          },
+          "restrictToMyDrive": {
+            "type": "boolean",
+            "description": "Whether to restrict the results to changes inside the My Drive hierarchy. This omits changes to files such as those in the Application Data folder or shared files which have not been added to My Drive.",
+            "default": false
+          },
+          "spaces": {
+            "type": "string",
+            "description": "A comma-separated list of spaces to query within the corpora. Supported values are 'drive' and 'appDataFolder'.",
+            "examples": [
+              "drive",
+              "appDataFolder",
+              "drive,appDataFolder"
+            ]
+          },
+          "supportsAllDrives": {
+            "type": "boolean",
+            "description": "Whether the requesting application supports both My Drives and shared drives.",
+            "default": false
+          },
+          "includePermissionsForView": {
+            "type": "string",
+            "description": "Specifies which additional view's permissions to include in the response. Only 'published' is supported.",
+            "examples": [
+              "published"
+            ]
+          },
+          "includeLabels": {
+            "type": "string",
+            "description": "A comma-separated list of IDs of labels to include in the labelInfo part of the response.",
+            "examples": [
+              "label_123",
+              "label_123,label_456"
+            ]
+          }
+        },
+        "required": [
+          "pageToken"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "update_revisions",
+      "description": "Updates a file revision in Google Drive with patch semantics. Allows setting keepForever, published, publishAuto and related revision metadata.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "description": "The ID of the file containing the revision",
+            "examples": [
+              "file_1"
+            ]
+          },
+          "revisionId": {
+            "type": "string",
+            "description": "The ID of the revision to update",
+            "examples": [
+              "rev_1"
+            ]
+          },
+          "keepForever": {
+            "type": "boolean",
+            "description": "Whether to keep this revision forever"
+          },
+          "published": {
+            "type": "boolean",
+            "description": "Whether this revision is published (for Docs, Sheets, Slides)"
+          },
+          "publishAuto": {
+            "type": "boolean",
+            "description": "Whether subsequent revisions should be automatically published"
+          }
+        },
+        "required": [
+          "fileId",
+          "revisionId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "watch_changes",
+      "description": "Sets up a notification channel to watch for changes to Google Drive resources. Creates a webhook subscription that sends notifications when files are created, modified, deleted, or shared. Essential for real-time synchronization and change monitoring across drives and shared drives.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pageToken": {
+            "type": "string",
+            "description": "The page token for listing changes. Use the token from get_changes_start_page_token to watch for future changes. Each page token is valid for a limited time.",
+            "minLength": 1,
+            "examples": [
+              "changes_token_abc123",
+              "page_token_def456",
+              "start_token_789xyz"
+            ]
+          },
+          "driveId": {
+            "type": "string",
+            "description": "The ID of the shared drive for which changes will be watched. If not provided, watches changes across all drives accessible to the user.",
+            "examples": [
+              "drive_123",
+              "shared_drive_456",
+              "team_drive_789"
+            ]
+          },
+          "includeCorpusRemovals": {
+            "type": "boolean",
+            "description": "Whether to include changes outside the target corpus in the result.",
+            "default": false
+          },
+          "includeItemsFromAllDrives": {
+            "type": "boolean",
+            "description": "Whether both My Drive and shared drive items should be included in results.",
+            "default": true
+          },
+          "includePermissionsForView": {
+            "type": "string",
+            "description": "Specifies which additional view's permissions to include in the response. Only 'published' is supported.",
+            "examples": [
+              "published"
+            ]
+          },
+          "includeRemoved": {
+            "type": "boolean",
+            "description": "Whether to include removed items (trashed/deleted files) in the response to detect file deletions.",
+            "default": true
+          },
+          "restrictToMyDrive": {
+            "type": "boolean",
+            "description": "Whether to restrict the results to changes inside the My Drive hierarchy.",
+            "default": false
+          },
+          "spaces": {
+            "type": "string",
+            "description": "A comma-separated list of spaces to query within the corpus. Supported values are 'drive' and 'appDataFolder'.",
+            "default": "drive",
+            "examples": [
+              "drive",
+              "drive,appDataFolder"
+            ]
+          },
+          "supportsAllDrives": {
+            "type": "boolean",
+            "description": "Whether the requesting application supports both My Drives and shared drives.",
+            "default": true
+          },
+          "id": {
+            "type": "string",
+            "description": "A unique identifier for the notification channel. Must be a UUID-like string to ensure uniqueness across all channels.",
+            "minLength": 1,
+            "examples": [
+              "channel_abc123def456",
+              "notification_789xyz012",
+              "webhook_456def789abc"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "description": "The type of notification channel. Currently only 'web_hook' is supported for HTTP POST notifications.",
+            "default": "web_hook"
+          },
+          "address": {
+            "type": "string",
+            "description": "The HTTPS URL where notifications will be sent. Must be accessible from Google's servers and support HTTPS.",
+            "minLength": 1,
+            "examples": [
+              "https://myapp.example.com/webhooks/drive/changes",
+              "https://api.company.com/notifications/google-drive",
+              "https://webhook.site/unique-id"
+            ]
+          },
+          "token": {
+            "type": "string",
+            "description": "An optional arbitrary string that will be passed with each notification to verify the source. Use this for basic authentication.",
+            "examples": [
+              "secret_token_abc123",
+              "webhook_verification_key",
+              "my_custom_auth_token"
+            ]
+          },
+          "expiration": {
+            "type": "integer",
+            "description": "The expiration time of the notification channel as a Unix timestamp in milliseconds. If not provided, defaults to maximum allowed (typically 24 hours).",
+            "minimum": 0,
+            "examples": [
+              1640995200000,
+              1641081600000
+            ]
+          },
+          "params": {
+            "type": "object",
+            "description": "Additional parameters controlling delivery channel behavior.",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "payload": {
+            "type": "boolean",
+            "description": "Whether payload is included in notifications.",
+            "default": true
+          },
+          "resourceUri": {
+            "type": "string",
+            "description": "A version-specific identifier for the watched resource.",
+            "minLength": 1,
+            "examples": [
+              "resource_123",
+              "resource_456"
+            ]
+          },
+          "resourceId": {
+            "type": "string",
+            "description": "An opaque ID that identifies the resource being watched on this channel.",
+            "minLength": 1,
+            "examples": [
+              "resource_123",
+              "resource_456"
+            ]
+          }
+        },
+        "required": [
+          "pageToken",
+          "id",
+          "address"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ]
+}
