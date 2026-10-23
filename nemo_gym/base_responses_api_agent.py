@@ -46,8 +46,9 @@ from nemo_gym._checkpoint.agent import (
     RestartOnlyTrackingMiddleware,
     RestoredAgentSession,
 )
-from nemo_gym._checkpoint.control import CheckpointMode, install_participant
+from nemo_gym._checkpoint.control import CheckpointMode
 from nemo_gym._checkpoint.errors import StaleAttemptError
+from nemo_gym._checkpoint.participant_workers import install_server_participant
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym._checkpoint.steps import CHECKPOINT_RESTART_HEADER
 from nemo_gym.agent_activation_types import (
@@ -558,9 +559,6 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        if (self.config.num_workers or 1) != 1:
-            # Each worker would track only its own calls, so a checkpoint could miss work in the others.
-            raise ValueError("agent checkpointing requires num_workers=1: sessions live in one process")
         if self.checkpoint_mode == "restart_only":
             # Fail closed: in-flight work is reported as restarts,
             # which never hold up a checkpoint and start over after a crash.
@@ -570,9 +568,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         else:
             self._checkpoint_participant = AgentSessionParticipant(self)
             participant = self._checkpoint_participant
-        install_participant(
+        install_server_participant(
             app,
             participant,
+            num_workers=self.config.num_workers or 1,
             auth_token=settings.control_auth_token,
             lease_grace_seconds=settings.lease_grace_seconds,
             instance_name=self.config.name,
