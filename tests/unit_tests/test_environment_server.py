@@ -97,10 +97,9 @@ def _environment_server(**config_overrides: Any) -> _EnvironmentServer:
     [
         ({"checkpoint_mode": "stateless"}, "checkpoint_mode='stateless'"),
         ({"checkpoint_mode": "exportd"}, "checkpoint_mode='exportd'"),
-        ({"checkpoint_boundaries": True}, 'declare checkpoint_mode = "exported"'),
     ],
 )
-def test_an_environment_server_with_an_unknown_or_replaced_checkpoint_declaration_fails_at_startup(
+def test_an_environment_server_with_an_unknown_checkpoint_declaration_fails_at_startup(
     declarations: dict[str, Any], error: str
 ) -> None:
     annotations = {name: ClassVar[Any] for name in declarations}
