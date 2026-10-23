@@ -168,14 +168,8 @@ class Terminus2SessionState(AgentSessionState):
 
 
 def _collector_task_identity(task_id: TaskId) -> str:
-    """The task identity rollout collection expects on a session run's trajectory.
-
-    A materialized row carries ``task_id`` as the ``TaskId`` mapping, and the collector's canonical
-    identity for it is that mapping's ``str`` (``_trajectory_identity`` in ``rollout_collection``).
-    The environment server posts only the task's ``responses_create_params`` on the turn, so the
-    seeded session request is the harness's only copy of that identity.
-    """
-    return str(task_id.model_dump(mode="json"))
+    """Carry the seeded logical task ID onto turns whose request body names no task."""
+    return task_id.task_id
 
 
 class Terminus2AgentRunRequest(BaseRunRequest):
