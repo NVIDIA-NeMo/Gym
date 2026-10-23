@@ -55,6 +55,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     bash_var,
     escape_for_single_quoted_block,
     render_driver_entrypoint,
+    render_export_tail,
     render_gym_cmd,
     render_health_check,
     render_ray_prelude,
@@ -62,6 +63,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_write_file_from_base64,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args
+from nemo_gym.orchestration.exports import effective_exports, export_install_extras, export_run_settings
 
 
 _SCRIPT_TEMPLATE = """\
@@ -1135,19 +1137,45 @@ def build_sbatch_script(
         # as a calling convention it would have to parse.
         gym_cmd = ""
         driver_env |= _command_env(benchmark, remote_bench_dir)
+    exports = effective_exports(config, benchmark_name)
+    export_tail = (
+        render_export_tail(
+            remote_bench_dir,
+            [
+                (
+                    name,
+                    flatten_run_args(
+                        export_run_settings(
+                            name,
+                            settings,
+                            benchmark_name=benchmark_name,
+                            gym_job_id=remote_bench_dir.parent.name,
+                            bench_dir=remote_bench_dir,
+                        )
+                    ),
+                )
+                for name, settings in exports.items()
+            ],
+        )
+        if exports
+        else None
+    )
+    extras = tuple(
+        dict.fromkeys(
+            ((GYM_TELEMETRY_EXTRA,) if instrumented else ())
+            + exporter_extras(benchmark.run)
+            + export_install_extras(list(exports))
+            + gitlab_storage_extras(benchmark.prepare)
+            + gitlab_storage_extras(benchmark.run)
+        )
+    )
     entrypoint = render_driver_entrypoint(
         repo=gi.repo if gi else None,
         ref=gi.ref if gi else None,
         prepare_cmd=prepare_cmd,
         command=benchmark.command,
-        extras=tuple(
-            dict.fromkeys(
-                ((GYM_TELEMETRY_EXTRA,) if instrumented else ())
-                + exporter_extras(benchmark.run)
-                + gitlab_storage_extras(benchmark.prepare)
-                + gitlab_storage_extras(benchmark.run)
-            )
-        ),
+        extras=extras,
+        export_tail=export_tail,
     )
     prepare_command = ""
     driver_env_prefix = _resolve_env(driver_env) if driver_env else ""

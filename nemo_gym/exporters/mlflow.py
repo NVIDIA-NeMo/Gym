@@ -35,7 +35,7 @@ from mlflow.utils.validation import (
 )
 from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym.config_types import MLFlowConfig
+from nemo_gym.config_types import MLFlowConfig, MLflowExportConfig, RunExportConfig
 from nemo_gym.exporters import run_failed
 from nemo_gym.exporters.base import BaseExporter
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
@@ -118,6 +118,7 @@ class MLflowExporter(BaseExporter):
     """
 
     name: ClassVar[str] = "mlflow"
+    config_model: ClassVar[type[RunExportConfig]] = MLflowExportConfig
 
     CONFIG_ARTIFACT_FILE: ClassVar[str] = "global_config.json"
     # Where a reopened run records each later segment's config; the first segment's stays in CONFIG_ARTIFACT_FILE.
