@@ -1,6 +1,6 @@
 # VisionArena-Bench v0.1
 
-500 prompts from [VisionArena-Bench](https://huggingface.co/datasets/lmarena-ai/vision-arena-bench-v0.1). The prompt adapts [the paper](https://arxiv.org/pdf/2412.08687#page=19) with LMArena v3 verdicts.
+486 evaluated prompts from the 500 in [VisionArena-Bench](https://huggingface.co/datasets/lmarena-ai/vision-arena-bench-v0.1); 14 lack usable baseline answers. The prompt adapts [the paper](https://arxiv.org/pdf/2412.08687#page=19) with LMArena v3 verdicts.
 
 Preparation downloads pinned prompts/images from Hugging Face and corresponding baseline answers from GitLab. No upstream prompts or images are stored in the GitLab artifact. Requires `huggingface_hub`, `pyarrow`, and GitLab credentials; existing prepared validation files are reused.
 

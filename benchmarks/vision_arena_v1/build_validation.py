@@ -52,6 +52,10 @@ def build_validation(*, questions: Path, responses: Path, output: Path, allow_pa
                     raise ValueError(f"Duplicate baseline question ID: {question_id}")
                 if not isinstance(answer, str) or not answer.strip() or not row.get("baseline_model"):
                     raise ValueError(f"Invalid baseline answer: {question_id}")
+                # Answers-only artifacts must follow the same final-answer contract as raw generations.
+                answer = re.sub(r"<(think|thinking)>.*?</\1>", "", answer, flags=re.DOTALL).strip()
+                if not answer or re.search(r"<(?:think|thinking)>", answer):
+                    raise ValueError(f"Invalid baseline final answer: {question_id}")
                 baselines[question_id] = (
                     {"model": row["baseline_model"], "response": {"id": row.get("baseline_response_id")}},
                     answer,

@@ -19,6 +19,19 @@ def prepare(source_jsonl: str | Path | None = None, *, judge_mode: str = "genrm"
     output = Path(__file__).parent / "data" / f"genrm_mmrb1_{judge_mode}_validation.jsonl"
     if source_jsonl:
         source = Path(source_jsonl).expanduser()
+        try:
+            with source.open() as stream:
+                rows = [json.loads(line) for line in stream if line.strip()]
+            matches = bool(rows) and all(
+                isinstance(row, dict)
+                and isinstance(row.get("verifier_metadata"), dict)
+                and row["verifier_metadata"].get("judge_mode") == judge_mode
+                for row in rows
+            )
+        except json.JSONDecodeError:
+            matches = False
+        if not matches:
+            raise ValueError("Input must match the selected judge_mode")
         if source.resolve() != output.resolve():
             output.parent.mkdir(parents=True, exist_ok=True)
             copyfile(source, output)

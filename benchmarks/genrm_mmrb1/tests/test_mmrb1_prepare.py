@@ -14,7 +14,7 @@ from benchmarks.genrm_mmrb1 import prepare as module
 def test_use_converted_file(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(module, "__file__", str(tmp_path / "prepare.py"))
     source = tmp_path / "source.jsonl"
-    source.write_text('{"id":"test"}\n')
+    source.write_text('{"id":"test","verifier_metadata":{"judge_mode":"llm_as_a_judge"}}\n')
     output = tmp_path / "data/genrm_mmrb1_llm_as_a_judge_validation.jsonl"
     assert module.prepare(source, judge_mode="llm_as_a_judge") == output
     assert output.read_bytes() == source.read_bytes()
@@ -26,6 +26,30 @@ def test_missing_explicit_source(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(module, "__file__", str(tmp_path / "prepare.py"))
     with pytest.raises(FileNotFoundError):
         module.prepare(tmp_path / "missing.jsonl")
+
+
+@pytest.mark.parametrize("mode", ["genrm", "llm_as_a_judge"])
+@pytest.mark.parametrize("same_path", [False, True])
+def test_import_rejects_wrong_mode_without_overwrite(tmp_path, monkeypatch, mode, same_path):
+    monkeypatch.setattr(module, "__file__", str(tmp_path / "prepare.py"))
+    output = tmp_path / "data" / f"genrm_mmrb1_{mode}_validation.jsonl"
+    output.parent.mkdir()
+    other = "genrm" if mode == "llm_as_a_judge" else "llm_as_a_judge"
+    original = json.dumps({"id": "test", "verifier_metadata": {"judge_mode": other}}) + "\n"
+    output.write_text(original)
+    source = output if same_path else tmp_path / "source.jsonl"
+    source.write_text(original)
+    with pytest.raises(ValueError, match="selected judge_mode"):
+        module.prepare(source, judge_mode=mode)
+    assert output.read_text() == original
+
+
+def test_empty_import_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(module, "__file__", str(tmp_path / "prepare.py"))
+    source = tmp_path / "empty.jsonl"
+    source.write_text("")
+    with pytest.raises(ValueError, match="selected judge_mode"):
+        module.prepare(source)
 
 
 @pytest.mark.parametrize("mode", ["genrm", "llm_as_a_judge"])
@@ -96,4 +120,24 @@ def test_incomplete_source_is_not_published(tmp_path: Path, monkeypatch) -> None
     completed.write_text("[]")
     with pytest.raises(ValueError, match="4,711"):
         module.prepare()
+    assert not (tmp_path / "data/genrm_mmrb1_genrm_validation.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"id":"x","verifier_metadata":null}\n',
+        '{"id":"x","verifier_metadata":["unexpected"]}\n',
+        '{"id":"x","verifier_metadata":"unexpected"}\n',
+        '{"id":"x","verifier_metadata":42}\n',
+        "not json\n",
+        "[1]\n",
+    ],
+)
+def test_import_rejects_malformed_rows(tmp_path, monkeypatch, content):
+    monkeypatch.setattr(module, "__file__", str(tmp_path / "prepare.py"))
+    source = tmp_path / "bad.jsonl"
+    source.write_text(content)
+    with pytest.raises(ValueError, match="selected judge_mode"):
+        module.prepare(source)
     assert not (tmp_path / "data/genrm_mmrb1_genrm_validation.jsonl").exists()

@@ -144,7 +144,10 @@ def test_explicit_partial_build_excludes_unusable_answers(tmp_path, inputs):
     assert "499" not in ids
 
 
-def test_prepare_local_answers_without_gitlab(tmp_path, inputs, monkeypatch):
+@pytest.mark.parametrize(
+    "answer", ["A tree.", "<think>private analysis</think>A tree.", "<thinking>private</thinking>A tree."]
+)
+def test_prepare_local_answers_without_gitlab(tmp_path, inputs, monkeypatch, answer):
     questions, _ = inputs
     rows = [
         {
@@ -157,6 +160,7 @@ def test_prepare_local_answers_without_gitlab(tmp_path, inputs, monkeypatch):
         }
         for i in range(486)
     ]
+    rows[0]["baseline_answer"] = answer
     responses = write_responses(tmp_path, rows)
     calls = []
 
@@ -171,6 +175,7 @@ def test_prepare_local_answers_without_gitlab(tmp_path, inputs, monkeypatch):
     assert len(result) == 486
     assert result[0]["metadata"]["baseline_response_id"] == "response-0"
     assert result[0]["baseline_answer"] == "A tree."
+    assert "private analysis" not in output.read_text()
     assert calls[0]["revision"] == preparation.DATASET_REVISION
     with pytest.raises(FileExistsError):
         preparation.prepare(baseline_responses=responses, output_path=output)
@@ -195,3 +200,24 @@ def test_minimal_answers_reject_duplicate_ids(tmp_path, inputs):
             output=tmp_path / "validation.jsonl",
             allow_partial=True,
         )
+
+
+@pytest.mark.parametrize("answer", ["<think>unfinished", "<thinking>unfinished", "<think>reasoning only</think>"])
+def test_answers_only_rejects_unusable_final_answer(tmp_path, inputs, monkeypatch, answer):
+    questions, _ = inputs
+    rows = [
+        {
+            "question_id": str(i),
+            "baseline_model": "baseline",
+            "baseline_answer": "A tree.",
+            "source": preparation.DATASET_ID,
+            "source_revision": preparation.DATASET_REVISION,
+        }
+        for i in range(486)
+    ]
+    rows[1]["baseline_answer"] = answer
+    monkeypatch.setattr(preparation, "hf_hub_download", lambda **kwargs: str(questions))
+    output = tmp_path / "validation.jsonl"
+    with pytest.raises(ValueError, match="Invalid baseline final answer"):
+        preparation.prepare(baseline_responses=write_responses(tmp_path, rows), output_path=output)
+    assert not output.exists()

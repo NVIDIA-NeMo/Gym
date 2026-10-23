@@ -8,7 +8,7 @@ Evaluate a model's chat capabilities on diverse conversational prompts. An LLM j
 |---|---:|---|
 | `lmarena_v3` | 3,713 | Recommended. Exact human-battle opponents, equal verdict weights, `both bad` as a tie, reference-length style control. |
 | `lmarena_v2` | 1,475 | Legacy/deprecated. Synthetic baselines, strong verdict weight 3, `both bad` excluded, Bradley-Terry style control. |
-| `vision_arena_v1` | 500 | Image-and-text prompts, multimodal judge, no style control. |
+| `vision_arena_v1` | 486 | Fixed subset of 500 upstream prompts; 14 lack usable baseline answers. Multimodal judge, no style control. |
 
 ## Setup
 

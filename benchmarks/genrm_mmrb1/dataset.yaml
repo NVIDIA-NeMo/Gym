@@ -17,16 +17,6 @@ genrm_eval:
 
 genrm_mmrb1_benchmark_agent:
   _inherit_from: genrm_eval_simple_agent
-  responses_api_agents:
-    simple_agent:
-      datasets:
-      - name: genrm_mmrb1
-        type: benchmark
-        jsonl_fpath: benchmarks/genrm_mmrb1/data/genrm_mmrb1_genrm_validation.jsonl
-        prepare_script: benchmarks/genrm_mmrb1/prepare.py
-        prompt_config: null
-        num_repeats: 1
-        license: CC-BY-NC-4.0; third-party image licenses also apply
 
 responses_create_params:
   max_output_tokens: 16384

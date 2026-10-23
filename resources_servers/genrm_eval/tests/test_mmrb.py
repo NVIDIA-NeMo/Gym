@@ -5,7 +5,9 @@
 from unittest.mock import MagicMock
 
 import pytest
+from omegaconf import OmegaConf
 
+from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.server_utils import ServerClient
 from resources_servers.genrm_eval.app import (
     GenRMEvalConfig,
@@ -14,6 +16,59 @@ from resources_servers.genrm_eval.app import (
     parse_ab_ranking,
 )
 from resources_servers.genrm_eval.mmrb import compute_metrics
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("benchmarks", [("genrm_mmrb1", "genrm_mmrb2"), ("genrm_mmrb2", "genrm_mmrb1")])
+async def test_composed_llm_configs_use_independent_verifiers(benchmarks):
+    resolved = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+            initial_global_config_dict=OmegaConf.create(
+                {
+                    "config_paths": [f"benchmarks/{benchmark}/llm_as_a_judge.yaml" for benchmark in benchmarks],
+                    "policy_base_url": "https://example.com/v1",
+                    "policy_api_key": "dummy",
+                    "policy_model_name": "judge",
+                }
+            ),
+        )
+    )
+    for benchmark, text in [("genrm_mmrb1", "[[A]]"), ("genrm_mmrb2", '{"better_response":"A"}')]:
+        name = resolved[f"{benchmark}_benchmark_agent"].responses_api_agents.simple_agent.resources_server.name
+        settings = OmegaConf.to_container(resolved[name].resources_servers.genrm_eval, resolve=True)
+        config = GenRMEvalConfig.model_validate(settings | {"name": name, "host": "localhost", "port": 8000})
+        server = GenRMEvalResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        body = GenRMEvalVerifyRequest.model_validate(
+            {
+                "id": "p",
+                "verifier_metadata": {"pair_id": "p", "ground_truth_label": 3},
+                "responses_create_params": {"input": [{"role": "user", "content": "Question and candidates"}]},
+                "response": {
+                    "id": "r",
+                    "created_at": 0,
+                    "model": "judge",
+                    "object": "response",
+                    "parallel_tool_calls": False,
+                    "tool_choice": "none",
+                    "tools": [],
+                    "output": [
+                        {
+                            "type": "message",
+                            "id": "m",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": text, "annotations": []}],
+                        }
+                    ],
+                },
+            }
+        )
+        result = await server.verify(body)
+        assert result.predicted_ranking == 3
+        assert result.reward == 1
 
 
 @pytest.mark.parametrize(
