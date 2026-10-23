@@ -42,14 +42,26 @@ from nemo_gym.sandbox.compose_fields import (
 )
 from nemo_gym.sandbox.compose_volumes import ComposeVolumeError
 from nemo_gym.sandbox.providers.registry import provider_service_option_fields
+from nemo_gym.tasks.harbor.compose_overlay import (
+    ComposeOverlayError,
+    HarborComposeOverlay,
+    absolute_env_files,
+    interpolate_overlay,
+    load_overlay_file,
+    merge_compose,
+    overlay_files,
+    synthesized_group,
+)
 from nemo_gym.tasks.harbor.compose_variables import (
     _warn_unset,
     compose_variables,
     inline_env_files,
     residual_interpolation,
+    resolve_env_files,
     restore_compose_types,
     substitute_compose,
     substitute_with_empty,
+    under_task_folder,
 )
 from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
@@ -87,14 +99,49 @@ def compose_file(task: HarborTask) -> Path | None:
     return None
 
 
+def compose_source(task: HarborTask, overlay: HarborComposeOverlay | None = None) -> str:
+    """What a message about the task's Compose document names as its source: ``environment/<file>`` for the task's own
+    file; with a job-level ``overlay`` that names Compose files, that file ``merged with Compose overlay files [...]``
+    (the files in merge order), or the overlay files alone for a task that declares no Compose file, since a field, a
+    bind source or a service the group cannot run may then come from any of them."""
+    path = compose_file(task)
+    own = f"environment/{path.name}" if path is not None else None
+    extra = overlay_files(overlay)
+    if not extra:
+        return own or "environment/"
+    files = "[" + ", ".join(str(file) for file in extra) + "]"
+    if own is None:
+        return f"Compose overlay files {files} (the task declares no Compose file of its own)"
+    return f"{own} merged with Compose overlay files {files}"
+
+
 def load_compose_document(
-    task: HarborTask, *, operator_variables: Mapping[str, str] | None = None
+    task: HarborTask,
+    *,
+    operator_variables: Mapping[str, str] | None = None,
+    overlay: HarborComposeOverlay | None = None,
 ) -> dict[str, Any] | None:
     """The task's Compose overlay with ``env_file`` entries inlined, ``${VAR}`` references resolved and the images
     prepare built standing in for the services it built (:func:`with_built_images`), ``main`` only when the loader
     resolved the task to its built image.
 
-    Returns ``None`` for a task without a Compose file. Prepare and the resources server both read the
+    Returns ``None`` for a task without a Compose file, unless the job-level ``overlay`` names Compose files
+    (:class:`~nemo_gym.tasks.harbor.compose_overlay.HarborComposeOverlay`): then a task without a file gets
+    Harbor's one-service group (``main`` alone, :func:`~nemo_gym.tasks.harbor.compose_overlay.synthesized_group`)
+    and every task's document takes the overlay files merged onto it, in order, as Compose merges the extra
+    ``-f`` files Harbor passes after the task's (:func:`~nemo_gym.tasks.harbor.compose_overlay.merge_compose`).
+    Each overlay file is interpolated with the task's variables (and the deployment's, when given); its relative
+    paths resolve against the project directory, the task's ``environment`` folder, as Compose resolves every ``-f``
+    file's and Harbor's ``--project-directory`` names it, never against the overlay file's own folder: its ``env_file``
+    entries are made absolute against it before the merge (an overlay's ``env_file`` may be any readable file; a
+    task's stays under the task) and its bind sources are left for the planner, which resolves them against the same
+    folder as the task's. The env files of the merged document are read once after the merge, the merged
+    ``environment`` winning over them, as Compose reads them after merging the ``-f`` files.
+    An overlay file that does not parse or merge raises :class:`ImageConfigError` naming it; an error in the merged
+    document (an env file it names, an interpolation left over, a ``services`` key the overlay removed) names the
+    task's file and the overlay files merged onto it (:func:`compose_source`).
+
+    Prepare and the resources server both read the
     file through this function, so the document the sandbox starts is the one prepare validated, provided
     both run with the same process environment (see :func:`compose_variables`). A required variable
     (``${VAR:?msg}``) without a value, a task variable the host does not set or a missing ``env_file``
@@ -109,11 +156,20 @@ def load_compose_document(
     with a warning, the images and structure being all prepare reads.
     """
     path = compose_file(task)
-    if path is None:
+    extra_files = overlay_files(overlay)
+    if path is None and not extra_files:
         return None
-    document = yaml.safe_load(path.read_text()) or {}
-    if not isinstance(document, dict):
-        raise ImageConfigError(f"{task.task_id}: {path.name} is not a mapping")
+    if path is None:
+        # Harbor starts a plain image task through Compose too (its own files define ``main``), so the job's
+        # extra files extend it the same way; the adapter fills ``main`` from the task as it does for a task
+        # file that leaves it out.
+        document: dict[str, Any] = synthesized_group()
+    else:
+        document = yaml.safe_load(path.read_text()) or {}
+        if not isinstance(document, dict):
+            raise ImageConfigError(f"{task.task_id}: {path.name} is not a mapping")
+    name = path.name if path is not None else "(no Compose file)"
+    base_dir = path.parent if path is not None else task.path / "environment"
     unset: set[str] = set()
     try:
         # Interpolate first, as Compose does, so an env_file path may use ${CONTEXT_DIR}; env_file values are then
@@ -121,19 +177,55 @@ def load_compose_document(
         variables = compose_variables(task, unset=unset)
         if operator_variables is not None:
             variables = dict(operator_variables) | variables
-            document = substitute_compose(document, variables)
+
+            def substitute(value: Any) -> Any:
+                return substitute_compose(value, variables)
+
         else:
-            document = substitute_with_empty(document, variables, unset)
-        document = inline_env_files(document, path.parent, variables)
+
+            def substitute(value: Any) -> Any:
+                return substitute_with_empty(value, variables, unset)
+
+        document = substitute(document)
+        # The task's env_file paths resolve under its environment folder now; the files are read after the merge.
+        document = resolve_env_files(document, under_task_folder(base_dir))
+    except ComposeSubstitutionError as exc:
+        raise ImageConfigError(f"{task.task_id}: {name}: {exc}") from exc
+    for extra_path in extra_files:
+        # The same variables as the task's file: Harbor's one ``docker compose`` command interpolates every
+        # ``-f`` file against one environment, resolves every file's relative paths against the project directory
+        # (``--project-directory``, the task's environment folder: ``base_dir``), then merges them in order. The
+        # overlay's env files land where the task's do, by the operator's rule (any readable file); its bind sources
+        # are the planner's, which resolves them against ``base_dir`` as it resolves the task's.
+        try:
+            extra = load_overlay_file(extra_path)
+            extra = interpolate_overlay(extra, substitute)
+            extra = absolute_env_files(extra, base_dir)
+            document = merge_compose(document, extra)
+        except (ComposeOverlayError, ComposeSubstitutionError) as exc:
+            raise ImageConfigError(f"{task.task_id}: Compose overlay {extra_path}: {exc}") from exc
+    if extra_files:
+        # The merged document is what the rest reads: its errors name every file it came from.
+        name = compose_source(task, overlay)
+        if not isinstance(document.get("services"), dict):
+            # ``services: !reset`` (or an ``!override`` scalar) in an overlay file: the merge removed the mapping the
+            # field check, the planner and the adapter index. Refused with the reason, not a KeyError at prepare and a
+            # retried seed.
+            raise ImageConfigError(f"{task.task_id}: {name}: the merged document has no services mapping")
+    try:
+        # The env files are read once, after the merge, the merged ``environment`` winning over them, as Compose
+        # reads them after merging the ``-f`` files (so a later file's ``env_file: !reset []`` dropped the earlier
+        # lists above); every service's ``environment`` becomes a mapping of strings here.
+        document = inline_env_files(document, None, variables)
         # Interpolation hands back strings; the adapter reads healthcheck ``disable`` and ``retries`` by type.
         document = restore_compose_types(document)
     except ComposeSubstitutionError as exc:
-        raise ImageConfigError(f"{task.task_id}: {path.name}: {exc}") from exc
+        raise ImageConfigError(f"{task.task_id}: {name}: {exc}") from exc
     _warn_unset(task, unset)
     residual = residual_interpolation(document)
     if residual is not None:
         # The key path only: the value next to it may be a host secret.
-        raise ImageConfigError(f"{task.task_id}: {path.name}: unresolved interpolation left at {residual}")
+        raise ImageConfigError(f"{task.task_id}: {name}: unresolved interpolation left at {residual}")
     images = dict(task.built_images)
     if task.built_image is None:
         # The loader resolved main elsewhere (docker_image declared, or pull/overlay mode): a recorded main is
@@ -279,6 +371,7 @@ def plan_task_compose_volumes(
     gpu_volume_sources: dict[str, str] | None = None,
     shared_storage: bool | None = None,
     gpu_shared_storage: bool | None = None,
+    overlay: HarborComposeOverlay | None = None,
 ) -> dict[str, list[dict[str, str]]]:
     """Resolve the ``volumes`` of a task's Compose document for a sandbox group; mutates ``document``.
 
@@ -292,7 +385,8 @@ def plan_task_compose_volumes(
     the same way: ``False`` leaves a task whose named volumes or shared logs binds need it out at prepare,
     naming the setting, rather than failing every seed; ``None`` (unknown) leaves that to the adapter.
     Anything the group cannot run raises :class:`ImageConfigError` naming the volume, path or field, so
-    prepare fails before a sandbox starts. Returns the uploads per service.
+    prepare fails before a sandbox starts; with the job-level ``overlay`` the document came from, the message names
+    the overlay files merged onto the task's (:func:`compose_source`). Returns the uploads per service.
     """
     path = compose_file(task)
     base_dir = path.parent if path is not None else task.path / "environment"
@@ -309,15 +403,20 @@ def plan_task_compose_volumes(
             gpu_shared_storage=gpu_shared_storage,
         )
     except ComposeVolumeError as exc:
-        raise ImageConfigError(f"{task.task_id}: {base_dir.name}/{path.name if path else ''}: {exc}") from exc
+        raise ImageConfigError(f"{task.task_id}: {compose_source(task, overlay)}: {exc}") from exc
 
 
-def compose_image_references(task: HarborTask, document: dict[str, Any] | None = None) -> list[str]:
-    """Every image a Compose task starts: the task image for ``main`` and each sidecar's image."""
+def compose_image_references(
+    task: HarborTask, document: dict[str, Any] | None = None, *, overlay: HarborComposeOverlay | None = None
+) -> list[str]:
+    """Every image a Compose task starts: the task image for ``main`` and each sidecar's image. A service without an
+    image and without a recorded build is refused by name; with the job-level ``overlay`` the document came from,
+    naming the overlay files merged onto the task's (:func:`compose_source`), since the service may be theirs."""
     if document is None:
-        document = load_compose_document(task)
+        document = load_compose_document(task, overlay=overlay)
     if document is None:
         return []
+    source = f"{compose_source(task, overlay)}: " if overlay_files(overlay) else ""
     services = document.get("services") or {}
     references: list[str] = []
     main_image = (services.get(MAIN_SERVICE) or {}).get("image") or task.image
@@ -332,12 +431,13 @@ def compose_image_references(task: HarborTask, document: dict[str, Any] | None =
             # service with build: is built, never pulled, so its image: (when it has one) is only a tag and is not
             # resolved from the registry.
             raise ImageConfigError(
-                f"{task.task_id}: Compose service {name!r} has a build section and prepare recorded no build for it"
+                f"{task.task_id}: {source}Compose service {name!r} has a build section and prepare recorded no "
+                "build for it"
             )
         image = service.get("image")
         if not image:
             raise ImageConfigError(
-                f"{task.task_id}: Compose service {name!r} names no image and prepare recorded no build for it"
+                f"{task.task_id}: {source}Compose service {name!r} names no image and prepare recorded no build for it"
             )
         references.append(image)
     return list(dict.fromkeys(references))
@@ -349,10 +449,48 @@ def task_declares_gpus(task: HarborTask) -> bool:
     return bool(task.config.environment.gpus or (verifier_environment is not None and verifier_environment.gpus))
 
 
-def _compose_field_error(task: HarborTask, exc: ComposeFieldError) -> ImageConfigError:
-    path = compose_file(task)
-    base_dir = path.parent if path is not None else task.path / "environment"
-    return ImageConfigError(f"{task.task_id}: {base_dir.name}/{path.name if path else ''}: {exc}")
+def _compose_field_error(
+    task: HarborTask, exc: ComposeFieldError, overlay: HarborComposeOverlay | None = None
+) -> ImageConfigError:
+    return ImageConfigError(f"{task.task_id}: {compose_source(task, overlay)}: {exc}")
+
+
+def check_task_sidecar_extra_hosts(
+    task: HarborTask,
+    document: dict[str, Any],
+    image_configs: Mapping[str, Any],
+    *,
+    overlay: HarborComposeOverlay | None = None,
+) -> None:
+    """The check that needs the recorded images: a sidecar whose image runs as a non-root user, which the group
+    starts without host injection, must declare no ``extra_hosts``
+    (:func:`~nemo_gym.sandbox.compose_config.check_sidecar_extra_hosts`). Prepare runs it once the images are
+    recorded; the seed runs it on the merged document before anything is provisioned, where ``adapt_non_root_sidecars``
+    would otherwise raise it inside the group's start. Raises :class:`ImageConfigError` naming the task and its
+    Compose source (with the overlay files merged onto it, :func:`compose_source`)."""
+    try:
+        check_sidecar_extra_hosts(document, image_configs)
+    except ComposeFieldError as exc:
+        raise _compose_field_error(task, exc, overlay) from exc
+
+
+def check_task_compose_services(
+    task: HarborTask, document: Mapping[str, Any], *, overlay: HarborComposeOverlay | None = None
+) -> None:
+    """Every service the task's ``artifacts`` entries and ``[[verifier.collect]]`` hooks name must be in the group
+    (``main`` always is: the group starts it from the task image). A task's own file names them in practice; a
+    job-level overlay file can reset one away (``kafka: !reset`` against a hook with ``service = "kafka"``), which
+    only the merged document shows, so prepare skips such a task with the reason and the seed refuses it terminally,
+    where the group's start would fail and be retried for every episode. Raises :class:`ImageConfigError` naming the
+    task, its Compose source (:func:`compose_source`) and the services."""
+    named = {artifact.service for artifact in task.config.artifacts}
+    named |= {hook.service for hook in task.config.verifier.collect}
+    missing = sorted(named - {None, MAIN_SERVICE} - set(document.get("services") or {}))
+    if missing:
+        raise ImageConfigError(
+            f"{task.task_id}: {compose_source(task, overlay)}: artifacts or collect hooks name Compose services the "
+            f"group does not have: {missing}"
+        )
 
 
 def check_task_compose_fields(
@@ -362,6 +500,7 @@ def check_task_compose_fields(
     provider: str | None = None,
     gpu_provider: str | None = None,
     platform: str = DEFAULT_PLATFORM,
+    overlay: HarborComposeOverlay | None = None,
 ) -> dict[str, Any]:
     """Give the service fields of a task's Compose document their meaning for a sandbox group; mutates ``document``.
 
@@ -376,7 +515,9 @@ def check_task_compose_fields(
     it: the task's services run on ``gpu_provider`` when ``task.toml`` declares GPUs, and a sidecar that
     reserves GPUs through ``deploy.resources`` runs there as well. Anything else raises
     :class:`ImageConfigError` naming the task, the file and the field, so prepare leaves the task out before a
-    sandbox starts. Without a provider name the capability check runs at seed instead, against the live provider.
+    sandbox starts; with the job-level ``overlay`` the document came from, the file named is the task's merged with
+    the overlay files (:func:`compose_source`), since the service or the field may be theirs. Without a provider
+    name the capability check runs at seed instead, against the live provider.
 
     The document checked is the one the server hands the adapter (``environment_servers/harbor/app.py``,
     ``_compose_document``): the services prepare built carrying their recorded images without ``build:`` or
@@ -391,7 +532,7 @@ def check_task_compose_fields(
     if task.built_image is None:
         document, reason = without_restated_main_build(task, document)
         if reason is not None:
-            raise _compose_field_error(task, ComposeFieldError("build", reason))
+            raise _compose_field_error(task, ComposeFieldError("build", reason), overlay)
     if gpu_provider is not None and task_declares_gpus(task):
         provider = gpu_provider
     fields = provider_service_option_fields(provider) if provider is not None else None
@@ -406,7 +547,7 @@ def check_task_compose_fields(
             gpu_service_option_fields=gpu_fields,
         )
     except ComposeFieldError as exc:
-        raise _compose_field_error(task, exc) from exc
+        raise _compose_field_error(task, exc, overlay) from exc
 
 
 def dockerfile_base_images(folder: Path, *, select: Callable[[str], bool] | None = None) -> dict[str, list[str]]:
@@ -484,7 +625,7 @@ def record_image_configs(
     # `platform`'s, linux/amd64 unless set. A record of another platform is read again at its pin, like a legacy one.
     requested = tuple(getattr(client, "platform", None) or platform_pair(platform))[:2]
     recorded = read_image_configs(folder)
-    missing = [ref for ref in references if not _reusable(recorded.get(ref), requested)]
+    missing = [ref for ref in references if not reusable_record(recorded.get(ref), requested)]
     if not missing:
         return path
     if client is None:
@@ -510,15 +651,16 @@ def record_image_configs(
     with record_lock(path):
         recorded = read_image_configs(folder)
         for reference, record in resolved.items():
-            if not _reusable(recorded.get(reference), requested):
+            if not reusable_record(recorded.get(reference), requested):
                 recorded[reference] = record
         write_json_record(path, recorded)
     return path
 
 
-def _reusable(record: Any, platform: tuple[str, ...]) -> bool:
+def reusable_record(record: Any, platform: tuple[str, ...]) -> bool:
     """A ``compose-images.json`` entry this run reads as it is: of the current record version and of ``platform``
-    (``os``, ``architecture``), the one the run records images for. Anything else is resolved again at its pin."""
+    (``os``, ``architecture``), the one the run records images for. Anything else is resolved again at its pin by
+    prepare, and refused at seed by the server, which cannot resolve it (``_check_compose_images``)."""
     if not isinstance(record, dict) or record.get("record_version") != RECORD_VERSION:
         return False
     recorded = (str(record.get("os") or "").lower(), str(record.get("architecture") or "").lower())
@@ -539,10 +681,13 @@ def record_compose_images(
     gpu_volume_sources: dict[str, str] | None = None,
     shared_storage: bool | None = None,
     gpu_shared_storage: bool | None = None,
+    overlay: HarborComposeOverlay | None = None,
 ) -> Path | None:
     """Write ``compose-images.json`` in ``folder`` for the Compose tasks among ``tasks``.
 
-    Returns the file's path, or ``None`` when no task uses Compose. Each Compose document's service fields are
+    Returns the file's path, or ``None`` when no task uses Compose. With a job-level ``overlay`` that names Compose
+    files every task is a Compose task (:func:`load_compose_document`): the overlay's images are recorded with the
+    tasks', and a plain image task's own image too, since the group starts it as ``main``. Each Compose document's service fields are
     checked on the way (see :func:`check_task_compose_fields`), with ``sandbox_provider`` and
     ``gpu_sandbox_provider`` naming the providers of the ``sandbox:`` and ``gpu_sandbox_provider`` blocks for the
     capability check and ``compose_platform`` the deployment's, which a service's ``platform`` must match;
@@ -551,29 +696,38 @@ def record_compose_images(
     ``volume_sources`` standing for the deployment's external volumes; a task that declares GPUs, and a GPU-reserving
     sidecar of any task, are checked against ``gpu_volume_sources`` instead when that is given (the
     ``gpu_sandbox_provider`` block's mapping, which is what the server resolves them against; an empty mapping when
-    that block has none), and ``shared_storage``/``gpu_shared_storage`` say whether each block's provider has the
+    that block has none), ``shared_storage``/``gpu_shared_storage`` say whether each block's provider has the
     shared storage named volumes and shared logs binds need (``False`` leaves such a task out, naming the
-    setting). A task whose Compose file
-    does not resolve (an :class:`ImageConfigError` from :func:`load_compose_document`), carries a field the group
-    cannot run, or declares volumes it cannot run (the planner's :class:`ImageConfigError`) does not stop the others: with ``skipped`` given it is recorded there by task id with the reason and left out,
+    setting), and the services the task's ``artifacts`` and ``[[verifier.collect]]`` hooks name must be
+    in the merged document (:func:`check_task_compose_services`; an overlay file can reset one away). A task whose
+    Compose file does not resolve (an :class:`ImageConfigError` from :func:`load_compose_document`), carries a field
+    the group cannot run, declares volumes it cannot run (the planner's :class:`ImageConfigError`), or lacks a
+    service its hooks name does not stop the others
+    (with an overlay, the reason names the overlay files merged onto the task's, :func:`compose_source`): with
+    ``skipped`` given it is recorded there by task id with the reason and left out,
     otherwise one :class:`ImageConfigError` at the end names every such task. Its images are still recorded, so
     a fixed task file needs no new registry round-trip. Once the image configurations are recorded, a sidecar
     whose image runs as a non-root user (which the group starts without host injection) must declare no
-    ``extra_hosts``, the way the adapter decides it at seed. An image the registry cannot resolve still raises
-    for the whole set, as :func:`record_image_configs` says.
+    ``extra_hosts`` (:func:`check_task_sidecar_extra_hosts`), the way the adapter decides it at seed. An image the
+    registry cannot resolve still raises for the whole set, as :func:`record_image_configs` says.
     """
     references: dict[str, list[str]] = {}
     failures: dict[str, str] = {}
     documents: list[tuple[HarborTask, dict[str, Any]]] = []
     for task in tasks:
         try:
-            document = load_compose_document(task)
+            document = load_compose_document(task, overlay=overlay)
             if document is None:
                 continue
-            for reference in compose_image_references(task, document):
+            for reference in compose_image_references(task, document, overlay=overlay):
                 references.setdefault(reference, []).append(task.task_id)
             check_task_compose_fields(
-                task, document, provider=sandbox_provider, gpu_provider=gpu_sandbox_provider, platform=compose_platform
+                task,
+                document,
+                provider=sandbox_provider,
+                gpu_provider=gpu_sandbox_provider,
+                platform=compose_platform,
+                overlay=overlay,
             )
             plan_task_compose_volumes(
                 task,
@@ -582,7 +736,9 @@ def record_compose_images(
                 gpu_volume_sources=gpu_volume_sources,
                 shared_storage=shared_storage,
                 gpu_shared_storage=gpu_shared_storage,
+                overlay=overlay,
             )
+            check_task_compose_services(task, document, overlay=overlay)
         except ImageConfigError as exc:
             failures[task.task_id] = str(exc)
             continue
@@ -596,11 +752,11 @@ def record_compose_images(
         recorded = json.loads(path.read_text())
         for task, document in documents:
             try:
-                check_sidecar_extra_hosts(document, recorded)
-            except ComposeFieldError as exc:
+                check_task_sidecar_extra_hosts(task, document, recorded, overlay=overlay)
+            except ImageConfigError as exc:
                 if skipped is None:
-                    raise _compose_field_error(task, exc) from exc
-                skipped[task.task_id] = str(_compose_field_error(task, exc))
+                    raise
+                skipped[task.task_id] = str(exc)
     return path
 
 

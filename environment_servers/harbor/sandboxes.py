@@ -49,15 +49,21 @@ from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, SandboxCreate
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import apply_rollout_prefix
 from nemo_gym.tasks.harbor import HarborTask
+from nemo_gym.tasks.harbor.compose_overlay import overlay_files
+from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.image_configs import (
     check_task_compose_fields,
+    check_task_compose_services,
+    check_task_sidecar_extra_hosts,
     load_compose_document,
     plan_task_compose_volumes,
+    reusable_record,
     task_declares_gpus,
     without_restated_main_build,
 )
 from nemo_gym.tasks.harbor.models import HarborEnvironment
+from nemo_gym.tasks.harbor.records import MAIN_SERVICE
 
 
 LOGGER = logging.getLogger(__name__)
@@ -337,6 +343,11 @@ class HarborSandboxMixin:
                 f"(sandbox_ready_timeout_s={self.config.sandbox_ready_timeout_s:g} plus {SEED_CREATE_GRACE_S:g}s grace)"
             ) from exc
 
+    def _uses_compose(self, task: HarborTask) -> bool:
+        """Whether the episode starts a Compose group: the task ships a Compose file, or the job-level overlay names
+        Compose files, which turn a plain image task into Harbor's one-service group plus the overlay's services."""
+        return task.needs_compose or bool(overlay_files(self.config.compose_overlay))
+
     def _compose_image_configs(self, task: HarborTask) -> dict[str, Any]:
         """The image configurations `gym dataset fetch` recorded next to the task folders."""
         path = task.path.parent / COMPOSE_IMAGES_FILE
@@ -347,16 +358,71 @@ class HarborSandboxMixin:
             )
         return json.loads(path.read_text())
 
-    def _compose_document(self, task: HarborTask, episode_key: str | None = None) -> dict[str, Any]:
-        """The published overlay resolved against recorded image metadata, ready for the Compose adapter."""
-        image_configs = self._compose_image_configs(task)
+    def _check_compose_images(self, task: HarborTask, document: Mapping[str, Any]) -> dict[str, Any]:
+        """Refuse, before anything is provisioned, a Compose group whose images prepare did not record for this
+        deployment: the record file missing next to the task folders, or a service of the merged document (an overlay's,
+        or ``main`` with the task's image) without an entry this deployment can use, by prepare's own rule
+        (:func:`~nemo_gym.tasks.harbor.image_configs.reusable_record`: the current record version and the platform the
+        sandboxes run; ``resolve_compose`` refuses a record of another platform at the group's start). A dataset
+        prepared without the ``compose_overlay`` the server now runs with, or for another platform (prepared on x86,
+        served on arm64), is the usual cause; it is a configuration error, so the seed is refused terminally (422)
+        naming the services and what was recorded, where the group's start would raise and be retried for every
+        episode. Returns the records, for the checks that read them (``_check_compose_group``)."""
+        path = task.path.parent / COMPOSE_IMAGES_FILE
+        if not path.is_file():
+            raise HTTPException(
+                422,
+                f"Compose group of task {task.task_id!r} needs the image configurations prepare records at {path}; "
+                "prepare the dataset again, with this compose_overlay when one is set",
+            )
+        recorded = json.loads(path.read_text())
+        platform = sandbox_platform(self.config.sandbox_provider_options)
+        missing: list[str] = []
+        for name, service in (document.get("services") or {}).items():
+            image = service.get("image") if isinstance(service, dict) else None
+            if image is None and name == MAIN_SERVICE:
+                image = task.image
+            record = recorded.get(image)
+            if reusable_record(record, platform):
+                continue
+            if isinstance(record, dict):
+                # Recorded, but not for this deployment: say what the record is, so the operator knows which prepare.
+                was = (
+                    f"{str(record.get('os') or '?').lower()}/{str(record.get('architecture') or '?').lower()}, record "
+                    f"version {record.get('record_version')!r}"
+                )
+                missing.append(
+                    f"service {name!r} ({image!r} is recorded for {was}; this deployment runs {'/'.join(platform)} and "
+                    f"reads record version {RECORD_VERSION})"
+                )
+            else:
+                missing.append(f"service {name!r} ({image!r})")
+        if missing:
+            raise HTTPException(
+                422,
+                f"Compose group of task {task.task_id!r}: no image configuration this deployment can use recorded in "
+                f"{path} for {', '.join(missing)}; prepare the dataset again with this compose_overlay, for this "
+                "platform, so its images are recorded",
+            )
+        return recorded
+
+    def _check_compose_group(
+        self, task: HarborTask, document: dict[str, Any], image_configs: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """The checks prepare ran on the task's Compose document, with this deployment's inputs: ``main``'s restated
+        build dropped, the field check against the providers the services run on, the volume planner against the
+        blocks' ``volume_sources``, the services the task's artifacts and collect hooks name present in the merged
+        document, and no ``extra_hosts`` on a sidecar whose recorded image runs as a non-root user (``image_configs``
+        is the record file the seed already read, or it is read here). Mutates and returns ``document`` (its fields
+        in their normalized forms, its bind mounts planned). The seed runs it before anything is provisioned, so a
+        document the deployment cannot run (a job-level overlay file with a field the group cannot run, a bind
+        source no ``volume_sources`` entry maps, a service reset away that a collect hook names, host entries on a
+        non-root sidecar; the overlay being a run-config value that changes between prepare and serve) is refused
+        terminally there, with the reason, and not raised from the group's start and retried for every episode;
+        ``_compose_document`` runs it again on the document the group starts. Raises :class:`ImageConfigError` or
+        :class:`HarborTaskError` naming the task, the files and the field."""
         global_config_dict = get_global_config_dict()
         provider = resolve_provider_config(self._provider_ref(task), global_config_dict)
-        # The same reader prepare used: env_file inlined, ${VAR} resolved from the task, not the process, and the
-        # images prepare built standing in for the sidecars it built (and main when the task runs from its built
-        # image), their build: and a pull_policy: build dropped. The record was read once by load_task: no hashing here.
-        # The deployment's compose_variables fill the names the task leaves to it (a name still unset fails here).
-        document = load_compose_document(task, operator_variables=self._compose_variable_values(episode_key))
         if task.built_image is None:
             # A pull or overlay task's main build: (and the pull_policy: build that goes with it) that only restates
             # Harbor's own build of the Dockerfile is dropped; a key that would change the image is the task's
@@ -380,6 +446,7 @@ class HarborSandboxMixin:
             provider=_provider_name(provider),
             gpu_provider=_provider_name(gpu_provider),
             platform=self._compose_platform(),
+            overlay=self.config.compose_overlay,
         )
         # The same planner prepare used: task-file bind mounts become uploads, named volumes stay for shared
         # storage, external ones resolve through the block each service runs on (a GPU-routed sidecar through the
@@ -389,21 +456,59 @@ class HarborSandboxMixin:
             document,
             volume_sources=self._volume_sources(task),
             gpu_volume_sources=self._gpu_volume_sources(global_config_dict),
+            overlay=self.config.compose_overlay,
         )
+        # The two checks prepare runs after those, in its order: the services the task's artifacts and collect hooks
+        # name are in the merged document (an overlay file can reset one away), and a sidecar whose recorded image
+        # runs as a non-root user declares no extra_hosts (the group starts it without host injection;
+        # `adapt_non_root_sidecars` would raise the same inside the group's start).
+        check_task_compose_services(task, document, overlay=self.config.compose_overlay)
+        if image_configs is None:
+            image_configs = self._compose_image_configs(task)
+        check_task_sidecar_extra_hosts(task, document, image_configs, overlay=self.config.compose_overlay)
+        return document
+
+    def _compose_document(self, task: HarborTask, episode_key: str | None = None) -> dict[str, Any]:
+        """The published overlay (with the job-level overlay files merged on) resolved against recorded image
+        metadata, ready for the Compose adapter."""
+        image_configs = self._compose_image_configs(task)
+        global_config_dict = get_global_config_dict()
+        provider = resolve_provider_config(self._provider_ref(task), global_config_dict)
+        # The same reader prepare used: env_file inlined, ${VAR} resolved from the task, not the process, and the
+        # images prepare built standing in for the sidecars it built (and main when the task runs from its built
+        # image), their build: and a pull_policy: build dropped. The record was read once by load_task: no hashing here.
+        # The deployment's compose_variables fill the names the task leaves to it (a name still unset fails here).
+        document = load_compose_document(
+            task, operator_variables=self._compose_variable_values(episode_key), overlay=self.config.compose_overlay
+        )
+        # The checks the seed already ran on this document (`_check_compose_group`), on the one the group starts.
+        document = self._check_compose_group(task, document, image_configs)
         # Every service of the group, GPU-routed or not, starts with the one configured set of provider options,
         # so the platform they request (OpenSandbox ``platform: {os, arch}``; linux/amd64 when unset) is the one
         # each recorded image has to be for (and the one `_compose_platform` spelled for the field check above).
         platform = sandbox_platform(self.config.sandbox_provider_options)
         document = resolve_compose(document, task.image, image_configs, platform=platform)
-        # A non-root sidecar runs without host injection and so takes no extra_hosts: prepare refused that already.
+        # A non-root sidecar runs without host injection and so takes no extra_hosts: prepare and the check above
+        # refused that already.
         adapt_non_root_sidecars(document, image_configs)
         if "opensandbox" in provider:
             opensandbox_shm_labels(document)
+        # Checked above too (`check_task_compose_services`, before the resolution): the last line before the adapter.
         sidecars = {a.service for a in task.config.artifacts} | {h.service for h in task.config.verifier.collect}
         missing = sidecars - {None, "main"} - set(document["services"])
         if missing:
             raise RuntimeError(
                 f"Artifacts or collect hooks name Compose services that do not exist: {sorted(missing)}"
+            )
+        if overlay_files(self.config.compose_overlay):
+            # The merged group is the run's, not the task's: say what the overlay made of this task once per
+            # resolution (per episode, since the document is private), so the run log shows the attached services.
+            LOGGER.info(
+                "%s: Compose group with the job-level overlay (%d file(s)): services %s; MCP servers %s",
+                task.task_id,
+                len(overlay_files(self.config.compose_overlay)),
+                list(document["services"]),
+                [server.name for server in self._task_mcp_servers(task)],
             )
         return document
 
@@ -451,11 +556,14 @@ class HarborSandboxMixin:
     async def _create_compose(self, task: HarborTask, episode_key: str) -> AsyncSandboxCompose:
         """Start the task's Compose group; the ``main`` service is the agent's sandbox.
 
-        With ``compose_variables`` the document is the episode's (a model server URL carries the rollout prefix)
-        and may hold credentials: the adapter reads it once, at start, from a private folder removed right after,
-        never under ``artifacts_dir``. Without them it is the task's, resolved and written once per digest.
+        With ``compose_variables`` or a job-level Compose overlay the document is the episode's (a model server URL
+        carries the rollout prefix) and may hold credentials: the adapter reads it once, at start, from a private
+        folder removed right after, never under ``artifacts_dir``. Without them it is the task's, resolved and
+        written once per digest.
         """
-        private = bool(self.config.compose_variables)
+        # A job-level overlay file is the operator's and commonly carries the deployment's keys (a memory
+        # sidecar's model key), so its document stays private too, like one with compose_variables.
+        private = bool(self.config.compose_variables) or bool(overlay_files(self.config.compose_overlay))
         if private:
             document, path = await asyncio.to_thread(self._write_compose_document, task, episode_key, private=True)
         else:
