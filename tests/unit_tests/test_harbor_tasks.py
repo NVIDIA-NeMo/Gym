@@ -1969,11 +1969,13 @@ def test_a_staging_directory_an_interrupted_fetch_left_behind_is_not_a_task(
 
 
 def test_a_legacy_unhidden_staging_directory_is_refused_as_a_duplicate_task(tmp_path):
-    """Review (round 14): a `main` build from before this change staged the fetch's clone under an unhidden
-    `nemo-gym-harbor-*` name, which first-level discovery never saw. The recursive search does see such a leftover,
-    and refuses it loudly (the clone holds the task that was being staged, so its ID is a duplicate) rather than
-    running a second copy. The name is not special-cased (a user folder may start that way); the README says to
-    delete those directories once."""
+    """Older fetches staged clones under visible `nemo-gym-harbor-*` names, which recursive discovery enters.
+
+    When the source folder and registry alias share a name, as here, the leftover causes a duplicate task ID.
+    Renamed sources have distinct IDs and can instead become extra tasks. The prefix is not special-cased
+    (a user folder may start that way); the README says to remove known staging leftovers before preparing
+    an existing dataset after upgrading.
+    """
     from nemo_gym.tasks.harbor.task import iter_task_folders
 
     dataset = tmp_path / "datasets" / "ds"
@@ -1982,7 +1984,7 @@ def test_a_legacy_unhidden_staging_directory_is_refused_as_a_duplicate_task(tmp_
     with pytest.raises(HarborTaskError, match=r"Duplicate Harbor task ID 'a'") as excinfo:
         iter_task_folders(dataset)
     assert "nemo-gym-harbor-k3x9q" in str(excinfo.value)
-    # Prepare discovers through the same walk, so nothing runs or scores with the leftover in place.
+    # Prepare uses the same walk, so the matching-name leftover also stops task discovery there.
     with pytest.raises(HarborTaskError, match=r"Duplicate Harbor task ID 'a'"):
         discover_tasks(dataset)
 

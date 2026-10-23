@@ -542,7 +542,12 @@ package is downloaded by content hash into `<name>/` (`latest`), `<name>-<tag>/`
 `manifest.toml`, which pins the package and the version the fetch resolved so a later fetch never mixes another package or a moved `latest` into the folder. A local task folder, or a folder of task folders, works the same way; task folders may be
 grouped in subfolders (the search is recursive, `task_id` stays the task folder's own name and must be unique
 across the dataset, and `dataset.toml` and the recorded image configurations sit at the dataset root). The
-taskset mapping records the relative path of a task found below the first level under `paths`. The fetch stages its clone in a hidden `.nemo-gym-harbor-*` directory inside the dataset folder, which the search skips. A fetch interrupted under a `main` build from before this change staged under an unhidden `nemo-gym-harbor-*` name; the recursive search sees that clone and refuses the dataset (a duplicate task ID, or a task the manifest does not record) rather than running it. Delete those directories once; nothing in them is needed. The generated run config declares the materialized rows as the agent's
+taskset mapping records the relative path of a task found below the first level under `paths`. The fetch stages its clone in a hidden
+`.nemo-gym-harbor-*` directory inside the dataset folder, which the search skips. Before preparing an existing
+dataset after upgrading, remove any known `nemo-gym-harbor-*` staging directories left by interrupted fetches
+from older Gym builds. These visible clones can cause duplicate task IDs or become extra tasks when source-folder
+names differ from registry aliases. An old manifest that records only upstream pins does not prevent the
+extra-task case. The generated run config declares the materialized rows as the agent's
 validation dataset and binds the per-taskset environment server to that agent. `gym dataset validate` reports,
 per task, the verifier's wall time (`verify_s`) and the network it ran under (`network`). Running model episodes
 requires a harness that accepts `sandbox_access` in its session seed and leaves the sandbox to the server
