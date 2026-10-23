@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+officeenv @ git+ssh://git@gitlab-master.nvidia.com:12051/dmolinari/officeenv.git@v1.7.0

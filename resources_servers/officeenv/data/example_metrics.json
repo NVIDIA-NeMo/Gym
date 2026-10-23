@@ -1,0 +1,47 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/officeenv/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 18.2,
+        "Min": 1.0,
+        "Max": 43.0,
+        "Standard deviation": 22.2
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 1519.8,
+        "Min": 201.0,
+        "Max": 3894.0,
+        "Standard deviation": 1758.43
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "officeenv_version": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "task_id": {
+        "unique_count": 5,
+        "total_count": 5
+    }
+}

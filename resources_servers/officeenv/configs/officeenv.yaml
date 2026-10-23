@@ -1,0 +1,38 @@
+# OfficeEnv: connected SaaS apps simulated per rollout. The environment is the officeenv
+# package pinned in requirements.txt; rows come from `officeenv emit` and carry the officeenv
+# version that emitted them.
+officeenv_resources_server:
+  resources_servers:
+    officeenv:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: OfficeEnv connected-apps environment (Slack, Gmail, Google Calendar, Google Sheets, HubSpot, Jira, …) with per-task exposure (tools / api_search / cli / mcp), fault injection, data injection and final-state reward
+      # Opt in for training only: AutomationBench's length penalty, reported as its own reward
+      # term (README, "Training length penalty"); the other knobs default as in app.py.
+      length_penalty:
+        enabled: false
+officeenv_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: officeenv_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 50
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/officeenv/data/example.jsonl
+# Rollout collection dispatches to environment servers; the simple agent owns its episode
+# through /run, so the legacy_agent environment server stands in front of it.
+officeenv_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: officeenv_simple_agent
