@@ -557,7 +557,7 @@ class TestRolloutMCPServers:
         assert agent._rollout_mcp_servers({}) is None
 
     def test_builds_streamable_http_entry_with_session_header(self) -> None:
-        agent = self._agent_with_resources_server()
+        agent = self._agent_with_resources_server(mcp_tool_timeout_seconds=30)
         servers = agent._rollout_mcp_servers(
             {
                 "mcp": {
@@ -571,6 +571,7 @@ class TestRolloutMCPServers:
             "example_mcp_weather": {
                 "url": "http://127.0.0.1:8123/mcp",
                 "http_headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
+                "tool_timeout_sec": 30.0,
             }
         }
 

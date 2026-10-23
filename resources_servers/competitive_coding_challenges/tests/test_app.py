@@ -40,6 +40,7 @@ class _StubCCCEvaluator:
 ccc_eval_stub.CCCEvaluator = _StubCCCEvaluator
 sys.modules.setdefault("ccc_eval", ccc_eval_stub)
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from resources_servers.competitive_coding_challenges.app import (
@@ -148,6 +149,32 @@ def test_setup_webserver_warns_when_shared_dir_is_tmp(
     assert "Set CCC_SHARED_TEMP_DIR to a path mounted into both containers" in caplog.text
 
 
+def test_setup_webserver_resolves_a_benchmark_test_file_from_the_gym_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # Benchmark configs (benchmarks/ioi/config.yaml) give repo-relative paths; the server runs from its own dir.
+    repo_relative = "resources_servers/competitive_coding_challenges/app.py"
+    monkeypatch.chdir(tmp_path)
+    server = _make_server(test_file=repo_relative)
+    with patch("resources_servers.competitive_coding_challenges.app.CCCEvaluator") as evaluator_cls:
+        server.setup_webserver()
+
+    assert evaluator_cls.call_args.kwargs["config"]["test_file"] == str(PARENT_DIR / repo_relative)
+
+
+def test_setup_webserver_keeps_a_test_file_found_from_the_server_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "test_metadata.jsonl").write_text("{}\n")
+    monkeypatch.chdir(tmp_path)
+    server = _make_server(test_file="data/test_metadata.jsonl")
+    with patch("resources_servers.competitive_coding_challenges.app.CCCEvaluator") as evaluator_cls:
+        server.setup_webserver()
+
+    assert evaluator_cls.call_args.kwargs["config"]["test_file"] == "data/test_metadata.jsonl"
+
+
 def test_setup_webserver_allows_disabling_local_compile_staging() -> None:
     server = _make_server(local_compile_dir=None)
     with patch("resources_servers.competitive_coding_challenges.app.CCCEvaluator") as evaluator_cls:
@@ -231,6 +258,8 @@ async def test_verify_partial_subtask_score_returns_zero_reward() -> None:
     response = await server.verify(request)
 
     assert response.reward == 0.0
+    assert response.mask_sample is False
+    assert response.failure_kind is None
     evaluator.get_problem_metadata.assert_called_once_with("prob-1", "comp-1")
 
 
@@ -318,6 +347,48 @@ async def test_verify_returns_error_details_when_evaluator_fails(
 
     assert response.reward == 0.0
     assert response.details == {"error": "boom"}
+    assert response.mask_sample is True
+    assert response.failure_kind == "verifier_error"
+    assert response.failure_reason == "boom"
+
+
+@pytest.mark.asyncio
+async def test_verify_scores_generated_text_that_cannot_be_encoded() -> None:
+    # A lone surrogate in the model's code comes from the model, so masking it would remove its penalty.
+    server = _make_server()
+    evaluator = MagicMock()
+    evaluator.eval_single = AsyncMock(side_effect=lambda _entry: "\ud800".encode("utf-8"))
+    server._evaluator = evaluator
+
+    response = await server.verify(_make_verify_request())
+
+    assert response.reward == 0.0
+    assert response.mask_sample is False
+    assert response.failure_kind is None
+    assert "surrogates not allowed" in response.details["error"]
+
+
+@pytest.mark.asyncio
+async def test_verify_masks_a_sandbox_infra_error() -> None:
+    server = _make_server()
+    evaluator = MagicMock()
+    evaluator.eval_single = AsyncMock(
+        return_value={
+            "test_case_results": {"samples": {"score": 0.0, "outputs": [{"compile_success": False, "score": 0.0}]}},
+            "infra_error": "sandbox cannot see the shared work dir",
+        }
+    )
+    evaluator.get_problem_metadata.return_value = {
+        "subtasks": {"samples": {"score": 1.0, "aggregation": "min", "test_names": ["t1"]}}
+    }
+    server._evaluator = evaluator
+
+    response = await server.verify(_make_verify_request())
+
+    assert response.reward == 0.0
+    assert response.mask_sample is True
+    assert response.failure_kind == "provider_unavailable"
+    assert response.failure_reason == "sandbox cannot see the shared work dir"
 
 
 # ---------------------------------------------------------------------------

@@ -2228,3 +2228,134 @@ class TestApp:
         assert response.reward == 0.0
         assert response.verifier_metadata["osworld_score"] == 0.4
         assert response.verifier_metadata["osworld_finished"] is False
+
+
+def _policy_completion(content: str, finish_reason: str, usage: Optional[Dict[str, Any]]) -> Any:
+    from openai.types.chat import ChatCompletion
+
+    return ChatCompletion.model_validate(
+        {
+            "id": "chatcmpl-policy",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "policy",
+            "choices": [
+                {"index": 0, "finish_reason": finish_reason, "message": {"role": "assistant", "content": content}}
+            ],
+            "usage": usage,
+        }
+    )
+
+
+def _chat_usage(prompt: int, cached: int, completion: int, reasoning: int) -> Dict[str, Any]:
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion,
+        "prompt_tokens_details": {"cached_tokens": cached},
+        "completion_tokens_details": {"reasoning_tokens": reasoning},
+    }
+
+
+def _child_result(**fields: Any) -> SimpleNamespace:
+    steps = [SimpleNamespace(**step, state=None, next_state=None) for step in DEFAULT_RUN_RESULT["steps"]]
+    values = {k: v for k, v in DEFAULT_RUN_RESULT.items() if k != "steps"}
+    return SimpleNamespace(**values, termination_reason="done", agent_contract=None, steps=steps, **fields)
+
+
+def _run_child(fake_run_osworld_task: Any, completions: list[Any]) -> Dict[str, Any]:
+    from responses_api_agents.osworld_agent.app import _run_osworld_task_remote
+
+    client = MagicMock()
+    client.chat.completions.create.side_effect = completions
+    runner_kwargs = {
+        "base_url": "http://policy/v1",
+        "model_name": "policy",
+        "api_key": "test-key",  # pragma: allowlist secret
+        "max_tokens": 64,
+        "temperature": 1.0,
+        "top_p": None,
+    }
+    with (
+        patch("responses_api_agents.osworld_agent.app._build_policy_openai_client", return_value=client),
+        patch("responses_api_agents.osworld_agent.client.run_osworld_task", side_effect=fake_run_osworld_task),
+    ):
+        return _run_osworld_task_remote._function({"id": "test-task-001"}, runner_kwargs)
+
+
+def test_child_result_sums_usage_of_every_policy_response_gym_received() -> None:
+    def fake_run_osworld_task(task_config, *, model_fn, messages_model_fn, **kwargs):
+        model_fn("system", "Open the browser.", [{"screenshot_b64": ""}])
+        # A response rejected for its finish reason still finished, so its tokens count.
+        with pytest.raises(ValueError, match="did not finish cleanly"):
+            messages_model_fn(
+                [{"role": "user", "content": "next"}],
+                {"model": "policy", "max_tokens": 8, "temperature": 0.0, "_nemo_gym_require_stop": True},
+            )
+        model_fn("system", "Open the browser.", [{"screenshot_b64": ""}])
+        return _child_result()
+
+    result = _run_child(
+        fake_run_osworld_task,
+        [
+            _policy_completion("```python\npyautogui.click(1, 2)\n```", "stop", _chat_usage(1000, 256, 50, 10)),
+            _policy_completion("```python\npyautogui", "length", _chat_usage(1200, 512, 8, 8)),
+            _policy_completion("```DONE```", "stop", _chat_usage(1500, 768, 60, 12)),
+        ],
+    )
+    expected = {
+        "input_tokens": 3700,
+        "input_tokens_details": {"cached_tokens": 1536},
+        "output_tokens": 118,
+        "output_tokens_details": {"reasoning_tokens": 30},
+        "total_tokens": 3818,
+    }
+    assert result["usage"] == expected
+
+    response = _build_response(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), result, "test-policy", 1.0, 0.9)
+    assert response.response.usage.model_dump(mode="json") == expected
+
+
+def test_child_result_usage_is_unknown_when_the_runner_calls_its_own_model_client() -> None:
+    # m3_agent and pointer_agent call the model through their own clients, which Gym does not see.
+    def fake_native_runner(task_config, **kwargs):
+        return _child_result()
+
+    result = _run_child(fake_native_runner, [])
+
+    assert result["usage"] is None
+    response = _build_response(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), result, "test-policy", 1.0, 0.9)
+    assert response.response.usage is None
+
+
+def test_policy_usage_treats_a_malformed_usage_block_as_unknown() -> None:
+    from openai.types.completion_usage import CompletionUsage
+
+    from responses_api_agents.osworld_agent.app import _PolicyUsage
+
+    policy_usage = _PolicyUsage()
+    # The SDK builds responses without validating them, so a provider's partial usage block arrives as-is.
+    partial = CompletionUsage.model_construct(prompt_tokens=None, completion_tokens=5, total_tokens=None)
+    policy_usage.add(SimpleNamespace(usage=partial))
+    assert policy_usage.reported() is None
+
+    # A later known call does not turn the lost usage into a complete total.
+    policy_usage.add(_policy_completion("```DONE```", "stop", _chat_usage(1500, 768, 60, 12)))
+    assert policy_usage.reported() is None
+
+
+@pytest.mark.parametrize("unknown_first", [True, False])
+def test_child_result_usage_is_unknown_when_a_finished_response_lost_its_usage(unknown_first: bool) -> None:
+    def fake_run_osworld_task(task_config, *, model_fn, messages_model_fn, **kwargs):
+        model_fn("system", "Open the browser.", [{"screenshot_b64": ""}])
+        model_fn("system", "Open the browser.", [{"screenshot_b64": ""}])
+        return _child_result()
+
+    known = _policy_completion("```python\npyautogui.click(1, 2)\n```", "stop", _chat_usage(1000, 256, 50, 10))
+    unknown = _policy_completion("```DONE```", "stop", None)
+    result = _run_child(fake_run_osworld_task, [unknown, known] if unknown_first else [known, unknown])
+
+    # Rollout usage is the sum over finished responses; one whose usage was lost makes it unknown, not a subtotal.
+    assert result["usage"] is None
+    response = _build_response(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), result, "test-policy", 1.0, 0.9)
+    assert response.response.usage is None

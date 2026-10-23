@@ -23,7 +23,7 @@ def make_task(
         "responses_create_params": {
             "input": turns,
             "metadata": {"response_1": first, "response_2": second},
-            "temperature": 0.6,
+            "temperature": 1.0,
             "top_p": 0.95,
             "max_output_tokens": 16384,
         },

@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: partner_if
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: instruction_following
+description: Internal tasks built from instruction-following failures seen in production agent
+  deployments, run on the policy model as text, search-tool and build-tool episodes. Binary
+  all-IF reward from code checks and a shared LLM judge. The rows are internal and download
+  from Gym's GitLab dataset registry.
+modality: text
+licensing: internal
+authors:
+- Katherine Huang
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+resources_server: partner_if
+agent_server: partner_if_dispatcher
+sandbox: opensandbox
+datasets:
+- name: partner_if
+  type: benchmark
+  jsonl_fpath: benchmarks/partner_if/data/partner_if_benchmark.jsonl
+  prepare_script: benchmarks/partner_if/prepare.py
+  num_repeats: 3
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

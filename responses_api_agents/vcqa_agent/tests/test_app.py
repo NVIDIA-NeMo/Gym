@@ -962,3 +962,81 @@ def test_fetch_artifact_omits_headers_when_none(tmp_path: Path, monkeypatch: pyt
         )
     )
     assert "headers" not in captured
+
+
+########################################
+# Token usage across turns
+########################################
+
+
+def _usage(input_tokens: int, cached: int | None, output_tokens: int, reasoning: int | None) -> dict:
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {"cached_tokens": cached},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": reasoning},
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
+def _model_turn(output: list[dict], usage: dict) -> MagicMock:
+    payload = {
+        "id": "resp_turn",
+        "created_at": 0,
+        "model": "policy",
+        "object": "response",
+        "output": output,
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+        "usage": usage,
+    }
+    turn = MagicMock()
+    turn.ok = True
+    turn.read = AsyncMock(return_value=json.dumps(payload).encode())
+    turn.cookies = {}
+    return turn
+
+
+@pytest.mark.parametrize(
+    ("second_usage", "expected"),
+    [
+        (_usage(200, 80, 20, 6), _usage(300, 120, 30, 10)),
+        # A turn whose provider reported no details makes the summed details unknown, not 0.
+        (_usage(200, None, 20, None), _usage(300, None, 30, None)),
+    ],
+)
+async def test_tool_loop_sums_usage_and_details_across_turns(second_usage: dict, expected: dict) -> None:
+    tool_call = {
+        "id": "call_1",
+        "call_id": "call_1",
+        "type": "function_call",
+        "name": "unknown_tool",
+        "arguments": "{}",
+        "status": "completed",
+    }
+    answer = {
+        "id": "msg_1",
+        "role": "assistant",
+        "status": "completed",
+        "type": "message",
+        "content": [{"annotations": [], "text": "done", "type": "output_text"}],
+    }
+    server_client = MagicMock(spec=ServerClient)
+    server_client.post = AsyncMock(
+        side_effect=[_model_turn([tool_call], _usage(100, 40, 10, 4)), _model_turn([answer], second_usage)]
+    )
+    agent = VcqaAgent(config=_make_config(inject_tools=False), server_client=server_client)
+
+    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+    result, steps = await agent._tool_loop(
+        request=MagicMock(cookies={}),
+        response=MagicMock(),
+        body=NeMoGymResponseCreateParamsNonStreaming(input="What is the answer?"),
+        sandbox=FakeSandbox(),
+        max_turns=4,
+    )
+
+    assert steps == 2
+    assert result.usage.model_dump(mode="json") == expected

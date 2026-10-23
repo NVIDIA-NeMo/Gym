@@ -37,6 +37,10 @@ _SHA = re.compile(r"[0-9a-f]{40}")
 # strings) is refused before it reaches a git command line.
 _GIT_URL_SCHEME = re.compile(r"(https|ssh|git)://[A-Za-z0-9]", re.IGNORECASE)
 _GIT_URL_SCP = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*:(?!-)[^:]*")
+# Package-store datasets are `org/name`; registry datasets are a bare name.
+_PACKAGE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
+# Task names become one path component under the dataset folder; these can never be.
+_NAME_SEPARATORS = ("/", "\\", "\0")
 
 
 class HubError(ValueError):
@@ -63,9 +67,16 @@ class HubRef:
             raise HubError(f"Not a Harbor hub reference: {target!r} (expected `harbor:<dataset>[@<version>]`)")
         body = target[len(REF_PREFIX) :]
         name, _, version = body.partition("@")
-        if not _NAME.fullmatch(name) or (version and not _NAME.fullmatch(version)):
+        if not (_NAME.fullmatch(name) or _PACKAGE_NAME.fullmatch(name)) or (
+            version and not (_NAME.fullmatch(version) or version.startswith("sha256:"))
+        ):
             raise HubError(f"Malformed Harbor hub reference: {target!r}")
         return cls(name=name, version=version or None)
+
+    @property
+    def is_package(self) -> bool:
+        """``org/name`` references live in Harbor's package store, not in ``registry.json``."""
+        return "/" in self.name
 
 
 @dataclass(frozen=True)
@@ -102,10 +113,16 @@ def _version_key(version: str) -> tuple:
     return (0, numeric, "") if numeric is not None else (1, (), version)
 
 
-def validate_task_name(name: str) -> str:
-    """Require one folder component, reserving the dataset manifest's name."""
-    if not name or ".." in name or name in (".", MANIFEST_FILE) or any(char in name for char in ("/", "\\", "\0")):
-        raise HubError(f"Unsafe Harbor task name {name!r}: expected a single folder name")
+def validate_task_name(name: str, *, error: type[ValueError] = HubError) -> str:
+    """Require one folder component, reserving the dataset manifest's name; raise ``error`` otherwise.
+
+    Task names arrive from ``registry.json`` and from package-store replies, and the fetchers
+    use them as path components, so empty names, ``.``, anything containing ``..``, a path
+    separator or NUL is refused. Other characters, such as ``$``, which real Harbor task names
+    contain, are accepted.
+    """
+    if not name or ".." in name or name in (".", MANIFEST_FILE) or any(char in name for char in _NAME_SEPARATORS):
+        raise error(f"Unsafe Harbor task name {name!r}: expected a single folder name")
     return name
 
 
@@ -134,6 +151,21 @@ def _validate_task_tree(source: Path) -> None:
             raise HubError(f"Invalid task symlink {link}: {exc}") from exc
         if target.is_absolute() or not resolved.is_relative_to(source.resolve()):
             raise HubError(f"Task symlink {link} leaves the task folder")
+
+
+def contained_path(target: Path, root: Path, *, error: type[ValueError] = HubError) -> Path:
+    """Return ``target`` after checking that it resolves to a path strictly inside ``root``; else raise ``error``.
+
+    Called before anything under a dataset folder is removed or replaced, so a spoofed name
+    or a symlink pointing elsewhere can never make a fetch touch files outside the dataset.
+    """
+    resolved_root = Path(root).resolve()
+    resolved = Path(target).resolve()
+    if resolved == resolved_root or not resolved.is_relative_to(resolved_root):
+        raise error(
+            f"Refusing to replace {target}: it resolves to {resolved}, outside the dataset folder {resolved_root}"
+        )
+    return target
 
 
 def validate_git_url(git_url: str) -> str:
@@ -416,8 +448,22 @@ def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
 
 
 def fetch_ref(target: str, root: Path | None = None, *, refresh_registry: bool = False) -> Path:
-    """Resolve and fetch a ``harbor:`` reference; return the dataset folder."""
+    """Resolve and fetch a ``harbor:`` reference; return the dataset folder.
+
+    A package-store fetch refuses a task folder whose content no longer matches the store
+    (see :func:`nemo_gym.tasks.harbor.package_store.fetch_package_dataset`). Whatever the store fetch
+    refuses or cannot read (a ``PackageStoreError``) is raised as a :class:`HubError`, so a caller handles
+    one error type for a ``harbor:`` reference of either source.
+    """
     root = Path(root) if root is not None else datasets_dir()
     ref = HubRef.parse(target)
+    if ref.is_package:
+        from nemo_gym.tasks.harbor.package_store import PackageRef, PackageStoreError, fetch_package_dataset
+
+        org, _, name = ref.name.partition("/")
+        try:
+            return fetch_package_dataset(PackageRef(org=org, name=name, ref=ref.version or "latest"), root)
+        except PackageStoreError as exc:
+            raise HubError(str(exc)) from exc
     registry = load_registry(root / ".harbor", refresh=refresh_registry)
     return fetch_dataset(resolve_dataset(ref, registry), root)

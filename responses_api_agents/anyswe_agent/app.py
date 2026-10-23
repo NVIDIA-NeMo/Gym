@@ -67,7 +67,7 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
 
 
 def _model_url_for_rollout(model_url: str, rollout_id: Optional[str]) -> str:
-    return apply_rollout_prefix(model_url, rollout_id) if model_url and rollout_id else model_url
+    return apply_rollout_prefix(model_url, rollout_id) if model_url else model_url
 
 
 def _model_name(params: "AnySweInstanceConfig") -> str:

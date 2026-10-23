@@ -495,6 +495,10 @@ class ClineAgent(SimpleResponsesAPIAgent):
             # Local session backend: a shared hub daemon would hand concurrent rollouts the same
             # process and state, which is exactly what the per-run data dir is avoiding.
             "CLINE_SESSION_BACKEND_MODE": "local",
+            # Cline otherwise ends every call by spawning a detached `npm update -g cline`, which
+            # replaces the pinned cline_version mid-collection and briefly removes the binary from
+            # under concurrent spawns. Only the exact value "1" disables it.
+            "CLINE_NO_AUTO_UPDATE": "1",
         }
         # A Gym model server wins over openai_base_url, so a config carrying both cannot point the
         # subprocess at the provider the model server is meant to replace.

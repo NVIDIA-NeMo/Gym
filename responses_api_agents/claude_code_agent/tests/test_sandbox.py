@@ -199,7 +199,9 @@ async def test_artifact_capture_reads_separate_stdout_and_process_info(monkeypat
 @pytest.mark.asyncio
 async def test_close_returns_gap_without_activation_and_honors_cleanup_error():
     instance = agent()
-    session = SimpleNamespace(close=AsyncMock(side_effect=RuntimeError("unconfirmed")), artifacts=None)
+    session = SimpleNamespace(
+        close=AsyncMock(side_effect=RuntimeError("unconfirmed")), artifacts=None, cleanup_confirmed=True
+    )
     state = adapter.ClaudeCodeSandboxSession(request=seed(), runtime="/runtime", session=session)
     with pytest.raises(RuntimeError, match="unconfirmed"):
         await instance._close_agent_session_state(state)
@@ -273,6 +275,7 @@ async def test_close_joins_captured_observations_during_parsing(monkeypatch, par
             artifacts=artifacts,
             cleanup={"timed_out": False, "return_code": 0, "cleanup_confirmed": True},
             close=AsyncMock(),
+            cleanup_confirmed=True,
         ),
     )
     monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", AsyncMock(return_value=artifacts))
@@ -570,3 +573,29 @@ def test_sandbox_rejects_request_instructions_that_local_mode_ignores():
 )
 def test_sandbox_accepts_one_text_turn_with_optional_system_message(input):
     agent()._validate_sandbox_request(NeMoGymResponseCreateParamsNonStreaming(input=input))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmed", [True, False])
+async def test_close_distinguishes_borrowed_release_from_confirmed_termination(confirmed):
+    from nemo_gym.agent_utils.sandbox_session import SandboxSession
+    from nemo_gym.agent_utils.supervisor_client import HarnessTerminationError
+
+    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), disconnect=AsyncMock())
+    session = SandboxSession(sandbox=remote, session_dir="/tmp/session", workdir="/app", harness="Claude Code")
+    session.launch_started = True
+    receipt = {
+        "cleanup_confirmed": confirmed,
+        "timed_out": False,
+        "return_code": 0,
+        "error": None if confirmed else "process survived",
+    }
+    if confirmed:
+        session.cleanup = receipt
+    else:
+        session.termination_error = HarnessTerminationError(harness="Claude Code", receipt=receipt)
+    state = adapter.ClaudeCodeSandboxSession(request=seed(), runtime="/runtime", session=session)
+    close = await agent()._close_agent_session_state(state)
+    remote.disconnect.assert_awaited_once()
+    assert close.cleanup_confirmed is confirmed
+    assert close.model_dump(mode="json")["cleanup_confirmed"] is confirmed

@@ -6,16 +6,29 @@ position: 9
 
 `gym eval submit` adds an OpenTelemetry Collector to every benchmark job it renders. The collector
 scrapes the model services' Prometheus metrics, receives OTLP from anything in the job, stamps a
-per-run identity on the data, and ships it to the OTLP/HTTP endpoint the deployment configures.
-It is on by default and needs three site-specific values.
+per-run identity on the data, and writes local JSONL files. It also ships data to the configured
+OTLP/HTTP endpoint when remote export is enabled and its token is available. The collector is on by default.
+
+To keep local dumps without backend access or credentials:
+
+```yaml
+otel:
+  enabled: true
+  remote_export: false
+```
+
+`remote_export` defaults to `true`. If the variable named by `token_env` is missing or empty in the
+submitting shell, Gym logs a warning and forces `remote_export: false`, keeping local collection enabled.
+This applies to submission, dry runs, and resubmission.
 
 ## Configure
 
 ```yaml
 otel:
-  enabled: true                       # default
-  endpoint: https://otlp.example.com  # OTLP/HTTP ingest; required when enabled
-  service_name: my-eval-service       # service.name resource attribute the backend routes by; required
+  enabled: true                       # default; false turns the collector off entirely
+  remote_export: true                # default; false keeps only local JSONL dumps
+  endpoint: https://otlp.example.com  # OTLP/HTTP ingest; required for remote export
+  service_name: my-eval-service       # backend routing identity; required for remote export
   token_env: OTEL_TOKEN      # env var in the submitting shell holding the bearer token
   binary: /shared/otelcol-contrib     # static collector binary reachable on the compute nodes
   container: null                     # optional image instead of the host binary
@@ -36,8 +49,13 @@ are separate settings. A deployment usually puts `endpoint`, `service_name`, `to
 fragment; user configs rarely need to mention the block. Set `enabled: false` to opt a run out. A job
 without a model service still gets a collector, because Gym's own servers produce telemetry.
 
-The submit fails before staging anything when `enabled` is true and `endpoint` or `service_name` is
-unset, or when the token variable is missing from the submitting shell. The error names the key to set.
+When remote export remains enabled, submission fails before staging if `endpoint` or `service_name`
+is unset. Local-only collection needs neither field nor a token. Collector startup and Gym instrumentation
+still need the binary and dependencies described below.
+
+Fresh submissions save the effective `remote_export` value in `resolved-config.yaml`. On resubmit, Gym
+refreshes that benchmark's collector configuration while holding its resubmit lock; a missing token
+disables remote export for that attempt without changing the saved requested configuration.
 
 ## What runs
 
@@ -69,6 +87,11 @@ collector's node is traced: headless data-parallel workers do not get the flag, 
 another node or on several nodes (a tier pinned to a later pool, one server per pool node, Ray Serve
 replicas across nodes) is left untraced rather than pointed at a collector it cannot reach.
 
+The collector also copies the rollout id out of each engine span's `gen_ai.request.id` (vLLM's
+`chatcmpl-<rollout id>-<8 hex>`) into `nemo.gym.rollout.id`, the attribute every other Gym span carries,
+so engine spans group per rollout in any backend without a regex at query time. An engine request id
+that is not Gym's is left alone, and an id the span already carries is never overwritten.
+
 ## What is exported
 
 | Source | How | Notes |
@@ -80,17 +103,17 @@ replicas across nodes) is left untraced rather than pointed at a collector it ca
 | Spans, as metrics | `span_metrics` connector | every span becomes a duration histogram and a call counter (`traces_span_metrics_*`) keyed by span name, producer and, for sandboxes, provider, so sandbox start/exec latency and error rates need no metric of their own |
 
 Every batch carries resource attributes the dashboards filter on: `user`, `run_id` (the gym job id),
-`slurm_job_id`, `benchmark`, `cluster` and `model`, plus `service.name` set to the routing identity
+`slurm_job_id`, `benchmark`, `cluster` and `model`, plus `service.name` set to the routing identity when configured
 and `service.name.override` to the producer's display name: each Gym server keeps its own name
 (`nemo-gym/<server>`), a scraped model service carries `<component>/<service>` (`gym-vllm/policy` with the
 defaults), and the node scrapes carry `dcgm` and `node`.
 
-Everything exported is also written to `<job dir>/otel/{metrics,traces,logs}.jsonl`, so a run can be
+Telemetry is always written to `<job dir>/otel/{metrics,traces,logs}.jsonl` while the collector is enabled, so a run can be
 inspected without backend access. The rendered collector configuration is at
-`<job dir>/otel/collector.yaml`; `gym eval submit --resolve-only` prints it without submitting.
+`<job dir>/otel/collector.yaml`; `gym eval submit --dry-run` prints it without submitting.
 
 ## The token
 
-The bearer token is read from the submitting shell, exported into the remote shell that runs
+When remote export is enabled, the bearer token is read from the submitting shell, exported into the remote shell that runs
 `sbatch`, and referenced from the collector configuration as `${env:<token_env>}`. It is not written
 to the job directory, the sbatch script or the resolved config.

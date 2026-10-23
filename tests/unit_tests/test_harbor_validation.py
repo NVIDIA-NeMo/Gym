@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import logging
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -14,7 +15,7 @@ import nemo_gym.global_config as global_config
 from nemo_gym.path_utils import failures_path_for, materialized_path_for
 from nemo_gym.tasks.harbor.cli import build_run, prepare_target, resolve_agent
 from nemo_gym.tasks.harbor.validation_report import summarize_validation
-from tests.unit_tests.test_harbor_tasks import write_task
+from tests.unit_tests.test_harbor_tasks import no_real_registry, write_task  # noqa: F401 (autouse fixture)
 
 
 def result(task="a", *, index=0, repeat=0, **fields):
@@ -78,6 +79,11 @@ def test_invalid_or_failing_reward_never_passes(tmp_path, reward):
 def validation_cli(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+    # `gym -v` installs a root logging handler bound to that run's stderr. pytest swaps the stream per
+    # test, so a handler left behind by an earlier test would write a "Logging error" traceback here.
+    root = logging.getLogger()
+    saved = root.handlers[:]
+    root.handlers.clear()
 
     def invoke(*flags):
         monkeypatch.setattr(
@@ -85,20 +91,23 @@ def validation_cli(tmp_path, monkeypatch):
         )
         main_module.main()
 
-    return invoke
+    yield invoke
+    root.handlers[:] = saved
 
 
-@pytest.mark.parametrize("source", ["cli", "file"])
+@pytest.mark.parametrize("source", ["cli", "file", "flag"])
 def test_validate_reads_effective_output_and_preserves_evaluation_artifacts(
     tmp_path, monkeypatch, validation_cli, source
 ):
     write_task(tmp_path / "ds" / "a")
     evaluated = prepare_target(str(tmp_path / "ds"))
-    config_path, _ = build_run(evaluated, resolve_agent("hermes"), sandbox="docker", overrides=[])
+    config_path, _ = build_run(evaluated, resolve_agent("hermes_agent"), sandbox="docker", overrides=[])
     original_config = config_path.read_bytes()
     stale = evaluated.output_dir / "rollouts.jsonl"
     write_jsonl(stale, [result()])
-    custom = tmp_path / "custom output.jsonl"
+    # `--output` is translated to a quoted Hydra override, so parentheses, commas, Unicode and backslashes
+    # survive the real parse and collection is pointed at the file the user named.
+    custom = tmp_path / (r"résumé(1),back\slash.jsonl" if source == "flag" else "custom output.jsonl")
     overlay = tmp_path / "overlay.yaml"
     overlay.write_text(yaml.safe_dump({"output_jsonl_fpath": str(custom)}))
     seen = []
@@ -111,14 +120,18 @@ def test_validate_reads_effective_output_and_preserves_evaluation_artifacts(
         write_jsonl(custom, [result(reward=0.0)])
 
     monkeypatch.setattr(main_module, "dispatch", collect)
-    flags = [f"+output_jsonl_fpath={json.dumps(str(custom))}"] if source == "cli" else ["--config", str(overlay)]
+    flags = {
+        "cli": [f"+output_jsonl_fpath='{custom}'"],
+        "file": ["--config", str(overlay)],
+        "flag": ["--output", str(custom)],
+    }[source]
     with pytest.raises(SystemExit) as exc:
         validation_cli(*flags)
     assert exc.value.code == 1
     assert seen == ["nemo_gym.cli.eval:e2e_rollout_collection"]
     assert config_path.read_bytes() == original_config
     assert json.loads(stale.read_text())["reward"] == 1.0
-    assert (tmp_path / "results/harbor/validation/ds/run_config.yaml").is_file()
+    assert (tmp_path / "results/harbor/validation/ds/run_config_harbor_oracle_agent.yaml").is_file()
 
 
 @pytest.mark.parametrize("oracle_status", ["solved", "failed"])
@@ -215,7 +228,7 @@ def test_network_default_is_below_explicit_config_and_cli(tmp_path, monkeypatch,
 
     _, tokens = build_run(
         prepared,
-        resolve_agent("hermes"),
+        resolve_agent("hermes_agent"),
         sandbox="docker",
         overrides=[
             f"+config_paths=[{PARENT_DIR / 'responses_api_models/openai_model/configs/openai_model.yaml'},{overlay}]",

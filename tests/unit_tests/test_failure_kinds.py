@@ -38,7 +38,17 @@ class TestNamingConvention:
 
     def test_every_name_states_the_layer_that_observed_the_failure(self) -> None:
         """`transport_timeout` and `agent_timeout` are different failures, not one."""
-        domains = ("transport_", "agent_", "judge_", "verifier_", "provider_", "session_", "cohort_", "persistence_")
+        domains = (
+            "model_",
+            "transport_",
+            "agent_",
+            "judge_",
+            "verifier_",
+            "provider_",
+            "session_",
+            "cohort_",
+            "persistence_",
+        )
         lifecycle = {"cancelled", "kill_shaped", "shutdown"}
 
         undomained = {n for n in FAILURE_KINDS if not n.startswith(domains)} - lifecycle
