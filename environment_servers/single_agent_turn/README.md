@@ -4,13 +4,14 @@ This Environment Server runs one agent turn against one Resources Server.
 It seeds both participant sessions, grants configured task-scoped tool access and any sandbox access returned by Resources to the agent, invokes `/v1/responses` once, verifies the response, and closes both sessions.
 
 `resources_server` names that Resources Server. Leave it unset to bind the one the agent's own `resources_server` names, as a `legacy_agent` relay's `/run` used it. The server then follows an `_inherit_from` rename of the agent, which can also rebind the agent to a renamed Resources Server. A server that sets none, in front of an agent that names none, does not start.
+The shipped templates in `configs/` set `resources_server.name: ???`, so a config that inherits one sets `resources_server: null` to bind the agent's.
 
 Use this server when one agent turn produces the response that Resources verifies.
 Other interaction patterns should define their own task input, episode result, and Environment Server implementation.
 
 `/verify` receives the Resources Server's own flat verify body, the same one an Agent's `/run` sends: the task's `task_data` fields, `responses_create_params`, and the agent's `response`. The request carries the Resources session cookie from seeding, which identifies the episode, so an existing Resources Server verifies these episodes without changes. The verify response becomes the episode result, with the agent's session observations added as `ng_agent_observations`.
 
-Set `skip_verification: true` to return `skip_verification_reward` (default `0.0`) without calling `/verify`, for example for data generation or infrastructure-only runs. The result keeps the flat shape: the verify body, the fixed `reward`, and `verification_skipped: true`, so reward profiling and training can tell it from a measured reward. Both sessions are still closed, and `/aggregate_metrics` returns empty metrics. When the Environment Server leaves either field unset, it uses the bound agent's value, which Gym fills from the global `skip_verification` and `skip_verification_reward` flags. A pairing moved off the `legacy_agent` relay therefore keeps the setting its agent's `/run` honored:
+Set `skip_verification: true` to return `skip_verification_reward` (default `0.0`) without calling `/verify`, for example for data generation or infrastructure-only runs. The result keeps the flat shape: the verify body, the fixed `reward`, and `verification_skipped: true`, so reward profiling and training can tell it from a measured reward. Both sessions are still closed, and `/aggregate_metrics` returns empty metrics. When the Environment Server leaves either field unset, it uses the bound agent's value, which Gym fills from the global `skip_verification` and `skip_verification_reward` flags. A pairing moved off the `legacy_agent` relay therefore keeps the setting its agent's `/run` honored. This applies to every bound agent, so the global flag also skips verification for agents whose own `/run` never read it:
 
 ```yaml
 environment_servers:
