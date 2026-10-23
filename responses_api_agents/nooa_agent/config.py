@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import ConfigDict, Field, field_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -52,6 +52,9 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         default=None,
         description="Controller-prepared offline runtime bundle; when set, task setup uses no package-network access.",
     )
+    runtime_wheelhouse_required: bool = Field(
+        default=False, description="Require an explicitly prepared offline runtime before starting this agent."
+    )
     nooa: NOOAInvocationConfig
     max_policy_calls: int | None = Field(
         default=None, gt=0, description="Optional shared model-call limit per rollout; null disables the limit."
@@ -79,3 +82,25 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         if value not in (None, 1):
             raise ValueError("NOOA sessions require num_workers=1")
         return value
+
+    @field_validator("runtime_wheelhouse")
+    @classmethod
+    def normalize_runtime_wheelhouse(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return None
+        expanded = value.expanduser()
+        if not expanded.is_absolute():
+            raise ValueError(
+                "runtime_wheelhouse must be an absolute path (or ~/path); relative server paths are ambiguous"
+            )
+        return expanded.resolve()
+
+    @model_validator(mode="after")
+    def require_prepared_runtime(self) -> NOOAAgentConfig:
+        if self.runtime_wheelhouse_required and self.runtime_wheelhouse is None:
+            raise ValueError(
+                "This recipe requires an offline NOOA runtime. Set NOOA_SWE_RUNTIME_WHEELHOUSE to an absolute "
+                "bundle path and prepare it with python -m responses_api_agents.nooa_agent.offline_runtime "
+                "--output PATH --target x86_64/gnu before starting servers."
+            )
+        return self

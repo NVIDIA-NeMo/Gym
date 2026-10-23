@@ -315,7 +315,7 @@ async def test_changed_cached_archive_is_rejected_before_payload_uploads(
 ) -> None:
     portable_download.return_value.write_bytes(b"cache replaced after initial verification")
     sandbox.exec.side_effect = [SandboxExecResult("x86_64/gnu", "", 0), SandboxExecResult("", "", 1)]
-    with pytest.raises(RuntimeError, match="NOOA Python artifact checksum mismatch for x86_64/gnu"):
+    with pytest.raises(RuntimeError, match="NOOA Python artifact checksum mismatch before sandbox upload"):
         await sandbox_runtime.prepare_nooa_runtime(sandbox)
     sandbox.upload.assert_awaited_once()
     assert sandbox.exec.await_count == 2
@@ -580,3 +580,118 @@ async def test_runtime_packaging_does_not_block_other_requests(
     finally:
         release.set()
         await preparation
+
+
+@pytest.mark.parametrize("root_name,runtime_name", [("pydantic_core", "Pydantic-Core"), ("hydra-core", "hydra_core")])
+def test_archive_normalizes_dependency_names(source_tree: Path, root_name: str, runtime_name: str) -> None:
+    (source_tree / "pyproject.toml").write_text(f'[project]\ndependencies = ["{root_name}>=1"]')
+    (source_tree / "responses_api_agents/nooa_agent/runtime/pyproject.toml").write_text(
+        "[project]\ndependencies = []\n[tool.nemo-gym-runtime]\n"
+        f'core-dependencies = ["{runtime_name}"]\nadditional-dependencies = []\n'
+    )
+    blob, _ = sandbox_runtime._runtime_archive(source_tree)
+    with tarfile.open(fileobj=io.BytesIO(blob)) as archive:
+        contents = tomllib.loads(archive.extractfile("pyproject.toml").read().decode())
+    assert contents["project"]["dependencies"] == [f"{root_name}>=1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["validate", "snapshot"])
+async def test_bundle_work_keeps_loop_responsive_and_joins_cancelled_workers(
+    monkeypatch: pytest.MonkeyPatch, sandbox: AsyncMock, wheelhouse: Path, stage: str
+) -> None:
+    import threading
+
+    from responses_api_agents.nooa_agent import offline_runtime
+
+    entered = threading.Event()
+    release = threading.Event()
+    completed = threading.Event()
+    snapshot_paths = []
+    module = offline_runtime if stage == "validate" else sandbox_runtime
+    name = "load_runtime_wheelhouse" if stage == "validate" else "_stage_runtime_artifacts"
+    original = getattr(module, name)
+
+    def blocked(*args, **kwargs):
+        if stage == "snapshot":
+            snapshot_paths.append(args[0])
+        entered.set()
+        assert release.wait(5), "Event loop stalled during bundle work"
+        result = original(*args, **kwargs)
+        completed.set()
+        return result
+
+    monkeypatch.setattr(module, name, blocked)
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/gnu", "", 0),
+        SandboxExecResult("glibc 2.28", "", 0),
+        SandboxExecResult("", "", 1),
+    ]
+    preparation = asyncio.create_task(sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        preparation.cancel()
+        await asyncio.sleep(0.01)
+        assert not preparation.done()
+        assert not completed.is_set()
+        for path in snapshot_paths:
+            assert path.exists()
+        preparation.cancel()  # Repeated cancellation still cannot race the worker's files.
+        await asyncio.sleep(0.01)
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await preparation
+    assert completed.is_set()
+    assert all(not path.exists() for path in snapshot_paths)
+    assert sandbox.upload.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_io_bounds_concurrent_bundle_work() -> None:
+    import threading
+
+    lock = threading.Lock()
+    release = threading.Event()
+    two_started = threading.Event()
+    active = 0
+    peak = 0
+
+    def work() -> None:
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                two_started.set()
+        assert release.wait(5)
+        with lock:
+            active -= 1
+
+    tasks = [asyncio.create_task(sandbox_runtime._runtime_io(work)) for _ in range(6)]
+    try:
+        assert await asyncio.to_thread(two_started.wait, 3)
+        await asyncio.sleep(0.01)
+        assert peak == active == 2
+    finally:
+        release.set()
+        await asyncio.gather(*tasks)
+    assert peak == 2
+
+
+@pytest.mark.asyncio
+async def test_glibc_217_bundle_accepts_ubuntu_1804_task_image(
+    sandbox: AsyncMock, wheelhouse: Path, portable_download: AsyncMock
+) -> None:
+    manifest_path = wheelhouse / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["glibc"] = "2.17"
+    manifest_path.write_text(json.dumps(manifest))
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/gnu", "", 0),
+        SandboxExecResult("glibc 2.27", "", 0),
+        SandboxExecResult("", "", 0),
+        SandboxExecResult("", "", 0),
+    ]
+    assert (await sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse)).endswith("/bin/python3")
+    portable_download.assert_not_awaited()

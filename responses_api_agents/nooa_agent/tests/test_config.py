@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -214,3 +215,16 @@ def test_shipped_yaml_declares_worker_and_close_defaults_with_episode_headroom()
         agent["sandbox_runner_timeout_seconds"] + environment["cleanup_timeout_seconds"]
         <= environment["default_episode_timeout_seconds"]
     )
+
+
+def test_runtime_wheelhouse_expands_user_and_resolves_absolute_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert agent_config(runtime_wheelhouse="~/bundle/../runtime").runtime_wheelhouse == tmp_path / "runtime"
+    assert agent_config(runtime_wheelhouse=tmp_path / "runtime").runtime_wheelhouse == tmp_path / "runtime"
+    for relative in ["bundle", "../bundle", Path(".")]:
+        with pytest.raises(ValidationError, match="must be an absolute path"):
+            agent_config(runtime_wheelhouse=relative)
+    with pytest.raises(ValidationError, match="Set NOOA_SWE_RUNTIME_WHEELHOUSE"):
+        agent_config(runtime_wheelhouse_required=True)
