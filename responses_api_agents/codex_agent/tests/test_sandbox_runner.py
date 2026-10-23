@@ -247,3 +247,18 @@ def test_python38_worker_captures_output_and_preserves_task_children(tmp_path):
                 os.kill(int((tmp_path / "child.pid").read_text()), signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def test_snapshot_retains_native_session_before_cleanup(tmp_path):
+    sessions = tmp_path / "home/.codex/sessions/2026/10/19"
+    sessions.mkdir(parents=True)
+    records = '{"type":"response_item","payload":{"call_id":"native-call"}}\n'
+    (sessions / "session.jsonl").write_text(records)
+    (sessions / "second.jsonl").write_text(records)
+    subprocess.run(
+        [sys.executable, "-I", sandbox_runner.__file__, "--snapshot", str(tmp_path)],
+        check=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert (tmp_path / "native_session.jsonl").read_text().splitlines() == records.splitlines() * 2

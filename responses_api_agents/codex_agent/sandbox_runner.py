@@ -26,11 +26,27 @@ def run(params: dict) -> int:
 
     signal.signal(signal.SIGTERM, interrupt)
     with ExitStack() as stack:
+        command = list(params["command"])
+        if params.get("model_base_url"):
+            # -I intentionally excludes the session directory from sys.path.
+            # Load only the adapter file staged beside this worker.
+            import runpy
+
+            proxy = runpy.run_path(str(Path(__file__).with_name("sandbox_transport.py")))["rate_limit_proxy"]
+            base_url = stack.enter_context(
+                proxy(
+                    params["model_base_url"],
+                    params["invocation_id"],
+                    directory / "model_attempts.jsonl",
+                    timeout=params["timeout"],
+                )
+            )
+            command[2:2] = ["-c", "model_providers.gym.base_url=" + json.dumps(base_url)]
         stderr = stack.enter_context((directory / "stderr.log").open("wb"))
         stdin = stack.enter_context((directory / "prompt.txt").open("rb"))
         events = stack.enter_context((directory / "events.jsonl").open("w"))
         process = subprocess.Popen(
-            params["command"],
+            command,
             cwd=params["cwd"],
             env={
                 **{
@@ -97,6 +113,14 @@ def run(params: dict) -> int:
 
 
 def main() -> None:
+    if sys.argv[1] == "--snapshot":
+        directory = Path(sys.argv[2])
+        files = sorted((directory / "home/.codex/sessions").glob("**/*.jsonl"))
+        if files:
+            (directory / "native_session.jsonl").write_text(
+                "\n".join(line for path in files for line in path.read_text(errors="replace").splitlines())
+            )
+        return
     params = json.loads(Path(sys.argv[1]).read_text())
     raise SystemExit(run(params))
 
