@@ -31,18 +31,21 @@ rows were materialized (see ``nemo_gym.tasks.harbor``).
 Every episode runs under its task's own time budget unless ``enforce_task_timeouts`` is off, and
 the sandbox lives for that budget. Operator secrets reach the ``test.sh`` process only.
 
-Reward rule: when ``test.sh`` ran, the sample is measured. A missing or invalid reward
-file scores 0 with a ``failure_kind``. Only a Gym-side failure (sandbox lost, transfer
-failed) masks the sample. A failed agent response whose harness classified the cause
-(``ng_agent_outcome``) goes through ``agent_outcome_policy`` before verification, as on
-``single_agent_turn``: by default a transport or unknown cause is retried ungraded instead
-of scoring 0. A task that cannot be set up is a handled episode failure:
+Reward rule: when ``test.sh`` ran, the sample is measured. In ``reward.json`` a ``reward``
+key is the score and the other keys are metrics; without one every key is a component of the
+score, which is their sum, and the result names them as ``reward_components`` (keys that sum to
+``reward``, the contract a trainer asserts). A missing or invalid reward file scores 0 with a
+``failure_kind``. Only a Gym-side failure (sandbox lost, transfer failed) masks the sample. A
+failed agent response whose harness classified the cause (``ng_agent_outcome``) goes through
+``agent_outcome_policy`` before verification, as on ``single_agent_turn``: by default a
+transport or unknown cause is retried ungraded instead of scoring 0. A task that cannot be set up is a handled episode failure:
 terminal when the task itself is at fault (unknown task, changed folder, unsupported
 settings), retryable when the sandbox provider failed.
 """
 
 import asyncio
 import logging
+import math
 import shutil
 import tempfile
 from contextlib import asynccontextmanager, nullcontext
@@ -76,6 +79,7 @@ from environment_servers.harbor.verifier import (
     _verifier_gets_overlay,
     _verifier_image,
     _verifier_key,
+    summing_components,
 )
 from nemo_gym import RESULTS_DIR
 from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
@@ -138,6 +142,8 @@ class HarborTurnResult(BaseModel):
     name: str
     reward: float
     verifier_rewards: dict[str, float] | None = None
+    # The keys of reward.json that sum to `reward`, when the file names no `reward` key (see verifier.py).
+    reward_components: dict[str, float] | None = Field(default=None, exclude_if=lambda value: value is None)
     mask_sample: bool = False
     failure_kind: str | None = None
     failure_reason: str | None = None
@@ -171,7 +177,9 @@ class HarborEpisodeResult(SingleAgentTurnResult):
     """The episode's verify response plus what the Harbor verifier produced.
 
     ``verifier_rewards`` is the parsed ``reward.json`` (``reward.txt`` becomes ``{"reward": value}``).
-    The ``verifier_*`` fields are ``None`` when ``test.sh`` never ran.
+    ``reward_components`` names the keys that sum to ``reward``, present only when the file named no
+    ``reward`` key (every key is then a component); with a ``reward`` key the other keys are metrics and
+    stay in ``verifier_rewards`` alone. The ``verifier_*`` fields are ``None`` when ``test.sh`` never ran.
 
     A multi-step task fills ``turns`` in order. The top-level reward follows
     ``turn_reward_strategy`` over them (Harbor's ``multi_step_reward_strategy``), and ``response``,
@@ -179,6 +187,7 @@ class HarborEpisodeResult(SingleAgentTurnResult):
     """
 
     verifier_rewards: dict[str, float] | None = None
+    reward_components: dict[str, float] | None = Field(default=None, exclude_if=lambda value: value is None)
     verifier_return_code: int | None = None
     verifier_logs_dir: str | None = None
     verifier_seconds: float | None = None
@@ -315,13 +324,18 @@ def min_reward_failure(rewards: dict[str, float] | None, min_reward: float | dic
     return None
 
 
-def roll_up_turns(turns: list["HarborTurnResult"], strategy: str) -> dict[str, Any]:
+def roll_up_turns(turns: list["HarborTurnResult"], strategy: str, *, task_id: str = "") -> dict[str, Any]:
     """The episode's reward fields from its turns, by Harbor's ``multi_step_reward_strategy``.
 
     A masked turn masks the episode. ``final`` is the last turn that ran, as Harbor takes the last step
-    result. ``mean`` averages over the turns that produced a verifier result: the reward is the mean of
-    their rewards, and ``verifier_rewards`` the per-key means with a key a turn lacks counting 0. With
-    nothing to roll up the episode is measured 0, as a single turn without a reward file is.
+    result, with its ``reward_components``. ``mean`` averages over the turns that produced a verifier
+    result: the reward is the mean of their rewards, and ``verifier_rewards`` the per-key means with a key
+    a turn lacks counting 0. ``reward_components`` are averaged the same way when every measured turn
+    named some (the per-key means then sum to the mean reward); a mix of turns with and without
+    components names none, since no set of keys would sum to the episode's reward. Components that do not
+    sum to the rolled-up reward are dropped with a warning naming the task (``task_id``), the keys and both
+    numbers: a results row names ``reward_components`` only when they sum to its ``reward``. With nothing to
+    roll up the episode is measured 0, as a single turn without a reward file is.
     """
     masked = next((turn for turn in turns if turn.mask_sample), None)
     if masked is not None:
@@ -332,7 +346,13 @@ def roll_up_turns(turns: list["HarborTurnResult"], strategy: str) -> dict[str, A
         if last.verifier_rewards is None:
             reason = f"turn {last.name!r}: {last.failure_reason}"[:2000]
             return {"reward": 0.0, "mask_sample": False, "failure_kind": last.failure_kind, "failure_reason": reason}
-        return {"reward": last.reward, "verifier_rewards": last.verifier_rewards}
+        rolled = {"reward": last.reward, "verifier_rewards": last.verifier_rewards}
+        components = _named_components(
+            last.reward, last.reward_components, task_id=task_id, where=f"turn {last.name!r}"
+        )
+        if components is not None:
+            rolled["reward_components"] = components
+        return rolled
     measured = [turn for turn in turns if turn.verifier_rewards is not None]
     if not measured:
         last = turns[-1]
@@ -340,7 +360,36 @@ def roll_up_turns(turns: list["HarborTurnResult"], strategy: str) -> dict[str, A
         return HarborEnvironmentServer._measured(0.0, last.failure_kind or NO_TURN_RESULT_KIND, reason)
     keys = sorted({key for turn in measured for key in turn.verifier_rewards})
     means = {key: sum(turn.verifier_rewards.get(key, 0.0) for turn in measured) / len(measured) for key in keys}
-    return {"reward": sum(turn.reward for turn in measured) / len(measured), "verifier_rewards": means}
+    reward = sum(turn.reward for turn in measured) / len(measured)
+    rolled = {"reward": reward, "verifier_rewards": means}
+    if all(turn.reward_components is not None for turn in measured):
+        component_keys = sorted({key for turn in measured for key in turn.reward_components})
+        component_means = {
+            key: sum(turn.reward_components.get(key, 0.0) for turn in measured) / len(measured)
+            for key in component_keys
+        }
+        components = _named_components(reward, component_means, task_id=task_id, where="the mean over turns")
+        if components is not None:
+            rolled["reward_components"] = components
+    return rolled
+
+
+def _named_components(
+    reward: float, components: dict[str, float] | None, *, task_id: str, where: str
+) -> dict[str, float] | None:
+    """``components`` when they sum to ``reward``, else ``None`` with a warning that says what was dropped and why."""
+    summing = summing_components(reward, components)
+    if components is not None and summing is None:
+        LOGGER.warning(
+            "task %r: reward_components %s from %s sum to %r, not to the episode reward %r; the episode names "
+            "no reward_components (a results row names only keys that sum to its reward)",
+            task_id,
+            sorted(components),
+            where,
+            math.fsum(components.values()),
+            reward,
+        )
+    return summing
 
 
 class HarborEnvironmentServer(
@@ -1028,7 +1077,7 @@ class HarborEnvironmentServer(
             turn_reward_strategy=strategy,
             turns_without_verifier_result=sum(1 for result in results if result.verifier_rewards is None),
             stopped_after_turn=stopped_after,
-            **roll_up_turns(results, strategy),
+            **roll_up_turns(results, strategy, task_id=request.task.task_id),
         )
         return HarborEpisodeResponse(episode_id=request.episode_id, task_id=request.task.task_id, result=episode)
 

@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Literal, 
 import aiohttp
 import orjson
 from aiohttp import ClientError
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 from tqdm.asyncio import tqdm
 
@@ -64,6 +64,7 @@ from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
+    ALLOWED_AGENTS_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
@@ -309,6 +310,27 @@ def _materialized_taskset(row: Mapping[str, Any]) -> str | None:
     assert isinstance(task_id, Mapping)
     taskset = task_id.get("taskset")
     return taskset if isinstance(taskset, str) and taskset else None
+
+
+def _dataset_admitted_agents(agent_config: DictConfig) -> list[tuple[str, list[str]]]:
+    """``(dataset name, allowed_agents)`` for each dataset the agent declares with a non-empty ``allowed_agents``.
+
+    A bare string is one entry, as ``allowed_agents_for`` reads a resources server's. A ``datasets`` list that is
+    missing, a placeholder or not a list declares nothing.
+    """
+    datasets = OmegaConf.select(agent_config, "datasets")
+    if not isinstance(datasets, ListConfig):
+        return []
+    admitted: list[tuple[str, list[str]]] = []
+    for entry in datasets:
+        if not isinstance(entry, DictConfig):
+            continue
+        declared = entry.get(ALLOWED_AGENTS_KEY_NAME)
+        if not declared:
+            continue
+        names = [declared] if isinstance(declared, str) else [str(name) for name in declared]
+        admitted.append((str(entry.get("name")), names))
+    return admitted
 
 
 def _environment_server_for_config_row(row: Mapping[str, Any], config: Any) -> str | None:
@@ -4345,7 +4367,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
     @staticmethod
     def _validate_agent_pairings(examples: List[Dict], global_config_dict: DictConfig) -> None:
-        """Fail before dispatch when a row points to agent incompatible with the resources server it runs on."""
+        """Fail before dispatch when a row points to agent incompatible with the resources server it runs on.
+
+        The verifier's ``allowed_agents`` is read from the row's ``task_source`` and from the resources server the
+        agent binds; a dataset the agent itself declares may also name the harnesses it admits (a Harbor dataset's
+        ``[gym] allowed_agents``, carried into its generated ``datasets:`` entry, whose rows route by taskset to an
+        environment server that binds no resources server). That list is checked against the agent's own type, so
+        a run config edited to another harness after ``gym eval run`` admitted one is refused here as well.
+        """
         if pairing_override_enabled(global_config_dict):
             return
         routes = {
@@ -4373,6 +4402,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 rejected[(agent, str(verifier))] = (
                     f"  - rows routed to '{agent}' run '{agent_type}', but {relation} "
                     f"'{verifier}' accepts only: {', '.join(allowed)}"
+                )
+            for dataset, admitted in _dataset_admitted_agents(agents[agent_type]):
+                if agent_type in admitted:
+                    continue
+                rejected[(agent, f"dataset {dataset}")] = (
+                    f"  - rows routed to '{agent}' run '{agent_type}', but its dataset "
+                    f"'{dataset}' admits only: {', '.join(admitted)}"
                 )
         if not rejected:
             return
