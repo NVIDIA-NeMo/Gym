@@ -607,16 +607,16 @@ def split_servers(
                 for file in reversed(files)
                 if (file, ancestor) in planned
             ]
-            if not switching:
-                continue
-            if switching == [(switching[0][0], name)]:
-                keep.setdefault(switching[0], f"{display(path)} merges it with a {RELAY} server")
-            else:
-                inherited = next(ancestor for _, ancestor in switching if ancestor != name)
+            # Several files of the run can declare the instance itself; they all stay with it.
+            inherited = next((ancestor for _, ancestor in switching if ancestor != name), None)
+            if inherited is not None:
                 refused.append(
                     f"{name} in a run of {display(path)} would merge a {RELAY} server with {inherited}, "
                     f"which switches; declare a server of its own there instead"
                 )
+                continue
+            for declaration in switching:
+                keep.setdefault(declaration, f"{display(path)} merges it with a {RELAY} server")
     return keep, refused
 
 
