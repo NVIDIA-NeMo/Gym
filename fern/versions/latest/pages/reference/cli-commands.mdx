@@ -965,7 +965,7 @@ gym eval aggregate \
 
 ### `gym eval export`
 
-Export a finished run with an exporter, chosen by the optional `EXPORTER` argument. `atif` is the default; `mlflow` and `wandb` send a finished run to those tracking backends. Exporter settings are Hydra `+key=value` overrides; the option flags below are equivalent forms for `atif`.
+Export a finished run with an exporter, chosen by the optional `EXPORTER` argument. `atif` is the default; `mlflow` and `wandb` send a finished run to those tracking backends, and `evalrdl` uploads it to EvalRDL. Exporter settings are Hydra `+key=value` overrides; the option flags below are equivalent forms for `atif`.
 
 `atif` exports supported `ng_trajectory` attachments from a Gym rollouts JSONL file as ATIF v1.7. The command writes one ATIF
 trajectory per rollout plus a manifest that preserves Gym's task and rollout identity. It is a strict offline conversion:
@@ -979,7 +979,7 @@ row's `agent_ref.name`; `--agent-version` records the version of that agent impl
 
 | Option | Description |
 | --- | --- |
-| `EXPORTER` | Exporter to run: `atif`, `mlflow` or `wandb`. Defaults to `atif`. |
+| `EXPORTER` | Exporter to run: `atif`, `mlflow`, `wandb` or `evalrdl`. Defaults to `atif`. |
 | `--format atif` | Deprecated. Pass the exporter name instead. |
 | `--rollouts PATH` | Gym rollouts JSONL containing `ng_trajectory` version `1.0` attachments. |
 | `--output-dir DIR` | New directory for the ATIF files and manifest. |
@@ -1016,6 +1016,37 @@ gym eval export mlflow \
     +mlflow_tracking_uri=https://mlflow.example \
     +mlflow_experiment_name=gym \
     +mlflow_run_name=nightly
+```
+
+#### Exporting to EvalRDL
+
+`evalrdl` uploads one run: its rollouts, aggregate metrics, saved config and, when present, its failures and
+materialized-inputs files. The files are copied into one staging folder, so the run needs `<stem>_aggregate_metrics.json`
+and `<stem>_resolved_config.yaml` like the `mlflow` and `wandb` exporters. The `evalrdl` SDK is installed into the
+exporter's own virtual environment, so it never enters Gym's environment. The SDK is served from a package index
+your organization provides; configure it through uv's own index settings (for example `UV_EXTRA_INDEX_URL`) when you run
+the command. The SDK finds your EvalRDL token itself, in the environment or its login cache.
+
+| Setting | Description |
+| --- | --- |
+| `+rollouts_jsonl_fpath=PATH` | The run's rollouts JSONL. |
+| `+label=TEXT` | Label for the uploaded run. |
+| `+tags=[a,b]` | Tags for the uploaded run. |
+| `+meta.KEY=VALUE` | Extra metadata for the uploaded run. |
+| `+parallel=N` | Number of parallel upload parts. Defaults to `4`. |
+| `+wait=true\|false` | Wait for EvalRDL's verdict on the upload. Defaults to `true`. |
+| `+timeout=SECONDS` | How long to wait for the verdict. Defaults to `1800`. |
+| `+url=prod\|stg\|URL` | EvalRDL service. Defaults to the SDK's own choice. |
+| `+requirement=SPEC` | pip requirement for the SDK, such as a pinned version. Defaults to `evalrdl`. |
+
+The result is `succeeded` when EvalRDL stored the run as new, and `skipped` when it already held the same content. An
+upload EvalRDL stored without a verdict before the timeout fails with exit code `3`, and one it refused fails with exit
+code `4`; both name the reason.
+
+```bash
+gym eval export evalrdl \
+    +rollouts_jsonl_fpath=results/rollouts.jsonl \
+    +label=nightly '+tags=[a,b]' +meta.model=qwen
 ```
 
 See the [trajectory capability matrix](/reference/trajectory-capabilities#atif-export) for the initial conversion boundary.

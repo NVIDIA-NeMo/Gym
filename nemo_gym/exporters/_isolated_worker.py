@@ -18,7 +18,7 @@ Invoked as `python _isolated_worker.py RESULT_FPATH WORKER_FPATH` with the JSON 
 only the standard library, because the environment it runs in has none of Gym's dependencies.
 
 The worker file defines `run(payload: dict) -> dict`. The returned dict may hold `state` (`succeeded` by default,
-`skipped` or `failed`), `error` and `detail`. The outcome is written as JSON to RESULT_FPATH rather than stdout, so
+`skipped` or `failed`), `error`, `exit_code` (for a failure; 1 by default) and `detail`. The outcome is written as JSON to RESULT_FPATH rather than stdout, so
 whatever the exporter's SDK prints cannot corrupt it.
 """
 
@@ -26,8 +26,8 @@ import os
 import sys
 
 
-# Running this file puts its directory first on sys.path, where the modules that sit beside it (`mlflow.py`,
-# `wandb.py`) would shadow the SDKs of the same name installed in this environment.
+# Running this file puts its directory first on sys.path, where the modules that sit beside it (`evalrdl.py`,
+# `mlflow.py`, `wandb.py`) would shadow the SDKs of the same name installed in this environment.
 sys.path[:] = [path for path in sys.path if path != os.path.dirname(os.path.abspath(__file__))]
 
 import importlib.util  # noqa: E402
@@ -50,11 +50,12 @@ def main(argv: list[str]) -> int:
         result = {
             "state": outcome.get("state", "succeeded"),
             "error": outcome.get("error"),
+            "exit_code": outcome.get("exit_code", 1),
             "detail": outcome.get("detail", {}),
         }
     except Exception as exc:
         traceback.print_exc()
-        result = {"state": "failed", "error": f"{type(exc).__name__}: {exc}", "detail": {}}
+        result = {"state": "failed", "error": f"{type(exc).__name__}: {exc}", "exit_code": 1, "detail": {}}
     temporary = f"{result_fpath}.tmp"
     with open(temporary, "w") as handle:
         json.dump(result, handle)

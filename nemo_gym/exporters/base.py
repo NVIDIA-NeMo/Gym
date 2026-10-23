@@ -124,6 +124,51 @@ def _upload_intent(config: DictConfig) -> UploadRolloutsConfigMixin:
     return UploadRolloutsConfigMixin.model_validate(values)
 
 
+def _aggregation_failure(aggregate_metrics: Path) -> Optional[str]:
+    """Why the aggregate metrics file is not a complete result, or None.
+
+    A failed `/aggregate_metrics` request leaves an `aggregation_error` entry beside the healthy agents'
+    metrics. A live run keeps those partial metrics and reports the failure, but an export marks the run
+    done, so it must not send a partial result.
+    """
+    from nemo_gym.batch_status import AGGREGATION_ERROR_KEY
+
+    try:
+        entries = orjson.loads(aggregate_metrics.read_bytes())
+    except orjson.JSONDecodeError as exc:
+        return f"Aggregate metrics {aggregate_metrics} are not valid JSON ({exc}). Run `gym eval aggregate` again."
+    failed = sorted(
+        str((entry.get("agent_ref") or {}).get("name", "<unknown>"))
+        for entry in entries
+        if isinstance(entry, dict) and AGGREGATION_ERROR_KEY in entry
+    )
+    if failed:
+        return f"Aggregation failed for agents: {', '.join(failed)}. Run `gym eval aggregate` again."
+    return None
+
+
+def unexportable_reason(artifacts: RunArtifacts, *, rollouts_required: bool = True) -> Optional[str]:
+    """What is missing for the run to be exported faithfully, or None when it can be.
+
+    Pass `rollouts_required=False` when the exporter does not read the rollouts file. When that file is there,
+    the aggregate metrics must still not be older than it.
+    """
+    rollouts = artifacts.rollouts_jsonl_fpath
+    if rollouts_required and not rollouts.is_file():
+        return f"Rollouts file not found: {rollouts}"
+    aggregate_metrics = artifacts.aggregate_metrics_json_fpath
+    if not aggregate_metrics.is_file():
+        return f"Aggregate metrics not found: {aggregate_metrics}. Run `gym eval aggregate` first."
+    if rollouts.is_file() and aggregate_metrics.stat().st_mtime < rollouts.stat().st_mtime:
+        return f"Aggregate metrics {aggregate_metrics} are older than {rollouts}. Run `gym eval aggregate` again."
+    if not artifacts.resolved_config_yaml_fpath.is_file():
+        return (
+            f"Saved run config not found: {artifacts.resolved_config_yaml_fpath}. "
+            "The run predates saving it; re-run it, or export it live."
+        )
+    return _aggregation_failure(aggregate_metrics)
+
+
 class BaseExporter(Exporter):
     """Sink for the run metadata a NeMo Gym eval produces: config, metrics, rollouts.
 
@@ -323,7 +368,8 @@ class BaseExporter(Exporter):
         marker = artifacts.export_done_fpath(self.name)
         if marker.exists():
             return ExportResult.skipped(reason="already exported", run_id=marker.read_text().strip())
-        unexportable = self._why_not_exportable(artifacts)
+        # The rollouts file is only required below, when the rollouts are actually uploaded.
+        unexportable = unexportable_reason(artifacts, rollouts_required=False)
         if unexportable is not None:
             return ExportResult.failed(unexportable)
 
@@ -369,49 +415,6 @@ class BaseExporter(Exporter):
         if live_run_id is not None:
             detail["live_run_id"] = live_run_id
         return ExportResult.succeeded(**detail)
-
-    @staticmethod
-    def _why_not_exportable(artifacts: RunArtifacts) -> Optional[str]:
-        """What is missing for the run to be exported faithfully, or None when it can be.
-
-        The rollouts file is not needed unless the rollouts are uploaded, which `export` checks. When it is there,
-        the aggregate metrics must not be older than it.
-        """
-        rollouts = artifacts.rollouts_jsonl_fpath
-        aggregate_metrics = artifacts.aggregate_metrics_json_fpath
-        if not aggregate_metrics.is_file():
-            return f"Aggregate metrics not found: {aggregate_metrics}. Run `gym eval aggregate` first."
-        if rollouts.is_file() and aggregate_metrics.stat().st_mtime < rollouts.stat().st_mtime:
-            return f"Aggregate metrics {aggregate_metrics} are older than {rollouts}. Run `gym eval aggregate` again."
-        if not artifacts.resolved_config_yaml_fpath.is_file():
-            return (
-                f"Saved run config not found: {artifacts.resolved_config_yaml_fpath}. "
-                "The run predates saving it; re-run it, or export it live."
-            )
-        return BaseExporter._aggregation_failure(aggregate_metrics)
-
-    @staticmethod
-    def _aggregation_failure(aggregate_metrics: Path) -> Optional[str]:
-        """Why the aggregate metrics file is not a complete result, or None.
-
-        A failed `/aggregate_metrics` request leaves an `aggregation_error` entry beside the healthy agents'
-        metrics. A live run keeps those partial metrics and reports the failure, but an export marks the run
-        done, so it must not send a partial result.
-        """
-        from nemo_gym.batch_status import AGGREGATION_ERROR_KEY
-
-        try:
-            entries = orjson.loads(aggregate_metrics.read_bytes())
-        except orjson.JSONDecodeError as exc:
-            return f"Aggregate metrics {aggregate_metrics} are not valid JSON ({exc}). Run `gym eval aggregate` again."
-        failed = sorted(
-            str((entry.get("agent_ref") or {}).get("name", "<unknown>"))
-            for entry in entries
-            if isinstance(entry, dict) and AGGREGATION_ERROR_KEY in entry
-        )
-        if failed:
-            return f"Aggregation failed for agents: {', '.join(failed)}. Run `gym eval aggregate` again."
-        return None
 
     def _upload_enabled(self, saved_config: DictConfig) -> bool:
         """Whether the rollouts are uploaded, as a live run would have decided.
