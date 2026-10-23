@@ -167,6 +167,9 @@ class BuildPlanEntry:
     target: str | None = None
     dockerfile_inline: bool = False
     verifier: bool = False
+    # The tasks of the context that declare ``[environment].docker_image`` and whose ``main`` is planned anyway, under
+    # ``builds.force`` (Harbor's ``--force-build``); recorded so the loader runs the build for them (``forced_tasks``).
+    forced_tasks: tuple[str, ...] = ()
 
     @property
     def compose_service(self) -> str:
@@ -220,7 +223,11 @@ class BuildConflict:
 
 
 def plan_builds(
-    folder: Path, *, select: Callable[[str], bool] | None = None, conflicts: dict[str, BuildConflict] | None = None
+    folder: Path,
+    *,
+    select: Callable[[str], bool] | None = None,
+    conflicts: dict[str, BuildConflict] | None = None,
+    force: bool = False,
 ) -> list[BuildPlanEntry]:
     """The services to build among the tasks under ``folder``, one entry per distinct build context and service.
 
@@ -235,7 +242,9 @@ def plan_builds(
     a task whose build fails, or plans again without the first task when that one is left out itself.
     A task's ``main`` counts when it has ``environment/Dockerfile``,
     declares no ``[environment].docker_image`` after the dataset's overrides, and the Dockerfile
-    is outside pull and overlay mode; a prebuilt ``main`` is never built. Every other service of the task's
+    is outside pull and overlay mode; a prebuilt ``main`` is never built, unless ``force`` is set: Harbor's
+    ``--force-build`` builds the Dockerfile instead of pulling the declared image, and the loader then runs the
+    recorded build. Every other service of the task's
     ``environment/docker-compose.yaml`` (the one Compose file Harbor reads) with a ``build`` section counts
     whatever ``main``'s mode, as Harbor's ``docker compose build`` builds it (:func:`sidecar_build_services`).
     Tasks whose ``task.toml`` does not load are left for the loader to report. Entries are grouped by context in
@@ -271,6 +280,8 @@ def plan_builds(
         conflicts = {}
     # The digests of tests/ contexts: their `verifier` service is the separate verifier's image, not a sidecar.
     verifier_digests: set[str] = set()
+    # By context digest, the tasks whose main is planned over a declared docker_image (``force``).
+    forced: dict[str, list[str]] = {}
     for child in children:
         if select is not None and not select(child.name):
             continue
@@ -283,7 +294,7 @@ def plan_builds(
         except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError):
             continue
         planned: list[str] = []
-        if text is not None and not config.environment.docker_image and needs_build(text, image_configs):
+        if text is not None and (force or not config.environment.docker_image) and needs_build(text, image_configs):
             planned.append(MAIN_SERVICE)
         planned += sidecar_build_services(context)
         # The task's contexts, each with the services planned of it and the settings its build sees.
@@ -315,6 +326,8 @@ def plan_builds(
             )
             if folder_path == verifier_context:
                 verifier_digests.add(digest)
+            elif force and config.environment.docker_image and MAIN_SERVICE in folder_services:
+                forced.setdefault(digest, []).append(child.name)
     return [
         BuildPlanEntry(
             digest,
@@ -323,6 +336,7 @@ def plan_builds(
             *settings[digest],
             service=service,
             verifier=service == VERIFIER_SERVICE and digest in verifier_digests,
+            forced_tasks=tuple(forced.get(digest, ())) if service == MAIN_SERVICE else (),
         )
         for digest, tasks in entries.items()
         for service in services[digest]
@@ -427,3 +441,4 @@ class BuildResult:
     pushed: bool
     record: dict[str, Any] = field(default_factory=dict)
     service: str = MAIN_SERVICE
+    forced_tasks: tuple[str, ...] = ()

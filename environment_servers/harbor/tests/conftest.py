@@ -28,6 +28,7 @@ from pytest import MonkeyPatch
 from environment_servers.harbor.app import (
     HarborEnvironmentServer,
     HarborEnvironmentServerConfig,
+    HarborEpisodeRequest,
     HarborEpisodeResponse,
 )
 from environment_servers.harbor.verifier import EXIT_RECORD_NAME
@@ -35,7 +36,6 @@ from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
-from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
 from nemo_gym.tasks.harbor import DIGEST_KEY, load_task
 from nemo_gym.tasks.harbor.digest import context_digest
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
@@ -185,7 +185,20 @@ class FakeSandbox:
         return OK
 
     async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
-        record = {"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user, "seen": None}
+        # The facade's rule (`AsyncSandbox.exec`): an exec that names no user runs as the sandbox's default, and
+        # a sandbox with no default runs as the image's own user. `user` is the raw argument, `ran_as` the user
+        # the container ran the command as.
+        effective = user if user is not None else self.default_user
+        who = str(effective) if effective is not None else self.image_user
+        record = {
+            "command": command,
+            "cwd": cwd,
+            "env": env,
+            "timeout_s": timeout_s,
+            "user": user,
+            "ran_as": who,
+            "seen": None,
+        }
         self.execs.append(record)
         if "test.sh" in command:
             if "timeout" not in command:
@@ -200,10 +213,21 @@ class FakeSandbox:
         if command == "pwd":
             # The image's own WORKDIR, asked for when a task declares none.
             return SandboxExecResult(stdout="/app\n", stderr="", return_code=0)
-        who = str(user) if user is not None else self.image_user
         if match := re.fullmatch(r"getent passwd (\S+) \| cut -d: -f1", command):
             name = self.passwd.get(shlex.split(match.group(1))[0], "")
             return SandboxExecResult(stdout=f"{name}\n" if name else "", stderr="", return_code=0)
+        if match := re.fullmatch(r"stat -c %u:%g (\S+)", command):
+            # The owner's uid and gid (one group per user here); a name the passwd table lacks is its own uid.
+            owner = self.dirs.get(shlex.split(match.group(1))[0], "root")
+            uid = next((uid for uid, name in self.passwd.items() if name == owner), owner)
+            return SandboxExecResult(stdout=f"{uid}:{uid}\n", stderr="", return_code=0)
+        if match := re.fullmatch(r"chown (\S+) (\S+)", command):
+            owner, path = shlex.split(match.group(1))[0], shlex.split(match.group(2))[0]
+            if who.split(":")[0] not in ("root", "0"):
+                return _fails(f"chown: changing ownership of '{path}': Operation not permitted")
+            uid = owner.split(":")[0]
+            self.dirs[path] = self.passwd.get(uid, uid)
+            return OK
         if match := re.fullmatch(r"test -d (\S+) \|\| \(mkdir -p \1 && chown (\S+) \1\)", command):
             path, owner = shlex.split(match.group(1))[0], shlex.split(match.group(2))[0]
             if path in self.dirs:
@@ -411,8 +435,8 @@ def make_server(
     return server, task, sandbox, created
 
 
-def episode(task, *, rollout="r1", attempt=0, digest=None, task_id="hello", taskset="ds") -> SingleAgentTurnRequest:
-    return SingleAgentTurnRequest.model_validate(
+def episode(task, *, rollout="r1", attempt=0, digest=None, task_id="hello", taskset="ds") -> HarborEpisodeRequest:
+    return HarborEpisodeRequest.model_validate(
         {
             "episode_id": {"rollout_id": rollout, "attempt": attempt},
             "task": {

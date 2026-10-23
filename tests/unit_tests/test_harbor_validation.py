@@ -597,3 +597,40 @@ def test_eval_run_with_the_oracle_is_a_validation_run(tmp_path, monkeypatch, cap
     assert outputs[-1] == evaluation / "rollouts.jsonl"
     assert not materialized_path_for(evaluation / "rollouts.jsonl").exists()
     assert json.loads((validation / "rollouts.jsonl").read_text())["response"]["metadata"]["oracle"] == "solved"
+
+
+def test_validate_keeps_a_multi_step_task_whose_solutions_are_per_step(tmp_path, monkeypatch, capsys, validation_cli):
+    """G7 round 24, attempt 4: the MemoryArena task keeps its reference solutions in `steps/<name>/solution/` and has
+    no top-level `solution/`, so `gym dataset validate` filtered it out as "no solution/" before any server started.
+    A multi-step task counts as validatable when every step has a solution, its own or the task's; a step with
+    neither leaves the task unvalidated, as a single-turn task without `solution/` is."""
+    from tests.unit_tests.test_harbor_tasks import write_multi_step_task
+
+    def multi_step(name: str, *, own: tuple[str, ...], top_level: bool) -> None:
+        root = write_multi_step_task(tmp_path / "ds" / name)
+        if not top_level:
+            (root / "solution" / "solve.sh").unlink()
+            (root / "solution").rmdir()
+        for step in own:
+            (root / "steps" / step / "solution").mkdir()
+            (root / "steps" / step / "solution" / "solve.sh").write_text("#!/bin/bash\necho ok\n")
+
+    multi_step("per_step", own=("01_plan", "02_implement"), top_level=False)
+    multi_step("mixed", own=("01_plan",), top_level=True)
+    multi_step("incomplete", own=("01_plan",), top_level=False)
+
+    def collect(target, tokens):
+        monkeypatch.setattr(sys, "argv", ["e2e", *tokens])
+        config = global_config.get_global_config_dict()
+        agent = config.harbor_ds_agent.responses_api_agents.harbor_oracle_agent
+        rows = [json.loads(line) for line in Path(agent.datasets[0].jsonl_fpath).read_text().splitlines()]
+        assert [row["task_id"]["task_id"] for row in rows] == ["mixed", "per_step"]
+        assert all(len(row["task_input"]["turns"]) == 2 for row in rows)
+        write_jsonl(Path(config.output_jsonl_fpath), [result("mixed", index=0), result("per_step", index=1)])
+
+    monkeypatch.setattr(main_module, "dispatch", collect)
+    validation_cli()
+    out = capsys.readouterr().out
+    # Listed as unvalidated, as a single-turn task without solution/ is (the report's existing rule for them).
+    assert "incomplete\tunvalidated (no solution/)" in out
+    assert "per_step [repeat 0]\toracle solved\t1.0" in out and "mixed [repeat 0]\toracle solved\t1.0" in out
