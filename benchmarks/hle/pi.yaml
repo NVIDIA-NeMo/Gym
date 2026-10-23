@@ -18,8 +18,13 @@ hle_pi_agent:
 equivalence_llm_judge_simple_agent: null
 hle_equivalence_llm_judge_simple_agent: null
 
-hle_equivalence_llm_judge_environment_server:
+# The benchmark's server fronts its simple_agent, so this harness, which has no agent sessions, gets a relay of its own.
+equivalence_llm_judge_environment_server: null
+hle_equivalence_llm_judge_environment_server: null
+hle_pi_environment_server:
   environment_servers:
     legacy_agent:
+      entrypoint: app.py
       agent_server:
+        type: responses_api_agents
         name: hle_pi_agent
