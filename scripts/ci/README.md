@@ -40,6 +40,13 @@ suite runs offline too when the provider sets `UV_OFFLINE=1` for the nested inst
 whose Git source, direct or transitive, is not pinned to a full commit (a branch, a tag, an
 abbreviated SHA, or no ref) still needs the network, because `uv` must fetch to resolve it.
 
+The same build option also prepares IFBench's pinned source and its four NLTK resources in
+`NLTK_DATA=/opt/nemo-gym/cache/nltk_data`. Keep that directory available at runtime; replacing it
+with an empty mount removes the seeded data. IFBench checks the cached resources during scoring
+without fetching NLTK's package index. Aviary's GSM8K lifecycle tests use local synthetic rows,
+so they do not need a Hugging Face dataset cache. Other servers may still need their own external
+data or tools; seeding Python distributions alone does not supply those resources.
+
 Both CI providers run `core_unit_tests.sh` in its deterministic `dev`-only environment. GitHub then
 installs its public-only sandbox dependencies and runs the sandbox-marked tests as a separate
 coverage pass.

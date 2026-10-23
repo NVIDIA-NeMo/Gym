@@ -36,6 +36,12 @@ IFBENCH_REPO = "https://github.com/allenai/IFBench.git"
 SERVER_DIR = Path(__file__).parent
 IFBENCH_DIR = SERVER_DIR / ".ifbench"
 INSTALL_MARKER = IFBENCH_DIR / ".installed"
+NLTK_RESOURCES = {
+    "punkt": "tokenizers/punkt",
+    "punkt_tab": "tokenizers/punkt_tab",
+    "stopwords": "corpora/stopwords",
+    "averaged_perceptron_tagger_eng": "taggers/averaged_perceptron_tagger_eng",
+}
 
 
 def _add_to_path() -> None:
@@ -46,29 +52,34 @@ def _add_to_path() -> None:
 
 
 def _ensure_nltk_data() -> None:
-    """Download required NLTK if not already present.
+    """Ensure required data exists, respecting NLTK_DATA for a shared cache."""
+    # Preserve the pre-imports needed by NLTK's safe import finder when this
+    # module runs directly during image builds (see PR #2290).
+    import defusedxml.ElementTree  # noqa: F401
+    import regex  # noqa: F401
+    import nltk  # isort: skip
 
-    NLTK stores its data in a user-level directory (~/.nltk_data),
-    not inside the venv, so we always check and download if missing,
-    regardless of whether the .installed marker exists.
-    """
-    try:
-        import nltk
+    for kind, resource in NLTK_RESOURCES.items():
+        try:
+            nltk.data.find(resource)
+        except LookupError:
+            nltk.download(kind, quiet=True, raise_on_error=True)
+            # Do not publish a successful setup marker for incomplete data.
+            nltk.data.find(resource)
 
-        for resource, kind in [
-            ("tokenizers/punkt", "punkt"),
-            ("tokenizers/punkt_tab", "punkt_tab"),
-            ("corpora/stopwords", "stopwords"),
-            ("taggers/averaged_perceptron_tagger_eng", "averaged_perceptron_tagger_eng"),
-        ]:
-            try:
-                nltk.data.find(resource)
-            except LookupError:
-                nltk.download(kind, quiet=True)
-    except ImportError:
-        pass
-    except Exception as e:
-        print(f"NLTK setup warning: {e}")
+
+def _patch_nltk_downloads(source: Path) -> None:
+    """Use setup's cached data instead of fetching NLTK's index during scoring."""
+    text = source.read_text(encoding="utf-8")
+    patched = text
+    for kind, resource in NLTK_RESOURCES.items():
+        patched = re.sub(
+            rf"nltk\.download\((['\"]){kind}\1\)",
+            f"nltk.data.find({resource!r})",
+            patched,
+        )
+    if patched != text:
+        source.write_text(patched, encoding="utf-8")
 
 
 def _patch_spacy_download(instructions_py: Path) -> None:
@@ -92,10 +103,13 @@ def _patch_spacy_download(instructions_py: Path) -> None:
 def ensure_ifbench() -> None:
     """Clone the IFBench repo if needed and make it importable.
 
-    The .installed marker ensures we only clone once. Afterwards, we
-    just re-add the repo to sys.path and re-check that NTLK data exists.
+    The .installed marker ensures we only clone once. Afterwards, apply any
+    setup patches, re-add the repo to sys.path, and check the NLTK data.
     """
     if INSTALL_MARKER.exists():
+        # Upgrade existing clones as well as fresh installs.
+        _patch_nltk_downloads(IFBENCH_DIR / "instructions.py")
+        _patch_nltk_downloads(IFBENCH_DIR / "instructions_util.py")
         _add_to_path()
         _ensure_nltk_data()
         return
@@ -116,9 +130,10 @@ def ensure_ifbench() -> None:
 
     # Disable the spaCy auto-download that runs at import time
     _patch_spacy_download(IFBENCH_DIR / "instructions.py")
+    _patch_nltk_downloads(IFBENCH_DIR / "instructions.py")
+    _patch_nltk_downloads(IFBENCH_DIR / "instructions_util.py")
 
-    # Download NLTK data before we first import instructions_util, which
-    # triggers its own download attempt at import time
+    # Populate the NLTK cache before importing the patched instruction checks.
     _ensure_nltk_data()
 
     # Touch the marker for future calls (which skip straight to _add_to_path())

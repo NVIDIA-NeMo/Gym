@@ -42,6 +42,12 @@ python resources_servers/ifbench/setup_ifbench.py
 
 This clones the repo, applies patches, and writes the `.installed` marker. On subsequent startups the server skips the clone and uses the pre-cloned copy.
 
+Setup also downloads the required NLTK resources when missing and fails if they cannot be installed.
+For offline execution, run setup with the server's dependencies installed and `NLTK_DATA` pointing
+to an existing writable directory. Preserve both that directory and `.ifbench/` in the runtime.
+The container build option `NEMO_GYM_SEED_SERVER_ENVS=1` prepares both. Once setup completes,
+instruction checks use the cached data without downloading NLTK's package index.
+
 ## Example Usage
 
 ```bash
