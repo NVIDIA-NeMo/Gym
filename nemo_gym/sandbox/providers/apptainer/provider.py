@@ -125,6 +125,8 @@ class ApptainerExecConfig:
     default_binds: list[str] = field(default_factory=list)
     extra_exec_args: list[str] = field(default_factory=list)
     concurrency: int = 32
+    # Per stream: a command can make its captured output arbitrarily large without writing it (truncate).
+    max_output_bytes: int = 64 * 1024 * 1024
 
     def __post_init__(self) -> None:
         if self.default_timeout_s is not None and self.default_timeout_s <= 0:
@@ -133,6 +135,8 @@ class ApptainerExecConfig:
             raise ValueError("exec.timeout_grace_s must be >= 0")
         if self.concurrency < 1:
             raise ValueError("exec.concurrency must be >= 1")
+        if self.max_output_bytes < 1:
+            raise ValueError("exec.max_output_bytes must be >= 1")
 
 
 @dataclass(frozen=True)
@@ -187,6 +191,19 @@ def _resource_passthrough_flags(resources: SandboxResources) -> list[str]:
     if resources.gpu:
         flags.append("--nv")
     return flags
+
+
+def _read_capture(file: Any, limit: int) -> bytes:
+    """At most ``limit`` bytes from the start of an exec's capture file, read in place.
+
+    A process the command left running can still hold the file: it may keep writing, so the shared file
+    offset is left alone (a seek would move its writes), and it may have grown or truncated the file to any
+    size, so the read is bounded and a longer capture ends with a marker.
+    """
+    data = os.pread(file.fileno(), limit, 0)
+    if os.fstat(file.fileno()).st_size > limit:
+        data += f"\n[output truncated at {limit} bytes]".encode()
+    return data
 
 
 def _resolve_image(image: str) -> str:
@@ -342,33 +359,37 @@ class ApptainerProvider:
             if daemonize:
                 return await self._run_daemonizing(argv, timeout_s=timeout_s)
 
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdin=asyncio.subprocess.PIPE if stdin is not None else None,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-                env=self._subprocess_env,
-            )
-            try:
-                stdout_b, stderr_b = await asyncio.wait_for(
-                    proc.communicate(input=stdin),
-                    timeout=timeout_s,
+            # Output goes to files, not pipes: a process the command leaves running in the instance
+            # (`tmux new-session -d`, `server &`) can keep the write end of an output pipe open, and reading
+            # the pipe to EOF then waits until that process exits. Under uvloop, the event loop of Gym's
+            # servers, Terminus 2's tmux start never returned. With files, the command's exit ends the wait.
+            with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+                proc = await asyncio.create_subprocess_exec(
+                    *argv,
+                    stdin=asyncio.subprocess.PIPE if stdin is not None else None,
+                    stdout=out_f,
+                    stderr=err_f,
+                    start_new_session=True,
+                    env=self._subprocess_env,
                 )
-            except asyncio.TimeoutError as e:
-                # Graceful timeout: SIGTERM the process group first and give it a short grace period
-                # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
-                # handler), THEN SIGKILL if it hasn't exited.
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                with contextlib.suppress(asyncio.TimeoutError, Exception):
-                    await asyncio.wait_for(proc.wait(), timeout=self._exec_config.timeout_grace_s)
-                if proc.returncode is None:  # still alive after grace -> hard kill
+                try:
+                    await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout_s)
+                except asyncio.TimeoutError as e:
+                    # Graceful timeout: SIGTERM the process group first and give it a short grace period
+                    # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
+                    # handler), THEN SIGKILL if it hasn't exited.
                     with contextlib.suppress(ProcessLookupError):
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    with contextlib.suppress(Exception):
-                        await proc.wait()
-                raise TimeoutError(f"apptainer command timed out after {timeout_s:g}s: {argv}") from e
+                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    with contextlib.suppress(asyncio.TimeoutError, Exception):
+                        await asyncio.wait_for(proc.wait(), timeout=self._exec_config.timeout_grace_s)
+                    if proc.returncode is None:  # still alive after grace -> hard kill
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        with contextlib.suppress(Exception):
+                            await proc.wait()
+                    raise TimeoutError(f"apptainer command timed out after {timeout_s:g}s: {argv}") from e
+                limit = self._exec_config.max_output_bytes
+                stdout_b, stderr_b = _read_capture(out_f, limit), _read_capture(err_f, limit)
 
             return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
             return return_code, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
