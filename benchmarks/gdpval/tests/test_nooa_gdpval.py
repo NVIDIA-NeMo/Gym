@@ -36,6 +36,7 @@ def test_nooa_recipe_preserves_gdpval_tools_grading_and_dispatch(
 
     monkeypatch.setenv("TAVILY_API_KEY", "unused")
     monkeypatch.setenv("GDPVAL_SANDBOX_IMAGE", "fixture:1")
+    monkeypatch.setenv("PERSIST_DELIVERABLES_DIR", str(tmp_path / "deliverables"))
     monkeypatch.setattr("nemo_gym.global_config._find_open_port_using_range", lambda **_: 12345)
     recipe = ROOT / "benchmarks/gdpval/nooa.yaml"
     assert recipe in _benchmark_config_paths(recipe.parent)
