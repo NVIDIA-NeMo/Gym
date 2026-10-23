@@ -87,6 +87,11 @@ collector's node is traced: headless data-parallel workers do not get the flag, 
 another node or on several nodes (a tier pinned to a later pool, one server per pool node, Ray Serve
 replicas across nodes) is left untraced rather than pointed at a collector it cannot reach.
 
+The collector also copies the rollout id out of each engine span's `gen_ai.request.id` (vLLM's
+`chatcmpl-<rollout id>-<8 hex>`) into `nemo.gym.rollout.id`, the attribute every other Gym span carries,
+so engine spans group per rollout in any backend without a regex at query time. An engine request id
+that is not Gym's is left alone, and an id the span already carries is never overwritten.
+
 ## What is exported
 
 | Source | How | Notes |
