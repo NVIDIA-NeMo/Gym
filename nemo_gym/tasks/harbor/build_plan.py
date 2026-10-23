@@ -17,12 +17,11 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import subprocess
 import tempfile
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import yaml
 
@@ -42,6 +41,11 @@ from nemo_gym.tasks.harbor.task import DOCKERFILE, TASK_FILE, HarborTaskConfig, 
 from nemo_gym.tasks.harbor.verifier_env import effective_verifier_environment, verifier_build_context
 
 
+if TYPE_CHECKING:
+    # The type of what a Runner returns only: this module spawns nothing (see tests/unit_tests/test_sandbox_policy.py).
+    import subprocess
+
+
 LOGGER = logging.getLogger(__name__)
 
 BUILD_TOOLS = ("buildah", "podman", "docker")
@@ -58,7 +62,7 @@ DOCKERFILE_NAME = "Dockerfile"
 # The seam tests replace: run one tool command and return its completed process (text mode). ``env`` is
 # the full environment of the command when the caller sets one (the docker backend passes Harbor's
 # Compose variables that way); ``None`` inherits the process environment.
-Runner = Callable[..., subprocess.CompletedProcess]
+type Runner = Callable[..., subprocess.CompletedProcess]
 
 
 class BuildError(RuntimeError):
