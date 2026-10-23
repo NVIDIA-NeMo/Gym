@@ -16,6 +16,7 @@
 from typing import Generator
 from unittest.mock import MagicMock
 
+import app as code_gen_app
 import pytest
 import ray
 from app import (
@@ -29,9 +30,11 @@ from lcb_integration.testing_util import MockStdinWithBuffer
 from pydantic import ValidationError
 
 from nemo_gym.base_resources_server import AggregateMetricsRequest
+from nemo_gym.failure_kinds import VERIFIER_ERROR
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationError
 
 
 class TestApp:
@@ -277,7 +280,7 @@ class TestApp:
         assert res.reward == 0.0 and res.metadata["error_message"] == "Runtime Error"
 
 
-def _make_server():
+def _make_server(**config_overrides):
     return CompCodingResourcesServer(
         config=CompCodingResourcesServerConfig(
             host="127.0.0.1",
@@ -287,9 +290,78 @@ def _make_server():
             num_processes=1,
             unit_test_timeout_secs=10,
             debug=False,
+            **config_overrides,
         ),
         server_client=MagicMock(spec=ServerClient),
     )
+
+
+def _verify_request(code: str) -> CompCodingVerifyRequest:
+    response = NeMoGymResponse(
+        id="resp_sandbox",
+        created_at=0.0,
+        model="dummy",
+        object="response",
+        output=[
+            {
+                "id": "msg_sandbox",
+                "content": [{"annotations": [], "text": f"```python\n{code}\n```", "type": "output_text"}],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+            }
+        ],
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+    )
+    return CompCodingVerifyRequest(
+        responses_create_params={"input": [{"role": "user", "content": "square n"}]},
+        response=response,
+        verifier_metadata={"unit_tests": {"inputs": ["3\n", "5\n"], "outputs": ["9", "25"]}},
+    )
+
+
+class TestSandboxVerify:
+    """verify() wiring for sandbox_provider; the sandbox path itself is covered in test_sandbox_execution.py."""
+
+    def _sandbox_server(self) -> CompCodingResourcesServer:
+        server = _make_server(sandbox_provider="sandbox", sandbox_config={"image": "code-gen-verifier:test"})
+        # Skip global-config resolution; check_correctness_in_sandbox is replaced in these tests.
+        server._sandbox_target = ({"local": {}}, {"nemo_gym_server": "code_gen"})
+        return server
+
+    def test_sandbox_provider_requires_image(self) -> None:
+        with pytest.raises(ValidationError, match="sandbox_config.image is required"):
+            _make_server(sandbox_provider="sandbox")
+
+    async def test_sandbox_results_are_scored(self, monkeypatch) -> None:
+        calls = []
+
+        async def _passing(*args, **kwargs):
+            calls.append(kwargs)
+            return [True, True], {"execution time": 0.01}
+
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _passing)
+        res = await self._sandbox_server().verify(_verify_request("n=int(input())\nprint(n*n)"))
+
+        assert res.reward == 1.0 and not res.mask_sample
+        assert res.result == [True, True]
+        assert calls[0]["num_tests"] == 2
+        assert calls[0]["metadata"] == {"nemo_gym_server": "code_gen"}
+
+    async def test_infrastructure_failure_masks_the_sample(self, monkeypatch) -> None:
+        async def _failing(*args, **kwargs):
+            raise SandboxVerificationError(VERIFIER_ERROR, "runner failed (exit=137)")
+
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _failing)
+        res = await self._sandbox_server().verify(_verify_request("print(9)"))
+
+        assert res.mask_sample is True
+        assert res.failure_kind == VERIFIER_ERROR
+        assert res.failure_reason == "runner failed (exit=137)"
+        assert res.reward == 0.0
+        assert res.extracted_model_code == "print(9)"
 
 
 class TestComputeMetrics:

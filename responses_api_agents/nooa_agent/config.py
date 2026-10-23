@@ -104,13 +104,6 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         description="Budget in seconds for each sandbox close phase and for joining the remaining activation.",
     )
 
-    @field_validator("num_workers")
-    @classmethod
-    def require_single_worker(cls, value: int | None) -> int | None:
-        if value not in (None, 1):
-            raise ValueError("NOOA sessions require num_workers=1")
-        return value
-
 
 def load_agent_class(path: str) -> type[Agent]:
     """Import and validate a ``module:Class`` NOOA agent reference."""
