@@ -29,6 +29,11 @@ policy turn from a caller-authored example. Neither diagnostic claims that train
 metadata originally existed. Identical diagnostics are collected once per rollout;
 the gap list is a set of diagnostic conditions, not a count of affected turns.
 
+This diagnostic can also appear for native assistant prefills represented as
+public dictionaries. It does not reject conformance or rollout collection, but
+strict ATIF export rejects trajectories containing any gap. Do not treat a public
+dictionary as evidence that native training metadata was captured.
+
 Structured responses are parsed from exactly the concatenated assistant text that
 NOOA persists as `content`. This permits callers to reparse the same JSON after
 restore, when `parsed` is absent. A refusal fails structured-output validation,
