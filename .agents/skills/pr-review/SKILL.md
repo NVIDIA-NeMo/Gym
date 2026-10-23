@@ -11,7 +11,13 @@ user-invocable: false
 Load this rubric from the protected base snapshot for formal `/review`.
 `mode=light` prioritizes high-confidence defects; `mode=strict` adds deeper
 edge-case, compatibility, and hardening analysis. Both apply the complete
-rubric below.
+rubric below. `role=engineer` applies the rubric as written;
+`role=automation` additionally focuses on CI workflows, review and release
+automation, identity and authority boundaries, idempotency, and retry and
+failure paths.
+
+This rubric accepts the invocation's default RESET, collection scope,
+coverage, and funnel policy; omit `review_policy` in the result.
 
 ## Formal review execution
 
@@ -235,7 +241,8 @@ diff changes, look at the unchanged code that depends on it:
   that the change should have updated too.
 
 Anchor each such finding on the unchanged line that is now wrong, and say
-which change in the diff broke it.
+which change in the diff broke it. In a follow-up review, apply this only to
+changes made since the previous bot review.
 
 ## Posting findings
 
@@ -264,3 +271,11 @@ Open with a one-line verdict: SHIP, SHIP WITH CARE, or HOLD. If the
 change is genuinely low-risk and you have nothing material, say so
 plainly: "LGTM — no reliability concerns." Finding nothing is a valid
 outcome; never invent work to look thorough.
+
+Return the structured verdict from the most severe finding:
+- any BLOCKER → `request_changes` (HOLD);
+- any RISK and no BLOCKER → `comment` (SHIP WITH CARE);
+- only NOTEs, or no findings → `approve` (SHIP).
+
+The review service decides whether the verdict is published as given or as a
+comment; grade findings the same way either way.
