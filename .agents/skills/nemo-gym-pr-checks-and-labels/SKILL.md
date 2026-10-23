@@ -1,6 +1,6 @@
 ---
 name: nemo-gym-pr-checks-and-labels
-description: Inspect and prepare NVIDIA-NeMo/Gym pull requests by reviewing relevant file history, selecting repository-specific local and CI checks, diagnosing missing or failed checks, and choosing current type, area, and state labels. Use for PR readiness, check selection, CI handoff, or PR labeling. Do not use for general code review or issue-triage sweeps.
+description: Inspect and prepare NVIDIA-NeMo/Gym pull requests by reviewing relevant file history, selecting repository-specific local and CI checks, diagnosing missing or failed checks, and choosing current type, area, and state labels. Use for PR readiness, check selection, CI handoff, PR labeling, or when CI did not start on a PR (`/ok to test <full-sha>`, unverified commits, external contributors, copy-pr-bot, missing `pull-request/<n>` mirror). Do not use for general code review or issue-triage sweeps.
 ---
 
 # NeMo Gym PR Checks and Labels
@@ -150,8 +150,9 @@ Distinguish three states:
    gate before assuming CI is broken.
 
 The main Gym pipeline runs from `pull-request/<number>`. An unverified or
-external head commit may need a maintainer to comment `/ok to test <full-sha>`.
-That comment authorizes repository CI to execute contributor code, so never post
+external head commit may need a maintainer to comment `/ok to test <full-sha>`,
+where `<full-sha>` is the full 40-character head SHA from `git rev-parse HEAD`
+(or `gh pr view <n> --json headRefOid`), not an abbreviation. That comment authorizes repository CI to execute contributor code, so never post
 it merely because a check is missing; do so only when the user explicitly asks
 and has the needed maintainer authority.
 

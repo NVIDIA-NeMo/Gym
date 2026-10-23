@@ -1008,3 +1008,47 @@ async def test_request_shaped_output_history_keeps_opaque_training_metadata(role
         output.model_dump(mode="json", exclude_none=True)
     ]
     assert state.gaps == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["max_tokens", "max_completion_tokens", "max_output_tokens"])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("gym_cap", [None, 256])
+async def test_reply_cap_alias_matches_planning_and_wire_request(key: str, nested: bool, gym_cap: int | None) -> None:
+    params = {key: 128}
+    if nested:
+        params = {"extra_body": params}
+    llm, client, _ = make_llm(model_response(), context_window=1024, sampling_overrides={"max_output_tokens": gym_cap})
+    limits = llm.get_context_limits(params)
+    await llm.acall([{"role": "user", "content": "hello"}], **params)
+    body = client.post.await_args.kwargs["json"]
+    assert body.max_output_tokens == limits.reserved_output_tokens == (gym_cap or 128)
+    assert limits.usable_input_tokens == 1024 - body.max_output_tokens
+
+
+@pytest.mark.asyncio
+async def test_absent_reply_cap_does_not_send_planning_fallback() -> None:
+    llm, client, _ = make_llm(model_response(), context_window=1024)
+    assert llm.get_context_limits(fallback_reserve=256).reserved_output_tokens == 256
+    await llm.acall([{"role": "user", "content": "hello"}])
+    assert client.post.await_args.kwargs["json"].max_output_tokens is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"max_tokens": 512, "max_completion_tokens": 64},
+        {"extra_body": {"max_tokens": 1024}},
+        {"max_completion_tokens": 0},
+        {"max_output_tokens": True},
+    ],
+)
+async def test_invalid_reply_caps_fail_planning_and_call_before_model_transport(params: dict) -> None:
+    llm, client, state = make_llm(model_response(), context_window=1024)
+    with pytest.raises(ValueError):
+        llm.get_context_limits(params)
+    with pytest.raises(ValueError):
+        await llm.acall([{"role": "user", "content": "hello"}], **params)
+    client.post.assert_not_awaited()
+    assert state.used == 0

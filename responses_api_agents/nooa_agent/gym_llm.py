@@ -414,6 +414,7 @@ class GymResponsesLLM(UnifiedLLM):
         **kwargs: Any,
     ) -> LLMResponse:
         try:
+            limits = self.get_context_limits(kwargs)
             input_items, instructions = _responses_input(
                 messages, gaps=self._state.gaps, replay_scope=self._gym_replay_scope
             )
@@ -435,15 +436,17 @@ class GymResponsesLLM(UnifiedLLM):
                     }
                 }
 
-            aliases = {"max_tokens": "max_output_tokens"}
             supported = set(NeMoGymResponseCreateParamsNonStreaming.model_fields) - {"model"}
             for name, value in kwargs.items():
-                destination = aliases.get(name, name)
-                if destination in supported and value is not None:
-                    request[destination] = value
+                if name not in REPLY_CAP_KEYS and name in supported and value is not None:
+                    request[name] = value
 
             # Explicit Gym rollout controls take precedence over NOOA's per-call settings.
             request.update(self._sampling_overrides)
+            if limits.reserve_is_fallback:
+                request.pop("max_output_tokens", None)
+            else:
+                request["max_output_tokens"] = limits.reserved_output_tokens
             body = NeMoGymResponseCreateParamsNonStreaming.model_validate(request)
         except Exception as error:
             self._state.fatal_error = error

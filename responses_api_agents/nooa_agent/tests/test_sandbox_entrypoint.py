@@ -6,6 +6,7 @@ import signal
 import stat
 import sys
 import textwrap
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import ModuleType
@@ -16,7 +17,7 @@ from pydantic import ValidationError
 
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap
+from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap, TrajectoryRecord
 from responses_api_agents.nooa_agent import sandbox_entrypoint as entrypoint
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.runner import NOOARunFailure, NOOARunRequest, NOOARunResult
@@ -253,23 +254,49 @@ async def test_main_initializes_shared_transport_and_always_closes_it(monkeypatc
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform == "win32", reason="The sandbox worker requires POSIX signal handlers")
-async def test_sigterm_writes_cancelled_result_from_real_main(tmp_path) -> None:
+@pytest.mark.parametrize("checkpoint_in_flight", [False, True])
+async def test_sigterm_writes_cancelled_result_from_real_main(tmp_path, checkpoint_in_flight: bool) -> None:
     source, destination = tmp_path / "input.json", tmp_path / "result.json"
     source.write_text(payload().model_dump_json())
     script = textwrap.dedent(
         """
         import asyncio
         import sys
+        import time
         from pathlib import Path
         from responses_api_agents.nooa_agent import sandbox_entrypoint as entrypoint
+        from responses_api_agents.nooa_agent.tests.test_sandbox_entrypoint import run_result
+
+        checkpoint_in_flight = sys.argv[3] == "True"
+        release = Path(sys.argv[1]).with_name("release")
+        started = asyncio.Event()
+        write_json = entrypoint._write_json
+
+        def blocked_write(path, value):
+            if path.name == "checkpoint.json":
+                loop.call_soon_threadsafe(started.set)
+                while not release.exists():
+                    time.sleep(0.01)
+            write_json(path, value)
+
+        entrypoint._write_json = blocked_write
 
         class WaitingRunner:
             def __init__(self, **kwargs):
-                pass
+                self.on_progress = kwargs["on_progress"]
 
             async def run(self, request):
+                global loop
+                loop = asyncio.get_running_loop()
+                if checkpoint_in_flight:
+                    self.on_progress(run_result())
+                    await started.wait()
                 print("ready", flush=True)
-                await asyncio.Event().wait()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    print("cancelled", flush=True)
+                    raise
 
         entrypoint.InProcessNOOARunner = WaitingRunner
         asyncio.run(entrypoint._main(Path(sys.argv[1]), Path(sys.argv[2])))
@@ -281,18 +308,34 @@ async def test_sigterm_writes_cancelled_result_from_real_main(tmp_path) -> None:
         script,
         str(source),
         str(destination),
+        str(checkpoint_in_flight),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     try:
         assert await asyncio.wait_for(process.stdout.readline(), timeout=30) == b"ready\n"
         process.send_signal(signal.SIGTERM)
+        assert await asyncio.wait_for(process.stdout.readline(), timeout=10) == b"cancelled\n"
+        if checkpoint_in_flight:
+            assert process.returncode is None
+            assert not destination.exists()
+            (tmp_path / "release").touch()
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
         assert process.returncode == 0, (stdout.decode(errors="replace"), stderr.decode(errors="replace"))
         result = entrypoint.SandboxResult.model_validate_json(destination.read_text())
         assert result.error.kind == "cancelled"
         assert result.response is None
-        assert sorted(path.name for path in tmp_path.iterdir()) == ["input.json", "result.json"]
+        if checkpoint_in_flight:
+            checkpoint = entrypoint.SandboxCheckpoint.model_validate_json((tmp_path / "checkpoint.json").read_text())
+            assert checkpoint.partial and checkpoint.response.status == "incomplete"
+            assert sorted(path.name for path in tmp_path.iterdir()) == [
+                "checkpoint.json",
+                "input.json",
+                "release",
+                "result.json",
+            ]
+        else:
+            assert sorted(path.name for path in tmp_path.iterdir()) == ["input.json", "result.json"]
     finally:
         if process.returncode is None:
             process.kill()
@@ -307,6 +350,68 @@ def test_worker_artifacts_are_private_and_readable_by_the_worker_uid(tmp_path) -
     entrypoint._write_json(path, result)
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert entrypoint.SandboxResult.model_validate_json(path.read_text()) == result
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="The sandbox worker requires POSIX signal handlers")
+async def test_sigkill_during_background_replacement_preserves_previous_checkpoint(tmp_path) -> None:
+    source, destination = tmp_path / "input.json", tmp_path / "result.json"
+    source.write_text(payload().model_dump_json())
+    checkpoint = tmp_path / "checkpoint.json"
+    entrypoint.write_checkpoint(checkpoint, run_result())
+    previous = checkpoint.read_bytes()
+    script = textwrap.dedent(
+        """
+        import asyncio
+        import sys
+        import threading
+        from pathlib import Path
+        from responses_api_agents.nooa_agent import sandbox_entrypoint as entrypoint
+        from responses_api_agents.nooa_agent.tests.test_sandbox_entrypoint import run_result
+
+        replace = Path.replace
+        def blocked_replace(source, destination):
+            if destination.name == "checkpoint.json":
+                print("before replace", flush=True)
+                threading.Event().wait()
+            return replace(source, destination)
+        Path.replace = blocked_replace
+
+        class Runner:
+            def __init__(self, **kwargs):
+                self.on_progress = kwargs["on_progress"]
+
+            async def run(self, request):
+                result = run_result()
+                result.model_cookies["model"] = "unpublished"
+                self.on_progress(result)
+                return result
+
+        entrypoint.InProcessNOOARunner = Runner
+        asyncio.run(entrypoint._main(Path(sys.argv[1]), Path(sys.argv[2])))
+        """
+    )
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        script,
+        str(source),
+        str(destination),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        assert await asyncio.wait_for(process.stdout.readline(), timeout=30) == b"before replace\n"
+        process.kill()
+        await asyncio.wait_for(process.communicate(), timeout=10)
+        assert process.returncode == -signal.SIGKILL
+        assert checkpoint.read_bytes() == previous
+        assert entrypoint.SandboxCheckpoint.model_validate_json(checkpoint.read_text()).partial
+        assert not destination.exists()
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.communicate()
 
 
 def test_checkpoint_is_explicit_partial_evidence_and_excludes_python_return_values(tmp_path) -> None:
@@ -360,3 +465,208 @@ def test_concurrent_atomic_writes_never_publish_partial_json(tmp_path) -> None:
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(publish, range(32)))
     assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.asyncio
+async def test_background_writer_detaches_evidence_and_bounds_pending_snapshots(monkeypatch, tmp_path) -> None:
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    started, release = asyncio.Event(), threading.Event()
+    serialized = []
+    serializing = threading.Lock()
+    serialize = entrypoint.SandboxCheckpoint.model_dump_json
+
+    def blocked_serialization(snapshot, *args, **kwargs):
+        assert threading.get_ident() != loop_thread
+        assert serializing.acquire(blocking=False), "Checkpoint writes must never overlap"
+        try:
+            if not serialized:
+                loop.call_soon_threadsafe(started.set)
+                assert release.wait(timeout=10)
+            wire = serialize(snapshot, *args, **kwargs)
+            serialized.append(entrypoint.SandboxCheckpoint.model_validate_json(wire))
+            return wire
+        finally:
+            serializing.release()
+
+    monkeypatch.setattr(entrypoint.SandboxCheckpoint, "model_dump_json", blocked_serialization)
+    writer = entrypoint._CheckpointWriter(tmp_path / "checkpoint.json")
+    result = run_result()
+    result.episode.response.output = NeMoGymResponse.model_validate(
+        model_response(
+            {
+                "type": "message",
+                "id": "answer",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "before", "annotations": []}],
+            }
+        )
+    ).output
+    result.trajectory = TrajectoryRecord(
+        task_id="task", rollout_id="rollout", gaps=[ObservationGap(code="trace", detail="before")]
+    )
+    result.return_value = ModuleType("must_not_copy_or_serialize")
+    result.model_cookies["sequence"] = "1"
+    writer.submit(result)
+    try:
+        await asyncio.wait_for(started.wait(), timeout=10)
+        # A separate coroutine can make progress while JSON serialization is blocked.
+        progressed = asyncio.Event()
+        loop.call_soon(progressed.set)
+        await asyncio.wait_for(progressed.wait(), timeout=1)
+        result.episode.response.output[0].content[0].text = "after"
+        result.episode.observations.gaps[0].detail = "after"
+        result.trajectory.gaps[0].detail = "after"
+        for sequence in range(2, 21):
+            result.model_cookies["sequence"] = str(sequence)
+            writer.submit(result)
+            await asyncio.sleep(0)
+        assert not (tmp_path / "checkpoint.json").exists()
+    finally:
+        release.set()
+        await writer.close()
+    assert [snapshot.model_cookies["sequence"] for snapshot in serialized] == ["1", "20"]
+    assert serialized[0].response.output[0].content[0].text == "before"
+    assert serialized[0].observations.gaps[0].detail == "evidence"
+    assert serialized[0].trajectory.gaps[0].detail == "before"
+    recovered = entrypoint.SandboxCheckpoint.model_validate_json((tmp_path / "checkpoint.json").read_text())
+    assert recovered == serialized[-1]
+    assert recovered.partial and recovered.response.status == "incomplete"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["checkpoint.json"]
+    with pytest.raises(RuntimeError, match="closed"):
+        writer.submit(result)
+
+
+@pytest.mark.asyncio
+async def test_background_writer_recovers_after_interrupted_replacement(monkeypatch, tmp_path, caplog) -> None:
+    path = tmp_path / "checkpoint.json"
+    entrypoint.write_checkpoint(path, run_result())
+    previous = path.read_bytes()
+    loop = asyncio.get_running_loop()
+    started, release = asyncio.Event(), threading.Event()
+    replace = Path.replace
+    attempts = []
+
+    def interrupted_replace(source, destination):
+        snapshot = entrypoint.SandboxCheckpoint.model_validate_json(source.read_text())
+        attempts.append(snapshot.model_cookies["sequence"])
+        if len(attempts) == 1:
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(timeout=10)
+            raise InterruptedError("interrupted before publication")
+        return replace(source, destination)
+
+    monkeypatch.setattr(Path, "replace", interrupted_replace)
+    writer = entrypoint._CheckpointWriter(path)
+    result = run_result()
+    result.model_cookies["sequence"] = "1"
+    writer.submit(result)
+    try:
+        await asyncio.wait_for(started.wait(), timeout=10)
+        assert path.read_bytes() == previous
+        result.model_cookies["sequence"] = "2"
+        writer.submit(result)
+    finally:
+        release.set()
+        await writer.close()
+    assert attempts == ["1", "2"]
+    assert entrypoint.SandboxCheckpoint.model_validate_json(path.read_text()).model_cookies["sequence"] == "2"
+    failures = [record for record in caplog.records if record.message == "Failed to persist NOOA partial checkpoint"]
+    assert len(failures) == 1
+    assert isinstance(failures[0].exc_info[1], InterruptedError)
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_artifact", ["checkpoint.json", "result.json"])
+async def test_main_cancellation_joins_writes_before_shutdown(monkeypatch, tmp_path, blocked_artifact: str) -> None:
+    loop = asyncio.get_running_loop()
+    started, release = asyncio.Event(), threading.Event()
+    write_json = entrypoint._write_json
+    writes = []
+
+    def blocked_write(path, value):
+        if path.name == blocked_artifact:
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(timeout=10)
+        write_json(path, value)
+        writes.append(path.name)
+
+    async def execute(p, *, on_progress):
+        on_progress(run_result())
+        return entrypoint.SandboxResult(
+            observations=AgentObservationBundle(source="nooa"), model_cookies={}, resource_cookies={}
+        )
+
+    client = MagicMock(close=AsyncMock())
+    remove_signal_handler = MagicMock()
+    monkeypatch.setattr(entrypoint, "_write_json", blocked_write)
+    monkeypatch.setattr(entrypoint, "execute", execute)
+    monkeypatch.setattr(entrypoint, "set_global_aiohttp_client", lambda config: client)
+    monkeypatch.setattr(loop, "add_signal_handler", MagicMock())
+    monkeypatch.setattr(loop, "remove_signal_handler", remove_signal_handler)
+    source, destination = tmp_path / "input.json", tmp_path / "result.json"
+    source.write_text(payload().model_dump_json())
+    task = asyncio.create_task(entrypoint._main(source, destination))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=10)
+        for _ in range(2):
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+            client.close.assert_not_awaited()
+            remove_signal_handler.assert_not_called()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=10)
+    client.close.assert_awaited_once()
+    remove_signal_handler.assert_called_once_with(signal.SIGTERM)
+    expected = ["checkpoint.json"] if blocked_artifact == "checkpoint.json" else ["checkpoint.json", "result.json"]
+    assert writes == expected
+    # The caller can immediately remove artifacts: no detached writer remains.
+    for path in tmp_path.iterdir():
+        path.unlink()
+    tmp_path.rmdir()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_artifact", ["checkpoint.json", "result.json"])
+async def test_only_checkpoint_publication_failures_are_best_effort(
+    monkeypatch, tmp_path, caplog, failed_artifact: str
+) -> None:
+    async def execute(p, *, on_progress):
+        on_progress(run_result())
+        return entrypoint.SandboxResult(
+            response=run_result().episode.response,
+            observations=AgentObservationBundle(source="nooa"),
+            model_cookies={},
+            resource_cookies={},
+        )
+
+    client = MagicMock(close=AsyncMock())
+    serialize = entrypoint.SandboxResult.model_dump_json
+
+    def fail_serialization(value, *args, **kwargs):
+        if isinstance(value, entrypoint.SandboxCheckpoint) == (failed_artifact == "checkpoint.json"):
+            raise OSError("disk full")
+        return serialize(value, *args, **kwargs)
+
+    monkeypatch.setattr(entrypoint, "execute", execute)
+    monkeypatch.setattr(entrypoint, "set_global_aiohttp_client", lambda config: client)
+    monkeypatch.setattr(entrypoint.SandboxResult, "model_dump_json", fail_serialization)
+    source, destination = tmp_path / "input.json", tmp_path / "result.json"
+    source.write_text(payload().model_dump_json())
+    if failed_artifact == "checkpoint.json":
+        await entrypoint._main(source, destination)
+        result = entrypoint.SandboxResult.model_validate_json(destination.read_text())
+        assert result.error is None and result.response is not None
+        assert sorted(path.name for path in tmp_path.iterdir()) == ["input.json", "result.json"]
+        assert "Failed to persist NOOA partial checkpoint" in caplog.text
+    else:
+        with pytest.raises(OSError, match="disk full"):
+            await entrypoint._main(source, destination)
+        assert not destination.exists()
+        assert entrypoint.SandboxCheckpoint.model_validate_json((tmp_path / "checkpoint.json").read_text()).partial
+    client.close.assert_awaited_once()

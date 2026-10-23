@@ -28,6 +28,7 @@ import hashlib
 import os
 import shutil
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -69,6 +70,16 @@ class ScicodeResourcesServerConfig(BaseResourcesServerConfig):
     required_grading_interpreters: int = Field(default=1, ge=1)
     # The canonical OR rule short-circuits after the first pass. Enable this only for diagnostics.
     run_all_grading_interpreters: bool = False
+    # Opt-in: keep each scored sub-step's execution record (exit code, timeout, duration, exception class
+    # and bounded stdout/stderr tails) in the verify response as `step_outputs`, aligned with `step_results`.
+    # Off by default: the record carries model-generated output text and grows every rollout row.
+    record_step_outputs: bool = False
+    # Last N characters of stdout and of stderr kept per sub-step when record_step_outputs is on (0 keeps none).
+    output_tail_chars: int = Field(default=2000, ge=0)
+    # Opt-in on top of record_step_outputs: each record also carries `code`, the accumulated solution the
+    # sub-step's tests ran against (the agent's solutions[step_id]); None for a sentinel step that never ran.
+    # Off by default: the code is model-generated and grows a row by the size of every scored program.
+    record_step_code: bool = False
 
 
 class ScicodeRunRequest(BaseRunRequest):
@@ -103,6 +114,12 @@ class ScicodeVerifyResponse(BaseVerifyResponse):
     scored_step_ids: List[str] = Field(default_factory=list)
     step_environment_results: List[Dict[str, bool]] = Field(default_factory=list)
     step_environment_errors: List[Dict[str, str]] = Field(default_factory=list)
+    # Per scored sub-step, aligned with step_results, only when record_step_outputs is on (None otherwise):
+    # {step_id, step_number, environment, status (executed | out_of_context | empty), passed, returncode,
+    #  timed_out, duration_s, exception_class, stdout_tail, stderr_tail} plus `code` when record_step_code
+    # is on too. The record describes the grading run that decided the step: the environment that passed
+    # under the OR rule, else the last one tried; `environment` is None for a sentinel step that never ran.
+    step_outputs: Optional[List[dict]] = None
 
 
 class ScicodeResourcesServer(SimpleResourcesServer):
@@ -198,6 +215,8 @@ class ScicodeResourcesServer(SimpleResourcesServer):
 
     async def verify(self, body: ScicodeVerifyRequest) -> ScicodeVerifyResponse:
         solutions = body.solutions or {}
+        record = self.config.record_step_outputs
+        record_code = record and self.config.record_step_code
         # Score only sub-steps the agent produced a solution for. Sub-steps absent from solutions
         # (prefilled steps) are excluded from the denominator entirely; out-of-context sentinels
         # are present and counted as failures.
@@ -207,6 +226,7 @@ class ScicodeResourcesServer(SimpleResourcesServer):
                 **body.model_dump(),
                 reward=0.0,
                 step_results=[],
+                step_outputs=[] if record else None,
                 num_steps_passed=0,
                 num_steps_total=0,
                 problem_accuracy=False,
@@ -216,25 +236,58 @@ class ScicodeResourcesServer(SimpleResourcesServer):
         grading_interpreters = self._resolve_grading_interpreters()
         loop = asyncio.get_running_loop()
 
-        async def _run_substep(i: int) -> tuple[bool, Dict[str, bool], Dict[str, str]]:
+        def _step_output(
+            i: int,
+            status: str,
+            passed: bool,
+            result: Optional[dict] = None,
+            code: Optional[str] = None,
+            environment: Optional[str] = None,
+        ) -> dict:
+            result = result or {}
+            output = {
+                "step_id": f"{body.problem_id}.{i + 1}",
+                "step_number": body.sub_steps[i]["step_number"],
+                "environment": environment,
+                "status": status,
+                "passed": passed,
+                "returncode": result.get("returncode"),
+                "timed_out": bool(result.get("timed_out", False)),
+                "duration_s": result.get("duration_s"),
+                "exception_class": result.get("exception_class"),
+                "stdout_tail": result.get("stdout_tail", ""),
+                "stderr_tail": result.get("stderr_tail", ""),
+            }
+            if record_code:
+                output["code"] = code
+            return output
+
+        async def _run_substep(i: int) -> tuple[bool, Dict[str, bool], Dict[str, str], Optional[dict]]:
             sub_step = body.sub_steps[i]
             code = solutions[f"{body.problem_id}.{i + 1}"]
             if not code or code == _OUT_OF_CONTEXT:
-                return False, {}, {}
+                status = "out_of_context" if code == _OUT_OF_CONTEXT else "empty"
+                return False, {}, {}, _step_output(i, status, False) if record else None
             sanitized = [sanitize_test(tc) for tc in sub_step["test_cases"]]
             program = build_test_program(code, h5_path, sub_step["step_number"], sanitized)
             per_environment = {}
             per_environment_errors = {}
+            attempts: List[tuple[str, dict]] = []
             for name, executable in grading_interpreters:
-                async with self._semaphore:
-                    result = await loop.run_in_executor(
-                        None,
+                if record:
+                    call = partial(
                         run_substep,
                         program,
                         self.config.timeout_secs,
                         executable,
+                        output_tail_chars=self.config.output_tail_chars,
                     )
+                else:
+                    call = partial(run_substep, program, self.config.timeout_secs, executable)
+                async with self._semaphore:
+                    result = await loop.run_in_executor(None, call)
                 per_environment[name] = bool(result["passed"])
+                attempts.append((name, result))
                 if result["error"]:
                     per_environment_errors[name] = result["error"]
                 if result.get("infrastructure_error"):
@@ -245,12 +298,19 @@ class ScicodeResourcesServer(SimpleResourcesServer):
                     )
                 if per_environment[name] and not self.config.run_all_grading_interpreters:
                     break
-            return any(per_environment.values()), per_environment, per_environment_errors
+            passed = any(per_environment.values())
+            output = None
+            if record:
+                # The run that decided the step: the environment that passed under the OR rule, else the last tried.
+                name, result = next(((n, r) for n, r in attempts if r["passed"]), attempts[-1])
+                output = _step_output(i, "executed", passed, result, code=code, environment=name)
+            return passed, per_environment, per_environment_errors, output
 
         evaluated_steps = list(await asyncio.gather(*[_run_substep(i) for i in scored]))
-        step_results = [passed for passed, _, _ in evaluated_steps]
-        step_environment_results = [per_environment for _, per_environment, _ in evaluated_steps]
-        step_environment_errors = [per_environment_errors for _, _, per_environment_errors in evaluated_steps]
+        step_results = [passed for passed, _, _, _ in evaluated_steps]
+        step_environment_results = [per_environment for _, per_environment, _, _ in evaluated_steps]
+        step_environment_errors = [per_environment_errors for _, _, per_environment_errors, _ in evaluated_steps]
+        step_outputs = [output for _, _, _, output in evaluated_steps] if record else None
         scored_step_ids = [body.sub_steps[i]["step_number"] for i in scored]
         num_passed = sum(step_results)
         all_passed = num_passed == len(scored)
@@ -266,6 +326,7 @@ class ScicodeResourcesServer(SimpleResourcesServer):
             scored_step_ids=scored_step_ids,
             step_environment_results=step_environment_results,
             step_environment_errors=step_environment_errors,
+            step_outputs=step_outputs,
         )
 
 
