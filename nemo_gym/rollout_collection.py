@@ -40,7 +40,7 @@ import aiohttp
 import orjson
 from aiohttp import ClientError
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
@@ -128,6 +128,7 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.skills import SkillsConfig, load_skill_directory
 from nemo_gym.task_materialization import TASK_ID_FIELDS
+from nemo_gym.telemetry.actor_diagnostics import startup_phase
 from nemo_gym.token_id_capture import (
     TokenCaptureStore,
     TokenIdCaptureConfig,
@@ -2553,6 +2554,14 @@ class _BoundedCompletionIterator:
 
 
 class RolloutCollectionHelper(BaseModel):
+    reuse_server_client: bool = Field(
+        default=False,
+        description="Reuse one resolved client/config per helper for a stable deployment. "
+        "Call setup_server_client(refresh=True) after changing that deployment's configuration.",
+    )
+    _cached_server_client: Optional[ServerClient] = PrivateAttr(default=None)
+    _cached_head_server_config: Optional[BaseServerConfig] = PrivateAttr(default=None)
+
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
         if config.limit:
@@ -4179,29 +4188,33 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``interleave_by_agent`` is enabled by the full evaluation path. Lower-level callers retain
         the order they supplied.
         """
-        server_client = self.setup_server_client(head_server_config)
-        if environment_server_name is not None:
-            for row in examples:
-                row[NG_ENVIRONMENT_SERVER_KEY] = environment_server_name
-        self._validate_environment_servers(examples, server_client.global_config_dict)
-        self._stamp_environment_server_agent_refs(examples, server_client.global_config_dict)
-        direct_agent_examples = [row for row in examples if NG_ENVIRONMENT_SERVER_KEY not in row]
-        self.resolve_task_sources(direct_agent_examples, server_client.global_config_dict)
-        self._validate_agent_names(direct_agent_examples, server_client.global_config_dict)
-        self._validate_agent_pairings(direct_agent_examples, server_client.global_config_dict)
+        with startup_phase("setup_server_client"):
+            server_client = self.setup_server_client(head_server_config)
+        with startup_phase("route_validation"):
+            if environment_server_name is not None:
+                for row in examples:
+                    row[NG_ENVIRONMENT_SERVER_KEY] = environment_server_name
+            self._validate_environment_servers(examples, server_client.global_config_dict)
+            self._stamp_environment_server_agent_refs(examples, server_client.global_config_dict)
+            direct_agent_examples = [row for row in examples if NG_ENVIRONMENT_SERVER_KEY not in row]
+            self.resolve_task_sources(direct_agent_examples, server_client.global_config_dict)
+            self._validate_agent_names(direct_agent_examples, server_client.global_config_dict)
+            self._validate_agent_pairings(direct_agent_examples, server_client.global_config_dict)
         # Resolve every agent-routed row before dispatch, so an unroutable agent fails the run instead of one future.
         if interleave_by_agent:
             examples = _round_robin_by_agent(examples)
-        servers_by_agent = _environment_servers_by_agent(server_client.global_config_dict)
-        server_for_agent = {
-            agent_name: _environment_server_for_agent(agent_name, servers_by_agent)
-            for agent_name in {row[AGENT_REF_KEY_NAME]["name"] for row in direct_agent_examples}
-        }
-        server_types = {
-            str(name): str(next(iter(block[ENVIRONMENT_SERVER_TYPE_KEY_NAME])))
-            for name, block in server_client.global_config_dict.items()
-            if isinstance(block, DictConfig) and isinstance(block.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME), DictConfig)
-        }
+        with startup_phase("route_index_build"):
+            servers_by_agent = _environment_servers_by_agent(server_client.global_config_dict)
+            server_for_agent = {
+                agent_name: _environment_server_for_agent(agent_name, servers_by_agent)
+                for agent_name in {row[AGENT_REF_KEY_NAME]["name"] for row in direct_agent_examples}
+            }
+            server_types = {
+                str(name): str(next(iter(block[ENVIRONMENT_SERVER_TYPE_KEY_NAME])))
+                for name, block in server_client.global_config_dict.items()
+                if isinstance(block, DictConfig)
+                and isinstance(block.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME), DictConfig)
+            }
         semaphore = semaphore or nullcontext()
         observer = driver_metrics()
         if observer is not None:
@@ -4389,9 +4402,23 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         )
 
     def setup_server_client(
-        self, head_server_config: Optional[BaseServerConfig] = None
+        self, head_server_config: Optional[BaseServerConfig] = None, *, refresh: bool = False
     ) -> ServerClient:  # pragma: no cover
-        return setup_server_client_utils(head_server_config)
+        """Resolve a client, optionally reusing a helper-local stable deployment.
+
+        The default keeps the existing per-call reload behavior. Opted-in
+        helpers retain at most one client, invalidate it when the supplied head
+        config changes, and reload explicitly with ``refresh=True``. A failed
+        reload raises without replacing the last successful client.
+        """
+        if not self.reuse_server_client:
+            return setup_server_client_utils(head_server_config)
+        if refresh or self._cached_server_client is None or head_server_config != self._cached_head_server_config:
+            client = setup_server_client_utils(head_server_config)
+            head_snapshot = head_server_config.model_copy(deep=True) if head_server_config is not None else None
+            self._cached_server_client = client
+            self._cached_head_server_config = head_snapshot
+        return self._cached_server_client
 
 
 class RolloutAggregationConfig(BaseNeMoGymCLIConfig):

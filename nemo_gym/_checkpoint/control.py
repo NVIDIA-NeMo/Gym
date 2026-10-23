@@ -53,6 +53,7 @@ from pydantic import (
     ConfigDict,
     Field,
     FiniteFloat,
+    JsonValue,
     PlainValidator,
     ValidationError,
     ValidationInfo,
@@ -95,6 +96,11 @@ _LEASE_REOPEN_WAIT_SECONDS = 30.0
 # Each stop mostly waits, for a cancelled task to end, a worker to reply, or a ledger thread,
 # so stops overlap well; the bound keeps one large retire from flooding the workers, threads, and servers they call.
 _STOP_CONCURRENCY = 32
+
+# Sample slow prepares, not every readiness notification or every live episode.
+MAX_PREPARE_DIAGNOSTIC_BLOCKERS = 8
+_PREPARE_DIAGNOSTIC_INITIAL_DELAY_S = 10.0
+_PREPARE_DIAGNOSTIC_INTERVAL_S = 30.0
 
 
 class CheckpointPhase(str, Enum):
@@ -436,6 +442,10 @@ class CheckpointParticipant(ABC):
     def status_extra(self) -> dict[str, Any]:
         return {}
 
+    def prepare_wait_diagnostics(self, blockers: list[str]) -> dict[str, JsonValue]:
+        """Read safe scheduling metadata for sampled blockers; never export their payloads."""
+        return {}
+
 
 def next_attempt(episode_id: EpisodeId) -> EpisodeId:
     return episode_id.model_copy(update={"attempt": episode_id.attempt + 1})
@@ -489,6 +499,7 @@ class ParticipantControlPlane:
         self._lock = asyncio.Lock()
 
     def status(self) -> dict[str, Any]:
+        report = self.participant.readiness()
         return {
             "kind": self.participant.kind,
             "instance": self.instance_name,
@@ -497,9 +508,39 @@ class ParticipantControlPlane:
             "lease_expires_at": self._lease_expires_at,
             # Rollouts retired and not yet forgotten: each refuses its retired attempts until ``forget``.
             "retired_rollouts": len(self.participant.retired),
-            "report": self.participant.readiness().model_dump(),
+            "report": report.model_dump(),
+            "prepare_diagnostics": self._prepare_wait_details(report),
             **self.participant.status_extra(),
         }
+
+    def _prepare_wait_details(self, report: PrepareReport) -> dict[str, JsonValue]:
+        if report.ready:
+            return {}
+        try:
+            return self.participant.prepare_wait_diagnostics(report.blockers[:MAX_PREPARE_DIAGNOSTIC_BLOCKERS])
+        except Exception as error:
+            # Observability must not change readiness, checkpoint state, or the
+            # original failure. Do not print exception text (it may hold data).
+            return {"diagnostic_error": type(error).__name__}
+
+    def _log_prepare_wait(self, request: CheckpointRequest, started: float, event: str) -> None:
+        try:
+            report = self.participant.readiness()
+            payload = {
+                "event": event,
+                "kind": self.participant.kind,
+                "instance": self.instance_name,
+                "checkpoint_id": request.checkpoint_id,
+                "elapsed_s": round(max(0.0, time.monotonic() - started), 3),
+                "remaining_s": round(max(0.0, request.deadline_ts - time.time()), 3),
+                "blocker_count": report.blocker_count,
+                "blockers": report.blockers[:MAX_PREPARE_DIAGNOSTIC_BLOCKERS],
+                "counts": report.counts,
+                "details": self._prepare_wait_details(report),
+            }
+            LOGGER.warning("checkpoint_prepare_wait %s", orjson.dumps(payload).decode())
+        except Exception as error:
+            LOGGER.warning("checkpoint_prepare_wait diagnostics unavailable: %s", type(error).__name__)
 
     def _recorded(self, checkpoint_id: str, operation: str, arguments: Any = None) -> Optional[dict[str, Any]]:
         """The result of ``operation`` already completed for this checkpoint, if any;
@@ -640,12 +681,31 @@ class ParticipantControlPlane:
             return result
 
     async def _wait_ready(self, request: CheckpointRequest) -> None:
-        # Only whether the participant is ready: the blockers are listed once, for the reply.
-        while True:
-            remaining = request.deadline_ts - time.time()
-            if self.participant.ready() or remaining <= 0 or self.checkpoint_id != request.checkpoint_id:
-                return
-            await self.participant.wait_changed(min(remaining, 1.0))
+        # Keep the cheap ready() check on notifications. Only enumerate
+        # blockers for a slow, rate-limited report and the final reply.
+        started = time.monotonic()
+        next_report = started + _PREPARE_DIAGNOSTIC_INITIAL_DELAY_S
+        reported = False
+        try:
+            while True:
+                remaining = request.deadline_ts - time.time()
+                ready = self.participant.ready()
+                if self.checkpoint_id != request.checkpoint_id:
+                    return
+                if ready or remaining <= 0:
+                    if reported or not ready:
+                        self._log_prepare_wait(request, started, "ready" if ready else "deadline")
+                    return
+                now = time.monotonic()
+                if now >= next_report:
+                    self._log_prepare_wait(request, started, "waiting")
+                    reported = True
+                    next_report = now + _PREPARE_DIAGNOSTIC_INTERVAL_S
+                await self.participant.wait_changed(min(remaining, 1.0))
+        except BaseException:
+            if reported and self.checkpoint_id == request.checkpoint_id:
+                self._log_prepare_wait(request, started, "interrupted")
+            raise
 
     async def retire(self, request: RetireRequest) -> dict[str, Any]:
         """Refuse these attempts, stop their running work and free their state, then reply.

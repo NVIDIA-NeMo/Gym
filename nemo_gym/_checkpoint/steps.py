@@ -37,12 +37,15 @@ so the episodes a checkpoint exports and the restarts it reports never change du
 
 import asyncio
 import heapq
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 from pydantic import JsonValue
+
+from nemo_gym._checkpoint.diagnostics import task_wait_diagnostics
 
 
 StepMode = Literal["wait", "replay"]
@@ -94,6 +97,7 @@ class _Episode:
     suspended_remaining: Optional[float] = None
     # Set when the owner's final cleanup starts: a retire then waits for the episode without cancelling it.
     finishing: bool = False
+    state_since: float = field(default_factory=time.monotonic)
 
     def suspend_deadline(self) -> None:
         if self.deadline is None or self.deadline.when() is None or self.suspended_remaining is not None:
@@ -130,6 +134,8 @@ class EpisodeSteps:
 
     def _set_state(self, episode: _Episode, state: _State) -> None:
         blocked = _blocks(episode)
+        if episode.state != state:
+            episode.state_since = time.monotonic()
         episode.state = state
         self._blocking += _blocks(episode) - blocked
 
@@ -292,6 +298,33 @@ class EpisodeSteps:
         if not self._blocking:
             return []
         return heapq.nsmallest(limit, (key for key, episode in self._episodes.items() if _blocks(episode)))
+
+    def diagnostic_state(self, key: str) -> dict[str, JsonValue] | None:
+        """Read one episode's scheduling state, never its response, cookies, or payload.
+
+        Only known protocol labels from the boundary are exposed. Boundary
+        dictionaries themselves may contain full model replies and secrets.
+        """
+        episode = self._episodes.get(key)
+        if episode is None:
+            return None
+        boundary = episode.boundary or {}
+        next_step = boundary.get("next")
+        verify_mode = boundary.get("verify_mode")
+        return {
+            "state": episode.state,
+            "state_age_s": round(max(0.0, time.monotonic() - episode.state_since), 3),
+            "blocking": _blocks(episode),
+            "retired": episode.retired,
+            "restart": episode.restart,
+            "finishing": episode.finishing,
+            "boundary_present": episode.boundary is not None,
+            "next": next_step if next_step in ("seed", "loop", "verify", "return") else None,
+            "verify_mode": verify_mode if verify_mode in ("wait", "replay") else None,
+            "deadline_suspended": episode.suspended_remaining is not None,
+            "resume_set": episode.resume.is_set(),
+            "task": task_wait_diagnostics(episode.task),
+        }
 
     def exported(self) -> dict[str, Optional[Boundary]]:
         """The latest boundary of every episode that is parked or inside a replay step, and not retired.

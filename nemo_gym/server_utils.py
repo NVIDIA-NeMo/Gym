@@ -89,6 +89,7 @@ from nemo_gym.global_config import (
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import ROUTED_PATH_STATE_KEY, current_rollout_id, maybe_rollout_id_from_run_body
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
+from nemo_gym.telemetry.actor_diagnostics import startup_phase
 from nemo_gym.telemetry.connection_pool import (
     QueueTimedTCPConnector,
     build_connection_pool_connector,
@@ -885,17 +886,19 @@ class ServerClient(BaseModel):
             head_server_config = cls.load_head_server_config()
 
         if _has_injected_global_config_env():
-            return cls(
-                head_server_config=head_server_config,
-                global_config_dict=get_global_config_dict(),
-            )
+            with startup_phase("config_injected_client_construct"):
+                return cls(
+                    head_server_config=head_server_config,
+                    global_config_dict=get_global_config_dict(),
+                )
 
         # It's critical we use requests here instead of the global httpx client since a FastAPI server may be run downstream of this function call.
         head_server_url = f"http://{head_server_config.host}:{head_server_config.port}"
         try:
-            response = requests.get(
-                f"{head_server_url}/global_config_dict_yaml",
-            )
+            with startup_phase("config_http_get"):
+                response = requests.get(
+                    f"{head_server_url}/global_config_dict_yaml",
+                )
         except ConnectionError as e:
             # requests' ConnectionError also covers proxy and name-resolution failures; keep the real reason
             # (with its traceback) for --verbose, since the ConfigError below is printed without its cause.
@@ -909,10 +912,13 @@ class ServerClient(BaseModel):
                 "`++head_server.host=<host>` / `++head_server.port=<port>` so this command can find it."
             ) from e
 
-        global_config_dict_yaml = response.content.decode()
-        global_config_dict = OmegaConf.create(json.loads(global_config_dict_yaml))
-
-        return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
+        with startup_phase("config_json_decode"):
+            global_config_dict_yaml = response.content.decode()
+            config_values = json.loads(global_config_dict_yaml)
+        with startup_phase("config_omegaconf_create"):
+            global_config_dict = OmegaConf.create(config_values)
+        with startup_phase("config_client_construct"):
+            return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
     async def request(
         self,

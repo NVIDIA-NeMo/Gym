@@ -31,6 +31,7 @@ so a rollout that is never checkpointed pays nothing for its boundaries.
 
 import asyncio
 import json
+import time
 from collections import Counter, deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -40,6 +41,7 @@ from typing import Any, Literal, Optional, Protocol
 from pydantic import JsonValue
 
 from nemo_gym._checkpoint.control import (
+    MAX_PREPARE_DIAGNOSTIC_BLOCKERS,
     CheckpointParticipant,
     CheckpointRecord,
     CheckpointRequest,
@@ -47,6 +49,7 @@ from nemo_gym._checkpoint.control import (
     PrepareReport,
     next_attempt,
 )
+from nemo_gym._checkpoint.diagnostics import task_wait_diagnostics
 from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, RolloutIdRequiredError, StaleAttemptError
 from nemo_gym._checkpoint.steps import Boundary, EpisodeSteps, StepMode
 from nemo_gym.episode_types import EpisodeId
@@ -146,6 +149,12 @@ class _Session:
     # The running activation's index, if its caller sent one, and an event set once that activation has ended.
     activation_index: Optional[int] = None
     activation_done: Optional[asyncio.Event] = None
+    state_since: float = field(default_factory=time.monotonic)
+
+    def set_state(self, state: Literal["idle", "running", "at_boundary"]) -> None:
+        if self.state != state:
+            self.state_since = time.monotonic()
+        self.state = state
 
 
 class Activation:
@@ -366,7 +375,7 @@ class AgentSessionParticipant(CheckpointParticipant):
             raise ControlError(f"agent session {session_key!r} already has an active activation")
         # An activation may start while a checkpoint is preparing: the caller invoked it before admission closed,
         # so it parks at its first boundary.
-        session.state = "running"
+        session.set_state("running")
         session.park_requested = not self.accepting
         session.task = asyncio.current_task()
         session.activation_index = index
@@ -375,7 +384,7 @@ class AgentSessionParticipant(CheckpointParticipant):
             yield Activation(self, session)
         finally:
             if self._live(session):
-                session.state = "idle"
+                session.set_state("idle")
                 session.boundary = None
                 session.task = None
                 session.activation_index = None
@@ -408,7 +417,7 @@ class AgentSessionParticipant(CheckpointParticipant):
 
     async def park(self, session: _Session) -> None:
         self._require_live(session)
-        session.state = "at_boundary"
+        session.set_state("at_boundary")
         session.resume.clear()
         if self.accepting:
             session.resume.set()
@@ -420,18 +429,18 @@ class AgentSessionParticipant(CheckpointParticipant):
                 break
             # A new checkpoint closed admission before this session woke: it stays parked for that one too.
             session.resume.clear()
-        session.state = "running"
+        session.set_state("running")
 
     @asynccontextmanager
     async def awaiting_model(self, session: _Session) -> AsyncIterator[None]:
-        session.state = "at_boundary"
+        session.set_state("at_boundary")
         if not self.accepting:
             await self.notify()
         try:
             yield
         except BaseException:
             if self._live(session):
-                session.state = "running"
+                session.set_state("running")
             raise
         if session.park_requested:
             # The reply arrived while a checkpoint is open, maybe after prepare counted the session at its boundary.
@@ -440,7 +449,7 @@ class AgentSessionParticipant(CheckpointParticipant):
             # if the model server's checkpoint kept this call, the token-capture builder treats the two as a retry.
             await self.park(session)
         elif self._live(session):
-            session.state = "running"
+            session.set_state("running")
 
     def _live(self, session: _Session) -> bool:
         return self._sessions.get(session.key) is session
@@ -517,6 +526,61 @@ class AgentSessionParticipant(CheckpointParticipant):
                 if key not in restart_keys:
                     return False
         return True
+
+    def prepare_wait_diagnostics(self, blockers: list[str]) -> dict[str, JsonValue]:
+        """Describe sampled blocked attempts without evaluating boundary callbacks.
+
+        Session keys can be cookies, so only episode capture keys are logged.
+        Limit both attempts and sessions; do not serialize agent continuations.
+        """
+        keys = blockers[:MAX_PREPARE_DIAGNOSTIC_BLOCKERS]
+        sampled: dict[str, list[_Session]] = {key: [] for key in keys}
+        totals: Counter[str] = Counter()
+        seeds: Counter[str] = Counter()
+        for session in self._sessions.values():
+            key = session.episode_id.capture_key
+            if key in sampled:
+                totals[key] += 1
+                if len(sampled[key]) < 2:
+                    sampled[key].append(session)
+        for pending in self._seeding.values():
+            for episode_id, count in pending.items():
+                if episode_id.capture_key in sampled:
+                    seeds[episode_id.capture_key] += count
+        details: list[JsonValue] = []
+        now = time.monotonic()
+        for key in keys:
+            sessions: list[JsonValue] = []
+            for session in sampled[key]:
+                sessions.append(
+                    {
+                        "state": session.state,
+                        "state_age_s": round(max(0.0, now - session.state_since), 3),
+                        "park_requested": session.park_requested,
+                        "retired": session.retired,
+                        "closing": session.closing,
+                        "restored_pending": session.restored_pending,
+                        "activation_index": session.activation_index,
+                        "activation_done": None
+                        if session.activation_done is None
+                        else session.activation_done.is_set(),
+                        "resume_set": session.resume.is_set(),
+                        "boundary_present": session.boundary is not None,
+                        "task": task_wait_diagnostics(session.task),
+                        "legacy_episode": self.legacy_episodes.diagnostic_state(session.key),
+                    }
+                )
+            details.append(
+                {
+                    "capture_key": key,
+                    "seeding_count": seeds[key],
+                    "session_count": totals[key],
+                    "sessions": sessions,
+                    "sessions_truncated": totals[key] > len(sessions),
+                    "orphan_legacy_episode": self.legacy_episodes.diagnostic_state(key) if not sessions else None,
+                }
+            )
+        return {"accepting": self.accepting, "legacy_closed": self.legacy_episodes.closed, "blockers": details}
 
     async def retire(self, episode_id: EpisodeId) -> None:
         # A seed admitted before the attempt was marked registers its session or, refused, frees what it built.
