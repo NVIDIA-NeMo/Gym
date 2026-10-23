@@ -52,7 +52,7 @@ def _config(
         "services": {"svc": SERVICE},
         "compute": compute or COMPUTE,
         "driver": driver,
-        "job": {"output_path": "/jobs", **({"exports": job_exports} if job_exports is not None else {})},
+        "job": {"output_path": "/jobs", **({"export": job_exports} if job_exports is not None else {})},
     }
 
 
@@ -70,7 +70,7 @@ class TestEffectiveExports:
     def test_a_benchmark_overrides_the_job_level_settings_one_by_one(self) -> None:
         config = _submit(
             job_exports={"evalrdl": {"label": "nightly", "tags": ["a"], "meta": {"k": "1", "j": "2"}}},
-            benchmarks={"gpqa": {"exports": {"evalrdl": {"label": "gpqa", "meta": {"k": "9"}}}}, "other": {}},
+            benchmarks={"gpqa": {"export": {"evalrdl": {"label": "gpqa", "meta": {"k": "9"}}}}, "other": {}},
         )
 
         assert effective_exports(config, "gpqa") == {
@@ -81,14 +81,14 @@ class TestEffectiveExports:
     def test_null_drops_an_inherited_export_for_that_benchmark_only(self) -> None:
         config = _submit(
             job_exports={"evalrdl": {"label": "nightly"}},
-            benchmarks={"gpqa": {"exports": {"evalrdl": None}}, "other": {}},
+            benchmarks={"gpqa": {"export": {"evalrdl": None}}, "other": {}},
         )
 
         assert effective_exports(config, "gpqa") == {}
         assert list(effective_exports(config, "other")) == ["evalrdl"]
 
     def test_a_benchmark_can_add_an_export_the_job_does_not_have(self) -> None:
-        config = _submit(benchmarks={"gpqa": {"exports": {"evalrdl": {"label": "x"}}}, "other": {}})
+        config = _submit(benchmarks={"gpqa": {"export": {"evalrdl": {"label": "x"}}}, "other": {}})
 
         assert list(effective_exports(config, "gpqa")) == ["evalrdl"]
         assert effective_exports(config, "other") == {}
@@ -104,13 +104,13 @@ class TestEffectiveExports:
     def test_the_merge_does_not_change_the_config(self) -> None:
         config = _submit(
             job_exports={"evalrdl": {"meta": {"k": "1"}}},
-            benchmarks={"gpqa": {"exports": {"evalrdl": {"meta": {"j": "2"}}}}},
+            benchmarks={"gpqa": {"export": {"evalrdl": {"meta": {"j": "2"}}}}},
         )
 
         effective_exports(config, "gpqa")["evalrdl"]["meta"]["k"] = "changed"
 
-        assert config.job.exports == {"evalrdl": {"meta": {"k": "1"}}}
-        assert config.driver.benchmarks["gpqa"].exports == {"evalrdl": {"meta": {"j": "2"}}}
+        assert config.job.export == {"evalrdl": {"meta": {"k": "1"}}}
+        assert config.driver.benchmarks["gpqa"].export == {"evalrdl": {"meta": {"j": "2"}}}
 
 
 class TestRunSettings:
@@ -194,11 +194,17 @@ class TestValidation:
             _submit(job_exports={"mlflow": {"mlflow_tracking_uri": "https://mlflow.example"}})
 
     def test_exports_on_a_command_benchmark_are_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="sets both `command` and `exports`"):
-            _submit(benchmarks={"custom": {"command": "echo hi", "exports": {"evalrdl": {}}}})
+        with pytest.raises(ValidationError, match="sets both `command` and `export`"):
+            _submit(benchmarks={"custom": {"command": "echo hi", "export": {"evalrdl": {}}}})
+
+    def test_the_key_is_export_like_prepare_and_run(self) -> None:
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            _submit(benchmarks={"gpqa": {"exports": {"evalrdl": {}}}})
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            SubmitConfig.model_validate({**_config(), "job": {"output_path": "/jobs", "exports": {}}})
 
     def test_dropping_an_export_on_a_command_benchmark_is_not_an_export(self) -> None:
-        _submit(benchmarks={"custom": {"command": "echo hi", "exports": {"evalrdl": None}}})
+        _submit(benchmarks={"custom": {"command": "echo hi", "export": {"evalrdl": None}}})
 
     def test_the_live_exporter_and_the_same_export_cannot_both_be_on(self) -> None:
         run = {"wandb_project": "p", "wandb_name": "n", "wandb_api_key": "k"}  # pragma: allowlist secret
