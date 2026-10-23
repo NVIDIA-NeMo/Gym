@@ -90,12 +90,70 @@ def test_bad_selection_rejected(dataset, tmp_path, languages, limit):
         prepare(dataset, output_dir=tmp_path / "out", languages=languages, limit_per_language=limit)
 
 
-def test_download_is_pinned(dataset, tmp_path, monkeypatch):
+@pytest.fixture
+def wide_dataset(tmp_path):
+    root = tmp_path / "wide-source"
+    root.mkdir()
+    rows = [
+        {
+            "id": f"source-{i}",
+            "position": i,
+            "instruction": f"English instruction {i}",
+            "instruction_Hindi_translation": f"Hindi instruction {i}",
+            "instruction_Kannada_translation": f"Kannada instruction {i}",
+        }
+        for i in range(805)
+    ]
+    pq.write_table(pa.Table.from_pylist(rows), root / "eval.parquet")
+    return root
+
+
+def test_prepare_wide_source(wide_dataset, tmp_path):
+    output = tmp_path / "out"
+    path = prepare(wide_dataset, output_dir=output, languages=["hi", "ka"], limit_per_language=2)
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [row["id"] for row in rows] == ["hi/source-0", "hi/source-1", "kn/source-0", "kn/source-1"]
+    assert [row["_ng_task_index"] for row in rows] == [1610, 1611, 2415, 2416]
+    for row in rows:
+        metadata = TaskData.model_validate(row).verifier_metadata
+        assert metadata.question == f"{metadata.language_name} instruction {metadata.row_index}"
+        assert row["responses_create_params"]["input"][0]["content"] == metadata.question
+        assert metadata.human_evaluation_pending is None
+        assert metadata.judge_pass_stage == "not_provided"
+        assert metadata.expected_counts == {"hi": 2, "kn": 2}
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["source_repo"] == "ai4bharat/indic-alpaca-eval"
+    assert manifest["source_revision"] is None
+    assert manifest["dataset_sha256"] == dict.fromkeys(["hi", "kn"], module.sha256(wide_dataset / "eval.parquet"))
+
+
+@pytest.mark.parametrize("mutation", ["duplicate_id", "missing_row", "position", "blank", "missing_column"])
+def test_bad_wide_source_rejected(wide_dataset, tmp_path, mutation):
+    path = wide_dataset / "eval.parquet"
+    rows = pq.read_table(path).to_pylist()
+    if mutation == "duplicate_id":
+        rows[1]["id"] = rows[0]["id"]
+    elif mutation == "missing_row":
+        rows.pop()
+    elif mutation == "position":
+        rows[1]["position"] = 0
+    elif mutation == "blank":
+        rows[0]["instruction_Hindi_translation"] = " "
+    else:
+        for row in rows:
+            del row["instruction_Hindi_translation"]
+    pq.write_table(pa.Table.from_pylist(rows), path)
+    with pytest.raises(ValueError):
+        prepare(wide_dataset, output_dir=tmp_path / "out", languages=["hi"])
+    assert not (tmp_path / "out/indic_alpaca_eval_benchmark.jsonl").exists()
+
+
+def test_download_is_pinned(wide_dataset, tmp_path, monkeypatch):
     calls = []
 
     def download(**kwargs):
         calls.append(kwargs)
-        return str(dataset)
+        return str(wide_dataset)
 
     monkeypatch.setattr("huggingface_hub.snapshot_download", download)
     prepare(output_dir=tmp_path / "out", languages=["hi"])
@@ -104,7 +162,7 @@ def test_download_is_pinned(dataset, tmp_path, monkeypatch):
             repo_id=module.SOURCE_REPO,
             repo_type="dataset",
             revision=module.SOURCE_REVISION,
-            allow_patterns=["data/en/eval.parquet", "data/hi/eval.parquet"],
+            allow_patterns=["eval.parquet"],
         )
     ]
     manifest = json.loads((tmp_path / "out/manifest.json").read_text())

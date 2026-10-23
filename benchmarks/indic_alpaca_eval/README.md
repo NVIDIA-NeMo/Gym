@@ -1,111 +1,89 @@
-# Indic AlpacaEval pointwise
+# Indic AlpacaEval
 
-Evaluate 805 translated instructions per language: 9,660 tasks across Bengali,
-Gujarati, Hindi, Kannada, Marathi, Malayalam, Nepali, Odia, Punjabi, Tamil,
-Telugu, and Urdu. Canonical codes are `bn gu hi kn mr ml ne or pa ta te ur`.
-Preparation accepts `ka`, `mar`, and `mal` as aliases for `kn`, `mr`, and `ml`.
-English is used to check alignment and is not evaluated.
+Gym implementation of
+[AI4Bharat Indic AlpacaEval](https://huggingface.co/datasets/ai4bharat/indic-alpaca-eval),
+a translated instruction-following benchmark evaluated with an LLM judge.
 
-This is a **custom pointwise adaptation**, with overall and diagnostic scores
-on a 1–5 scale. These scores are not official AlpacaEval pairwise or
-length-controlled win rates. See the
-[judge rubric and metrics](../../resources_servers/alpaca_pointwise_judge/README.md).
+## What it tests
 
-## Prepare data
+The benchmark evaluates 805 instructions per language across Bengali, Gujarati,
+Hindi, Kannada, Marathi, Malayalam, Nepali, Odia, Punjabi, Tamil, Telugu, and
+Urdu: **9,660 tasks across 12 languages**.
 
-Run from a checkout with Gym and [requirements.txt](requirements.txt) installed:
+Each response is evaluated independently on four dimensions:
 
-```bash
-python -m benchmarks.indic_alpaca_eval.prepare
-# Or supply a local snapshot:
-python -m benchmarks.indic_alpaca_eval.prepare --dataset-dir /path/to/dataset
-```
+- **Instruction following:** adherence to the request and its constraints.
+- **Correctness:** factual accuracy and sound reasoning in the final answer.
+- **Usefulness:** relevance, completeness, and practical value.
+- **Language quality:** fluency, clarity, and appropriate use of the requested language.
 
-The default downloads
-[anushakamathofficial/indic_alpaca_eval](https://huggingface.co/datasets/anushakamathofficial/indic_alpaca_eval)
-at revision `5a173582c9e9f184e6a8fdefb0fb12ae485d56fa`.
-`gym eval prepare --benchmark indic_alpaca_eval` uses the same preparer.
-Use `--languages hi ta` and `--limit-per-language 2` for a smaller selection.
+The judge assigns integer scores from 1 to 5 for each dimension and a separate
+holistic overall score. It evaluates the final answer after reasoning is
+removed. The overall score is assigned independently of the dimension scores.
 
-Preparation checks all 805 English row IDs and indices and exact ordered
-correspondence in each selected translation. It rejects missing, duplicate,
-reordered, mislabeled, or empty translated rows. Instructions are passed to
-the policy unchanged. Translation review flags are retained without filtering;
-alignment checks do not establish translation quality.
+This is a custom pointwise protocol. Its scores are not official AlpacaEval
+pairwise or length-controlled win rates. See the
+[resources server](../../resources_servers/alpaca_pointwise_judge/README.md)
+for the rubric, judge configuration, and scoring details.
 
-Generated files are ignored by Git:
+## Data
 
-- `data/indic_alpaca_eval_benchmark.jsonl`: the selected tasks.
-- `data/bn.jsonl`, etc.: language shards with a shared coverage contract.
-- `data/smoke.jsonl`: one instruction per selected language, with its own contract.
-- `data/manifest.json`: source revision, source/adapter/rubric/output hashes,
-  counts, evaluation-set ID, and filtering policy. Local snapshots record
-  their path and hashes without claiming the pinned revision.
+Data is loaded from
+[ai4bharat/indic-alpaca-eval](https://huggingface.co/datasets/ai4bharat/indic-alpaca-eval/tree/94f35aa27454ddcfbf1128b8c8b61093ab284163)
+at revision `94f35aa27454ddcfbf1128b8c8b61093ab284163`.
+The source contains 805 rows with the original English instruction and
+translation columns for 14 languages. This integration selects 12:
+`bn gu hi kn mr ml ne or pa ta te ur`. Preparation also accepts `ka`, `mar`,
+and `mal` as aliases for `kn`, `mr`, and `ml`.
 
-The external dataset declares CC-BY-NC-4.0. Benchmark text is downloaded at
-runtime; only synthetic Apache-2.0 examples are included in this repository.
+[prepare.py](prepare.py) validates 805 unique source IDs, ordered positions
+0–804, and nonempty translations for every selected language. Translations
+remain attached to their original source row. English is excluded from
+evaluation. The published dataset does not expose per-row translation-review
+status; preparation records that status as unknown and applies no review filter.
 
-## Configure the judge and run
+Preparation writes `data/indic_alpaca_eval_benchmark.jsonl`, one JSONL shard
+per language, `data/smoke.jsonl`, and a provenance manifest. Tasks retain stable
+source identifiers, language metadata, and expected coverage. Language shards
+share an evaluation-set ID for aggregation.
 
-Set `INDIC_ALPACA_JUDGE_BASE_URL`, `INDIC_ALPACA_JUDGE_MODEL`, and
-`INDIC_ALPACA_JUDGE_API_KEY` for your OpenAI-compatible judge endpoint. The judge
-must support Chat Completions with JSON-schema structured output and the
-configured reasoning effort. Its default settings are temperature 0,
-4,096 maximum output tokens, low reasoning effort, and concurrency 1.
-Use a configuration override for providers with different supported parameters.
+The dataset declares CC-BY-NC-4.0. Benchmark text is loaded at runtime and
+generated files are ignored by Git. The repository includes only synthetic
+Apache-2.0 examples.
 
-Prepared candidate requests default to temperature 1, top-p 0.95, seed 42,
-thinking enabled, and 120,000 maximum output tokens. The endpoint must have
-enough context for the input plus this output budget; reduce the budget for
-smaller context windows. These defaults belong to each Alpaca row, so they do
-not replace another benchmark's sampling or metadata in a combined run.
-Explicit run-level settings take precedence. Repeat seeds are independent.
+## Example usage
+
+Run from the repository root with Gym and [requirements.txt](requirements.txt)
+installed. Configure the
+[judge endpoint](../../resources_servers/alpaca_pointwise_judge/README.md#configuring-the-judge)
+and supply a served candidate model:
 
 ```bash
+gym eval prepare --benchmark indic_alpaca_eval
+
 gym eval run --benchmark indic_alpaca_eval \
   --model-type vllm_model --model YOUR_MODEL \
   --model-url http://127.0.0.1:8000/v1 --model-api-key EMPTY \
+  --output results/indic_alpaca_eval/rollouts.jsonl \
   --max-output-tokens 4096
 ```
 
-For a served Gemma model, [gemma.yaml](gemma.yaml) is a single-benchmark recipe
-that adds top-k 64 and configures the vLLM reasoning parser. Sampling travels
-through request parameters, including `metadata.extra_body` for top-k.
-The [run.py](run.py) launcher starts Gym's servers around an existing policy
-endpoint using `RunHelper`, collects and aggregates rollouts, then stops Gym.
+The example overrides the prepared 120,000-token output budget. Choose a
+budget that fits the candidate model's context window and record it with the
+results. See [usage.md](usage.md) for local data, language selection, sampling
+settings, the Gemma recipe, language jobs, and smoke validation.
 
-```bash
-python -m benchmarks.indic_alpaca_eval.run \
-  --judge-key-file /path/to/private/api-key \
-  +input_jsonl_fpath=benchmarks/indic_alpaca_eval/data/smoke.jsonl \
-  +output_jsonl_fpath=results/indic_alpaca_eval/smoke/rollouts.jsonl \
-  +policy_base_url=http://127.0.0.1:8000/v1
-```
+## Metrics
 
-Omit `--judge-key-file` when the key is already in the environment. Keep keys
-out of CLI overrides. The default full-run output is
-`results/indic_alpaca_eval/gemma31b-it/rollouts.jsonl`. Gym writes metrics and
-failed measurements beside the rollouts; successful rows resume from cache.
-Use a fresh output path when changing models, prompts, or sampling settings.
+Scores retain the 1–5 scale. Repeated responses are averaged within each task,
+then tasks within each language, then languages with equal weight.
 
-Language shards have globally unique task indices and can be collected
-independently, then combined with `gym eval aggregate`. A single shard does
-not count as a complete multilingual evaluation. Preserve the configuration
-and preparation manifest with every run.
+- `alpaca_pointwise/macro_mean_overall_score`: holistic score across languages.
+- `alpaca_pointwise/macro_mean_<dimension>`: each rubric dimension across languages.
+- `alpaca_pointwise/<lang>/mean_overall_score`: holistic score for one language.
+- `alpaca_pointwise/<lang>/mean_<dimension>`: each rubric dimension for one language.
+- `alpaca_pointwise/complete`: whether all expected tasks have valid judgments.
 
-## Validate
-
-```bash
-pytest tests/unit_tests/test_indic_alpaca_eval.py
-gym env test +entrypoint=resources_servers/alpaca_pointwise_judge +should_validate_data=true
-python -m benchmarks.indic_alpaca_eval.check_run \
-  --inputs benchmarks/indic_alpaca_eval/data/smoke.jsonl \
-  --rollouts results/indic_alpaca_eval/smoke/rollouts.jsonl --smoke
-```
-
-If a run overrides the prepared token budget, pass that budget to the checker
-with `--max-output-tokens`. The checker verifies exact task coverage, metadata,
-score validity, normalized reward, final-answer extraction, and token budgets.
-Tests cover alignment, provenance, CLI overrides, mixed-benchmark metadata,
-repeat seeds, judge failures, and aggregation. The resources server remains
-`verified: false` pending a reviewed baseline.
+Macro scores are emitted only for complete evaluations. A language shard
+reports local scores; aggregate all expected shards to obtain multilingual
+scores. Gym reward is `(overall_score - 1) / 4`, on a 0–1 scale.

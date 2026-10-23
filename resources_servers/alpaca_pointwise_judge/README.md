@@ -1,76 +1,134 @@
 # Alpaca pointwise judge
 
-A native `SimpleResourcesServer` for the custom Indic AlpacaEval pointwise
-protocol. Each answer receives integer 1–5 ratings for instruction following,
-correctness, usefulness, language quality, and a separate holistic overall score.
-The holistic score is not an average of the four dimensions.
+LLM-judge resources server for
+[Indic AlpacaEval](../../benchmarks/indic_alpaca_eval/README.md). It evaluates
+each candidate response independently using Gym's `SimpleResourcesServer`,
+`simple_agent`, model adapters, and rollout collection and aggregation.
 
-The anchored rubric lives in
-[prompts/alpaca_pointwise_v1.yaml](prompts/alpaca_pointwise_v1.yaml).
-It adapts AlpacaEval's response quality, relevance, accuracy, and helpfulness
-criteria to independent scoring. These are **custom scores**, not official
-AlpacaEval pairwise or length-controlled win rates.
+## What it does
 
-## Reused Gym components
+The judge receives the translated instruction, expected language, and final
+answer. Structured reasoning and tagged thinking are removed before judging.
+Model identity, English source text, and translation-review flags are excluded
+from the judge prompt. Explicit output-language instructions take precedence
+over the dataset language.
 
-- `SimpleResourcesServer`, `BaseVerifyRequest`, and `BaseVerifyResponse` provide
-  the verification endpoint and stateless re-verification.
-- `nemo_gym.judge.call_judge` and `ServerClient` route requests through the
-  existing `openai_model` server. Transport and exhausted parse failures raise
-  `JudgeError`; Gym preserves the candidate in its failure sidecar for retry.
-- `load_prompt_config` / `fill_prompt` load the native YAML prompt.
-- `simple_agent` generates a response using the existing `vllm_model` or
-  another Gym policy server; `legacy_agent` exposes the environment interface.
-- Native rollout collection and aggregation write responses, judgments,
-  coverage, and metrics. Arena's pairwise battle/Elo implementation does not
-  apply to this independent scoring protocol.
+The [anchored rubric](prompts/alpaca_pointwise_v1.yaml) adapts AlpacaEval's
+response-quality criteria to pointwise ratings:
 
-The judge sees only the translated instruction, expected language, and final
-answer. Model identity, English source, review flags, and structured or tagged
-reasoning are excluded. Explicit output-language instructions override the
-dataset language. Empty answers and refusals use the same rubric. Strict JSON
-validation requires all scores, a concise rationale, and detected language;
-malformed/truncated judgments get up to three attempts.
+| Score | What it measures |
+| --- | --- |
+| `instruction_following` | Adherence to the instruction and its constraints. |
+| `correctness` | Factual accuracy and sound reasoning in the final answer. |
+| `usefulness` | Relevance, completeness, and practical value. |
+| `language_quality` | Fluency, clarity, and appropriate use of the requested language. |
+| `overall_score` | Holistic quality, assigned independently of the four dimensions. |
+
+All scores are integers from 1 to 5. The structured judgment also includes a
+concise rationale and detected response language. Empty answers and refusals
+are evaluated with the same rubric. These custom pointwise scores are not
+official AlpacaEval pairwise or length-controlled win rates.
+
+Requests use `nemo_gym.judge.call_judge` through Gym's `openai_model` server.
+Malformed or truncated judgments receive up to three attempts. Exhausted
+judge failures raise `JudgeError`; Gym preserves the candidate in its
+failed-measurement sidecar for retry.
+
+## Data schema
+
+Each input row contains `responses_create_params.input` for the candidate and
+`verifier_metadata` for scoring and coverage. The metadata includes the
+question, source row ID and index, language code and name, evaluation-set ID,
+expected per-language counts, and translation-review status. The published
+AI4Bharat dataset has no per-row review flags: `judge_pass_stage` is
+`not_provided` and `human_evaluation_pending` is `null`. See
+[task_data.py](task_data.py) for validation rules.
+
+The [example data](data/example.jsonl) contains five synthetic arithmetic
+tasks in Bengali, Hindi, Kannada, Tamil, and Urdu. Benchmark preparation loads
+translated instructions from
+[ai4bharat/indic-alpaca-eval](https://huggingface.co/datasets/ai4bharat/indic-alpaca-eval)
+at runtime. Code and synthetic examples are Apache-2.0; the external dataset
+declares CC-BY-NC-4.0.
+
+## Example usage
+
+From the repository root, configure the judge and start Gym with a served
+candidate model:
+
+```bash
+gym env start --resources-server alpaca_pointwise_judge \
+  --model-type vllm_model --model YOUR_MODEL \
+  --model-url http://127.0.0.1:8000/v1 --model-api-key EMPTY
+```
+
+In another terminal, collect the example tasks against those servers:
+
+```bash
+gym eval run --no-serve \
+  --agent alpaca_pointwise_judge_simple_agent \
+  --input resources_servers/alpaca_pointwise_judge/data/example.jsonl \
+  --output results/alpaca_pointwise_judge/example/rollouts.jsonl \
+  --max-output-tokens 4096 --num-repeats 1
+```
+
+See the [benchmark usage guide](../../benchmarks/indic_alpaca_eval/usage.md)
+for dataset preparation, sampling settings, and language jobs.
+
+## Configuring the judge
+
+[configs/alpaca_pointwise_judge.yaml](configs/alpaca_pointwise_judge.yaml)
+reads three environment variables:
+
+- `INDIC_ALPACA_JUDGE_BASE_URL`: OpenAI-compatible endpoint base URL.
+- `INDIC_ALPACA_JUDGE_MODEL`: judge model identifier.
+- `INDIC_ALPACA_JUDGE_API_KEY`: endpoint credential.
+
+The endpoint must support Chat Completions with JSON-schema structured output
+and the configured reasoning effort. Defaults are temperature 0, low reasoning
+effort, 4,096 maximum output tokens, and one concurrent judge request per model
+server process. Override provider parameters and the budget in the Gym config
+to match the evaluation protocol. The endpoint and judge model are explicitly
+configured by the caller.
 
 ## Metrics
 
-`reward = (overall_score - 1) / 4` is a graded Gym reward.
-The headline metric is `alpaca_pointwise/macro_mean_overall_score` on the
-original 1–5 scale. The four `macro_mean_<dimension>` metrics also average
-equally across languages. They are emitted only when every expected language has all
-expected tasks judged. Per-language metrics include overall and dimension
-means, standard error across task scores, judged/expected counts, empty final
-answers, and translation-review-pending counts. Repeats are averaged within
-each task before averaging tasks. Generic pass@k metrics are not the headline
-for this graded protocol.
+Gym reward is `(overall_score - 1) / 4`, on a 0–1 scale. Quality metrics use
+the original 1–5 scores. Repeats are averaged within each task, tasks are
+averaged within each language, and macro scores weight languages equally.
+The holistic score is an independent judgment, not the arithmetic mean of the
+four rubric dimensions.
 
-Prepared rows carry an evaluation-set ID and expected counts. Aggregation
-rejects mixed sets, duplicate task identities, and inconsistent coverage.
-A language shard reports its local scores but remains incomplete until the
-other expected shards are aggregated. Gym records failed/masked measurements
-separately; retry these before reporting a complete benchmark.
+- `alpaca_pointwise/macro_mean_overall_score`: headline multilingual score.
+- `alpaca_pointwise/macro_mean_<dimension>`: multilingual score for each rubric dimension.
+- `alpaca_pointwise/<lang>/mean_overall_score`: per-language holistic score.
+- `alpaca_pointwise/<lang>/mean_<dimension>`: per-language rubric score.
+- `alpaca_pointwise/<lang>/standard_error`: standard error across task-level overall scores.
+- `alpaca_pointwise/{expected,judged,complete}`: total task coverage.
 
-## Configuration and data
+Per-language metrics also report expected and judged task counts,
+completeness, invalid judgments, empty final answers, and judged tasks
+explicitly flagged for translation review. An unknown review status does not
+count as a flagged task. Macro scores are emitted only when every expected
+language has all expected tasks judged and no invalid judgments. Mixed
+evaluation sets, duplicate task identities, and inconsistent coverage are
+rejected. A language shard reports local scores while retaining the shared
+multilingual coverage requirement.
 
-[configs/alpaca_pointwise_judge.yaml](configs/alpaca_pointwise_judge.yaml)
-reads the endpoint, model, and key from `INDIC_ALPACA_JUDGE_BASE_URL`,
-`INDIC_ALPACA_JUDGE_MODEL`, and `INDIC_ALPACA_JUDGE_API_KEY`. The reusable
-server defaults to temperature 0, low reasoning effort, 4,096 output tokens,
-and one concurrent judge request per model-server process. Override the
-budget and provider parameters for the evaluation protocol being reproduced.
-No credential is stored here.
+## Example rollouts
 
-The included five example rollouts were generated through Gym with
-`gcp/google/gemini-3.8-flash` as both candidate and judge. The candidate used
-8,192 maximum output tokens, temperature 0, and low reasoning; the judge used
-65,536 maximum output tokens, temperature 0, and low reasoning. All five
-synthetic arithmetic tasks (Bengali, Hindi, Kannada, Tamil, Urdu) completed
-with nonempty final answers and valid judgments. This is integration smoke
-evidence, not a model quality comparison or a full AlpacaEval score.
+The checked-in [rollouts](data/example_rollouts.jsonl) contain five completed
+synthetic tasks generated through Gym with `gcp/google/gemini-3.8-flash` as both
+candidate and judge. Both used temperature 0 and low reasoning effort. The
+candidate output budget was 8,192 tokens; the judge budget was 65,536 tokens.
+All five final answers are nonempty and all judgments are valid on the first
+attempt. These examples demonstrate integration, not full benchmark quality.
 
-See [the Indic benchmark](../../benchmarks/indic_alpaca_eval/README.md) for
-preparation and Gemma execution. Five synthetic arithmetic examples are included
-for schema validation; benchmark text is downloaded or read locally at runtime.
+Validate the included evidence with:
 
-Code and synthetic examples: Apache-2.0. Dependency: NeMo Gym (Apache-2.0).
-The external Indic AlpacaEval dataset declares CC-BY-NC-4.0 and is not vendored.
+```bash
+python -m benchmarks.indic_alpaca_eval.check_run \
+  --inputs resources_servers/alpaca_pointwise_judge/data/example.jsonl \
+  --rollouts resources_servers/alpaca_pointwise_judge/data/example_rollouts.jsonl \
+  --max-output-tokens 8192 --smoke
+```

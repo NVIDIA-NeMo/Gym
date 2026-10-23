@@ -35,7 +35,7 @@ class AlpacaTask(BaseModel):
     expected_counts: dict[str, Annotated[int, Field(strict=True, gt=0)]] = Field(min_length=1)
     evaluation_set_id: str = Field(min_length=1)
     judge_pass_stage: str
-    human_evaluation_pending: bool
+    human_evaluation_pending: bool | None
     human_review_reason: str = ""
 
     @model_validator(mode="after")

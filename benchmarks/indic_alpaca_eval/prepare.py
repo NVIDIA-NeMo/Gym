@@ -14,8 +14,8 @@ import pyarrow.parquet as pq
 from resources_servers.alpaca_pointwise_judge.task_data import LANGUAGE_ALIASES, LANGUAGES, AlpacaTask
 
 
-SOURCE_REPO = "anushakamathofficial/indic_alpaca_eval"
-SOURCE_REVISION = "5a173582c9e9f184e6a8fdefb0fb12ae485d56fa"  # pragma: allowlist secret
+SOURCE_REPO = "ai4bharat/indic-alpaca-eval"
+SOURCE_REVISION = "94f35aa27454ddcfbf1128b8c8b61093ab284163"  # pragma: allowlist secret
 DEFAULT_OUTPUT = Path(__file__).parent / "data"
 RUBRIC_PATH = (
     Path(__file__).resolve().parents[2] / "resources_servers/alpaca_pointwise_judge/prompts/alpaca_pointwise_v1.yaml"
@@ -67,7 +67,7 @@ def convert_rows(rows: dict[str, list[dict]], *, dataset_hashes: dict[str, str])
                     # Native aggregation groups by this key across language jobs.
                     "_ng_task_index": list(LANGUAGES).index(code) * 805 + row["row_index"],
                     # Independently owned row defaults preserve other benchmarks' metadata
-                    # and allow explicit run-level CLI overrides (see Gym PR #3596).
+                    # and allow explicit run-level CLI overrides.
                     "responses_create_params": {
                         "input": [{"role": "user", "content": row["instruction"]}],
                         "temperature": 1.0,
@@ -108,24 +108,54 @@ def prepare(
                 repo_id=SOURCE_REPO,
                 repo_type="dataset",
                 revision=SOURCE_REVISION,
-                allow_patterns=["data/en/eval.parquet", *[f"data/{code}/eval.parquet" for code in languages]],
+                allow_patterns=["eval.parquet"],
             )
         )
     dataset_dir = Path(dataset_dir)
     output_dir = Path(output_dir)
-    english_path = dataset_dir / "data/en/eval.parquet"
-    english = pq.read_table(english_path).to_pylist()
+    wide_path = dataset_dir / "eval.parquet"
+    if wide_path.exists():
+        table = pq.read_table(wide_path)
+        columns = {code: f"instruction_{LANGUAGES[code]}_translation" for code in languages}
+        missing = {"id", "position", "instruction", *columns.values()} - set(table.column_names)
+        if missing:
+            raise ValueError(f"Missing source columns: {sorted(missing)}")
+        source = table.to_pylist()
+        english_path = wide_path
+        english = [{"row_id": row["id"], "row_index": row["position"]} for row in source]
+        selected = {
+            code: [
+                {
+                    "row_id": row["id"],
+                    "row_index": row["position"],
+                    "instruction": row[column],
+                    "language_code": code,
+                    # The published table does not expose per-row review status.
+                    "judge_pass_stage": "not_provided",
+                    "human_evaluation_pending": None,
+                }
+                for row in source
+            ]
+            for code, column in columns.items()
+        }
+        source_paths = {code: wide_path for code in languages}
+    else:
+        english_path = dataset_dir / "data/en/eval.parquet"
+        english = pq.read_table(english_path).to_pylist()
+        source_paths = {code: dataset_dir / "data" / code / "eval.parquet" for code in languages}
+        selected = {code: pq.read_table(path).to_pylist() for code, path in source_paths.items()}
     expected = [(row["row_id"], row["row_index"]) for row in english]
     if (
         len(english) != 805
+        or any(not isinstance(row["row_id"], str) or not row["row_id"].strip() for row in english)
         or len({row["row_id"] for row in english}) != 805
         or [row["row_index"] for row in english] != list(range(805))
     ):
         raise ValueError("Expected 805 unique English source rows indexed 0–804")
-    selected, hashes = {}, {}
+    hashes = {}
     for code in languages:
-        path = dataset_dir / "data" / code / "eval.parquet"
-        rows = pq.read_table(path).to_pylist()
+        path = source_paths[code]
+        rows = selected[code]
         if [(row["row_id"], row["row_index"]) for row in rows] != expected:
             raise ValueError(f"{code}: IDs or order do not align with the English source")
         if any(row["language_code"] != code for row in rows):
