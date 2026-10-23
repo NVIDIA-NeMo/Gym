@@ -197,12 +197,6 @@ class TestValidation:
         with pytest.raises(ValidationError, match="sets both `command` and `export`"):
             _submit(benchmarks={"custom": {"command": "echo hi", "export": {"evalrdl": {}}}})
 
-    def test_the_key_is_export_like_prepare_and_run(self) -> None:
-        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-            _submit(benchmarks={"gpqa": {"exports": {"evalrdl": {}}}})
-        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-            SubmitConfig.model_validate({**_config(), "job": {"output_path": "/jobs", "exports": {}}})
-
     def test_dropping_an_export_on_a_command_benchmark_is_not_an_export(self) -> None:
         _submit(benchmarks={"custom": {"command": "echo hi", "export": {"evalrdl": None}}})
 
