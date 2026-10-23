@@ -28,6 +28,7 @@ from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, ToolCall
 from pydantic import BaseModel
 
 from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessageForTraining,
     NeMoGymResponse,
     NeMoGymResponseFunctionToolCallForTraining,
     NeMoGymResponseFunctionWebSearch,
@@ -39,6 +40,7 @@ from nemo_gym.openai_utils import (
 )
 from responses_api_agents.nooa_agent.gym_llm import (
     GymResponsesLLM,
+    InvalidPolicyOutputError,
     OutputTokenLimitExceeded,
     PolicyCallBudgetExceeded,
     RolloutLLMState,
@@ -323,7 +325,7 @@ async def test_preserves_function_call_token_metadata() -> None:
     assert result.finish_reason == "tool_calls"
     assert result.tool_calls[0].name == "weather"
     assert result.raw_response.output[0].generation_token_ids == [11, 12]
-    replayed, _ = _responses_input([result])
+    replayed, _ = _responses_input([result], replay_scope=result.replay_scope)
     assert replayed[0]["generation_token_ids"] == [11, 12]
 
 
@@ -475,6 +477,7 @@ async def test_formatter_history_edits_preserve_public_reasoning_without_provide
     assert original.model_dump(mode="json") == original_snapshot
     assert state.calls[0].response.model_dump(mode="json") == original_response
     assert rendered == rendered_snapshot
+    assert [gap.code for gap in state.gaps] == ["public_assistant_metadata_unavailable"]
 
 
 @pytest.mark.asyncio
@@ -621,7 +624,9 @@ async def test_nontext_outputs_survive_snapshot_replay(output: BaseModel, reason
 
 
 def test_cache_boundary_is_never_a_model_input() -> None:
-    replayed, instructions = _responses_input([{"role": "user", "content": "Weather?"}, CacheBoundary()])
+    replayed, instructions = _responses_input(
+        [{"role": "user", "content": "Weather?"}, CacheBoundary()], replay_scope="gym-test"
+    )
 
     assert replayed == [{"role": "user", "content": "Weather?"}]
     assert instructions is None
@@ -636,7 +641,7 @@ def test_foreign_llm_response_projects_portable_and_records_gap() -> None:
     )
     gaps: list = []
 
-    replayed, _ = _responses_input([foreign], gaps=gaps)
+    replayed, _ = _responses_input([foreign], gaps=gaps, replay_scope="gym-test")
 
     assert replayed == [
         {
@@ -671,6 +676,7 @@ async def test_structured_output_schema_and_parsing() -> None:
     restored = deserialize(json.loads(json.dumps(blob)), allowlist)
     assert restored.parsed is None
     assert restored.content == result.content
+    assert StructuredAnswer.model_validate_json(restored.content) == result.parsed
 
     await llm.acall([restored])
 
@@ -764,6 +770,35 @@ async def test_summary_call_preserves_main_transport_state(main_failed: bool, su
     assert (state.calls[1].response is None) is summary_failed
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("main_failed", [False, True])
+@pytest.mark.parametrize("invalid_cap", [False, True])
+async def test_summary_preparation_failure_preserves_main_state(main_failed: bool, invalid_cap: bool) -> None:
+    from nooa.agents.summarization import _in_summary_fork
+
+    llm, client, state = make_llm(model_response())
+    main_error = ConnectionError("main model failure")
+    if main_failed:
+        client.post.side_effect = main_error
+        with pytest.raises(ConnectionError):
+            await llm.acall([{"role": "user", "content": "task"}])
+    else:
+        await llm.acall([{"role": "user", "content": "task"}])
+
+    token = _in_summary_fork.set(True)
+    try:
+        with pytest.raises((ValueError, KeyError)):
+            if invalid_cap:
+                await llm.acall([{"role": "user", "content": "summary"}], max_output_tokens=0)
+            else:
+                await llm.acall([{"role": "tool", "content": "missing call id"}])
+    finally:
+        _in_summary_fork.reset(token)
+
+    assert state.fatal_error is (main_error if main_failed else None)
+    assert state.used == llm.calls == len(state.calls) == client.post.await_count == 1
+
+
 def output_limit_response(*outputs: object, response_id: str = "partial-response") -> dict:
     return model_response(*outputs, response_id=response_id) | {
         "status": "incomplete",
@@ -840,3 +875,246 @@ async def test_successful_response_after_output_limit_recovers_normally() -> Non
     assert state.used == len(state.calls) == 2
     assert state.calls[0].response.incomplete_details.reason == "max_output_tokens"
     assert state.calls[1].response.incomplete_details is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("split_messages", [False, True])
+async def test_structured_output_parses_exact_persisted_text(split_messages: bool) -> None:
+    blocks = [NeMoGymResponseOutputText(annotations=[], text=text) for text in ('{"verdict":"pos', 'itive"}')]
+    outputs = (
+        [NeMoGymResponseOutputMessage(id=f"msg-{i}", content=[block]) for i, block in enumerate(blocks)]
+        if split_messages
+        else [NeMoGymResponseOutputMessage(id="msg", content=blocks)]
+    )
+    llm, client, state = make_llm(model_response(*outputs))
+    result = await llm.acall([{"role": "user", "content": "Classify"}], output_model=StructuredAnswer)
+    blob, allowlist = serialize(result)
+    restored = deserialize(json.loads(json.dumps(blob)), allowlist)
+
+    assert result.parsed == StructuredAnswer(verdict="positive")
+    assert restored.parsed is None
+    assert StructuredAnswer.model_validate_json(restored.content) == result.parsed
+    await llm.acall([restored])
+    assert client.post.await_args.kwargs["json"].model_dump(mode="json", exclude_none=True)["input"] == [
+        output.model_dump(mode="json", exclude_none=True) for output in outputs
+    ]
+    assert state.gaps == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_json", [False, True])
+async def test_structured_output_refusal_preserves_evidence_and_fails(include_json: bool) -> None:
+    blocks = [{"type": "refusal", "refusal": "Cannot answer."}]
+    if include_json:
+        blocks.append({"type": "output_text", "text": '{"verdict":"positive"}', "annotations": []})
+    output = NeMoGymResponseOutputMessage(id="msg", content=blocks)
+    llm, client, state = make_llm(model_response(output))
+    with pytest.raises(InvalidPolicyOutputError, match="refused to produce StructuredAnswer"):
+        await llm.acall([{"role": "user", "content": "Classify"}], output_model=StructuredAnswer)
+    assert state.calls[0].response.output == [output]
+    assert state.used == llm.calls == client.post.await_count == 1
+    assert state.fatal_error is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("index", "field", "value"),
+    [
+        (0, "text", "Edited reasoning."),
+        (1, "text", "Edited text."),
+        (2, "id", "edited-call"),
+        (2, "name", "edited_tool"),
+        (2, "arguments", '{"city":"Berlin"}'),
+    ],
+)
+async def test_archive_public_edits_invalidate_native_replay(index: int, field: str, value: str) -> None:
+    llm, client, state = make_llm(mixed_model_response())
+    original = await llm.acall([{"role": "user", "content": "Weather?"}])
+    archive = original.model_dump(mode="json")
+    archive["parts"][index][field] = value
+    rebuilt = LLMResponse.model_validate(archive)
+    assert rebuilt.parts[index].native is not None
+    await llm.acall([rebuilt])
+
+    items = client.post.await_args.kwargs["json"].model_dump(mode="json", exclude_none=True)["input"]
+    expected = []
+    for part in rebuilt.parts:
+        if isinstance(part, ToolCall):
+            expected.append(
+                {"type": "function_call", "call_id": part.id, "name": part.name, "arguments": part.arguments}
+            )
+        elif part.text:
+            expected.append({"type": "message", "role": "assistant", "content": part.text})
+    assert items == expected
+    assert [gap.code for gap in state.gaps] == ["foreign_turn_projected_portable"]
+    assert state.calls[0].response.model_dump(mode="json") == mixed_model_response()
+
+
+def test_native_replay_requires_explicit_non_null_scope() -> None:
+    response = LLMResponse(
+        parts=(
+            AssistantText(
+                text="answer",
+                native={
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "answer"}],
+                },
+            ),
+        ),
+    )
+    with pytest.raises(TypeError, match="replay_scope"):
+        _responses_input([response])
+    items, _ = _responses_input([response], replay_scope=None)
+    assert items == [{"role": "assistant", "content": "answer"}]
+
+
+@pytest.mark.asyncio
+async def test_repeated_portable_history_deduplicates_provenance_neutral_gaps() -> None:
+    llm, _, state = make_llm(model_response(), max_policy_calls=None)
+    public = {"role": "assistant", "content": "An example or an edit."}
+    foreign = LLMResponse(content="Another turn.")
+    for _ in range(5):
+        await llm.acall([public, foreign, public, foreign])
+    assert [gap.code for gap in state.gaps] == [
+        "public_assistant_metadata_unavailable",
+        "foreign_turn_projected_portable",
+    ]
+    assert "caller-authored example" in state.gaps[0].detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "assistant", "reasoning_content": {"invalid": "object"}},
+        {"role": "assistant", "tool_calls": [{"function": {"name": "weather", "arguments": "{}"}}]},
+        {"role": "tool", "content": "missing call id"},
+        {"type": "not_a_response_item"},
+    ],
+)
+async def test_history_preparation_failure_does_not_spend_policy_budget(message: dict) -> None:
+    llm, client, state = make_llm(model_response(), max_policy_calls=1)
+    with pytest.raises((ValueError, KeyError)) as caught:
+        await llm.acall([message])
+    assert state.fatal_error is caught.value
+    assert state.used == llm.calls == 0
+    assert state.calls == []
+    client.post.assert_not_awaited()
+    await llm.acall([{"role": "user", "content": "valid retry"}])
+    assert state.used == llm.calls == 1
+    assert state.fatal_error is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "output",
+    [
+        {"type": "custom_tool_call", "id": "custom", "call_id": "call", "name": "custom", "input": "payload"},
+        {
+            "type": "computer_call",
+            "id": "computer",
+            "call_id": "call",
+            "status": "completed",
+            "action": {"type": "screenshot"},
+            "pending_safety_checks": [],
+        },
+        {
+            "type": "local_shell_call",
+            "id": "local-shell",
+            "call_id": "call",
+            "status": "completed",
+            "action": {"type": "exec", "command": ["pwd"], "env": {}},
+        },
+        {
+            "type": "shell_call",
+            "id": "shell",
+            "call_id": "call",
+            "status": "completed",
+            "action": {"type": "exec", "commands": ["pwd"]},
+        },
+        {
+            "type": "apply_patch_call",
+            "id": "patch",
+            "call_id": "call",
+            "status": "completed",
+            "operation": {"type": "create_file", "path": "a.py", "diff": "+pass"},
+        },
+    ],
+)
+async def test_unsupported_client_tool_calls_fail_after_capture(output: dict) -> None:
+    llm, client, state = make_llm(model_response(output))
+    captured = []
+    llm._on_response = lambda: captured.append(state.calls[0].response)
+    with pytest.raises(InvalidPolicyOutputError, match=output["type"]):
+        await llm.acall([{"role": "user", "content": "Continue"}])
+    assert captured == [state.calls[0].response]
+    assert state.calls[0].response.output[0].model_dump(mode="json", exclude_none=True) == output
+    assert state.used == llm.calls == client.post.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", ["Prompt", [{"type": "input_text", "text": "Prompt"}]])
+@pytest.mark.parametrize("role", ["user", "assistant"])
+async def test_request_shaped_output_history_keeps_opaque_training_metadata(role: str, content: str | list) -> None:
+    output = NeMoGymEasyInputMessageForTraining(
+        role=role,
+        content=content,
+        prompt_token_ids=[1],
+        generation_token_ids=[2],
+        generation_log_probs=[-0.1],
+    )
+    llm, client, state = make_llm(model_response(output))
+    result = await llm.acall([{"role": "user", "content": "Continue"}])
+    assert result.content == ""
+    blob, allowlist = serialize(result)
+    restored = deserialize(json.loads(json.dumps(blob)), allowlist)
+    await llm.acall([restored])
+    assert client.post.await_args.kwargs["json"].model_dump(mode="json", exclude_none=True)["input"] == [
+        output.model_dump(mode="json", exclude_none=True)
+    ]
+    assert state.gaps == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["max_tokens", "max_completion_tokens", "max_output_tokens"])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("gym_cap", [None, 256])
+async def test_reply_cap_alias_matches_planning_and_wire_request(key: str, nested: bool, gym_cap: int | None) -> None:
+    params = {key: 128}
+    if nested:
+        params = {"extra_body": params}
+    llm, client, _ = make_llm(model_response(), context_window=1024, sampling_overrides={"max_output_tokens": gym_cap})
+    limits = llm.get_context_limits(params)
+    await llm.acall([{"role": "user", "content": "hello"}], **params)
+    body = client.post.await_args.kwargs["json"]
+    assert body.max_output_tokens == limits.reserved_output_tokens == (gym_cap or 128)
+    assert limits.usable_input_tokens == 1024 - body.max_output_tokens
+
+
+@pytest.mark.asyncio
+async def test_absent_reply_cap_does_not_send_planning_fallback() -> None:
+    llm, client, _ = make_llm(model_response(), context_window=1024)
+    assert llm.get_context_limits(fallback_reserve=256).reserved_output_tokens == 256
+    await llm.acall([{"role": "user", "content": "hello"}])
+    assert client.post.await_args.kwargs["json"].max_output_tokens is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"max_tokens": 512, "max_completion_tokens": 64},
+        {"extra_body": {"max_tokens": 1024}},
+        {"max_completion_tokens": 0},
+        {"max_output_tokens": True},
+    ],
+)
+async def test_invalid_reply_caps_fail_planning_and_call_before_model_transport(params: dict) -> None:
+    llm, client, state = make_llm(model_response(), context_window=1024)
+    with pytest.raises(ValueError):
+        llm.get_context_limits(params)
+    with pytest.raises(ValueError):
+        await llm.acall([{"role": "user", "content": "hello"}], **params)
+    client.post.assert_not_awaited()
+    assert state.used == 0

@@ -32,6 +32,10 @@ export const AssistantMessageHeader = () => {
       });
     },
     "chat.headers"(input, output) {
+      const activation = process.env.NEMO_GYM_OPENCODE_ACTIVATION_ID;
+      if (activation) {
+        output.headers["X-Session-Id"] = `${activation}:${input.sessionID}`;
+      }
       const candidates = [...(active.get(input.sessionID)?.values() ?? [])].filter(m =>
         m.parentID === input.message.id && m.agent === input.agent &&
         m.modelID === input.model.id && m.providerID === input.model.providerID);

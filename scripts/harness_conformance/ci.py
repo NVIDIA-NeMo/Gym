@@ -108,7 +108,8 @@ def install_runtime(harness: str) -> None:
         from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
 
         config.setdefault("opencode_version", OPENCODE_VERSION)
-    version = config[f"{harness}_version"]
+    version_key = "kilo_version" if harness == "kilocode" else f"{harness}_version"
+    version = config[version_key]
     if not version:
         raise ValueError(f"{harness} needs a pinned runtime version")
     setup = importlib.import_module(f"responses_api_agents.{harness}_agent.setup_{harness}")

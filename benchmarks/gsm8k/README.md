@@ -6,8 +6,8 @@ nemo-skills' `nemo_skills/dataset/gsm8k`.
 Data is fetched from the upstream openai/grade-school-math repo at
 prepare time. `prepare.py` applies the same Skills transforms
 (hardcoded answer fixes, `<<...>>` calc-string stripping, int-cast when
-the expected answer is integer-valued), then renames `problem` ->
-`question` for Gym.
+the expected answer is integer-valued). Gym renames `problem` to
+`question` and writes `expected_answer` as a string for `math_with_judge`.
 
 ## Example usage
 

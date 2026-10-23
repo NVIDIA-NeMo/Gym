@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Literal, Optional, Self, Tuple, Union
 
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 from tqdm.auto import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
@@ -70,6 +70,12 @@ from nemo_gym.task_data import (
     load_task_data_schema,
 )
 from nemo_gym.task_materialization import materialize_task
+
+
+def _ref_name(ref: Any) -> Optional[str]:
+    """The ``name`` of a server reference given as a mapping, a model or nothing."""
+    name = ref.get("name") if isinstance(ref, (dict, DictConfig)) else getattr(ref, "name", None)
+    return name if isinstance(name, str) else None
 
 
 class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
@@ -512,6 +518,19 @@ def _prepare_command(global_config: DictConfig, dataset: DatasetConfig) -> str:
 
 
 class TrainDataProcessor(BaseModel):
+    # Every server instance of the run config, kept by `load_and_validate_server_instance_configs`. The
+    # in-scope list it returns holds only dataset-bearing instances, but the schema that validates an
+    # agent's rows may live on the environment server that drives it (the Harbor layout), which declares
+    # no datasets itself and would otherwise never be seen by the lookup.
+    _all_server_instance_configs: List[ServerInstanceConfig] = PrivateAttr(default_factory=list)
+
+    def _schema_lookup_configs(
+        self, server_instance_configs: List[ServerInstanceConfig]
+    ) -> List[ServerInstanceConfig]:
+        """The in-scope instances plus every other instance of the run config, for schema-home lookups."""
+        names = {c.name for c in server_instance_configs}
+        return list(server_instance_configs) + [c for c in self._all_server_instance_configs if c.name not in names]
+
     def run(self, global_config_dict: DictConfig):  # pragma: no cover
         """
         See the README section "How To: Prepare and validate data for PR submission or RL training"
@@ -551,6 +570,7 @@ class TrainDataProcessor(BaseModel):
     ) -> List[ServerInstanceConfig]:
         parser = GlobalConfigDictParser()
         server_instance_configs = parser.filter_for_server_instance_configs(global_config_dict)
+        self._all_server_instance_configs = list(server_instance_configs)
 
         # Datasets may be declared by resources servers (the normal, decoupled home: the RS owns
         # the task schema and verifier) or by agents (self-contained environments that verify
@@ -799,7 +819,10 @@ class TrainDataProcessor(BaseModel):
                 state,
                 sample_idx,
                 sample_dict_str,
-                require_responses=dataset_config.taskset is None,
+                # Benchmark prompt templates create the input during collation;
+                # count the original task rows before validating rendered inputs.
+                require_responses=dataset_config.taskset is None
+                and not (dataset_config.type == "benchmark" and dataset_config.prompt_config),
                 dataset_metrics_hook=dataset_metrics_hook,
             )
 
@@ -807,7 +830,9 @@ class TrainDataProcessor(BaseModel):
 
         return state
 
-    def _validate_aggregate_metrics(self, aggregate_metrics_dict: Dict, metrics_fpath: Path) -> Optional[Path]:
+    def _validate_aggregate_metrics(
+        self, aggregate_metrics_dict: Dict, metrics_fpath: Path, *, source_metrics: bool = False
+    ) -> Optional[Path]:
         """
         Returns the conflicting metrics fpath if invalid. Else returns None
         """
@@ -885,7 +910,14 @@ class TrainDataProcessor(BaseModel):
                 diffs.append(f"Value differs at {path}: {prev_v} != {new_v}")
 
         diffs: List[str] = []
-        diff_values(previous_aggregate_metrics_dict, aggregate_metrics_dict, path="", diffs=diffs)
+        previous_comparison = previous_aggregate_metrics_dict
+        current_comparison = aggregate_metrics_dict
+        if source_metrics:
+            # A rendering template does not describe the original dataset. Keep it
+            # significant for collated-output metrics, including existing sidecars.
+            previous_comparison = {k: v for k, v in previous_comparison.items() if k != "prompt_config"}
+            current_comparison = {k: v for k, v in current_comparison.items() if k != "prompt_config"}
+        diff_values(previous_comparison, current_comparison, path="", diffs=diffs)
 
         if diffs:
             print("Differences found in aggregate metrics:")
@@ -904,7 +936,9 @@ class TrainDataProcessor(BaseModel):
         dataset_type_to_aggregate_metrics: Dict[str, DatasetMetrics] = defaultdict(DatasetMetrics)
         for c in server_instance_configs:
             for d in c.datasets:
-                dataset_metrics_hook = self._dataset_metrics_hook_for(c, server_instance_configs)
+                dataset_metrics_hook = self._dataset_metrics_hook_for(
+                    c, self._schema_lookup_configs(server_instance_configs)
+                )
                 state = self._validate_samples_and_aggregate_metrics_single_dataset(d, dataset_metrics_hook)
 
                 dataset_type_to_aggregate_metrics[d.type].add(state.metrics)
@@ -927,7 +961,7 @@ class TrainDataProcessor(BaseModel):
                 metrics_fpath = data_fpath.with_name(f"{data_fpath.stem}_metrics.json")
 
                 maybe_conflicting_metrics_fpath = self._validate_aggregate_metrics(
-                    aggregate_metrics_dict, metrics_fpath
+                    aggregate_metrics_dict, metrics_fpath, source_metrics=True
                 )
                 if maybe_conflicting_metrics_fpath is not None:
                     conflicting_fpaths.append(str(maybe_conflicting_metrics_fpath))
@@ -984,21 +1018,66 @@ This could be due to a change in how metrics are calculated, leading to outdated
         Datasets declared by a resources server belong to its own implementation; datasets
         declared by an agent belong to the resources server the agent references. Self-contained
         agents (no resources_server reference) return None here; the validator lookup then falls
-        back to the agent's own directory.
+        back to the environment server that drives the agent, then to the agent's own directory.
         """
         if c.SERVER_TYPE == "resources_servers":
             return next(iter(c.resources_servers))
         if c.SERVER_TYPE != "responses_api_agents":
             return None
-        inner = c.get_inner_run_server_config()
-        ref = getattr(inner, "resources_server", None)
-        rs_name = ref.get("name") if isinstance(ref, (dict, DictConfig)) else getattr(ref, "name", None)
-        if not isinstance(rs_name, str):
+        rs_name = _ref_name(getattr(c.get_inner_run_server_config(), "resources_server", None))
+        if rs_name is None:
             return None
         for other in server_instance_configs:
             if other.SERVER_TYPE == "resources_servers" and other.name == rs_name:
                 return next(iter(other.resources_servers))
         return None
+
+    @staticmethod
+    def _owning_environment_server_impl(
+        c: ServerInstanceConfig, server_instance_configs: List[ServerInstanceConfig]
+    ) -> Optional[str]:
+        """The environment-server implementation that drives a self-contained agent's episodes.
+
+        An environment server that names the agent as its ``agent_server`` owns the rows the agent
+        declares (the Harbor layout: the agent block carries ``datasets`` so rollout collection
+        finds them, the environment server seeds and verifies them), so its ``task_data.py``,
+        when it ships one, is the schema to validate against.
+        """
+        if c.SERVER_TYPE != "responses_api_agents":
+            return None
+        for other in server_instance_configs:
+            if other.SERVER_TYPE != "environment_servers":
+                continue
+            if _ref_name(getattr(other.get_inner_run_server_config(), "agent_server", None)) == c.name:
+                return next(iter(other.environment_servers))
+        return None
+
+    @classmethod
+    def _schema_home_for(
+        cls, c: ServerInstanceConfig, server_instance_configs: List[ServerInstanceConfig]
+    ) -> Optional[tuple[str, str]]:
+        """``(implementation, base_folder)`` whose ``task_data.py`` validates ``c``'s datasets, or None.
+
+        A resources server owns its own data and the data of agents that reference it. An agent
+        without a reference is owned by the environment server that names it when that server
+        ships a ``task_data.py`` (the Harbor layout), else by itself: a self-contained agent
+        wrapped by a schema-less environment server (the ``legacy_agent`` layout) validates
+        against its own ``task_data.py``. An agent whose reference is dangling is skipped: its
+        schema home is the (missing) server.
+        """
+        impl_key = cls._owning_resources_server_impl(c, server_instance_configs)
+        if impl_key is not None:
+            return impl_key, "resources_servers"
+        if c.SERVER_TYPE != "responses_api_agents":
+            return None
+        if getattr(c.get_inner_run_server_config(), "resources_server", None) is not None:
+            return None
+        impl_key = cls._owning_environment_server_impl(c, server_instance_configs)
+        if impl_key is not None:
+            env_dir = find_server_dir(impl_key, base_folder="environment_servers")
+            if env_dir is not None and (env_dir / "task_data.py").is_file():
+                return impl_key, "environment_servers"
+        return next(iter(c.responses_api_agents)), "responses_api_agents"
 
     @classmethod
     def _task_data_validator_for(
@@ -1007,19 +1086,10 @@ This could be due to a change in how metrics are calculated, leading to outdated
         d: Union[DatasetConfig, BenchmarkDatasetConfig],
         server_instance_configs: List[ServerInstanceConfig],
     ) -> Optional[TaskDataValidator]:
-        impl_key = cls._owning_resources_server_impl(c, server_instance_configs)
-        base_folder = "resources_servers"
-        if impl_key is None:
-            # No resources server owns this data. A self-contained agent (one that declares no
-            # resources_server reference at all) may own a schema itself, under
-            # responses_api_agents/<implementation>/task_data.py. An agent whose reference is
-            # dangling is skipped: its schema home is the (missing) resources server.
-            if c.SERVER_TYPE != "responses_api_agents":
-                return None
-            if getattr(c.get_inner_run_server_config(), "resources_server", None) is not None:
-                return None
-            impl_key = next(iter(c.responses_api_agents))
-            base_folder = "responses_api_agents"
+        home = cls._schema_home_for(c, server_instance_configs)
+        if home is None:
+            return None
+        impl_key, base_folder = home
         server_dir = find_server_dir(impl_key, base_folder=base_folder)
         if server_dir is None:
             return None
@@ -1038,15 +1108,10 @@ This could be due to a change in how metrics are calculated, leading to outdated
         c: ServerInstanceConfig,
         server_instance_configs: List[ServerInstanceConfig],
     ) -> DatasetMetricHook | None:
-        impl_key = cls._owning_resources_server_impl(c, server_instance_configs)
-        base_folder = "resources_servers"
-        if impl_key is None:
-            if c.SERVER_TYPE != "responses_api_agents":
-                return None
-            if getattr(c.get_inner_run_server_config(), "resources_server", None) is not None:
-                return None
-            impl_key = next(iter(c.responses_api_agents))
-            base_folder = "responses_api_agents"
+        home = cls._schema_home_for(c, server_instance_configs)
+        if home is None:
+            return None
+        impl_key, base_folder = home
         server_dir = find_server_dir(impl_key, base_folder=base_folder)
         if server_dir is None:
             return None
@@ -1102,7 +1167,9 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 legacy_agent_ref_rows = 0
                 validator = None
                 if task_data_validation != "off":
-                    validator = self._task_data_validator_for(c, d, server_instance_configs)
+                    validator = self._task_data_validator_for(
+                        c, d, self._schema_lookup_configs(server_instance_configs)
+                    )
                 with open(prepare_path, "w") as target:
                     for row_index, line in enumerate(self._iter_dataset_lines(d)):
                         row = json.loads(line)

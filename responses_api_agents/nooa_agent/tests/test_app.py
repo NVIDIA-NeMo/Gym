@@ -9,7 +9,11 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.base_responses_api_agent import (
+    AGENT_SESSION_COOKIE_KEY,
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+)
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -87,6 +91,16 @@ async def close(instance: NOOAAgent):
             episode_id=seed().episode_id,
         ),
     )
+
+
+async def test_several_workers_seed_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Session routing sends a session's later requests to the worker that seeded it."""
+    monkeypatch.setattr(InProcessNOOARunner, "run", AsyncMock(return_value=result()))
+    instance = NOOAAgent(config=agent_config(num_workers=2), server_client=MagicMock(spec=ServerClient))
+    req = await open_session(instance)
+
+    assert isinstance(instance._require_agent_session("session").runner, InProcessNOOARunner)
+    assert req.session[AGENT_SESSION_COOKIE_KEY] == "session"
 
 
 async def test_embedded_runners_are_created_per_session_at_seed(monkeypatch: pytest.MonkeyPatch) -> None:

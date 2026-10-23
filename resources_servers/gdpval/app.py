@@ -519,9 +519,15 @@ TRANSPORT_INELIGIBLE_FAILURE_CLASS = "transport_ineligible"
 PERMANENT_JUDGE_ERROR_FAILURE_CLASS = "permanent_judge_error"
 
 
-def _gdpval_failure(failure_class: str) -> Dict[str, Any]:
-    """Route a GDPVal-specific failure to the failures file as a masked, non-terminal sample."""
-    return {NG_FAILURE_CLASS_KEY: failure_class, "failure_kind": f"gdpval:{failure_class}", "mask_sample": True}
+def _gdpval_failure(failure_class: str, *, terminal: bool = False) -> Dict[str, Any]:
+    """Route a GDPVal-specific failure to the failures file as a masked sample.
+
+    A terminal one is not retried on resume and is an omission under the stage's coverage floors.
+    """
+    failure = {NG_FAILURE_CLASS_KEY: failure_class, "failure_kind": f"gdpval:{failure_class}", "mask_sample": True}
+    if terminal:
+        failure[NG_TERMINAL_KEY] = True
+    return failure
 
 
 def _permanent_judge_failure(
@@ -533,7 +539,7 @@ def _permanent_judge_failure(
         reward=0.0,
         verify_mode=verify_mode,
         judge_response=judge_response,
-        **{**_gdpval_failure(PERMANENT_JUDGE_ERROR_FAILURE_CLASS), NG_TERMINAL_KEY: True},
+        **_gdpval_failure(PERMANENT_JUDGE_ERROR_FAILURE_CLASS, terminal=True),
     )
 
 
@@ -1005,7 +1011,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 verify_mode="rubric",
                 judge_response={"scoring_error": "missing_rubric"},
-                **{**_gdpval_failure("missing_rubric"), NG_TERMINAL_KEY: True},
+                **_gdpval_failure("missing_rubric", terminal=True),
             )
 
         judges = self._resolve_judges()
@@ -1163,20 +1169,20 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     f"strict comparison trial contract failed for task {body.task_id}: reference_missing"
                 )
             # Not a model outcome: no reference deliverable exists, so no battle
-            # can be scored. Stamped as a failure rather than returned
+            # can be scored. Stamped as a terminal failure rather than returned
             # as a zero-reward success -- a success row carrying no battle
             # evidence is rejected outright by the non-final-stage coverage gate
             # (_partial_stage_outcome), which no partial_completion setting can
             # relax, so one missing reference file used to kill the whole run.
-            # Retried only on resume, because nothing makes the file appear within
-            # the run; as an omission it is then governed by the stage's
-            # partial_completion fractions like any other unusable row.
+            # Terminal because retrying cannot make the file appear; as an
+            # omission it is then governed by the stage's partial_completion
+            # fractions like any other unusable row.
             return GDPValVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
                 verify_mode="comparison",
                 judge_response={"error": "reference_missing"},
-                **_gdpval_failure(REFERENCE_MISSING_FAILURE_CLASS),
+                **_gdpval_failure(REFERENCE_MISSING_FAILURE_CLASS, terminal=True),
             )
 
         if eval_task_dir is None or not task_attempted(str(eval_task_dir)):
@@ -1221,16 +1227,15 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 )
             if self.config.strict_comparison_trials:
                 raise RuntimeError(f"strict comparison trial contract failed for task {body.task_id}: eval_missing")
-            # A failure for the same reason as reference_missing above: a
-            # zero-reward success row carries no battle evidence, is rejected by
-            # the coverage gate, and permanently gates the key on resume. A
-            # classified failure is instead re-validated on resume.
+            # Terminal for the same reason as reference_missing above: a
+            # zero-reward success row carries no battle evidence and is rejected
+            # by the coverage gate.
             return GDPValVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
                 verify_mode="comparison",
                 judge_response={"error": "eval_missing"},
-                **_gdpval_failure(EVAL_MISSING_FAILURE_CLASS),
+                **_gdpval_failure(EVAL_MISSING_FAILURE_CLASS, terminal=True),
             )
 
         if self.config.preconvert_office_to_pdf:
@@ -1659,14 +1664,13 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 # Deterministic eligibility exclusion of every judge on every
                 # matchup: retrying the same payload cannot succeed, so a
                 # generic 500 would only burn attempts and silently drop the
-                # task. Not retried within the run; re-validated on resume (caps,
-                # renderers, or panel config may change between runs).
+                # task. Terminal: an omission under the stage's coverage floors.
                 return GDPValVerifyResponse(
                     **body.model_dump(),
                     reward=0.0,
                     verify_mode="comparison",
                     judge_response={"error": "transport_ineligible", "ref_errors": ref_errors},
-                    **_gdpval_failure(TRANSPORT_INELIGIBLE_FAILURE_CLASS),
+                    **_gdpval_failure(TRANSPORT_INELIGIBLE_FAILURE_CLASS, terminal=True),
                 )
             if transport_ineligible_matchups + permanent_error_matchups == attempted_matchups:
                 # Every error is one the same payload will hit again, so a retry cannot succeed.

@@ -18,6 +18,7 @@ from responses_api_agents.nooa_agent.sandbox_runtime import (
     _PYTHON_VERSION,
     _python_download_url,
     _runtime_archive,
+    _runtime_io,
 )
 
 
@@ -32,6 +33,7 @@ def file_sha256(path: Path) -> str:
 
 def load_runtime_wheelhouse(output: Path, *, target: str, source_fingerprint: str) -> dict[str, object]:
     """Validate the exact source, platform and artifact bytes before staging."""
+    output = output.expanduser().resolve()
     if target not in _TARGETS:
         raise ValueError(f"Offline NOOA runtime supports only {', '.join(_TARGETS)}; got {target!r}")
     try:
@@ -110,10 +112,10 @@ async def prepare_runtime_wheelhouse(
     if target not in _TARGETS:
         raise ValueError(f"Unsupported offline NOOA target {target!r}; expected one of {tuple(_TARGETS)}")
     root = Path(__file__).resolve().parents[2]
-    source, fingerprint = _runtime_archive(root)
+    source, fingerprint = await _runtime_io(_runtime_archive, root)
     output = output.expanduser().resolve()
-    if output.exists():
-        load_runtime_wheelhouse(output, target=target, source_fingerprint=fingerprint)
+    if output.exists() and (not output.is_dir() or any(output.iterdir())):
+        await _runtime_io(load_runtime_wheelhouse, output, target=target, source_fingerprint=fingerprint)
         return output
     if shutil.which("docker") is None:
         raise RuntimeError(
@@ -133,7 +135,7 @@ async def prepare_runtime_wheelhouse(
     python_archive = await cached_download(_python_download_url(target), sha256=_PYTHON_SHA256[target])
     output.parent.mkdir(parents=True, exist_ok=True)
     arch = target.split("/")[0]
-    builder_image = builder_image or f"quay.io/pypa/manylinux_2_28_{arch}:latest"
+    builder_image = builder_image or f"quay.io/pypa/manylinux2014_{arch}:latest"
     await _command("docker", "pull", "--platform", f"linux/{_TARGETS[target]}", builder_image)
     image_id = (await _command("docker", "image", "inspect", "--format", "{{.Id}}", builder_image)).strip()
     with tempfile.TemporaryDirectory(prefix=".nooa-wheelhouse-", dir=output.parent) as temporary:
@@ -237,7 +239,7 @@ def main() -> None:
                 builder_image=args.builder_image,
             )
         )
-    print(f"NOOA runtime wheelhouse ready: {args.output.resolve()}")
+    print(f"NOOA runtime wheelhouse ready: {args.output.expanduser().resolve()}")
 
 
 if __name__ == "__main__":

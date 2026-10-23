@@ -165,3 +165,32 @@ async def test_command_timeout_kills_and_joins_process(monkeypatch: pytest.Monke
         await offline_runtime._command("fixture", timeout=0)
     process.kill.assert_called_once()
     process.wait.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_builder_accepts_empty_output_directory(tmp_path: Path, builder: AsyncMock) -> None:
+    output = tmp_path / "bundle"
+    output.mkdir()
+    await offline_runtime.prepare_runtime_wheelhouse(output, target="x86_64/gnu")
+    assert (output / "manifest.json").is_file()
+    assert builder.await_args_list[0].args[-1] == "quay.io/pypa/manylinux2014_x86_64:latest"
+
+
+@pytest.mark.asyncio
+async def test_builder_does_not_overwrite_nonempty_directory(tmp_path: Path, builder: AsyncMock) -> None:
+    output = tmp_path / "bundle"
+    output.mkdir()
+    (output / "owned.txt").write_text("preserve")
+    with pytest.raises(ValueError, match="Prepare the NOOA runtime wheelhouse first"):
+        await offline_runtime.prepare_runtime_wheelhouse(output, target="x86_64/gnu")
+    assert (output / "owned.txt").read_text() == "preserve"
+    builder.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_validate_only_expands_tilde(
+    tmp_path: Path, builder: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    await offline_runtime.prepare_runtime_wheelhouse(Path("~/bundle"), target="x86_64/gnu")
+    assert offline_runtime.validate_runtime_wheelhouse(Path("~/bundle"), target="x86_64/gnu")["target"] == "x86_64/gnu"
