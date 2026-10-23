@@ -26,7 +26,7 @@ from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, Bas
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure, EpisodeId
 from nemo_gym.failure_kinds import FailureStage
 from nemo_gym.rollout_correlation import rollout_context
-from nemo_gym.server_utils import SimpleServer, describe_dependency_error
+from nemo_gym.server_utils import SimpleServer, format_exception_with_response_body
 
 
 LOGGER = logging.getLogger(__name__)
@@ -171,12 +171,12 @@ def dependency_failure(
     """Turn a failed call to another server into the episode's failure.
 
     ``failure_reason`` keeps the dependency's own explanation from its response body
-    (see ``describe_dependency_error``), prefixed with the error's class name when ``name_error_type`` is set,
+    (see ``format_exception_with_response_body``), prefixed with the error's class name when ``name_error_type`` is set,
     and bounded to the failure's 2000 characters. ``terminal`` defaults to
     ``not is_retryable_dependency_error(error)``; pass it only where the stage decides on its own.
     ``fields`` fill the failure model's own fields, such as a partial response.
     """
-    failure_reason = describe_dependency_error(error)
+    failure_reason = format_exception_with_response_body(error)
     if name_error_type:
         failure_reason = f"{type(error).__name__}: {failure_reason}"
     return HandledEpisodeError(

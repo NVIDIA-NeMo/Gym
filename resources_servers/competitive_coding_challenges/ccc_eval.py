@@ -3,6 +3,7 @@
 import asyncio
 import glob
 import json
+import logging
 import os
 import re
 import shlex
@@ -15,6 +16,9 @@ from dataclasses import dataclass, is_dataclass
 from uuid import uuid4
 
 import httpx
+
+
+LOG = logging.getLogger(__name__)
 
 
 def nested_dataclass(*args, **kwargs):
@@ -103,6 +107,10 @@ class LocalSandbox:
             limits=httpx.Limits(max_keepalive_connections=2048, max_connections=2048),
         )
 
+    @property
+    def url(self) -> str:
+        return f"http://{self.host}:{self.port}/execute"
+
     async def close(self):
         await self.http_session.aclose()
 
@@ -129,7 +137,7 @@ class LocalSandbox:
         }
         try:
             response = await self.http_session.post(
-                url=f"http://{self.host}:{self.port}/execute",
+                url=self.url,
                 content=json.dumps(request),
                 timeout=timeout + 5.0,
                 headers={"Content-Type": "application/json"},
@@ -140,8 +148,18 @@ class LocalSandbox:
                 output = response.json()
             except json.JSONDecodeError:
                 output = {"process_status": "error", "stdout": "", "stderr": "Unknown error"}
-        except (httpx.TimeoutException, httpx.TransportError):
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            # The request never reached the sandbox, so the result says nothing about the code.
+            output = {
+                "process_status": "timeout",
+                "stdout": "",
+                "stderr": f"{type(e).__name__}: {e}\n",
+                "sandbox_unreachable": True,
+            }
+        except httpx.TimeoutException:
             output = {"process_status": "timeout", "stdout": "", "stderr": "Client timed out\n"}
+        except httpx.TransportError as e:
+            output = {"process_status": "timeout", "stdout": "", "stderr": f"{type(e).__name__}: {e}\n"}
         return output, None
 
 
@@ -168,6 +186,43 @@ def _exec_sync(tls: threading.local, sandbox: LocalSandbox, cmd: str, *, languag
         loop = asyncio.new_event_loop()
         tls.loop = loop
     return loop.run_until_complete(sandbox.execute_code(cmd, language=language, timeout=timeout))[0]
+
+
+# Printed, as the whole stdout, by a guard that runs before compile.sh.
+WORK_DIR_NOT_VISIBLE = "CCC_WORK_DIR_NOT_VISIBLE_TO_SANDBOX"
+
+
+def _require_visible(work_dir: str, script: str) -> str:
+    """Shell guard: stop before ``script`` runs if the sandbox cannot see ``work_dir``."""
+    return f"[ -f {shlex.quote(os.path.join(work_dir, script))} ] || {{ echo {WORK_DIR_NOT_VISIBLE}; exit 3; }}"
+
+
+def sandbox_unreachable_error(result: dict) -> str | None:
+    """Why a sandbox call never reached the sandbox, or None. No code ran, so the solution cannot have caused it."""
+    if result.get("sandbox_unreachable"):
+        return f"NeMo Skills sandbox unreachable: {result.get('stderr', '').strip()}"
+    return None
+
+
+def compile_infra_error(compile_result: dict) -> str | None:
+    """Why a compile failed for a reason outside the solution, or None.
+
+    The marker counts only here: compile.sh comes from the problem metadata and compiles without running the
+    solution, and compilers print diagnostics to stderr, so the solution cannot make it the whole stdout. run.sh
+    runs the solution, so nothing it prints or returns is trusted.
+    """
+    unreachable = sandbox_unreachable_error(compile_result)
+    if unreachable:
+        return unreachable
+    if (
+        compile_result.get("process_status") != "completed"
+        and compile_result.get("stdout", "").strip() == WORK_DIR_NOT_VISIBLE
+    ):
+        return (
+            "NeMo Skills sandbox cannot see the shared work directory; mount shared_dir into the sandbox at the "
+            "same path (see 'Sandbox prerequisite' in resources_servers/competitive_coding_challenges/README.md)"
+        )
+    return None
 
 
 def _get_thread_test_sandbox() -> LocalSandbox:
@@ -220,22 +275,41 @@ fi
 exit "$compile_status"
 """.strip()
 
+    command = f"{_require_visible(work_dir, 'compile.sh')}\n{command}"
     if ignore_failure:
         command = f"({command}) || true"
     return _exec_sync(tls, sandbox, command, language="shell", timeout=timeout)
 
 
-def wait_for_sandbox(sandbox, timeout: int = 240, poll: float = 1.0):
+def wait_for_sandbox(sandbox: LocalSandbox, timeout: float = 240, poll: float = 1.0) -> None:
+    """Wait until the external NeMo Skills sandbox runs a shell command.
+
+    Connection errors are retried until ``timeout``: NeMo Skills' ``with_sandbox=True`` starts the sandbox next to
+    this server, so it may still be booting.
+    """
     deadline = time.monotonic() + timeout
+    last_problem = "no probe completed"
+    warned = False
     while time.monotonic() < deadline:
         try:
             resp = _exec_sync(_precompile_loop_tls, sandbox, "echo hello world", language="shell", timeout=10)
             if resp.get("stdout", "").strip() == "hello world":
                 return
-        except Exception:
-            pass
+            last_problem = f"process_status={resp.get('process_status')!r}, stderr={resp.get('stderr', '').strip()!r}"
+        except Exception as e:
+            last_problem = f"{type(e).__name__}: {e}"
+        if not warned:
+            warned = True
+            LOG.warning(
+                "NeMo Skills sandbox at %s is not ready (%s); waiting up to %ss.", sandbox.url, last_problem, timeout
+            )
         time.sleep(poll)
-    raise RuntimeError(f"Sandbox not ready after waiting {timeout}s")
+    raise RuntimeError(
+        f"NeMo Skills sandbox at {sandbox.url} did not run `echo hello world` within {timeout}s "
+        f"(last probe: {last_problem}). Start the sandbox first, see 'Sandbox prerequisite' in "
+        "resources_servers/competitive_coding_challenges/README.md, or set NEMO_SKILLS_SANDBOX_HOST and "
+        "NEMO_SKILLS_SANDBOX_PORT to a running one."
+    )
 
 
 def _safe_fs_name(text: str) -> str:
@@ -500,9 +574,13 @@ def run_test_case(task_args: dict, worker_id: int) -> dict:
             language="shell",
             timeout=run_timeout,
         )
-        result["run_time_s"] = time.monotonic() - run_start
         result["run_stdout"] = run_result.get("stdout", "")
         result["run_stderr"] = run_result.get("stderr", "")
+        infra_error = sandbox_unreachable_error(run_result)
+        if infra_error:
+            result["infra_error"] = infra_error
+            return result
+        result["run_time_s"] = time.monotonic() - run_start
         try:
             result["score"] = float(result["run_stdout"].strip())
         except (ValueError, TypeError):
@@ -697,6 +775,7 @@ class CCCEvaluator(BaseEvaluator):
             all_test_items = [(name, data) for name, data in all_test_items if name in target_tests]
         batch_size = self.eval_cfg.test_batch_size
         all_run_times: list[float] = []
+        run_infra_errors: list[str] = []
         for i in range(0, len(all_test_items), batch_size):
             candidate_batch = all_test_items[i : i + batch_size]
             batch = []
@@ -724,6 +803,8 @@ class CCCEvaluator(BaseEvaluator):
             for (test_name, _), result in zip(batch, results):
                 if "run_time_s" in result:
                     all_run_times.append(result["run_time_s"])
+                if result.get("infra_error"):
+                    run_infra_errors.append(result["infra_error"])
                 result["test_name"] = test_name
                 test_group = problem_metadata["all_tests"][test_name].get("group")
                 if test_group is not None:
@@ -745,7 +826,7 @@ class CCCEvaluator(BaseEvaluator):
             }
 
         num_tests_run = len(all_run_times)
-        return {
+        details = {
             "name": entry["name"],
             "subtask": entry["subtask"],
             "test_case_results": test_case_results,
@@ -753,6 +834,16 @@ class CCCEvaluator(BaseEvaluator):
             "total_test_execution_time_s": sum(all_run_times),
             "mean_test_execution_time_s": sum(all_run_times) / num_tests_run if num_tests_run else 0.0,
         }
+        # No solution code runs before the compile result, so its infra error always counts. Tests run
+        # concurrently, so one test's solution could crash the sandbox for the others: a run-stage infra error
+        # counts only when no test of this solution was measured. Count from all results, not `outputs`, which
+        # `min` aggregation trims after the first failure.
+        infra_error = compile_infra_error(compile_result)
+        if not infra_error and num_tests_run == 0 and run_infra_errors:
+            infra_error = run_infra_errors[0]
+        if infra_error:
+            details["infra_error"] = infra_error
+        return details
 
     async def _evaluate_entry(self, entry: dict) -> dict:
         await self._initialize_runtime()
