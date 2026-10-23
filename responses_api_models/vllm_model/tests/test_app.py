@@ -6589,7 +6589,7 @@ class TestSamplingOverrides:
     def test_token_override_wins_over_sampling_url_alias(
         self, override_field, requested_limit, use_completions_api, caplog
     ) -> None:
-        from nemo_gym.model_sampling import ModelCallSampling, model_sampling_base_url
+        from nemo_gym.rollout_sampling import ModelCallSampling, model_sampling_base_url
 
         server = self._server({override_field: 32}, use_completions_api=use_completions_api)
         provider = MagicMock()

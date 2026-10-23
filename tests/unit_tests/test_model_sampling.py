@@ -16,8 +16,8 @@ from pydantic import ValidationError
 
 from nemo_gym.base_responses_api_model import CaptureStore, ModelCallCaptureConfig, install_model_call_capture
 from nemo_gym.config_types import TOKEN_CAPTURE_PATH_SEGMENT
-from nemo_gym.model_sampling import ModelCallSampling, ModelSamplingMiddleware, model_sampling_base_url
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollout_sampling import ModelCallSampling, ModelSamplingMiddleware, model_sampling_base_url
 
 
 @pytest.mark.parametrize("top_p", [1e-12, 1.0])

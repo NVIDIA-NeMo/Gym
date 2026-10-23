@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.config_types import TOKEN_CAPTURE_PATH_SEGMENT
-from nemo_gym.model_sampling import ModelCallSampling, model_sampling_base_url
+from nemo_gym.rollout_sampling import ModelCallSampling, model_sampling_base_url
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 

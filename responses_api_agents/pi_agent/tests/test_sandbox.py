@@ -31,7 +31,7 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
-from nemo_gym.testing.model_sampling import assert_model_sampling
+from nemo_gym.testing.rollout_sampling import assert_model_sampling
 from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest
 
 

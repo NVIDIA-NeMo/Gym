@@ -11,7 +11,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 from starlette.testclient import TestClient
 
-from nemo_gym.model_sampling import ModelSamplingMiddleware
+from nemo_gym.rollout_sampling import ModelSamplingMiddleware
 
 
 def assert_model_sampling(

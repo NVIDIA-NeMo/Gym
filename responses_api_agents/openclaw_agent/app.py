@@ -48,7 +48,6 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.model_sampling import ModelCallSampling, model_sampling_base_url
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -68,6 +67,7 @@ from nemo_gym.rollout_observability import (
     AgentObservationBundle,
     ObservationGap,
 )
+from nemo_gym.rollout_sampling import ModelCallSampling, model_sampling_base_url
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config

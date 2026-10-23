@@ -70,7 +70,6 @@ from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
-from nemo_gym.model_sampling import ModelSamplingMiddleware
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -86,6 +85,7 @@ from nemo_gym.responses_streaming import (
     validate_streaming_responses_params,
 )
 from nemo_gym.rollout_correlation import rollout_context, scope_with_routed_path
+from nemo_gym.rollout_sampling import ModelSamplingMiddleware
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
