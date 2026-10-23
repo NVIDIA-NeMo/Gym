@@ -14,6 +14,8 @@ config_paths:
 prepare_script_args:
   include_evidence: true
   dscp: name_or_col_dscp
+  dialect: sqlite  # the default; other dialects are selected by `eval.sh --dialect` (see README.md, "SQL dialects")
+  split: dev  # the default; the train split is selected by `eval.sh --split train` (see README.md, "Splits")
 
 # Inherit-from directives isolate this benchmark config from the generic server config.
 birdbench_bird_sql_resources_server:
@@ -28,10 +30,12 @@ birdbench_bird_sql_simple_agent:
       datasets:
         - name: birdbench
           type: benchmark
-          jsonl_fpath: benchmarks/birdbench/data/birdbench_benchmark.jsonl
-          prompt_config: benchmarks/birdbench/prompts/default.yaml
+          jsonl_fpath: benchmarks/birdbench/data/birdbench_sqlite_dev.jsonl
+          prompt_config: benchmarks/birdbench/prompts/default_sqlite.yaml
           prepare_script: benchmarks/birdbench/prepare.py
-          num_repeats: 16
+          # Never repeat the dataset: `gym eval run` multiplies this by `--num-repeats`, so any value above 1 makes
+          # the prepared files 1534 x N rows. Take several rollouts per task with `--num-repeats` only.
+          num_repeats: 1
 
 birdbench_bird_sql_environment_server:
   _inherit_from: bird_sql_environment_server
