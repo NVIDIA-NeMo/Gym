@@ -33,7 +33,7 @@ from nemo_gym._checkpoint.agent import (
     require_rollout,
 )
 from nemo_gym._checkpoint.errors import RolloutIdRequiredError
-from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepMode, seed_restarts, seed_verify_mode
+from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType, seed_restarts, seed_verify_step_type
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -136,7 +136,8 @@ class SimpleAgentSessionState(AgentSessionState):
     activations: int = 0
     # With checkpointing, the last activation that finished and the reply it gave:
     # an environment server restored from a checkpoint before that reply invokes it again and gets the same reply.
-    # The reply's response is kept as the object the activation returned, and serialized only to replay or export it;
+    # The saved reply's response is kept as the object the activation returned,
+    # and serialized only to return or export it;
     # a restored reply holds the JSON it was exported as.
     completed_activation: int = 0
     completed_reply: dict[str, Any] | None = None
@@ -187,7 +188,7 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 
 
 class SimpleAgent(SimpleResponsesAPIAgent):
-    checkpoint_sessions_supported = True
+    checkpoint_mode = "exported"
     config: SimpleAgentConfig
     # With checkpointing, each legacy /run's loop reply, by its session key.
     # An entry leaves with its /run, or with a retire.
@@ -628,8 +629,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             while index is not None:
                 if index == loop.completed_activation:
                     # The caller's checkpoint precedes the reply this activation already gave: give it again.
-                    participant.replayed(session_key, episode_id)
-                    return self._completed_activation_reply(loop, session_key)
+                    participant.answered_from_saved_reply(session_key, episode_id)
+                    return self._saved_reply(loop, session_key)
                 if index != loop.completed_activation + 1:
                     raise ActivationOutOfOrderError(
                         f"activation {index} of agent session {session_key!r} is out of order: "
@@ -686,7 +687,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             for k, v in downstream_cookies:
                 response.set_cookie(k, v)
             # A session caller that sends the activation index takes the session's evidence at close,
-            # so its reply carries no trajectory, and neither does the copy kept to replay it.
+            # so its reply carries no trajectory, and neither does the saved reply.
             # Other callers, and a legacy /run, read the trajectory from the reply.
             if trajectory is not None and (state is None or index is None):
                 model_response = model_response.model_copy(
@@ -708,10 +709,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         return model_response
 
     @staticmethod
-    def _completed_activation_reply(
-        loop: SimpleAgentSessionState | _LegacyLoopReply, session_key: str
-    ) -> JSONResponse:
-        """The reply of the session's last completed activation, without running anything again."""
+    def _saved_reply(loop: SimpleAgentSessionState | _LegacyLoopReply, session_key: str) -> JSONResponse:
+        """The saved reply of the session's last completed activation, without running anything again."""
         if loop.completed_reply is None:
             raise ActivationOutOfOrderError(f"agent session {session_key!r} has completed no activation to reply with")
         reply = JSONResponse(content=_to_json(loop.completed_reply["response"]))
@@ -748,7 +747,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             # The session's own episode cannot stand in for a missing rollout path.
             # A restore rewrites it to the replacement attempt,
             # so a late call from the replaced attempt's harness, with only the session's cookie,
-            # would pass as the replacement and could replay its reply or start its next activation.
+            # would pass as the replacement and could get its saved reply or start its next activation.
             if path_episode is None:
                 raise RolloutIdRequiredError(
                     f"checkpointing requires the /ng-rollout/<id> prefix on every activation of agent session "
@@ -795,7 +794,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         stage = continuation.get("next", "seed")
         cookies: Any = continuation.get("cookies", request.cookies)
         # Whether the resources server's /verify may be replayed, as its seed reply reported.
-        verify_mode: StepMode = continuation.get("verify_mode", "wait")
+        resources_verify_step_type: StepType = continuation.get("resources_verify_step_type", "wait")
 
         async def boundary(state: dict[str, Any]) -> None:
             if legacy_run is None:
@@ -808,8 +807,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 loop.completed_reply = None
             await legacy_run.boundary(state)
 
-        def step(mode: StepMode) -> AbstractAsyncContextManager[None]:
-            return legacy_run.step(mode) if legacy_run is not None else nullcontext()
+        def step(step_type: StepType) -> AbstractAsyncContextManager[None]:
+            return legacy_run.step(step_type) if legacy_run is not None else nullcontext()
 
         if stage == "seed":
             await boundary({"next": "seed"})
@@ -823,14 +822,20 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 )
                 await raise_for_status(seed_session_response)
             cookies = _cookie_values(seed_session_response.cookies)
-            verify_mode = seed_verify_mode(seed_session_response.headers)
+            resources_verify_step_type = seed_verify_step_type(seed_session_response.headers)
             if legacy_run is not None and seed_restarts(seed_session_response.headers):
                 # The resources server cannot capture its session, so this episode starts over after a crash.
                 await legacy_run.mark_restart()
             stage = "loop"
 
         if stage == "loop":
-            await boundary({"next": "loop", "cookies": _cookie_values(cookies), "verify_mode": verify_mode})
+            await boundary(
+                {
+                    "next": "loop",
+                    "cookies": _cookie_values(cookies),
+                    "resources_verify_step_type": resources_verify_step_type,
+                }
+            )
             # The turn loop parks at its own boundaries and continues from them after a restore.
             # It is the /run's one activation: a restore after its reply invokes it again and gets the same reply.
             async with step("replay"):
@@ -897,7 +902,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     "response": boundary_response_json,
                     "result": result,
                     "cookies": _cookie_values(cookies),
-                    "verify_mode": verify_mode,
+                    "resources_verify_step_type": resources_verify_step_type,
                 }
             )
         else:
@@ -906,11 +911,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     "next": "verify",
                     "response": boundary_response_json,
                     "cookies": _cookie_values(cookies),
-                    "verify_mode": verify_mode,
+                    "resources_verify_step_type": resources_verify_step_type,
                 }
             )
             verify_payload = body.model_dump() | {"response": model_response_json}
-            async with step(verify_mode):
+            async with step(resources_verify_step_type):
                 verify_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path="/verify",
@@ -920,7 +925,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     # The resources server then keeps the session until the close below, so a restore can verify again.
                     headers=(
                         {CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"}
-                        if self._closes_after_verify(legacy_run, verify_mode)
+                        if self._closes_after_verify(legacy_run, resources_verify_step_type)
                         else {}
                     ),
                 )
@@ -933,10 +938,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     "response": boundary_response_json,
                     "result": result,
                     "cookies": _cookie_values(cookies),
-                    "verify_mode": verify_mode,
+                    "resources_verify_step_type": resources_verify_step_type,
                 }
             )
-        if self._closes_after_verify(legacy_run, verify_mode) and not self.config.skip_verification:
+        if self._closes_after_verify(legacy_run, resources_verify_step_type) and not self.config.skip_verification:
             await self._close_legacy_resources_session(body, cookies)
         if trajectory is not None:
             resolved = result.get("resolved")
@@ -948,9 +953,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         return SimpleAgentVerifyResponse.model_validate(result)
 
     @staticmethod
-    def _closes_after_verify(legacy_run: LegacyRun | None, verify_mode: StepMode) -> bool:
+    def _closes_after_verify(legacy_run: LegacyRun | None, resources_verify_step_type: StepType) -> bool:
         """Whether a legacy /run closes its resources session after a verification a checkpoint does not wait for."""
-        return legacy_run is not None and verify_mode == "replay"
+        return legacy_run is not None and resources_verify_step_type == "replay"
 
     async def _close_legacy_resources_session(self, body: SimpleAgentRunRequest, cookies: Any) -> None:
         """Close the resources session a legacy /run seeded, keeping the run's verdict if the close fails.

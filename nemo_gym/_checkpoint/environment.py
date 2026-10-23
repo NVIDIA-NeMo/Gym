@@ -3,8 +3,8 @@
 """Environment server participant: record where each episode can continue.
 
 An environment server owns the protocol of its episodes: which step runs next and what it needs.
-The protocol records a boundary after each completed step and runs each step in ``wait``
-or ``replay`` mode (see ``nemo_gym._checkpoint.steps``).
+The protocol records a boundary after each completed step,
+and runs each step as a ``wait`` or ``replay`` step (see ``nemo_gym._checkpoint.steps``).
 Prepare closes episode admission and is ready once every live episode is parked at a boundary or inside a replay step.
 A restored boundary is handed to the replacement attempt's ``/run``, which continues from it instead of starting over.
 Replacements are refused until the controller resumes after the restore:
@@ -28,7 +28,7 @@ from nemo_gym._checkpoint.control import (
     next_attempt,
 )
 from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError
-from nemo_gym._checkpoint.steps import Boundary, EpisodeSteps, StepMode
+from nemo_gym._checkpoint.steps import Boundary, EpisodeSteps, StepType
 from nemo_gym.episode_types import EpisodeId
 
 
@@ -102,8 +102,8 @@ class EnvironmentParticipant(CheckpointParticipant):
         await self.steps.boundary(episode_id.capture_key, state)
 
     @asynccontextmanager
-    async def step(self, episode_id: EpisodeId, mode: StepMode) -> AsyncIterator[None]:
-        async with self.steps.step(episode_id.capture_key, mode):
+    async def step(self, episode_id: EpisodeId, step_type: StepType) -> AsyncIterator[None]:
+        async with self.steps.step(episode_id.capture_key, step_type):
             yield
 
     async def close_admission(self, request: CheckpointRequest) -> None:
@@ -149,14 +149,14 @@ class EnvironmentParticipant(CheckpointParticipant):
         # An unclaimed restored episode still continues from its restored boundary,
         # so a checkpoint taken before its replacement runs carries it forward,
         # while the commit's scope still continues it.
-        pending = [
+        unclaimed = [
             EpisodeRecord(
                 episode_id=EpisodeId.from_capture_key(key), task_digest=record.task_digest, boundary=record.boundary
             )
             for key, record in self._restored.items()
             if scope is None or key in scope
         ]
-        return live + pending
+        return live + unclaimed
 
     def restore_records(self, records: list[CheckpointRecord]) -> None:
         if self.steps.keys() or self._restored:
@@ -164,11 +164,11 @@ class EnvironmentParticipant(CheckpointParticipant):
         self._restored = {next_attempt(record.episode_id).capture_key: record for record in records}
         self._awaiting_resume = True
 
-    async def restored_pending(self) -> list[EpisodeId]:
+    async def unclaimed(self) -> list[EpisodeId]:
         return [EpisodeId.from_capture_key(key) for key in self._restored]
 
     def status_extra(self) -> dict[str, Any]:
-        return {"restored_pending": sorted(self._restored)}
+        return {"unclaimed": sorted(self._restored)}
 
 
 def _covers(retired: EpisodeId, capture_key: str) -> bool:

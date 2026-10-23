@@ -43,7 +43,7 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, ClassVar, Optional, TypeVar
+from typing import Annotated, Any, ClassVar, Literal, Optional, TypeVar
 
 import orjson
 from fastapi import APIRouter, FastAPI, Header, Request
@@ -83,6 +83,13 @@ from nemo_gym.telemetry.gym_metrics import (
 
 
 LOGGER = logging.getLogger(__name__)
+
+# What a server can capture, declared as ``checkpoint_mode`` on agent, resources and environment server classes.
+# ``restart_only``: nothing of the server is in a checkpoint.
+#   Its rollouts start over from their input after a crash.
+# ``stateless``: its sessions hold nothing a continuation needs (resources servers only).
+# ``exported``: it exports and restores its state through the hooks of its kind.
+CheckpointMode = Literal["restart_only", "stateless", "exported"]
 
 CHECKPOINT_ROUTE_PREFIX = "/ng-control/v1/checkpoint"
 CHECKPOINT_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
@@ -399,8 +406,8 @@ class CheckpointParticipant(ABC):
         """Stop refusing these rollouts' retired attempts. Override to tell other processes as well."""
         self.retired.forget(rollout_ids)
 
-    async def restored_pending(self) -> list[EpisodeId]:
-        """Restored episodes whose replacement has not started here yet, as the attempts that continue them.
+    async def unclaimed(self) -> list[EpisodeId]:
+        """Unclaimed restored episodes: no next attempt has used them here yet. Each is named by the attempt that continues it.
 
         A commit deletes the ones its scope leaves out: the controller no longer continues them,
         and nothing else would free their restored state.
@@ -740,7 +747,7 @@ class ParticipantControlPlane:
         if episode_ids is None:
             return
         scope = set(episode_ids)
-        unscoped = [episode_id for episode_id in await self.participant.restored_pending() if episode_id not in scope]
+        unscoped = [episode_id for episode_id in await self.participant.unclaimed() if episode_id not in scope]
         await _concurrently(self.participant.delete_restored, unscoped)
 
     async def commit(self, request: CommitRequest) -> dict[str, Any]:

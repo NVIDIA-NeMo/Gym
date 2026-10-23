@@ -502,7 +502,7 @@ def _cutting_worker(cut: bool = True):
     return request_cut, requests
 
 
-async def test_undelivered_call_is_cut_and_continued_by_the_reissued_call(tmp_path: Path) -> None:
+async def test_undelivered_call_is_cut_and_continued_by_the_resent_call(tmp_path: Path) -> None:
     ledger = FileLineageStore(tmp_path / "before")
     await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r", staging_chain=("r/c1",)))
     request_cut, requests = _cutting_worker()
@@ -736,9 +736,9 @@ async def test_a_newer_cut_replaces_the_restored_cut_a_resumed_call_keeps_for_it
     ],
 )
 def test_constrained_decoding_must_restart_instead_of_continuing_a_cut(body: dict, reason: str | None) -> None:
-    from nemo_gym._checkpoint.model import generation_cut_restart_reason
+    from nemo_gym._checkpoint.model import generation_cut_regenerate_reason
 
-    assert generation_cut_restart_reason(body) == reason
+    assert generation_cut_regenerate_reason(body) == reason
 
 
 async def test_a_constrained_call_is_not_cut_and_never_continues_a_restored_cut(tmp_path: Path) -> None:
@@ -748,7 +748,7 @@ async def test_a_constrained_call_is_not_cut_and_never_continues_a_restored_cut(
     constrained = participant.gate.enter("s")
     constrained.backend = "http://worker-0/v1"
     constrained.capture = CaptureContext(rollout_id="s", model_call_id="c2", token_sink=None, request_items=[USER_1])
-    constrained.cut_restart_reason = "tool_choice:required"
+    constrained.cut_regenerate_reason = "tool_choice:required"
     await participant.close_admission(CheckpointRequest(**control()))
     report = participant.readiness()
 
@@ -1117,7 +1117,7 @@ async def test_a_commit_deletes_a_restored_attempt_nothing_started_without_fenci
     # Gone, and not fenced: the controller may still start the rollout over as r-a1.
     assert ledger.export_rows("r-a1") == [] and participant._restored_cuts == {}
     assert not (tmp_path / "ledger" / "r-a1.lineage.retired").exists()
-    assert await participant.restored_pending() == []
+    assert await participant.unclaimed() == []
 
 
 async def test_restoring_again_clears_a_dead_execution_of_an_in_scope_episode_without_a_record(tmp_path: Path) -> None:
@@ -1309,7 +1309,7 @@ async def test_a_failed_restored_ledger_delete_is_retried_by_the_next_commit_att
     await controller.commit(_commit_request("c2", tmp_path / "ckpt2", []))
 
     assert ledger.export_rows("r-a1") == []
-    assert await participant.restored_pending() == []
+    assert await participant.unclaimed() == []
 
 
 async def test_a_retried_retire_waits_for_a_cancelled_call_s_cleanup_without_cancelling_it_again() -> None:
@@ -1678,12 +1678,14 @@ def _model_server_starting(name: str, global_config: dict, ledger: FileLineageSt
     """Run a model server's checkpoint setup, as its startup does."""
     from types import SimpleNamespace
 
-    from nemo_gym.base_responses_api_model import SimpleResponsesAPIModel
+    from nemo_gym.base_responses_api_model import ModelCheckpointConfig, SimpleResponsesAPIModel
 
     entry = next(iter(global_config[name]["responses_api_models"].values()))
     server = SimpleNamespace(
         server_client=SimpleNamespace(global_config_dict=global_config),
-        config=SimpleNamespace(name=name, checkpoint_policy=entry.get("checkpoint_policy", False)),
+        config=SimpleNamespace(
+            name=name, checkpoint=ModelCheckpointConfig.model_validate(entry.get("checkpoint", {}))
+        ),
     )
     SimpleResponsesAPIModel.setup_policy_checkpoint(server, FastAPI(), ledger)
 
@@ -1700,7 +1702,7 @@ def test_a_model_server_outside_the_checkpoint_gate_that_writes_the_policy_ledge
     run = {
         "checkpoint": {"enabled": True, "control_auth_token": "t"},
         "token_id_capture": {"enabled": True, "all_agents": True, "external_staging": True, "rebuild_response": False},
-        "policy_model": model(checkpoint_policy=True),
+        "policy_model": model(checkpoint={"policy": True}),
         "user_model": model(),
         "judge_model": model(),
         # The agent sends the training-token capture prefix to every model server it calls.
@@ -1714,7 +1716,7 @@ def test_a_model_server_outside_the_checkpoint_gate_that_writes_the_policy_ledge
 
     with pytest.raises(ValueError, match="'user_model'.*'agent'.*'policy_model'"):
         _model_server_starting("user_model", run, ledger)
-    _model_server_starting("judge_model", {**run, "user_model": model(checkpoint_policy=True)}, ledger)
+    _model_server_starting("judge_model", {**run, "user_model": model(checkpoint={"policy": True})}, ledger)
     _model_server_starting(
         "judge_model", {**run, "token_id_capture": {**run["token_id_capture"], "all_agents": False}}, ledger
     )

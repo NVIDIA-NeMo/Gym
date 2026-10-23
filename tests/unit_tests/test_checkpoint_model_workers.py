@@ -477,7 +477,7 @@ async def test_a_restored_attempt_any_worker_started_is_no_longer_pending(tmp_pa
         # The replacement of r starts on the second worker; s's replacement has not started anywhere.
         second.gate.enter("r-a1")
 
-        pending = await participant.restored_pending()
+        pending = await participant.unclaimed()
 
     assert [episode_id.capture_key for episode_id in pending] == ["s-a1"]
 
@@ -494,7 +494,7 @@ async def test_a_reopen_does_not_make_a_started_restored_attempt_pending_again(t
         await participant.close_admission(CheckpointRequest(**control("c1")))
         await participant.open_admission()
 
-        pending = await participant.restored_pending()
+        pending = await participant.unclaimed()
 
     assert [episode_id.capture_key for episode_id in pending] == ["s-a1"]
 
@@ -542,7 +542,7 @@ async def test_a_failed_restored_ledger_delete_keeps_the_attempt_pending_for_the
         ledger._remove = failing_once
         with pytest.raises(OSError):
             await participant.delete_restored(EpisodeId(rollout_id="r", attempt=1))
-        pending = await participant.restored_pending()
+        pending = await participant.unclaimed()
         await participant.delete_restored(EpisodeId(rollout_id="r", attempt=1))
 
     assert [episode_id.capture_key for episode_id in pending] == ["r-a1"]

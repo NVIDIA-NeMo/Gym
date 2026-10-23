@@ -245,7 +245,7 @@ async def test_a_refused_stale_call_does_not_claim_a_restored_session(tmp_path: 
         await restore(fresh, tmp_path, {"rollout_id": "r"})
         stale = await increment(fresh, token)
         # Still unclaimed, so a commit that no longer continues the episode deletes the session.
-        unclaimed = await server._checkpoint.restored_pending()
+        unclaimed = await server._checkpoint.unclaimed()
 
     assert refused(stale)
     assert unclaimed == [EpisodeId(rollout_id="r", attempt=1)]
