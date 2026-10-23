@@ -154,10 +154,7 @@ def test_ensure_probes_every_directory_the_command_must_see(tmp_path, template_p
     assert list(unbound.iterdir()) == []
 
 
-@pytest.mark.parametrize("sees_persist_dir", [True, False])
-def test_server_startup_probes_persist_deliverables_dir(tmp_path, template_pdf, sees_persist_dir):
-    persist = tmp_path / "persist"
-    script, _ = _converter(tmp_path / "bin", template_pdf, unseen=None if sees_persist_dir else persist)
+def _gdpval_server(persist: Path, script: Path, **extra) -> GDPValResourcesServer:
     config = GDPValResourcesServerConfig(
         host="127.0.0.1",
         port=8000,
@@ -169,14 +166,76 @@ def test_server_startup_probes_persist_deliverables_dir(tmp_path, template_pdf, 
         sandbox_config={},
         persist_deliverables_dir=str(persist),
         libreoffice_command=[str(script)],
+        **extra,
     )
+    return GDPValResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+@pytest.mark.parametrize("sees_persist_dir", [True, False])
+def test_server_startup_probes_persist_deliverables_dir(tmp_path, template_pdf, sees_persist_dir):
+    persist = tmp_path / "persist"
+    script, _ = _converter(tmp_path / "bin", template_pdf, unseen=None if sees_persist_dir else persist)
     if sees_persist_dir:
-        GDPValResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        _gdpval_server(persist, script)
     else:
         with pytest.raises(RuntimeError, match="failed its startup check"):
-            GDPValResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+            _gdpval_server(persist, script)
     # The probe cleans up after itself in the deliverables tree.
     assert list(persist.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "reference, starts",
+    [
+        ("seen", True),
+        ("unseen", False),
+        ("missing", False),
+        # Unseen too: the server cannot write it, so /verify converts nothing there and the probe is skipped.
+        pytest.param(
+            "read_only",
+            True,
+            marks=pytest.mark.skipif(os.geteuid() == 0, reason="root can write a read-only directory"),
+        ),
+    ],
+)
+def test_server_startup_probes_reference_deliverables_dirs(tmp_path, template_pdf, reference, starts):
+    refs = tmp_path / "refs"
+    if reference != "missing":
+        refs.mkdir()
+    script, _ = _converter(tmp_path / "bin", template_pdf, unseen=None if reference == "seen" else refs)
+    if reference == "read_only":
+        refs.chmod(0o555)
+    try:
+        if starts:
+            _gdpval_server(
+                tmp_path / "persist", script, reward_mode="comparison", reference_deliverables_dir=str(refs)
+            )
+        else:
+            with pytest.raises(RuntimeError, match="startup check" if reference == "unseen" else "not a directory"):
+                _gdpval_server(
+                    tmp_path / "persist", script, reward_mode="comparison", reference_deliverables_dir=str(refs)
+                )
+    finally:
+        if refs.exists():
+            refs.chmod(0o755)
+    # Neither creates a mistyped reference directory nor leaves probe files in the reference tree.
+    assert not refs.exists() if reference == "missing" else list(refs.iterdir()) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write a read-only directory")
+def test_ensure_rejects_probe_directory_the_server_cannot_create(tmp_path, template_pdf, caplog):
+    parent = tmp_path / "read-only"
+    parent.mkdir(mode=0o555)
+    script, log = _converter(tmp_path / "bin", template_pdf)
+
+    try:
+        # A warning and False, so the server raises its startup error instead of a bare PermissionError.
+        assert setup_libreoffice.ensure_libreoffice([str(script)], probe_dirs=[parent / "persist"]) is False
+    finally:
+        parent.chmod(0o755)
+    assert f"could not write the LibreOffice probe workbook in {parent / 'persist'}" in caplog.text
+    # --version and the temp-directory probe ran; the persist-directory probe never reached the command.
+    assert len(_calls(log)) == 2
 
 
 def test_ensure_rejects_missing_command(tmp_path):

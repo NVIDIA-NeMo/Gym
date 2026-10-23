@@ -139,14 +139,20 @@ def _probe_converts(libreoffice_command: Sequence[str], root: Path | None) -> bo
     """
     from resources_servers.gdpval.preconvert import libreoffice_pdf_argv
 
-    if root is not None:
-        root.mkdir(parents=True, exist_ok=True)
     probe_dir = profile_dir = None
     try:
-        probe_dir = Path(tempfile.mkdtemp(prefix="gdpval-lo-probe-", dir=root))
-        profile_dir = Path(tempfile.mkdtemp(prefix="lo-profile-"))
-        probe = probe_dir / "probe.xlsx"
-        _write_probe_workbook(probe)
+        try:
+            if root is not None:
+                root.mkdir(parents=True, exist_ok=True)
+            probe_dir = Path(tempfile.mkdtemp(prefix="gdpval-lo-probe-", dir=root))
+            profile_dir = Path(tempfile.mkdtemp(prefix="lo-profile-"))
+            probe = probe_dir / "probe.xlsx"
+            _write_probe_workbook(probe)
+        except OSError as exc:
+            LOGGER.warning(
+                "could not write the LibreOffice probe workbook in %s: %r", root or tempfile.gettempdir(), exc
+            )
+            return False
         argv = libreoffice_pdf_argv(probe, probe_dir, profile_dir, libreoffice_command)
         try:
             rc, _, err = _run(argv, timeout=_COMMAND_CHECK_TIMEOUT_S)
@@ -161,7 +167,7 @@ def _probe_converts(libreoffice_command: Sequence[str], root: Path | None) -> bo
                 shutil.rmtree(directory, ignore_errors=True)
     if not converted:
         LOGGER.warning(
-            "libreoffice_command %s did not convert a probe workbook in %s (rc=%s): %s",
+            "LibreOffice command %s did not convert a probe workbook in %s (rc=%s): %s",
             libreoffice_command,
             probe_dir,
             rc,
@@ -222,9 +228,10 @@ def ensure_libreoffice(libreoffice_command: Sequence[str] | None = None, *, prob
     Returns True if libreoffice + a usable JRE are available after the call.
 
     apt is skipped only when libreoffice's own `javaldx` bridge resolves a JRE
-    (see ``_javaldx_works``). Weaker checks are not safe early-exits: an image
-    can ship libreoffice without a JRE, or with a `java` binary that passes
-    `which()` and even `java -version` while `javaldx` (which loads libjvm.so
+    (see ``_javaldx_works``) and a probe workbook with a formula and a chart
+    converts; the same probe runs after an install. Weaker checks are not safe
+    early-exits: an image can ship libreoffice without a JRE, or with a `java`
+    binary that passes `which()` and even `java -version` while `javaldx` (which loads libjvm.so
     via JNI) still can't find a usable JRE, and then every chart/formula
     document fails to convert. Otherwise this runs apt-update + apt-install of
     the full package list: `apt-get install` is idempotent on already-installed
@@ -246,7 +253,7 @@ def ensure_libreoffice(libreoffice_command: Sequence[str] | None = None, *, prob
         )
         return False
 
-    if shutil.which("libreoffice") and _java_runs() and _javaldx_works():
+    if shutil.which("libreoffice") and _java_runs() and _javaldx_works() and _probe_converts(["libreoffice"], None):
         LOGGER.info("libreoffice, a working JRE and javaldx are already present; skipping apt-get.")
         return True
 
@@ -292,6 +299,8 @@ def ensure_libreoffice(libreoffice_command: Sequence[str] | None = None, *, prob
     rc, out, err = _run(["libreoffice", "--version"], timeout=30)
     if rc != 0:
         LOGGER.warning("libreoffice --version failed after install (rc=%d): %s", rc, (err or "").strip()[:200])
+        return False
+    if not _probe_converts(["libreoffice"], None):
         return False
 
     LOGGER.info("libreoffice ready: %s", out.strip())

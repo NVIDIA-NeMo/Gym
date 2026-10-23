@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 import tempfile
 from contextlib import asynccontextmanager
@@ -308,7 +309,8 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # or a wrapper script. It must see persist_deliverables_dir, the reference
     # deliverables, the temp directory and any other deliverables directory that
     # /verify gets at the same absolute paths. When set, startup checks it with
-    # --version and a probe conversion and fails if the check fails; the host
+    # --version and probe conversions in the temp directory, persist_deliverables_dir
+    # and the writable reference directories, and fails if the check fails; the host
     # javaldx check and apt install are skipped. None uses `libreoffice` on PATH.
     libreoffice_command: Optional[List[str]] = Field(default=None, min_length=1)
 
@@ -636,6 +638,20 @@ class GDPValResourcesServer(SimpleResourcesServer):
             # directory fails the first conversion attempt of every Office file.
             persist_dir = self.config.persist_deliverables_dir
             probe_dirs = [Path(persist_dir)] if persist_dir else []
+            # /verify also converts reference deliverables in place.
+            for ref_id, ref in self._references.items():
+                ref_dir = Path(ref.deliverables_dir)
+                if not ref_dir.is_dir():
+                    raise RuntimeError(f"Reference {ref_id!r}: deliverables_dir {ref_dir} is not a directory")
+                if os.access(ref_dir, os.W_OK):
+                    probe_dirs.append(ref_dir)
+                else:
+                    LOGGER.info(
+                        "Not probing reference %r: the server cannot write %s, so its Office files need PDFs already",
+                        ref_id,
+                        ref_dir,
+                    )
+            probe_dirs = list(dict.fromkeys(probe_dirs))
             if not ensure_libreoffice(self.config.libreoffice_command, probe_dirs=probe_dirs):
                 raise RuntimeError(
                     f"libreoffice_command {self.config.libreoffice_command} failed its startup check "
