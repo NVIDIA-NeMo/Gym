@@ -947,7 +947,8 @@ class TestRolloutCollection:
             ROLLOUT_ID_KEY_NAME: "caller-capture-id",
         }
 
-    def test_build_trajectory_record_merges_all_evidence_sources(self) -> None:
+    @pytest.mark.parametrize("output_type", ["function_call_output", "custom_tool_call_output"])
+    def test_build_trajectory_record_merges_all_evidence_sources(self, output_type: str) -> None:
         row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
         result = {
             "ng_trajectory": {
@@ -958,8 +959,8 @@ class TestRolloutCollection:
                         "invocation_id": "root",
                         "status": "completed",
                         "conversation": [
-                            {"type": "function_call_output", "call_id": "tool-1", "output": "result"},
-                            {"type": "function_call_output", "call_id": "observed-only", "output": "new"},
+                            {"type": output_type, "call_id": "tool-1", "output": "result"},
+                            {"type": output_type, "call_id": "observed-only", "output": "new"},
                         ],
                     }
                 ],

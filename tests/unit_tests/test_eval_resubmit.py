@@ -23,12 +23,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+import yaml
 
 from nemo_gym.cli.main import COMMANDS, _eval_resubmit
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOperationError
 from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
+from nemo_gym.orchestration.executors.otel import render_collector_config
 from nemo_gym.orchestration.executors.resume_script import RETRY_FILE_NAME, render_resume_prologue
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
@@ -83,7 +85,11 @@ def _staged_run(tmp_path: Path, *, executor: str = "slurm", config: SubmitConfig
             BenchmarkJob(benchmark="mmlu", job_dir=str(run_dir / "mmlu"), job_id="101"),
         ],
     )
-    SlurmExecutor().persist(record, config or _config(tmp_path), LocalConnection().write_text)
+    config = config or _config(tmp_path)
+    conn = LocalConnection()
+    if config.otel.enabled:
+        conn.write_text(job_dir / "otel" / "collector.yaml", render_collector_config(config, "gsm8k", job_dir))
+    SlurmExecutor().persist(record, config, conn.write_text)
     return job_dir
 
 
@@ -382,11 +388,6 @@ def test_resubmit_forwards_what_submit_forwards(
     ("config_kwargs", "unset", "message"),
     [
         ({"forward_env": ["MY_KEY"]}, "MY_KEY", "compute.forward_env variables are unset: MY_KEY"),
-        (
-            {"otel": {"enabled": True, "token_env": "MY_INGEST_TOKEN", "endpoint": "https://o", "service_name": "s"}},
-            "MY_INGEST_TOKEN",
-            "'MY_INGEST_TOKEN' is not set",
-        ),
     ],
 )
 def test_resubmit_queues_nothing_when_a_forwarded_value_is_unset(
@@ -408,3 +409,45 @@ def test_resubmit_with_telemetry_off_needs_no_token(
     monkeypatch.delenv("OTEL_TOKEN", raising=False)
 
     assert resubmit(*_handle(job_dir)).job_id == "4242"
+
+
+def test_resubmit_without_auth_updates_the_collector_and_can_restore_remote_export(
+    tmp_path: Path, slurm_bin: Path, ssh_like_shell: None, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    otel = {"token_env": "NVAUTH_TOKEN", "endpoint": "https://otel.example", "service_name": "s"}
+    job_dir = _staged_run(tmp_path, config=_config(tmp_path, otel=otel))
+    collector_path = job_dir / "otel" / "collector.yaml"
+    assert "otlp_http/managed" in collector_path.read_text()
+    monkeypatch.delenv("NVAUTH_TOKEN", raising=False)
+    original_job_sh = (job_dir / "job.sh").read_text()
+
+    assert resubmit(*_handle(job_dir)).job_id == "4242"
+
+    collector = yaml.safe_load(collector_path.read_text())
+    assert set(collector["exporters"]) == {"file/metrics", "file/traces", "file/logs"}
+    assert "NVAUTH_TOKEN" not in _sbatch_env(slurm_bin)
+    assert "otel.remote_export=false" in caplog.text
+    assert (job_dir / "job.sh").read_text() == original_job_sh
+
+    # The saved requested config still permits remote export on a later authenticated resubmit.
+    monkeypatch.setenv("NVAUTH_TOKEN", "new-token")
+    assert resubmit(*_handle(job_dir)).job_id == "4242"
+    assert "otlp_http/managed" in collector_path.read_text()
+    assert _sbatch_env(slurm_bin)["NVAUTH_TOKEN"] == "new-token"
+
+
+def test_resubmit_missing_auth_does_not_change_an_active_runs_collector(
+    tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    otel = {"token_env": "NVAUTH_TOKEN", "endpoint": "https://otel.example", "service_name": "s"}
+    job_dir = _staged_run(tmp_path, config=_config(tmp_path, otel=otel))
+    collector_path = job_dir / "otel" / "collector.yaml"
+    original = collector_path.read_text()
+    monkeypatch.delenv("NVAUTH_TOKEN", raising=False)
+    (slurm_bin / "squeue_workdirs").write_text(f"{job_dir}\n")
+
+    with pytest.raises(RuntimeError, match="still pending or running"):
+        resubmit(*_handle(job_dir))
+
+    assert collector_path.read_text() == original
+    assert not (slurm_bin / "cwd").exists()

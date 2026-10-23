@@ -670,7 +670,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                     (invocation.invocation_id, item.call_id): item.output
                     for invocation in invocations
                     for item in invocation.conversation
-                    if getattr(item, "type", None) == "function_call_output"
+                    if getattr(item, "type", None) in {"function_call_output", "custom_tool_call_output"}
                 }
                 positions = {(tool.invocation_id, tool.tool_call_id): index for index, tool in enumerate(tools)}
                 for observed in observed_tools:

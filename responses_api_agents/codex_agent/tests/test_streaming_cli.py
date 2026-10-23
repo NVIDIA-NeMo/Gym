@@ -18,14 +18,19 @@ from responses_api_agents.codex_agent.tests.test_sandbox_sessions import close_b
 from responses_api_agents.codex_agent.tests.test_sandbox_sessions import setup as setup
 
 
-@pytest.mark.parametrize("recover", [False, True])
-def test_pinned_cli_incomplete_stream_retries_preserve_usage_gaps(tmp_path: Path, setup, recover: bool) -> None:
+def pinned_cli() -> str:
     binary = os.environ.get("CODEX_TEST_BIN")
     if not binary or not Path(binary).is_file():
         pytest.skip("Set CODEX_TEST_BIN to an existing Codex 0.144.4 executable; never auto-install for this test")
     version = subprocess.run([binary, "--version"], capture_output=True, text=True, errors="replace", timeout=10)
     if version.returncode or version.stdout.strip() != "codex-cli 0.144.4":
         pytest.skip("This boundary regression targets Codex 0.144.4")
+    return binary
+
+
+@pytest.mark.parametrize("recover", [False, True])
+def test_pinned_cli_incomplete_stream_retries_preserve_usage_gaps(tmp_path: Path, setup, recover: bool) -> None:
+    binary = pinned_cli()
     reasoning = "Inspect arithmetic before editing."
     response = {
         "id": "resp_incomplete",
@@ -145,3 +150,105 @@ def test_pinned_cli_incomplete_stream_retries_preserve_usage_gaps(tmp_path: Path
         assert native["usage"]["output_tokens_details"]["reasoning_tokens"] is None
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
         assert "partial_model_usage_unavailable" in {gap["code"] for gap in closed["agent_observations"]["gaps"]}
+
+
+def test_pinned_cli_failed_turn_retains_transcript_usage(tmp_path: Path, setup) -> None:
+    binary = pinned_cli()
+    agent, sandbox = setup
+    requests = []
+    expected_usage = {"input_tokens": 41, "output_tokens": 8, "total_tokens": 49}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            if len(requests) > 1:
+                wire = b'{"error":{"message":"controlled rejection","type":"invalid_request_error"}}'
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+            else:
+                response = {
+                    "id": "resp_tool",
+                    "object": "response",
+                    "created_at": 1,
+                    "model": "gym-policy-model",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "id": "fc_tool",
+                            "call_id": "call_tool",
+                            "name": "exec_command",
+                            "arguments": json.dumps({"cmd": "printf usage_probe"}),
+                            "status": "completed",
+                        }
+                    ],
+                    "usage": expected_usage,
+                }
+                wire = "".join(synthesize_responses_sse(response)).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(wire)))
+            self.end_headers()
+            self.wfile.write(wire)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    home = tmp_path / "home"
+    home.mkdir()
+    config = agent._build_config(f"http://127.0.0.1:{server.server_port}/v1")
+    (home / "config.toml").write_text(toml_dumps(config))
+    try:
+        result = subprocess.run(
+            [binary, "exec", "--json", "--skip-git-repo-check", "--cd", str(tmp_path), "--", "Run the shell check."],
+            env={
+                "PATH": os.environ["PATH"],
+                "HOME": str(home),
+                "CODEX_HOME": str(home),
+                "OPENAI_API_KEY": "synthetic",
+            },
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=60,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert len(requests) == 2
+    events = [json.loads(line) for line in result.stdout.splitlines()]
+    assert any(event["type"] == "turn.failed" for event in events)
+    assert not any(event["type"] == "turn.completed" for event in events)
+    transcripts = sorted((home / "sessions").rglob("*.jsonl"))
+    assert transcripts, "The real CLI must persist its transcript for the usage fallback"
+    transcript = "\n".join(path.read_text() for path in transcripts)
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(events))
+    sandbox.result["return_code"] = result.returncode
+    original_publish = sandbox.publish
+
+    def publish():
+        original_publish()
+        sandbox.files[f"{sandbox.directory}/native_session.jsonl"] = transcript
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = '{"status":200}\n{"status":400}\n'
+
+    sandbox.publish = publish
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Run the shell check."})
+        response.raise_for_status()
+        body = response.json()
+        assert body["status"] == "failed"
+        assert {key: body["usage"][key] for key in expected_usage} == expected_usage
+        assert any(item["type"] == "function_call_output" for item in body["output"])
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        closed.raise_for_status()
+        observations = closed.json()["agent_observations"]
+        assert observations["records"][0]["status"] == "failed"
+        assert observations["records"][0]["error_type"] == "provider_error"
+        assert "agent_artifact_record_unparseable" not in {gap["code"] for gap in observations["gaps"]}
