@@ -4,7 +4,7 @@ config_paths:
   - resources_servers/indic_arena_judge/configs/indic_arena_judge.yaml
 
 # pointwise scores one answer without a baseline; pairwise preserves Arena-Elo.
-indic_arena_hard_v2_judge_mode: pairwise
+indic_arena_hard_v2_judge_mode: pointwise
 
 indic_arena_hard_v2_resources_server:
   _inherit_from: indic_arena_judge

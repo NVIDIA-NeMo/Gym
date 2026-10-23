@@ -87,15 +87,15 @@ def _mock_judge_sequence(server_mock: MagicMock, judge_texts: list[str]) -> None
 
 
 class TestPointwiseJudge:
-    def _config(self, mode: str = "pointwise") -> IndicArenaJudgeConfig:
+    def _config(self, mode: str | None = None) -> IndicArenaJudgeConfig:
         return IndicArenaJudgeConfig(
             host="127.0.0.1",
             port=8080,
             entrypoint="",
             name="indic_arena_judge",
-            evaluation_mode=mode,
             judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
             judge_chat_completions_create_params=NeMoGymChatCompletionCreateParamsNonStreaming(messages=[]),
+            **({"evaluation_mode": mode} if mode is not None else {}),
         )
 
     def _body(self, answer: str = "हिंदी उत्तर", baseline: str | None = None) -> ArenaJudgeVerifyRequest:
@@ -116,11 +116,12 @@ class TestPointwiseJudge:
         )
 
     @pytest.mark.asyncio
-    async def test_one_call_without_baseline_and_normalized_reward(self) -> None:
+    @pytest.mark.parametrize("baseline", [None, "ignored baseline"])
+    async def test_default_one_call_and_normalized_reward(self, baseline: str | None) -> None:
         client = MagicMock(spec=ServerClient)
         _mock_judge_sequence(client, [self._judgement()])
         server = IndicArenaJudgeServer(config=self._config(), server_client=client)
-        result = await server.verify(self._body(baseline="ignored baseline"))
+        result = await server.verify(self._body(baseline=baseline))
         assert client.post.await_count == 1
         prompt = str(client.post.call_args.kwargs["json"].messages)
         assert "हिंदी उत्तर" in prompt

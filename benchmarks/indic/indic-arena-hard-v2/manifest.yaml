@@ -6,7 +6,7 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: other
-description: AI4Bharat Indic Arena Hard v2 prompts evaluated with the Arena Hard pairwise LLM judge and language-specific baselines.
+description: AI4Bharat Indic Arena Hard v2 prompts evaluated with a custom pointwise rubric by default, with optional pairwise judging against language-specific baselines.
 modality: text
 licensing: Apache-2.0
 authors:

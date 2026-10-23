@@ -301,29 +301,35 @@ def test_benchmark_discovery_and_manifest_use_moved_paths(monkeypatch: pytest.Mo
     assert benchmark.dataset.prepare_dependencies == ["datasets", "pyarrow"]
 
 
-def test_indic_pointwise_configuration_preserves_english_instances(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("preset", ["config.yaml", "pointwise_smoke.yaml"])
+@pytest.mark.parametrize("mode", [None, "pairwise"])
+def test_indic_configuration_preserves_english_instances(
+    monkeypatch: pytest.MonkeyPatch, preset: str, mode: str | None
+) -> None:
     monkeypatch.setattr("nemo_gym.global_config._find_open_port_using_range", lambda **_: 12345)
     monkeypatch.setenv("ARENA_JUDGE_MODEL", "english-judge")
+    monkeypatch.setenv("INDIC_ARENA_JUDGE_MODEL", "indic-judge")
     monkeypatch.setenv("INDIC_ARENA_SMOKE_MODEL", "indic-judge")
 
-    def resolve(paths: list[str]):
+    def resolve(paths: list[str], mode_override: str | None = None):
         initial = OmegaConf.merge(
             GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
             {"config_paths": paths},
+            {"indic_arena_hard_v2_judge_mode": mode_override} if mode_override is not None else {},
         )
         return GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial)
 
     english_path = "benchmarks/arena_hard_v2/config.yaml"
     english = resolve([english_path])
-    combined = resolve([english_path, str(BENCHMARK_DIR / "pointwise_smoke.yaml")])
+    combined = resolve([english_path, str(BENCHMARK_DIR / preset)], mode)
     # Compare all English model, judge, agent and environment instances,
-    # including the candidate model, after adding the Indic smoke preset.
+    # including the candidate model, after adding either Indic preset.
     server_types = {"responses_api_models", "resources_servers", "responses_api_agents", "environment_servers"}
     for name, config in english.items():
         if OmegaConf.is_dict(config) and server_types.intersection(config):
             assert OmegaConf.to_container(combined[name], resolve=True) == OmegaConf.to_container(config, resolve=True)
     assert combined.get("responses_create_params") == english.get("responses_create_params")
     indic = combined.indic_arena_hard_v2_resources_server.resources_servers.indic_arena_judge
-    assert indic.evaluation_mode == "pointwise"
+    assert indic.evaluation_mode == (mode or "pointwise")
     assert indic.judge_model_server.name == "indic_arena_judge_model"
     assert combined.indic_arena_judge_model.responses_api_models.openai_model.openai_model == "indic-judge"

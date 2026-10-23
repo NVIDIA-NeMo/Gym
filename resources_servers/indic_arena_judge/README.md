@@ -7,13 +7,13 @@ judge transport, and `legacy_agent` environment server.
 
 ## Modes
 
-- `pairwise` (default) validates a nonempty matching-language `baseline_answer`,
-  then delegates both answer orderings, category prompts, verdict parsing, and
-  Arena-Elo aggregation to the English judge implementation.
-- `pointwise` evaluates one answer using the [custom rubric](prompts/pointwise.yaml).
+- `pointwise` (default) evaluates one answer without a baseline using the [custom rubric](prompts/pointwise.yaml).
   Correctness, relevance, completeness, and language quality each receive an
   integer from 0 to 4. Their mean is rescaled to 0–100; reward is that score divided
   by 100. These custom scores are not official Arena Hard win rates.
+- `pairwise` (opt-in) validates a nonempty matching-language `baseline_answer`,
+  then delegates both answer orderings, category prompts, verdict parsing, and
+  Arena-Elo aggregation to the English judge implementation.
 
 Pointwise scoring makes one judge request per nonempty answer. Empty answers get
 zero without a judge call. Invalid rubric output is counted and excluded from
@@ -27,7 +27,10 @@ and parsed scores are retained in the rollout.
 agent, and environment instances. Configure the judge with
 `INDIC_ARENA_JUDGE_BASE_URL`, `INDIC_ARENA_JUDGE_API_KEY`, and
 `INDIC_ARENA_JUDGE_MODEL`, or override those fields through Gym YAML. The benchmark
-selects the mode through `indic_arena_hard_v2_judge_mode`.
+selects the mode through `indic_arena_hard_v2_judge_mode`, defaulting to `pointwise`.
+Pass `++indic_arena_hard_v2_judge_mode=pairwise` when starting the benchmark
+to use baseline comparisons. Standalone resource-server users can set
+`evaluation_mode: pairwise` in their Indic resource configuration.
 
 The English `arena_hard_v2` benchmark and the shared `arena_judge` have no changes
 in this integration. The optional Indic smoke preset also uses a separate

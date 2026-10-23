@@ -6,9 +6,9 @@ indic_arena_judge:
       entrypoint: app.py
       domain: other
       verified: false
-      description: Indic Arena Hard v2 pairwise judging with an optional custom pointwise rubric
+      description: Indic Arena Hard v2 custom pointwise scoring with optional pairwise judging
       value: Evaluate translated open-ended prompts with language-specific baselines or reference-free rubric scores
-      evaluation_mode: pairwise
+      evaluation_mode: pointwise
       judge_model_server:
         type: responses_api_models
         name: indic_arena_judge_model

@@ -4,7 +4,7 @@ Integrates [ai4bharat/indic-arena-hard-v2](https://huggingface.co/datasets/ai4bh
 using Gym's `simple_agent`, model-server adapters, and generic prompt. The
 Indic-specific `indic_arena_judge` resource server delegates pairwise judging to
 the unchanged [Arena Hard v2 judge](../../../resources_servers/arena_judge/README.md)
-and owns the optional pointwise rubric. Its default judge settings are temperature
+and defaults to a custom pointwise rubric. Its default judge settings are temperature
 0 and maximum 4,096 tokens. The English benchmark, judge, and their configurations
 are unchanged; Indic mode and model settings are separate.
 
@@ -40,16 +40,17 @@ such fields are retained when present in older local inputs.
 
 ## Evaluation modes
 
-Set `indic_arena_hard_v2_judge_mode` in the benchmark config, or override it with
-`++indic_arena_hard_v2_judge_mode=pointwise` when starting an evaluation:
+Pointwise scoring is the default. Set `indic_arena_hard_v2_judge_mode` in the
+benchmark config, or pass `++indic_arena_hard_v2_judge_mode=pairwise` when starting
+the servers to opt into pairwise scoring:
 
-- `pairwise` (default): the English Arena Hard protocol, comparing against saved
-  baseline answers with swapped positions and reporting Arena-Elo. Missing or blank
-  baselines are rejected before calling the judge.
-- `pointwise`: custom evaluation of one answer without any baseline. One judge call
+- `pointwise` (default): custom evaluation of one answer without any baseline. One judge call
   rates correctness, relevance, completeness, and language quality from 0 to 4 each.
   `pointwise/score` is their equally weighted average, rescaled to 0–100;
   rollout `reward` is that score divided by 100. This is not an Arena Hard win rate.
+- `pairwise` (opt-in): the English Arena Hard protocol, comparing against saved
+  baseline answers with swapped positions and reporting Arena-Elo. Missing or blank
+  baselines are rejected before calling the judge.
 
 Pointwise metrics average repeats within each task, then average tasks. They also
 include `pointwise/language/<code>/score` and each dimension's mean on its 0–4 scale.
@@ -71,7 +72,8 @@ token. Set `HF_HOME` to choose a Hugging Face cache directory.
 This dataset contains **no baseline answers**. Its 504 English prompts form the
 English subset of Arena Hard v2's 750 prompts; it is also distinct from the
 500-question Arena Hard v0.1 evaluation set.
-Supply answers generated for these exact prompts in each
+The default pointwise evaluation needs no baselines. For pairwise evaluation,
+supply answers generated for these exact prompts in each
 language; the prepare script does not substitute English answers for translations.
 
 The baseline JSONL format is:
@@ -82,9 +84,8 @@ The baseline JSONL format is:
 
 Rows are joined by `(language, row_id)`. Missing, duplicate, and empty baseline
 answers fail preparation before replacing the output. Without `--baseline-file`,
-preparation warns and emits empty `baseline_answer` values, matching the existing
-multilingual Arena Hard preparation workflow. That output can be used for pointwise
-evaluation or prompt generation; pairwise scoring still requires baseline answers.
+preparation warns and emits empty `baseline_answer` values. That output is ready
+for the default pointwise evaluation; pairwise scoring still requires baseline answers.
 
 ## Usage
 
@@ -108,17 +109,16 @@ python benchmarks/indic/indic-arena-hard-v2/prepare.py --dataset-dir "$DATASET_D
 gym eval prepare --benchmark indic/indic-arena-hard-v2 \
     +prepare_script_args.dataset_dir="$DATASET_DIR"
 
-# Download all prompts for inspection (no baseline answers).
+# Download all prompts for default pointwise evaluation (no baselines needed).
 gym eval prepare --benchmark indic/indic-arena-hard-v2
 
-# Prepare selected languages with baseline answers before judging.
+# Prepare selected languages for default pointwise judging.
 python benchmarks/indic/indic-arena-hard-v2/prepare.py \
     --dataset-dir "$DATASET_DIR" \
-    --languages hi ta \
-    --baseline-file path/to/baselines.jsonl
+    --languages hi ta
 
 # Configure INDIC_ARENA_JUDGE_BASE_URL, INDIC_ARENA_JUDGE_API_KEY and INDIC_ARENA_JUDGE_MODEL.
-# Select the candidate model through Gym's usual model configuration.
+# Select the candidate model through Gym's usual model configuration; judging defaults to pointwise.
 gym env start --model-type vllm_model --benchmark indic/indic-arena-hard-v2
 
 gym eval run --no-serve \
@@ -129,9 +129,25 @@ gym eval run --no-serve \
     --prompt-config benchmarks/prompts/generic/default.yaml
 ```
 
-Omit `--languages` to prepare every language, including English, with a
-complete baseline file. Use `--languages en` for the dataset's English control.
-Re-running preparation without baselines replaces the output with prompts only.
+Omit `--languages` to prepare every language, including English. Use
+`--languages en` for the dataset's English control. Re-running preparation without
+baselines replaces the output with prompts only and supports default pointwise scoring.
+
+For pairwise scoring, prepare matching baselines and explicitly select the mode
+when starting the servers, then use the same `gym eval run --no-serve` command above:
+
+```bash
+python benchmarks/indic/indic-arena-hard-v2/prepare.py \
+    --dataset-dir "$DATASET_DIR" --languages hi ta \
+    --baseline-file path/to/baselines.jsonl
+
+gym env start --model-type vllm_model --benchmark indic/indic-arena-hard-v2 \
+    ++indic_arena_hard_v2_judge_mode=pairwise
+```
+
+Commands that previously relied on implicit pairwise scoring must now include
+this mode override. The default score is a pointwise rubric score, so label results
+with the evaluation mode when comparing runs.
 
 ## Pointwise smoke run
 

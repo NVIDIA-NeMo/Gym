@@ -121,7 +121,7 @@ def prepare(
     if baselines is None:
         warnings.warn(
             "No baseline file supplied: baseline_answer will be empty. "
-            "Use pointwise mode for reference-free scoring, or --baseline-file before running pairwise judging.",
+            "The default pointwise mode needs no baseline; supply --baseline-file for optional pairwise judging.",
             stacklevel=2,
         )
 

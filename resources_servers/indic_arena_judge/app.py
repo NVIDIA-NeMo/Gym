@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Indic Arena Hard judging, with an isolated optional pointwise rubric.
+"""Indic Arena Hard judging, defaulting to an isolated pointwise rubric.
 
 Pairwise judging delegates to Gym's unchanged Arena Hard v2 server. Baseline
 validation and reference-free scoring belong only to this Indic component.
@@ -45,12 +45,12 @@ class PointwiseJudgement(BaseModel):
 class IndicArenaJudgeConfig(ArenaJudgeConfig):
     """Indic-specific evaluation mode; English Arena configuration is unchanged."""
 
-    evaluation_mode: Literal["pairwise", "pointwise"] = "pairwise"
+    evaluation_mode: Literal["pairwise", "pointwise"] = "pointwise"
     pointwise_prompt_path: str = "resources_servers/indic_arena_judge/prompts/pointwise.yaml"
 
 
 class IndicArenaJudgeVerifyResponse(ArenaJudgeVerifyResponse):
-    evaluation_mode: Literal["pairwise", "pointwise"] = "pairwise"
+    evaluation_mode: Literal["pairwise", "pointwise"] = "pointwise"
     judgement_pointwise: str | None = None
     pointwise_scores: dict[str, int] | None = None
     pointwise_score: float | None = None
