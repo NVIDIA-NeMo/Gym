@@ -185,9 +185,9 @@ def test_profile_preserves_evaluation_settings_and_adds_deployment_from_sandbox_
     model = config["policy_model"]["responses_api_models"]["vllm_model"]
     assert agent["entrypoint"] == "app.py"
     assert agent["interleaved_thinking"] is model["uses_interleaved_reasoning"] is True
-    assert agent["terminal_hidden_mounts"] == ["/mnt/s3-data", "/mnt/.s3-gate"]
-    # The tmux binary that mount hiding needs only comes from sandbox_utils.yaml (the recipe header says to add it).
-    assert bool(agent["remote_tmux_binary_path"]) is deployment
+    # The S3 mounts are removed from the sandbox, so the terminal hides nothing and tmux is not copied from S3.
+    assert agent["terminal_hidden_mounts"] == []
+    assert agent["remote_tmux_binary_path"] is None
     assert agent["model_context_limit"] == 1048576
     assert agent["sandbox_timeout"] == 10800
     assert agent["llm_request_timeout"] == 3600
@@ -195,6 +195,7 @@ def test_profile_preserves_evaluation_settings_and_adds_deployment_from_sandbox_
     assert resources["evaluation_timeout"] == 1800
     assert resources["is_verifying_golden_patch"] is False
     assert resources["sandbox_config"]["env"]["DEBIAN_FRONTEND"] == "noninteractive"
+    assert resources["sandbox_config"]["metadata"]["nemo.nvidia.com/s3-hostpath"] == "false"
     assert resources["sandbox_config"]["resources"] == {"cpu": 4, "memory_mib": 16384, "disk_gib": 30}
     assert model["chat_template_kwargs"] == {"reasoning_effort": "max"}
     assert agent["num_workers"] == model["num_workers"] == 4

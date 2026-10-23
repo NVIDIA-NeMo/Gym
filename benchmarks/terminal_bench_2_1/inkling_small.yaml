@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Inkling evaluation settings and pinned task inputs. Sandbox deployment settings (tmux binary, resource
-# metadata) come from benchmarks/nemotron_3.5_super/sandbox_utils.yaml, which sbatch_external_vllm.sh loads
-# automatically. When running without that launcher, add it with --config: this recipe hides the service
-# mounts from task terminals, which needs that tmux binary, and without it every rollout fails with
-# "Private terminal requires tmux".
+# Inkling evaluation settings and pinned task inputs. Sandbox resource metadata comes from
+# benchmarks/nemotron_3.5_super/sandbox_utils.yaml, which sbatch_external_vllm.sh loads automatically.
+# The nemo.nvidia.com/s3-hostpath label below removes the S3-backed service mounts from the task
+# sandboxes, so a find / in a task terminal cannot stall on them.
 # Serving configuration: benchmarks/nemotron_3.5_super/vllm_configs/inkling_small.sh
 config_paths:
   - benchmarks/terminal_bench_2_1/terminus_2.yaml
@@ -20,11 +19,6 @@ terminal_bench_2_1_terminus_2_sandboxed_agent:
       llm_request_timeout: 3600
       # Send earlier reasoning back on later turns; the shared agent default is off.
       interleaved_thinking: true
-      # Hide unrelated service mounts from task terminals; a find / over them stalls the shell. Needs Linux
-      # root, user/mount namespaces and the tmux binary that sandbox_utils.yaml sets (see the file header).
-      terminal_hidden_mounts:
-        - /mnt/s3-data
-        - /mnt/.s3-gate
       datasets:
         - name: terminal_bench_2_1_inkling_small
           type: benchmark
@@ -40,6 +34,8 @@ terminal_bench_2_1_terminus_2_sandboxed_resources_server:
         env:
           # Use package defaults instead of interactive configuration prompts.
           DEBIAN_FRONTEND: noninteractive
+        metadata:
+          nemo.nvidia.com/s3-hostpath: "false"
 
 policy_model:
   responses_api_models:
