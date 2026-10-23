@@ -23,6 +23,7 @@ from aiohttp import ClientResponseError
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, ValidationError, field_validator
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -114,6 +115,20 @@ class AgenticIFResourcesServerConfig(BaseResourcesServerConfig):
     artifacts_dir: Path
     # Caps each command seed runs in the task sandbox (workspace staging, baseline, prefix replay).
     sandbox_timeout_seconds: float = Field(default=3600, gt=0, allow_inf_nan=False)
+    # Host files seed copies into every task sandbox's bundle directory, for the agent to read by in-sandbox path;
+    # relative paths are under the Gym root. The benchmark stages OpenCode's ripgrep and plugin dependencies this way
+    # for sandboxes without internet access, and opencode_agent checks each copy against its pinned digest.
+    opencode_runtime_files: list[Path] = Field(default_factory=list)
+
+    @field_validator("opencode_runtime_files")
+    @classmethod
+    def resolve_opencode_runtime_files(cls, value: list[Path]) -> list[Path]:
+        """Resolve relative paths under the Gym root; the files land in one directory, so their names must differ."""
+        paths = [path if path.is_absolute() else PARENT_DIR / path for path in value]
+        names = [path.name for path in paths]
+        if len(set(names)) != len(names):
+            raise ValueError(f"opencode_runtime_files must have distinct file names, got {names}")
+        return paths
 
     @field_validator("artifacts_dir")
     @classmethod
@@ -221,6 +236,11 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
         super().model_post_init(context)
         if self.config.num_workers not in (None, 1):
             raise ValueError("agentic IF sessions hold sandbox connections in one process: num_workers must be 1")
+        if missing := [str(path) for path in self.config.opencode_runtime_files if not path.is_file()]:
+            raise ValueError(
+                f"opencode_runtime_files are missing: {missing}; for the benchmark, run "
+                "`gym eval prepare --benchmark agentic_if`"
+            )
         self._closed = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
         self._grading_slots = asyncio.Semaphore(self.config.max_concurrent_grades)
 
@@ -352,6 +372,11 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
         staged = await bundle.stage(sandbox.transport, spec=spec, agent_user=agent_user)
         episode.profile_sha256 = staged.profile_sha256
         episode.seed["bundle"] = staged.receipt
+        if self.config.opencode_runtime_files:
+            # After staging, which creates the bundle directory.
+            episode.seed["runtime_files"] = await bundle.stage_runtime_files(
+                sandbox.transport, self.config.opencode_runtime_files
+            )
         if spec.continuation is not None:
             # After staging, so the bundle's own setup cannot remove it.
             episode.seed["session_import"] = await bundle.stage_session_import(

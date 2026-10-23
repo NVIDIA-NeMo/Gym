@@ -24,9 +24,23 @@ terminal_bench_2_1_resources_server:
       sandbox_config:
         ttl_s: 21600
 
+# OpenCode's ripgrep and plugin dependencies come with the dataset (prepare.py) and the resources server stages them
+# into each task sandbox, so a sandbox without internet access needs only the OpenCode binary (opencode_agent's
+# sandbox_executable_* fields); opencode_agent checks each staged copy against its digest.
+agentic_if_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      sandbox_ripgrep_path: /tmp/nemo-gym-agentic-if/rg
+      sandbox_ripgrep_sha256: ebeaf56f8a25e102e9419933423738b3a2a613a444fd749d695e15eba53f71f2  # pragma: allowlist secret
+      sandbox_plugin_dependencies_path: /tmp/nemo-gym-agentic-if/opencode-1.17.11-plugin-dependencies.tar.gz
+      sandbox_plugin_dependencies_sha256: 77b03eba45c8d7fe3d0a58bfc215f6fb99a1db4dd18a7e3d91fd29981fddafb1  # pragma: allowlist secret
+
 agentic_if_resources:
   resources_servers:
     agentic_if:
+      opencode_runtime_files:
+        - benchmarks/agentic_if/data/opencode-runtime/rg
+        - benchmarks/agentic_if/data/opencode-runtime/opencode-1.17.11-plugin-dependencies.tar.gz
       datasets:
         - name: agentic_if
           type: benchmark

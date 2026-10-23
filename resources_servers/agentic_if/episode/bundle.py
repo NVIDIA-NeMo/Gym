@@ -9,7 +9,7 @@
 import dataclasses
 import json
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from shlex import quote
@@ -114,6 +114,19 @@ async def collect(
         files={str(path): bytes(data) for path, data in outputs.files.items()},
         presentation_gaps=[str(gap) for gap in opencode_bundle.presentation_gaps(outputs, system=system)],
     )
+
+
+async def stage_runtime_files(transport: AsyncSandbox, paths: Sequence[Path]) -> list[str]:
+    """Copy host files into the bundle directory by name, readable by every identity; return their sandbox paths."""
+    staged = []
+    for path in paths:
+        target = f"{opencode_bundle.BUNDLE_ROOT}/{path.name}"
+        await transport.upload(path, target)
+        mode = await transport.exec(f"chmod 0644 {quote(target)}", user="root", timeout_s=30)
+        if mode.return_code != 0 or mode.error_type:
+            raise RuntimeError(f"cannot stage {path.name} for the agent")
+        staged.append(target)
+    return staged
 
 
 async def stage_session_import(transport: AsyncSandbox, prefix_export: Mapping[str, JsonValue]) -> str:

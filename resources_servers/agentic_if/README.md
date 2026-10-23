@@ -6,7 +6,7 @@ Measures whether a coding agent follows instructions while it completes a real r
 1. **Seed.** It checks the sealed row, borrows the task's sandbox through the `scale_swe` or `terminal_bench_2_1`
    typed session, checks the agent user and working directory, and stages the row's workspace files. For a row that
    continues a recorded session, it also restores that session's workspace and stages its export. It then stages the
-   OpenCode plugins in `opencode_bundle/` and lends the sandbox to `opencode_agent`.
+   OpenCode plugins in `opencode_bundle/`, and any `opencode_runtime_files`, and lends the sandbox to `opencode_agent`.
 2. **Agent turn.** `opencode_agent` runs OpenCode in that sandbox with the plugins. A profile plugin applies the row's
    tool argument maps, read-before-edit guards and planted tool failures, and writes receipts. A boundary plugin
    applies the row's system prompt, tool selection and tool descriptions, and records every model call.
@@ -34,7 +34,10 @@ and instruction checks that exercise the features the benchmark rows use.
 - The sandbox provider's settings, for example `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`.
 - `agentic_if_artifacts_dir`, optional: an absolute directory for the saved episodes. It defaults to
   `<results_dir>/agentic_if`.
-- Sandboxes without internet access need OpenCode's offline bundle; see `benchmarks/agentic_if/README.md`.
+- `opencode_runtime_files`, optional: host files that seed copies into each task sandbox's bundle directory
+  (`/tmp/nemo-gym-agentic-if/`), for `opencode_agent` to read by in-sandbox path; relative paths are under the Gym
+  root. The benchmark stages OpenCode's ripgrep and plugin dependencies this way for sandboxes without internet access;
+  see `benchmarks/agentic_if/README.md`.
 
 ## Run the examples
 

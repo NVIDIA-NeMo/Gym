@@ -22,6 +22,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
@@ -202,6 +203,31 @@ async def test_seed_lends_the_backend_sandbox_after_preparing_the_workspace_and_
     with pytest.raises(HTTPException) as different:
         await seed(world, swe_row(text="Another task"))
     assert different.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_seed_stages_the_configured_runtime_files_for_the_agent(world, tmp_path):
+    rg, archive = tmp_path / "rg", tmp_path / "plugin-dependencies.tar.gz"
+    rg.write_bytes(b"ripgrep")
+    archive.write_bytes(b"dependencies")
+    world.server = make_server(world.artifacts, world.backends, opencode_runtime_files=[rg, archive])
+
+    await seed(world, swe_row())
+
+    root = opencode_bundle.BUNDLE_ROOT
+    assert world.sandbox.uploads[f"{root}/rg"] == b"ripgrep"
+    assert world.sandbox.uploads[f"{root}/plugin-dependencies.tar.gz"] == b"dependencies"
+    chmods = [call for call in world.sandbox.calls if call["command"].startswith(f"chmod 0644 {root}/")]
+    assert len(chmods) == 2 and all(call["user"] == "root" for call in chmods)
+
+
+def test_runtime_files_resolve_under_the_gym_root_and_must_exist(world):
+    relative = Path("benchmarks/agentic_if/data/not-prepared-for-this-test/rg")
+    with pytest.raises(ValueError, match="gym eval prepare") as missing:
+        make_server(world.artifacts, world.backends, opencode_runtime_files=[relative])
+    assert str(PARENT_DIR / relative) in str(missing.value)
+    with pytest.raises(ValueError, match="distinct file names"):
+        make_server(world.artifacts, world.backends, opencode_runtime_files=[Path("/a/rg"), Path("/b/rg")])
 
 
 @pytest.mark.asyncio

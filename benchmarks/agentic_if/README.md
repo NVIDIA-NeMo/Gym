@@ -11,10 +11,11 @@ in OpenCode 1.17.11 with this configuration, not the model alone.
 
 - 586 tasks. Each pairs a real repository task (Scale-SWE) or terminal task (Terminal-Bench format) with synthetic
   instructions about how to do the work. Tasks that proved problematic or too easy were filtered out.
-- The task rows are internal. They live in Gym's dataset registry as dataset `agentic_if`, version `2.0.0`, with a
-  second artifact that holds the `tests/` files of the terminal tasks. `prepare.py` pins both by SHA-256. Data
-  license: internal. Code: Apache-2.0. The offline OpenCode bundle (see Settings) is OpenCode (MIT), ripgrep (MIT or
-  Unlicense) and the npm packages that `opencode/package-lock.json` pins (MIT, ISC, Apache-2.0, BSD-3-Clause).
+- The task rows are internal. They live in Gym's dataset registry as dataset `agentic_if`, version `2.1.0`, with a
+  second artifact that holds the `tests/` files of the terminal tasks and a third with OpenCode's ripgrep and plugin
+  dependencies (see Settings). `prepare.py` pins all three by SHA-256. Data license: internal. Code: Apache-2.0. The
+  offline OpenCode files are OpenCode (MIT), ripgrep (MIT or Unlicense) and the npm packages that
+  `opencode/package-lock.json` pins (MIT, ISC, Apache-2.0, BSD-3-Clause).
 - The `example` split of `resources_servers/agentic_if` holds 5 public tasks whose synthetic instructions exercise the
   same features.
 
@@ -72,28 +73,32 @@ in OpenCode 1.17.11 with this configuration, not the model alone.
   `mlflow_tracking_token` for preparation, with the `mlflow` extra installed.
 - The sandbox provider's settings, for example `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`. With a remote provider,
   set `use_absolute_ip: true` so OpenCode in the sandbox can reach Gym's model server.
-- Sandboxes without internet access need OpenCode's offline bundle (x86_64), which our measurements always pin;
-  without it, `opencode_agent` installs its standard OpenCode 1.17.11 build from GitHub. Set these `opencode_agent`
-  fields on `agentic_if_opencode_agent`, each with its SHA-256 (see `responses_api_agents/opencode_agent/README.md`):
-  - `sandbox_executable_path`: `package/bin/opencode` of
-    https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.17.11.tgz, SHA-256
-    `0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded`.
-  - `sandbox_ripgrep_path`: `ripgrep-15.1.0-x86_64-unknown-linux-musl/rg` of
-    https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz,
-    SHA-256 `ebeaf56f8a25e102e9419933423738b3a2a613a444fd749d695e15eba53f71f2`. OpenCode otherwise downloads it on
-    first use.
-  - `sandbox_plugin_dependencies_path`: the `@opencode-ai/plugin@1.17.11` install that OpenCode otherwise runs at
-    startup, built from `opencode/` (its lockfile pins every package), SHA-256
-    `77b03eba45c8d7fe3d0a58bfc215f6fb99a1db4dd18a7e3d91fd29981fddafb1` with Node 24.15.0, npm 11.12.1, GNU tar 1.34
-    and GNU gzip 1.10 (another gzip build changes only the compressed bytes):
+- OpenCode runs from pinned files (x86_64), so task sandboxes need no internet access (see
+  `responses_api_agents/opencode_agent/README.md`):
+  - The OpenCode binary is set per deployment on `agentic_if_opencode_agent`: `sandbox_executable_path` (a file inside
+    the sandbox, such as a mounted copy) or `sandbox_local_executable_path` (a host file uploaded at seed), with
+    `sandbox_executable_sha256` `0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded`. That is
+    `package/bin/opencode` of https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.17.11.tgz,
+    byte-identical to `opencode` in the v1.17.11 GitHub release's `opencode-linux-x64.tar.gz`. Without it,
+    `opencode_agent` installs OpenCode 1.17.11 from GitHub, which needs internet access in the sandbox.
+  - ripgrep and the plugin dependencies come with the dataset: `prepare.py` writes them to `data/opencode-runtime/`,
+    the benchmark config has the resources server stage them into each task sandbox (`opencode_runtime_files`), and
+    `opencode_agent` checks their SHA-256 there.
+    - `rg`: `ripgrep-15.1.0-x86_64-unknown-linux-musl/rg` of
+      https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz,
+      SHA-256 `ebeaf56f8a25e102e9419933423738b3a2a613a444fd749d695e15eba53f71f2`.
+    - `opencode-1.17.11-plugin-dependencies.tar.gz`: the `@opencode-ai/plugin@1.17.11` install that OpenCode
+      otherwise runs at startup, built from `opencode/` (its lockfile pins every package), SHA-256
+      `77b03eba45c8d7fe3d0a58bfc215f6fb99a1db4dd18a7e3d91fd29981fddafb1` with Node 24.15.0, npm 11.12.1, GNU tar 1.34
+      and GNU gzip 1.10 (another gzip build changes only the compressed bytes):
 
-    ```bash
-    cp -r benchmarks/agentic_if/opencode opencode  # npm records the folder name, so keep it
-    (cd opencode && npm ci --ignore-scripts --no-audit --no-fund)
-    tar -C opencode --sort=name --mtime=@1792627200 --owner=0 --group=0 --numeric-owner --mode=u+rwX,go+rX,go-w \
-        --hard-dereference --format=gnu -cf - package.json package-lock.json node_modules \
-        | gzip -n -9 > opencode-1.17.11-plugin-dependencies.tar.gz
-    ```
+      ```bash
+      cp -r benchmarks/agentic_if/opencode opencode  # npm records the folder name, so keep it
+      (cd opencode && npm ci --ignore-scripts --no-audit --no-fund)
+      tar -C opencode --sort=name --mtime=@1792627200 --owner=0 --group=0 --numeric-owner --mode=u+rwX,go+rX,go-w \
+          --hard-dereference --format=gnu -cf - package.json package-lock.json node_modules \
+          | gzip -n -9 > opencode-1.17.11-plugin-dependencies.tar.gz
+      ```
 
 ## Prepare and run
 

@@ -3,9 +3,13 @@
 
 from pathlib import Path
 
+import yaml
+
+from benchmarks.agentic_if import prepare
 from nemo_gym.benchmarks import BenchmarkConfig
 from nemo_gym.environment.manifest import load_manifest, resolve_manifest_config_path
 from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
+from resources_servers.agentic_if import opencode_bundle
 
 
 BENCHMARK_DIR = Path(__file__).parents[1]
@@ -28,3 +32,18 @@ def test_the_benchmark_routes_to_opencode_through_single_agent_turn() -> None:
     assert benchmark.dataset.taskset == "agentic_if:benchmark"
     assert benchmark.environment_server == "agentic_if_environment_server"
     assert benchmark.agent_name == "agentic_if_opencode_agent"
+
+
+def test_the_agent_reads_the_runtime_files_the_resources_server_stages() -> None:
+    config = yaml.safe_load((BENCHMARK_DIR / "config.yaml").read_text())
+    staged = config["agentic_if_resources"]["resources_servers"]["agentic_if"]["opencode_runtime_files"]
+    agent = config["agentic_if_opencode_agent"]["responses_api_agents"]["opencode_agent"]
+    paths = [agent["sandbox_ripgrep_path"], agent["sandbox_plugin_dependencies_path"]]
+
+    # The resources server stages prepare.py's files by name into the bundle directory the agent reads them from.
+    assert staged == [str(prepare.RUNTIME_PREFIX / name) for name in prepare.RUNTIME_FILES]
+    assert {str(Path(path).parent) for path in paths} == {opencode_bundle.BUNDLE_ROOT}
+    assert {
+        Path(agent["sandbox_ripgrep_path"]).name: agent["sandbox_ripgrep_sha256"],
+        Path(agent["sandbox_plugin_dependencies_path"]).name: agent["sandbox_plugin_dependencies_sha256"],
+    } == prepare.RUNTIME_FILES
