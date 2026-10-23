@@ -889,6 +889,18 @@ gym eval run --no-serve \
 Because the merge is shallow, setting a field inside a nested object, such as `++responses_create_params.reasoning.effort=low`, replaces the row's entire nested dictionary at that key. Other fields under the same nested object are not preserved.
 </Tip>
 
+#### Output files
+
+Next to `--output` (`<stem>` is its name without `.jsonl`), the run writes:
+
+| File | Content |
+| --- | --- |
+| `<stem>.jsonl` | The rollouts. |
+| `<stem>_materialized_inputs.jsonl` | The fully expanded input rows. |
+| `<stem>_failures.jsonl` | Failed rollouts routed to the sidecar, when there are any. |
+| `<stem>_aggregate_metrics.json` | Aggregate metrics, unless aggregation is disabled. |
+| `<stem>_resolved_config.yaml` | The run's configuration, written before collection starts and overwritten by each attempt. Secrets are masked and `${...}` interpolations stay unresolved. |
+
 #### Resume interrupted runs
 
 Pass `--resume` to restart the **same command** after a crash or interruption and pick up only the rows that have not finished yet.
