@@ -136,6 +136,38 @@ def test_inconsistent_configuration_is_rejected(changes, match):
         spec(**changes)
 
 
+GUARD = {"edit": {"unread": "Read {{path}} first.", "changed": "Read {{path}} again."}}
+
+
+@pytest.mark.parametrize(
+    "tools,match",
+    [
+        ({"read_first": {}}, "read_first requires non-empty tool/case objects"),
+        ({"read_first": {"edit": {}}}, "read_first requires non-empty tool/case objects"),
+        ({"read_first": {"edit": {"unread": "  "}}}, "read_first messages must not be blank"),
+        ({"read_first": {"edit": {"unread": "Read {{file}} first."}}}, "read_first messages support only the"),
+        # the guard can only be enforced with the read tool and each tool it guards exposed
+        (
+            {"tool_names": {"edit": "edit", "write": "write"}, "read_first": GUARD},
+            r"exposed built-in tools: \['read'\]",
+        ),
+        (
+            {"tool_names": {"read": "read", "bash": "bash"}, "read_first": {"write": GUARD["edit"]}},
+            r"exposed built-in tools: \['write'\]",
+        ),
+    ],
+)
+def test_read_first_guards_are_validated_before_allocation(tools, match):
+    with pytest.raises(ValidationError, match=match):
+        spec(tools=tools)
+
+
+def test_a_read_first_guard_keeps_its_literal_placeholder():
+    tools = {"tool_names": {"read": "read", "edit": "edit", "write": "write"}, "read_first": GUARD}
+    parsed = runtime.validate_runtime(runtime.seal_runtime_row(base_row(), spec(tools=tools)))
+    assert parsed.tools.read_first.root == GUARD
+
+
 def test_package_task_references_are_rejected():
     row = base_row() | {"task_name": "example", "task_ref": "sha256:abc", "dataset_ref": "dataset"}
     with pytest.raises(ValueError, match="task_ref"):

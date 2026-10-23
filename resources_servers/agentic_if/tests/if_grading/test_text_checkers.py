@@ -25,6 +25,7 @@ NO_CALLS = {"calls": []}
         ('The "why does it hang?" bug is fixed.', "sentences", 1),
         ("I checked, e.g. the parser. Done.", "sentences", 2),
         ("- first item\n- second item", "sentences", 2),
+        ("1) fix the parser 2) add tests", "sentences", 2),  # an inline numbered list
     ],
 )
 def test_count_units(content, unit, count):
@@ -125,6 +126,11 @@ def test_element_present_anywhere_or_at_the_start():
         ("no_offer", "Fixed the parser. I can also confirm the old tests pass.", True),
         ("no_question_or_offer", "Fixed the parser.", True),
         ("no_question_or_offer", "Fixed the parser. Happy to add a test.", False),
+        # a message that is all code has no last sentence: it asks nothing
+        ("no_question", "```\nprint(1)\n```", True),
+        ("question", "```\nprint(1)\n```", False),
+        # a sentence that is all quote is the question itself
+        ("question", 'Fixed.\n\n"Why does it hang?"', True),
     ],
 )
 def test_ending(value, content, ok):
@@ -177,3 +183,64 @@ def test_json_needs_its_keys_value(value):
 )
 def test_changed_file_marks_in_plain_text(content, bad):
     assert text.changed_file_marks(content, ["src/app.py"], "plain") == bad
+
+
+def test_indented_code_is_code_unless_it_continues_a_list_item():
+    rm = {"regex": "rm -rf"}
+    assert text.check_element_absent("Run:\n\n    rm -rf build\n\nDone.", rm, {}, NO_CALLS, {}) == (True, "absent")
+    assert text.check_element_absent("Run:\n\n    rm -rf build", rm | {"part": "all"}, {}, NO_CALLS, {})[0] is False
+    assert text.check_element_absent("- Clean the build:\n\n    rm -rf build", rm, {}, NO_CALLS, {}) == (
+        False,
+        "found ['rm -rf']",
+    )
+
+
+def test_unknown_parts_and_elements_are_errors_not_verdicts():
+    with pytest.raises(ValueError, match="unknown part 'code'"):
+        text.check_length("Done.", {"n": 4, "unit": "words"}, {"part": "code"}, NO_CALLS, {})
+    with pytest.raises(ValueError, match="unknown element 'md_fancy'"):
+        text.check_element_absent("Done.", "md_fancy", {}, NO_CALLS, {})
+    for value in (5, {"name": "no regex"}):
+        with pytest.raises(ValueError, match="an element is a name or"):
+            text.check_element_present("Done.", value, {}, NO_CALLS, {})
+    # colon_before_tool_call reads the whole message and has no pattern of its own
+    assert text.element_regex("colon_before_tool_call") == (None, "all", "colon_before_tool_call")
+
+
+@pytest.mark.parametrize(
+    "content,changed,mark,bad",
+    [
+        ("Changed app.py.", ["src/app.py"], "backticks", ["app.py is written in plain text, not in backticks"]),
+        (
+            "Changed <code>src/app.py</code>.",
+            ["src/app.py"],
+            "plain",
+            ["src/app.py is written in <code> tags, not in plain text"],
+        ),
+        ("See file:///w/src/app.py for the change.", ["src/app.py"], "file_uri", []),
+        (
+            "See file:///w/src/app.py for the change.",
+            ["src/app.py"],
+            "plain",
+            ["file:///w/src/app.py is written as a file:// address, not in plain text"],
+        ),
+        ("See [the file](file:///w/src/app.py).", ["src/app.py"], "file_uri", []),
+        ("See [the file](file:///w/src/app.py).", ["src/app.py"], "link", []),
+        ("- Changed: src/app.py", ["src/app.py"], "changed_line", []),
+        (
+            "- Changed: src/app.py",
+            ["src/app.py"],
+            "backticks",
+            ['src/app.py is written on a line of its own that starts with "Changed: ", not in backticks'],
+        ),
+        # a web address, a markup tag, a route, a date, and/or and a library name are no mention of a changed file
+        ("See https://github.com/org/repo/blob/main/src/app.py for the change.", ["src/app.py"], "backticks", []),
+        ("See www.example.com/src/app.py for the change.", ["src/app.py"], "backticks", []),
+        ('<code_snippet path="src/app.py" mode="EXCERPT">', ["src/app.py"], "backticks", []),
+        ("Changed `src/app.py`; GET /api/users now returns 404.", ["src/app.py", "api/users"], "backticks", []),
+        ("Changed `src/app.py`; the docs and/or tests on 2026/10/23.", ["src/app.py", "or", "10/23"], "backticks", []),
+        ("Built on Three.js; changed `src/app.py`.", ["src/app.py", "vendor/Three.js"], "backticks", []),
+    ],
+)
+def test_changed_file_marks_for_each_mark(content, changed, mark, bad):
+    assert text.changed_file_marks(content, changed, mark) == bad

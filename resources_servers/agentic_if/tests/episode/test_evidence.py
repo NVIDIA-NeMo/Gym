@@ -6,7 +6,7 @@ from copy import deepcopy
 
 import pytest
 
-from resources_servers.agentic_if.episode.opencode_evidence import opencode_evidence
+from resources_servers.agentic_if.episode.opencode_evidence import opencode_evidence, visible_assistant_text
 from resources_servers.agentic_if.if_grading.contracts import SessionInfo
 from resources_servers.agentic_if.tests.support import call, export, message, text
 
@@ -165,6 +165,97 @@ def test_missing_observations_are_explicit_evidence_gaps(source, options, issue)
     evidence = opencode_evidence(source, **options)
     assert evidence.status == "incomplete"
     assert issue in evidence.issues
+
+
+def done_export(**info):
+    source = export(message("a", "assistant", text("Done")))
+    source["info"].update(info)
+    return source
+
+
+def without_parts():
+    source = done_export()
+    source["messages"][0]["parts"] = None
+    return source
+
+
+def unnamed_tool():
+    part = call("x")
+    part["tool"] = ""
+    return export(message("a", "assistant", part))
+
+
+@pytest.mark.parametrize(
+    "source, options, issue, kept",
+    [
+        (done_export(id=""), {}, "missing_session_id", []),
+        # a second export of the same session is not merged into the first
+        (
+            done_export(),
+            {"child_exports": [export(message("b", "assistant", text("Again"), created=2))]},
+            "duplicate_session:root",
+            [("assistant", "Done")],
+        ),
+        (done_export(parentID=""), {}, "invalid_parent:root", [("assistant", "Done")]),
+        (export(message("a", "assistant", text("Done"), session="other")), {}, "wrong_message_session:root:a", []),
+        (
+            export(message("s", "system", text("Hidden")), message("a", "assistant", text("Done"))),
+            {},
+            "unsupported_message_role:root:s",
+            [("assistant", "Done")],
+        ),
+        (without_parts(), {}, "missing_message_parts:root:a", []),
+        (unnamed_tool(), {}, "missing_tool_name:root:a:x", [("assistant", "")]),
+        # a repeated call identity keeps only the first call and its result
+        (
+            export(message("a", "assistant", call("x"), call("x", output="again"))),
+            {},
+            "duplicate_call:root:x",
+            [("assistant", ""), ("tool", "contents")],
+        ),
+        (
+            export(message("a", "assistant", text("Done"), session="child"), session="child", parent="ghost"),
+            {},
+            "missing_parent:child:ghost",
+            [("assistant", "Done")],
+        ),
+        (
+            done_export(),
+            {"expected_sessions": [SessionInfo(id="root", parent_id="other")]},
+            "wrong_session_parent:root",
+            [("assistant", "Done")],
+        ),
+    ],
+    ids=[
+        "session_id",
+        "duplicate_session",
+        "invalid_parent",
+        "wrong_message_session",
+        "unsupported_role",
+        "message_parts",
+        "tool_name",
+        "duplicate_call",
+        "missing_parent",
+        "wrong_session_parent",
+    ],
+)
+def test_malformed_or_contradictory_exports_are_explicit_evidence_gaps(source, options, issue, kept):
+    evidence = opencode_evidence(source, **options)
+    assert evidence.status == "incomplete"
+    assert issue in evidence.issues
+    assert [(step.role, step.output if step.role == "tool" else step.text) for step in evidence.steps] == kept
+
+
+def test_an_unfinished_reasoning_block_is_not_visible_text():
+    assert visible_assistant_text("leftover reasoning</think>Visible") == "Visible"
+    assert visible_assistant_text("Visible<think>unfinished reasoning") == "Visible"
+
+
+def test_an_interface_mapping_that_does_not_resolve_adds_no_argument():
+    source = export(message("a", "assistant", call("e", "edit", input={"location": {"file": "/app/x"}})))
+    interface = {"args_map": {"filePath": "location.missing", "oldString": 5, "newString": "location.file"}}
+    actual = opencode_evidence(source, interfaces={"edit": interface}).steps[0].calls[0]
+    assert actual.args == {"location": {"file": "/app/x"}, "content": "/app/x"}
 
 
 def test_missing_call_identity_is_not_replaced_with_a_random_id():

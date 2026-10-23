@@ -318,3 +318,190 @@ def test_judge_view_preserves_system_text_and_associates_results_by_call_identit
     assert "SYSTEM: Read before editing." in shown
     assert "RESULT (ReadSource): OK_SECOND" in shown
     assert "RESULT (ReadSource, error, refused before it ran): BAD_FIRST" in shown
+
+
+def test_first_turn_of_a_rule_that_starts_at_an_event_is_the_first_reply_after_it():
+    e = trace(
+        {"role": "user", "text": "Fix the parser."},
+        {"role": "assistant", "text": "Let me run the whole test suite first.", "calls": [call("bash")]},
+        {
+            "role": "tool",
+            "tool": "bash",
+            "call_id": "c",
+            "invocation_id": "run",
+            "output": "Timed out.",
+            "error": True,
+        },
+        {"role": "assistant", "text": "The tests timed out."},
+        {"role": "assistant", "text": "Here is the full summary of the work."},
+        events=[{"id": "timeout", "step_index": 2}],
+    )
+    check = ResolvedCheck(
+        id="c",
+        kind="length",
+        parameters={"value": {"n": 4, "unit": "words", "dir": "max"}},
+        scope={"activation": "event", "event_id": "timeout", "places": ["first_turn"]},
+    )
+    result = engine.grade([check], e, judge=Judge())
+    assert result.checks[0].status == "pass"
+    assert [unit["step"] for unit in result.checks[0].details["units"]] == [3]
+
+
+def test_a_text_check_on_a_whole_run_place_is_an_error_not_a_verdict():
+    result = engine.grade(
+        [criterion("exact", "DONE", places=["run"])], trace({"role": "assistant", "text": "DONE"}), judge=Judge()
+    )
+    assert result.checks[0].status == "error"
+    assert result.checks[0].explanation == "ValueError: exact requires a text place, not run"
+
+
+@pytest.mark.parametrize(
+    "if_no_text,status,units",
+    [
+        (None, "pass", [(1, "pass")]),  # a message that only calls a tool is not graded
+        ("fail", "fail", [(0, "fail"), (1, "pass")]),
+        ("pass", "pass", [(0, "pass"), (1, "pass")]),
+    ],
+)
+def test_a_message_without_text_counts_only_as_the_rule_says(if_no_text, status, units):
+    e = trace({"role": "assistant", "calls": [call("bash")]}, {"role": "assistant", "text": "DONE"})
+    check = criterion("exact", "DONE", places=["any_turn"], **({"if_no_text": if_no_text} if if_no_text else {}))
+    result = engine.grade([check], e, judge=Judge(error=AssertionError("No judge for a text check")))
+    assert result.checks[0].status == status
+    assert [(unit["step"], unit["status"]) for unit in result.checks[0].details["units"]] == units
+
+
+PASTED_TRACEBACK = "Traceback (most recent call last):\n  File \"app.py\", line 1, in <module>\nKeyError: 'name'"
+
+
+@pytest.mark.parametrize(
+    "request_text,reply,status",
+    [
+        # the pasted English traceback is not the user's language
+        (
+            "Me sale este error cuando corro las pruebas:\n" + PASTED_TRACEBACK,
+            "Corregí el error y las pruebas pasan ahora.",
+            "pass",
+        ),
+        # a request that is all pasted output has no language to keep: the check does not apply
+        (PASTED_TRACEBACK, "I fixed the bug and the tests pass now.", "not_applicable"),
+        # a reply that is only code has no prose to grade
+        ("Fix the parser and run the tests.", "```\nprint(1)\n```", "not_applicable"),
+    ],
+    ids=["spanish", "only_pasted_request", "only_code_reply"],
+)
+def test_user_language_is_read_from_the_users_own_words(request_text, reply, status):
+    e = trace({"role": "user", "text": request_text}, {"role": "assistant", "text": reply})
+    judge = Judge(error=AssertionError("A clear language verdict asks no judge"))
+    result = engine.grade([criterion("language", "user")], e, judge=judge)
+    assert result.checks[0].status == status
+    assert not judge.seen
+
+
+def changed_file_rule():
+    return ResolvedCheck(
+        id="marks",
+        kind="judge",
+        rubric="Name each changed file in backticks.",
+        parameters={
+            "context": "message_with_changed_files",
+            "marks": "changed_file",
+            "mark_parts": {"path": "backticks"},
+        },
+        scope={"places": ["final"]},
+    )
+
+
+def test_changed_file_marks_are_checked_by_code_before_the_judge_is_asked():
+    wrote = {"role": "assistant", "calls": [call("write", args={"path": "src/app.py", "content": "x"})]}
+    judge = Judge()
+    result = engine.grade(
+        [changed_file_rule()], trace(wrote, {"role": "assistant", "text": "Updated **src/app.py**."}), judge=judge
+    )
+    assert result.checks[0].status == "fail"
+    assert result.checks[0].explanation == "marks (checked by code): src/app.py is written in bold, not in backticks"
+    assert not judge.seen
+    result = engine.grade(
+        [changed_file_rule()], trace(wrote, {"role": "assistant", "text": "Updated `src/app.py`."}), judge=judge
+    )
+    assert result.checks[0].status == "pass"
+    assert [(context, shown.splitlines()[-1]) for _, context, shown in judge.seen] == [
+        ("message_with_changed_files", "Updated `src/app.py`.")
+    ]
+
+
+def test_a_rule_about_changed_files_does_not_apply_before_any_file_changed():
+    judge = Judge(error=AssertionError("Nothing to judge"))
+    result = engine.grade(
+        [changed_file_rule()], trace({"role": "assistant", "text": "Updated src/app.py."}), judge=judge
+    )
+    assert result.checks[0].status == "not_applicable"
+    assert result.if_all is None
+
+
+class PrefixJudge(Judge):
+    """Passes the whole session but answers the prefix question with `prefix_status`."""
+
+    def __init__(self, prefix_status):
+        super().__init__()
+        self.prefix_status = prefix_status
+
+    def evaluate(self, *, rubric, context, evidence, n_steps=None, instruction=None):
+        self.seen.append((rubric, context, evidence))
+        status = self.prefix_status if "only the first part of the session" in rubric else "pass"
+        return JudgeDecision(status=status, explanation=f"Controlled {status}")
+
+
+def continued_session():
+    return trace(
+        {"role": "assistant", "text": "WRONG"},
+        {"role": "user", "text": "Continue."},
+        {"role": "assistant", "text": "DONE"},
+        continuation_start=1,
+    )
+
+
+def test_a_whole_run_judge_rule_judges_its_prefix_with_the_prefix_question():
+    rule = ResolvedCheck(
+        id="c", kind="judge", rubric="Never apologize.", scope={"places": ["run"], "check_prefix": True}
+    )
+    judge = PrefixJudge("fail")
+    result = engine.grade([rule], continued_session(), judge=judge)
+    assert result.checks[0].status == "pass"
+    assert result.checks[0].details["prefix_failures"] == [{"where": "run", "step": None, "why": "Controlled fail"}]
+    question, context, shown = judge.seen[-1]
+    assert question == engine.PREFIX_QUESTION.format(question="Never apologize.")
+    assert context == "run" and shown == "ASSISTANT: WRONG"  # only the steps before the continuation
+    result = engine.grade([rule], continued_session(), judge=PrefixJudge("error"))
+    assert result.checks[0].status == "error"
+    assert "prefix judgment failed: Controlled error" in result.checks[0].explanation
+
+
+@pytest.mark.parametrize(
+    "places,prefix_failures",
+    [
+        # the last message of a prefix is not the session's final message
+        (["final"], []),
+        (["any_turn"], [{"where": "any_turn", "step": 0, "why": "reply 'WRONG' is not 'DONE'"}]),
+    ],
+)
+def test_prefix_failures_come_only_from_places_a_prefix_can_settle(places, prefix_failures):
+    check = ResolvedCheck(
+        id="c", kind="exact", parameters={"value": "DONE"}, scope={"places": places, "check_prefix": True}
+    )
+    result = engine.grade([check], continued_session(), judge=Judge())
+    assert result.checks[0].details["prefix_failures"] == prefix_failures
+
+
+def test_an_empty_prefix_has_no_failures():
+    e = trace(
+        {"role": "user", "text": "Do not call bash."},
+        {"role": "assistant", "calls": [call("bash")]},
+        continuation_start=0,
+    )
+    check = ResolvedCheck(
+        id="c", kind="calls", parameters={"value": {"mode": "never", "tool": "bash"}}, scope={"check_prefix": True}
+    )
+    result = engine.grade([check], e, judge=Judge())
+    assert result.checks[0].status == "fail"
+    assert result.checks[0].details["prefix_failures"] == []
