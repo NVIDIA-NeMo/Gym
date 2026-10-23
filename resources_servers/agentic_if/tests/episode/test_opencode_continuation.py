@@ -70,7 +70,7 @@ async def test_restore_replays_shell_as_agent_and_restores_binary_diff(tmp_path,
     prefix["info"]["directory"] = str(repo)
     arguments = {"command": "printf changed > file; printf drift"}
     if timeout_ms is not None:
-        arguments.update(command=arguments["command"] + "; sleep 1; printf late > ../late", timeout=timeout_ms)
+        arguments.update(command=arguments["command"] + "; sleep 5; printf late > ../late", timeout=timeout_ms)
     prefix["messages"][1]["parts"] = [
         {
             "type": "tool",
