@@ -44,12 +44,11 @@ abbreviated SHA, or no ref) still needs the network, because `uv` must fetch to 
 
 IFBench source and NLTK resources live under
 `s3://nemo-ci-storage-31ff58e3-a555-4c8b-ad91-c453ce311bbd/nemo-fw/TestData/nemo_gym/v1/`.
-GitHub server-test jobs use the local `mount-test-data` action to obtain a short-lived read-only
-OIDC role, mount that prefix with pinned Mountpoint for S3, and run `scripts/ci/check_test_data.py`.
-The preflight requires 14 nonempty files and the pinned IFBench revision. Mounts are released by
-an `always()` cleanup step. The TF-States `s3-iam/gym-test-data` stack owns the role.
-Normal test jobs request one-hour credentials; the nightly server suite requests six hours,
-matching its explicit six-hour job deadline so a long shard retains access to the mounted data.
+GitHub test jobs use the existing `nemo-ci-aws-cpu-4-16` ARC runner pool, which already mounts
+that bucket read-only at `/mnt/s3-data-ro`. Jobs set `NEMO_GYM_TEST_DATA_ROOT` to
+`/mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1`, set `NLTK_DATA` to its `nltk_data` child, and
+run `scripts/ci/check_test_data.py`. The preflight requires 14 nonempty files and the pinned
+IFBench revision before tests start.
 
 TF-States owns recurring S3 → GCS → Singapore GCS transfers. Its existing `gpu-datasets-sync`
 CronJob copies the complete `nemo-fw/TestData` parent to the read-only dataset export and verifies

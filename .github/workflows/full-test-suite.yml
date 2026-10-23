@@ -29,10 +29,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
-permissions:
-  contents: read
-  id-token: write
-
 env:
   # Number of parallel shards for the full server suite. Keep in sync with the matrix below.
   NUM_SHARDS: "8"
@@ -88,8 +84,10 @@ jobs:
 
   server-suite:
     name: Server suite (shard ${{ matrix.shard }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
+    runs-on: nemo-ci-aws-cpu-4-16
+    env:
+      NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
+      NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
     strategy:
       fail-fast: false
       matrix:
@@ -122,10 +120,8 @@ jobs:
           source .venv/bin/activate
           uv sync --extra dev
 
-      - name: Mount shared test data and check inventory
-        uses: ./.github/actions/mount-test-data
-        with:
-          role-duration-seconds: "21600"
+      - name: Check shared test-data inventory
+        run: python3 scripts/ci/check_test_data.py
 
       - name: Server tests (shard ${{ matrix.shard }}/${{ env.NUM_SHARDS }})
         run: |
@@ -135,10 +131,6 @@ jobs:
             +delete_venvs_after_each_test=true \
             +num_shards=${{ env.NUM_SHARDS }} \
             +shard_index=${{ matrix.shard }}
-
-      - name: Unmount shared test data
-        if: always()
-        uses: ./.github/actions/unmount-test-data
 
   server-suite-result:
     name: Server suite
