@@ -22,7 +22,7 @@ import fnmatch
 import json
 import logging
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -77,6 +77,7 @@ from nemo_gym.tasks.harbor.registry import (
     credentials_for_image_prefixes,
     platform_pair,
 )
+from nemo_gym.tasks.harbor.run_summary import output_signatures, write_run_summary
 from nemo_gym.tasks.harbor.task import HarborTask, discover_tasks, is_task_folder
 from nemo_gym.tasks.harbor.validation_report import (
     _task_digests,
@@ -297,6 +298,9 @@ class PreparedTaskset:
     # ``manifest.toml``, whose table and images it uses); a task folder whose parent is no dataset is labelled
     # by its own name (see ``_dataset_label``). ``None`` (a hand-built taskset) labels the rows with the taskset.
     task_source: str | None = None
+    # Where the dataset came from (``manifest.toml``'s ``[dataset].source``: ``harbor-registry``,
+    # ``harbor-package-store``, ``git`` or ``local``), for the run summary.
+    dataset_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -517,6 +521,7 @@ def prepare_target(
         dataset_toml_digest=identity.dataset_toml_digest,
         dataset=dataset or GymDatasetConfig(),
         task_source=task_source,
+        dataset_source=identity.source,
     )
 
 
@@ -901,15 +906,66 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error(str(exc))
     tokens = _merge_config_paths(tokens)
     collection = _resolved_collection(tokens, prepared)
+    helper = RolloutCollectionHelper()
+    expected: list[dict[str, Any]] | None = None
+    before_dispatch = None
     cache = _resumable_cache(collection)
     if cache is not None:
         # The collector resumes its saved inputs, not the rows just prepared: a selection or digest that
         # changed since would run (or 404 on) tasks the server no longer maps. Refuse before startup.
-        conflict = _resume_conflict(cache, RolloutCollectionHelper()._preprocess_rows_from_config(collection))
+        expected = helper._preprocess_rows_from_config(collection)
+        conflict = _resume_conflict(cache, expected)
         if conflict:
             args._parser.error(conflict)
+    else:
+        # A fresh start clears its output files only once the servers are up: what sits under those names now
+        # is an earlier run's, and the summary must not report it as this run's if the collector never gets there.
+        before_dispatch = output_signatures(Path(collection.output_jsonl_fpath))
     print(f"Run config written to {config_path} (datasets folder: {datasets_dir()})")
-    dispatch("nemo_gym.cli.eval:e2e_rollout_collection", tokens)
+    try:
+        dispatch("nemo_gym.cli.eval:e2e_rollout_collection", tokens)
+    finally:
+        _write_summary(
+            Path(collection.output_jsonl_fpath),
+            command="gym eval run",
+            target=args.target,
+            prepared=prepared,
+            agent=agent,
+            run_config=config_path,
+            # A fresh run reads its selected rows only for the summary, after the collector has had them.
+            expected=expected if expected is not None else lambda: helper._preprocess_rows_from_config(collection),
+            split=_collector_split(),
+            before_dispatch=before_dispatch,
+        )
+
+
+def _collector_split() -> str | None:
+    """The split the resolved run config dispatches (``validation`` unless overridden), for the run summary."""
+    from nemo_gym.global_config import get_global_config_dict
+
+    split = get_global_config_dict().get("split")
+    return str(split) if split else None
+
+
+def _write_summary(
+    rollouts: Path, *, expected: list[dict[str, Any]] | Callable[[], list[dict[str, Any]]] | None, **kwargs: Any
+) -> None:
+    """Write the run summary beside ``rollouts`` (:mod:`nemo_gym.tasks.harbor.run_summary`) and say where.
+
+    Runs after collection whatever it did, so a run that stopped early still leaves a summary of what it
+    wrote; a summary that cannot be written is logged and never displaces the run's own outcome. ``expected``
+    may be a callable that reads the collector's selected rows, so a run that did not need them before
+    dispatch reads them here, inside the same guard. ``before_dispatch`` (in ``kwargs``) is what a fresh start
+    found under its output names before dispatch, so files it never got to clear are not reported as its own.
+    """
+    try:
+        if callable(expected):
+            expected = expected()
+        path = write_run_summary(rollouts, expected=expected, **kwargs)
+    except Exception:
+        logger.warning("Could not write the run summary beside %s", rollouts, exc_info=True)
+        return
+    print(f"Run summary written to {path}")
 
 
 def _rows_name(agent: AgentSelection) -> str:
@@ -937,6 +993,21 @@ def _resolved_collection(tokens: list[str], prepared: PreparedTaskset) -> "Rollo
     except InterpolationResolutionError as exc:
         raise translate_interpolation_error(exc) from exc
     return RolloutCollectionConfig.model_validate({**resolved, "input_jsonl_fpath": str(prepared.rows_path)})
+
+
+def _requested_output(tokens: list[str], default: Path) -> Path:
+    """The rollouts path ``tokens`` ask for (``--output``, ``+output_jsonl_fpath=`` or a ``--config`` overlay), or
+    ``default`` when they name none.
+
+    Resolved through the same parser dispatch uses, so a quoted ``--output`` and a file overlay both count, for
+    the path that dispatches nothing and so has no run config to resolve a collection from.
+    """
+    from nemo_gym.global_config import get_global_config_dict, reset_global_config_dict
+
+    sys.argv = [sys.argv[0], *tokens]
+    reset_global_config_dict()
+    requested = get_global_config_dict().get("output_jsonl_fpath")
+    return Path(str(requested)) if requested else default
 
 
 def _resumable_cache(collection: "RolloutCollectionConfig") -> Path | None:
@@ -1050,6 +1121,7 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
         collection = _resolved_collection(tokens, prepared)
         expected = RolloutCollectionHelper()._preprocess_rows_from_config(collection)
         rollouts = Path(collection.output_jsonl_fpath)
+        before_dispatch = None
         cache = _resumable_cache(collection)
         if cache is not None:
             # The collector resumes its saved inputs, not the just-prepared task rows. Reject a stale
@@ -1075,8 +1147,40 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
                     f"{', ...' if len(foreign) > 5 else ''}. Use +resume_from_cache=false to validate the current "
                     "tasks, or choose a new +output_jsonl_fpath to keep the old results."
                 )
+        else:
+            # See run_target: a fresh start's files under the output names are an earlier run's until the
+            # collector clears them, which happens only once the servers are up.
+            before_dispatch = output_signatures(rollouts)
         print(f"Run config written to {config_path}; validating {len(expected)} oracle rollout(s)")
-        dispatch("nemo_gym.cli.eval:e2e_rollout_collection", tokens)
+        try:
+            dispatch("nemo_gym.cli.eval:e2e_rollout_collection", tokens)
+        finally:
+            _write_summary(
+                rollouts,
+                command="gym dataset validate",
+                target=args.target,
+                prepared=prepared,
+                agent=agent,
+                run_config=config_path,
+                expected=expected,
+                split=_collector_split(),
+                before_dispatch=before_dispatch,
+            )
+    else:
+        # Nothing to dispatch (no selected task has a solution/): the summary still says what was selected,
+        # beside the rollouts file the command line asked for (there is no run config to resolve it from).
+        rollouts = _requested_output(_merge_config_paths(list(overrides)), rollouts)
+        _write_summary(
+            rollouts,
+            command="gym dataset validate",
+            target=args.target,
+            prepared=prepared,
+            agent=agent,
+            run_config=None,
+            expected=expected,
+            # Nothing ran, so whatever sits under the output names is an earlier run's.
+            before_dispatch=output_signatures(rollouts),
+        )
     report = summarize_validation(rollouts, unvalidated, expected=expected, skipped=prepared.skipped)
     print(report.text)
     if not report.ok:
