@@ -143,6 +143,61 @@ The same statistics are laid out differently depending on which command produced
 
 ---
 
+## Bayes@N for binary rewards
+
+For a complete evaluation with repeated independent generations and a binary correctness
+verifier, reward profiling can also report [Bayes@N](https://arxiv.org/abs/2510.04265)
+posterior moments. Use the full materialized-input file from one collection, which defines
+the selected question set. Reconstructing that file from surviving results can hide
+questions whose rollouts all failed to complete.
+
+```bash
+gym eval profile \
+    --inputs results/rollouts_materialized_inputs.jsonl \
+    --rollouts results/rollouts.jsonl \
+    --bayes-at-n
+```
+
+The option adds two fields to each run's entry in `results/rollouts_agent_metrics.json`:
+
+| Key, for N=2 trials | Meaning | Units |
+| --- | --- | --- |
+| `bayes@2/reward` | Posterior mean of the fixed question set's mean success probability | [0, 1] |
+| `std/bayes@2/reward` | Posterior standard deviation of that mean | Reward units |
+
+The number in each key is the actual trial count. Each question with `s` successes
+in `N` trials has a `Beta(s+1, N-s+1)` posterior, using the uniform `Beta(1,1)` prior.
+Bayes@N averages the question means. Its standard deviation is the square root of
+summed question variances divided by the number of questions. For example, two
+questions with outcomes `[0, 0]` and `[1, 1]` give mean `0.5` and posterior standard
+deviation `sqrt(3/160)`, about `0.13693`. Pooling all outcomes into one Beta posterior
+would describe a different model.
+
+The posterior standard deviation measures uncertainty about this fixed cohort's
+mean success probability. It is separate from `std/reward`, the empirical standard
+deviation of observed rewards, and from standard errors or t-intervals across repeats.
+The option does not add a credible interval. Agents and Environment Server runs stay
+separate, with the same labels used by ordinary profiling. No posterior is averaged
+across repeats or shards. The default profile output is unchanged without the option.
+
+The option requires every scheduled task/rollout pair, unique nonnegative integer
+indices, the same positive N for each question within a run, and numeric rewards
+exactly 0 or 1. Missing rewards, masked or failed rows, partial collections and ragged
+trial counts raise errors, including when `+allow_partial_rollouts=true` is set.
+Repeated materialized question inputs must agree apart from the rollout index and
+native per-rollout RNG seed; explicit seeds must be distinct within a question/run.
+
+Select this option only for a verifier that defines binary correctness. A continuous
+grader such as GraphWalks F1 is unsupported even when one file happens to contain only
+0 and 1. Keep the model, agent, environment, verifier, prompt and sampling configuration
+fixed across the trials. Use fresh independent generations; repeated verification of
+one completion, cached duplicate responses, changing checkpoints and adaptive allocation
+do not meet this experiment's assumptions. Saved files cannot establish independence
+or certify the identity of an external model or verifier. Categorical weights and
+historical observations from the broader method are outside this binary option.
+
+---
+
 ## Custom Metrics
 
 Override these hooks on your resources server to add custom metrics.
