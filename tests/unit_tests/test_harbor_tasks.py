@@ -727,12 +727,31 @@ class TestDiscovery:
     def test_single_task_folder(self, tmp_path):
         assert [t.task_id for t in discover_tasks(write_task(tmp_path / "solo"))] == ["solo"]
 
-    def test_folder_of_task_folders_one_level(self, tmp_path):
+    def test_folder_of_task_folders_is_searched_recursively(self, tmp_path):
         write_task(tmp_path / "ds" / "b")
         write_task(tmp_path / "ds" / "a")
         write_task(tmp_path / "ds" / "nested" / "deep")
+        write_task(tmp_path / "ds" / ".hidden" / "never")
         (tmp_path / "ds" / "README.md").write_text("dataset readme")
-        assert [t.task_id for t in discover_tasks(tmp_path / "ds")] == ["a", "b"]
+        tasks = discover_tasks(tmp_path / "ds")
+        assert [t.task_id for t in tasks] == ["a", "b", "deep"]
+        # A nested task reads the dataset's own files from the root, not from its parent folder.
+        (tmp_path / "ds" / "dataset.toml").write_text("[gym.defaults]\ntimeout_multiplier = 2.0\n")
+        deep = discover_tasks(tmp_path / "ds")[2]
+        assert deep.path == (tmp_path / "ds" / "nested" / "deep").resolve()
+        assert deep.config.agent.timeout_sec == 240.0
+
+    def test_duplicate_task_ids_across_folders_are_rejected(self, tmp_path):
+        from nemo_gym.tasks.harbor.build_plan import plan_builds
+        from nemo_gym.tasks.harbor.image_configs import dockerfile_base_images
+        from nemo_gym.tasks.harbor.task import iter_task_folders
+
+        write_task(tmp_path / "ds" / "a")
+        write_task(tmp_path / "ds" / "nested" / "a")
+        # The folder walk itself rejects them, so every scan keyed by task name fails before doing work.
+        for scan in (discover_tasks, iter_task_folders, plan_builds, dockerfile_base_images):
+            with pytest.raises(HarborTaskError, match="Duplicate Harbor task ID 'a'"):
+                scan(tmp_path / "ds")
 
     def test_empty_folder_is_an_error(self, tmp_path):
         (tmp_path / "empty").mkdir()
@@ -1254,6 +1273,27 @@ class TestCli:
         # A second prepare finds everything recorded and asks the registry for nothing.
         prepare_target(str(folder), output_root=tmp_path / "out")
         assert FakeRegistryClient.resolved == ["ubuntu:24.04", "debian:bookworm-slim"]
+
+    def test_prepare_rejects_duplicate_task_ids_before_registry_or_build_work(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "v1" / "x")
+        write_task(folder / "v2" / "x", dockerfile=TB21_DEBIAN_DOCKERFILE)
+        with pytest.raises(HarborTaskError, match="Duplicate Harbor task ID 'x'"):
+            prepare_target(str(folder), output_root=tmp_path / "out")
+        assert FakeRegistryClient.resolved == []
+        assert not (folder / IMAGE_CONFIGS_FILE).exists()
+
+    def test_prepare_records_compose_images_at_the_dataset_root_for_nested_tasks(self, tmp_path):
+        folder = tmp_path / "ds"
+        web = write_task(folder / "00-services" / "web")
+        (web / "environment" / "docker-compose.yaml").write_text("services:\n  api:\n    image: redis:7-alpine\n")
+        write_task(folder / "zeta")
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out")
+        assert [task.task_id for task in prepared.tasks] == ["web", "zeta"]
+        # Where the loader and the environment server read it from: the dataset root, not the group folder.
+        recorded = json.loads((folder / "compose-images.json").read_text())
+        assert "redis:7-alpine" in recorded
+        assert not (folder / "00-services" / "compose-images.json").exists()
 
     def test_prepare_fails_clearly_when_a_base_image_cannot_be_fetched(self, tmp_path):
         from nemo_gym.tasks.harbor.registry import ImageConfigError
@@ -1868,6 +1908,85 @@ def test_interrupted_fetch_preserves_pins_when_head_moves(tmp_path, registry_rep
     assert pins["b"]["git_commit_id"] == new_head
     assert (folder / "a" / "instruction.md").read_text().startswith("Create a file")
     assert (folder / "b" / "instruction.md").read_text() == "new contents"
+
+
+@pytest.mark.parametrize("name", ["a", "renamed"])
+def test_a_staging_directory_an_interrupted_fetch_left_behind_is_not_a_task(
+    tmp_path, registry_repo, monkeypatch, name
+):
+    """The process died after the pin was published but before the staging directory was cleaned up. The
+    retry reuses the task, and discovery, which walks the dataset folder recursively, must not take the
+    leftover clone for a second copy of the task (the same ID) or for an extra task (another name)."""
+    from nemo_gym.tasks.harbor.task import iter_task_folders
+
+    dataset = registry_dataset(registry_repo, name=name)
+    real_tempfile = hub_module.tempfile
+
+    class LeakedStaging:
+        """A TemporaryDirectory whose process never reached the cleanup."""
+
+        def __init__(self, *, prefix, dir):
+            self.name = real_tempfile.mkdtemp(prefix=prefix, dir=dir)
+
+        def __enter__(self):
+            return self.name
+
+        def __exit__(self, *exc):
+            return None
+
+    publish = hub_module._write_manifest
+
+    def publish_then_die(*args, **kwargs):
+        publish(*args, **kwargs)
+        raise RuntimeError("killed after publishing the pin")
+
+    class StagingTempfile:
+        """`tempfile` as the fetch sees it: everything real, except the staging directory, which leaks."""
+
+        TemporaryDirectory = LeakedStaging
+
+        def __getattr__(self, name):
+            return getattr(real_tempfile, name)
+
+    monkeypatch.setattr(hub_module, "tempfile", StagingTempfile())
+    monkeypatch.setattr(hub_module, "_write_manifest", publish_then_die)
+    with pytest.raises(RuntimeError, match="killed"):
+        fetch_dataset(dataset, tmp_path / "datasets")
+    monkeypatch.undo()
+
+    folder = tmp_path / "datasets" / dataset.folder_name
+    (leftover,) = [path for path in folder.iterdir() if path.is_dir() and path.name != name]
+    assert leftover.name.startswith(".nemo-gym-harbor-")
+    assert (leftover / "repo" / "tasks" / "a" / "task.toml").is_file()
+    manifest = (folder / "manifest.toml").read_text()
+
+    assert fetch_dataset(dataset, tmp_path / "datasets") == folder
+
+    # The published task was reused as it is, and the leftover is neither a duplicate nor an extra task.
+    assert (folder / "manifest.toml").read_text() == manifest and leftover.is_dir()
+    assert iter_task_folders(folder) == [folder / name]
+    assert [task.task_id for task in discover_tasks(folder)] == [name]
+
+
+def test_a_legacy_unhidden_staging_directory_is_refused_as_a_duplicate_task(tmp_path):
+    """Older fetches staged clones under visible `nemo-gym-harbor-*` names, which recursive discovery enters.
+
+    When the source folder and registry alias share a name, as here, the leftover causes a duplicate task ID.
+    Renamed sources have distinct IDs and can instead become extra tasks. The prefix is not special-cased
+    (a user folder may start that way); the README says to remove known staging leftovers before preparing
+    an existing dataset after upgrading.
+    """
+    from nemo_gym.tasks.harbor.task import iter_task_folders
+
+    dataset = tmp_path / "datasets" / "ds"
+    write_task(dataset / "a")
+    write_task(dataset / "nemo-gym-harbor-k3x9q" / "repo" / "tasks" / "a")
+    with pytest.raises(HarborTaskError, match=r"Duplicate Harbor task ID 'a'") as excinfo:
+        iter_task_folders(dataset)
+    assert "nemo-gym-harbor-k3x9q" in str(excinfo.value)
+    # Prepare uses the same walk, so the matching-name leftover also stops task discovery there.
+    with pytest.raises(HarborTaskError, match=r"Duplicate Harbor task ID 'a'"):
+        discover_tasks(dataset)
 
 
 def test_existing_unpinned_task_is_never_relabeled(tmp_path, registry_repo):
@@ -2671,3 +2790,120 @@ def test_eval_run_resume_reports_a_config_error_cleanly(tmp_path, monkeypatch, c
     assert exc.value.code == 1 and len(dispatched) == 1
     out = capsys.readouterr().out
     assert "Error:" in out and "policy_model_name" in out and "Provide it via a CLI override" in out
+
+
+class TestDatasetTaskAdditions:
+    """`[gym.tasks."<id>"]` gains `verifier` overrides and `artifacts` additions, applied like `environment`."""
+
+    def test_verifier_fields_override_and_env_merges(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "a", toml=HELLO_TOML + '\n[verifier.env]\nMODE = "fast"\nKEEP = "1"\n')
+        (folder / "dataset.toml").write_text(
+            '[gym.tasks."a".verifier]\ntimeout_sec = 900.0\nuser = "root"\n'
+            '[gym.tasks."a".verifier.env]\nMODE = "strict"\nJUDGE = "${JUDGE_KEY}"\n'
+        )
+        verifier = load_task(folder / "a").config.verifier
+        assert verifier.timeout_sec == 900.0 and verifier.user == "root"
+        assert verifier.env == {"MODE": "strict", "KEEP": "1", "JUDGE": "${JUDGE_KEY}"}
+        # The task's own file is untouched and the digest, which covers it, is unchanged by dataset.toml.
+        assert "900" not in (folder / "a" / "task.toml").read_text()
+
+    def test_verifier_environment_override_merges_env_like_the_agents(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(
+            folder / "a",
+            toml=HELLO_TOML + '\n[verifier.environment]\ndocker_image = "org/verifier:1"\nenv = { A = "1" }\n',
+        )
+        (folder / "dataset.toml").write_text('[gym.tasks."a".verifier.environment]\ncpus = 4\nenv = { B = "2" }\n')
+        environment = load_task(folder / "a").config.verifier.environment
+        assert environment.docker_image == "org/verifier:1" and environment.cpus == 4
+        assert environment.env == {"A": "1", "B": "2"}
+
+    def test_artifacts_are_added_after_the_tasks_own(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "a", toml=HELLO_TOML.replace("[task]\n", 'artifacts = ["/app/out.txt"]\n\n[task]\n', 1))
+        (folder / "dataset.toml").write_text(
+            '[gym.tasks."a"]\nartifacts = ["/var/log/app", { source = "/data/db", service = "db" }]\n'
+        )
+        artifacts = load_task(folder / "a").config.artifacts
+        assert [(a.source, a.service) for a in artifacts] == [
+            ("/app/out.txt", None),
+            ("/var/log/app", None),
+            ("/data/db", "db"),
+        ]
+        # Timeout multipliers still apply on top of the per-task verifier override.
+        (folder / "dataset.toml").write_text(
+            '[gym.defaults]\ntimeout_multiplier = 2.0\n[gym.tasks."a".verifier]\ntimeout_sec = 100.0\n'
+        )
+        assert load_task(folder / "a").config.verifier.timeout_sec == 200.0
+
+    @pytest.mark.parametrize(
+        ("table", "message"),
+        [
+            ('[gym.tasks."a".verifier]\ntimeout = 5\n', r"verifier\] has unknown keys: timeout"),
+            ('[gym.tasks."a".verifier]\ntimeout_sec = -1\n', r"verifier\]:"),
+            ('[gym.tasks."a"]\nartifacts = ["../escape"]\n', r"artifacts\]:"),
+        ],
+    )
+    def test_bad_additions_are_named(self, tmp_path, table, message):
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        (folder / "dataset.toml").write_text(table)
+        with pytest.raises(HarborTaskError, match=message):
+            load_task(folder / "a")
+
+
+def test_taskset_mapping_records_the_relative_path_of_nested_tasks(tmp_path):
+    from nemo_gym.tasks.harbor.materialize import taskset_mapping
+
+    folder = tmp_path / "ds"
+    write_task(folder / "a")
+    write_task(folder / "group" / "sub" / "deep")
+    tasks = discover_tasks(folder)
+    mapping = taskset_mapping(tasks, folder)
+    assert mapping["folder"] == str(folder.resolve())
+    assert set(mapping["tasks"]) == {"a", "deep"}
+    # Only tasks below the first level need a path; the server resolves the others as <folder>/<task_id>.
+    assert mapping["paths"] == {"deep": "group/sub/deep"}
+    assert Path(mapping["folder"]) / mapping["paths"]["deep"] == tasks[1].path
+    # Prepare writes the same mapping into the run config.
+    config = run_config(
+        taskset="ds",
+        folder=folder,
+        tasks=tasks,
+        rows_path=tmp_path / "out" / "tasks.jsonl",
+        agent_instance_name="hermes_agent",
+        agent_impl="hermes_agent",
+    )
+    assert config["harbor_ds_environment"]["environment_servers"]["harbor"]["tasksets"]["ds"]["paths"] == {
+        "deep": "group/sub/deep"
+    }
+
+
+def test_validation_summary_reports_verify_time_and_network_per_task(tmp_path):
+    from nemo_gym.tasks.harbor.validation_report import summarize_validation
+
+    rollouts = tmp_path / "rollouts.jsonl"
+    rows = [
+        {
+            "_ng_task_id": {"taskset": "ds", "task_id": "timed"},
+            "response": {"metadata": {"oracle": "solved"}},
+            "reward": 1.0,
+            "verifier_seconds": 12.345,
+            "verifier_network": "public",
+        },
+        {
+            "_ng_task_id": {"taskset": "ds", "task_id": "masked"},
+            "response": {"metadata": {"oracle": "solved"}},
+            "reward": 0.0,
+            "mask_sample": True,
+            "failure_kind": "provider_unavailable",
+            "verifier_seconds": 3,
+            "verifier_network": "no-network",
+        },
+    ]
+    rollouts.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    lines = summarize_validation(rollouts, []).text.splitlines()
+    assert lines[0] == "task_id\tstatus\treward\tverify_s\tnetwork"
+    assert "timed\toracle solved\t1.0\t12.3\tpublic" in lines
+    assert "masked\tmasked (provider_unavailable)\t-\t3.0\tno-network" in lines

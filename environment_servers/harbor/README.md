@@ -457,9 +457,52 @@ The task's `[agent].timeout_sec` reaches the harness twice: in the agent-session
 for the oracle the resolved `[solution].env` as `env`; the oracle's solve budget is that `agent_timeout_sec`),
 and, until every harness reads the seed, as the materialized `agent_timeout_sec` metadata that Hermes
 honors today, using the smaller of that deadline and its configured runner limit. The verifier uses
-`[verifier].timeout_sec`. Sandbox lifetime covers the episode budget (`default_episode_timeout_seconds`),
-the final cleanup budget (`cleanup_timeout_seconds`) and `sandbox_ttl_slack_s`, so setup and queued agent
-work also fit; both budgets must be finite. Sandboxes are normally stopped as soon as the episode ends.
+`[verifier].timeout_sec`.
+
+Every episode runs under its task's own time budget (`enforce_task_timeouts: true`). The deadline starts
+when the sandbox is ready, after the image pull, its retries and the overlay, and covers
+`harness_setup_allowance_s`, `[agent].timeout_sec`, `[verifier].timeout_sec` and `verifier_grace_s`, with a
+second sandbox start for a separate verifier; the seed has its own bounds (`sandbox_ready_timeout_s` per
+start, `image_pull_retries`) and is never charged against it. An episode that overruns it fails with
+`failure_kind: harbor:task_deadline` (retryable), naming the stage it was in. The whole task budget (one
+sandbox start, plus `[environment].build_timeout_sec` for an overlay, plus the deadline) never exceeds
+`default_episode_timeout_seconds`, which stays the run-wide cap. Sandbox lifetime covers that budget, the
+final cleanup budget (`cleanup_timeout_seconds`) and `sandbox_ttl_slack_s`, so setup and queued agent work
+also fit; both budgets must be finite. Set `++<instance>.environment_servers.harbor.enforce_task_timeouts=false`
+to run with the run-wide deadline alone. Sandboxes are normally stopped as soon as the episode ends.
+
+Before `test.sh` runs, in either mode, the server writes the agent transcript to `/logs/agent/trajectory.json`
+in ATIF v1.7 (the version Harbor 0.22 and 0.23 read), exported from the Gym transcript by
+`nemo_gym.atif_export.transcript_to_atif`. Harnesses that feed terminal output back as user turns (Terminus)
+export with those turns as the previous step's observation. Shapes a model causes still export and are
+graded: a turn cut off inside its reasoning (a reasoning item no answer follows) becomes an agent step with
+an empty message and `extra.nemo_gym.incomplete: max_output_tokens`, several reasoning segments join with
+newlines, empty or encrypted reasoning exports without `reasoning_content`, tool arguments that are not
+a JSON object become `{}` with the original string under the call's `extra.nemo_gym.raw_arguments`, and a
+refusal part exports as the step's text, flagged `extra.nemo_gym.refusal` with reason `refusal` (Harbor's
+Terminus records an empty step there and grades on; the text is kept here); the trajectory then says
+`conversion.status: partial` with the `reasons`. A transcript the exporter cannot
+represent at all (a copied assistant turn, a later system turn, a tool result for no call or a second
+`function_call_output` for the same `call_id`, item types ATIF has no place for) masks the sample with
+`failure_kind: harbor:trajectory_export_failed`, so a converter defect can never appear as a reward; a copy
+of the file sits in the verification's log directory.
+
+Operator secrets (judge API keys and the like) go in the server's `secrets` block, by environment variable
+name. They fill `${NAME}` templates in a task's `[verifier].env`, which is the whole `test.sh` process
+environment, and reach nothing else: a secret no template names is passed nowhere (Harbor's verifier
+resolves its env the same way), and a `${NAME}` template in `[environment].env` or
+`[verifier.environment].env` still resolves from the server's own environment only. Secrets never enter a
+task folder or a row.
+
+A sandbox start that fails on an image pull (the agent's sandbox, a Compose group or a separate verifier's
+sandbox) is retried `image_pull_retries` times in the server, with jittered backoff and behind a per-server
+gate, before the failure is reported as retryable. A slow
+agent-session close that fails only by timeout no longer discards the finished turn: the episode is
+verified and scored with `ng_agent_observations` unset.
+
+`separate_verifier_for_artifacts: true` verifies every task that declares `artifacts` in a fresh sandbox even
+when its `task.toml` keeps Harbor's shared mode, so an agent running as root cannot tamper with the grader.
+Tasks without artifacts keep their declared mode.
 
 Resource settings come from the task. `sandbox_resources_override`, `gpu_sandbox_provider`,
 `request_gpu_type` and `verifier_grace_s` belong to later stack layers and are not configuration options
@@ -496,8 +539,17 @@ registry's current copy.
 datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `./datasets`). `harbor:<org>/<name>[@<tag> | @sha256:<digest>]`
 fetches a package-store dataset instead (for example `harbor:terminal-bench/terminal-bench@4.0.0`): every task
 package is downloaded by content hash into `<name>/` (`latest`), `<name>-<tag>/` or `<name>-<12 digest chars>/` (a digest pin), checked against the content hash Harbor published for it and recorded in
-`manifest.toml`, which pins the package and the version the fetch resolved so a later fetch never mixes another package or a moved `latest` into the folder. A local task folder, or a folder of task folders, works the same way. The generated run config declares the materialized rows as the agent's
-validation dataset and binds the per-taskset environment server to that agent. Running model episodes
+`manifest.toml`, which pins the package and the version the fetch resolved so a later fetch never mixes another package or a moved `latest` into the folder. A local task folder, or a folder of task folders, works the same way; task folders may be
+grouped in subfolders (the search is recursive, `task_id` stays the task folder's own name and must be unique
+across the dataset, and `dataset.toml` and the recorded image configurations sit at the dataset root). The
+taskset mapping records the relative path of a task found below the first level under `paths`. The fetch stages its clone in a hidden
+`.nemo-gym-harbor-*` directory inside the dataset folder, which the search skips. Before preparing an existing
+dataset after upgrading, remove any known `nemo-gym-harbor-*` staging directories left by interrupted fetches
+from older Gym builds. These visible clones can cause duplicate task IDs or become extra tasks when source-folder
+names differ from registry aliases. An old manifest that records only upstream pins does not prevent the
+extra-task case. The generated run config declares the materialized rows as the agent's
+validation dataset and binds the per-taskset environment server to that agent. `gym dataset validate` reports,
+per task, the verifier's wall time (`verify_s`) and the network it ran under (`network`). Running model episodes
 requires a harness that accepts `sandbox_access` in its session seed and leaves the sandbox to the server
 when its session is closed.
 
@@ -607,7 +659,7 @@ deployment wants the same value; a unit test pins that list.
 | Home | File | Owner | Holds |
 |---|---|---|---|
 | Task | `task.toml` | task author | image, resources, timeouts, env, verifier, agent user (read-only once fetched) |
-| Dataset | `dataset.toml`, `[gym]` table | dataset author | `[gym.defaults]` `timeout_multiplier`, `resource_multiplier`; `[gym.tasks."<id>".environment]` overrides in Harbor's own fields (`env` merges) |
+| Dataset | `dataset.toml`, `[gym]` table | dataset author | `[gym.defaults]` `timeout_multiplier`, `resource_multiplier`; `[gym.tasks."<id>"]` `environment` and `verifier` overrides in Harbor's own fields (`env` merges, other fields replace) and `artifacts` additions appended to the task's own |
 | Deployment | the `sandbox:` provider block | operator | image rewrites and registry credentials (`images`), root setup commands (`setup`), networking, shared-memory labels |
 | Run | run config | the run | provider selection, GPU routing, repeats, output paths, `sandbox_resources_override` for parity runs |
 

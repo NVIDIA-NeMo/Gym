@@ -26,6 +26,10 @@ from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.tasks.harbor import load_task
 
 
+# What run() hands the verifier: the exported ATIF transcript, written to /logs/agent before test.sh runs.
+TRAJECTORY = b'{"schema_version": "ATIF-v1.7"}\n'
+
+
 class LocalSandbox:
     """Run production transfer and verifier commands on a pytest-owned filesystem tree."""
 
@@ -91,7 +95,7 @@ async def test_linked_verifier_roots_cannot_preserve_planted_success(tmp_path, m
         f"> {shlex.quote(str(logs / 'verifier' / 'reward.txt'))}\n"
     )
     outcome = await server._run_verifier(
-        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None)
+        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None), TRAJECTORY
     )
     assert outcome["reward"] == 0
     assert not outcome.get("mask_sample", False)
@@ -99,6 +103,141 @@ async def test_linked_verifier_roots_cannot_preserve_planted_success(tmp_path, m
     assert not (tests / "helper.sh").exists()
     assert (planted / "reward.json").read_text() == '{"reward": 1}'
     await server.shutdown()
+
+
+async def separate_verification(tmp_path, monkeypatch, verifier_tree, artifacts: list[str]) -> dict:
+    """One separate-mode verification on the pytest-owned tree, with real shell and tar on both sides.
+
+    The agent's sandbox and the fresh verifier sandbox are the same host tree: every artifact is collected
+    from it, stopping the agent's sandbox empties the tree (the verifier starts fresh, as its own sandbox
+    would), and the restores bring back what the agent left, planted files included, the way they would into
+    a real verifier sandbox. ``artifacts`` are host paths under the tree; the trusted ``test.sh`` writes reward 0.
+    """
+    root, logs, tests = verifier_tree
+
+    class AgentSandbox(LocalSandbox):
+        async def stop(self):
+            for child in root.iterdir():
+                shutil.rmtree(child) if child.is_dir() and not child.is_symlink() else child.unlink()
+
+    monkeypatch.setattr(verifier, "ARTIFACTS_DIR", str(logs / "artifacts"))
+    entries = ", ".join(f'"{source}"' for source in artifacts)
+    toml = (
+        'schema_version = "1.4"\n\n'
+        f"artifacts = [{entries}]\n\n"
+        '[verifier]\ntimeout_sec = 300.0\nenvironment_mode = "separate"\n\n'
+        '[verifier.environment]\ndocker_image = "org/verifier:1"\n\n'
+        "[agent]\ntimeout_sec = 120.0\n\n"
+        '[environment]\ndocker_image = "org/agent:1"\n'
+    )
+    server, task, _, _ = make_server(tmp_path, monkeypatch, toml=toml)
+    (task.path / "tests" / "test.sh").write_text(
+        f"#!/bin/bash\necho 0 > {shlex.quote(str(logs / 'verifier' / 'reward.txt'))}\n"
+    )
+    agent = AgentSandbox()
+
+    async def create_verifier(task, *, episode_key=None):
+        return LocalSandbox()
+
+    async def nothing():
+        return None
+
+    monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+    session = SimpleNamespace(
+        task=task,
+        sandbox=agent,
+        workdir=str(root),
+        entrypoint=None,
+        session_id="r1",
+        service=lambda name: agent,
+        stop_main=agent.stop,
+        stop_agent_side=nothing,
+    )
+    outcome = await server._run_verifier(session, TRAJECTORY)
+    await server.shutdown()
+    return outcome
+
+
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
+@pytest.mark.parametrize("leading", ["/", "//"], ids=["logs", "double_slash_logs"])
+async def test_a_restored_artifact_over_the_logs_cannot_replace_the_graders_reward(
+    tmp_path, monkeypatch, verifier_tree, leading
+):
+    """The reviewer's case: ``artifacts = ["/logs"]`` is valid and brought the agent's ``/logs/verifier/reward.json``
+    into the fresh verifier sandbox right before ``test.sh`` ran, and its reward of 1 beat the ``reward.txt`` of 0
+    that the trusted tests wrote, unmasked. The restore still brings the agent's folders back (Harbor restores
+    ``/logs`` whole), but ``/logs/verifier`` is emptied again after it, so the grader's result is the only one.
+    Spelled ``//logs`` the entry names the same directory and is held to the same rule."""
+    root, logs, tests = verifier_tree
+    for folder in ("verifier", "agent", "artifacts"):
+        (logs / folder).mkdir(parents=True)
+    (logs / "verifier" / "reward.json").write_text('{"reward": 1}')
+    (logs / "agent" / "agent.log").write_text("agent output")
+    (logs / "artifacts" / "state.db").write_text("db")
+
+    outcome = await separate_verification(tmp_path, monkeypatch, verifier_tree, [leading + str(logs).lstrip("/")])
+
+    assert outcome["reward"] == 0 and not outcome.get("mask_sample", False), outcome
+    assert "failure_kind" not in outcome and outcome["verifier_mode"] == "separate"
+    assert not (logs / "verifier" / "reward.json").exists()
+    assert (logs / "verifier" / "reward.txt").read_text().strip() == "0"
+    # The agent's other folders came back with the restore, and the transcript was written after it.
+    assert (logs / "agent" / "agent.log").read_text() == "agent output"
+    assert (logs / "artifacts" / "state.db").read_text() == "db"
+    assert (logs / "agent" / "trajectory.json").read_bytes() == TRAJECTORY
+    # The planted file was collected, as the host diagnostic every artifact leaves, under /logs's own staging root.
+    staged = Path(outcome["verifier_logs_dir"]) / "artifacts" / "01" / str(logs).lstrip("/")
+    assert (staged / "verifier" / "reward.json").read_text() == '{"reward": 1}'
+
+
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
+@pytest.mark.parametrize(
+    "shape", ["tests", "double_slash_tests", "verifier_dir", "verifier_file", "file_through_link", "dir_through_link"]
+)
+async def test_an_artifact_that_reaches_the_tests_or_the_verifier_outputs_is_collected_but_never_restored(
+    tmp_path, monkeypatch, verifier_tree, caplog, shape
+):
+    """An artifact at ``/tests`` would replace the trusted test script, one at or inside ``/logs/verifier`` would
+    plant a reward, and one whose path runs through a link an earlier artifact restored (``/app/out -> /tests``)
+    would do the first by another name. Each is collected on the host and refused at the restore with a warning,
+    the trusted ``test.sh`` runs as uploaded and the sample is scored on what it wrote."""
+    root, logs, tests = verifier_tree
+    rigged = f"#!/bin/bash\necho 1 > {shlex.quote(str(logs / 'verifier' / 'reward.txt'))}\n"
+    if shape in ("tests", "double_slash_tests", "file_through_link", "dir_through_link"):
+        tests.mkdir()
+        (tests / "test.sh").write_text(rigged)
+    else:
+        (logs / "verifier").mkdir(parents=True)
+        (logs / "verifier" / "reward.json").write_text('{"reward": 1}')
+    if shape.endswith("through_link"):
+        (root / "app").mkdir()
+        (root / "app" / "out").symlink_to(tests, target_is_directory=True)
+    artifacts = {
+        "tests": [str(tests)],
+        "double_slash_tests": ["/" + str(tests)],
+        "verifier_dir": [str(logs / "verifier")],
+        "verifier_file": [str(logs / "verifier" / "reward.json")],
+        "file_through_link": [str(root / "app"), str(root / "app" / "out" / "test.sh")],
+        "dir_through_link": [str(root / "app"), str(root / "app" / "out")],
+    }[shape]
+
+    with caplog.at_level("WARNING"):
+        outcome = await separate_verification(tmp_path, monkeypatch, verifier_tree, artifacts)
+
+    assert outcome["reward"] == 0 and not outcome.get("mask_sample", False), outcome
+    assert "failure_kind" not in outcome
+    assert f"artifact {'/' + artifacts[-1].lstrip('/')!r} not restored" in caplog.text
+    assert (tests / "test.sh").read_text().startswith("#!/bin/bash\necho 0 > ")
+    assert not (logs / "verifier" / "reward.json").exists()
+    if shape.endswith("through_link"):
+        # The first artifact was restored, link and all; only the one that ran through the link was refused.
+        assert (root / "app" / "out").is_symlink() and f"artifact {artifacts[0]!r} not restored" not in caplog.text
+        assert "physically is" in caplog.text
+    else:
+        assert "would replace the grader's" in caplog.text
+    # Every artifact was collected: the refused one is on the host under its own staging root.
+    staged = Path(outcome["verifier_logs_dir"]) / "artifacts" / f"{len(artifacts):02d}" / artifacts[-1].lstrip("/")
+    assert staged.is_file() if shape in ("verifier_file", "file_through_link") else staged.is_dir()
 
 
 @pytest.mark.parametrize("literal", ["9" * 400, "NaN"], ids=["overflow", "nan"])
@@ -124,7 +263,7 @@ async def test_unsafe_diagnostic_link_does_not_mask_valid_reward(tmp_path, monke
         "echo useful-output\n"
     )
     outcome = await server._run_verifier(
-        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None)
+        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None), TRAJECTORY
     )
     assert outcome["reward"] == 1 and not outcome.get("mask_sample", False)
     artifacts = Path(outcome["verifier_logs_dir"])
@@ -161,7 +300,9 @@ async def test_optional_diagnostic_transfer_failure_preserves_score(tmp_path, mo
         await download(source, target)
 
     monkeypatch.setattr(sandbox, "download", fail_diagnostics)
-    outcome = await server._run_verifier(SimpleNamespace(task=task, sandbox=sandbox, workdir="/app", entrypoint=None))
+    outcome = await server._run_verifier(
+        SimpleNamespace(task=task, sandbox=sandbox, workdir="/app", entrypoint=None), TRAJECTORY
+    )
     assert calls == 2
     assert outcome["reward"] == 1 and not outcome.get("mask_sample", False)
     await server.shutdown()
@@ -177,7 +318,7 @@ async def test_unsafe_reward_link_still_masks_transfer_failure(tmp_path, monkeyp
         f"ln -s {shlex.quote(str(outside))} {shlex.quote(str(logs / 'verifier/reward.txt'))}\n"
     )
     outcome = await server._run_verifier(
-        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None)
+        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None), TRAJECTORY
     )
     assert outcome["reward"] == 0 and outcome["mask_sample"] is True
     assert not list(server._artifacts_dir.rglob("reward.txt"))
@@ -250,7 +391,7 @@ async def test_verifier_logs_preserve_directory_permissions_after_transfers(
         expected = server._artifacts_dir / "ordinary-directory"
         expected.mkdir()
         outcome = await server._run_verifier(
-            SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None)
+            SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None), TRAJECTORY
         )
     finally:
         os.umask(previous_umask)
@@ -308,7 +449,7 @@ async def test_test_sh_alone_is_made_executable_as_root_and_the_package_modes_st
     previous_umask = os.umask(0o077)
     try:
         outcome = await server._run_verifier(
-            SimpleNamespace(task=task, sandbox=sandbox, workdir=str(root), entrypoint=None)
+            SimpleNamespace(task=task, sandbox=sandbox, workdir=str(root), entrypoint=None), TRAJECTORY
         )
     finally:
         os.umask(previous_umask)
