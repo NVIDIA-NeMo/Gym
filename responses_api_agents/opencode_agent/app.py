@@ -15,7 +15,6 @@
 
 import asyncio
 import copy
-import hashlib
 import json
 import logging
 import math
@@ -189,21 +188,6 @@ def _is_sandbox_path(path: object) -> bool:
     )
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as binary:
-        for chunk in iter(lambda: binary.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _file_version(path: Path) -> tuple[str, int, int, int]:
-    """A host file's resolved path, inode, size and modification time: while they match, its digest is reused."""
-    resolved = os.path.realpath(path)
-    stat = os.stat(resolved)
-    return resolved, stat.st_ino, stat.st_size, stat.st_mtime_ns
-
-
 # Exit status of the runner's setup modes and the plugin check when an owner-supplied input is unusable (pinned
 # bytes failing their SHA-256 or health check, an export OpenCode cannot import): a retry cannot succeed.
 _INPUT_REJECTED = 3
@@ -219,8 +203,6 @@ _CHECK_EXPORT_DIR = (
     "assert workdir != export_dir and workdir not in export_dir.parents and export_dir not in workdir.parents, "
     "'OpenCode export_dir overlaps the task workdir'"
 )
-# Host uploads of pinned files in flight per worker: providers may hold a whole file in memory.
-_EXECUTABLE_UPLOAD_SLOTS = 4
 
 
 # OpenCode 1.17.11's built-in agents. Each sets its own sampling (``title`` fixes temperature 0.5) and none inherits
@@ -266,15 +248,10 @@ _IMPORTED_SESSION = TypeAdapter(_ImportedSession | None)
 
 @dataclass(frozen=True, kw_only=True)
 class _PinnedFile:
-    """A file the sandbox must use byte for byte: already inside it, or a checked host file to upload."""
+    """A file inside the sandbox that the session must use byte for byte."""
 
     digest: str
-    sandbox_path: str | None = None
-    local_path: Path | None = None
-
-    def cleanup(self, source: str) -> str:
-        """Shell suffix that drops an uploaded copy once it is installed; owner files are never removed."""
-        return f" && rm -f -- {quote(source)}" if self.local_path is not None else ""
+    sandbox_path: str
 
 
 class _ActivationDeadlineExpired(Exception):
@@ -322,13 +299,10 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     plugins: list[str] = Field(default_factory=list)
     # Sandbox sessions only. Offline runtime bundle beside the binary, each pinned the same way: an rg for OpenCode's
     # grep/glob tools, and a tar archive of the plugin dependencies OpenCode otherwise installs at every start.
-    # Either file is one already inside the sandbox or one on this host to upload, and requires its SHA-256, which
-    # is checked inside the sandbox.
+    # Either is a file already inside the sandbox and requires its SHA-256, which is checked there.
     sandbox_ripgrep_path: str | None = None
-    sandbox_local_ripgrep_path: str | None = None
     sandbox_ripgrep_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     sandbox_plugin_dependencies_path: str | None = None
-    sandbox_local_plugin_dependencies_path: str | None = None
     sandbox_plugin_dependencies_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     # Sandbox sessions only. Absolute sandbox directory, outside the task workdir, where each activation's capture
     # also writes `opencode export` of every OpenCode session and the event log, for the sandbox owner to read after
@@ -401,10 +375,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
     calls_model_from_sandbox: ClassVar[bool] = True
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
-    _executable_uploads: Semaphore = PrivateAttr(default_factory=lambda: Semaphore(_EXECUTABLE_UPLOAD_SLOTS))
-    # SHA-256 of host-pinned files by _file_version, so seeds do not hash the same bytes again.
-    _host_digests: dict[tuple[str, int, int, int], str] = PrivateAttr(default_factory=dict)
-    _host_digest_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -866,8 +836,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
         if self.config.session_import_path is not None and not _is_sandbox_path(self.config.session_import_path):
             raise AgentSeedRejectedError("OpenCode session_import_path must be an absolute, normalized sandbox path")
-        ripgrep = await self._pinned_file("ripgrep")
-        plugin_dependencies = await self._pinned_file("plugin_dependencies")
+        ripgrep = self._pinned_file("ripgrep")
+        plugin_dependencies = self._pinned_file("plugin_dependencies")
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
             sandbox = AsyncSandbox(provider)
@@ -946,7 +916,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     state,
                     ripgrep,
                     mode="--stage-executable",
-                    upload_name="ripgrep-executable",
                     target=f"{state.persistent_directory}/cache/opencode/bin/rg",
                     what="ripgrep executable",
                 )
@@ -957,7 +926,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     state,
                     plugin_dependencies,
                     mode="--stage-archive",
-                    upload_name="plugin-dependencies.tar",
                     target=f"{state.persistent_directory}/config/opencode",
                     what="plugin dependency archive",
                 )
@@ -978,69 +946,27 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise
         return state
 
-    async def _pinned_file(self, kind: str) -> _PinnedFile | None:
-        """Validate ``sandbox_<kind>_path``, ``sandbox_local_<kind>_path`` and ``sandbox_<kind>_sha256``.
-
-        Runs before any sandbox is touched. A host file is hashed here, and its uploaded copy again in the sandbox.
-        """
-        path_field, local_field, digest_field = (
-            f"sandbox_{kind}_path",
-            f"sandbox_local_{kind}_path",
-            f"sandbox_{kind}_sha256",
-        )
-        path, local, digest = (getattr(self.config, name) for name in (path_field, local_field, digest_field))
-        if path and local:
-            raise AgentSeedRejectedError(f"Choose either {path_field} or {local_field}")
-        if not (path or local):
+    def _pinned_file(self, kind: str) -> _PinnedFile | None:
+        """Validate ``sandbox_<kind>_path`` and ``sandbox_<kind>_sha256`` before any sandbox is touched."""
+        path_field, digest_field = f"sandbox_{kind}_path", f"sandbox_{kind}_sha256"
+        path, digest = getattr(self.config, path_field), getattr(self.config, digest_field)
+        if not path:
             if digest:
-                raise AgentSeedRejectedError(f"{digest_field} pins a supplied file; set {path_field} or {local_field}")
+                raise AgentSeedRejectedError(f"{digest_field} pins a supplied file; set {path_field}")
             return None
         if not digest:
             raise AgentSeedRejectedError(f"A supplied file requires {digest_field}")
-        digest = digest.lower()
-        if path:
-            if not _is_sandbox_path(path):
-                raise AgentSeedRejectedError(f"{path_field} must be an absolute, normalized sandbox path")
-            return _PinnedFile(digest=digest, sandbox_path=path)
-        local_path = Path(local).expanduser()
-        try:
-            found = await self._host_sha256(local_path)
-        except OSError as error:
-            raise AgentSeedRejectedError(f"Cannot read {local_field}: {error}") from error
-        if found != digest:
-            raise AgentSeedRejectedError(f"{local_field} SHA-256 mismatch: expected {digest}, found {found}")
-        return _PinnedFile(digest=digest, local_path=local_path)
-
-    async def _host_sha256(self, path: Path) -> str:
-        """SHA-256 of a host file, hashed once per version of it (``_file_version``); seeds share that hash.
-
-        The uploaded copy is hashed again inside the sandbox, which stays authoritative, so a change that keeps
-        the path, inode, size and modification time is still caught there.
-        """
-        version = await asyncio.to_thread(_file_version, path)
-        async with self._host_digest_lock:
-            if version not in self._host_digests:
-                self._host_digests[version] = await asyncio.to_thread(_sha256_file, Path(version[0]))
-            return self._host_digests[version]
-
-    async def _pinned_source(self, sandbox: AsyncSandbox, pin: _PinnedFile, upload_path: str) -> str:
-        """The in-sandbox file to install from: the configured path, or the host file uploaded to ``upload_path``."""
-        if pin.local_path is None:
-            return pin.sandbox_path
-        async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
-            async with self._executable_uploads:
-                await sandbox.upload(pin.local_path, upload_path)
-        return upload_path
+        if not _is_sandbox_path(path):
+            raise AgentSeedRejectedError(f"{path_field} must be an absolute, normalized sandbox path")
+        return _PinnedFile(digest=digest.lower(), sandbox_path=path)
 
     async def _stage_pinned_file(
-        self, state: OpenCodeSandboxSession, pin: _PinnedFile, *, mode: str, upload_name: str, target: str, what: str
+        self, state: OpenCodeSandboxSession, pin: _PinnedFile, *, mode: str, target: str, what: str
     ) -> None:
         """Copy a pinned file into session storage through the runner, which checks the copy's SHA-256 first."""
-        directory = state.session.session_dir
-        source = await self._pinned_source(state.session.sandbox, pin, f"{directory}/{upload_name}")
         command = (
-            f"python3 -I {quote(directory + '/sandbox_runner.py')} {mode} "
-            f"{quote(source)} {pin.digest} {quote(target)}" + pin.cleanup(source)
+            f"python3 -I {quote(state.session.session_dir + '/sandbox_runner.py')} {mode} "
+            f"{quote(pin.sandbox_path)} {pin.digest} {quote(target)}"
         )
         result = await state.session.sandbox.exec(
             command, cwd="/", timeout_s=self.config.sandbox_install_timeout_seconds

@@ -262,20 +262,17 @@ The OpenCode binary is pinned with `sandbox_executable_path` and
 [Offline sandbox runtimes and native model identity](#offline-sandbox-runtimes-and-native-model-identity));
 a binary that fails its checks is a retryable setup error. ripgrep and the plugin
 dependencies, which OpenCode would otherwise download at runtime, are pinned alike: an
-existing file inside the sandbox (`sandbox_<item>_path`, for example on a mounted cache)
-or a file on the Gym host that seed uploads (`sandbox_local_<item>_path`), plus
-`sandbox_<item>_sha256`, which is required with either and is the only way to set one.
-A host file is hashed before any sandbox is touched; inside the sandbox the adapter
-copies the file, hashes the copy and uses only those bytes. A digest or health-check
-mismatch fails seed with 422. A missing in-sandbox file, or a health check that times
-out or is ended by a signal (such as the OOM killer's), is a retryable setup error. At
-most four host uploads run at once per worker, and uploaded copies are deleted once
-installed.
+existing file inside the sandbox (`sandbox_<item>_path`, for example on a mounted cache or
+staged by the sandbox owner), plus `sandbox_<item>_sha256`, which is required with the
+path and is the only way to set one. The adapter copies the file, hashes the copy and
+uses only those bytes. A digest or health-check mismatch fails seed with 422. A missing
+file, or a health check that times out or is ended by a signal (such as the OOM
+killer's), is a retryable setup error.
 
 | Item | Fields | Where it goes | How to build it |
 | --- | --- | --- | --- |
-| ripgrep | `sandbox_ripgrep_path`, `sandbox_local_ripgrep_path`, `sandbox_ripgrep_sha256` | `XDG_CACHE_HOME/opencode/bin/rg` in the session's private directories, where OpenCode 1.17.11 looks after `PATH`; it stays off task shells' `PATH`. Must answer `--version`. Replaces the installer's best-effort package install | ripgrep 15.1.0, which OpenCode 1.17.11 would download (`ripgrep-15.1.0-<arch>-unknown-linux-musl`) |
-| Plugin dependencies | `sandbox_plugin_dependencies_path`, `sandbox_local_plugin_dependencies_path`, `sandbox_plugin_dependencies_sha256` | Unpacked into `XDG_CONFIG_HOME/opencode` before launch. Members must be files, folders or links that stay inside it. Where the sandbox's Python lacks tarfile's `data` filter (PEP 706), no member path or link target may pass through a link either; npm's `node_modules/.bin` links pass | See below |
+| ripgrep | `sandbox_ripgrep_path`, `sandbox_ripgrep_sha256` | `XDG_CACHE_HOME/opencode/bin/rg` in the session's private directories, where OpenCode 1.17.11 looks after `PATH`; it stays off task shells' `PATH`. Must answer `--version`. Replaces the installer's best-effort package install | ripgrep 15.1.0, which OpenCode 1.17.11 would download (`ripgrep-15.1.0-<arch>-unknown-linux-musl`) |
+| Plugin dependencies | `sandbox_plugin_dependencies_path`, `sandbox_plugin_dependencies_sha256` | Unpacked into `XDG_CONFIG_HOME/opencode` before launch. Members must be files, folders or links that stay inside it. Where the sandbox's Python lacks tarfile's `data` filter (PEP 706), no member path or link target may pass through a link either; npm's `node_modules/.bin` links pass | See below |
 
 With any plugin configured (the adapter always configures `task_environment.mjs`),
 OpenCode 1.17.11 installs `@opencode-ai/plugin` into its config directory at every start

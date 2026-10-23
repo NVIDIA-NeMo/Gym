@@ -3,7 +3,6 @@
 """Owner-staged plugins, pinned binaries and owner exports are opt-in; unset, sessions are unchanged."""
 
 import asyncio
-import hashlib
 import json
 import shlex
 import shutil
@@ -15,7 +14,7 @@ from time import monotonic
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException, Request
+from fastapi import Request
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -24,7 +23,6 @@ from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSee
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
-from responses_api_agents.opencode_agent import app as opencode_app
 from responses_api_agents.opencode_agent import sandbox_runner
 from responses_api_agents.opencode_agent.app import _CHECK_EXPORT_DIR, _CHECK_PLUGIN_FILES, OpenCodeAgentConfig
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
@@ -604,18 +602,10 @@ def test_local_config_drops_null_tools(setup):
     assert "tools" not in agent._build_opencode_config()
 
 
-@pytest.mark.parametrize("where", ["sandbox", "host"])
-async def test_pinned_ripgrep_is_staged_where_opencode_looks_and_replaces_the_package_install(setup, tmp_path, where):
+async def test_pinned_ripgrep_is_staged_where_opencode_looks_and_replaces_the_package_install(setup):
     agent, sandbox = setup
-    if where == "host":
-        binary = tmp_path / "rg"
-        binary.write_text("#!/bin/sh\necho ripgrep 15.1.0\n")
-        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
-        agent.config.sandbox_local_ripgrep_path = str(binary)
-    else:
-        digest = PIN
-        agent.config.sandbox_ripgrep_path = "/mnt/cache/rg"
-    agent.config.sandbox_ripgrep_sha256 = digest
+    agent.config.sandbox_ripgrep_path = "/mnt/cache/rg"
+    agent.config.sandbox_ripgrep_sha256 = PIN
     events = record(sandbox)
     response, _ = await episode(agent, sandbox)
     assert response.status == "completed"
@@ -624,49 +614,34 @@ async def test_pinned_ripgrep_is_staged_where_opencode_looks_and_replaces_the_pa
     assert install.startswith("NG_OPENCODE_SKIP_RIPGREP=1 bash ")
     stage = index(events, "--stage-executable")
     assert index(events, "install_opencode_runtime.sh") < stage < index(events, "--receipt")
-    staged = f"{directory}/ripgrep-executable" if where == "host" else "/mnt/cache/rg"
-    command, *cleanup = events[stage].split(" && ")
-    assert shlex.split(command) == [
+    assert shlex.split(events[stage]) == [
         "python3",
         "-I",
         f"{directory}/sandbox_runner.py",
         "--stage-executable",
-        staged,
-        digest,
+        "/mnt/cache/rg",
+        PIN,
         f"{directory}/cache/opencode/bin/rg",
     ]
-    assert cleanup == ([f"rm -f -- {staged}"] if where == "host" else [])
-    if where == "host":
-        assert sandbox.files[staged] == binary.read_text()
     payload, _ = launch_config(sandbox)
     assert payload["env"]["XDG_CACHE_HOME"] == f"{directory}/cache"
 
 
-@pytest.mark.parametrize("where", ["sandbox", "host"])
-async def test_pinned_plugin_dependencies_unpack_into_the_private_config_directory(setup, tmp_path, where):
+async def test_pinned_plugin_dependencies_unpack_into_the_private_config_directory(setup):
     agent, sandbox = setup
-    if where == "host":
-        archive = tmp_path / "plugin-dependencies.tar"
-        archive.write_text("archive stand-in")
-        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-        agent.config.sandbox_local_plugin_dependencies_path = str(archive)
-    else:
-        digest = PIN
-        agent.config.sandbox_plugin_dependencies_path = "/mnt/cache/opencode-plugin-dependencies.tar.gz"
-    agent.config.sandbox_plugin_dependencies_sha256 = digest
+    agent.config.sandbox_plugin_dependencies_path = "/mnt/cache/opencode-plugin-dependencies.tar.gz"
+    agent.config.sandbox_plugin_dependencies_sha256 = PIN
     events = record(sandbox)
     response, _ = await episode(agent, sandbox)
     assert response.status == "completed"
     directory = sandbox.directory
-    stage = events[index(events, "--stage-archive")]
-    argv = shlex.split(stage.split(" && ")[0])
+    argv = shlex.split(events[index(events, "--stage-archive")])
     assert argv[3:] == [
         "--stage-archive",
-        f"{directory}/plugin-dependencies.tar" if where == "host" else agent.config.sandbox_plugin_dependencies_path,
-        digest,
+        agent.config.sandbox_plugin_dependencies_path,
+        PIN,
         f"{directory}/config/opencode",
     ]
-    assert stage.endswith(f" && rm -f -- {directory}/plugin-dependencies.tar") is (where == "host")
     payload, _ = launch_config(sandbox)
     assert payload["env"]["XDG_CONFIG_HOME"] == f"{directory}/config"
     # Without a pinned rg the installer keeps its best-effort ripgrep install.
@@ -697,9 +672,7 @@ def test_only_rejected_bundle_bytes_are_a_deterministic_setup_error(setup, kind,
     [
         {"sandbox_ripgrep_path": "/mnt/rg"},
         {"sandbox_ripgrep_sha256": PIN},
-        {"sandbox_ripgrep_path": "/mnt/rg", "sandbox_local_ripgrep_path": "/host/rg", "sandbox_ripgrep_sha256": PIN},
         {"sandbox_plugin_dependencies_path": "deps.tar", "sandbox_plugin_dependencies_sha256": PIN},
-        {"sandbox_local_plugin_dependencies_path": "/host/deps.tar"},
         {"session_import_path": "relative/export.json"},
         {"session_import_path": "/staged/../export.json"},
     ],
@@ -899,41 +872,6 @@ async def test_unset_export_dir_adds_no_prepare_check(setup):
     assert _CHECK_EXPORT_DIR not in shlex.split(prepare)
 
 
-async def test_host_pin_is_hashed_once_per_version_of_the_file(setup, tmp_path, monkeypatch):
-    agent, sandbox = setup
-    binary = tmp_path / "rg"
-    binary.write_text("#!/bin/sh\necho ripgrep 15.1.0\n")
-    agent.config.sandbox_local_ripgrep_path = str(binary)
-    agent.config.sandbox_ripgrep_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
-    hashed = []
-    sha256_file = opencode_app._sha256_file
-
-    def counted(path):
-        hashed.append(path)
-        return sha256_file(path)
-
-    monkeypatch.setattr(opencode_app, "_sha256_file", counted)
-
-    async def seed_once():
-        return await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
-
-    # Concurrent seeds and later ones share one read of the file.
-    await asyncio.wait_for(asyncio.gather(*(seed_once() for _ in range(4))), 10)
-    await seed_once()
-    assert hashed == [binary.resolve()]
-    # A rebuilt file is read again, so its changed bytes are never vouched for by the earlier digest.
-    binary.write_text("#!/bin/sh\necho ripgrep 15.1.0  # rebuilt\n")
-    with pytest.raises(HTTPException) as mismatch:
-        await seed_once()
-    assert mismatch.value.status_code == 422 and "SHA-256 mismatch" in mismatch.value.detail
-    assert hashed == [binary.resolve()] * 2
-    agent.config.sandbox_ripgrep_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
-    await seed_once()
-    assert hashed == [binary.resolve()] * 2
-    uploads = [path for path in sandbox.files if path.endswith("/ripgrep-executable")]
-    assert len(uploads) == 6 and sandbox.files[uploads[-1]] == binary.read_text()
-
-
 def refused(agent, caplog):
     """Seed through the real route, as an Environment Server does; return the refusal, which must be final."""
     body = seed()
@@ -961,13 +899,9 @@ SETTING_REFUSALS = {
         {"session_import_path": "/staged/../export.json"},
         "OpenCode session_import_path must be an absolute, normalized sandbox path",
     ),
-    "two sources": (
-        {"sandbox_ripgrep_path": "/mnt/rg", "sandbox_local_ripgrep_path": "/host/rg", "sandbox_ripgrep_sha256": PIN},
-        "Choose either sandbox_ripgrep_path or sandbox_local_ripgrep_path",
-    ),
     "digest without a file": (
         {"sandbox_ripgrep_sha256": PIN},
-        "sandbox_ripgrep_sha256 pins a supplied file; set sandbox_ripgrep_path or sandbox_local_ripgrep_path",
+        "sandbox_ripgrep_sha256 pins a supplied file; set sandbox_ripgrep_path",
     ),
     "file without a digest": (
         {"sandbox_plugin_dependencies_path": "/mnt/deps.tar"},
@@ -988,23 +922,6 @@ def test_unusable_owner_setting_refuses_the_seed_before_connecting(setup, caplog
     assert refused(agent, caplog) == reason
     sandbox.exec.assert_not_awaited()
     sandbox.disconnect.assert_not_awaited()
-
-
-@pytest.mark.parametrize("problem", ["mismatch", "missing"])
-def test_unusable_host_pin_refuses_the_seed_before_connecting(setup, caplog, tmp_path, problem):
-    agent, sandbox = setup
-    binary = tmp_path / "rg"
-    if problem == "mismatch":
-        binary.write_text("other bytes")
-    agent.config.sandbox_local_ripgrep_path = str(binary)
-    agent.config.sandbox_ripgrep_sha256 = PIN
-    expected = {
-        "mismatch": f"sandbox_local_ripgrep_path SHA-256 mismatch: expected {PIN}, found ",
-        "missing": "Cannot read sandbox_local_ripgrep_path: ",
-    }[problem]
-    assert refused(agent, caplog).startswith(expected)
-    sandbox.exec.assert_not_awaited()
-    assert not sandbox.files
 
 
 INPUT_REFUSALS = {
