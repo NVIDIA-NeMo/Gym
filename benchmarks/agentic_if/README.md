@@ -79,9 +79,10 @@ in OpenCode 1.17.11 with this configuration, not the model alone.
   - The OpenCode binary is set per deployment on `agentic_if_opencode_agent`: `sandbox_executable_path` (a file inside
     the sandbox, such as a mounted copy) with `sandbox_executable_sha256`
     `0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded`. That is
-    `package/bin/opencode` of https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.17.11.tgz,
-    byte-identical to `opencode` in the v1.17.11 GitHub release's `opencode-linux-x64.tar.gz`. Without it,
-    `opencode_agent` installs OpenCode 1.17.11 from GitHub, which needs internet access in the sandbox.
+    `package/bin/opencode` of https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.17.11.tgz (the
+    x86_64 glibc build, not the `-baseline` or `-musl` one), byte-identical to `opencode` in the v1.17.11 GitHub
+    release's `opencode-linux-x64.tar.gz`. Without it, `opencode_agent` installs OpenCode 1.17.11 from GitHub, which
+    needs internet access in the sandbox.
   - ripgrep and the plugin dependencies come with the dataset: `prepare.py` writes them to `data/opencode-runtime/`,
     the benchmark config has the resources server stage them into each task sandbox (`opencode_runtime_files`), and
     `opencode_agent` checks their SHA-256 there.
