@@ -70,7 +70,7 @@ from nemo_gym.openai_utils import (
     PermanentEndpointError,
 )
 from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
-from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.rollout_sampling import rollout_context
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.token_id_capture import (
     CaptureContext,
@@ -5319,6 +5319,25 @@ class TestCompletionsBackendBodyTranslation:
         assert out["top_p"] == 0.95
         assert out["min_p"] == 0.05
 
+    @mark.parametrize(
+        "extra_body",
+        [{"max_completion_tokens": 1024}, {"max_tokens": 2048, "max_completion_tokens": 1024}],
+    )
+    @mark.parametrize(
+        "request_body, expected_limit",
+        [({}, 1024), ({"max_tokens": 11}, 11), ({"max_completion_tokens": 11}, 11)],
+    )
+    def test_extra_body_token_alias_does_not_override_request_limit(
+        self, extra_body, request_body, expected_limit
+    ) -> None:
+        model = _make_completions_backend_model(extra_body=extra_body)
+
+        out = model._build_completion_body_from_chat_body(request_body, prompt="x")
+
+        assert out["max_tokens"] == expected_limit
+        assert "max_completion_tokens" not in out
+        assert model.config.extra_body == extra_body
+
     def test_token_id_information_sets_logprobs_and_extra_flags(self) -> None:
         model = _make_completions_backend_model(return_token_id_information=True)
         out = model._build_completion_body_from_chat_body({}, prompt="x")
@@ -6442,12 +6461,42 @@ class TestSamplingOverrides:
         assert out["temperature"] == 1.0
         assert out["top_p"] == 1.0
 
-    def test_overrides_apply_even_when_the_client_sent_nothing(self) -> None:
-        server = self._server({"temperature": 1.0})
-        out = server._preprocess_chat_completion_create_params(
-            MagicMock(), {"messages": [{"role": "user", "content": "hi"}]}
+    @mark.parametrize("use_completions_api", [False, True])
+    def test_override_conflicts_warn_once_per_worker_then_log_at_debug(self, use_completions_api, caplog) -> None:
+        with caplog.at_level(logging.DEBUG, logger="nemo_gym.vllm_model"):
+            for _ in range(2):
+                server = self._server({"temperature": 1.0}, use_completions_api=use_completions_api)
+                for temperature in (1.0, 0.2, 0.2, 0.4):
+                    body = {"messages": [{"role": "user", "content": "hi"}], "temperature": temperature}
+                    out = (
+                        server._build_completion_body_from_chat_body(body, "hi")
+                        if use_completions_api
+                        else server._preprocess_chat_completion_create_params(MagicMock(), body)
+                    )
+                    assert out["temperature"] == 1.0
+
+        records = [record for record in caplog.records if "sampling_overrides replaces" in record.getMessage()]
+        assert [record.levelno for record in records] == [logging.WARNING, logging.DEBUG, logging.DEBUG] * 2
+        assert [record.args[1] for record in records] == [
+            {"temperature": {"requested": value, "effective": 1.0}} for value in (0.2, 0.2, 0.4)
+        ] * 2
+
+    @mark.parametrize("request_values", [{}, {"temperature": None}, {"temperature": 1.0}])
+    @mark.parametrize("use_completions_api", [False, True])
+    def test_overrides_do_not_warn_for_unset_or_matching_request_values(
+        self, request_values, use_completions_api, caplog
+    ) -> None:
+        server = self._server(
+            {"temperature": 1.0}, extra_body={"temperature": 0.2}, use_completions_api=use_completions_api
+        )
+        body = {"messages": [{"role": "user", "content": "hi"}], **request_values}
+        out = (
+            server._build_completion_body_from_chat_body(body, "hi")
+            if use_completions_api
+            else server._preprocess_chat_completion_create_params(MagicMock(), body)
         )
         assert out["temperature"] == 1.0
+        assert "sampling_overrides replaces" not in caplog.text
 
     def test_unset_leaves_the_request_alone(self) -> None:
         server = self._server(None)
@@ -6533,6 +6582,66 @@ class TestSamplingOverrides:
         assert event["request_payload"]["new_param"] == sent["new_param"] == "value"
         # Nothing is printed per request; the trace exists only when the log is enabled.
         assert capsys.readouterr().out == ""
+
+    @mark.parametrize("override_field", ["max_tokens", "max_completion_tokens"])
+    @mark.parametrize("requested_limit", [32, 73])
+    @mark.parametrize("use_completions_api", [False, True])
+    def test_token_override_wins_over_sampling_url_alias(
+        self, override_field, requested_limit, use_completions_api, caplog
+    ) -> None:
+        from nemo_gym.rollout_sampling import ModelCallSampling, model_sampling_base_url
+
+        server = self._server({override_field: 32}, use_completions_api=use_completions_api)
+        provider = MagicMock()
+        provider.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chatcmpl-limit",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "dummy_model",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "hi"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        )
+        provider.create_completion = AsyncMock(
+            return_value={
+                "id": "cmpl-limit",
+                "object": "text_completion",
+                "created": 0,
+                "model": "dummy_model",
+                "choices": [{"index": 0, "finish_reason": "stop", "text": "hi"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        )
+        server._clients = [provider]
+        base_url = model_sampling_base_url(
+            "http://testserver/v1", ModelCallSampling(max_output_tokens=requested_limit)
+        )
+        response = TestClient(server.setup_webserver()).post(
+            f"{base_url}/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+        assert response.status_code == 200, response.text
+        call = provider.create_completion if use_completions_api else provider.create_chat_completion
+        sent = call.await_args.kwargs
+        output_field = "max_tokens" if use_completions_api else override_field
+        assert sent[output_field] == 32
+        other_alias = "max_tokens" if output_field == "max_completion_tokens" else "max_completion_tokens"
+        assert other_alias not in sent
+        warnings = [record for record in caplog.records if "sampling_overrides replaces" in record.getMessage()]
+        expected = {override_field: {"requested": requested_limit, "effective": 32}}
+        assert [record.args[1] for record in warnings] == ([expected] if requested_limit != 32 else [])
+
+    def test_completions_backend_prefers_canonical_token_alias_when_both_are_pinned(self, caplog) -> None:
+        server = self._server({"max_tokens": 16, "max_completion_tokens": 32}, use_completions_api=True)
+
+        sent = server._build_completion_body_from_chat_body({"max_completion_tokens": 73}, "hi")
+
+        assert sent["max_tokens"] == 32
+        assert "max_completion_tokens" not in sent
+        warnings = [record for record in caplog.records if "sampling_overrides replaces" in record.getMessage()]
+        assert [record.args[1] for record in warnings] == [
+            {"max_completion_tokens": {"requested": 73, "effective": 32}}
+        ]
 
 
 class TestEndpointFile:

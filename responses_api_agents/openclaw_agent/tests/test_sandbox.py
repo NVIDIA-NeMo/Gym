@@ -25,6 +25,7 @@ from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.testing.rollout_sampling import assert_model_sampling
 from responses_api_agents.openclaw_agent.app import OpenClawAgent, OpenClawAgentConfig, _unique_usage_messages
 
 
@@ -423,11 +424,8 @@ def test_failed_or_partial_openclaw_output_is_preserved(setup, reason):
 @pytest.mark.parametrize(
     "override",
     [
-        {"temperature": 0.2},
-        {"max_output_tokens": 123},
         {"top_k": 3},
         {"input": ""},
-        {"top_p": 0.9},
         {"tools": [{"type": "function", "name": "foo"}]},
         {"input": [{"role": "assistant", "content": "old turn"}]},
     ],
@@ -447,7 +445,7 @@ def test_rejected_request_does_not_consume_activation(setup):
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
         path = "/ng-rollout/openclaw-smoke-a2/v1/responses"
-        assert client.post(path, json={"input": "task", "temperature": 0.2}).status_code == 422
+        assert client.post(path, json={"input": "task", "temperature": -1}).status_code == 422
         sandbox.launch.assert_not_awaited()
         accepted = client.post(path, json={"input": "task"})
         assert accepted.status_code == 200, accepted.text
@@ -1997,3 +1995,52 @@ def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
         assert accepted.status_code == 200, accepted.text
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
+
+
+@pytest.mark.parametrize("temperature", [0.0, 0.7])
+def test_session_sampling_reaches_model_route_and_preserves_retry_binding(setup, temperature):
+    agent, sandbox = setup
+    original_config = agent.config.model_dump()
+    controls = {"temperature": temperature, "top_p": 0.9, "max_output_tokens": 128}
+    body = {"input": "Fix the code", **controls}
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        path = "/ng-rollout/openclaw-smoke-a2/v1/responses"
+        result = client.post(path, json=body)
+        assert result.status_code == 200, result.text
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        provider = payload["config"]["models"]["providers"]["nemo"]
+        base_url = provider["baseUrl"]
+        assert provider["models"][0]["maxTokens"] == 128
+        assert_model_sampling(base_url, controls, routed_base_path=path.removesuffix("/responses"))
+        assert client.post(path, json=body).json() == result.json()
+        assert client.post(path, json={**body, "top_p": 0.8}).status_code == 409
+    sandbox.launch.assert_awaited_once()
+    assert agent.config.model_dump() == original_config
+
+
+def test_request_output_cap_respects_context_window_without_consuming_activation(setup):
+    agent, sandbox = setup
+    agent.config.context_window = 4096
+    agent.config.max_output_tokens = 4096
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        path = "/ng-rollout/openclaw-smoke-a2/v1/responses"
+        rejected = client.post(path, json={"input": "Fix the code", "max_output_tokens": 4097})
+        assert rejected.status_code == 422
+        assert "context_window" in rejected.json()["detail"]
+        assert next(iter(agent._session_records.values())).state.task is None
+        sandbox.launch.assert_not_awaited()
+        accepted = client.post(path, json={"input": "Fix the code", "max_output_tokens": 4096})
+        assert accepted.status_code == 200, accepted.text
+    sandbox.launch.assert_awaited_once()
+
+
+def test_request_output_cap_does_not_require_a_configured_context_window(setup):
+    agent, sandbox = setup
+    agent.config.context_window = None
+    assert (
+        agent._sandbox_input(NeMoGymResponseCreateParamsNonStreaming(input="task", max_output_tokens=4096))[0]
+        == "task"
+    )
+    sandbox.launch.assert_not_awaited()

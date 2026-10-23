@@ -87,7 +87,7 @@ from nemo_gym.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import (
+from nemo_gym.rollout_sampling import (
     ROUTED_PATH_STATE_KEY,
     current_rollout_id,
     maybe_rollout_id_from_run_body,

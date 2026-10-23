@@ -69,6 +69,7 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     ToolCallObservation,
 )
+from nemo_gym.rollout_sampling import ModelCallSampling, model_sampling_base_url
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
@@ -759,13 +760,10 @@ class PiAgent(SimpleResponsesAPIAgent):
         """Validate the supported controls for a sandbox session activation."""
         if body.model is not None and body.model != self.config.model:
             raise HTTPException(422, "Pi model must match the configured model")
-        if body.max_output_tokens is not None:
-            raise HTTPException(
-                422,
-                "Pi does not support the total max_output_tokens budget; "
-                "configure the agent's max_output_tokens for a per-model-call limit instead",
-            )
-        supported = {"input", "instructions", "model"}
+        ModelCallSampling.from_request(body)
+        if body.max_output_tokens is not None and body.max_output_tokens > self.config.context_window:
+            raise HTTPException(422, "Pi request max_output_tokens must not exceed context_window")
+        supported = {"input", "instructions", "temperature", "top_p", "max_output_tokens", "model"}
         for name, field in type(body).model_fields.items():
             if name in supported:
                 continue
@@ -835,7 +833,11 @@ class PiAgent(SimpleResponsesAPIAgent):
         # Sandbox sessions use only Gym's provider; do not copy credentials for
         # unrelated direct providers from the host configuration into the sandbox.
         models = {
-            "providers": {"nemo": self._build_models_config(state.request.episode_id.capture_key)["providers"]["nemo"]}
+            "providers": {
+                "nemo": self._build_models_config(
+                    state.request.episode_id.capture_key, sampling=ModelCallSampling.from_request(body)
+                )["providers"]["nemo"]
+            }
         }
         await state.upload_json("home/.pi/agent/models.json", models)
         await state.upload_json("home/.pi/agent/settings.json", self._build_settings_config())
@@ -1134,13 +1136,15 @@ class PiAgent(SimpleResponsesAPIAgent):
             "retry": {"provider": {"timeoutMs": timeout_ms}},
         }
 
-    def _build_models_config(self, rollout_id: Optional[str] = None) -> dict[str, Any]:
+    def _build_models_config(
+        self, rollout_id: Optional[str] = None, *, sampling: ModelCallSampling | None = None
+    ) -> dict[str, Any]:
         config = copy.deepcopy(self.config.models_config)
         if self.config.model_server is None:
             return config
         providers = config.setdefault("providers", {})
         providers["nemo"] = {
-            "baseUrl": self._resolve_model_base_url(rollout_id),
+            "baseUrl": model_sampling_base_url(self._resolve_model_base_url(rollout_id), sampling),
             "api": "openai-completions",
             "apiKey": "EMPTY",  # pragma: allowlist secret
             "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": False},
@@ -1150,7 +1154,9 @@ class PiAgent(SimpleResponsesAPIAgent):
                     "reasoning": True,
                     "input": ["text"],
                     "contextWindow": self.config.context_window,
-                    "maxTokens": self.config.max_output_tokens,
+                    "maxTokens": sampling.max_output_tokens
+                    if sampling is not None and sampling.max_output_tokens is not None
+                    else self.config.max_output_tokens,
                 }
             ],
         }

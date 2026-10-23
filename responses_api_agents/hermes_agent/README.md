@@ -117,11 +117,20 @@ hermes_agent:
 The model-server url is resolved at request time and passed to `AIAgent(base_url=..., api_key="gym")`. <!-- pragma: allowlist secret -->
 
 Host and sandbox execution use the same request rules. User tasks remain user messages.
-Request `model` must match the configured model. Unsupported non-default controls return
-HTTP 422, including `top_p` (even `1.0`), `store`, `service_tier`, and request metadata.
-`max_output_tokens` also returns 422: Hermes does not enforce a total response token budget.
-Config `max_tokens` limits each model call. Only text input is supported; `developer` messages
-are rejected.
+Request `model` must match the configured model. Request `temperature`, `top_p`, and
+`max_output_tokens` apply to model calls through the Gym Model Server, including final
+summary calls. Request `max_output_tokens` replaces the agent YAML's `max_tokens` default,
+whether higher or lower; omitting it retains that default. For each model call, Gym uses
+the smaller of the request limit and any positive output limit Hermes sends for that call.
+This is a per-call limit, not an episode-wide budget.
+
+On the `vllm_model` Model Server, `sampling_overrides` are separate from the agent YAML defaults.
+They apply last and can replace the requested temperature, top-p, or the token limit computed
+above, even with a higher limit.
+Conflicting explicit values produce a warning. Omitted request controls retain existing defaults.
+Unsupported non-default controls such as `store`,
+`service_tier`, and request metadata return HTTP 422. Only text input is supported;
+`developer` messages are rejected.
 
 Compatibility: the host path previously let config `system_prompt` replace the dataset's
 system message and ignored request `temperature`. It now combines the prompts and honors

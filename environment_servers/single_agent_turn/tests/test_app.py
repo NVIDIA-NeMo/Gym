@@ -35,8 +35,8 @@ from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSee
 from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
+from nemo_gym.rollout_sampling import current_rollout_id
 from nemo_gym.server_utils import BaseServerConfig, ServerClient, SimpleServer
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnResponse, SingleAgentTurnTaskInput
 

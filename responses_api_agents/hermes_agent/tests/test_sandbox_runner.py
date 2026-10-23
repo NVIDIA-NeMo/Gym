@@ -18,14 +18,17 @@ from unittest.mock import MagicMock
 import openai
 import pytest
 import uvicorn
+from fastapi import FastAPI, Request
 from run_agent import AIAgent
 from tools.mcp_tool import shutdown_mcp_servers
 
 from nemo_gym.agent_utils import process_supervisor
 from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE
+from nemo_gym.base_responses_api_model import CaptureStore, ModelCallCaptureConfig, install_model_call_capture
 from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose
 from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentInvocation
+from nemo_gym.rollout_sampling import ModelCallSampling, ModelSamplingMiddleware, model_sampling_base_url
 from nemo_gym.server_utils import ServerClient
 from resources_servers.example_mcp_weather.app import (
     ExampleMCPWeatherResourcesServer,
@@ -420,7 +423,11 @@ def test_iteration_limit_summary_reaches_the_model_server(
                     },
                 ),
             )
-            monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *_args: model_server.base_url)
+            monkeypatch.setattr(
+                HermesAgent,
+                "resolve_model_base_url",
+                lambda self, model_server_name, rollout_id=None: model_server.base_url,
+            )
             observations = []
             output = asyncio.run(
                 agent._create_response(
@@ -593,3 +600,60 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
     assert output["observations"]["invocations"][0]["status"] == "incomplete"
     with pytest.raises(ProcessLookupError):
         os.kill(output["runtime"]["pid"], 0)
+
+
+def test_sampling_controls_reach_hermes_turn_and_summary_over_http(tmp_path, restore_process_globals):
+    """Run the pinned harness against HTTP fixtures, including its auxiliary summary call."""
+    app = FastAPI()
+    requests = []
+    answers = [
+        _completion(
+            {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": json.dumps({"command": "echo hi"})},
+                    }
+                ],
+            }
+        ),
+        _completion({"content": "summary of the work"}),
+    ]
+    answers[0]["id"] = "chatcmpl-turn"
+    answers[1]["id"] = "chatcmpl-summary"
+
+    @app.post("/v1/chat/completions")
+    async def completion(request: Request):
+        requests.append(await request.json())
+        return answers[len(requests) - 1]
+
+    capture_dir = tmp_path / "capture"
+    install_model_call_capture(
+        app,
+        ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=capture_dir),
+        model_server_name="policy",
+    )
+    app.add_middleware(ModelSamplingMiddleware)
+
+    with _ResourcesServer(app) as model_server:
+        base_url = model_sampling_base_url(
+            f"{model_server.base_url}/ng-rollout/hermes-sampling-a2/v1",
+            ModelCallSampling(temperature=0.0, top_p=0.67, max_output_tokens=64),
+        )
+        output = _run(_payload(base_url, temperature=1.0, max_tokens=128, max_turns=1), tmp_path)
+
+    assert output["result"]["final_response"] == "summary of the work"
+    assert output["result"]["stop_reason"] == "max_iterations"
+    assert len(requests) == 2
+    for body in requests:
+        NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(body)
+        assert body["temperature"] == 0.0
+        assert body["top_p"] == 0.67
+        assert body["max_completion_tokens"] == 64
+        assert "max_tokens" not in body
+    assert any(message["role"] == "tool" for message in requests[1]["messages"])
+    captured = CaptureStore(capture_dir).read("hermes-sampling-a2")
+    assert [call["request"] for call in captured] == requests
+    assert [call["response"]["id"] for call in captured] == ["chatcmpl-turn", "chatcmpl-summary"]

@@ -205,12 +205,21 @@ Sandbox request support is deliberately explicit:
   Configured `system_prompt`, request `instructions`, and the optional system message are joined
   and prepended to OpenClaw's user prompt. The harness retains its own system prompt.
 - The request `model`, when supplied, must match the configured model.
-- `max_output_tokens`, `temperature`, `top_p`, reasoning overrides, tool-selection controls, output
+- Request `temperature`, `top_p`, and `max_output_tokens` apply through the Gym Model Server
+  to each model call, including summaries. Request `max_output_tokens` replaces the agent
+  YAML's `max_output_tokens` default, whether higher or lower; omitting it retains that default.
+  For each model call, Gym uses the smaller of the request limit and any positive output
+  limit OpenClaw sends for that call. This is not an episode-wide budget.
+- On the `vllm_model` Model Server, `sampling_overrides` are separate from the agent YAML defaults.
+  They apply last and can replace the requested temperature, top-p, or the token limit computed
+  above, even with a higher limit.
+  Conflicting explicit values produce a warning. Omitted request controls retain existing defaults.
+- Reasoning overrides, tool-selection controls, output
   schemas, history replay, request `metadata`, and other unsupported Responses options are rejected before activation.
   This includes `metadata.extra_body.seed` added by `num_repeats_add_seed`; disable that option
   for sandbox sessions. Request `metadata.chat_template_kwargs` is also rejected; configure it
   on the Gym model server instead.
-  To limit output, set the agent config field `max_output_tokens` instead. It is written as
+  To set the default output limit, use the agent config field `max_output_tokens`. It is written as
   `maxTokens` of the generated model entry, so it is the most output OpenClaw requests per call. Set
   `context_window` as well (see [Config fields](#config-fields)); a `max_output_tokens` that is not
   positive or exceeds `context_window` is rejected. Model metadata does not prove an effective

@@ -32,6 +32,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     PermanentEndpointError,
 )
+from nemo_gym.rollout_sampling import ModelSamplingMiddleware
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.openai_model import app as openai_model_module
 from responses_api_models.openai_model.app import (
@@ -370,7 +371,8 @@ class TestApp:
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_response = AsyncMock(return_value=_response_data())
         app = server.setup_webserver()
-        assert app.user_middleware[0].cls is _CaptureMiddleware
+        middleware_classes = [middleware.cls for middleware in app.user_middleware]
+        assert middleware_classes.index(ModelSamplingMiddleware) < middleware_classes.index(_CaptureMiddleware)
         assert not issubclass(_CaptureMiddleware, BaseHTTPMiddleware)
         client = TestClient(app)
 

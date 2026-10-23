@@ -64,6 +64,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
+from nemo_gym.rollout_sampling import ModelCallSampling, model_sampling_base_url
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
@@ -667,10 +668,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
     def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
         """Validate and normalize input before consuming the session's activation."""
+        ModelCallSampling.from_request(body)
         unsupported = (
-            "max_output_tokens",
-            "temperature",
-            "top_p",
             "reasoning",
             "max_tool_calls",
             "previous_response_id",
@@ -760,7 +759,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
         system: str,
     ) -> NeMoGymResponse:
         invocation_id = state.request.episode_id.capture_key
-        base_url = self._resolve_call_base_url(invocation_id)
+        base_url = model_sampling_base_url(
+            self._resolve_call_base_url(invocation_id),
+            ModelCallSampling.from_request(body),
+        )
         config = self._build_config(base_url, developer_instructions=system)
         config["model_providers"]["gym"]["http_headers"] = {"x-session-id": invocation_id}
         await state.upload_text("home/.codex/config.toml", toml_dumps(config))

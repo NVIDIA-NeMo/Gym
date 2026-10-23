@@ -34,10 +34,11 @@ _MODEL_API_KEY = "gym"
 
 
 def _use_model_server(base_url: str) -> None:
-    """Point every model client Hermes builds in this process at the Gym Model Server.
+    """Configure Hermes agent calls to the Gym Model Server without streaming.
 
-    The root agent and its iteration-limit summary share one client, delegated children inherit the
-    parent's base URL, and auxiliary clients such as context compression read ``OPENAI_BASE_URL``.
+    The root agent and its iteration-limit summary share one client; delegated children inherit the
+    parent's base URL. Context compression uses a separate provider resolver that ignores
+    ``OPENAI_BASE_URL`` in the pinned Hermes version, so it is not automatically routed through Gym.
     """
     from run_agent import AIAgent
 

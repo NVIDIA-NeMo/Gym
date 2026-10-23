@@ -24,8 +24,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nemo_gym.rollout_observability import AgentInvocation, SandboxObservation, ToolCallObservation
+from nemo_gym.rollout_sampling import ModelCallSampling
 from nemo_gym.sandbox.agent_tools import restricted_network_policy
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.testing.rollout_sampling import assert_model_sampling
 from responses_api_agents.pi_agent.app import PiAgentRunRequest, PiMCPServerConfig
 from responses_api_agents.pi_sandboxed_agent import app
 from responses_api_agents.pi_sandboxed_agent.app import _RUN, PiSandboxedAgent, PiSandboxedAgentConfig
@@ -128,6 +130,19 @@ def agent(tmp_path, monkeypatch):
 def request_body():
     return PiAgentRunRequest.model_validate(
         {"_ng_rollout_id": "pi-rollout", "responses_create_params": {"input": "Compute 2+2"}}
+    )
+
+
+@pytest.mark.parametrize("controls", [{}, {"temperature": 0.0, "top_p": 0.9, "max_output_tokens": 128}])
+def test_inherited_model_builder_preserves_sandbox_resolver_contract(agent, controls):
+    server, _ = agent
+    context = _RUN.set({"body": request_body()})
+    try:
+        models = server._build_models_config(sampling=ModelCallSampling(**controls))
+    finally:
+        _RUN.reset(context)
+    assert_model_sampling(
+        models["providers"]["nemo"]["baseUrl"], controls, routed_base_path="/ng-rollout/pi-rollout/v1"
     )
 
 

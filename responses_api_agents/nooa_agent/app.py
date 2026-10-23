@@ -27,7 +27,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.rollout_sampling import rollout_context
 from nemo_gym.tool_access import DirectHTTPToolAccess
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 from responses_api_agents.nooa_agent.result import finalize_run_result, is_transient_infrastructure_error

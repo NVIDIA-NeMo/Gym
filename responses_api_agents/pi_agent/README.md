@@ -139,14 +139,24 @@ extra-argument, and environment overrides; those remain available on the local p
 
 Sandbox session input is one text user message, optionally preceded by a system message. Both sandbox
 and local execution combine the configured system prompt, request `instructions`, and input
-system message in that order. Sampling and chat-template settings belong on the Gym Model Server.
-Sandbox sessions reject unsupported request controls before execution.
+system message in that order. Sandbox sessions accept request `temperature`, `top_p`, and
+`max_output_tokens` through the Gym Model Server. Request `max_output_tokens` replaces
+the agent YAML's `max_output_tokens` default, whether higher or lower; omitting it retains
+that default. For each model call, including summaries, Gym uses the smaller of the request
+limit and any positive output limit Pi sends for that call. This is not an episode-wide budget.
+
+On the `vllm_model` Model Server, `sampling_overrides` are separate from the agent YAML defaults.
+They apply last and can replace the requested temperature, top-p, or the token limit computed
+above, even with a higher limit.
+Conflicting explicit values produce a warning. Omitted request controls retain existing defaults.
+Chat-template settings belong on the Model Server. Other unsupported request controls
+are rejected before execution.
 
 Set the agent configuration's `max_output_tokens` for a per-model-call output cap, including
 reasoning tokens. An adapter-owned Pi extension applies it as `max_tokens`, preserving any
-smaller upstream cap. Limits must be positive JavaScript-safe integers. Request-level
-`max_output_tokens` is rejected in sandbox sessions because a total-response budget is not implemented. Model Server
-configuration must not replace the agent's cap with a larger value. Enforcement is tested with Pi 0.80.2.
+smaller upstream cap. Limits must be positive JavaScript-safe integers. Sandbox sessions use
+the request limit instead of this default when supplied, as described above. Enforcement is
+tested with Pi 0.80.2.
 
 ## Lifecycle and ownership
 

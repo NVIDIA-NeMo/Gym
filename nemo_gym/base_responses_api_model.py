@@ -84,7 +84,7 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import rollout_context, scope_with_routed_path
+from nemo_gym.rollout_sampling import ModelSamplingMiddleware, rollout_context, scope_with_routed_path
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
@@ -381,6 +381,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         )
 
         self.setup_policy_checkpoint(app, capture_ledger)
+        # Normalize routing and caller controls before admission and capture.
+        # Model-specific overrides can still change the eventual provider request.
+        app.add_middleware(ModelSamplingMiddleware)
         return app
 
     def setup_policy_checkpoint(self, app: FastAPI, capture_ledger: CaptureLedger | None) -> None:
@@ -456,7 +459,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
             app.router.lifespan_context = lifespan_with_coordinator
             gate = link.gate
-        # Outermost of this app's middleware: a refused call must not register capture intent.
+        # Runs before capture: a refused call must not register capture intent.
         app.add_middleware(PolicyAdmissionMiddleware, gate=gate)
         app.state.nemo_gym_policy_gate = gate
 
@@ -1840,6 +1843,6 @@ __getattr__ = moved_attr_getter(
             ),
             "nemo_gym.observability.model_calls",
         ),
-        "maybe_rollout_id_from_run_body": "nemo_gym.rollout_correlation",
+        "maybe_rollout_id_from_run_body": "nemo_gym.rollout_sampling",
     },
 )

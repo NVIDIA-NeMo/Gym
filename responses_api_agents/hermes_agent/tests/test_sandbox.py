@@ -26,6 +26,7 @@ from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.testing.rollout_sampling import assert_model_sampling
 from responses_api_agents.hermes_agent import sandbox as hermes_sandbox
 from responses_api_agents.hermes_agent.app import (
     AGENT_TIMEOUT_METADATA_KEY,
@@ -54,7 +55,9 @@ def agent(monkeypatch):
     )
 
     monkeypatch.setattr(
-        HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/ng-rollout/episode-a1/v1"
+        HermesAgent,
+        "resolve_model_base_url",
+        lambda self, model_server_name, rollout_id=None: "http://model:8000/ng-rollout/episode-a1/v1",
     )
     return result
 
@@ -180,7 +183,7 @@ async def test_invalid_activation_keeps_session_ready(agent: HermesAgent, state:
     agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     agent._run_sandbox_episode = AsyncMock(return_value=episode(agent))
     with pytest.raises(HTTPException) as error:
-        await agent.responses(request(state), NeMoGymResponseCreateParamsNonStreaming(input="task", top_p=0.9))
+        await agent.responses(request(state), NeMoGymResponseCreateParamsNonStreaming(input="task", top_p=1.1))
     assert error.value.status_code == 422
     assert state.task is None
     agent._run_sandbox_episode.assert_not_awaited()
@@ -905,9 +908,11 @@ async def test_runner_exit_without_cleanup_receipt_blocks_close(agent, state, re
     state.session.sandbox.disconnect.assert_awaited_once()
 
 
-@pytest.mark.parametrize("overrides", [{}, {"temperature": 0.0}])
+@pytest.mark.parametrize("overrides", [{}, {"temperature": 0.0, "top_p": 0.9, "max_output_tokens": 128}])
 async def test_session_prompt_and_limits_reach_runner(agent, state, overrides, tmp_path, monkeypatch):
     state.session.session_dir = str(tmp_path)
+    resolve_url = MagicMock(return_value="http://model:8000/v1")
+    monkeypatch.setattr(HermesAgent, "resolve_model_base_url", resolve_url)
     monkeypatch.setattr(hermes_sandbox, "_SANDBOX_PYTHON", sys.executable)
     state.session.sandbox.upload.side_effect = shutil.copyfile
     agent.server_client.global_config_dict = {
@@ -951,8 +956,11 @@ async def test_session_prompt_and_limits_reach_runner(agent, state, overrides, t
     assert payload["user_message"] == "Fix the bug"
     assert payload["history"] == []
     assert payload["system_message"] == "Configured instruction\n\nRequest instruction"
-    assert payload["max_tokens"] == 500
+    assert payload["max_tokens"] == overrides.get("max_output_tokens", 500)
     assert payload["temperature"] == overrides.get("temperature", 0.7)
+    assert_model_sampling(payload["model_base_url"], overrides)
+    assert agent.config.max_tokens == 500
+    assert agent.config.temperature == 0.7
     assert body.input == "Fix the bug"  # Do not mutate the caller's request.
 
 
@@ -1021,9 +1029,6 @@ async def test_exec_reads_final_output_after_confirmed_cleanup(agent, state, out
 @pytest.mark.parametrize(
     "override",
     [
-        {"top_p": 0.8},
-        {"top_p": 1.0},
-        {"max_output_tokens": 32},
         {"model": "different-model"},
         {"store": True},
         {"store": False},
@@ -1064,9 +1069,11 @@ async def test_unsupported_requests_are_rejected(agent, state, override, sandbox
     agent._create_response.assert_not_awaited()
 
 
-@pytest.mark.parametrize("temperature", [None, 0.0, 0.2])
-async def test_host_and_sandbox_prepare_the_same_request(agent, state, monkeypatch, temperature):
+@pytest.mark.parametrize("controls", [{}, {"temperature": 0.0, "top_p": 0.9, "max_output_tokens": 128}])
+async def test_host_and_sandbox_prepare_the_same_request(agent, state, monkeypatch, controls):
     validations = []
+    resolve_url = MagicMock(return_value="http://model:8000/v1")
+    monkeypatch.setattr(HermesAgent, "resolve_model_base_url", resolve_url)
     validate = HermesAgent._validate_request
 
     def count_validation(self, body):
@@ -1078,7 +1085,7 @@ async def test_host_and_sandbox_prepare_the_same_request(agent, state, monkeypat
     body = NeMoGymResponseCreateParamsNonStreaming(
         model="model",
         instructions="Request instruction",
-        temperature=temperature,
+        **controls,
         input=[
             {"role": "system", "content": "Input system instruction"},
             {"role": "user", "content": "First question"},
@@ -1121,12 +1128,13 @@ async def test_host_and_sandbox_prepare_the_same_request(agent, state, monkeypat
         == system_message
         == ("Configured instruction\n\nRequest instruction\n\nInput system instruction")
     )
+    assert payload["temperature"] == constructor.call_args.kwargs["temperature"] == controls.get("temperature", 0.7)
     assert (
-        payload["temperature"]
-        == constructor.call_args.kwargs["temperature"]
-        == (temperature if temperature is not None else 0.7)
+        payload["max_tokens"] == constructor.call_args.kwargs["max_tokens"] == controls.get("max_output_tokens", 500)
     )
-    assert payload["max_tokens"] == constructor.call_args.kwargs["max_tokens"] == 500
+    assert resolve_url.call_count == 2
+    assert_model_sampling(payload["model_base_url"], controls)
+    assert_model_sampling(constructor.call_args.kwargs["base_url"], controls)
     assert body.model_dump() == original
     assert len(validations) == 2  # Exactly once per incoming request, not again in the runner.
 

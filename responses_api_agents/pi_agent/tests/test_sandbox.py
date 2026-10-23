@@ -31,6 +31,7 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.testing.rollout_sampling import assert_model_sampling
 from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest
 
 
@@ -318,7 +319,7 @@ async def test_provider_error_type_blocks_setup_even_with_zero_exit(setup, stage
     assert not any(record.state is not None for record in agent._session_records.values())
 
 
-@pytest.mark.parametrize("limit", [0, -1, 128, 2**53])
+@pytest.mark.parametrize("limit", [0, -1, 2**53])
 def test_invalid_output_limit_does_not_consume_activation(setup, limit):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:
@@ -332,6 +333,27 @@ def test_invalid_output_limit_does_not_consume_activation(setup, limit):
         sandbox.launch.assert_not_awaited()
         response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"})
         assert response.status_code == 200
+
+
+def test_request_output_limit_must_fit_context_window_before_activation(setup):
+    agent, sandbox = setup
+    agent.config.context_window = 4096
+    agent.config.max_output_tokens = 1024
+    path = "/ng-rollout/pi-smoke-a2/v1/responses"
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
+        response = client.post(path, json={"input": "Fix the code", "max_output_tokens": 4097})
+        assert response.status_code == 422
+        assert "must not exceed context_window" in response.json()["detail"]
+        assert next(iter(agent._session_records.values())).state.task is None
+        sandbox.launch.assert_not_awaited()
+
+        response = client.post(path, json={"input": "Fix the code", "max_output_tokens": 4096})
+        assert response.status_code == 200, response.text
+        models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
+        model = models["providers"]["nemo"]["models"][0]
+        assert model["maxTokens"] == model["contextWindow"] == 4096
+    sandbox.launch.assert_awaited_once()
 
 
 def test_session_output_limit_uses_config_default(setup):
@@ -457,8 +479,6 @@ def test_failed_or_partial_pi_output_is_preserved(setup, reason, expected):
 @pytest.mark.parametrize(
     "override",
     [
-        {"temperature": 0.2},
-        {"top_p": 0.9},
         {"tools": [{"type": "function", "name": "foo"}]},
         {"input": [{"role": "assistant", "content": "old turn"}]},
     ],
@@ -503,7 +523,7 @@ def test_rejected_request_does_not_consume_activation(setup):
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
         path = "/ng-rollout/pi-smoke-a2/v1/responses"
-        assert client.post(path, json={"input": "task", "temperature": 0.2}).status_code == 422
+        assert client.post(path, json={"input": "task", "temperature": -1}).status_code == 422
         sandbox.launch.assert_not_awaited()
         accepted = client.post(path, json={"input": "task"})
         assert accepted.status_code == 200, accepted.text
@@ -1421,9 +1441,6 @@ async def test_cancelled_http_waiter_does_not_cancel_shared_activation(setup):
 @pytest.mark.parametrize(
     "control",
     [
-        {"max_output_tokens": 128},
-        {"temperature": 0},
-        {"top_p": 1},
         {"metadata": {"ignored": "value"}},
         {"store": True},
     ],
@@ -2383,3 +2400,25 @@ def test_process_exit_before_promised_retry_is_execution_failure(setup):
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200
         assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
+
+
+@pytest.mark.parametrize("temperature", [0.0, 0.7])
+def test_session_sampling_reaches_model_route_and_preserves_retry_binding(setup, temperature):
+    agent, sandbox = setup
+    original_config = agent.config.model_dump()
+    controls = {"temperature": temperature, "top_p": 0.9, "max_output_tokens": 128}
+    body = {"input": "Fix the code", **controls}
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        path = "/ng-rollout/pi-smoke-a2/v1/responses"
+        result = client.post(path, json=body)
+        assert result.status_code == 200, result.text
+        models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
+        provider = models["providers"]["nemo"]
+        base_url = provider["baseUrl"]
+        assert provider["models"][0]["maxTokens"] == 128
+        assert_model_sampling(base_url, controls, routed_base_path=path.removesuffix("/responses"))
+        assert client.post(path, json=body).json() == result.json()
+        assert client.post(path, json={**body, "top_p": 0.8}).status_code == 409
+    sandbox.launch.assert_awaited_once()
+    assert agent.config.model_dump() == original_config

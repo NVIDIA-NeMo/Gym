@@ -21,7 +21,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.rollout_sampling import rollout_context
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     is_nemo_gym_fastapi_entrypoint,
