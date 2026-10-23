@@ -124,7 +124,25 @@ Dockerfiles outside pull and overlay mode are built at prepare, see below.
 A task with `[[steps]]` runs each step as one turn in the same sandbox, as Harbor's multi-step trial does
 without `resume_trajectory`: a fresh agent session per turn, with the step's
 `steps/<name>/instruction.md` as its only input and the step's `[steps.agent].timeout_sec` (else the task's)
-as its budget. The task's top-level `instruction.md` is never sent; a multi-step task may keep material there
+as its budget. `turn_sessions: continue` on the server is Harbor's `--resume-trajectory`: the first turn seeds
+one multi-turn continuation session and every later turn is the next activation of it, so the agent keeps its
+conversation across steps; each step is still verified on its own, the session is closed once, after the last
+turn's activation and before that step's verifier, and its observations and cumulative trajectory are the episode's (`ng_agent_observations`,
+`ng_trajectory`; the per-turn results carry none). The result's top-level `responses_create_params` and `response`
+are then the last activation's input and its new output alone, produced with the earlier steps in the harness's
+own conversation, not a standalone prompt and completion: a continued episode's record is the cumulative
+`ng_trajectory` (every trajectory turn names its activation) with, when
+[model-call capture](https://docs.nvidia.com/nemo/gym/latest/model-server/model-call-capture) is enabled at the
+model server (`observability_enabled`, opt-in outside `gym eval submit`), the captured model calls, which hold what
+the model saw and produced. The run is refused before any sandbox when the harness
+declares no multi-turn continuation (`GET /v1/agent_sessions/capabilities`; only OpenCode does today), as
+Harbor refuses `resume_trajectory` for an agent without `SUPPORTS_RESUME` before any environment spend, and when
+the task's steps switch the agent user, which a live session cannot follow. The setting is a no-op for a
+single-step task, as in Harbor. One divergence: Harbor's resumed agent has exited between steps, and so has the
+continued harness's process (an activation returns once the process it launched has stopped), but between steps
+the session keeps its conversation state on disk in the sandbox and the borrowed connection the next activation
+reuses, through every step's verifier but the last's; services the task itself started are untouched between steps
+in either mode. The task's top-level `instruction.md` is never sent; a multi-step task may keep material there
 the agent must not see. After each turn the shared verifier runs the task's `tests/` with
 `steps/<name>/tests/` on top, under the step's verifier user and environment over the task's and the step's own
 `[steps.verifier].timeout_sec`, else Harbor's step default of 600 s (times a dataset `timeout_multiplier`, like every
@@ -249,7 +267,10 @@ MemoryArena adapters write) are read as Harbor 0.22.0 reads them: `version` is `
 `multi_step_reward_mode = "aggregate"` is dropped and the task rolls up with the default `mean` (or its own
 `multi_step_reward_strategy`), as under Harbor, which has no such field; any other value of that key is dropped
 too, with a warning naming it, never read as a strategy. The result lists every turn under `turns`; its
-`response` and `ng_agent_observations` are the last turn's whose agent ran. Each turn is seeded with its step's agent budget and hands the verifier an
+`response` is the last turn's whose agent ran, and each turn carries its own session's `agent_observations` and
+`trajectory` (one record per step, as Harbor keeps one `steps/<name>/agent/` per step) while the episode-level
+`ng_agent_observations` and `ng_trajectory` stay empty when more than one fresh session ran (a single fresh
+session is the episode's; merging several is issue #5063). Each turn is seeded with its step's agent budget and hands the verifier an
 ATIF transcript of its own request; with `enforce_task_timeouts` the task deadline sums every turn's harness
 setup, agent budget, hooks and verifier time. A long task's turns can budget more than
 `default_episode_timeout_seconds`. The seed sizes three figures per episode: what the steps need once the sandbox
