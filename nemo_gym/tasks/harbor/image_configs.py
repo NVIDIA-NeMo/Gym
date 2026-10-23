@@ -33,13 +33,14 @@ from typing import Any, Callable
 
 import yaml
 
-from nemo_gym.sandbox.compose_config import check_sidecar_extra_hosts
+from nemo_gym.sandbox.compose_config import check_sidecar_extra_hosts, plan_compose_volumes
 from nemo_gym.sandbox.compose_fields import (
     DEFAULT_PLATFORM,
     ComposeFieldError,
     ComposeSubstitutionError,
     check_compose_fields,
 )
+from nemo_gym.sandbox.compose_volumes import ComposeVolumeError
 from nemo_gym.sandbox.providers.registry import provider_service_option_fields
 from nemo_gym.tasks.harbor.compose_variables import (
     _warn_unset,
@@ -257,9 +258,51 @@ def without_pull_policy(document: dict[str, Any]) -> dict[str, Any]:
     return document
 
 
-def compose_image_references(task: HarborTask) -> list[str]:
+def plan_task_compose_volumes(
+    task: HarborTask,
+    document: dict[str, Any],
+    *,
+    volume_sources: dict[str, str] | None = None,
+    gpu_volume_sources: dict[str, str] | None = None,
+    shared_storage: bool | None = None,
+    gpu_shared_storage: bool | None = None,
+) -> dict[str, list[dict[str, str]]]:
+    """Resolve the ``volumes`` of a task's Compose document for a sandbox group; mutates ``document``.
+
+    Bind mounts of the task's own files become ``x-sandbox.uploads`` entries (performed into the service
+    once it starts), named volumes stay for the provider's shared storage, and external volumes or bind
+    sources outside the task resolve through ``volume_sources`` (the sandbox block's mapping). Each service
+    resolves through the mapping of the block it runs on, the way :func:`check_task_compose_fields` routes
+    the capability check: when ``gpu_volume_sources`` is given (the ``gpu_sandbox_provider`` block's mapping),
+    every service of a task that declares GPUs and a GPU-reserving sidecar of any task resolve through it.
+    ``shared_storage`` and ``gpu_shared_storage`` say whether each block's provider has shared storage, routed
+    the same way: ``False`` leaves a task whose named volumes or shared logs binds need it out at prepare,
+    naming the setting, rather than failing every seed; ``None`` (unknown) leaves that to the adapter.
+    Anything the group cannot run raises :class:`ImageConfigError` naming the volume, path or field, so
+    prepare fails before a sandbox starts. Returns the uploads per service.
+    """
+    path = compose_file(task)
+    base_dir = path.parent if path is not None else task.path / "environment"
+    if (gpu_volume_sources, gpu_shared_storage) != (None, None) and task_declares_gpus(task):
+        volume_sources, shared_storage = gpu_volume_sources, gpu_shared_storage
+    try:
+        return plan_compose_volumes(
+            document,
+            base_dir,
+            root=task.path,
+            volume_sources=volume_sources,
+            gpu_volume_sources=gpu_volume_sources,
+            shared_storage=shared_storage,
+            gpu_shared_storage=gpu_shared_storage,
+        )
+    except ComposeVolumeError as exc:
+        raise ImageConfigError(f"{task.task_id}: {base_dir.name}/{path.name if path else ''}: {exc}") from exc
+
+
+def compose_image_references(task: HarborTask, document: dict[str, Any] | None = None) -> list[str]:
     """Every image a Compose task starts: the task image for ``main`` and each sidecar's image."""
-    document = load_compose_document(task)
+    if document is None:
+        document = load_compose_document(task)
     if document is None:
         return []
     services = document.get("services") or {}
@@ -479,6 +522,10 @@ def record_compose_images(
     sandbox_provider: str | None = None,
     gpu_sandbox_provider: str | None = None,
     compose_platform: str = DEFAULT_PLATFORM,
+    volume_sources: dict[str, str] | None = None,
+    gpu_volume_sources: dict[str, str] | None = None,
+    shared_storage: bool | None = None,
+    gpu_shared_storage: bool | None = None,
 ) -> Path | None:
     """Write ``compose-images.json`` in ``folder`` for the Compose tasks among ``tasks``.
 
@@ -487,9 +534,15 @@ def record_compose_images(
     ``gpu_sandbox_provider`` naming the providers of the ``sandbox:`` and ``gpu_sandbox_provider`` blocks for the
     capability check and ``compose_platform`` the deployment's, which a service's ``platform`` must match;
     ``platform`` is the one the images are recorded for, as :func:`record_image_configs` takes it (the built images'
-    ``builds.platform``). A task whose Compose file does not resolve (an
-    :class:`ImageConfigError` from :func:`load_compose_document`) or carries a field the group cannot run does
-    not stop the others: with ``skipped`` given it is recorded there by task id with the reason and left out,
+    ``builds.platform``). Each document's ``volumes`` are planned next (see :func:`plan_task_compose_volumes`), with
+    ``volume_sources`` standing for the deployment's external volumes; a task that declares GPUs, and a GPU-reserving
+    sidecar of any task, are checked against ``gpu_volume_sources`` instead when that is given (the
+    ``gpu_sandbox_provider`` block's mapping, which is what the server resolves them against; an empty mapping when
+    that block has none), and ``shared_storage``/``gpu_shared_storage`` say whether each block's provider has the
+    shared storage named volumes and shared logs binds need (``False`` leaves such a task out, naming the
+    setting). A task whose Compose file
+    does not resolve (an :class:`ImageConfigError` from :func:`load_compose_document`), carries a field the group
+    cannot run, or declares volumes it cannot run (the planner's :class:`ImageConfigError`) does not stop the others: with ``skipped`` given it is recorded there by task id with the reason and left out,
     otherwise one :class:`ImageConfigError` at the end names every such task. Its images are still recorded, so
     a fixed task file needs no new registry round-trip. Once the image configurations are recorded, a sidecar
     whose image runs as a non-root user (which the group starts without host injection) must declare no
@@ -504,10 +557,18 @@ def record_compose_images(
             document = load_compose_document(task)
             if document is None:
                 continue
-            for reference in compose_image_references(task):
+            for reference in compose_image_references(task, document):
                 references.setdefault(reference, []).append(task.task_id)
             check_task_compose_fields(
                 task, document, provider=sandbox_provider, gpu_provider=gpu_sandbox_provider, platform=compose_platform
+            )
+            plan_task_compose_volumes(
+                task,
+                document,
+                volume_sources=volume_sources,
+                gpu_volume_sources=gpu_volume_sources,
+                shared_storage=shared_storage,
+                gpu_shared_storage=gpu_shared_storage,
             )
         except ImageConfigError as exc:
             failures[task.task_id] = str(exc)
