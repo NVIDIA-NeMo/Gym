@@ -34,6 +34,7 @@ from nemo_gym.environment.validation import (
         "fukuyamabench",
         "moldetox",
         "scicodepile",
+        "partner_if",
     ],
 )
 def test_current_benchmark_manifests_match_runtime_composition(name: str) -> None:
