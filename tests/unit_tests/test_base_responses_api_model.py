@@ -675,6 +675,30 @@ def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
     assert read_model_call_records(CaptureStore(tmp_path), "rollout") == []
 
 
+def test_rollout_id_header_correlates_capture_for_a_fixed_base_url(tmp_path):
+    """A client that cannot change its base URL names the rollout in a header instead of the prefix."""
+    app = FastAPI()
+
+    @app.post("/v1/responses")
+    async def _responses(body: dict = Body()) -> dict:
+        return {"output": [], "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4}}
+
+    _install_capture(app, tmp_path)
+    client = TestClient(app)
+
+    r = client.post("/v1/responses", json={"input": "hi"}, headers={"x-ng-rollout-id": "task7-roll2"})
+    assert r.status_code == 200
+    calls = read_model_call_records(CaptureStore(tmp_path), "task7-roll2")
+    assert len(calls) == 1 and calls[0].tokens_total == 4
+
+    conflicting = client.post(
+        "/ng-rollout/task7-roll2/v1/responses", json={"input": "hi"}, headers={"x-ng-rollout-id": "task8-roll0"}
+    )
+    assert conflicting.status_code == 400
+    assert len(read_model_call_records(CaptureStore(tmp_path), "task7-roll2")) == 1
+    assert read_model_call_records(CaptureStore(tmp_path), "task8-roll0") == []
+
+
 def test_per_rollout_prefix_strips_for_non_observed_paths_too(tmp_path):
     """A prefixed but non-observed path (e.g. /v1/models) is still stripped and routed normally,
     and is not captured (composes with arbitrary endpoints, not just the observed dialects)."""

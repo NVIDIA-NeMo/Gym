@@ -12,10 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import functools
 from urllib.parse import urlsplit
 
+import httpx
 import orjson
 import pytest
+import requests
 from fastapi import Body, FastAPI
 from fastapi.responses import JSONResponse
 from omegaconf import OmegaConf
@@ -42,8 +46,13 @@ from nemo_gym.base_responses_api_model import (
 from nemo_gym.config_types import BaseServerConfig
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.rollout_correlation import (
+    ROLLOUT_ID_HEADER,
+    RolloutContextMiddleware,
+    add_rollout_id_header,
+    add_rollout_id_header_async,
     current_rollout_id,
     maybe_rollout_id_from_run_body,
+    rollout_context,
 )
 from nemo_gym.server_utils import ServerClient, get_response_json
 
@@ -374,3 +383,77 @@ def test_an_explicit_rollout_id_with_an_attempt_suffix_cannot_also_take_an_attem
     # Both at once would build "job-a2-a1", which decodes to no rollout and attempt.
     with pytest.raises(ValueError, match="already ends with the attempt suffix"):
         maybe_rollout_id_from_run_body({"_ng_rollout_id": "job-a2", "_ng_attempt_index": 1})
+
+
+def _rollout_echo_app() -> FastAPI:
+    app = FastAPI()
+
+    @app.get("/whoami")
+    async def _whoami() -> dict:
+        return {"rollout_id": current_rollout_id()}
+
+    app.add_middleware(RolloutContextMiddleware)
+    return app
+
+
+def test_rollout_id_header_names_the_rollout_like_the_path_prefix() -> None:
+    client = TestClient(_rollout_echo_app())
+
+    assert client.get("/whoami", headers={ROLLOUT_ID_HEADER: "3-0"}).json() == {"rollout_id": "3-0"}
+    assert client.get("/ng-rollout/3-0/whoami", headers={ROLLOUT_ID_HEADER: "3-0"}).json() == {"rollout_id": "3-0"}
+    assert client.get("/ng-rollout/3-0/whoami").json() == {"rollout_id": "3-0"}
+    assert client.get("/whoami").json() == {"rollout_id": None}
+
+
+@pytest.mark.parametrize(
+    ("path", "headers", "message"),
+    [
+        ("/ng-rollout/3-0/whoami", [(ROLLOUT_ID_HEADER, "4-0")], "names rollout '3-0'"),
+        ("/whoami", [(ROLLOUT_ID_HEADER, ".hidden")], "must be letters"),
+        ("/whoami", [(ROLLOUT_ID_HEADER, "3-0"), (ROLLOUT_ID_HEADER, "4-0")], "repeated with different values"),
+    ],
+)
+def test_contradictory_or_malformed_rollout_id_headers_are_refused(path, headers, message) -> None:
+    response = TestClient(_rollout_echo_app()).get(path, headers=headers)
+
+    assert response.status_code == 400
+    assert message in response.json()["detail"]
+
+
+async def test_a_shared_client_tags_each_concurrent_request_with_its_own_rollout() -> None:
+    base_url = "http://gym-model"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_rollout_echo_app()),
+        base_url=base_url,
+        event_hooks={"request": [functools.partial(add_rollout_id_header_async, base_urls=[base_url])]},
+    ) as client:
+
+        async def call(rollout_id: str) -> str:
+            with rollout_context(rollout_id):
+                await asyncio.sleep(0)
+                return (await client.get("/whoami")).json()["rollout_id"]
+
+        rollout_ids = [f"{task}-0" for task in range(20)]
+        assert await asyncio.gather(*(call(rollout_id) for rollout_id in rollout_ids)) == rollout_ids
+
+
+def test_add_rollout_id_header_tags_only_listed_gym_servers_and_only_once() -> None:
+    base_urls = ["http://gym-model:8000/"]
+    request = httpx.Request("POST", "http://gym-model:8000/v1/responses")
+    with rollout_context("3-0"):
+        add_rollout_id_header(request, base_urls=base_urls)
+        add_rollout_id_header(request, base_urls=base_urls)
+        unrelated = httpx.Request("POST", "http://other-host/v1/responses")
+        add_rollout_id_header(unrelated, base_urls=base_urls)
+        lookalike = httpx.Request("POST", "http://gym-model:80001/v1/responses")
+        add_rollout_id_header(lookalike, base_urls=base_urls)
+        prepared = requests.Request("POST", "http://gym-model:8000/v1/chat/completions").prepare()
+        add_rollout_id_header(prepared, base_urls=base_urls)
+    outside_rollout = httpx.Request("POST", "http://gym-model:8000/v1/responses")
+    add_rollout_id_header(outside_rollout, base_urls=base_urls)
+
+    assert request.headers.get_list(ROLLOUT_ID_HEADER) == ["3-0"]
+    assert ROLLOUT_ID_HEADER not in unrelated.headers
+    assert ROLLOUT_ID_HEADER not in lookalike.headers
+    assert prepared.headers[ROLLOUT_ID_HEADER] == "3-0"
+    assert ROLLOUT_ID_HEADER not in outside_rollout.headers
