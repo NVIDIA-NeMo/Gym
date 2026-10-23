@@ -344,6 +344,8 @@ _HOST_NETWORK_SANDBOX_PROVIDERS = frozenset({"local"})
 _LOCAL_DOCKER_SANDBOX_PROVIDERS = frozenset({"docker"})
 # An agent either exports its sessions or restarts its rollouts; it has no stateless mode.
 _AGENT_CHECKPOINT_MODES = ("restart_only", "exported")
+# The name checkpoint_mode replaced; a subclass that still declares it would silently be restart_only.
+_OLD_AGENT_CHECKPOINT_DECLARATION = "checkpoint_sessions_supported"
 
 
 def is_loopback_host(url: str) -> bool:
@@ -549,6 +551,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if getattr(app.state, "nemo_gym_agent_checkpoint_installed", False):
             return
         app.state.nemo_gym_agent_checkpoint_installed = True
+        if hasattr(type(self), _OLD_AGENT_CHECKPOINT_DECLARATION):
+            raise ValueError(
+                f"{type(self).__name__} declares {_OLD_AGENT_CHECKPOINT_DECLARATION}; "
+                'declare checkpoint_mode = "exported" or "restart_only" instead'
+            )
         # The declaration is a class attribute nothing else checks: a typo would act as a mode of its own.
         if self.checkpoint_mode not in _AGENT_CHECKPOINT_MODES:
             raise ValueError(

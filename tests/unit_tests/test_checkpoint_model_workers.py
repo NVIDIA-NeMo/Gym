@@ -467,7 +467,7 @@ async def test_restore_is_refused_after_a_worker_left_even_if_its_replacement_is
         shutil.rmtree(directory, ignore_errors=True)
 
 
-async def test_a_restored_attempt_any_worker_started_is_no_longer_pending(tmp_path: Path) -> None:
+async def test_a_restored_attempt_any_worker_started_is_no_longer_unclaimed(tmp_path: Path) -> None:
     async with deployment(2, ledger=FileLineageStore(tmp_path / "ledger")) as (coordinator, [first, second]):
         participant = coordinator.participant
         # A restore closes every worker, which report that they have served nothing, then installs.
@@ -482,7 +482,7 @@ async def test_a_restored_attempt_any_worker_started_is_no_longer_pending(tmp_pa
     assert [episode_id.capture_key for episode_id in pending] == ["s-a1"]
 
 
-async def test_a_reopen_does_not_make_a_started_restored_attempt_pending_again(tmp_path: Path) -> None:
+async def test_a_reopen_does_not_make_a_started_restored_attempt_unclaimed_again(tmp_path: Path) -> None:
     async with deployment(2, ledger=FileLineageStore(tmp_path / "ledger")) as (coordinator, [first, second]):
         participant = coordinator.participant
         await participant.close_admission(CheckpointRequest(**control("r1")))

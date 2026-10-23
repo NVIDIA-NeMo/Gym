@@ -35,7 +35,7 @@ import os
 import re
 import time
 from abc import abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, ClassVar, Iterable, Literal, NotRequired, Optional, TypedDict
@@ -269,6 +269,13 @@ def _orjson_dispatch_response(content: Any) -> Any:
     return Response(content=orjson.dumps(content), media_type="application/json")
 
 
+# Model server settings that moved into the checkpoint block, by their new names.
+_FLAT_CHECKPOINT_FIELDS = {
+    "checkpoint_policy": "checkpoint.policy",
+    "checkpoint_generation_cuts": "checkpoint.generation_cuts",
+}
+
+
 class ModelCheckpointConfig(BaseModel):
     """A model server instance's ``checkpoint`` block."""
 
@@ -307,6 +314,17 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     )
     # This instance's part in partial-rollout checkpoints, which the global ``checkpoint`` block turns on.
     checkpoint: ModelCheckpointConfig = Field(default_factory=ModelCheckpointConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def refuse_flat_checkpoint_fields(cls, data: Any) -> Any:
+        # These settings moved into the checkpoint block.
+        # The config accepts unknown fields, so an old name would otherwise be ignored and leave checkpointing off.
+        if isinstance(data, Mapping):
+            for old, new in _FLAT_CHECKPOINT_FIELDS.items():
+                if old in data:
+                    raise ValueError(f"{old} is now {new}: set it in this model server's checkpoint block")
+        return data
 
 
 class BaseResponsesAPIModel(BaseServer):

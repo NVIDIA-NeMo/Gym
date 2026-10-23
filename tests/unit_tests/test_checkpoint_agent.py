@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import httpx
@@ -342,6 +343,29 @@ def _unsupported_agent_app() -> tuple[_UnsupportedAgent, Any]:
     )
     agent.started, agent.release = asyncio.Event(), asyncio.Event()
     return agent, agent.setup_webserver()
+
+
+@pytest.mark.parametrize(
+    "declarations, error",
+    [
+        ({"checkpoint_mode": "stateless"}, "checkpoint_mode='stateless'"),
+        ({"checkpoint_mode": "exportd"}, "checkpoint_mode='exportd'"),
+        ({"checkpoint_sessions_supported": True}, 'declare checkpoint_mode = "exported"'),
+    ],
+)
+def test_an_agent_with_an_unknown_or_replaced_checkpoint_declaration_fails_at_startup(
+    declarations: dict[str, Any], error: str
+) -> None:
+    annotations = {name: ClassVar[Any] for name in declarations}
+    agent_type = type("Declared", (_UnsupportedAgent,), {**declarations, "__annotations__": annotations})
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "t"}}
+    agent = agent_type(
+        config=BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name="agent"), server_client=client
+    )
+
+    with pytest.raises(ValueError, match=re.escape(error)):
+        agent.setup_webserver()
 
 
 async def test_an_agent_without_session_hooks_reports_its_rollouts_as_restarts_that_keep_running(
@@ -821,7 +845,7 @@ async def test_a_retire_during_a_close_does_not_cancel_the_activation_again() ->
     assert hooks.retired == ["s"] and not participant.has_session("s")
 
 
-async def test_a_restored_legacy_run_claimed_at_verify_is_no_longer_pending_and_survives_a_commit(
+async def test_a_restored_legacy_run_claimed_at_verify_is_no_longer_unclaimed_and_survives_a_commit(
     tmp_path: Path,
 ) -> None:
     hooks = Hooks()
