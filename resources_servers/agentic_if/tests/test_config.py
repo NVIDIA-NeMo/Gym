@@ -63,11 +63,9 @@ def test_the_judge_model_server_serves_the_model_judge_yaml_names():
 async def test_a_judge_outage_fails_after_the_bounded_retries(monkeypatch):
     """A refused connection counts against the retry policy, so an outage ends as a failed call, not a hung episode."""
     block = CONFIG["agentic_if_judge_model"]["responses_api_models"]["openai_model"]
+    endpoint = {"openai_base_url": "https://judge.invalid/v1", "openai_api_key": "test"}  # pragma: allowlist secret
     config = openai_model.SimpleModelServerConfig(
-        host="127.0.0.1",
-        port=0,
-        name="agentic_if_judge_model",
-        **(block | {"openai_base_url": "https://judge.invalid/v1", "openai_api_key": "test-key"}),  # pragma: allowlist secret
+        host="127.0.0.1", port=0, name="agentic_if_judge_model", **(block | endpoint)
     )
     server = openai_model.SimpleModelServer(
         config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={})
