@@ -353,9 +353,9 @@ class ResourcesParticipant(CheckpointParticipant):
 
     async def mark_retired(self, episode_ids: list[EpisodeId]) -> None:
         await super().mark_retired(episode_ids)
-        self.fence_retired(episode_ids)
+        self.mark_retired_sessions(episode_ids)
 
-    def fence_retired(self, episode_ids: list[EpisodeId]) -> None:
+    def mark_retired_sessions(self, episode_ids: list[EpisodeId]) -> None:
         """Refuse the sessions these attempts and their earlier ones already have, from now on.
 
         It runs as the attempts are marked, before anything awaits,
@@ -363,9 +363,9 @@ class ResourcesParticipant(CheckpointParticipant):
         held up in readiness, and left out of exports until a retried retire frees them.
         """
         for episode_id in episode_ids:
-            self._fence(episode_id)
+            self._mark_sessions(episode_id)
 
-    def _fence(self, episode_id: EpisodeId) -> list[str]:
+    def _mark_sessions(self, episode_id: EpisodeId) -> list[str]:
         """Refuse the tracked sessions of ``episode_id`` and its earlier attempts until forget; return them."""
         retired = [
             session_id
@@ -381,7 +381,7 @@ class ResourcesParticipant(CheckpointParticipant):
     async def retire(self, episode_id: EpisodeId) -> None:
         """Refuse the attempts' sessions, wait for their requests in flight, then release them."""
         # The sessions known now are refused before the first await, whether or not this retire finishes.
-        self._fence(episode_id)
+        self._mark_sessions(episode_id)
         # A seed admitted before the retire marked its attempt registers its session when it finishes; wait for it,
         # so that session is freed here and not left behind.
         while any(
@@ -390,7 +390,7 @@ class ResourcesParticipant(CheckpointParticipant):
         ):
             await self.wait_changed(1.0)
         # Again, for the sessions those seeds created.
-        retired = self._fence(episode_id)
+        retired = self._mark_sessions(episode_id)
         while any(self._session_requests[session_id] for session_id in retired):
             await self.wait_changed(1.0)
         for session_id in retired:
@@ -431,8 +431,8 @@ class ResourcesParticipant(CheckpointParticipant):
         )
         if seeding:
             raise RetireIncompleteError(f"seeds of retired attempts {seeding[:10]} are still in flight")
-        # Every tracked session of a retired attempt, fenced or not,
-        # so a fence a retire never reached cannot leave a session live once the mark is gone.
+        # Every tracked session of a retired attempt, marked or not,
+        # so a mark a retire never reached cannot leave a session live once the attempt's mark is gone.
         unfreed = sorted(
             session_id
             for rollout_id in rollout_ids
@@ -540,7 +540,7 @@ class ResourcesCheckpointMiddleware:
     A tool call over MCP is one POST to the MCP endpoint.
     It names its session with a signed token instead of the cookie,
     and the token also names the attempt whose seed minted it.
-    The middleware admits, fences, and counts that request as a whole, so direct MCP dispatch inside it loses nothing.
+    The middleware admits, refuses, and counts that request as a whole, so direct MCP dispatch inside it loses nothing.
     While a checkpoint is open, an MCP call waits for resume instead of being refused:
     MCP clients are third-party agent harnesses that would show a refusal to the model as a tool error.
     A waiting call is not in flight, so it never holds up prepare.

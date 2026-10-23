@@ -1324,7 +1324,7 @@ async def test_a_commit_deletes_unscoped_restored_state_without_retiring_it(tmp_
         await client.post("/ng-control/v1/checkpoint/prepare", json=body())
         await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path), episode_ids=[]))
 
-    # The default delete_restored retires; a participant whose retire fences overrides it.
+    # The default delete_restored retires; a participant whose retire marks overrides it.
     assert deleted == ["r-a1", "retired r-a1"]
 
 
