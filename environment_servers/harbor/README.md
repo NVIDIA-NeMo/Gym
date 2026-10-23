@@ -543,7 +543,7 @@ registry's current copy.
 datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `./datasets`). `harbor:<org>/<name>[@<tag> | @sha256:<digest>]`
 fetches a package-store dataset instead (for example `harbor:terminal-bench/terminal-bench@4.0.0`): every task
 package is downloaded by content hash into `<name>/` (`latest`), `<name>-<tag>/` or `<name>-<12 digest chars>/` (a digest pin), checked against the content hash Harbor published for it and recorded in
-`manifest.toml`, which pins the package and the version the fetch resolved so a later fetch never mixes another package or a moved `latest` into the folder. A local task folder, or a folder of task folders, works the same way; task folders may be
+`manifest.toml`, whose per-task pins carry the task's package and that content hash, so a later fetch never mixes another package or a moved `latest` into the folder. A local task folder, or a folder of task folders, works the same way; task folders may be
 grouped in subfolders (the search is recursive, `task_id` stays the task folder's own name and must be unique
 across the dataset, and `dataset.toml` and the recorded image configurations sit at the dataset root). The
 taskset mapping records the relative path of a task found below the first level under `paths`. The fetch stages its clone in a hidden `.nemo-gym-harbor-*` directory inside the dataset folder, which the search skips. A fetch interrupted under a `main` build from before this change staged under an unhidden `nemo-gym-harbor-*` name; the recursive search sees that clone and refuses the dataset (a duplicate task ID, or a task the manifest does not record) rather than running it. Delete those directories once; nothing in them is needed. The generated run config declares the materialized rows as the agent's
@@ -551,6 +551,37 @@ validation dataset and binds the per-taskset environment server to that agent. `
 per task, the verifier's wall time (`verify_s`) and the network it ran under (`network`). Running model episodes
 requires a harness that accepts `sandbox_access` in its session seed and leaves the sandbox to the server
 when its session is closed.
+
+### Dataset identity
+
+`manifest.toml` beside the task folders holds derived facts only, never a copy of the name or version
+(those live in `dataset.toml`): `[dataset]` `source` (`harbor-registry`, `harbor-package-store`, `git` or
+`local`), `digest` (the dataset's identity: a hash over the sorted per-task digests and `dataset.toml`),
+`dataset_toml_digest` on its own, and per task
+`[tasks."<id>"]` `digest` (the folder digest rows carry as `_ng_digest`) with its upstream pin (`git_url`,
+`git_commit_id`, `path`, or `package`, `content_hash`). The output is deterministic: fixed key order,
+sorted tasks, no timestamps, so equal manifests mean identical inputs and two runs compare by `digest`.
+Two datasets that differ only in a `[gym]` timeout override are different datasets, on purpose.
+
+Fetches write the manifest and record only the tasks they fetched; a task folder beside them that neither the
+source names nor a previous fetch recorded stops the fetch (move it aside). Prepare writes a manifest for a
+local folder, unless git tracks the folder (such as `data/tasks/` here), whose identity is computed in memory.
+Before any image is built or pushed, prepare recomputes the per-task digests from the folders and refuses a
+fetched dataset whose folders no longer match (the folder was edited by hand or deleted, or its source moved):
+the error names the tasks and says to delete the folder, or move it aside, and run again. A registry fetch
+re-hashes the folders it keeps only when it also adds tasks (a package-store fetch compares every folder it finds
+on each run), while prepare recomputes every task digest on each run, so a hand-edited folder a re-fetch kept is
+caught at prepare. A manifest naming a
+source this Gym does not know is refused too, never read as local. When only `dataset.toml` moved, the derived
+facts are rewritten without a fetch. A `latest` package-store folder whose manifest was written for another
+version of the dataset is refused the same way: the error names the version difference and says to delete the
+folder, or move it aside, and run again to fetch the store's `latest`, or to pin the version you have with
+`harbor:<org>/<name>@<tag>`. A manifest written by a newer Gym (a `schema_version` this Gym does not read) is
+refused untouched, by fetch and prepare alike, until Gym is upgraded or the folder moved aside. The dataset digest is
+recorded in the run config (`tasksets.<name>.dataset_digest` and `dataset_toml_digest`), in every materialized
+row as `task_data._ng_dataset_digest`, and, because rollout collection copies a row's `_ng_*` task data onto the
+record it writes, in every `rollouts.jsonl` row as `_ng_dataset_digest` (beside `_ng_digest`), so every results
+file says which dataset ran.
 
 ## Example data
 
@@ -754,7 +785,7 @@ deployment wants the same value; a unit test pins that list.
 | Home | File | Owner | Holds |
 |---|---|---|---|
 | Task | `task.toml` | task author | image, resources, timeouts, env, verifier, agent user (read-only once fetched) |
-| Dataset | `dataset.toml`, `[gym]` table | dataset author | `[gym.defaults]` `timeout_multiplier`, `resource_multiplier`; `[gym.tasks."<id>"]` `environment` and `verifier` overrides in Harbor's own fields (`env` merges, other fields replace) and `artifacts` additions appended to the task's own |
+| Dataset | `dataset.toml`, `[gym]` table | dataset author | `[gym]` `license` (one of Gym's dataset license values, required for `train` and `validation`) and `type` (`train`, `validation`, `example` or `benchmark`; unset means `validation` with a license, else `benchmark`); `[gym.defaults]` `timeout_multiplier`, `resource_multiplier`; `[gym.tasks."<id>"]` `environment` and `verifier` overrides in Harbor's own fields (`env` merges, other fields replace) and `artifacts` additions appended to the task's own |
 | Deployment | the `sandbox:` provider block | operator | image rewrites and registry credentials (`images`), root setup commands (`setup`), networking, shared-memory labels, shared storage and `volume_sources` for Compose volumes |
 | Run | run config | the run | provider selection, GPU routing, repeats, output paths, `sandbox_resources_override` for parity runs |
 

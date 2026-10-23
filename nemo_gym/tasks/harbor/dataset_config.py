@@ -4,10 +4,11 @@
 """The ``[gym]`` table of a dataset's ``dataset.toml``: dataset-level settings for its tasks.
 
 ``task.toml`` is the task author's file and, once fetched, read-only. What a dataset needs on top
-of it goes here, as data: defaults that scale every task, and per-task overrides expressed with
-Harbor's own ``[environment]`` fields. The loader applies them before anything else sees a task,
-so servers, agents and rows only ever see the effective ``task.toml``. Harbor's own tables in the
-same file (``[dataset]`` and friends) are left to Harbor.
+of it goes here, as data: the facts Harbor has no field for (``license`` and ``type``, which say
+which split the rows may enter), defaults that scale every task, and per-task overrides expressed
+with Harbor's own ``[environment]`` fields. The loader applies the task-shaping settings before
+anything else sees a task, so servers, agents and rows only ever see the effective ``task.toml``.
+Harbor's own tables in the same file (``[dataset]`` and friends) are left to Harbor.
 
 Deployment settings (which sandbox provider, registry credentials, image mirrors) do not belong
 here: a dataset must run unchanged on every deployment.
@@ -16,15 +17,19 @@ here: a dataset must run unchanged on every deployment.
 import math
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
+from nemo_gym.config_types import DatasetLicense
 from nemo_gym.tasks.harbor.models import HarborArtifact, HarborEnvironment, HarborTaskConfig, HarborVerifier
 
 
 DATASET_FILE = "dataset.toml"
 GYM_TABLE = "gym"
+# Gym's existing dataset splits, plus `benchmark`: evaluates, never enters a training split.
+DatasetSplit = Literal["train", "validation", "example", "benchmark"]
+TRAINING_SPLITS = ("train", "validation")
 # [environment] fields that scale with `resource_multiplier`; GPUs never do.
 SCALED_RESOURCES = ("cpus", "memory_mb", "storage_mb")
 
@@ -62,14 +67,37 @@ class GymDatasetConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # One of Gym's dataset license values; required for the `train` and `validation` splits, Gym's rule
+    # for every dataset. A hub dataset without one evaluates as a benchmark and never enters training.
+    license: DatasetLicense | None = None
+    # Which split the rows enter. Unset means `validation` when a license is set, else `benchmark`.
+    type: DatasetSplit | None = None
     defaults: GymDatasetDefaults = Field(default_factory=GymDatasetDefaults)
     tasks: dict[str, GymTaskOverride] = Field(default_factory=dict)
     # The dataset.toml this table was read from, so that errors in applying it name the file.
     _path: Path | None = PrivateAttr(default=None)
 
+    @model_validator(mode="after")
+    def _training_splits_need_a_license(self) -> "GymDatasetConfig":
+        if self.type in TRAINING_SPLITS and self.license is None:
+            raise ValueError(f"type = {self.type!r} requires a license (Gym's rule for train and validation sets)")
+        return self
+
+    @property
+    def effective_type(self) -> str:
+        """The split the rows enter: the declared one, else ``validation`` with a license, else ``benchmark``."""
+        if self.type is not None:
+            return self.type
+        return "validation" if self.license is not None else "benchmark"
+
+    @property
+    def shapes_tasks(self) -> bool:
+        """Whether any setting changes the effective ``task.toml`` (identity fields never do)."""
+        return bool(self.tasks) or self.defaults != GymDatasetDefaults()
+
     @property
     def is_empty(self) -> bool:
-        return not self.tasks and self.defaults == GymDatasetDefaults()
+        return not self.shapes_tasks and self.license is None and self.type is None
 
     @property
     def path(self) -> Path | None:
@@ -171,7 +199,7 @@ def _added_artifacts(entries: list[Any], *, task_id: str) -> list[HarborArtifact
 
 def apply_dataset_config(config: HarborTaskConfig, task_id: str, dataset: GymDatasetConfig) -> HarborTaskConfig:
     """The effective ``task.toml`` for ``task_id``: overrides first, then the dataset defaults."""
-    if dataset.is_empty:
+    if not dataset.shapes_tasks:
         return config
     defaults = dataset.defaults
     override = dataset.tasks.get(task_id)
