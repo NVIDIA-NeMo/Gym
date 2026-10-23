@@ -904,7 +904,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
         update_metrics(params.metrics_fpath, {"mask_sample": mask_sample})
 
         response_path = params.persistent_dir / "response.json"
-        output_items, tools = [], []
+        output_items, tools, usage = [], [], None
         if response_path.exists():
             try:
                 data = json.loads(response_path.read_text())
@@ -912,6 +912,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
                 saved = NeMoGymResponse.model_validate(data)
                 output_items = saved.output
                 tools = saved.tools or []
+                usage = saved.usage
             except (json.JSONDecodeError, ValueError) as e:
                 print(f"[{params.task_name}] response.json unreadable ({e}), treating as empty response", flush=True)
 
@@ -924,6 +925,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=params.body.parallel_tool_calls,
             tool_choice=params.body.tool_choice,
             tools=tools,
+            usage=usage,
             metadata={
                 "input": json.dumps(params.body.model_dump(mode="json").get("input") or []),
                 "metrics": params.metrics_fpath.read_text(),
