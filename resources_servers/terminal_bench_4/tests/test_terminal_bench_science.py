@@ -250,20 +250,25 @@ def test_oracle_runner_builds_a_local_docker_resources_server(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize(
-    ("error_type", "return_code", "reason"),
+    ("chmod_code", "setsid_code", "error_type", "return_code", "reason"),
     [
-        (None, 0, "completed"),
-        (None, 3, "nonzero_exit"),
-        ("timeout", 124, "timeout"),
-        ("provider_error", 125, "infrastructure_error"),
+        (0, 0, None, 0, "completed"),
+        (0, 0, None, 3, "nonzero_exit"),
+        (0, 0, "timeout", 124, "timeout"),
+        (0, 0, "provider_error", 125, "infrastructure_error"),
+        (1, 0, None, 0, "infrastructure_error"),
+        (0, 1, None, 0, "infrastructure_error"),
     ],
 )
-async def test_oracle_reports_how_the_reference_solution_ended(monkeypatch, error_type, return_code, reason):
+async def test_oracle_reports_how_the_reference_solution_ended(
+    monkeypatch, chmod_code, setsid_code, error_type, return_code, reason
+):
     from benchmarks.terminal_bench_science import oracle
 
     # The sandbox reports a timeout or a provider failure in error_type, not by raising.
     solution = SandboxExecResult(stdout=None, stderr="lost", return_code=return_code, error_type=error_type)
-    sandbox = SimpleNamespace(exec=AsyncMock(side_effect=[SandboxExecResult("", "", 0), solution]))
+    setup = [SandboxExecResult("", "", chmod_code), SandboxExecResult("", "", setsid_code)]
+    sandbox = SimpleNamespace(exec=AsyncMock(side_effect=[*setup, solution]))
     provider = SimpleNamespace(aclose=AsyncMock())
     monkeypatch.setattr(oracle, "create_provider", lambda _config: provider)
     monkeypatch.setattr(oracle, "resolve_provider_config", lambda config: config)
@@ -289,6 +294,11 @@ async def test_oracle_reports_how_the_reference_solution_ended(monkeypatch, erro
     termination = server.verify.await_args.args[1].termination
     assert termination.reason == reason
     provider.aclose.assert_awaited_once()
+    if not (chmod_code or setsid_code):
+        # Its own process group, listed where quiesce_agent stops the agent's groups before collection.
+        command = sandbox.exec.await_args.args[0]
+        assert command.startswith("setsid --fork --wait bash -c ")
+        assert "echo $$ >> /tmp/session.pids; exec /solution/solve.sh" in command
 
 
 async def test_oracle_refuses_unknown_tasks_and_a_used_output_directory(tmp_path):
