@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 
 from nemo_gym.reward_profile import compute_aggregate_metrics
-from resources_servers.equivalence_llm_judge.app import LLMJudgeResourcesServer
 from resources_servers.equivalence_llm_judge.domain_metrics import compute_domain_metrics
 
 
@@ -39,19 +38,6 @@ def test_missing_labels_tokens_and_single_question():
     assert result[prefix + "ci_available/reward"] is False
     with pytest.raises(ValueError, match="Inconsistent"):
         compute_domain_metrics([[row(0, 0, 1), row(0, 1, 1, category="Physics")]])
-
-
-def test_aggregation_hook_excludes_masked_and_preserves_headline_score():
-    server = SimpleNamespace(config=SimpleNamespace(report_hle_domains=True))
-    rows = [row(0, 0, 1), row(1, 0, 0), {**row(2, 0, 1), "mask_sample": True}]
-    result = compute_aggregate_metrics(
-        rows, compute_metrics_fn=lambda tasks: LLMJudgeResourcesServer.compute_metrics(server, tasks)
-    )
-    assert result.agent_metrics["domains/category/Math/mean/reward"] == 0.5
-    assert result.agent_metrics["domains/category/Math/question_count"] == 2
-    assert result.key_metrics["mean/reward"] == 0.5
-    server.config.report_hle_domains = False
-    assert LLMJudgeResourcesServer.compute_metrics(server, [[row(0, 0, 1)]]) == {}
 
 
 @pytest.mark.parametrize("include_vision", [False, True])

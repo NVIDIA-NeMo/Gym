@@ -15,6 +15,7 @@
 import json
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.encoders import jsonable_encoder
@@ -30,6 +31,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
 from resources_servers.equivalence_llm_judge.app import (
@@ -40,6 +42,23 @@ from resources_servers.equivalence_llm_judge.app import (
     _extract_question_text,
     _match_verdict_labels,
 )
+
+
+def test_aggregation_hook_excludes_masked_and_preserves_headline_score():
+    server = SimpleNamespace(config=SimpleNamespace(report_hle_domains=True))
+    rows = [
+        {"_ng_task_index": 0, "_ng_rollout_index": 0, "category": "Math", "reward": 1},
+        {"_ng_task_index": 1, "_ng_rollout_index": 0, "category": "Math", "reward": 0},
+        {"_ng_task_index": 2, "_ng_rollout_index": 0, "category": "Math", "reward": 1, "mask_sample": True},
+    ]
+    result = compute_aggregate_metrics(
+        rows, compute_metrics_fn=lambda tasks: LLMJudgeResourcesServer.compute_metrics(server, tasks)
+    )
+    assert result.agent_metrics["domains/category/Math/mean/reward"] == 0.5
+    assert result.agent_metrics["domains/category/Math/question_count"] == 2
+    assert result.key_metrics["mean/reward"] == 0.5
+    server.config.report_hle_domains = False
+    assert LLMJudgeResourcesServer.compute_metrics(server, [[rows[0]]]) == {}
 
 
 async def test_hle_verified_fixture() -> None:
