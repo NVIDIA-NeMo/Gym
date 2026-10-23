@@ -198,7 +198,7 @@ def test_session_timeout_defaults_and_fractional_budgets() -> None:
     assert configured.session_close_timeout_seconds == 0.25
 
 
-def test_shipped_yaml_declares_worker_and_close_defaults_with_episode_headroom() -> None:
+def test_shipped_yaml_declares_worker_and_close_defaults_below_episode_timeout() -> None:
     from pathlib import Path
 
     import yaml
@@ -209,10 +209,8 @@ def test_shipped_yaml_declares_worker_and_close_defaults_with_episode_headroom()
     defaults = agent_config()
     assert agent["sandbox_runner_timeout_seconds"] == defaults.sandbox_runner_timeout_seconds
     assert agent["session_close_timeout_seconds"] == defaults.session_close_timeout_seconds
-    assert (
-        agent["sandbox_runner_timeout_seconds"] + environment["cleanup_timeout_seconds"]
-        <= environment["default_episode_timeout_seconds"]
-    )
+    # These clocks start at different times; this does not reserve cleanup time within the episode.
+    assert agent["sandbox_runner_timeout_seconds"] < environment["default_episode_timeout_seconds"]
 
 
 def test_runtime_wheelhouse_expands_user_and_resolves_absolute_path(

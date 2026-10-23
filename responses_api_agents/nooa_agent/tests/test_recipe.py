@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from inspect import signature
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -91,6 +92,8 @@ def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment(
     from nemo_gym.cli.env import _configured_servers
     from nemo_gym.global_config import GlobalConfigDictParser
     from nemo_gym.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.sandbox import AsyncSandbox
+    from resources_servers.swebench_pro.app import SWEBenchProResourcesServerConfig
     from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 
     for key, value in {
@@ -133,6 +136,28 @@ def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment(
     assert "sandbox" not in config  # The caller explicitly selects a provider overlay.
     assert resources.datasets[0].jsonl_fpath == "benchmarks/swebench/data/swebench_pro_benchmark.jsonl"
     assert resources.datasets[0].prepare_script == "benchmarks/swebench/pro/prepare.py"
+    resource_config = SWEBenchProResourcesServerConfig(
+        name=environment.resources_server.name,
+        host="localhost",
+        port=8002,
+        **OmegaConf.to_container(resources, resolve=True),
+    )
+    ttl = resource_config.sandbox_config["ttl_s"]
+    # Patch extraction and patch-file removal each use AsyncSandbox.exec's default timeout.
+    command_timeout = signature(AsyncSandbox.exec).parameters["timeout_s"].default
+    assert isinstance(command_timeout, (int, float))
+    assert resource_config.verification_stop_timeout is not None
+    assert environment.default_episode_timeout_seconds is not None
+    # SingleAgentTurn registers Resources, agent, and post-verification Resources retry callbacks.
+    final_cleanup_budget = 3 * environment.cleanup_timeout_seconds
+    assert ttl > (
+        agent.sandbox_runner_timeout_seconds
+        + 2 * command_timeout
+        + resource_config.verification_stop_timeout
+        + final_cleanup_budget
+    )
+    # The episode deadline bounds the caller's wait for setup and patch download, which has no separate timeout.
+    assert ttl > environment.default_episode_timeout_seconds + final_cleanup_budget
     instances = parser.filter_for_server_instance_configs(config)
     assert {(instance.name, instance.SERVER_TYPE) for instance in instances} == {
         ("swebench_pro_nooa_agent", "responses_api_agents"),
