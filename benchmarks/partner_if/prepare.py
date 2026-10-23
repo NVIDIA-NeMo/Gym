@@ -22,10 +22,10 @@ OUTPUT_FPATH = DATA_DIR / "partner_if_benchmark.jsonl"
 TOOLS_FPATH = DATA_DIR / "partner_if_tools.jsonl"
 
 DATASET_NAME = "partner_if"
-VERSION = "2.0.1"
+VERSION = "2.0.0"
 ARTIFACT = "partner_if.jsonl"
 # The registry download neither checks the HTTP status nor verifies content, so the digest guards both.
-SHA256 = "893a6f2b7c37a8fc3d67cd516e5336d6e2dc583461b1c564a1b73f97cc5ec95d"
+SHA256 = "ae7baf81b4e31185e8e73a163a9f46785f8c21e5e39d62f8b930f19511f7b5ad"
 ROW_COUNT = 22
 
 

@@ -7,7 +7,7 @@ task checks whether the model follows its instructions, graded against versioned
 ## Data
 
 - **Source:** NVIDIA-internal rows in Gym's GitLab dataset registry: dataset `partner_if`, version
-  `2.0.1`, file `partner_if.jsonl`. `prepare.py` pins the file's sha256 and refuses any other content. The
+  `2.0.0`, file `partner_if.jsonl`. `prepare.py` pins the file's sha256 and refuses any other content. The
   rows are not in this repository.
 - **License:** internal.
 - **Size:** 22 tasks with 83 IF rubric items, plus 4 completion items: 17 text tasks, 2 search-tool tasks and
@@ -44,7 +44,7 @@ task checks whether the model follows its instructions, graded against versioned
 - **Reward:** a rollout scores 1 when every IF rubric item passes, and 0 otherwise. Code checks
   (partner_if's built-in and fixed checks) and an LLM judge grade the items. Completion items are
   reported but never change the reward.
-- **Provisional rubrics:** every contract in 2.0.1 is unsigned (`audit_signoff: false`). The config sets
+- **Provisional rubrics:** every contract in 2.0.0 is unsigned (`audit_signoff: false`). The config sets
   `allow_provisional_rubrics: true`, so the rows are scored and marked `provisional`.
 - **Metrics:** reported on a 0–100 scale.
   - Headline: `pass@1[avg-of-3]/all_if_pass`, each task's pass rate over 3 repeats, averaged over tasks
