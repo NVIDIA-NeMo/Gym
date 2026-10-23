@@ -19,6 +19,8 @@ swebench_pro_nooa_resources_server:
       task_network_policy:
         model_server: ${swebench_pro_nooa_agent.responses_api_agents.nooa_agent.model_server}
       sandbox_config:
+        # Outlive the episode, patch extraction, and final cleanup budgets.
+        ttl_s: 25200
         provider_options:
           platform: {os: linux, arch: amd64}
       datasets:
