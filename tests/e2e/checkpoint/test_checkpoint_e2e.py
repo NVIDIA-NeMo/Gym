@@ -22,6 +22,7 @@ parser, for example::
 
 import asyncio
 import collections
+import itertools
 import json
 import os
 import time
@@ -726,6 +727,12 @@ async def test_real_model_restarts_keep_running_through_a_checkpoint_and_start_o
 async def test_checkpoint_at_scale(deploy, tmp_path: Path, policy_workers: int, server_workers: int) -> None:
     """Checkpoint thousands of in-flight rollouts, crash, restore, and finish every one of them."""
     count = int(os.environ["NEMO_GYM_CHECKPOINT_SCALE"])
+    # At most this many rollouts open connections at once,
+    # as a training framework bounds the episodes it has in flight.
+    # A busy server worker on uvloop accepts about one new connection per event-loop iteration.
+    # A larger burst waits in the accept queue, and a session close can outlast the environment's cleanup timeout,
+    # so the test would measure connection setup rather than the checkpoint.
+    in_flight = int(os.environ.get("NEMO_GYM_CHECKPOINT_SCALE_IN_FLIGHT", "500"))
     # The training framework raises Gym's per-host connection limit the same way.
     deployment = deploy(
         "sessions",
@@ -744,8 +751,15 @@ async def test_checkpoint_at_scale(deploy, tmp_path: Path, policy_workers: int, 
     await lift_connection_limit()
     async with GymHTTP(deployment.url("environment"), timeout=900) as http:
         started = time.monotonic()
-        runs = [asyncio.create_task(http.post("/run", json=weather_episode(rollout_id))) for rollout_id in rollout_ids]
-        await wait_until(lambda: every_rollout_held_at_its_second_call(deployment, count), timeout=600)
+        runs: list[asyncio.Task] = []
+        # Dispatch in waves, and start the next wave once every rollout so far is held at its second call.
+        # A held rollout keeps its connections open until the checkpoint, so it must not count against the bound:
+        # a semaphore held until each run returns would stop dispatch at the bound and never reach the checkpoint.
+        for wave in itertools.batched(rollout_ids, in_flight):
+            runs.extend(
+                asyncio.create_task(http.post("/run", json=weather_episode(rollout_id))) for rollout_id in wave
+            )
+            await wait_until(lambda: every_rollout_held_at_its_second_call(deployment, len(runs)), timeout=600)
         timings["dispatch_to_held"] = time.monotonic() - started
 
         participants = await deployment.participants()
@@ -802,10 +816,15 @@ async def test_checkpoint_at_scale(deploy, tmp_path: Path, policy_workers: int, 
         await coordination.resume(participants, "scale-restore", deadline_ts=deadline(120))
         timings["resume"] = time.monotonic() - clock
 
+        # A replacement runs to its end, so a semaphore bounds the replacements in flight.
+        replacing = asyncio.Semaphore(in_flight)
+
+        async def replace(key: str) -> Reply:
+            async with replacing:
+                return await http.post("/run", json=weather_episode(key, attempt=1))
+
         clock = time.monotonic()
-        replacements = await asyncio.gather(
-            *(http.post("/run", json=weather_episode(key, attempt=1)) for key in exported)
-        )
+        replacements = await asyncio.gather(*(replace(key) for key in exported))
         timings["replacements"] = time.monotonic() - clock
         cuts = deployment.backend("/_ctl/cuts")
         continued = sum(1 for call in deployment.backend_calls() if call.get("continued_from"))
@@ -820,7 +839,7 @@ async def test_checkpoint_at_scale(deploy, tmp_path: Path, policy_workers: int, 
         str(result.get("failure") or result)[:160] for result, reward in zip(results, rewards) if reward != 1.0
     )
     print(
-        f"\nscale={count} policy_workers={policy_workers} server_workers={server_workers} finished_before={len(finished)} exported={len(exported)}"
+        f"\nscale={count} in_flight={in_flight} policy_workers={policy_workers} server_workers={server_workers} finished_before={len(finished)} exported={len(exported)}"
         f"\ntimings_s={ {name: round(value, 2) for name, value in timings.items()} }"
         f"\nrecords_bytes={sizes} report={prepared.replies['policy_model']['report']['counts']}"
         f"\ncut_rounds={len(cuts)} prefixes_cut={sum(len(round_) for round_ in cuts)} calls_continued={continued}"
