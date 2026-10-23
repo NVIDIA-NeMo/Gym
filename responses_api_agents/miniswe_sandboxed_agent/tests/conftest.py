@@ -95,6 +95,7 @@ async def runner_factory(tmp_path, monkeypatch, native_python):
 
     async def make(**kwargs):
         query = kwargs.pop("query")
+        evidence_directory = kwargs.pop("evidence_directory", None)
         session_id = kwargs["context"].session_id
 
         class Handler(BaseHTTPRequestHandler):
@@ -142,6 +143,10 @@ async def runner_factory(tmp_path, monkeypatch, native_python):
             **kwargs,
         )
         harness.remote_directory = str(root / "runtime")
+        if evidence_directory is not None:
+            harness.evidence_directory = str(evidence_directory)
+        elif not harness.context.durable_agent_logs:
+            harness.evidence_directory = harness.remote_directory
         await harness.setup()
         return harness
 

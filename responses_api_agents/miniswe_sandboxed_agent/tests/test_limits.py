@@ -136,7 +136,8 @@ async def test_context_overflow_stops_without_format_retries(
     error.response_content = json.dumps({"error": {"message": message}}).encode()
     query = AsyncMock(side_effect=error)
     harness = await make_harness(tmp_path, query, runner_factory)
-    _, outcome, extra = await harness.execute(15)
+    # Leave room for cold native CLI imports before checking the model's error.
+    _, outcome, extra = await harness.execute(60)
     query.assert_awaited_once()
     assert outcome.reason == ("nonzero_exit" if is_context_overflow else "infrastructure_error")
     expected = (
