@@ -25,6 +25,7 @@ from typing import Any
 
 import yaml
 
+from environment_servers.harbor.overlay import HarborOverlayError
 from environment_servers.harbor.session import _task_sandbox_env, resolve_env_templates
 from environment_servers.harbor.users import _creation_user
 from environment_servers.harbor.verifier import _verifier_image, _verifier_key, _verifier_runs_task_image
@@ -33,12 +34,13 @@ from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxSpec, cla
 from nemo_gym.sandbox.compose_config import (
     adapt_non_root_sidecars,
     deployment_platform,
+    document_volume_sources,
     opensandbox_shm_labels,
     resolve_compose,
     sandbox_platform,
 )
 from nemo_gym.sandbox.compose_fields import service_gpus
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata, resolve_provider_volume_sources
 from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, SandboxCreateError
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.tasks.harbor import HarborTask
@@ -46,6 +48,7 @@ from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.image_configs import (
     check_task_compose_fields,
     load_compose_document,
+    plan_task_compose_volumes,
     task_declares_gpus,
     without_restated_main_build,
 )
@@ -347,6 +350,15 @@ class HarborSandboxMixin:
             gpu_provider=_provider_name(gpu_provider),
             platform=self._compose_platform(),
         )
+        # The same planner prepare used: task-file bind mounts become uploads, named volumes stay for shared
+        # storage, external ones resolve through the block each service runs on (a GPU-routed sidecar through the
+        # GPU block's, as `_create_compose` hands the adapter). Sources point into the server's task copy.
+        plan_task_compose_volumes(
+            task,
+            document,
+            volume_sources=self._volume_sources(task),
+            gpu_volume_sources=self._gpu_volume_sources(global_config_dict),
+        )
         # Every service of the group, GPU-routed or not, starts with the one configured set of provider options,
         # so the platform they request (OpenSandbox ``platform: {os, arch}``; linux/amd64 when unset) is the one
         # each recorded image has to be for (and the one `_compose_platform` spelled for the field check above).
@@ -418,9 +430,12 @@ class HarborSandboxMixin:
         global_config_dict = get_global_config_dict()
         task_ref = self._provider_ref(task)
         # Sidecars keep their own image's default user; the task's USER belongs to the main image only. A sidecar
-        # that reserves GPUs runs on the GPU block, per service, the way the main service does for the task.
+        # that reserves GPUs runs on the GPU block, per service, the way the main service does for the task, and
+        # resolves its external volumes through that block's mapping. Each mapping is narrowed to the names this
+        # document resolves through it, so an ordinary named volume never takes a mapped name's shared path.
         service_specs: dict[str, SandboxSpec] = {}
         service_providers: dict[str, Any] = {}
+        service_volume_sources: dict[str, dict[str, str]] = {}
         for name, service in document["services"].items():
             if name == "main":
                 service_specs[name] = main_spec
@@ -429,24 +444,61 @@ class HarborSandboxMixin:
             ref = self._sidecar_provider_ref(task, service)
             if ref != task_ref:
                 service_providers[name] = resolve_provider_config(ref, global_config_dict)
+                service_volume_sources[name] = document_volume_sources(
+                    document, resolve_provider_volume_sources(ref, global_config_dict)
+                )
+        volume_sources = document_volume_sources(document, self._volume_sources(task))
         provider_config = resolve_provider_config(task_ref, global_config_dict)
         platform = self._compose_platform()
+        # An overlay task's Dockerfile RUN lines run inside the group's start, on main once it exists and before
+        # its bind-mount uploads, its command and its healthcheck: Harbor's order (a build, then `compose up` with
+        # the mounts). The overlay keeps its own budget on top of the start's, and the names it resolved wait for
+        # the seed under the episode key.
+        service_setup: dict[str, Callable[[AsyncSandbox], Awaitable[None]]] = {}
+        timeout_s = self.config.sandbox_ready_timeout_s
+        overlay_failure: list[HarborOverlayError] = []
+        if task.overlay:
+            timeout_s += task.config.environment.build_timeout_sec
+
+            async def run_overlay(sandbox: AsyncSandbox) -> None:
+                try:
+                    self._overlay_names[episode_key] = await self._apply_overlay(sandbox, task)
+                except HarborOverlayError as exc:
+                    overlay_failure.append(exc)
+                    raise
+
+            service_setup["main"] = run_overlay
         # Ownership starts before start(): a group that fails half-way is still stopped whole, and a pull
         # failure of any service is retried with a fresh group, like a single sandbox's.
-        return await self._start_with_pull_retries(
-            task,
-            key=episode_key,
-            what="Compose group",
-            make=lambda: AsyncSandboxCompose(
-                provider_config,
-                path,
-                service_specs=service_specs,
-                timeout_s=self.config.sandbox_ready_timeout_s,
-                service_providers=service_providers,
-                platform=platform,
-            ),
-            start=lambda compose: compose.start(),
-        )
+        try:
+            return await self._start_with_pull_retries(
+                task,
+                key=episode_key,
+                what="Compose group",
+                make=lambda: AsyncSandboxCompose(
+                    provider_config,
+                    path,
+                    service_specs=service_specs,
+                    timeout_s=timeout_s,
+                    service_providers=service_providers,
+                    platform=platform,
+                    volume_sources=volume_sources,
+                    service_volume_sources=service_volume_sources,
+                    service_setup=service_setup,
+                    # Upload sources may only come from the server's own copy of the task, the one the planner saw.
+                    upload_root=task.path,
+                ),
+                start=lambda compose: compose.start(),
+            )
+        except ExceptionGroup as exc:
+            # The group's cleanup after a failed overlay failed too: the overlay is still the seed's reason.
+            self._overlay_names.pop(episode_key, None)
+            if overlay_failure:
+                raise overlay_failure[-1] from exc
+            raise
+        except BaseException:
+            self._overlay_names.pop(episode_key, None)
+            raise
 
     async def _create_verifier_sandbox(self, task: HarborTask, *, episode_key: str | None = None) -> AsyncSandbox:
         """A separate verifier runs in its own sandbox, sized by ``[verifier.environment]``.
@@ -576,3 +628,17 @@ class HarborSandboxMixin:
         ``platform`` (OpenSandbox's ``{os, arch}``) when set, else linux/amd64, the one prepare records images for.
         Prepare reads the same ``sandbox_provider_options`` (``compose_platform_from_overrides``), so both agree."""
         return deployment_platform(self.config.sandbox_provider_options)
+
+    def _volume_sources(self, task: HarborTask) -> dict[str, str]:
+        """The task's provider block's ``volume_sources``: external volumes and foreign bind sources on shared
+        storage, the whole deployment-wide mapping. The planner checks the document against it; the adapter gets
+        only the entries the planned document resolves through it (:func:`document_volume_sources`, in
+        `_create_compose`), so an ordinary named volume that happens to share a mapped name stays the group's own."""
+        return resolve_provider_volume_sources(self._provider_ref(task), get_global_config_dict())
+
+    def _gpu_volume_sources(self, global_config_dict: dict[str, Any]) -> dict[str, str] | None:
+        """The GPU block's ``volume_sources`` (empty when it has none), or ``None`` without a GPU block: what a
+        GPU-routed service resolves its external volumes through, as `_sidecar_provider_ref` routes it."""
+        if not self.config.gpu_sandbox_provider:
+            return None
+        return resolve_provider_volume_sources(self.config.gpu_sandbox_provider, global_config_dict)
