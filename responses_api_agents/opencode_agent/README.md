@@ -209,6 +209,21 @@ The task sandbox remains available to its owner for verification or teardown.
 
 Ordinary single-turn sessions keep their existing protocol and evidence shape.
 
+### Offline sandbox runtimes and native model identity
+
+For a sandbox without runtime-download egress, set `sandbox_executable_path` to
+an existing sandbox-visible OpenCode binary and `sandbox_executable_sha256` to its
+SHA-256. Seed verifies bytes and version before copying it into the adapter cache.
+`sandbox_python_executable` selects an existing Python interpreter (default
+`python3`); `sandbox_path_prefix` adds executable directories for installation and
+CLI/tool subprocesses while retaining the image PATH. These paths must already
+exist; the sandbox owner supplies mounts or image contents.
+
+`sandbox_model_id` selects the native OpenCode model ID. It defaults to the existing
+`dummy_model` compatibility alias. Benchmarks can set the native ID to retain
+family-specific prompts, tools and defaults behind a Gym model route; the route
+still controls the actual provider/model. Native ID changes can affect scores.
+
 ## Owner extensions
 
 These sandbox-session settings are off by default; unset, sessions behave as described
@@ -242,19 +257,23 @@ fixed, so plugins should read their settings from files beside them (`import.met
 
 ### Pinned offline runtime bundle
 
-Each artifact is pinned the same way: an existing file inside the sandbox
-(`sandbox_<item>_path`, for example on a mounted cache) or a file on the Gym host that
-seed uploads (`sandbox_local_<item>_path`), plus `sandbox_<item>_sha256`, which is
-required with either and is the only way to set one. A host file is hashed before any
-sandbox is touched; inside the sandbox the adapter copies the file, hashes the copy and
-uses only those bytes. A digest or health-check mismatch fails seed with 422. A missing
-in-sandbox file, or a health check that times out or is ended by a signal (such as the
-OOM killer's), is a retryable setup error. At most four host uploads run at once per
-worker, and uploaded copies are deleted once installed.
+The OpenCode binary is pinned with `sandbox_executable_path` and
+`sandbox_executable_sha256` (see
+[Offline sandbox runtimes and native model identity](#offline-sandbox-runtimes-and-native-model-identity));
+a binary that fails its checks is a retryable setup error. ripgrep and the plugin
+dependencies, which OpenCode would otherwise download at runtime, are pinned alike: an
+existing file inside the sandbox (`sandbox_<item>_path`, for example on a mounted cache)
+or a file on the Gym host that seed uploads (`sandbox_local_<item>_path`), plus
+`sandbox_<item>_sha256`, which is required with either and is the only way to set one.
+A host file is hashed before any sandbox is touched; inside the sandbox the adapter
+copies the file, hashes the copy and uses only those bytes. A digest or health-check
+mismatch fails seed with 422. A missing in-sandbox file, or a health check that times
+out or is ended by a signal (such as the OOM killer's), is a retryable setup error. At
+most four host uploads run at once per worker, and uploaded copies are deleted once
+installed.
 
 | Item | Fields | Where it goes | How to build it |
 | --- | --- | --- | --- |
-| OpenCode binary | `sandbox_executable_path`, `sandbox_local_executable_path`, `sandbox_executable_sha256` | `/tmp/nemo-gym-opencode-runtime-<version>-<sha256>/opencode`; must report `opencode_version`. Never downloaded; no curl, tar or package installation | The `bin/opencode` of the pinned release for the task's platform |
 | ripgrep | `sandbox_ripgrep_path`, `sandbox_local_ripgrep_path`, `sandbox_ripgrep_sha256` | `XDG_CACHE_HOME/opencode/bin/rg` in the session's private directories, where OpenCode 1.17.11 looks after `PATH`; it stays off task shells' `PATH`. Must answer `--version`. Replaces the installer's best-effort package install | ripgrep 15.1.0, which OpenCode 1.17.11 would download (`ripgrep-15.1.0-<arch>-unknown-linux-musl`) |
 | Plugin dependencies | `sandbox_plugin_dependencies_path`, `sandbox_local_plugin_dependencies_path`, `sandbox_plugin_dependencies_sha256` | Unpacked into `XDG_CONFIG_HOME/opencode` before launch. Members must be files, folders or links that stay inside it. Where the sandbox's Python lacks tarfile's `data` filter (PEP 706), no member path or link target may pass through a link either; npm's `node_modules/.bin` links pass | See below |
 

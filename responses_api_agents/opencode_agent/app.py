@@ -140,7 +140,9 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
-def _sandbox_prepare_command(workdir: str, directory: str, runtime: str, *, export_dir: str | None = None) -> str:
+def _sandbox_prepare_command(
+    workdir: str, directory: str, runtime: str, *, python: str = "python3", export_dir: str | None = None
+) -> str:
     # Bootstrap with POSIX sh; the runtime installer itself requires Bash.
     bootstrap = """set -eu
 set --
@@ -167,12 +169,13 @@ fi
         "for root in roots), 'OpenCode runtime/session storage overlaps the task workdir'"
     )
     command = (
-        bootstrap + f"python3 -I -c {quote(validate_paths)} {quote(workdir)} "
+        bootstrap.replace("command -v python3", "command -v " + quote(python))
+        + f"{quote(python)} -I -c {quote(validate_paths)} {quote(workdir)} "
         f"{quote(str(PurePosixPath(directory).parent))} {quote(runtime)}"
     )
     if export_dir is not None:
         # Exports are written after the agent stops; in the workdir they would become part of the task's result.
-        command += f" && python3 -I -c {quote(_CHECK_EXPORT_DIR)} {quote(workdir)} {quote(export_dir)}"
+        command += f" && {quote(python)} -I -c {quote(_CHECK_EXPORT_DIR)} {quote(workdir)} {quote(export_dir)}"
     return command + f" && mkdir -p {quote(directory)}"
 
 
@@ -201,7 +204,7 @@ def _file_version(path: Path) -> tuple[str, int, int, int]:
     return resolved, stat.st_ino, stat.st_size, stat.st_mtime_ns
 
 
-# Exit status of the installer and of the runner's setup modes when an owner-supplied input is unusable (pinned
+# Exit status of the runner's setup modes and the plugin check when an owner-supplied input is unusable (pinned
 # bytes failing their SHA-256 or health check, an export OpenCode cannot import): a retry cannot succeed.
 _INPUT_REJECTED = 3
 # Prints each owner-staged plugin path that is not a regular file and exits with _INPUT_REJECTED if any.
@@ -299,6 +302,15 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     max_output_tokens: int = 131072
     opencode_version: str = OPENCODE_VERSION
 
+    # Optional verified, preinstalled runtime for sandboxes without download egress.
+    sandbox_python_executable: str = "python3"
+    sandbox_path_prefix: list[str] = Field(default_factory=list)
+    sandbox_executable_path: str | None = None
+    sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    # The native model ID affects OpenCode's model-family prompts and tools.
+    # Preserve the existing alias unless a benchmark explicitly qualifies another ID.
+    sandbox_model_id: str = "dummy_model"
+
     # Used only when Resources does not supply a borrowed sandbox.
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
@@ -308,13 +320,10 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Sandbox sessions only. Absolute sandbox paths of OpenCode plugin files that the sandbox owner staged,
     # loaded after Gym's own plugins in this order. Seed fails with 422 if one is not a regular file.
     plugins: list[str] = Field(default_factory=list)
-    # Sandbox sessions only. A pinned OpenCode binary instead of the download: one already inside the sandbox,
-    # or one on this host to upload. Either requires its SHA-256, which is checked inside the sandbox.
-    sandbox_executable_path: str | None = None
-    sandbox_local_executable_path: str | None = None
-    sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     # Sandbox sessions only. Offline runtime bundle beside the binary, each pinned the same way: an rg for OpenCode's
     # grep/glob tools, and a tar archive of the plugin dependencies OpenCode otherwise installs at every start.
+    # Either file is one already inside the sandbox or one on this host to upload, and requires its SHA-256, which
+    # is checked inside the sandbox.
     sandbox_ripgrep_path: str | None = None
     sandbox_local_ripgrep_path: str | None = None
     sandbox_ripgrep_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
@@ -857,7 +866,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
         if self.config.session_import_path is not None and not _is_sandbox_path(self.config.session_import_path):
             raise AgentSeedRejectedError("OpenCode session_import_path must be an absolute, normalized sandbox path")
-        executable = await self._pinned_file("executable")
         ripgrep = await self._pinned_file("ripgrep")
         plugin_dependencies = await self._pinned_file("plugin_dependencies")
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
@@ -872,15 +880,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         # Caller-assigned IDs are wire identifiers, never filesystem paths.
         directory = f"/tmp/nemo-gym-opencode-sessions/{uuid4().hex}"
         runtime = f"/tmp/nemo-gym-opencode-runtime-{self.config.opencode_version}"
-        if executable is not None:
-            # A pinned runtime never shares a cache with downloads or with other pins of the same version.
-            runtime += f"-{executable.digest}"
         state = OpenCodeSandboxSession(
             request=body,
             session=SandboxSession(
                 sandbox=sandbox, session_dir=directory, workdir=workdir, harness="OpenCode", owns_sandbox=owns_sandbox
             ),
             runtime=runtime,
+            python_executable=self.config.sandbox_python_executable,
             model_ref=self.config.model_server,
             export_dir=self.config.export_dir,
         )
@@ -895,7 +901,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
             state.sandbox_id = sandbox.sandbox_id
-            command = _sandbox_prepare_command(workdir, directory, runtime, export_dir=self.config.export_dir)
+            command = _sandbox_prepare_command(
+                workdir,
+                directory,
+                runtime,
+                python=self.config.sandbox_python_executable,
+                export_dir=self.config.export_dir,
+            )
             result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
             prepared_directory = True
@@ -910,17 +922,22 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 self._check_sandbox_setup(command, result)
             installer = "install_opencode_runtime.sh"
             await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
-            installer_args = [f"{directory}/{installer}", runtime, self.config.opencode_version]
             # A pinned rg (below) replaces the installer's best-effort package install of ripgrep.
             command = "NG_OPENCODE_SKIP_RIPGREP=1 " if ripgrep is not None else ""
-            if executable is None:
-                command += "bash " + " ".join(quote(arg) for arg in installer_args)
-            else:
-                source = await self._pinned_source(sandbox, executable, f"{directory}/opencode-executable")
-                command += "bash " + " ".join(quote(arg) for arg in [*installer_args, source, executable.digest])
-                command += executable.cleanup(source)
+            command += "bash " + " ".join(
+                quote(arg)
+                for arg in (
+                    f"{directory}/{installer}",
+                    runtime,
+                    self.config.opencode_version,
+                    self.config.sandbox_executable_path or "",
+                    self.config.sandbox_executable_sha256 or "",
+                    self.config.sandbox_python_executable,
+                    ":".join(self.config.sandbox_path_prefix),
+                )
+            )
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
-            self._check_sandbox_setup(command, result, pinned="OpenCode executable" if executable else None)
+            self._check_sandbox_setup(command, result)
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
             if ripgrep is not None:
                 # OpenCode 1.17.11 runs the rg on PATH, else <XDG_CACHE_HOME>/opencode/bin/rg, else downloads one.
@@ -1381,8 +1398,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         previous_session_id = state.harness_session_id
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
         config = {
-            "model": "nemo_gym/dummy_model",
-            "small_model": "nemo_gym/dummy_model",
+            "model": "nemo_gym/" + self.config.sandbox_model_id,
+            "small_model": "nemo_gym/" + self.config.sandbox_model_id,
             "enabled_providers": ["nemo_gym"],
             "autoupdate": False,
             "share": "disabled",
@@ -1395,7 +1412,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         "timeout": False,
                     },  # pragma: allowlist secret
                     "models": {
-                        "dummy_model": {
+                        self.config.sandbox_model_id: {
+                            **(
+                                {"reasoning": self.config.thinking}
+                                if self.config.sandbox_model_id != "dummy_model"
+                                else {}
+                            ),
                             "interleaved": {"field": "reasoning_content"},
                             "limit": {
                                 "context": self.config.context_window,
@@ -1413,7 +1435,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             config["agent"] = {agent: dict(sampling) for agent in _OPENCODE_AGENTS}
             if "temperature" in sampling:
                 # OpenCode sends temperature only for models that declare the capability.
-                config["provider"]["nemo_gym"]["models"]["dummy_model"]["temperature"] = True
+                config["provider"]["nemo_gym"]["models"][self.config.sandbox_model_id]["temperature"] = True
         # System instructions are separate from the user's task and applied to every OpenCode model turn.
         if system:
             config["instructions"] = [f"{state.session.session_dir}/instructions.md"]
@@ -1429,6 +1451,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             command.extend(["--session", state.harness_session_id])
         payload = {
             "instructions": system,
+            "path_prefix": self.config.sandbox_path_prefix,
             "directory": state.session.session_dir,
             "cwd": state.session.workdir,
             "command": command,

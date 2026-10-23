@@ -3,24 +3,23 @@
 # SPDX-License-Identifier: Apache-2.0
 set -Eeuo pipefail
 trap 'status=$?; printf "OpenCode setup failed: command=%s exit=%s\n" "$BASH_COMMAND" "$status" >&2; exit "$status"' ERR
-# Usage: install_opencode_runtime.sh RUNTIME VERSION [PINNED SHA256]
-# With PINNED and SHA256, nothing is downloaded: the bytes copied from the in-sandbox file PINNED must hash to SHA256
-# and report VERSION, or the script exits 3 so the adapter can reject the pin as a deterministic error. A version
-# check ended by a signal, or one that bash reports as not found (127), exits 1, which stays retryable.
 runtime=$1
 version=$2
-pinned=${3:-}
-expected=${4:-}
+source_binary=${3:-}
+source_sha256=${4:-}
+python_executable=${5:-python3}
+path_prefix=${6:-}
+if [ -n "$path_prefix" ]; then export PATH="$path_prefix:$PATH"; fi
 
 require() {
   command -v "$1" >/dev/null 2>&1 || { echo "OpenCode sandbox execution requires $1 in the task image" >&2; exit 1; }
 }
-require python3
-python3 -c 'import sys; assert sys.platform == "linux" and sys.version_info >= (3, 8), "OpenCode sandbox execution requires Linux and Python >=3.8 in the task image"'
+require "$python_executable"
+"$python_executable" -c 'import sys; assert sys.platform == "linux" and sys.version_info >= (3, 8), "OpenCode sandbox execution requires Linux and Python >=3.8 in the task image"'
 # Serialize preparation of the version-scoped cache in a shared task sandbox.
 # The lock descriptor remains open across exec and releases on installer exit.
 if [ "${NG_OPENCODE_INSTALL_LOCKED:-0}" != 1 ]; then
-  exec python3 -c 'import fcntl,os,sys; fd=os.open(sys.argv[1]+".lock",os.O_CREAT|os.O_RDWR,0o600); fcntl.flock(fd,fcntl.LOCK_EX); os.set_inheritable(fd,True); os.environ["NG_OPENCODE_INSTALL_LOCKED"]="1"; os.execvp("bash",["bash",*sys.argv[2:]])' "$runtime" "$0" "$@"
+  exec "$python_executable" -c 'import fcntl,os,sys; fd=os.open(sys.argv[1]+".lock",os.O_CREAT|os.O_RDWR,0o600); fcntl.flock(fd,fcntl.LOCK_EX); os.set_inheritable(fd,True); os.environ["NG_OPENCODE_INSTALL_LOCKED"]="1"; os.execvp("bash",["bash",*sys.argv[2:]])' "$runtime" "$0" "$@"
 fi
 case "$(uname -m)" in
   x86_64) arch=x64-baseline ;;
@@ -37,26 +36,41 @@ else
 fi
 mkdir -p "$runtime/home" "$runtime/cache" "$runtime/data" "$runtime/config"
 export HOME="$runtime/home" XDG_CACHE_HOME="$runtime/cache" XDG_DATA_HOME="$runtime/data" XDG_CONFIG_HOME="$runtime/config"
-sha256() {
-  python3 -I -c 'import hashlib, sys
-digest = hashlib.sha256()
-with open(sys.argv[1], "rb") as binary:
-    for chunk in iter(lambda: binary.read(1 << 20), b""):
-        digest.update(chunk)
-print(digest.hexdigest())' "$1"
-}
+if [ -n "$source_binary" ]; then
+  [ -n "$source_sha256" ] || { echo 'A preinstalled OpenCode binary requires its SHA-256' >&2; exit 1; }
+  # Publish a verified new inode so active sessions can keep executing the old one.
+  "$python_executable" -I - "$source_binary" "$source_sha256" "$runtime/opencode" "$version" <<'PY'
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+source, expected, target, version = sys.argv[1:]
+if not Path(source).is_file():
+    raise ValueError("OpenCode executable digest mismatch")
+fd, staged = tempfile.mkstemp(prefix=".opencode-", dir=Path(target).parent)
+os.close(fd)
+try:
+    shutil.copyfile(source, staged)
+    if hashlib.sha256(Path(staged).read_bytes()).hexdigest() != expected:
+        raise ValueError("OpenCode executable digest mismatch")
+    os.chmod(staged, 0o755)
+    if subprocess.check_output([staged, "--version"], text=True).rstrip("\n") != version:
+        raise ValueError("OpenCode executable version mismatch")
+    os.replace(staged, target)
+finally:
+    Path(staged).unlink(missing_ok=True)
+PY
+fi
 cached=false
-if [ -n "$expected" ]; then
-  # Reuse a pinned runtime only while its bytes match the pin; hash before running it.
-  if [ -x "$runtime/opencode" ] && [ "$(sha256 "$runtime/opencode")" = "$expected" ] \
-    && [ "$("$runtime/opencode" --version)" = "$version" ]; then
-    cached=true
-  fi
-elif [ -x "$runtime/opencode" ] && [ "$("$runtime/opencode" --version)" = "$version" ]; then
+if [ -x "$runtime/opencode" ] && [ "$("$runtime/opencode" --version)" = "$version" ]; then
   cached=true
 fi
 missing=()
-if [ "$cached" = false ] && [ -z "$expected" ]; then
+if [ "$cached" = false ]; then
   for tool in curl tar gzip; do
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
   done
@@ -93,40 +107,6 @@ if [ "${NG_OPENCODE_SKIP_RIPGREP:-0}" != 1 ] && ! command -v rg >/dev/null 2>&1;
   command -v rg >/dev/null 2>&1 || echo 'Warning: optional ripgrep is unavailable; OpenCode can download it on demand' >&2
 fi
 if [ "$cached" = true ]; then
-  exit 0
-fi
-if [ -n "$expected" ]; then
-  if [ ! -f "$pinned" ]; then
-    echo "Pinned OpenCode executable not found in the sandbox: $pinned" >&2
-    exit 1
-  fi
-  staged=$(mktemp "$runtime/.opencode.XXXXXX")
-  trap 'rm -f "$staged"' EXIT
-  # Check the private copy, not the source, so the verified bytes are the ones that run.
-  cp "$pinned" "$staged"
-  actual=$(sha256 "$staged")
-  if [ "$actual" != "$expected" ]; then
-    echo "Pinned OpenCode executable SHA-256 mismatch: expected $expected, found $actual in $pinned" >&2
-    exit 3
-  fi
-  chmod 0755 "$staged"
-  version_status=0
-  actual=$("$staged" --version 2>&1) || version_status=$?
-  # A signal (128+N, such as the OOM killer's SIGKILL) or a failed exec other than "cannot execute" says nothing
-  # about the pinned bytes: exit 1 keeps the setup retryable. A missing interpreter is 127, or 126 with "bad
-  # interpreter" before bash 5.2.
-  if [ "$version_status" -gt 128 ] || [ "$version_status" -eq 127 ] \
-    || { [ "$version_status" -eq 126 ] && [[ "$actual" == *"bad interpreter"* ]]; }; then
-    echo "Pinned OpenCode executable --version did not complete (exit $version_status): $actual" >&2
-    exit 1
-  fi
-  [ "$version_status" -eq 0 ] || actual="no version (exit $version_status): $actual"
-  if [ "$actual" != "$version" ]; then
-    echo "Pinned OpenCode executable version mismatch: requested $version, found $actual" >&2
-    exit 3
-  fi
-  # Publish atomically: concurrent readers see the previous runtime or the verified one, never a partial copy.
-  mv -f "$staged" "$runtime/opencode"
   exit 0
 fi
 curl -fSL --retry 3 "https://github.com/anomalyco/opencode/releases/download/v${version}/opencode-linux-${arch}.tar.gz" -o "$runtime/opencode.tar.gz"

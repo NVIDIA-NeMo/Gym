@@ -62,8 +62,9 @@ agentic_if_judge_model:
       # Each attempt of a judge call; a failed call is retried by the model server and then by the grader.
       upstream_request_timeout_seconds: 600
 
-# The harness. A run that pins the OpenCode binary sets its path and SHA-256 together (a SHA-256 without its path is
-# refused); benchmarks/agentic_if/config.yaml also stages ripgrep and the plugin dependencies.
+# The harness. A run that pins the OpenCode binary sets its path and SHA-256 together (opencode_agent ignores a SHA-256
+# without its path and downloads OpenCode); benchmarks/agentic_if/config.yaml also stages ripgrep and the plugin
+# dependencies.
 agentic_if_opencode_agent:
   # Moves the base instance, so no extra server starts.
   _inherit_from: opencode_agent

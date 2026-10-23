@@ -76,8 +76,8 @@ in OpenCode 1.17.11 with this configuration, not the model alone.
 - OpenCode runs from pinned files (x86_64), so task sandboxes need no internet access (see
   `responses_api_agents/opencode_agent/README.md`):
   - The OpenCode binary is set per deployment on `agentic_if_opencode_agent`: `sandbox_executable_path` (a file inside
-    the sandbox, such as a mounted copy) or `sandbox_local_executable_path` (a host file uploaded at seed), with
-    `sandbox_executable_sha256` `0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded`. That is
+    the sandbox, such as a mounted copy) with `sandbox_executable_sha256`
+    `0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded`. That is
     `package/bin/opencode` of https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.17.11.tgz,
     byte-identical to `opencode` in the v1.17.11 GitHub release's `opencode-linux-x64.tar.gz`. Without it,
     `opencode_agent` installs OpenCode 1.17.11 from GitHub, which needs internet access in the sandbox.

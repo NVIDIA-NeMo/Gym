@@ -1,0 +1,154 @@
+# partner_if: internal instruction-following tasks on the policy model, as text, search-tool and build-tool
+# episodes; see README.md for the measurement contract. prepare.py downloads the rows from Gym's GitLab dataset
+# registry (mlflow_tracking_uri and mlflow_tracking_token). The tool tasks run their backends in sandboxes, so add a
+# sandbox provider config, such as nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml.
+config_paths:
+  - resources_servers/partner_if/configs/verifier_base.yaml
+
+# The judge settings are part of the measurement contract.
+partner_if:
+  resources_servers:
+    partner_if:
+      allow_provisional_rubrics: true
+      judge_responses_create_params: {input: [], max_output_tokens: 32768, temperature: 0.0}
+      judge_max_concurrency: 2
+
+partner_if_judge:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${judge_base_url}
+      api_key: ${judge_api_key}
+      model: ${judge_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      reasoning_field: reasoning_content
+
+# Supply the judge endpoint and key, for example in env.yaml.
+judge_base_url: null
+judge_api_key: null
+judge_model_name: nvidia/zai-org/glm-5.3
+
+# Text tasks: one reply, no tools run.
+partner_if_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      execute_tools: false
+      resources_server: {type: resources_servers, name: partner_if}
+      model_server: {type: responses_api_models, name: policy_model}
+
+partner_if_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      cleanup_timeout_seconds: 180
+      resources_server: {type: resources_servers, name: partner_if}
+      resources_tool_transports: []
+      agent_server: {type: responses_api_agents, name: partner_if_simple_agent}
+
+# Tool tasks: each row brings its tool backend, which runs in a fresh sandbox for each rollout.
+partner_if_tools:
+  resources_servers:
+    partner_if:
+      entrypoint: mock_tools_app.py
+      domain: instruction_following
+      verified: false
+      num_workers: 1
+      tasks_path: benchmarks/partner_if/data/partner_if_tools.jsonl
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: python:3.13-slim
+        # Egress only to the package index, to install each bundle's pinned requirements.
+        network: package_index
+        ttl_s: 3600
+        ready_timeout_s: 600
+        resources: {cpu: 1, memory_mib: 1024}
+        metadata: {environment: partner-if-tools}
+      judge_model_server: {type: responses_api_models, name: partner_if_judge}
+      allow_provisional_rubrics: true
+      judge_responses_create_params: {input: [], max_output_tokens: 32768, temperature: 0.0}
+      judge_max_concurrency: 2
+
+partner_if_search_tools_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 30
+      execute_tools: true
+      resources_server: {type: resources_servers, name: partner_if_tools}
+      model_server: {type: responses_api_models, name: policy_model}
+
+partner_if_search_tools:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      cleanup_timeout_seconds: 180
+      resources_server: {type: resources_servers, name: partner_if_tools}
+      resources_tool_transports:
+        - direct_http
+      agent_server: {type: responses_api_agents, name: partner_if_search_tools_agent}
+
+partner_if_build_tools_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 15
+      execute_tools: true
+      resources_server: {type: resources_servers, name: partner_if_tools}
+      model_server: {type: responses_api_models, name: policy_model}
+
+partner_if_build_tools:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      cleanup_timeout_seconds: 180
+      resources_server: {type: resources_servers, name: partner_if_tools}
+      resources_tool_transports:
+        - direct_http
+      agent_server: {type: responses_api_agents, name: partner_if_build_tools_agent}
+
+# The dispatcher routes each task to its environment, so all three share one dataset and one score.
+partner_if_dispatcher:
+  responses_api_agents:
+    partner_if_dispatcher:
+      entrypoint: app.py
+      resources_server: {type: resources_servers, name: partner_if}
+      task_routes:
+        pif_001: {type: environment_servers, name: partner_if_environment_server}
+        pif_002: {type: environment_servers, name: partner_if_environment_server}
+        pif_003: {type: environment_servers, name: partner_if_environment_server}
+        pif_004: {type: environment_servers, name: partner_if_search_tools}
+        pif_005: {type: environment_servers, name: partner_if_search_tools}
+        pif_006: {type: environment_servers, name: partner_if_environment_server}
+        pif_007: {type: environment_servers, name: partner_if_environment_server}
+        pif_008: {type: environment_servers, name: partner_if_environment_server}
+        pif_009: {type: environment_servers, name: partner_if_environment_server}
+        pif_010: {type: environment_servers, name: partner_if_environment_server}
+        pif_011: {type: environment_servers, name: partner_if_environment_server}
+        pif_012: {type: environment_servers, name: partner_if_environment_server}
+        pif_013: {type: environment_servers, name: partner_if_environment_server}
+        pif_014: {type: environment_servers, name: partner_if_environment_server}
+        pif_015: {type: environment_servers, name: partner_if_environment_server}
+        pif_016: {type: environment_servers, name: partner_if_environment_server}
+        pif_017: {type: environment_servers, name: partner_if_environment_server}
+        pif_018: {type: environment_servers, name: partner_if_environment_server}
+        pif_019: {type: environment_servers, name: partner_if_environment_server}
+        pif_020: {type: environment_servers, name: partner_if_build_tools}
+        pif_021: {type: environment_servers, name: partner_if_build_tools}
+        pif_022: {type: environment_servers, name: partner_if_build_tools}
+      datasets:
+        - name: partner_if
+          type: benchmark
+          jsonl_fpath: benchmarks/partner_if/data/partner_if_benchmark.jsonl
+          prepare_script: benchmarks/partner_if/prepare.py
+          prompt_config: null
+          num_repeats: 3
+
+partner_if_dispatcher_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server: {type: responses_api_agents, name: partner_if_dispatcher}

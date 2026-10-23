@@ -25,11 +25,8 @@ opencode_agent:
 
       # Owner extensions for sandbox sessions (README "Owner extensions"); these defaults change nothing.
       plugins: []  # absolute sandbox paths of owner-staged OpenCode plugins, loaded after Gym's
-      # Pinned offline bundle: a file already in the sandbox (*_path) or on this host to upload (*_local_*_path),
-      # each requiring its SHA-256 (*_sha256), which is checked inside the sandbox. A pinned binary is never downloaded.
-      sandbox_executable_path: null
-      sandbox_local_executable_path: null
-      sandbox_executable_sha256: null
+      # Pinned offline bundle beside the binary: a file already in the sandbox (*_path) or on this host to upload
+      # (*_local_*_path), each requiring its SHA-256 (*_sha256), which is checked inside the sandbox.
       sandbox_ripgrep_path: null  # e.g. ripgrep 15.1.0, the build OpenCode 1.17.11 downloads
       sandbox_local_ripgrep_path: null
       sandbox_ripgrep_sha256: null

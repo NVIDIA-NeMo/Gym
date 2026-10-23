@@ -113,7 +113,16 @@ async def test_unset_extensions_keep_setup_activation_and_capture_unchanged(setu
     response, closed = await episode(agent, sandbox)
     directory = sandbox.directory
     install = events[index(events, "install_opencode_runtime.sh")]
-    assert shlex.split(install) == ["bash", f"{directory}/install_opencode_runtime.sh", RUNTIME, "1.17.11"]
+    assert shlex.split(install) == [
+        "bash",
+        f"{directory}/install_opencode_runtime.sh",
+        RUNTIME,
+        "1.17.11",
+        "",
+        "",
+        "python3",
+        "",
+    ]
     assert index(events, "install_opencode_runtime.sh") == 1
     for marker in ("os.path.isfile", "--export", "--stage-", "--import", "NG_OPENCODE_SKIP_RIPGREP"):
         assert not any(marker in event for event in events)
@@ -140,7 +149,6 @@ async def test_unset_extensions_keep_setup_activation_and_capture_unchanged(setu
     }
     assert set(config) == {"model", "small_model", "enabled_providers", "autoupdate", "share", "provider", "plugin"}
     assert config["plugin"] == [Path(f"{directory}/task_environment.mjs").as_uri()]
-    assert f"{directory}/opencode-executable" not in sandbox.files
     assert response.status == "completed"
     assert "export_dir_write_failed" not in gap_codes(closed.agent_observations)
 
@@ -220,15 +228,6 @@ def test_plugin_check_outage_stays_retryable(setup):
         {"export_dir": "/tmp/nemo-gym-opencode-sessions/exports"},
         {"export_dir": "/app"},
         {"export_dir": "/app/exports"},
-        {"sandbox_executable_path": "/mnt/cache/opencode"},
-        {"sandbox_local_executable_path": "/host/opencode"},
-        {"sandbox_executable_sha256": PIN},
-        {
-            "sandbox_executable_path": "/mnt/cache/opencode",
-            "sandbox_local_executable_path": "/host/opencode",
-            "sandbox_executable_sha256": PIN,
-        },
-        {"sandbox_executable_path": "mnt/cache/opencode", "sandbox_executable_sha256": PIN},
     ],
 )
 def test_invalid_extension_settings_fail_before_connecting(setup, override):
@@ -249,69 +248,18 @@ def test_malformed_pin_is_rejected_by_configuration(digest):
         )
 
 
-async def test_in_sandbox_executable_is_pinned_and_keys_its_runtime_by_digest(setup):
+@pytest.mark.parametrize("code", [1, 3])
+def test_failed_binary_pin_stays_a_retryable_setup_error(setup, code):
     agent, sandbox = setup
-    agent.config.sandbox_executable_path = "/mnt/cache/opencode-linux-x64"
-    agent.config.sandbox_executable_sha256 = PIN.upper()
-    events = record(sandbox)
-    response, _ = await episode(agent, sandbox)
-    assert response.status == "completed"
-    directory = sandbox.directory
-    runtime = f"{RUNTIME}-{PIN}"
-    assert runtime in events[0]
-    assert shlex.split(events[index(events, "install_opencode_runtime.sh")]) == [
-        "bash",
-        f"{directory}/install_opencode_runtime.sh",
-        runtime,
-        "1.17.11",
-        "/mnt/cache/opencode-linux-x64",
-        PIN,
-    ]
-    assert json.loads(sandbox.files[f"{directory}/input.json"])["command"][0] == f"{runtime}/opencode"
-    assert f"{directory}/opencode-executable" not in sandbox.files
-
-
-async def test_host_executable_is_checked_uploaded_and_dropped_after_install(setup, tmp_path):
-    agent, sandbox = setup
-    binary = tmp_path / "opencode"
-    binary.write_text("#!/bin/sh\necho 1.17.11\n")
-    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
-    agent.config.sandbox_local_executable_path = str(binary)
-    agent.config.sandbox_executable_sha256 = digest
-    events = record(sandbox)
-    response, _ = await episode(agent, sandbox)
-    assert response.status == "completed"
-    directory = sandbox.directory
-    staged = f"{directory}/opencode-executable"
-    assert sandbox.files[staged] == binary.read_text()
-    install = events[index(events, "install_opencode_runtime.sh")]
-    command, cleanup = install.split(" && ")
-    assert shlex.split(command) == [
-        "bash",
-        f"{directory}/install_opencode_runtime.sh",
-        f"{RUNTIME}-{digest}",
-        "1.17.11",
-        staged,
-        digest,
-    ]
-    assert shlex.split(cleanup) == ["rm", "-f", "--", staged]
-
-
-@pytest.mark.parametrize(("pinned", "code", "status"), [(True, 3, 422), (True, 1, 500), (False, 3, 500)])
-def test_only_a_rejected_pin_is_a_deterministic_setup_error(setup, pinned, code, status):
-    agent, sandbox = setup
-    if pinned:
-        agent.config.sandbox_executable_path = "/mnt/cache/opencode"
-        agent.config.sandbox_executable_sha256 = PIN
+    agent.config.sandbox_executable_path = "/mnt/cache/opencode"
+    agent.config.sandbox_executable_sha256 = PIN
 
     async def installer(command, **kwargs):
-        return result(code, stderr="Pinned OpenCode executable SHA-256 mismatch: expected a, found b")
+        return result(code, stderr="ValueError: OpenCode executable digest mismatch")
 
     intercept(sandbox, "install_opencode_runtime.sh", installer)
     response = seed_status(agent, raise_server_exceptions=False)
-    assert response.status_code == status
-    if status == 422:
-        assert "SHA-256 mismatch: expected a, found b" in response.json()["detail"]
+    assert response.status_code == 500
     sandbox.disconnect.assert_awaited_once()
     sandbox.launch.assert_not_awaited()
     assert not active_sessions(agent)
@@ -953,10 +901,10 @@ async def test_unset_export_dir_adds_no_prepare_check(setup):
 
 async def test_host_pin_is_hashed_once_per_version_of_the_file(setup, tmp_path, monkeypatch):
     agent, sandbox = setup
-    binary = tmp_path / "opencode"
-    binary.write_text("#!/bin/sh\necho 1.17.11\n")
-    agent.config.sandbox_local_executable_path = str(binary)
-    agent.config.sandbox_executable_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
+    binary = tmp_path / "rg"
+    binary.write_text("#!/bin/sh\necho ripgrep 15.1.0\n")
+    agent.config.sandbox_local_ripgrep_path = str(binary)
+    agent.config.sandbox_ripgrep_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
     hashed = []
     sha256_file = opencode_app._sha256_file
 
@@ -974,15 +922,15 @@ async def test_host_pin_is_hashed_once_per_version_of_the_file(setup, tmp_path, 
     await seed_once()
     assert hashed == [binary.resolve()]
     # A rebuilt file is read again, so its changed bytes are never vouched for by the earlier digest.
-    binary.write_text("#!/bin/sh\necho 1.17.11  # rebuilt\n")
+    binary.write_text("#!/bin/sh\necho ripgrep 15.1.0  # rebuilt\n")
     with pytest.raises(HTTPException) as mismatch:
         await seed_once()
     assert mismatch.value.status_code == 422 and "SHA-256 mismatch" in mismatch.value.detail
     assert hashed == [binary.resolve()] * 2
-    agent.config.sandbox_executable_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
+    agent.config.sandbox_ripgrep_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
     await seed_once()
     assert hashed == [binary.resolve()] * 2
-    uploads = [path for path in sandbox.files if path.endswith("/opencode-executable")]
+    uploads = [path for path in sandbox.files if path.endswith("/ripgrep-executable")]
     assert len(uploads) == 6 and sandbox.files[uploads[-1]] == binary.read_text()
 
 
@@ -1014,12 +962,8 @@ SETTING_REFUSALS = {
         "OpenCode session_import_path must be an absolute, normalized sandbox path",
     ),
     "two sources": (
-        {
-            "sandbox_executable_path": "/mnt/opencode",
-            "sandbox_local_executable_path": "/host/opencode",
-            "sandbox_executable_sha256": PIN,
-        },
-        "Choose either sandbox_executable_path or sandbox_local_executable_path",
+        {"sandbox_ripgrep_path": "/mnt/rg", "sandbox_local_ripgrep_path": "/host/rg", "sandbox_ripgrep_sha256": PIN},
+        "Choose either sandbox_ripgrep_path or sandbox_local_ripgrep_path",
     ),
     "digest without a file": (
         {"sandbox_ripgrep_sha256": PIN},
@@ -1030,8 +974,8 @@ SETTING_REFUSALS = {
         "A supplied file requires sandbox_plugin_dependencies_sha256",
     ),
     "relative pin": (
-        {"sandbox_executable_path": "mnt/opencode", "sandbox_executable_sha256": PIN},
-        "sandbox_executable_path must be an absolute, normalized sandbox path",
+        {"sandbox_ripgrep_path": "mnt/rg", "sandbox_ripgrep_sha256": PIN},
+        "sandbox_ripgrep_path must be an absolute, normalized sandbox path",
     ),
 }
 
@@ -1049,14 +993,14 @@ def test_unusable_owner_setting_refuses_the_seed_before_connecting(setup, caplog
 @pytest.mark.parametrize("problem", ["mismatch", "missing"])
 def test_unusable_host_pin_refuses_the_seed_before_connecting(setup, caplog, tmp_path, problem):
     agent, sandbox = setup
-    binary = tmp_path / "opencode"
+    binary = tmp_path / "rg"
     if problem == "mismatch":
         binary.write_text("other bytes")
-    agent.config.sandbox_local_executable_path = str(binary)
-    agent.config.sandbox_executable_sha256 = PIN
+    agent.config.sandbox_local_ripgrep_path = str(binary)
+    agent.config.sandbox_ripgrep_sha256 = PIN
     expected = {
-        "mismatch": f"sandbox_local_executable_path SHA-256 mismatch: expected {PIN}, found ",
-        "missing": "Cannot read sandbox_local_executable_path: ",
+        "mismatch": f"sandbox_local_ripgrep_path SHA-256 mismatch: expected {PIN}, found ",
+        "missing": "Cannot read sandbox_local_ripgrep_path: ",
     }[problem]
     assert refused(agent, caplog).startswith(expected)
     sandbox.exec.assert_not_awaited()
@@ -1069,12 +1013,6 @@ INPUT_REFUSALS = {
         "os.path.isfile",
         result(3, stdout="/opt/owner/missing.mjs\n"),
         "OpenCode plugin files are missing from the sandbox: /opt/owner/missing.mjs",
-    ),
-    "pinned executable": (
-        {"sandbox_executable_path": "/mnt/cache/opencode", "sandbox_executable_sha256": PIN},
-        "install_opencode_runtime.sh",
-        result(3, stderr="Pinned OpenCode executable SHA-256 mismatch: expected a, found b"),
-        "Pinned OpenCode executable rejected",
     ),
     "pinned ripgrep": (
         {"sandbox_ripgrep_path": "/mnt/cache/rg", "sandbox_ripgrep_sha256": PIN},

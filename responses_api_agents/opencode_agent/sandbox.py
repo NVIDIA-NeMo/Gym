@@ -109,6 +109,7 @@ class OpenCodeSandboxSession(AgentSessionState):
     session: SandboxSession[str]
     runtime: str
     sandbox_id: str | None = None
+    python_executable: str = "python3"
     model_ref: ModelServerRef | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
@@ -275,9 +276,9 @@ class OpenCodeSandboxSession(AgentSessionState):
             )
         await self.upload_json("input.json", payload)
         return SandboxCommand(
-            python="python3",
+            python=self.python_executable,
             argv=[
-                "python3",
+                self.python_executable,
                 "-I",
                 f"{self.persistent_directory}/sandbox_runner.py",
                 f"{self.session.session_dir}/input.json",
@@ -471,7 +472,7 @@ class OpenCodeSandboxSession(AgentSessionState):
         if self.session.cleanup is None or not self.session.cleanup["cleanup_confirmed"]:
             raise RuntimeError("OpenCode transcript capture requires confirmed cleanup")
         captured = await self.session.sandbox.exec(
-            f"python3 -I {quote(self.persistent_directory + '/sandbox_runner.py')} "
+            f"{quote(self.python_executable)} -I {quote(self.persistent_directory + '/sandbox_runner.py')} "
             f"--snapshot {quote(self.session.session_dir)} {quote(self.persistent_directory)}",
             cwd=self.session.workdir,
             timeout_s=timeout,
