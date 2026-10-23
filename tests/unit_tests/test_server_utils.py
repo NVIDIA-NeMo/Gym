@@ -18,12 +18,13 @@ import multiprocessing
 import pickle
 import socket
 from concurrent.futures import ProcessPoolExecutor
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import uvicorn
 from aiohttp import ClientOSError, ClientResponseError, RequestInfo, TCPConnector
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from multidict import CIMultiDict, CIMultiDictProxy
@@ -68,6 +69,10 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.telemetry import connection_pool
 from nemo_gym.telemetry.connection_pool import connection_pool_capacity, report_connection_pool_capacity
+
+
+# A request from this node, which the head server's config endpoint answers.
+LOOPBACK_REQUEST = MagicMock(client=SimpleNamespace(host="127.0.0.1"))
 
 
 _TCP_KEEPALIVE_TEST_IDLE = 42
@@ -558,9 +563,24 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
 
         head_server = HeadServer(config=BaseServerConfig(host="", port=0))
-        resp = await head_server.global_config_dict_yaml()
+        resp = await head_server.global_config_dict_yaml(LOOPBACK_REQUEST)
 
         assert "a: 2\n" == resp
+
+    async def test_HeadServer_global_config_dict_yaml_answers_loopback_and_private_callers_only(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """The merged config carries credentials: a caller from a public address, such as a cloud sandbox, is refused."""
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=DictConfig({})))
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+        for host in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "10.109.30.14", "192.168.1.20", "172.17.0.2"):
+            await head_server.global_config_dict_yaml(MagicMock(client=SimpleNamespace(host=host)))
+        for host in ("7.248.112.47", "2001:4860:4860::8888", "testclient", None):
+            with raises(HTTPException) as refused:
+                await head_server.global_config_dict_yaml(MagicMock(client=SimpleNamespace(host=host)))
+            assert refused.value.status_code == 403, host
+        with raises(HTTPException):
+            await head_server.global_config_dict_yaml(MagicMock(client=None))
 
     async def test_HeadServer_global_config_dict_yaml_caches(self, monkeypatch: MonkeyPatch) -> None:
         """Serialize the global config once until the cache is cleared."""
@@ -572,14 +592,14 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "to_yaml", to_yaml_mock)
 
         head_server = HeadServer(config=BaseServerConfig(host="", port=0))
-        first = await head_server.global_config_dict_yaml()
-        second = await head_server.global_config_dict_yaml()
+        first = await head_server.global_config_dict_yaml(LOOPBACK_REQUEST)
+        second = await head_server.global_config_dict_yaml(LOOPBACK_REQUEST)
 
         assert first is second
         assert to_yaml_mock.call_count == 1
 
         head_server.invalidate_global_config_dict_yaml_cache()
-        third = await head_server.global_config_dict_yaml()
+        third = await head_server.global_config_dict_yaml(LOOPBACK_REQUEST)
         assert third == first
         assert to_yaml_mock.call_count == 2
 

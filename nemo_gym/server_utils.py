@@ -15,6 +15,7 @@
 import ast
 import asyncio
 import atexit
+import ipaddress
 import json
 import logging
 import resource
@@ -51,7 +52,7 @@ from aiohttp import (
 )
 from aiohttp.client import _RequestOptions
 from anyio import create_task_group
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -2019,10 +2020,26 @@ class HeadServer(BaseServer):
 
         return uvicorn_server, thread, server
 
-    async def global_config_dict_yaml(self) -> str:
+    async def global_config_dict_yaml(self, request: Request) -> str:
+        # The merged config carries credentials (sandbox and model API keys). A harness in a sandbox can reach a
+        # head server bound beyond loopback (NeMo RL binds it to 0.0.0.0), so answer only callers on loopback or
+        # a private network (the cluster's nodes), never a public address such as a cloud sandbox's.
+        if not _is_loopback_or_private(request.client.host if request.client else None):
+            raise HTTPException(status_code=403, detail="The global config answers loopback and private callers only")
         if self._cached_yaml is None:
             self._cached_yaml = OmegaConf.to_yaml(get_global_config_dict())
         return self._cached_yaml
+
+
+def _is_loopback_or_private(host: Optional[str]) -> bool:
+    """Whether a caller's address is loopback or private; an IPv4 caller of a dual-stack socket counts as IPv4."""
+    try:
+        address = ipaddress.ip_address(host or "")
+    except ValueError:  # no address, or a name such as a test client's
+        return False
+    if address.version == 6 and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_loopback or address.is_private
 
 
 class ServerInstanceDisplayConfig(BaseModel):
