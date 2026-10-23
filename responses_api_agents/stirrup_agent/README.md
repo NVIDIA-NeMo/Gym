@@ -25,6 +25,11 @@ supervisor. The runner builds Stirrup's messages from `responses_create_params.i
 The model server is reached directly from the sandbox, so its address must be reachable from there. The trajectory
 comes back as the response's output items; verification belongs to the resources server.
 
+If the model server rejects a request as invalid (HTTP 400, 413 or 422, such as a context overflow), the episode ends
+there. The response carries the turns completed so far, with `status: failed`, an `error` and
+`metadata.stop_reason: model_error`, and the resources server verifies it. Any other model server error fails the
+episode.
+
 ## Configuration
 
 `configs/stirrup_agent.yaml` is the stand-alone config. Keys:

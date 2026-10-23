@@ -24,6 +24,7 @@ import re
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 from uuid import uuid4
 
+from openai.types.completion_usage import CompletionUsage
 from openai.types.responses.response_create_params import ToolParam
 from pydantic import BaseModel, Field
 
@@ -80,7 +81,7 @@ _IMAGE_OUTPUT_PLACEHOLDER = "[image omitted from tool output]"
 _REPORTING_ONLY_REASONING_FIELDS = ("summary", "generate_summary")
 
 
-def _message_content_to_text(content: Any) -> str:
+def message_content_to_text(content: Any) -> str:
     """Plain text of a chat message content (a string, or a list of text parts)."""
     if isinstance(content, str):
         return content
@@ -105,6 +106,36 @@ def _usage_detail(usage: Any, detail_group: str, detail_name: str, *top_level_al
         if value is not None:
             return value
     return None
+
+
+def chat_completion_usage_to_response_usage(usage: Optional[CompletionUsage]) -> Optional[NeMoGymResponseUsage]:
+    """Convert one Chat Completions ``usage`` block to Responses usage; ``None`` when the provider reported none.
+
+    Agents that make several chat calls per rollout sum these with ``accumulate_response_usage``.
+    """
+    if not usage:
+        return None
+    cached_tokens = _usage_detail(
+        usage,
+        "prompt_tokens_details",
+        "cached_tokens",
+        "cached_input_tokens",
+        "cache_read_input_tokens",
+    )
+    reasoning_tokens = _usage_detail(
+        usage,
+        "completion_tokens_details",
+        "reasoning_tokens",
+        "reasoning_output_tokens",
+    )
+    return NeMoGymResponseUsage(
+        input_tokens=usage.prompt_tokens,
+        input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
+        output_tokens=usage.completion_tokens,
+        output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
+        # Provider totals can use accounting that differs from prompt + completion.
+        total_tokens=usage.total_tokens,
+    )
 
 
 class ResponsesConverterState(BaseModel):
@@ -346,7 +377,7 @@ class ResponsesConverter(BaseModel):
         if instructions:
             leading_parts = [instructions]
             while state.messages and state.messages[0]["role"] in ("system", "developer"):
-                leading_parts.append(_message_content_to_text(state.messages.pop(0)["content"]))
+                leading_parts.append(message_content_to_text(state.messages.pop(0)["content"]))
             state.messages.insert(
                 0,
                 NeMoGymChatCompletionSystemMessageParam(content="\n\n".join(leading_parts), role="system"),
@@ -949,31 +980,7 @@ class ResponsesConverter(BaseModel):
         response_output = self.postprocess_chat_response(choice)
         response_output_dicts = [item.model_dump() for item in response_output]
 
-        usage = None
-        if chat_completion.usage:
-            cached_tokens = _usage_detail(
-                chat_completion.usage,
-                "prompt_tokens_details",
-                "cached_tokens",
-                "cached_input_tokens",
-                "cache_read_input_tokens",
-            )
-            reasoning_tokens = _usage_detail(
-                chat_completion.usage,
-                "completion_tokens_details",
-                "reasoning_tokens",
-                "reasoning_output_tokens",
-            )
-            usage = NeMoGymResponseUsage(
-                input_tokens=chat_completion.usage.prompt_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(
-                    cached_tokens=cached_tokens,
-                ),
-                output_tokens=chat_completion.usage.completion_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
-                # Provider totals can use accounting that differs from prompt + completion.
-                total_tokens=chat_completion.usage.total_tokens,
-            )
+        usage = chat_completion_usage_to_response_usage(chat_completion.usage)
 
         incomplete_details = None
         if choice.finish_reason == "length":
@@ -1023,6 +1030,7 @@ class ResponsesConverter(BaseModel):
             status="incomplete" if incomplete_details is not None else "completed",
             incomplete_details=incomplete_details,
             usage=usage,
+            metrics=chat_completion.metrics,
             **provider_metadata,
         )
 

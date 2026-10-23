@@ -501,9 +501,10 @@ async def test_failures_are_isolated_and_completion_order_controls_dedup(
         {"scenarios": [result.result.scenarios[-1].model_dump(mode="json")]}
     )
     assert response_payload["incomplete_details"] == {"reason": "max_output_tokens"}
-    assert response_payload["usage"]["input_tokens"] == 5
-    assert response_payload["usage"]["output_tokens"] == 3
-    assert response_payload["usage"]["total_tokens"] == 8
+    # Usage sums the 19 completions that came back (5/3/8 each), not only the selected one.
+    assert response_payload["usage"]["input_tokens"] == 95
+    assert response_payload["usage"]["output_tokens"] == 57
+    assert response_payload["usage"]["total_tokens"] == 152
 
 
 @pytest.mark.asyncio
@@ -547,6 +548,102 @@ async def test_parse_failure_retains_the_raw_completion() -> None:
     assert outcome.trace.status == "failed"
     assert outcome.trace.error_type == "ValidationError"
     assert outcome.trace.raw_chat_completion["id"] == "response-malformed"
+
+
+@pytest.mark.asyncio
+async def test_run_usage_sums_every_returned_completion() -> None:
+    def completion(response_id: str, content: str, usage: dict[str, Any]) -> dict[str, Any]:
+        payload = chat_completion(response_id, [])
+        payload["choices"][0]["message"]["content"] = content
+        payload["usage"] = usage
+        return payload
+
+    payloads = [
+        completion(
+            "response-0",
+            json.dumps({"scenarios": [scenario("first")]}),
+            {
+                "prompt_tokens": 300,
+                "completion_tokens": 1400,
+                "total_tokens": 1700,
+                "prompt_tokens_details": {"cached_tokens": 100},
+                "completion_tokens_details": {"reasoning_tokens": 1200},
+            },
+        ),
+        # Unparseable text still spent tokens.
+        completion(
+            "response-1",
+            "not json",
+            {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150,
+                "prompt_tokens_details": {"cached_tokens": 0},
+                "completion_tokens_details": {"reasoning_tokens": 0},
+            },
+        ),
+        completion(
+            "response-2",
+            json.dumps({"scenarios": [scenario("third")]}),
+            {
+                "prompt_tokens": 1818,
+                "completion_tokens": 24,
+                "total_tokens": 1842,
+                "prompt_tokens_details": {"cached_tokens": 300},
+                "completion_tokens_details": {"reasoning_tokens": 0},
+            },
+        ),
+    ]
+
+    class SequenceClient:
+        async def post(self, **kwargs: Any) -> FakeHTTPResponse:
+            return FakeHTTPResponse(payloads.pop(0))
+
+    result = await agent(SequenceClient(), request_count=3, max_concurrency=1).run(run_request())
+
+    assert result.generation_trace.failed_call_count == 1
+    assert "third" in result.response.output[0].content[0].text
+    # Usage covers every completion the rollout received, not just the one its response text came from.
+    assert result.response.usage.model_dump() == {
+        "input_tokens": 2218,
+        "input_tokens_details": {"cached_tokens": 400},
+        "output_tokens": 1474,
+        "output_tokens_details": {"reasoning_tokens": 1200},
+        "total_tokens": 3692,
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_usage_counted_when_no_completion_parses() -> None:
+    payloads = []
+    for index, (prompt_tokens, completion_tokens) in enumerate([(100, 50), (200, 24)]):
+        payload = chat_completion(f"unparseable-{index}", [])
+        payload["choices"][0]["message"]["content"] = "not json"
+        payload["usage"] = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "prompt_tokens_details": {"cached_tokens": 10},
+            "completion_tokens_details": {"reasoning_tokens": 5},
+        }
+        payloads.append(payload)
+
+    class SequenceClient:
+        async def post(self, **kwargs: Any) -> FakeHTTPResponse:
+            return FakeHTTPResponse(payloads.pop(0))
+
+    result = await agent(SequenceClient(), request_count=2, max_concurrency=1).run(run_request())
+
+    # No artifact, so the empty response is returned; it still carries the tokens both calls spent.
+    assert result.generation_trace.failed_call_count == 2
+    assert result.response.id == "conversational_tool_use_scenario_generation_empty"
+    assert result.response.usage.model_dump() == {
+        "input_tokens": 300,
+        "input_tokens_details": {"cached_tokens": 20},
+        "output_tokens": 74,
+        "output_tokens_details": {"reasoning_tokens": 10},
+        "total_tokens": 374,
+    }
 
 
 @pytest.mark.asyncio

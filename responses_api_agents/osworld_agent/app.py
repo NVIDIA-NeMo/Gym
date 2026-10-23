@@ -35,7 +35,7 @@ from typing import Any, Callable, Dict, List, Literal, Mapping, Optional
 
 import ray
 from fastapi import Body
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -49,7 +49,10 @@ from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseUsage,
+    accumulate_response_usage,
 )
+from nemo_gym.responses_converter import chat_completion_usage_to_response_usage
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import (
     get_first_server_config_dict,
@@ -567,6 +570,32 @@ def _build_policy_openai_client(*, base_url: str, api_key: str):
     )
 
 
+class _PolicyUsage:
+    """Sum of the usage on the policy-model responses that Gym's own model callers receive.
+
+    A finished response whose usage is missing or malformed makes the sum unknown: a subtotal of the other calls must
+    not read as the rollout's total (rollout-evidence.mdx).
+    """
+
+    def __init__(self) -> None:
+        self.total: Optional[NeMoGymResponseUsage] = None
+        self.complete = True
+
+    def add(self, response: Any) -> None:
+        try:
+            usage = chat_completion_usage_to_response_usage(getattr(response, "usage", None))
+        except ValidationError:
+            # A malformed usage block is unknown usage, not a reason to fail the policy call.
+            usage = None
+        if usage is None:
+            self.complete = False
+        self.total = accumulate_response_usage(self.total, usage)
+
+    def reported(self) -> Optional[NeMoGymResponseUsage]:
+        """The summed usage, or ``None`` when any finished response's usage was lost or no call was seen."""
+        return self.total if self.complete else None
+
+
 # Imported lazily by ``_run_osworld_task_remote`` so this module imports
 # cleanly without OSWorld installed.
 def _build_model_fn(
@@ -579,6 +608,7 @@ def _build_model_fn(
     top_p: Optional[float],
     model_timeout_s: float = 900.0,
     log_context: Optional[Mapping[str, Any]] = None,
+    policy_usage: Optional[_PolicyUsage] = None,
 ) -> Callable[[str, str, List[Dict[str, Any]]], str]:
     """Return a sync ``model_fn`` that hits a Gym vLLM/OpenAI-compatible model.
 
@@ -658,6 +688,8 @@ def _build_model_fn(
             if isinstance(exc, APITimeoutError):
                 raise OSWorldModelTimeoutError(f"policy model call exceeded {model_timeout_s:g}s") from exc
             raise
+        if policy_usage is not None:
+            policy_usage.add(resp)
         return resp.choices[0].message.content or ""
 
     return _call
@@ -671,6 +703,7 @@ def _build_messages_model_fn(
     model_timeout_s: float = 900.0,
     log_context: Optional[Mapping[str, Any]] = None,
     rollout_purpose: Optional[Literal["training", "evaluation"]] = None,
+    policy_usage: Optional[_PolicyUsage] = None,
 ):
     """Return a sync model caller for native OSWorld agents.
 
@@ -767,6 +800,9 @@ def _build_messages_model_fn(
             if isinstance(exc, APITimeoutError):
                 raise OSWorldModelTimeoutError(f"policy model call exceeded {model_timeout_s:g}s") from exc
             raise
+        # The response finished, so its tokens count even if it is rejected below.
+        if policy_usage is not None:
+            policy_usage.add(resp)
         choice = resp.choices[0]
         finish_reason_error = None
         if payload.get("_nemo_gym_require_stop") and choice.finish_reason not in {"stop", "tool_calls"}:
@@ -1098,6 +1134,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
     rollout_purpose = runner_kwargs.pop("rollout_purpose", None)
     log_context = _normalize_log_context(runner_kwargs.pop("log_context", None))
     print(f"OSWORLD_CHILD_PURPOSE|purpose={rollout_purpose}|temperature={temperature}|top_p={top_p}", flush=True)
+    policy_usage = _PolicyUsage()
     model_fn = _build_model_fn(
         base_url=base_url,
         model_name=model_name,
@@ -1107,6 +1144,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         top_p=top_p,
         model_timeout_s=model_timeout,
         log_context=log_context,
+        policy_usage=policy_usage,
     )
     messages_model_fn = _build_messages_model_fn(
         base_url=base_url,
@@ -1115,6 +1153,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         model_timeout_s=model_timeout,
         log_context=log_context,
         rollout_purpose=rollout_purpose,
+        policy_usage=policy_usage,
     )
     result = run_osworld_task(
         task_config,
@@ -1143,6 +1182,9 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         "artifact_dir": result.artifact_dir,
         "termination_reason": result.termination_reason,
         "agent_contract": result.agent_contract,
+        # Only Gym's model callers see usage. m3_agent and pointer_agent call models through their own clients, so
+        # their usage stays unknown (None).
+        "usage": usage.model_dump(mode="json") if (usage := policy_usage.reported()) is not None else None,
         "steps": [
             {
                 "step": s.step,
@@ -1574,6 +1616,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                         LOG.exception("Failed to cancel timed-out OSWorld Ray task")
                 error = f"task_timeout exceeded ({self.config.task_timeout}s) during end-to-end rollout"
                 LOG.error("OSWorld rollout timed out: %s", error)
+                # The child's usage never comes back, so the row's usage stays unknown (None), not zero.
                 return _empty_response(
                     body,
                     error=error,
@@ -1584,6 +1627,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 )
             except Exception as exc:  # noqa: BLE001
                 LOG.exception("OSWorld rollout failed")
+                # As for a timeout: the failed worker's usage is lost, so the row's usage stays unknown (None).
                 return _empty_response(body, error=f"{type(exc).__name__}: {exc}")
 
             # These values are owned by the current request, not the Ray
@@ -1761,6 +1805,7 @@ def _build_response(
         "tools": [],
         "temperature": temperature,
         "top_p": top_p,
+        "usage": result.get("usage"),
         **trajectory_fields,
         **exact_fields,
     }
