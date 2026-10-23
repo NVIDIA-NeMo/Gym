@@ -54,11 +54,12 @@ import asyncio
 import logging
 from collections import Counter
 from collections.abc import Callable
-from typing import Any, Literal, NamedTuple, Optional, Protocol
+from typing import Any, NamedTuple, Optional, Protocol
 
 from pydantic import JsonValue
 
 from nemo_gym._checkpoint.control import (
+    CheckpointMode,
     CheckpointParticipant,
     CheckpointRecord,
     CheckpointRequest,
@@ -77,7 +78,7 @@ from nemo_gym._checkpoint.steps import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     CHECKPOINT_RESTART_HEADER,
     CHECKPOINT_VERIFY_HEADER,
-    StepMode,
+    StepType,
 )
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.rollout_correlation import current_episode_id
@@ -86,7 +87,6 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 
 LOGGER = logging.getLogger(__name__)
 
-ResourcesCheckpointMode = Literal["stateless", "exported", "restart_only"]
 _SESSION_START = "/seed_session"
 _SESSION_CLOSE = "/close_session"
 _SESSION_ENDS = (_SESSION_CLOSE, "/verify")
@@ -144,16 +144,16 @@ class ResourcesParticipant(CheckpointParticipant):
     record_model = ResourcesSessionRecord
 
     def __init__(
-        self, hooks: ResourcesSessionHooks, mode: ResourcesCheckpointMode, *, verify_mode: StepMode = "wait"
+        self, hooks: ResourcesSessionHooks, mode: CheckpointMode, *, verify_step_type: StepType = "wait"
     ) -> None:
         super().__init__()
         self.hooks = hooks
         self.mode = mode
-        self.verify_mode = verify_mode
+        self.verify_step_type = verify_step_type
         # Requests the checkpoint does not wait for:
         # a verification the server declared replayable does not change checkpointed state.
         # A seed is waited for, so the session matches the environment's boundary.
-        self.replayable_paths = {"/verify"} if verify_mode == "replay" else set()
+        self.replayable_paths = {"/verify"} if verify_step_type == "replay" else set()
         self.accepting = True
         self._open = asyncio.Event()
         self._open.set()
@@ -175,7 +175,7 @@ class ResourcesParticipant(CheckpointParticipant):
         # The requests in flight per session that a checkpoint waits for, the ones ``inflight`` counts.
         self._session_waited: Counter[str] = Counter()
         # Restored sessions no request has used yet; a commit that no longer continues their episode retires them.
-        self._restored_pending: set[str] = set()
+        self._unclaimed: set[str] = set()
 
     def admit(
         self,
@@ -223,7 +223,7 @@ class ResourcesParticipant(CheckpointParticipant):
         # Refusing it would fail that episode; its episode re-runs it after a crash anyway.
         if not self.accepting and path not in self.replayable_paths:
             raise AdmissionClosedError("resources admission is closed for a checkpoint")
-        self._restored_pending.discard(session_id)
+        self._unclaimed.discard(session_id)
 
     async def wait_open(self) -> None:
         """Return once admission is open: after resume, or when a lease expires.
@@ -246,7 +246,7 @@ class ResourcesParticipant(CheckpointParticipant):
         # Recorded in every mode: a stateless session has nothing to export, but a retire still drains and refuses it.
         # A seed of a restored session's ID claims it: a commit must not delete it as unclaimed.
         self._unbind(session_id)
-        self._restored_pending.discard(session_id)
+        self._unclaimed.discard(session_id)
         self._sessions[session_id] = episode_id
         self._rollout_sessions.setdefault(episode_id.rollout_id, set()).add(session_id)
 
@@ -259,7 +259,7 @@ class ResourcesParticipant(CheckpointParticipant):
 
     def ended(self, session_id: str) -> None:
         self._unbind(session_id)
-        self._restored_pending.discard(session_id)
+        self._unclaimed.discard(session_id)
         self._restored_sessions.discard(session_id)
 
     def session_ended_by(self, session_id: str, path: str, *, close_follows: bool = False) -> None:
@@ -416,7 +416,7 @@ class ResourcesParticipant(CheckpointParticipant):
         for session_id in [
             key
             for key in self._rollout_sessions.get(episode_id.rollout_id, ())
-            if key in self._restored_pending and self._sessions[key] == episode_id
+            if key in self._unclaimed and self._sessions[key] == episode_id
         ]:
             if self.mode == "exported":
                 await self.hooks.retire_session_state(session_id)
@@ -514,12 +514,12 @@ class ResourcesParticipant(CheckpointParticipant):
             await self.hooks.restore_session_states({record.session_id: record.state for record in records})
         for record in records:
             self._bind(record.session_id, next_attempt(record.episode_id))
-            self._restored_pending.add(record.session_id)
+            self._unclaimed.add(record.session_id)
             self._restored_sessions.add(record.session_id)
 
-    async def restored_pending(self) -> list[EpisodeId]:
+    async def unclaimed(self) -> list[EpisodeId]:
         return sorted(
-            {self._sessions[session_id] for session_id in self._restored_pending},
+            {self._sessions[session_id] for session_id in self._unclaimed},
             key=lambda episode_id: episode_id.capture_key,
         )
 
@@ -527,7 +527,11 @@ class ResourcesParticipant(CheckpointParticipant):
         raise NotImplementedError("resources sessions restore through install(), which awaits the server's hooks")
 
     def status_extra(self) -> dict[str, Any]:
-        return {"mode": self.mode, "verify": self.verify_mode, "retired_sessions": len(self._retired_session_rollouts)}
+        return {
+            "mode": self.mode,
+            "verify": self.verify_step_type,
+            "retired_sessions": len(self._retired_session_rollouts),
+        }
 
 
 class ResourcesCheckpointMiddleware:
@@ -658,7 +662,7 @@ class ResourcesCheckpointMiddleware:
                 if seed is not None:
                     # Tell the caller, before it ever verifies, whether this server's /verify may be replayed,
                     # and whether its episode must start over after a crash because this server cannot capture it.
-                    headers = [(CHECKPOINT_VERIFY_HEADER.encode(), self.participant.verify_mode.encode())]
+                    headers = [(CHECKPOINT_VERIFY_HEADER.encode(), self.participant.verify_step_type.encode())]
                     if self.participant.mode == "restart_only":
                         headers.append((CHECKPOINT_RESTART_HEADER.encode(), b"1"))
                     message = {**message, "headers": [*message.get("headers", []), *headers]}

@@ -257,7 +257,7 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
         # A worker disconnected while admission was closed: its undelivered calls are unknown.
         self.lost_worker = False
         # A worker left since this server started: what it served, and which restored attempts it started,
-        # are unknown, so restore is refused and no restored attempt counts as pending any more.
+        # are unknown, so restore is refused and no restored attempt counts as unclaimed any more.
         self.worker_left = False
         self.restored_cuts: dict[str, GenerationCutRecord] = {}
         # Restored attempts, by capture key, that no worker had started as of the last check.
@@ -445,10 +445,10 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
         # The restored attempts continue as the next attempt, so their own ledgers are no longer used.
         await retire_ledgers(self.ledger, scope)
 
-    async def restored_pending(self) -> list[EpisodeId]:
+    async def unclaimed(self) -> list[EpisodeId]:
         if self.restored_targets:
             # An attempt any worker started is no longer pending.
-            replies = await self._broadcast("restored_pending", {}, timeout=_MESSAGE_TIMEOUT_SECONDS)
+            replies = await self._broadcast("unclaimed", {}, timeout=_MESSAGE_TIMEOUT_SECONDS)
             for reply in replies.values():
                 self.restored_targets &= set(reply["targets"])
         return [EpisodeId.from_capture_key(key) for key in sorted(self.restored_targets)]
@@ -726,7 +726,7 @@ class PolicyWorkerLink:
                 self.gate.restored_targets = set(body["restored_targets"])
             self.gate.open()
             return {}
-        if kind == "restored_pending":
+        if kind == "unclaimed":
             return {"targets": sorted(self.gate.restored_targets)}
         if kind == "snapshot":
             return self.gate.snapshot().model_dump(mode="json")

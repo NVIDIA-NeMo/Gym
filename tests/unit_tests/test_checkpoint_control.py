@@ -84,7 +84,7 @@ class FakeParticipant(CheckpointParticipant):
             next_id = record.episode_id.model_copy(update={"attempt": record.episode_id.attempt + 1})
             self.executions[next_id.capture_key] = {"parked": True, "value": record.value}
 
-    async def restored_pending(self) -> list[EpisodeId]:
+    async def unclaimed(self) -> list[EpisodeId]:
         return [
             EpisodeId.from_capture_key(key) for key, execution in self.executions.items() if execution.get("restored")
         ]
@@ -567,16 +567,16 @@ def test_prepare_report_caps_listed_blockers_but_counts_all() -> None:
     assert PrepareReport.model_validate(report.model_dump()) == report
 
 
-def test_seed_reply_reports_the_verify_mode_and_defaults_to_wait() -> None:
+def test_seed_reply_reports_the_verify_step_type_and_defaults_to_wait() -> None:
     from multidict import CIMultiDict
 
-    from nemo_gym._checkpoint.steps import seed_verify_mode
+    from nemo_gym._checkpoint.steps import seed_verify_step_type
 
-    assert seed_verify_mode(CIMultiDict({"X-NG-Checkpoint-Verify": "replay"})) == "replay"
-    assert seed_verify_mode({"x-ng-checkpoint-verify": "wait"}) == "wait"
-    assert seed_verify_mode({"x-ng-checkpoint-verify": "unexpected"}) == "wait"
-    assert seed_verify_mode({}) == "wait"
-    assert seed_verify_mode(None) == "wait"
+    assert seed_verify_step_type(CIMultiDict({"X-NG-Checkpoint-Verify": "replay"})) == "replay"
+    assert seed_verify_step_type({"x-ng-checkpoint-verify": "wait"}) == "wait"
+    assert seed_verify_step_type({"x-ng-checkpoint-verify": "unexpected"}) == "wait"
+    assert seed_verify_step_type({}) == "wait"
+    assert seed_verify_step_type(None) == "wait"
 
 
 async def test_an_episode_woken_by_resume_stays_parked_if_a_new_checkpoint_closes_first() -> None:

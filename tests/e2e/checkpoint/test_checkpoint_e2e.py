@@ -395,16 +395,16 @@ async def test_a_checkpoint_without_a_crash_parks_and_then_resumes_the_episode(
     assert len(deployment.backend_calls()) == 2
 
 
-@pytest.mark.parametrize("mode", ["replay", "wait"])
-async def test_verification_in_flight_is_replayed_or_waited_for(deploy, tmp_path: Path, mode: str) -> None:
-    deployment = deploy("slow", checkpoint_verify=mode)
+@pytest.mark.parametrize("verify", ["replay", "wait"])
+async def test_verification_in_flight_is_replayed_or_waited_for(deploy, tmp_path: Path, verify: str) -> None:
+    deployment = deploy("slow", checkpoint_verify=verify)
     deployment.slow_verify_flag.touch()
     async with GymHTTP(deployment.url("environment"), timeout=120) as http:
         first = asyncio.create_task(http.post("/run", json=weather_episode("verify-1")))
         await wait_until(lambda: deployment.verifications() == 1)
         participants = await deployment.participants()
         early = await coordination.prepare(participants, "c1", deadline_ts=deadline(1))
-        if mode == "wait":
+        if verify == "wait":
             deployment.slow_verify_flag.unlink()
         await checkpoint(deployment, tmp_path / "ckpt", ["verify-1"])
         record = environment_record(tmp_path / "ckpt")
@@ -414,7 +414,7 @@ async def test_verification_in_flight_is_replayed_or_waited_for(deploy, tmp_path
 
     assert replacement.json()["result"]["reward"] == 1.0
     assert len(deployment.backend_calls()) == 2
-    if mode == "replay":
+    if verify == "replay":
         # A replay step does not hold the checkpoint; the restored episode runs verification again.
         assert early.prepared
         assert record["boundary"]["next"] == "verify"

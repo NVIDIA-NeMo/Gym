@@ -10,7 +10,7 @@ from uuid import uuid4
 from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator
 
-from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepMode, seed_restarts, seed_verify_mode
+from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType, seed_restarts, seed_verify_step_type
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
@@ -84,7 +84,7 @@ class SessionHandles(BaseModel):
     agent_session_id: str
     agent_cookies: dict[str, str] = Field(default_factory=dict)
     # Whether a checkpoint may replay the resources server's /verify, as its seed reply reported.
-    resources_verify: StepMode = "wait"
+    resources_verify_step_type: StepType = "wait"
 
     @classmethod
     def new(cls) -> "SessionHandles":
@@ -161,7 +161,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
     config: SingleAgentTurnEnvironmentServerConfig
     request_model = SingleAgentTurnRequest
-    checkpoint_boundaries = True
+    checkpoint_mode = "exported"
     response_model = SingleAgentTurnResponse
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
@@ -306,7 +306,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     "trajectory": dumped_trajectory(),
                 },
             )
-            async with self.checkpoint_step(request, handles.resources_verify):
+            async with self.checkpoint_step(request, handles.resources_verify_step_type):
                 verification = await self._verify(request, handles, agent_response, observations, trajectory)
             stage = "return"
 
@@ -351,7 +351,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
             await raise_for_status(seed_http_response)
             handles.resources_cookies = _cookies(seed_http_response)
-            handles.resources_verify = seed_verify_mode(seed_http_response.headers)
+            handles.resources_verify_step_type = seed_verify_step_type(seed_http_response.headers)
             if seed_restarts(seed_http_response.headers):
                 await self.checkpoint_restart(request)
             if not handles.resources_cookies:

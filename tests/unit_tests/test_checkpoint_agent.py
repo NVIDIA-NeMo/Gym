@@ -202,7 +202,7 @@ async def test_a_restored_run_episode_not_yet_reclaimed_is_still_named_in_the_co
     await controller.resume(CheckpointRequest(**control("r1")))
     replacement = EpisodeId(rollout_id="run", attempt=1)
     # No replacement /run has claimed the session yet.
-    assert await restored.restored_pending() == [replacement]
+    assert await restored.unclaimed() == [replacement]
     await controller.prepare(CheckpointRequest(**control("c2")))
     reply = await controller.commit(
         CommitRequest(**control("c2", checkpoint_dir=str(tmp_path / "second"), episode_ids=[replacement]))
@@ -849,7 +849,7 @@ async def test_a_restored_legacy_run_claimed_at_verify_is_no_longer_pending_and_
 
     task = asyncio.create_task(run())
     await asyncio.wait_for(verifying.wait(), 5)
-    pending = await participant.restored_pending()
+    pending = await participant.unclaimed()
     await controller.prepare(CheckpointRequest(**control("c2")))
     # The controller's scope leaves the rollout out; the claimed /run must not be retired for that.
     await controller.commit(CommitRequest(**control("c2", checkpoint_dir=str(tmp_path), episode_ids=[])))
@@ -911,7 +911,7 @@ async def test_model_calls_and_activations_notify_only_while_a_checkpoint_is_ope
 class _SandboxAgent(SimpleResponsesAPIAgent):
     """An agent whose seed awaits while it builds the session, as one that starts a sandbox does."""
 
-    checkpoint_sessions_supported = True
+    checkpoint_mode = "exported"
     building: Any = None
     release: Any = None
     events: Any = None

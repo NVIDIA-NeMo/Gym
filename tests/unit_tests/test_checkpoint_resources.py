@@ -527,7 +527,7 @@ class ReplayVerifyServer(CounterServer):
 
 
 @pytest.mark.parametrize("server_type, expected", [(CounterServer, "wait"), (ReplayVerifyServer, "replay")])
-async def test_the_seed_reply_and_status_report_the_verify_mode(
+async def test_the_seed_reply_and_status_report_the_verify_step_type(
     server_type: type[CounterServer], expected: str
 ) -> None:
     _, client = make_server(server_type)
@@ -1161,17 +1161,17 @@ async def test_deleting_one_rollout_s_restored_sessions_does_not_scan_every_rest
     participant = server._checkpoint
     for index in range(1000):
         participant.seeded(f"s{index}", EpisodeId(rollout_id=f"r{index}", attempt=1))
-    participant._restored_pending.update(participant._sessions)
+    participant._unclaimed.update(participant._sessions)
 
     class Unscannable(set):
         def __iter__(self):  # noqa: ANN204
             raise AssertionError("deleting a restored episode scanned every restored session")
 
-    participant._restored_pending = Unscannable(participant._restored_pending)
+    participant._unclaimed = Unscannable(participant._unclaimed)
     await participant.delete_restored(EpisodeId(rollout_id="r7", attempt=1))
 
     assert "s7" not in participant._sessions and len(participant._sessions) == 999
-    assert "s7" not in participant._restored_pending and "s8" in participant._restored_pending
+    assert "s7" not in participant._unclaimed and "s8" in participant._unclaimed
 
 
 def test_ready_does_not_list_blockers() -> None:
@@ -1267,10 +1267,10 @@ async def test_a_seed_of_a_restored_session_s_id_claims_it(tmp_path: Path) -> No
             headers=AUTH,
         )
         await fresh.post("/ng-control/v1/checkpoint/resume", json=control("r1"), headers=AUTH)
-        pending_before = await restored._checkpoint.restored_pending()
+        pending_before = await restored._checkpoint.unclaimed()
         # The environment continues from before its seed, so it seeds the same session again.
         await fresh.post("/ng-rollout/r-a1/seed_session", json=SEED)
-        pending_after = await restored._checkpoint.restored_pending()
+        pending_after = await restored._checkpoint.unclaimed()
 
     assert pending_before == [EpisodeId(rollout_id="r", attempt=1)]
     # Claimed, so a commit never deletes it as unused restored state.
@@ -1589,7 +1589,7 @@ async def test_after_a_restore_only_the_replacement_s_prefixed_calls_reach_the_s
         # A harness of the replaced attempt, with and without its rollout prefix.
         stale = await fresh.post("/ng-rollout/r/increment")
         cookie_only = await fresh.post("/increment")
-        unclaimed = await restored.checkpoint_participant.restored_pending()
+        unclaimed = await restored.checkpoint_participant.unclaimed()
         counts_after_refusals = dict(restored.counters)
         replacement = await fresh.post("/ng-rollout/r-a1/increment")
 
@@ -1600,7 +1600,7 @@ async def test_after_a_restore_only_the_replacement_s_prefixed_calls_reach_the_s
     # so a commit that drops the episode would still delete it.
     assert counts_after_refusals == {session_id: 1} and unclaimed == [EpisodeId(rollout_id="r", attempt=1)]
     assert replacement.json() == {"count": 2}
-    assert await restored.checkpoint_participant.restored_pending() == []
+    assert await restored.checkpoint_participant.unclaimed() == []
 
 
 async def test_stale_and_cookie_only_calls_stay_refused_across_a_second_restore(tmp_path: Path) -> None:
@@ -1648,7 +1648,7 @@ async def test_stale_and_cookie_only_calls_stay_refused_across_a_second_restore(
             await second.post("/ng-rollout/r-a1/increment"),
             await second.post("/increment"),
         ]
-        unclaimed = await restored.checkpoint_participant.restored_pending()
+        unclaimed = await restored.checkpoint_participant.unclaimed()
         replacement = await second.post("/ng-rollout/r-a2/increment")
 
     assert [response.json()["error"]["code"] for response in refused] == [

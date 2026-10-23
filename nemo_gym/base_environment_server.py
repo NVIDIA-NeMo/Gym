@@ -17,11 +17,11 @@ from fastapi import Body, FastAPI
 from pydantic import ConfigDict, Field, JsonValue, PositiveFloat, PositiveInt, model_validator
 from typing_extensions import Self
 
-from nemo_gym._checkpoint.control import install_participant
+from nemo_gym._checkpoint.control import CheckpointMode, install_participant
 from nemo_gym._checkpoint.environment import EnvironmentParticipant
 from nemo_gym._checkpoint.errors import ControlError
 from nemo_gym._checkpoint.settings import checkpoint_settings
-from nemo_gym._checkpoint.steps import StepMode
+from nemo_gym._checkpoint.steps import StepType
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure, EpisodeId
 from nemo_gym.failure_kinds import FailureStage
@@ -30,6 +30,8 @@ from nemo_gym.server_utils import SimpleServer, format_exception_with_response_b
 
 
 LOGGER = logging.getLogger(__name__)
+# An environment server either records boundaries or restarts its episodes; it has no stateless mode.
+_ENVIRONMENT_CHECKPOINT_MODES = ("restart_only", "exported")
 
 EpisodeRequestT = TypeVar("EpisodeRequestT", bound=BaseEpisodeRequest[Any])
 EpisodeResponseT = TypeVar("EpisodeResponseT", bound=BaseEpisodeResponse[Any])
@@ -197,10 +199,12 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
     response_model: ClassVar[type[EpisodeResponseT]]
     _admission: asyncio.Semaphore | None = None
     _checkpoint: EnvironmentParticipant | None = None
-    # Whether ``run`` records checkpoint boundaries.
-    # Episodes of a protocol that records none cannot be continued, so they are restarts:
-    # they never hold up a checkpoint, and start over from their input after a crash.
-    checkpoint_boundaries: ClassVar[bool] = False
+    # How this server's episodes take part in partial-rollout checkpoints.
+    # A protocol whose ``run`` records checkpoint boundaries declares "exported".
+    # Its episodes continue after a restore.
+    # The default fails closed: episodes of a protocol that records no boundaries cannot be continued.
+    # They are restarts, which never hold up a checkpoint and start over from their input after a crash.
+    checkpoint_mode: ClassVar[CheckpointMode] = "restart_only"
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -270,7 +274,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                                 request.episode_id,
                                 request.task.model_dump(mode="json"),
                                 deadline,
-                                restart=not self.checkpoint_boundaries,
+                                restart=self.checkpoint_mode == "restart_only",
                             )
                             begun = True
                         response = await self.run(request, cleanup)
@@ -320,11 +324,17 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         """Take part in partial-rollout checkpoints when they are enabled.
 
         Every episode is tracked.
-        A protocol that records boundaries (``checkpoint_boundaries``) continues after a restore;
+        A protocol that records boundaries (``checkpoint_mode = "exported"``) continues after a restore;
         the episodes of a protocol that records none are restarts,
         which never hold up a checkpoint and start over from their input after a crash.
         Call this from any ``setup_webserver`` that builds its own app.
         """
+        # The declaration is a class attribute nothing else checks: a typo would act as a mode of its own.
+        if self.checkpoint_mode not in _ENVIRONMENT_CHECKPOINT_MODES:
+            raise ValueError(
+                f"{type(self).__name__} declares checkpoint_mode={self.checkpoint_mode!r}; "
+                f"expected one of {_ENVIRONMENT_CHECKPOINT_MODES}"
+            )
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
@@ -372,15 +382,15 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         if self._checkpoint is not None:
             await self._checkpoint.mark_restart(request.episode_id)
 
-    def checkpoint_step(self, request: EpisodeRequestT, mode: StepMode) -> AbstractAsyncContextManager[None]:
-        """Run one protocol step in ``wait`` or ``replay`` mode (see ``nemo_gym._checkpoint.steps``).
+    def checkpoint_step(self, request: EpisodeRequestT, step_type: StepType) -> AbstractAsyncContextManager[None]:
+        """Run one protocol step as a ``wait`` or ``replay`` step (see ``nemo_gym._checkpoint.steps``).
 
         Use ``replay`` only for a step that is safe to run again after a crash
         and does not change checkpointed state; everything else waits.
         """
         if self._checkpoint is None:
             return nullcontext()
-        return self._checkpoint.step(request.episode_id, mode)
+        return self._checkpoint.step(request.episode_id, step_type)
 
     def _unhandled_failure_response(self, request: EpisodeRequestT, error: Exception) -> EpisodeResponseT:
         LOGGER.exception(f"Unhandled environment server error: episode_id={request.episode_id}")

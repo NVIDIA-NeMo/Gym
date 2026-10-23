@@ -46,7 +46,7 @@ from nemo_gym._checkpoint.agent import (
     RestartOnlyTrackingMiddleware,
     RestoredAgentSession,
 )
-from nemo_gym._checkpoint.control import install_participant
+from nemo_gym._checkpoint.control import CheckpointMode, install_participant
 from nemo_gym._checkpoint.errors import StaleAttemptError
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym._checkpoint.steps import CHECKPOINT_RESTART_HEADER
@@ -342,6 +342,8 @@ class _AgentSessionRecord:
 # to the host. Docker only does so when the daemon runs on the host and the container uses host networking.
 _HOST_NETWORK_SANDBOX_PROVIDERS = frozenset({"local"})
 _LOCAL_DOCKER_SANDBOX_PROVIDERS = frozenset({"docker"})
+# An agent either exports its sessions or restarts its rollouts; it has no stateless mode.
+_AGENT_CHECKPOINT_MODES = ("restart_only", "exported")
 
 
 def is_loopback_host(url: str) -> bool:
@@ -526,9 +528,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             raise HTTPException(409, "Unknown or closing agent_session_id")
         return record.state
 
-    # Agents that implement the AgentSessionHooks methods set this to take part in partial-rollout checkpoints.
-    # Other agents restart unfinished rollouts from their input.
-    checkpoint_sessions_supported: ClassVar[bool] = False
+    # How this agent takes part in partial-rollout checkpoints.
+    # Agents that implement the AgentSessionHooks methods declare "exported".
+    # The default fails closed: unfinished rollouts are restarts, which start over from their input after a crash.
+    checkpoint_mode: ClassVar[CheckpointMode] = "restart_only"
     _checkpoint_participant: Optional[AgentSessionParticipant] = PrivateAttr(default=None)
     _restart_only: Optional[RestartOnlyAgentParticipant] = PrivateAttr(default=None)
 
@@ -546,13 +549,19 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if getattr(app.state, "nemo_gym_agent_checkpoint_installed", False):
             return
         app.state.nemo_gym_agent_checkpoint_installed = True
+        # The declaration is a class attribute nothing else checks: a typo would act as a mode of its own.
+        if self.checkpoint_mode not in _AGENT_CHECKPOINT_MODES:
+            raise ValueError(
+                f"{type(self).__name__} declares checkpoint_mode={self.checkpoint_mode!r}; "
+                f"expected one of {_AGENT_CHECKPOINT_MODES}"
+            )
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
         if (self.config.num_workers or 1) != 1:
             # Each worker would track only its own calls, so a checkpoint could miss work in the others.
             raise ValueError("agent checkpointing requires num_workers=1: sessions live in one process")
-        if not self.checkpoint_sessions_supported:
+        if self.checkpoint_mode == "restart_only":
             # Fail closed: in-flight work is reported as restarts,
             # which never hold up a checkpoint and start over after a crash.
             self._restart_only = RestartOnlyAgentParticipant(self.retire_agent_session)
