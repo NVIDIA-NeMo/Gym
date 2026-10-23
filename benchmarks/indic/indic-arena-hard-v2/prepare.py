@@ -13,7 +13,7 @@ import pyarrow.parquet as pq
 
 HF_DATASET = "ai4bharat/indic-arena-hard-v2"
 HF_REVISION = "aebdc931858cb6df854f16a0513e184fc38a3b1e"
-OUTPUT_FPATH = Path(__file__).parent / "data" / "indic_arena_hard_benchmark.jsonl"
+OUTPUT_FPATH = Path(__file__).parent / "data" / "indic_arena_hard_v2_benchmark.jsonl"
 LANGUAGE_NAMES = {
     "en": "English",
     "as": "Assamese",

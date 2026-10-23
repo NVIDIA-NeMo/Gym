@@ -1,10 +1,12 @@
 # Indic Arena Hard v2
 
 Integrates [ai4bharat/indic-arena-hard-v2](https://huggingface.co/datasets/ai4bharat/indic-arena-hard-v2)
-using the same `arena_judge`, `simple_agent`, `policy_model`, and generic prompt
-as the [Arena Hard v2 benchmark](../arena_hard_v2/README.md). Judge prompts,
-sampling settings (temperature 0, maximum 4096 tokens), side-swapped comparisons,
-and scoring come from the shared English configuration.
+using Gym's `simple_agent`, model-server adapters, and generic prompt. The
+Indic-specific `indic_arena_judge` resource server delegates pairwise judging to
+the unchanged [Arena Hard v2 judge](../../../resources_servers/arena_judge/README.md)
+and owns the optional pointwise rubric. Its default judge settings are temperature
+0 and maximum 4,096 tokens. The English benchmark, judge, and their configurations
+are unchanged; Indic mode and model settings are separate.
 
 ## Data
 
@@ -38,8 +40,8 @@ such fields are retained when present in older local inputs.
 
 ## Evaluation modes
 
-Set `arena_judge_mode` in the benchmark config, or override it with
-`++arena_judge_mode=pointwise` when starting an evaluation:
+Set `indic_arena_hard_v2_judge_mode` in the benchmark config, or override it with
+`++indic_arena_hard_v2_judge_mode=pointwise` when starting an evaluation:
 
 - `pairwise` (default): the English Arena Hard protocol, comparing against saved
   baseline answers with swapped positions and reporting Arena-Elo. Missing or blank
@@ -88,31 +90,40 @@ evaluation or prompt generation; pairwise scoring still requires baseline answer
 
 Run from the repository root with the same Gym environment as the English benchmark.
 
+The benchmark key is `indic/indic-arena-hard-v2`. Migrate commands from the previous
+`indic_arena_hard` key and `benchmarks/indic_arena_hard/` directory to this path.
+The agent is now `indic_arena_hard_v2_simple_agent`; the mode setting is
+`indic_arena_hard_v2_judge_mode`. Set the `INDIC_ARENA_JUDGE_*` variables below for
+Indic judging. English runs continue to use their existing `ARENA_JUDGE_*` variables.
+Regenerate prepared data at the new path before running. The former
+`gemini_pointwise.yaml` preset is now `pointwise_smoke.yaml`, with explicit endpoint,
+model, and credential configuration.
+
 ```bash
 # Prepare an existing local download (no network or token needed).
 DATASET_DIR=/path/to/huggingface_datasets/ai4bharat/indic-arena-hard-v2
-python benchmarks/indic_arena_hard/prepare.py --dataset-dir "$DATASET_DIR"
+python benchmarks/indic/indic-arena-hard-v2/prepare.py --dataset-dir "$DATASET_DIR"
 
 # The same local source can be passed through Gym.
-gym eval prepare --benchmark indic_arena_hard \
+gym eval prepare --benchmark indic/indic-arena-hard-v2 \
     +prepare_script_args.dataset_dir="$DATASET_DIR"
 
 # Download all prompts for inspection (no baseline answers).
-gym eval prepare --benchmark indic_arena_hard
+gym eval prepare --benchmark indic/indic-arena-hard-v2
 
 # Prepare selected languages with baseline answers before judging.
-python benchmarks/indic_arena_hard/prepare.py \
+python benchmarks/indic/indic-arena-hard-v2/prepare.py \
     --dataset-dir "$DATASET_DIR" \
     --languages hi ta \
     --baseline-file path/to/baselines.jsonl
 
-# Use the same ARENA_JUDGE_BASE_URL, ARENA_JUDGE_API_KEY, ARENA_JUDGE_MODEL,
-# and policy-model configuration as the English benchmark.
-gym env start --model-type vllm_model --benchmark indic_arena_hard
+# Configure INDIC_ARENA_JUDGE_BASE_URL, INDIC_ARENA_JUDGE_API_KEY and INDIC_ARENA_JUDGE_MODEL.
+# Select the candidate model through Gym's usual model configuration.
+gym env start --model-type vllm_model --benchmark indic/indic-arena-hard-v2
 
 gym eval run --no-serve \
-    --agent indic_arena_hard_arena_judge_simple_agent \
-    --input benchmarks/indic_arena_hard/data/indic_arena_hard_benchmark.jsonl \
+    --agent indic_arena_hard_v2_simple_agent \
+    --input benchmarks/indic/indic-arena-hard-v2/data/indic_arena_hard_v2_benchmark.jsonl \
     --output results/indic_arena_hard_rollouts.jsonl \
     --num-repeats 4 \
     --prompt-config benchmarks/prompts/generic/default.yaml
@@ -122,34 +133,36 @@ Omit `--languages` to prepare every language, including English, with a
 complete baseline file. Use `--languages en` for the dataset's English control.
 Re-running preparation without baselines replaces the output with prompts only.
 
-## Gemini pointwise run
+## Pointwise smoke run
 
-[`gemini_pointwise.yaml`](gemini_pointwise.yaml) configures
-`https://inference-api.nvidia.com/v1` and `gcp/google/gemini-3.8-flash` as both the
-candidate and judge for a smoke run. The `inference_provider` adapter sends candidate
-requests to Chat Completions, matching this endpoint. Judge calls use the same API.
-Set `ARENA_JUDGE_MODEL` to use another judge model on this endpoint; scoring with the
-same model as candidate and judge should be treated as a self-evaluation smoke test.
+[`pointwise_smoke.yaml`](pointwise_smoke.yaml) uses a dedicated candidate model
+instance and an Indic judge instance. Set `INDIC_ARENA_SMOKE_BASE_URL`,
+`INDIC_ARENA_SMOKE_MODEL`, and `INDIC_ARENA_SMOKE_API_KEY` for an OpenAI-compatible
+Chat Completions endpoint. The same model generates and judges answers in this
+smoke preset. It provides workflow evidence, not independent model-quality scores.
+These settings do not override the English benchmark's candidate or judge.
 
 From the repository root, after activating the Gym environment:
 
 ```bash
 # Enter a valid key interactively; it stays out of shell history and config files.
-read -rsp 'NVIDIA API key: ' NVIDIA_API_KEY
-export NVIDIA_API_KEY
+read -rsp 'Smoke endpoint API key: ' INDIC_ARENA_SMOKE_API_KEY
+export INDIC_ARENA_SMOKE_API_KEY
+export INDIC_ARENA_SMOKE_BASE_URL=https://your-endpoint.example/v1
+export INDIC_ARENA_SMOKE_MODEL=your-model
 
 # Prepare one language from the local download, without baseline answers.
-python benchmarks/indic_arena_hard/prepare.py \
+python benchmarks/indic/indic-arena-hard-v2/prepare.py \
     --dataset-dir "$DATASET_DIR" --languages hi
 
 # Start the servers in this terminal and keep them running.
-gym env start --config benchmarks/indic_arena_hard/gemini_pointwise.yaml
+gym env start --config benchmarks/indic/indic-arena-hard-v2/pointwise_smoke.yaml
 
 # In a second terminal, activate the same Gym environment and run three tasks.
 gym eval run --no-serve \
-    --agent indic_arena_hard_arena_judge_simple_agent \
-    --input benchmarks/indic_arena_hard/data/indic_arena_hard_benchmark.jsonl \
-    --output results/indic_arena_hard_gemini_pointwise.jsonl \
+    --agent indic_arena_hard_v2_simple_agent \
+    --input benchmarks/indic/indic-arena-hard-v2/data/indic_arena_hard_v2_benchmark.jsonl \
+    --output results/indic_arena_hard_v2_pointwise.jsonl \
     --prompt-config benchmarks/prompts/generic/default.yaml \
     --limit 3 --num-repeats 1 --concurrency 1 \
     --max-output-tokens 4096 --temperature 0
@@ -157,16 +170,17 @@ gym eval run --no-serve \
 
 Stop the servers with Ctrl+C in the first terminal when evaluation finishes.
 The explicit input file requires `--no-serve`; the server-start command above
-loads the Gemini model and pointwise judge configuration.
+loads the smoke model and pointwise judge configuration.
 
-Both candidate and judge default to a 4,096-token output limit. The CLI flag above
+The smoke candidate's request defaults and the judge use a 4,096-token output limit.
+Explicit candidate request settings override the smoke defaults. The CLI flag above
 changes the candidate limit; the judge limit is
 `judge_chat_completions_create_params.max_tokens` on the resources server.
 Remove `--limit 3` to evaluate the entire prepared split after inspecting smoke results.
 
 ## Metrics and validation status
 
-In pairwise mode the shared [Arena judge](../../resources_servers/arena_judge/README.md) reports
+In pairwise mode the shared [Arena judge](../../../resources_servers/indic_arena_judge/README.md) reports
 `arena_elo/score`, bootstrap confidence bounds, invalid verdict counts, and
 win/tie/loss decompositions. It currently aggregates Arena-Elo by category,
 not language. Prepare and evaluate each language separately for per-language
@@ -177,7 +191,7 @@ This integration is experimental and inherits `verified: false`. Both modes requ
 configured policy/judge endpoints; only pairwise mode requires baseline answers.
 
 A live smoke test on September 23, 2026 used the earlier dataset source and three
-Hindi prompts with the Gemini preset above, one repeat, and concurrency one. This
+Hindi prompts with Gemini as candidate and judge, one repeat, and concurrency one. This
 predates the AI4Bharat source migration. All three answers completed within
 the 4,096-token limit and produced valid pointwise judgments with no failed
 rollouts. The self-judge assigned 100/100 to each; this validates the workflow,

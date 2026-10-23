@@ -1,14 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
 import json
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 from datasets import Dataset
+from omegaconf import OmegaConf
 
-from benchmarks.indic_arena_hard import prepare as module
+from nemo_gym.benchmarks import BenchmarkConfig
+from nemo_gym.environment.manifest import load_manifest
+from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+
+
+module = importlib.import_module("benchmarks.indic.indic-arena-hard-v2.prepare")
+BENCHMARK_DIR = Path(__file__).parents[2] / "benchmarks/indic/indic-arena-hard-v2"
 
 
 @pytest.fixture
@@ -277,3 +285,45 @@ def test_wide_local_parquet_preparation_without_hub(wide_source: list[dict], tmp
     assert all(row["category"] == "creative_writing" for row in rows)
     module.datasets.get_dataset_config_names.assert_not_called()
     module.datasets.load_dataset.assert_not_called()
+
+
+@pytest.mark.parametrize("preset", ["config.yaml", "pointwise_smoke.yaml"])
+def test_benchmark_discovery_and_manifest_use_moved_paths(monkeypatch: pytest.MonkeyPatch, preset: str) -> None:
+    monkeypatch.setattr("nemo_gym.global_config._find_open_port_using_range", lambda **_: 12345)
+    manifest = load_manifest(BENCHMARK_DIR / "manifest.yaml")
+    benchmark = BenchmarkConfig.from_config_path(BENCHMARK_DIR / preset)
+    assert manifest.name == "indic/indic-arena-hard-v2"
+    assert manifest.resources_server == "indic_arena_judge"
+    assert benchmark.name == "indic_arena_hard_v2"
+    assert benchmark.agent_name == "indic_arena_hard_v2_simple_agent"
+    assert Path(benchmark.dataset.prepare_script).resolve() == Path(module.__file__).resolve()
+    assert Path(benchmark.dataset.jsonl_fpath).resolve() == module.OUTPUT_FPATH.resolve()
+    assert benchmark.dataset.prepare_dependencies == ["datasets", "pyarrow"]
+
+
+def test_indic_pointwise_configuration_preserves_english_instances(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("nemo_gym.global_config._find_open_port_using_range", lambda **_: 12345)
+    monkeypatch.setenv("ARENA_JUDGE_MODEL", "english-judge")
+    monkeypatch.setenv("INDIC_ARENA_SMOKE_MODEL", "indic-judge")
+
+    def resolve(paths: list[str]):
+        initial = OmegaConf.merge(
+            GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            {"config_paths": paths},
+        )
+        return GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial)
+
+    english_path = "benchmarks/arena_hard_v2/config.yaml"
+    english = resolve([english_path])
+    combined = resolve([english_path, str(BENCHMARK_DIR / "pointwise_smoke.yaml")])
+    # Compare all English model, judge, agent and environment instances,
+    # including the candidate model, after adding the Indic smoke preset.
+    server_types = {"responses_api_models", "resources_servers", "responses_api_agents", "environment_servers"}
+    for name, config in english.items():
+        if OmegaConf.is_dict(config) and server_types.intersection(config):
+            assert OmegaConf.to_container(combined[name], resolve=True) == OmegaConf.to_container(config, resolve=True)
+    assert combined.get("responses_create_params") == english.get("responses_create_params")
+    indic = combined.indic_arena_hard_v2_resources_server.resources_servers.indic_arena_judge
+    assert indic.evaluation_mode == "pointwise"
+    assert indic.judge_model_server.name == "indic_arena_judge_model"
+    assert combined.indic_arena_judge_model.responses_api_models.openai_model.openai_model == "indic-judge"
