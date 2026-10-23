@@ -9,7 +9,7 @@ from uuid import uuid4
 from warnings import warn
 
 from fastapi import Body
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, ValidationInfo, field_validator
 
 from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepMode, seed_restarts, seed_verify_mode
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
@@ -172,7 +172,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     response_model = SingleAgentTurnResponse
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
-        """Forward to the resources server, which owns verification in this protocol."""
+        """Forward to the resources server, which owns verification in this protocol.
+
+        Without verification there is nothing to aggregate, so a skipping server returns empty metrics.
+        """
         if self._skipped_verification_reward() is not None:
             warn(
                 "Skipping aggregate metrics because skip_verification=True; "
@@ -570,6 +573,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         """The fixed reward that replaces /verify, or None to verify.
 
         This server's own setting wins; otherwise the bound agent's applies.
+        The agent's raw values are parsed as the agent's own config parses them, so a string "false" stays false.
         """
         agent_config = get_first_server_config_dict(
             self.server_client.global_config_dict,
@@ -577,13 +581,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         )
         skip = self.config.skip_verification
         if skip is None:
-            skip = bool(agent_config.get(SKIP_VERIFICATION_KEY_NAME, False))
+            skip = TypeAdapter(bool).validate_python(agent_config.get(SKIP_VERIFICATION_KEY_NAME, False))
         if not skip:
             return None
         reward = self.config.skip_verification_reward
         if reward is None:
-            reward = agent_config.get(SKIP_VERIFICATION_REWARD_KEY_NAME, 0.0)
-        return float(reward)
+            reward = TypeAdapter(float).validate_python(agent_config.get(SKIP_VERIFICATION_REWARD_KEY_NAME, 0.0))
+        return reward
 
     def _agent_responses_path(self, request: SingleAgentTurnRequest) -> str:
         block = self.server_client.global_config_dict.get(TOKEN_ID_CAPTURE_BLOCK) or {}

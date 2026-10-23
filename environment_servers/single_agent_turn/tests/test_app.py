@@ -532,6 +532,9 @@ def _skipping_environment_server(
         # Unset here, the bound agent's setting applies; Gym copies the global flag into it.
         ({}, {"skip_verification": True, "skip_verification_reward": -1.5}, -1.5),
         ({"skip_verification": True}, {"skip_verification_reward": 2.0}, 2.0),
+        ({"skip_verification_reward": 3.0}, {"skip_verification": True, "skip_verification_reward": 0.25}, 3.0),
+        # Strings, as a quoted override or an ${oc.env:...} interpolation leaves them, parse as the agent parses them.
+        ({}, {"skip_verification": "true", "skip_verification_reward": "0.5"}, 0.5),
     ],
 )
 async def test_skip_verification_returns_the_fixed_reward_and_still_closes_both_sessions(
@@ -563,6 +566,20 @@ async def test_the_environment_servers_own_setting_overrides_the_agents() -> Non
     client.global_config_dict.agent.responses_api_agents.test.update({"skip_verification": True})
     environment_server.config = SingleAgentTurnEnvironmentServerConfig.model_validate(
         {**environment_server.config.model_dump(), "skip_verification": False}
+    )
+
+    result = await environment_server.run_request(_request())
+
+    assert result.result.reward == 1.0
+    assert "verification_skipped" not in result.result.model_dump()
+    assert "/verify" in [path for _, path, _ in client.calls]
+
+
+@pytest.mark.parametrize("agent_skip", [False, "false"])
+async def test_an_agent_that_does_not_skip_keeps_verifying(agent_skip: bool | str) -> None:
+    environment_server, client = _environment_server()
+    client.global_config_dict.agent.responses_api_agents.test.update(
+        {"skip_verification": agent_skip, "skip_verification_reward": 0.5}
     )
 
     result = await environment_server.run_request(_request())
