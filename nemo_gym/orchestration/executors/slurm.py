@@ -25,7 +25,7 @@ from pathlib import Path
 import yaml
 
 from nemo_gym import __version__
-from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
+from nemo_gym.orchestration.api import SAVED_CONFIG, SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import Connection, get_connection
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
@@ -293,7 +293,7 @@ class SlurmExecutor(BaseExecutor):
         """The resolved config `persist()` saved for this run, so a resubmit repeats what submit did."""
         resolved = run_dir / RESOLVED_CONFIG_NAME
         text = conn.run([f"cat {shlex.quote(str(resolved))}"])
-        return SubmitConfig.model_validate(yaml.safe_load(text))
+        return SubmitConfig.model_validate(yaml.safe_load(text), context={SAVED_CONFIG: True})
 
     def _build_record(
         self,

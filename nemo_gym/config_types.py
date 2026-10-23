@@ -1008,3 +1008,4 @@ class AggregateMetrics(BaseModel):
 # the capture middleware in base_responses_api_model.py strips this prefix before routing.
 ROLLOUT_PATH_PREFIX = "ng-rollout"
 TOKEN_CAPTURE_PATH_SEGMENT = "training-token-capture"
+TRACE_CONTEXT_PATH_SEGMENT = "ng-trace"

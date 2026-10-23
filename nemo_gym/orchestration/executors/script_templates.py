@@ -227,7 +227,9 @@ def render_driver_entrypoint(
         # so nothing depends on the clone being reachable afterwards.
         preamble += [
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
-            'source "$HOME/.local/bin/env"',
+            # Not `source "$HOME/.local/bin/env"`: the installer skips writing that file when
+            # the directory is already on PATH, and the file only does this export anyway.
+            'export PATH="$HOME/.local/bin:$PATH"',
             'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
             render_repo_checkout(repo, ref, dest='"$GYM_SRC/gym"'),
             # A real venv, not --system: --system targets whatever interpreter happens to be on

@@ -1338,7 +1338,7 @@ async def test_an_episode_the_environment_reports_as_a_restart_does_not_hold_up_
 
     async with resources:
         running = asyncio.create_task(environment_server.run_request(request))
-        # A seed also counts as in flight; wait for the activation's tool call, not its seed.
+        # Seeds also count as in flight; wait for the activation's held tool call before checkpointing.
         await until(lambda: episode_client.tool_calls == 1 and resources_server._checkpoint.inflight == 1)
         participants = await coordination.discover(control_client, auth_token="t")
         prepared = await coordination.prepare(participants, "c1", deadline_ts=time.time() + 2)
