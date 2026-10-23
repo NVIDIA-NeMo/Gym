@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""One episode's evidence, built from what the plugin bundle collected, as the OpenCode driver built it after a run."""
+"""One episode's evidence, built from the exports and receipts the plugin bundle collected."""
 
 from copy import deepcopy
 
@@ -8,11 +8,12 @@ from resources_servers.agentic_if.episode.session_evidence import build_session_
 from resources_servers.agentic_if.if_grading.contracts import SessionInfo
 from resources_servers.agentic_if.task_variants.runtime import RuntimeSpec
 from resources_servers.agentic_if.tests.support import (
+    REPLAY_RECEIPT,
+    answered_export,
     call,
     export,
     message,
     observation,
-    session_export,
     text,
     tool_observation,
 )
@@ -20,12 +21,6 @@ from resources_servers.agentic_if.tests.support import (
 
 PROFILE = "p" * 64
 LOADED = [{"kind": "loaded", "profile_sha256": PROFILE}]
-
-
-def finished(session="root", parent=None):
-    source = session_export(session, parent)
-    source["messages"].append(message("z", "assistant", text("Done"), session=session, created=5))
-    return source
 
 
 def build(
@@ -58,7 +53,7 @@ def build(
 
 
 def test_a_plain_session_binds_its_model_calls_and_receipts():
-    source = finished()
+    source = answered_export()
     before = deepcopy(source)
     built = build(exports=[source], calls=[observation(), tool_observation()])
     evidence = built.evidence
@@ -79,27 +74,30 @@ def test_a_receipt_that_binds_to_no_call_keeps_the_raw_exports_and_is_a_gap():
         "opencode_tool": "bash",
         "metadata": {},
     }
-    built = build(exports=[finished()], hooks=LOADED + [receipt], calls=[observation(), tool_observation()])
+    built = build(exports=[answered_export()], hooks=LOADED + [receipt], calls=[observation(), tool_observation()])
     assert built.enriched_exports is None
     assert built.evidence.status == "incomplete"
     assert any(issue.startswith("hook_execution_receipts:") for issue in built.evidence.issues)
 
 
 def test_missing_plugin_or_model_records_make_the_evidence_incomplete():
-    assert "hook_receipt_error:missing live hook load receipt" in build(exports=[finished()], hooks=[]).evidence.issues
-    unobserved = build(exports=[finished()], calls=[]).evidence
+    assert (
+        "hook_receipt_error:missing live hook load receipt"
+        in build(exports=[answered_export()], hooks=[]).evidence.issues
+    )
+    unobserved = build(exports=[answered_export()], calls=[]).evidence
     assert unobserved.status == "incomplete"
     assert "missing_model_observation:root:a" in unobserved.issues
 
 
 def test_a_delegated_child_session_is_graded_beside_its_root():
-    child = finished("child", "root")
+    child = answered_export("child", "root")
     calls = [observation(), tool_observation(), observation("child", tool="ChildShell"), tool_observation("child")]
-    evidence = build(exports=[finished(), child], calls=calls).evidence
+    evidence = build(exports=[answered_export(), child], calls=calls).evidence
     assert evidence.status == "complete", evidence.issues
     assert [(session.id, session.parent_id) for session in evidence.sessions] == [("root", None), ("child", "root")]
     missing = build(
-        exports=[finished()],
+        exports=[answered_export()],
         sessions=[SessionInfo(id="root"), SessionInfo(id="child", parent_id="root")],
         calls=calls[:2],
     ).evidence
@@ -123,17 +121,19 @@ def test_a_planted_event_binds_to_the_call_it_failed():
             "call_id": "c1",
         },
     ]
-    evidence = build(spec, exports=[finished()], events=fired, calls=[observation(), tool_observation()]).evidence
+    evidence = build(
+        spec, exports=[answered_export()], events=fired, calls=[observation(), tool_observation()]
+    ).evidence
     assert evidence.status == "complete", evidence.issues
     assert evidence.events[0].id == "notice" and evidence.steps[evidence.events[0].step_index].planted
 
 
 def test_tool_steps_show_what_the_model_saw_and_capture_gaps_are_explicit():
     presented = tool_observation(value="RunCommand failed: denied")
-    evidence = build(exports=[finished()], calls=[observation(), presented]).evidence
+    evidence = build(exports=[answered_export()], calls=[observation(), presented]).evidence
     assert evidence.status == "complete", evidence.issues
     assert next(step for step in evidence.steps if step.role == "tool").output == "RunCommand failed: denied"
-    changed = finished()
+    changed = answered_export()
     changed["messages"][1]["parts"][0]["text"] = "Not what the model said"
     gap = build(exports=[changed], calls=[observation(), tool_observation()]).evidence
     assert gap.status == "incomplete"
@@ -153,16 +153,16 @@ def test_the_row_s_prompt_texts_are_its_system_message_and_its_user_messages():
 
 
 def first_user_text(value):
-    source = finished()
+    source = answered_export()
     source["messages"][0]["parts"] = [text(value)]
     return source
 
 
 def test_the_root_session_must_start_from_the_row_s_literal_task():
     calls = [observation(), tool_observation()]
-    exact = build(exports=[finished()], calls=calls, task_text="Fix it").evidence
+    exact = build(exports=[answered_export()], calls=calls, task_text="Fix it").evidence
     assert exact.status == "complete", exact.issues
-    # The harness may frame the task with its own text, as the model boundary allowed.
+    # The harness may frame the task with its own text.
     framed = build(exports=[first_user_text("<task>\nFix it\n</task>")], calls=calls, task_text="Fix it").evidence
     assert framed.status == "complete", framed.issues
     for export_text in ("Fix that", "Fix", ""):
@@ -173,7 +173,7 @@ def test_the_root_session_must_start_from_the_row_s_literal_task():
 
 
 def test_a_root_session_without_a_user_message_did_not_present_the_task():
-    source = finished()
+    source = answered_export()
     source["messages"] = source["messages"][1:]
     evidence = build(exports=[source], calls=[observation(), tool_observation()], task_text="Fix it").evidence
     assert "literal_task_not_presented:root" in evidence.issues
@@ -201,14 +201,6 @@ def continuation_spec():
     )
 
 
-RECEIPT = {
-    "mode": "restore",
-    "replayed_commands": 0,
-    "command_output_mismatch_indices": [],
-    "workspace_matches_diff": True,
-}
-
-
 def test_a_continuation_grades_from_its_fresh_user_message_without_receipts_for_the_prefix():
     root = prefix_export()
     root["messages"] += [
@@ -226,7 +218,7 @@ def test_a_continuation_grades_from_its_fresh_user_message_without_receipts_for_
         continuation_spec(),
         exports=[root],
         calls=[call_record],
-        replay=RECEIPT,
+        replay=REPLAY_RECEIPT,
         artifacts={"prefix_export": "/artifacts/prefix-export.json"},
     )
     evidence = built.evidence
@@ -255,7 +247,7 @@ def test_a_continuation_must_present_the_row_s_task_after_its_restored_prefix():
             continuation_spec(),
             exports=[document],
             calls=[call_record],
-            replay=RECEIPT,
+            replay=REPLAY_RECEIPT,
             artifacts={"prefix_export": "/artifacts/prefix-export.json"},
             task_text=task_text,
         ).evidence
@@ -270,7 +262,7 @@ def test_a_continuation_must_present_the_row_s_task_after_its_restored_prefix():
 
 def test_a_continuation_without_its_root_or_replay_receipt_is_incomplete():
     assert "missing_replay_receipt" in build(continuation_spec(), exports=[prefix_export()]).evidence.issues
-    no_root = build(continuation_spec(), exports=[], sessions=[], replay=RECEIPT).evidence
+    no_root = build(continuation_spec(), exports=[], sessions=[], replay=REPLAY_RECEIPT).evidence
     assert "missing_continued_root_session" in no_root.issues and "missing_export" in no_root.issues
 
 

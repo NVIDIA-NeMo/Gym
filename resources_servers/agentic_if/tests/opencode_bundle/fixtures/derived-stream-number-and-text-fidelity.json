@@ -1,8 +1,6 @@
 {
  "case": "derived-stream-number-and-text-fidelity",
  "kind": "gateway",
- "source": "derived: model_streaming re-serializes every data event with json.dumps(ensure_ascii=False)",
- "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
  "notes": "",
  "spec": {
   "schema_version": 1,

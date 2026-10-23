@@ -101,6 +101,22 @@ def session_export(session="root", parent=None):
     )
 
 
+# The replay receipt seed records for a continuation that replayed no commands and matched its recorded diff.
+REPLAY_RECEIPT = {
+    "mode": "restore",
+    "replayed_commands": 0,
+    "command_output_mismatch_indices": [],
+    "workspace_matches_diff": True,
+}
+
+
+def answered_export(session="root", parent=None):
+    """The OpenCode session through the final reply that follows the tool result."""
+    source = session_export(session, parent)
+    source["messages"].append(message("z", "assistant", text("Done"), session=session, created=5))
+    return source
+
+
 def tool_observation(session="root", value="/app"):
     """The next actor request: it carries the tool result, and its reply ends the session."""
     return {
@@ -113,12 +129,9 @@ def tool_observation(session="root", value="/app"):
     }
 
 
-REASONING = "private-reasoning-sentinel"  # Distinct from the /private prefix of macOS temporary paths.
-
-
-def exported(session, parent=None, text="Done"):
+def exported(session, text="Done"):
     return {
-        "info": {"id": session, "parentID": parent},
+        "info": {"id": session, "parentID": None},
         "messages": [
             {
                 "info": {"id": "u", "role": "user", "sessionID": session, "time": {"created": 1}},
@@ -132,7 +145,7 @@ def exported(session, parent=None, text="Done"):
                     "finish": "stop",
                     "time": {"created": 2, "completed": 3},
                 },
-                "parts": [{"type": "reasoning", "text": REASONING}, {"type": "text", "text": text}],
+                "parts": [{"type": "reasoning", "text": "Thinking"}, {"type": "text", "text": text}],
             },
         ],
     }
@@ -177,15 +190,13 @@ def final_call_record(answer="DONE", *, session="ses_root", message_id="a1"):
 
 
 class Transport:
-    """A connected task sandbox: records every command and answers identity, cwd and Git probes from a script."""
+    """A connected task sandbox: records every command and answers the identity and cwd probes; anything else (the Git
+    baseline included) prints nothing."""
 
-    def __init__(self, *, uid="1001", gid="1001", workdir="/app", initial_diff="", root_default=True):
+    def __init__(self):
         self.calls = []
         self.uploads = {}
-        self.uid, self.gid = uid, gid
-        self.workdir = workdir
-        self.initial_diff = initial_diff
-        self.root_default = root_default
+        self.uid = "1001"
         self.stops = self.disconnects = 0
         self.fail = {}
 
@@ -196,17 +207,15 @@ class Transport:
                 return result
         output = ""
         if command == "id -u":
-            output = "0\n" if self.root_default else "1000\n"
+            output = "0\n"
         elif command == "id -u && id -g":
-            output = f"{self.uid}\n{self.gid}\n"
+            output = f"{self.uid}\n1001\n"
         elif "getent passwd" in command:
             output = "/home/agent\n/bin/bash\n"
         elif command.startswith("pwd -P &&"):
             # `pwd -P && (cd -- <expected> && pwd -P)`: this sandbox has no symlinks, so the path resolves to itself.
             expected = shlex.split(command.split("cd -- ", 1)[1].rsplit(" &&", 1)[0])[0]
-            output = f"{kwargs.get('cwd') or self.workdir}\n{expected}\n"
-        elif "git rev-parse --is-inside-work-tree" in command:
-            output = self.initial_diff
+            output = f"{kwargs.get('cwd') or '/app'}\n{expected}\n"
         return SandboxExecResult(stdout=output, stderr="", return_code=0)
 
     async def upload(self, source, destination):
@@ -253,12 +262,6 @@ class LocalTransport:
     async def upload(self, source, destination):
         Path(destination).parent.mkdir(parents=True, exist_ok=True)
         Path(destination).write_bytes(Path(source).read_bytes())
-
-    async def download(self, source, destination):
-        Path(destination).write_bytes(Path(source).read_bytes())
-
-    async def disconnect(self):
-        pass
 
 
 def seeded(workdir="/app", *, session_id="attempt-a", sandbox_id="sandbox-a"):
@@ -435,7 +438,6 @@ def judge_reply(model, text, *, response_id="judge-reply", usage=None):
 def bundle_outputs(
     exports=(),
     *,
-    sessions=None,
     hook_receipts=None,
     event_records=(),
     call_records=(),
@@ -443,16 +445,13 @@ def bundle_outputs(
     boundary_issues=(),
     boundary_receipts=(),
 ):
-    """What the plugin bundle reports at verify: exports keyed by session ID and today's receipt formats.
-
-    The session inventory defaults to the exports' own sessions; the raw files are the exports and receipts as read.
-    """
+    """What the plugin bundle reports at verify: exports keyed by session ID, their session inventory, the receipts,
+    and the raw files as read."""
     exports = {document["info"]["id"]: document for document in exports}
-    if sessions is None:
-        sessions = [
-            SessionInfo(id=session_id, parent_id=document["info"].get("parentID"))
-            for session_id, document in exports.items()
-        ]
+    sessions = [
+        SessionInfo(id=session_id, parent_id=document["info"].get("parentID"))
+        for session_id, document in exports.items()
+    ]
     hook_receipts = [{"kind": "loaded", "profile_sha256": "p" * 64}] if hook_receipts is None else list(hook_receipts)
     files = {f"exports/{session_id}.json": json.dumps(document).encode() for session_id, document in exports.items()}
     files |= {
@@ -465,7 +464,7 @@ def bundle_outputs(
     }
     return SimpleNamespace(
         exports=exports,
-        sessions=list(sessions),
+        sessions=sessions,
         hook_receipts=hook_receipts,
         event_records=list(event_records),
         call_records=list(call_records),
@@ -476,7 +475,7 @@ def bundle_outputs(
     )
 
 
-def presented(row, answer="DONE"):
+def presented(row):
     """The bundle outputs of a run that showed the model the row as written, then answered at once.
 
     The boundary was configured with the row's system text, the model call carried it as its only system message, the
@@ -486,20 +485,15 @@ def presented(row, answer="DONE"):
     messages = ([{"role": "system", "content": system}] if system is not None else []) + [
         {"role": "user", "content": task}
     ]
-    record = final_call_record(answer) | {"request": {"messages": messages}}
+    record = final_call_record() | {"request": {"messages": messages}}
     configured = {
         "kind": "configured",
         "system_sha256": None if system is None else hashlib.sha256(system.encode()).hexdigest(),
     }
     events = row["agentic_if"].get("events") or []
     return bundle_outputs(
-        [finished_session(answer, task=task)],
+        [finished_session(task=task)],
         call_records=[record],
         boundary_receipts=[configured],
         event_records=[{"kind": "loaded", "plants": len(events)}] if events else (),
     )
-
-
-def write_json(path, value):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(json.dumps(value))

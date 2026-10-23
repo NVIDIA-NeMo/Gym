@@ -72,11 +72,11 @@ async def test_resource_identity_and_cookies_survive_verification_then_owned_sto
     remote = Remote(seeded(workdir="/app/project"))
     task = session(remote, task_row=row() | {"agent_user": "1001"})
     await task.prepare()
-    await task.sandbox.exec(command="pwd", env={"EXTRA": "literal"})
+    await task.sandbox.exec(command="pwd", timeout_s=30)
     command = transport.calls[-1]
     assert command["user"] == 1001
     assert command["cwd"] == "/app/project"
-    assert command["env"] == {"HOME": "/home/agent", "SHELL": "/bin/bash", "EXTRA": "literal"}
+    assert command["env"] == {"HOME": "/home/agent", "SHELL": "/bin/bash"}
     result = await task.finish(response(), params=PARAMS)
     await task.close()
     assert result["reward"] == 0.25
@@ -103,7 +103,7 @@ async def test_resource_identity_and_cookies_survive_verification_then_owned_sto
 async def test_row_workdir_wins_over_the_sandbox_default(transport):
     task = session(Remote(seeded(workdir="/image/default")), task_row=row() | {"workdir": "/required/repository"})
     await task.prepare()
-    await task.sandbox.exec(command="pwd")
+    await task.sandbox.exec(command="pwd", timeout_s=30)
     assert transport.calls[-1]["cwd"] == "/required/repository"
 
 

@@ -1,8 +1,6 @@
 {
  "case": "derived-descriptions-pointers-history",
  "kind": "gateway",
- "source": "derived: model_boundary describe_parameters (pointers into properties, items, anyOf, $defs, tuple items), tool_choice, tool-message name removal, history restore",
- "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
  "notes": "",
  "spec": {
   "schema_version": 1,

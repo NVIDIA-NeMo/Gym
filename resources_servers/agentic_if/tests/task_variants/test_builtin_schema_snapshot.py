@@ -35,5 +35,3 @@ def test_the_example_stack_runs_the_opencode_version_the_snapshot_describes():
     agent = yaml.safe_load(CONFIG.read_text())["agentic_if_opencode_agent"]["responses_api_agents"]["opencode_agent"]
     # Unset, the agent runs its own pinned default.
     assert str(agent.get("opencode_version", OPENCODE_VERSION)) == PINNED[0]
-    if agent.get("sandbox_executable_sha256") is not None:
-        assert agent["sandbox_executable_sha256"] == PINNED[1]

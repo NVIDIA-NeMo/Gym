@@ -1,8 +1,6 @@
 {
  "case": "gateway-auxiliary-title",
  "kind": "gateway",
- "source": "environment_servers/agentic_if/tests/test_model_gateway.py::test_open_code_auxiliary_calls_are_not_actor_evidence_or_prompt_overrides",
- "code": "00be1884d931e3f083a548dc5ea6d231c74902e2",
  "spec": {
   "schema_version": 1,
   "harness": "opencode",

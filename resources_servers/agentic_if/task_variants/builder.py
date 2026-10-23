@@ -16,7 +16,7 @@ def content_text(content: object) -> str:
         for part in content
     ):
         return "\n".join(part["text"] for part in content)
-    raise ValueError("fresh-task variants require text-only messages")
+    raise ValueError("agentic IF rows require text-only messages")
 
 
 def digest(value: object) -> str:

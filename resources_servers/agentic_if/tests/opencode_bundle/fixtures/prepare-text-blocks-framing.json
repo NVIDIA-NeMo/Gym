@@ -1,8 +1,6 @@
 {
  "case": "prepare-text-blocks-framing",
  "kind": "prepare",
- "source": "environment_servers/agentic_if/tests/test_model_boundary.py: the literal task survives OpenCode's text parts and framing",
- "code": "00be1884d931e3f083a548dc5ea6d231c74902e2",
  "spec": {
   "schema_version": 1,
   "harness": "opencode",

@@ -7,6 +7,7 @@ modes and ownership are exercised as written.
 """
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import os
@@ -15,10 +16,10 @@ from pathlib import Path
 
 import pytest
 
+from nemo_gym.sandbox.providers import SandboxExecResult as ExecResult
 from resources_servers.agentic_if.opencode_bundle import (
     BUNDLE_ROOT,
     BundleReceipt,
-    ExecResult,
     UnsupportedFeatureError,
     bundle_files,
     collect_bundle,
@@ -151,7 +152,7 @@ async def test_stage_failures_raise(
 @pytest.mark.asyncio
 async def test_collect_names_every_missing_part(sandbox: LocalSandbox) -> None:
     receipt = await stage_bundle(sandbox, spec=private_like_spec(), agent_user=None)
-    outputs = await collect_bundle(sandbox, expected=receipt)
+    outputs = await collect_bundle(sandbox, expected=dataclasses.asdict(receipt))
     assert (outputs.exports, outputs.sessions, outputs.hook_receipts, outputs.event_records, outputs.call_records) == (
         {},
         [],
@@ -225,11 +226,7 @@ async def test_staged_plugins_run_and_their_records_come_back_in_the_evidence_fo
     assert run.calls[0]["error"] is None
     write_exports(sandbox.root, [("ses_root", None), ("ses_child", "ses_root")])
     (sandbox.root / "exports" / "ses_root.events.jsonl").write_text('{"type": "step_start"}\n')
-    for expected in (
-        receipt,
-        {"profile_sha256": receipt.profile_sha256, "boundary_sha256": receipt.boundary_sha256, "files": receipt.files},
-        None,
-    ):
+    for expected in (dataclasses.asdict(receipt),):
         outputs = await collect_bundle(sandbox, expected=expected)
         assert outputs.gaps == []
         assert outputs.exports == {
@@ -265,17 +262,17 @@ async def test_staged_plugins_run_and_their_records_come_back_in_the_evidence_fo
 
 @pytest.mark.asyncio
 async def test_collect_names_bad_or_missing_exports(sandbox: LocalSandbox) -> None:
-    await stage_bundle(sandbox, spec=private_like_spec(), agent_user=None)
+    receipt = dataclasses.asdict(await stage_bundle(sandbox, spec=private_like_spec(), agent_user=None))
     write_exports(
         sandbox.root, [("ses_root", None), ("ses_child", "ses_root"), ("ses_other", "ses_root")], skip="ses_child"
     )
     (sandbox.root / "exports" / "ses_other.json").write_text(json.dumps(session_export("ses_renamed", "ses_root")))
-    outputs = await collect_bundle(sandbox)
+    outputs = await collect_bundle(sandbox, expected=receipt)
     assert set(outputs.exports) == {"ses_root", "ses_renamed"}
     assert "export_missing:ses_child:FileNotFoundError" in outputs.gaps
     assert "export_session_mismatch:ses_other" in outputs.gaps
     (sandbox.root / "exports" / "sessions.json").write_text('{"id": "ses_root"}')
-    outputs = await collect_bundle(sandbox)
+    outputs = await collect_bundle(sandbox, expected=receipt)
     assert outputs.exports == {} and "export_inventory_invalid:ValueError" in outputs.gaps
 
 
@@ -318,7 +315,7 @@ async def test_collect_checks_load_receipts_and_reports_boundary_issues(sandbox:
         "".join(json.dumps(row) + "\n" for row in calls) + "not json\n"
     )
     write_exports(sandbox.root, [("ses_root", None)])
-    outputs = await collect_bundle(sandbox, expected=receipt)
+    outputs = await collect_bundle(sandbox, expected=dataclasses.asdict(receipt))
     assert outputs.boundary_issues == ["ValueError", "ValueError"]
     assert outputs.call_records == [calls[2]["observation"]]
     assert outputs.gaps == [

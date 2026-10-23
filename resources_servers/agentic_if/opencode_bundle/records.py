@@ -14,15 +14,16 @@
   ``{"kind": "transport_error", "call", "transport_error": ...}`` when the model server reported an error, which
   reached OpenCode unchanged:
 
-  - ``{"phase": "http_rejected", "status"}``: an HTTP error reply, as the 00be1884 gateway recorded it;
+  - ``{"phase": "http_rejected", "status"}``: an HTTP error reply;
   - ``{"phase": "stream_error", "status", "message", "chunks"}``: an error event inside a 200 stream (an
     ``event: error`` field, or data whose top level is an error object) before its terminal event. ``status`` is the
     event's ``status``/``code`` when it names one, else null; ``chunks`` counts the chat-completion chunks OpenCode
     had already received in that stream. Such a call has no ``response``;
-- ``{"kind": "issue", "call", "error", "message"}`` for every failure the 00be1884 gateway appended to its ``issues``.
+- ``{"kind": "issue", "call", "error", "message"}`` for every call the boundary refused or could not complete;
+  ``error`` is a Python exception type name.
 
-``boundary_records()`` rebuilds ``ModelGateway.observations`` (request time order, the reply merged in) and
-``ModelGateway.issues`` (exception type names) from those lines.
+``boundary_records()`` rebuilds the observations (one per observed call, in request order, the reply merged in) and
+the issues (exception type names) from those lines.
 """
 
 import json
@@ -60,9 +61,9 @@ class BoundaryRecords:
     """The boundary's records of one sandbox, reassembled."""
 
     observations: list[dict[str, JsonValue]] = field(default_factory=list)
-    """``ModelGateway.observations``: one dict per observed model call, in request order."""
+    """One dict per observed model call, in request order."""
     issues: list[str] = field(default_factory=list)
-    """``ModelGateway.issues``: the exception type name of every failed call or stream."""
+    """The exception type name of every failed call or stream."""
     loads: list[dict[str, JsonValue]] = field(default_factory=list)
     """The ``loaded`` and ``load_error`` receipts (one per plugin instance)."""
     configurations: list[dict[str, JsonValue]] = field(default_factory=list)

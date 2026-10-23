@@ -1,8 +1,6 @@
 {
  "case": "derived-stream-split-name",
  "kind": "gateway",
- "source": "derived from test_model_gateway.py::test_chat_stream_preserves_fragments_and_observes_model_visible_calls, alias-free",
- "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
  "notes": "",
  "spec": {
   "schema_version": 1,

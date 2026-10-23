@@ -11,20 +11,8 @@ SELECTED = ["bash", "edit", "glob", "grep", "read", "task", "todowrite", "write"
 
 
 def unrestricted_spec() -> RuntimeSpec:
-    """The shape of the public example rows at 00be1884: no tool selection, OpenCode's built-in tool inventory."""
-    return RuntimeSpec(
-        harness="opencode",
-        task_backend="tb21",
-        checks=[
-            {
-                "id": "final-token",
-                "kind": "exact",
-                "parameters": {"value": "DONE"},
-                "instruction": {"text": "Reply with exactly DONE.", "at": "task_message"},
-                "scope": {"places": ["final"]},
-            }
-        ],
-    )
+    """A row without tool selection (OpenCode's built-in inventory): row validation still accepts this shape."""
+    return RuntimeSpec(harness="opencode", task_backend="tb21")
 
 
 def private_like_spec() -> RuntimeSpec:

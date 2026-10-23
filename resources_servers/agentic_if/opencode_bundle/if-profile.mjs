@@ -13,9 +13,8 @@
 //   - plants.json: the planted tool failures, read at the same time;
 //   - receipts/hook-applied.jsonl: the load receipt, tool definitions, tool receipts and presentation receipts;
 //   - receipts/hook-events-fired.jsonl: one "loaded" (or "error") line for the plants, then one line per firing.
-// The profile plugin of the IF environment server at 00be1884 read the same files through NEMO_GYM_OPENCODE_*
-// variables; the records keep its format, with OpenCode's tool ID and error in `opencode_tool` and `opencode_error`.
-// Its alias gate and its restamping of frozen prefix receipts are gone (no row uses them).
+// The records are evidence format (episode/opencode_hooks.py reads them): OpenCode's tool ID and error are in
+// `opencode_tool` and `opencode_error`.
 //
 // Fail closed: OpenCode logs a plugin that throws while it is created and continues without it, so this factory
 // never throws. A missing or unreadable profile leaves a "load_error" line instead of the "loaded" receipt (the
@@ -179,20 +178,13 @@ const EDIT_DIAGNOSTICS = new Set([
   "Found multiple matches for oldString. Provide more surrounding context to make the match unique.",
 ]);
 
-function toProfileNames(tool, toolID, text, visibleTools) {
+function toProfileNames(tool, toolID, text) {
   const names = tool?.args_map || {};
   if (toolID === "read" && names.offset && /^Offset \d+ is out of range for this file \(\d+ lines\)$/.test(text)) {
     return names.offset + text.slice("Offset".length);
   }
   if (toolID !== "edit" || !EDIT_DIAGNOSTICS.has(text)) return text;
-  let result = text.replace(/\b(?:filePath|oldString|newString)\b/g, word => names[word] || word);
-  if (visibleTools !== undefined) {
-    const recommendation = ", or use write for an intentional full-file replacement.";
-    result = result.replace(recommendation, () => visibleTools.write
-      ? `, or use ${visibleTools.write} for an intentional full-file replacement.`
-      : ".");
-  }
-  return result;
+  return text.replace(/\b(?:filePath|oldString|newString)\b/g, word => names[word] || word);
 }
 
 // Hints OpenCode appends to a successful result that name a built-in argument. Only these exact phrases are renamed:
@@ -218,8 +210,7 @@ function renameHints(tool, toolID, text, metadata) {
 
 function presentedError(profile, toolID, text, mapped, args) {
   if (typeof text !== "string" || (profile.literal_errors || []).includes(text)) return text;
-  // Frozen prefixes from before guard-error receipts have none. Their exact authored
-  // refusal is already model-facing text, not an OpenCode diagnostic to rename.
+  // A read-first refusal's text is the row's authored message, not an OpenCode diagnostic: it is shown as is.
   if (profile.read_first?.[toolID]) {
     const definition = profile.tools?.[toolID];
     const builtin = definition?.args_map ? toBuiltin(definition, args || {}) : args;
@@ -227,15 +218,14 @@ function presentedError(profile, toolID, text, mapped, args) {
       message => message.replaceAll("{{path}}", () => builtin.filePath) === text)) return text;
   }
   if (profile.visible_tools === undefined) return mapped ? toProfileNames(profile.tools[toolID], toolID, text) : text;
-  const visible = profile.visible_tools?.[toolID] || toolID;
-  if (text.startsWith(`${visible} failed: `)) return text;
+  if (text.startsWith(`${toolID} failed: `)) return text;
   const denied = "The user has specified a rule which prevents you from using this specific tool call.";
-  if (text.startsWith(denied)) return `${visible} failed: ${denied}`;
+  if (text.startsWith(denied)) return `${toolID} failed: ${denied}`;
   // Only OpenCode-generated argument errors are renamed. Nonzero command output
   // is a completed tool result and never enters this path.
   let detail = text.replace(/^The \S+ tool was called with invalid arguments: /, "Invalid arguments: ");
-  detail = toProfileNames(mapped ? profile.tools[toolID] : undefined, toolID, detail, profile.visible_tools);
-  return `${visible} failed: ${detail}`;
+  detail = toProfileNames(mapped ? profile.tools[toolID] : undefined, toolID, detail);
+  return `${toolID} failed: ${detail}`;
 }
 
 function record(entry) {
@@ -448,7 +438,6 @@ export const IfProfile = async (input) => {
         readRecord = {file: readFile, sha256: contentSha256(readFile)};
         knownIn(input.sessionID).set(readFile, readRecord.sha256);
       }
-      if (!configured && !profile.profile_sha256 && diff === null && !readRecord) return;
       output.metadata = output.metadata && typeof output.metadata === "object" ? output.metadata : {};
       output.metadata[META_KEY] = {
         profile_sha256: profile.profile_sha256 ?? null,
@@ -482,10 +471,6 @@ export const IfProfile = async (input) => {
             part.state.input = stamp.configured_args;
           } else if (stash && stash.configured_args) {
             part.state.input = stash.configured_args;
-          }
-          if (part.state.status === "error" && (typeof stamp?.model_error === "string" || stamp?.dispatch_rejected)) {
-            part.state.error = stamp.model_error ?? stamp.error;
-            continue;
           }
           // Otherwise the plugin rejected the call before mapping it: the stored input is exactly what the model sent
           // (possibly built-in names), shown as is next to its error.

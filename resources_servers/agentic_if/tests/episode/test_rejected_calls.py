@@ -39,11 +39,11 @@ def rejected_call_export(session="source", *, parent=None):
     }
 
 
-def captured(session="source", arguments='{ "path": "source" }'):
+def captured(arguments='{ "path": "source" }'):
     """The boundary's record of the call: the model's own name and raw arguments, and the tools it was offered."""
     return {
         "source": "model",
-        "session_id": session,
+        "session_id": "source",
         "assistant_message_id": "a",
         "execution_tools": {},
         "request": {"messages": [], "tools": [{"type": "function", "function": {"name": "read"}}]},

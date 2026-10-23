@@ -27,10 +27,10 @@ RECEIPTS_DIR = f"{BUNDLE_ROOT}/receipts"
 """Written by the plugins as the identity OpenCode runs as."""
 
 HOOK_RECEIPTS = "hook-applied.jsonl"
-"""Profile plugin records: load receipt, tool definitions, tool and presentation receipts (today's format)."""
+"""Profile plugin records: load receipt, tool definitions, tool and presentation receipts."""
 
 EVENT_RECEIPTS = "hook-events-fired.jsonl"
-"""Planted-event records: one ``loaded`` (or ``error``) line, then one line per firing (today's format)."""
+"""Planted-event records: one ``loaded`` (or ``error``) line, then one line per firing."""
 
 CALL_RECORDS = "model-calls.jsonl"
 """Boundary records: load and configuration receipts, then the request, reply and issue lines of every model call."""

@@ -6,8 +6,11 @@ from copy import deepcopy
 
 import pytest
 
+from resources_servers.agentic_if.episode.opencode_hooks import merge_hook_receipts
+from resources_servers.agentic_if.episode.opencode_profile import model_visible_tool_output
 
-def export(session, tool="bash"):
+
+def export(session):
     return {
         "info": {"id": session},
         "messages": [
@@ -16,7 +19,7 @@ def export(session, tool="bash"):
                 "parts": [
                     {
                         "type": "tool",
-                        "tool": tool,
+                        "tool": "bash",
                         "callID": "same",
                         "state": {
                             "status": "error",
@@ -44,8 +47,6 @@ def receipt(session, code):
 
 
 def test_failure_receipts_join_exact_sessions_without_overwriting_opencode_status_or_output():
-    from resources_servers.agentic_if.episode.opencode_hooks import merge_hook_receipts
-
     originals = {"root": export("root"), "child": export("child")}
     saved = deepcopy(originals)
     result = merge_hook_receipts(originals, [receipt("child", 4), receipt("root", 3)])
@@ -70,9 +71,6 @@ def presentation(session="root"):
 
 @pytest.mark.parametrize("reverse", [False, True])
 def test_presentation_receipt_preserves_execution_facts_and_raw_error(reverse):
-    from resources_servers.agentic_if.episode.opencode_hooks import merge_hook_receipts
-    from resources_servers.agentic_if.episode.opencode_profile import model_visible_tool_output
-
     original = {"root": export("root")}
     before = deepcopy(original)
     records = [receipt("root", 3), presentation()]
@@ -85,8 +83,6 @@ def test_presentation_receipt_preserves_execution_facts_and_raw_error(reverse):
 
 
 def test_identical_replayed_presentation_is_idempotent():
-    from resources_servers.agentic_if.episode.opencode_hooks import merge_hook_receipts
-
     records = [receipt("root", 3), presentation()]
     assert merge_hook_receipts({"root": export("root")}, records) == merge_hook_receipts(
         {"root": export("root")}, records + [presentation()]
@@ -95,8 +91,6 @@ def test_identical_replayed_presentation_is_idempotent():
 
 @pytest.mark.parametrize("defect", ["opencode_error", "session", "tool", "duplicate", "output", "status"])
 def test_unbound_presentation_receipt_cannot_replace_opencode_error(defect):
-    from resources_servers.agentic_if.episode.opencode_hooks import merge_hook_receipts
-
     original = {"root": export("root")}
     records = [receipt("root", 3), presentation()]
     if defect == "opencode_error":
@@ -117,8 +111,6 @@ def test_unbound_presentation_receipt_cannot_replace_opencode_error(defect):
 
 @pytest.mark.parametrize("case", ["duplicate", "wrong_tool", "missing_session"])
 def test_incomplete_or_mismatched_receipts_do_not_make_a_replayable_export(case):
-    from resources_servers.agentic_if.episode.opencode_hooks import merge_hook_receipts
-
     records = [receipt("root", 3)]
     if case == "duplicate":
         records.append(receipt("root", 4))

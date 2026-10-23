@@ -1,16 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Golden equivalence: ``if-boundary.mjs`` against the recorded input -> output pairs of the Python model gateway.
+"""Golden equivalence: ``if-boundary.mjs`` against recorded input -> output pairs (``fixtures/``), byte for byte.
 
-``fixtures/index.json`` lists every fixture of a needed feature; each must match byte for byte:
+``fixtures/index.json`` lists every fixture; each must match:
 
-- the request body the plugin sends == the bytes the Python gateway sent (``orjson.dumps`` of its outgoing request);
-- the reply OpenCode receives == the Python gateway's reply (its SSE text, or Starlette's compact JSON rendering);
-- refusals: the plugin refuses with the same exception type and message and sends nothing (four fixtures
+- the request body the plugin sends == the recorded outgoing request (``orjson.dumps`` of it);
+- the reply OpenCode receives == the recorded reply (its SSE text, or compact JSON);
+- refusals: the plugin refuses with the recorded exception type and message and sends nothing (four fixtures
   expect the plugin's wording, which names OpenCode's user prompts, permission configuration and history);
-- the call records, read back by ``records.py``, == ``ModelGateway.observations`` and ``ModelGateway.issues``.
-
-The dropped fixtures (aliases, split user turns, the output-token cap, empty system text) are listed in the index.
+- the call records, read back by ``records.py``, == the recorded observations and issues.
 """
 
 import json
@@ -35,7 +33,7 @@ OK = {"choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_re
 def _spec(fixture: dict, entry: dict) -> RuntimeSpec:
     spec = deepcopy(fixture["spec"])
     if entry.get("normalize_aliases") and spec["tools"].get("tool_names"):
-        # The call bypasses tool presentation, so the fixture's incidental alias cannot change its output.
+        # The fixture's spec names an alias; the call bypasses tool presentation, so identity names give the same output.
         spec["tools"]["tool_names"] = {name: name for name in spec["tools"]["tool_names"]}
     return RuntimeSpec.model_validate(spec)
 
@@ -74,7 +72,7 @@ def _check_refusal(actual: dict, expected_error: str) -> None:
     assert expected_error in _error_text(actual)
 
 
-def _replay_gateway(tmp_path: Path, fixture: dict, entry: dict) -> None:
+def _replay_calls(tmp_path: Path, fixture: dict, entry: dict) -> None:
     calls = [
         call(item["opencode_request"], _reply(item["upstream_reply"]), **_identity(item["headers"]))
         for item in fixture["calls"]
@@ -89,7 +87,7 @@ def _replay_gateway(tmp_path: Path, fixture: dict, entry: dict) -> None:
         else:
             assert actual["sent"] == orjson.dumps(expected["outgoing_request"]).decode(), where
         if expected["error"] is not None and entry.get("returned") == "pass_through":
-            # By design the upstream HTTP error reaches OpenCode unchanged (the 00be1884 gateway raised instead).
+            # The upstream HTTP error reaches OpenCode unchanged (the fixture recorded a refusal here).
             assert actual["status"] == expected["upstream_reply"]["status"], where
             assert run.returned(index) == expected["upstream_reply"]["error_body"].encode(), where
         elif expected["error"] is not None:
@@ -146,17 +144,15 @@ def _check_receipts(run: BoundaryRun) -> None:
 
 
 @needs_node
-@pytest.mark.parametrize("entry", INDEX["needed"], ids=lambda entry: entry["case"])
-def test_needed_fixture_matches_the_python_gateway_byte_for_byte(tmp_path: Path, entry: dict) -> None:
+@pytest.mark.parametrize("entry", INDEX["cases"], ids=lambda entry: entry["case"])
+def test_fixture_matches_byte_for_byte(tmp_path: Path, entry: dict) -> None:
     fixture = json.loads((FIXTURES / f"{entry['case']}.json").read_text())
     if fixture["kind"] == "prepare":
         _replay_prepare(tmp_path, fixture, entry)
     else:
-        _replay_gateway(tmp_path, fixture, entry)
+        _replay_calls(tmp_path, fixture, entry)
 
 
-def test_index_lists_every_fixture_and_every_dropped_case() -> None:
+def test_index_lists_every_fixture() -> None:
     files = {path.stem for path in FIXTURES.glob("*.json")} - {"index", "profile-goldens"}
-    assert files == {entry["case"] for entry in INDEX["needed"]}
-    assert not files & {entry["case"] for entry in INDEX["dropped"]}
-    assert all(entry["dropped"] for entry in INDEX["dropped"])
+    assert files == {entry["case"] for entry in INDEX["cases"]}

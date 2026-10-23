@@ -10,6 +10,7 @@ from resources_servers.agentic_if.episode.opencode_evidence import opencode_evid
 from resources_servers.agentic_if.episode.opencode_export import export_output
 from resources_servers.agentic_if.episode.opencode_observations import bind_observations, project_output
 from resources_servers.agentic_if.tests.support import (
+    answered_export,
     call,
     export,
     message,
@@ -21,7 +22,7 @@ from resources_servers.agentic_if.tests.support import (
 
 
 def test_names_and_arguments_come_from_actual_model_call_without_mutating_the_raw_export():
-    source = finished()
+    source = answered_export()
     before = deepcopy(source)
     evidence = bind_observations(opencode_evidence(source), [observation(), tool_observation()])
     assert evidence.status == "complete"
@@ -38,20 +39,13 @@ def test_names_and_arguments_come_from_actual_model_call_without_mutating_the_ra
     assert source == before
 
 
-def finished(session="root", parent=None):
-    """The OpenCode session through the final reply that follows the tool result."""
-    source = session_export(session, parent)
-    source["messages"].append(message("z", "assistant", text("Done"), session=session, created=5))
-    return source
-
-
 HTTP_REJECTION = {"phase": "http_rejected", "status": 429}
 # A model server that answered 200, then sent an error event before any model chunk (a rate-limited stream).
 STREAM_REJECTION = {"phase": "stream_error", "status": 429, "message": "rate limit exceeded", "chunks": 0}
 
 
-def rejected_observation(error=HTTP_REJECTION, **kwargs):
-    result = observation(**kwargs)
+def rejected_observation(error=HTTP_REJECTION):
+    result = observation()
     result.pop("response")
     result["transport_error"] = deepcopy(error)
     return result
@@ -59,7 +53,7 @@ def rejected_observation(error=HTTP_REJECTION, **kwargs):
 
 @pytest.mark.parametrize("error", [HTTP_REJECTION, STREAM_REJECTION], ids=["http", "stream"])
 def test_recovered_rejections_do_not_duplicate_the_exported_assistant_turn(error):
-    source = finished()
+    source = answered_export()
     observed = [rejected_observation(error), rejected_observation(error), observation(), tool_observation()]
     before = deepcopy(observed)
     evidence = bind_observations(opencode_evidence(source), observed)
@@ -93,25 +87,25 @@ def test_only_a_proven_rejection_recovered_by_the_same_later_turn_is_ignored(kin
         rejected["session_id"] = "child"
     else:
         rejected["response"] = deepcopy(observation()["response"])
-    evidence = bind_observations(opencode_evidence(finished()), observed)
+    evidence = bind_observations(opencode_evidence(answered_export()), observed)
     assert evidence.status == "incomplete"
     assert evidence.issues
     if kind != "other_session":
-        _, issues = project_output(export_output(finished()), observed, session_id="root")
+        _, issues = project_output(export_output(answered_export()), observed, session_id="root")
         assert issues
 
 
 def test_an_unrecovered_http_rejection_is_not_a_complete_model_turn():
     observed = [rejected_observation(), tool_observation()]
-    evidence = bind_observations(opencode_evidence(finished()), observed)
+    evidence = bind_observations(opencode_evidence(answered_export()), observed)
     assert evidence.status == "incomplete"
     assert any("inconsistent_model_observation" in issue for issue in evidence.issues)
-    _, issues = project_output(export_output(finished()), observed, session_id="root")
+    _, issues = project_output(export_output(answered_export()), observed, session_id="root")
     assert "invalid_model_output_capture" in issues
 
 
 def test_training_output_uses_observed_tool_error_not_the_error_opencode_stored():
-    source = finished()
+    source = answered_export()
     source["messages"][1]["parts"][1]["state"].update(
         status="error", error="OpenCode bash permission details", output=None
     )
@@ -128,7 +122,7 @@ def test_training_output_uses_observed_tool_error_not_the_error_opencode_stored(
 )
 def test_training_capture_gaps_are_explicit(change):
     observed = [observation(), tool_observation()]
-    source = finished()
+    source = answered_export()
     if change == "missing_result":
         observed.pop()
     elif change == "changed_result":
@@ -144,7 +138,7 @@ def test_training_capture_gaps_are_explicit(change):
 
 
 def test_training_projection_preserves_reasoning_and_scopes_child_calls():
-    source = finished()
+    source = answered_export()
     source["messages"][1]["parts"].insert(0, {"type": "reasoning", "text": "private reasoning"})
     parent = observation()
     parent["response"]["choices"][0]["message"]["reasoning_content"] = "private reasoning"

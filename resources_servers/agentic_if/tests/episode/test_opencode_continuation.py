@@ -18,7 +18,7 @@ from resources_servers.agentic_if.episode.opencode_replay import (
 )
 from resources_servers.agentic_if.episode.runtime import BoundSandbox
 from resources_servers.agentic_if.task_variants.runtime import ContinuationSpec, RuntimeSpec
-from resources_servers.agentic_if.tests.support import LocalTransport, exported
+from resources_servers.agentic_if.tests.support import REPLAY_RECEIPT, LocalTransport, exported
 
 
 @pytest.mark.asyncio
@@ -133,22 +133,14 @@ async def test_seed_restore_checks_the_recorded_diff_and_removes_its_staging(tmp
     assert staging.startswith("/tmp/nemo-gym-agentic-if-replay-") and not os.path.exists(staging)
 
 
-def continued_root(prefix, *, fresh_text="Fresh decision"):
+def continued_root(prefix):
     """The root session after the harness imported the prefix and continued it with the row's user message."""
     document = deepcopy(prefix)
-    for message in exported("root", text=fresh_text)["messages"]:
+    for message in exported("root", text="Fresh decision")["messages"]:
         message["info"]["id"] += "-fresh"
         message["info"]["time"]["created"] += 10
         document["messages"].append(message)
     return document
-
-
-RECEIPT = {
-    "mode": "restore",
-    "replayed_commands": 0,
-    "command_output_mismatch_indices": [],
-    "workspace_matches_diff": True,
-}
 
 
 def test_prefix_then_real_continuation_uses_same_opencode_session():
@@ -157,7 +149,7 @@ def test_prefix_then_real_continuation_uses_same_opencode_session():
         continuation(prefix, ""),
         session_id="root",
         export=continued_root(prefix),
-        receipt=RECEIPT,
+        receipt=REPLAY_RECEIPT,
         artifacts={"prefix_export": "/artifacts/prefix-export.json"},
     )
     assert session.prefix_ids == frozenset({"u", "a"})
@@ -182,7 +174,7 @@ def test_restored_history_must_match_the_recorded_prefix(defect):
         }
     )
     root = continued_root(prefix)
-    receipt = dict(RECEIPT)
+    receipt = dict(REPLAY_RECEIPT)
     if defect == "tool_output":
         root["messages"][1]["parts"][-1]["state"]["output"] = "changed"
     elif defect == "workspace":

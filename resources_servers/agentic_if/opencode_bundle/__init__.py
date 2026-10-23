@@ -18,12 +18,8 @@ Sandbox layout (``BUNDLE_ROOT``)::
     prefix-export.json                the agent's ``session_import_path`` (continuation rows; the Resources Server)
 """
 
-from resources_servers.agentic_if.opencode_bundle.boundary import compile_boundary
 from resources_servers.agentic_if.opencode_bundle.bundle import (
-    BundleOutputs,
     BundleReceipt,
-    ExecResult,
-    SandboxIO,
     bundle_files,
     collect_bundle,
     presentation_gaps,
@@ -34,29 +30,19 @@ from resources_servers.agentic_if.opencode_bundle.layout import (
     BUNDLE_ROOT,
     EXPORT_DIR,
     PLUGIN_PATHS,
-    RECEIPTS_DIR,
     SESSION_IMPORT_PATH,
 )
-from resources_servers.agentic_if.opencode_bundle.profile import compile_plants, compile_profile, profile_sha256
 
 
 __all__ = [
     "BUNDLE_ROOT",
     "EXPORT_DIR",
     "PLUGIN_PATHS",
-    "RECEIPTS_DIR",
     "SESSION_IMPORT_PATH",
-    "BundleOutputs",
     "BundleReceipt",
-    "ExecResult",
-    "SandboxIO",
     "UnsupportedFeatureError",
     "bundle_files",
     "collect_bundle",
-    "compile_boundary",
-    "compile_plants",
-    "compile_profile",
     "presentation_gaps",
-    "profile_sha256",
     "stage_bundle",
 ]

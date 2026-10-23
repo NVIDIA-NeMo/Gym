@@ -1,8 +1,6 @@
 {
  "case": "derived-http-rejection",
  "kind": "gateway",
- "source": "derived: an HTTP rejection is retained without poisoning OpenCode's retry",
- "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
  "notes": "returned differs by design: the boundary plugin passes the upstream 429 through instead of raising",
  "spec": {
   "schema_version": 1,

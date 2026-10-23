@@ -1,8 +1,6 @@
 {
  "case": "derived-duplicate-call-identity",
  "kind": "gateway",
- "source": "derived: ModelGateway._record_dispatch refuses a duplicate tool call ID (stream)",
- "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
  "notes": "",
  "spec": {
   "schema_version": 1,

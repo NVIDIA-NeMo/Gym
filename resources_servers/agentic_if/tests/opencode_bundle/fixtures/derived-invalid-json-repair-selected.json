@@ -1,8 +1,6 @@
 {
  "case": "derived-invalid-json-repair-selected",
  "kind": "gateway",
- "source": "derived from test_model_gateway.py::test_selected_tool_json_repair_preserves_observed_arguments_without_changing_defaults",
- "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
  "notes": "",
  "spec": {
   "schema_version": 1,

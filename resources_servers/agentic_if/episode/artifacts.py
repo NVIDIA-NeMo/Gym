@@ -30,14 +30,6 @@ def save_json(path: Path, payload: JsonValue) -> None:
     temporary.replace(path)
 
 
-def save_jsonl(path: Path, rows: list[dict[str, JsonValue]]) -> None:
-    """Write ``rows`` atomically, one JSON object per line."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text("".join(json.dumps(row, ensure_ascii=True) + "\n" for row in rows), encoding="utf-8")
-    temporary.replace(path)
-
-
 class BackendVerdict(BaseModel):
     """The task backend's own verify reply, or why there is none."""
 

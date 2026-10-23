@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """``profile.json`` and ``plants.json``: the profile plugin's configuration, compiled from the RuntimeSpec.
 
-Moved from the driver at commit 00be1884 (``environment_servers/agentic_if/drivers/opencode_hooks.py``:
-``compile_hooks`` plus the continuation keys ``stage_hooks`` added; ``drivers/opencode_profile.py``:
-``profile_sha256``). The output is byte-for-byte the configuration that driver staged as ``hook-config.json``, so
-``profile_sha256`` and every tool receipt that carries it are unchanged.
+The compiled profile is evidence format: its canonical hash ``profile_sha256`` is in the seed record, in the profile
+plugin's load receipt and in every tool receipt, and the seed record keeps the digest of its staged bytes.
+``tests/opencode_bundle/fixtures/profile-goldens.json`` pins them: keep every key and its order, including the keys
+the plugin does not read (``profile_version``, ``id``, ``check_aliases``, ``prefix_receipts``, ``prefix_mode``).
 """
 
 import hashlib
@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import JsonValue
 
-from resources_servers.agentic_if.opencode_bundle.features import check_supported, prefix_receipts
+from resources_servers.agentic_if.opencode_bundle.features import check_supported
 from resources_servers.agentic_if.task_variants.interfaces import installed_interfaces
 from resources_servers.agentic_if.task_variants.runtime import RuntimeSpec
 
@@ -41,17 +41,17 @@ def compile_profile(spec: RuntimeSpec) -> dict[str, JsonValue]:
         config["read_first"] = spec.tools.read_first.model_dump(mode="json")
     if spec.tools.tool_names is not None:
         config["visible_tools"] = dict(spec.tools.tool_names)
-        # Always false: aliases are refused above. Kept so the hash matches the 00be1884 driver's configuration.
-        config["check_aliases"] = any(builtin != alias for builtin, alias in config["visible_tools"].items())
+        # Unread hash input: check_supported refuses aliases.
+        config["check_aliases"] = False
     config["literal_errors"] = [event.text for event in spec.events]
     if spec.continuation is not None:
-        # The plugin reads neither; both stay in the hashed configuration exactly as the 00be1884 driver staged them.
-        config["prefix_receipts"] = prefix_receipts(spec.continuation)
+        # Unread hash inputs; prefix_receipts is always empty (check_supported refuses frozen error receipts).
+        config["prefix_receipts"] = []
         config["prefix_mode"] = spec.continuation.mode
     config["profile_sha256"] = profile_sha256(config)
     return config
 
 
 def compile_plants(spec: RuntimeSpec) -> list[dict[str, JsonValue]]:
-    """The planted tool failures, in the form the profile plugin reads (today's ``hook-events.json``)."""
+    """The planted tool failures, in the form the profile plugin reads."""
     return [event.model_dump(mode="json", exclude_none=True) for event in spec.events]

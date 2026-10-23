@@ -1,8 +1,6 @@
 {
  "case": "derived-auxiliary-title",
  "kind": "gateway",
- "source": "derived from test_model_gateway.py::test_open_code_auxiliary_calls_are_not_actor_evidence_or_prompt_overrides",
- "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
  "notes": "",
  "spec": {
   "schema_version": 1,

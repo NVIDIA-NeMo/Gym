@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Authored guard policies for built-in tools, shared by import and execution contracts."""
+"""Read-first guards: per-tool refusals of an edit or write to a file the agent has not read, or that changed since."""
 
 import re
 from collections.abc import Collection

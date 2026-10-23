@@ -1,8 +1,6 @@
 {
  "case": "derived-tool-choice-unselected",
  "kind": "gateway",
- "source": "derived: model_boundary refuses a tool_choice that names an unselected tool",
- "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
  "notes": "",
  "spec": {
   "schema_version": 1,

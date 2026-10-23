@@ -8,8 +8,15 @@ import subprocess
 import pytest
 from pydantic import ValidationError
 
+from resources_servers.agentic_if.episode.opencode_replay import restore_workspace
 from resources_servers.agentic_if.episode.runtime import BoundSandbox
-from resources_servers.agentic_if.task_variants.runtime import RuntimeSpec, seal_runtime_row, validate_runtime
+from resources_servers.agentic_if.episode.workspace import stage_workspace_files
+from resources_servers.agentic_if.task_variants.runtime import (
+    ContinuationSpec,
+    RuntimeSpec,
+    seal_runtime_row,
+    validate_runtime,
+)
 from resources_servers.agentic_if.tests.support import LocalTransport, exported
 
 
@@ -49,8 +56,6 @@ def test_rejects_file_directory_collision():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("child", [False, True])
 async def test_absolute_relative_collisions_are_rejected_before_any_write(tmp_path, child):
-    from resources_servers.agentic_if.episode.workspace import stage_workspace_files
-
     target = tmp_path / "state"
     files = {"state": "first", str(target / "nested" if child else target): "second"}
     sandbox = BoundSandbox(LocalTransport(), user=os.getuid(), workdir=str(tmp_path), timeout_s=60)
@@ -82,8 +87,6 @@ def test_workspace_contents_stay_literal_and_bound_to_configuration_receipt(file
 @pytest.mark.asyncio
 @pytest.mark.parametrize("default_cwd", [False, True])
 async def test_staging_preserves_exact_bytes_and_identity(tmp_path, monkeypatch, default_cwd):
-    from resources_servers.agentic_if.episode.workspace import stage_workspace_files
-
     monkeypatch.chdir(tmp_path)
     transport = LocalTransport()
     sandbox = BoundSandbox(transport, user=os.getuid(), workdir=None if default_cwd else str(tmp_path), timeout_s=60)
@@ -107,8 +110,6 @@ async def test_staging_preserves_exact_bytes_and_identity(tmp_path, monkeypatch,
 @pytest.mark.parametrize("leaf", [False, True])
 @pytest.mark.parametrize("absolute", [False, True])
 async def test_staging_rejects_existing_symlink(tmp_path, leaf, absolute):
-    from resources_servers.agentic_if.episode.workspace import stage_workspace_files
-
     root = tmp_path / "root"
     root.mkdir()
     target = tmp_path / "outside"
@@ -141,8 +142,6 @@ def repository(path, files):
 
 async def restore(tmp_path, sandbox, files, *, workspace_diff="", staging=None):
     """Restore a recorded prefix and its workspace diff over the staged `files`; returns the receipt."""
-    from resources_servers.agentic_if.episode.opencode_replay import restore_workspace
-    from resources_servers.agentic_if.task_variants.runtime import ContinuationSpec
 
     prefix = exported("root")
     prefix["info"]["directory"] = str(tmp_path)
@@ -159,8 +158,6 @@ async def restore(tmp_path, sandbox, files, *, workspace_diff="", staging=None):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("absolute", [False, True])
 async def test_restore_retains_initial_files(tmp_path, absolute):
-    from resources_servers.agentic_if.episode.workspace import stage_workspace_files
-
     repository(tmp_path, {"tracked": "original"})
     sandbox = BoundSandbox(LocalTransport(), user=os.getuid(), workdir=str(tmp_path), timeout_s=60)
     files = {"tracked": "initial override", "memory/state.md": "initial memory\n"}
@@ -174,8 +171,6 @@ async def test_restore_retains_initial_files(tmp_path, absolute):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("absolute", [False, True])
 async def test_restore_applies_recorded_changes_to_seed_files(tmp_path, absolute):
-    from resources_servers.agentic_if.episode.workspace import stage_workspace_files
-
     git = repository(tmp_path, {".gitignore": ".env\n", "tracked": "base", "deleted": "base"})
     files = {
         "tracked": "seed",

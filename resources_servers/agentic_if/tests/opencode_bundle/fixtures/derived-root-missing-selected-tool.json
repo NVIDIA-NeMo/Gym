@@ -1,8 +1,6 @@
 {
  "case": "derived-root-missing-selected-tool",
  "kind": "gateway",
- "source": "derived from test_model_boundary.py::test_child_permissions_are_intersected_not_expanded (root), alias-free",
- "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
  "notes": "",
  "spec": {
   "schema_version": 1,

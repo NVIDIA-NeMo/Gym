@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Build one episode's ``SessionEvidence`` from the OpenCode exports and the plugins' receipts.
 
-The steps are the OpenCode driver's after its run (exports enriched with hook receipts, evidence, model observations,
-hook and plant receipts, continuation, model-visible projection), now fed by the plugin bundle instead of a driver.
+In order: the exports enriched with the hook receipts, the evidence, the model observations, the hook and plant
+receipts, the continuation, and the model-visible projection.
 """
 
 import hashlib
@@ -16,7 +16,6 @@ from pathlib import Path, PurePosixPath
 from pydantic import JsonValue
 
 from resources_servers.agentic_if.episode.artifacts import save_json
-from resources_servers.agentic_if.episode.bundle import CollectedBundle
 from resources_servers.agentic_if.episode.opencode_context import actor_export
 from resources_servers.agentic_if.episode.opencode_evidence import opencode_evidence
 from resources_servers.agentic_if.episode.opencode_export import export_output
@@ -24,6 +23,8 @@ from resources_servers.agentic_if.episode.opencode_hooks import check_hook_recei
 from resources_servers.agentic_if.episode.opencode_observations import bind_observations, project_output
 from resources_servers.agentic_if.episode.opencode_replay import continued_session
 from resources_servers.agentic_if.if_grading.contracts import SessionEvidence, SessionInfo
+from resources_servers.agentic_if.opencode_bundle import presentation_gaps
+from resources_servers.agentic_if.opencode_bundle.bundle import BundleOutputs
 from resources_servers.agentic_if.task_variants.builder import content_text
 from resources_servers.agentic_if.task_variants.interfaces import installed_interfaces
 from resources_servers.agentic_if.task_variants.runtime import RuntimeSpec
@@ -98,7 +99,6 @@ def build_session_evidence(
         root,
         child_exports=[value for key, value in enriched.items() if key not in roots],
         expected_sessions=sessions,
-        tool_names=spec.tools.tool_names,
         interfaces=installed_interfaces(spec.tools.tool_interfaces),
         artifacts=artifacts,
         controlled_messages=controlled,
@@ -222,8 +222,9 @@ def with_seed_facts(evidence: SessionEvidence, seed: Mapping[str, JsonValue]) ->
 
 def evidence_from_bundle(
     spec: RuntimeSpec,
-    collected: CollectedBundle,
+    collected: BundleOutputs,
     *,
+    system: str | None,
     profile_sha256: str | None,
     seed: Mapping[str, JsonValue],
     directory: Path,
@@ -232,9 +233,9 @@ def evidence_from_bundle(
     """Save what the bundle held under ``directory``, and build the episode's evidence from it.
 
     Returns the evidence and the root session's export. A model call the boundary could not forward makes the
-    evidence an infrastructure error, as it made the episode's. A gap the bundle reported, a model call without the
-    row's system prompt, and a root session that did not start from ``task_text`` make it incomplete. Runs in a worker
-    thread: exports can be large.
+    evidence an infrastructure error. A gap the bundle reported, a model call without the row's system prompt
+    (``system``, the text of its system message or None), and a root session that did not start from ``task_text``
+    make it incomplete. Runs in a worker thread: exports can be large.
     """
     files = save_bundle_files(collected.files, directory)
     artifacts = {}
@@ -289,7 +290,7 @@ def evidence_from_bundle(
     if collected.boundary_issues:
         evidence.status = "infrastructure_error"
         evidence.issues = list(dict.fromkeys(evidence.issues + collected.boundary_issues))
-    gaps = [f"bundle_gap:{gap}" for gap in collected.gaps] + collected.presentation_gaps
+    gaps = [f"bundle_gap:{gap}" for gap in collected.gaps] + presentation_gaps(collected, system=system)
     if gaps:
         if evidence.status == "complete":
             evidence.status = "incomplete"

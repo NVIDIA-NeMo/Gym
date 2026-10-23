@@ -88,7 +88,7 @@ await assert.rejects(before(resumed, "edit", {...edit}, "failed-prefix"), /first
 const directoryRead = await after(resumed, await before(resumed, "read", {filePath: directory}));
 assert.equal(directoryRead.metadata.nemo_gym_profile.read_first, undefined);
 // Interface mappings still guard the actual built-in path; error presentation for selected tools must not rewrite
-// literal guard errors imported from an earlier hook version.
+// a read-first refusal's authored text.
 const configured = JSON.parse(fs.readFileSync(PROFILE));
 configured.tools = {read: {parameters: {type: "object", properties: {path: {type: "string"}}, required: ["path"]},
   args_map: {filePath: "path"}}};

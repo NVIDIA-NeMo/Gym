@@ -114,16 +114,6 @@ def test_without_an_instructions_file_the_opencode_system_prompt_stays(tmp_path:
     assert run.rows[1]["instructions"] == [] and run.rows[1]["system_sha256"] is None
 
 
-def test_an_empty_instructions_file_is_an_empty_literal_system_prompt(tmp_path: Path) -> None:
-    run = run_boundary(
-        tmp_path, boundary=compile_boundary(unrestricted_spec()), calls=[call(request(), OK)], system=""
-    )
-    assert json.loads(run.calls[0]["sent"])["messages"] == [
-        {"role": "system", "content": ""},
-        {"role": "user", "content": "Fix it"},
-    ]
-
-
 def test_compaction_is_recorded_as_such_and_bypasses_presentation(tmp_path: Path) -> None:
     body = {
         "messages": [{"role": "system", "content": "Summarize"}, {"role": "user", "content": "History"}],
@@ -183,7 +173,7 @@ def test_upstream_http_errors_reach_opencode_unchanged(tmp_path: Path) -> None:
     assert run.returned(0) == b'{"error": {"message": "maximum context length exceeded"}}'
     assert run.records.observations[0]["transport_error"] == {"phase": "http_rejected", "status": 400}
     assert "response" not in run.records.observations[0]
-    # As the 00be1884 gateway: an unobserved call's HTTP error is an issue, an observed one is a transport error.
+    # An unobserved call's HTTP error is an issue; an observed call's is a transport error on its record.
     assert run.records.issues == ["ClientResponseError"]
 
 
@@ -375,34 +365,17 @@ def test_ambiguous_instructions_are_a_configuration_error(tmp_path: Path) -> Non
 
 
 def test_a_missing_provider_installs_no_wrapper_and_the_process_guard_refuses_bypassing_calls(tmp_path: Path) -> None:
-    bundle = make_bundle(tmp_path, compile_boundary(private_like_spec()))
-    case = {
-        "plugin": str(bundle / BOUNDARY_PLUGIN),
-        "base_url": BASE_URL,
-        "instructions": [],
-        "register_profile": True,
-        "provider_id": "other",
-        "global_probe": True,
-        "calls": [],
-    }
-    import subprocess
-
-    from .harness import NODE, RUNNER
-
-    (tmp_path / "case.json").write_text(json.dumps(case))
-    finished = subprocess.run(
-        [NODE, str(RUNNER), str(tmp_path / "case.json"), str(tmp_path / "result.json")],
-        capture_output=True,
-        text=True,
-        timeout=60,
+    run = run_boundary(
+        tmp_path,
+        boundary=compile_boundary(private_like_spec()),
+        calls=[],
+        provider_id="other",
+        global_probe=True,
     )
-    assert finished.returncode == 0, finished.stderr
-    result = json.loads((tmp_path / "result.json").read_text())
-    assert result["provider_fetch_installed"] is False
-    assert result["global_probe"]["refused"] is True
-    rows = [json.loads(line) for line in (bundle / "receipts" / "model-calls.jsonl").read_text().splitlines()]
-    assert rows[1] == {"kind": "config_error", "message": "provider nemo_gym is not configured"}
-    assert rows[2]["kind"] == "issue" and rows[2]["error"] == "ValueError" and rows[2]["call"] is None
+    assert run.provider_fetch_installed is False
+    assert run.global_probe["refused"] is True
+    assert run.rows[1] == {"kind": "config_error", "message": "provider nemo_gym is not configured"}
+    assert run.rows[2]["kind"] == "issue" and run.rows[2]["error"] == "ValueError" and run.rows[2]["call"] is None
 
 
 def test_the_process_guard_refuses_a_bypassing_call_even_when_configured(tmp_path: Path) -> None:

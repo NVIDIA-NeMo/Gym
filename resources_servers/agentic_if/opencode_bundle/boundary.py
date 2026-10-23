@@ -2,16 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """``boundary.json``: what ``if-boundary.mjs`` applies to every model call, compiled from the RuntimeSpec only.
 
-The boundary replaces the Python model gateway at commit 00be1884 (``environment_servers/agentic_if/``
-``model_boundary.py``, ``model_gateway.py``, ``model_streaming.py``; removed since). Python resolves everything that
-depends on the row; the plugin applies it to the request OpenCode actually sends:
+Python resolves everything that depends on the row; the plugin applies it to the request OpenCode actually sends:
 
-- ``tool_names`` / ``targets``: the per-row selection and the inventory check (``effective_tool_names``);
-- ``deny``: the permission denies the plugin's ``config`` hook appends (the environment-server driver's
-  ``_configuration``);
+- ``tool_names`` / ``targets``: the per-row selection and the inventory check (``effectiveToolNames`` in the plugin);
+- ``deny``: the permission denies the plugin's ``config`` hook appends;
 - ``descriptions``: the effective description of each tool (the catalog interface's, overridden by the row's);
-- ``parameter_descriptions``: the row's parameter descriptions as parsed JSON-pointer paths (``describe_parameters``);
+- ``parameter_descriptions``: the row's parameter descriptions as parsed JSON-pointer paths (``describeParameters``);
 - ``historical_rejected_calls``: rejected model calls witnessed in a continuation prefix (``prefix_model_calls``).
+
+The staged bytes are evidence format (``boundary_sha256`` in the seed record, ``config_sha256`` in the plugin's load
+receipt): keep the keys and their order.
 
 The row's literal system text is not here: at seed the row has no ``responses_create_params``. The plugin reads it
 from the instructions file the OpenCode agent writes (see ``if-boundary.mjs``).
@@ -46,8 +46,8 @@ def parameter_targets(descriptions: Mapping[str, str]) -> list[dict[str, JsonVal
     """Parse a tool's parameter-description keys into schema paths, in the row's order.
 
     Keys are top-level property names or JSON pointers (RFC 6901) to nested schema objects. The plugin walks each path
-    on the schema OpenCode sends, with ``describe_parameters``' rules, and raises when the target does not exist.
-    Moved from ``model_boundary.describe_parameters``; a duplicate target is refused here, at compile time.
+    on the schema OpenCode sends (``parameterSchema``) and raises when the target does not exist; a duplicate target is
+    refused here, at compile time.
     """
     seen: set[tuple[str, ...]] = set()
     targets = []
@@ -57,8 +57,8 @@ def parameter_targets(descriptions: Mapping[str, str]) -> list[dict[str, JsonVal
             if key.startswith("/")
             else ("properties", key)
         )
-        if not path or path in seen:
-            raise ValueError(f"invalid or duplicate parameter target: {key}")
+        if path in seen:
+            raise ValueError(f"duplicate parameter target: {key}")
         seen.add(path)
         targets.append({"target": key, "path": list(path), "description": text})
     return targets
@@ -67,8 +67,8 @@ def parameter_targets(descriptions: Mapping[str, str]) -> list[dict[str, JsonVal
 def prefix_model_calls(continuation: ContinuationSpec | None) -> dict[str, dict[str, JsonValue]]:
     """Rejected model calls witnessed in a continuation prefix, by call ID; never inferred.
 
-    Moved from ``drivers/opencode_observations.py``. Each receipt is the ``nemo_gym_model_call`` metadata of the
-    prefix's tool part: ``{"function": {"name", "arguments"}, "available_names": [...]}``.
+    Each receipt is the ``nemo_gym_model_call`` metadata of the prefix's tool part:
+    ``{"function": {"name", "arguments"}, "available_names": [...]}``.
     """
     result: dict[str, dict[str, JsonValue]] = {}
     if continuation is None:

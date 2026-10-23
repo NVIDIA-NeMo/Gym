@@ -52,7 +52,7 @@ for (const [label, text, pattern] of [
   assert.deepEqual(registry, { profile: [{ status: "error", message: row.message }] }, label);
 }
 
-// Loaded: today's load receipt byte for byte, then the plugin's own digest; the registry records the load.
+// Loaded: the load receipt byte for byte, then the plugin's own digest; the registry records the load.
 const profile = JSON.parse(valid);
 assert.match(profile.profile_sha256, /^[0-9a-f]{64}$/);
 {

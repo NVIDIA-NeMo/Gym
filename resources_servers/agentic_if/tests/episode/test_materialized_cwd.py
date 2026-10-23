@@ -7,14 +7,13 @@ import os
 import pytest
 
 from resources_servers.agentic_if.episode.runtime import BoundSandbox
+from resources_servers.agentic_if.episode.workspace import verify_materialized_cwd
 from resources_servers.agentic_if.tests.support import LocalTransport
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("spelling", ["physical", "symlink", "omitted"])
 async def test_cwd_fact_accepts_equivalent_directories_without_changing_identity(tmp_path, spelling):
-    from resources_servers.agentic_if.episode.workspace import verify_materialized_cwd
-
     task = tmp_path / "task root"
     task.mkdir()
     alias = tmp_path / "alias"
@@ -31,8 +30,6 @@ async def test_cwd_fact_accepts_equivalent_directories_without_changing_identity
 @pytest.mark.asyncio
 @pytest.mark.parametrize("expected", ["different", "missing", "relative", "not-text", "newline"])
 async def test_inaccurate_cwd_fails_before_actor_execution(tmp_path, expected):
-    from resources_servers.agentic_if.episode.workspace import verify_materialized_cwd
-
     task = tmp_path / "task"
     task.mkdir()
     other = tmp_path / "different"

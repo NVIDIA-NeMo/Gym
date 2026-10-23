@@ -1,8 +1,6 @@
 {
  "case": "derived-opencode-literal-system-and-history",
  "kind": "gateway",
- "source": "phase0-spike fixture spike-boundary-cross-check (real OpenCode 1.17.11 requests), alias-free spec; single user message equal to OpenCode's joined user text",
- "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
  "notes": "",
  "spec": {
   "schema_version": 1,

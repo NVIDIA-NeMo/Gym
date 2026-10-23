@@ -40,7 +40,7 @@ const fired = (index, tool, action, callNumber, callID) => ({
 });
 
 // The bundle always stages plants.json. Without it the plants cannot be loaded: an "error" line, nothing is planted,
-// and the profile still applies. (The plugin at 00be1884 wrote nothing when its plants variable was unset.)
+// and the profile still applies.
 {
   const { records, call } = await plugin();
   const lines = records();

@@ -1,8 +1,6 @@
 {
  "case": "derived-compaction-stream",
  "kind": "gateway",
- "source": "derived: OpenCode's compaction call bypasses actor presentation but is recorded",
- "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
  "notes": "",
  "spec": {
   "schema_version": 1,

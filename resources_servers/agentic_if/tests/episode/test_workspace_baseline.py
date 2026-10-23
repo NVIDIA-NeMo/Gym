@@ -11,6 +11,7 @@ import pytest
 
 from nemo_gym.sandbox.providers import SandboxExecResult
 from resources_servers.agentic_if.episode.runtime import BoundSandbox
+from resources_servers.agentic_if.episode.workspace import snapshot_workspace
 from resources_servers.agentic_if.if_grading.checkers.run import evidence_steps, mark_repo_changes
 from resources_servers.agentic_if.if_grading.contracts import SessionEvidence
 from resources_servers.agentic_if.tests.support import LocalTransport
@@ -72,8 +73,6 @@ def test_evidence_uses_initial_snapshot_before_recorded_prefix_and_live_calls():
 
 @pytest.mark.asyncio
 async def test_snapshot_observes_real_dirty_tree_without_mutating_index(tmp_path):
-    from resources_servers.agentic_if.episode.workspace import snapshot_workspace
-
     def git(*args):
         return subprocess.check_output(["git", "-C", str(tmp_path), *args])
 
@@ -111,8 +110,6 @@ async def test_snapshot_observes_real_dirty_tree_without_mutating_index(tmp_path
 async def test_unavailable_or_unreadable_repository_is_an_unknown_snapshot_not_a_clean_tree(
     tmp_path, monkeypatch, state
 ):
-    from resources_servers.agentic_if.episode.workspace import snapshot_workspace
-
     if state == "no_git":
         monkeypatch.setenv("PATH", str(tmp_path / "no-tools"))
     elif state != "no_repository":
@@ -132,8 +129,6 @@ async def test_unavailable_or_unreadable_repository_is_an_unknown_snapshot_not_a
 
 @pytest.mark.asyncio
 async def test_temporary_index_lock_failure_is_not_an_unknown_repository(tmp_path, monkeypatch):
-    from resources_servers.agentic_if.episode.workspace import snapshot_workspace
-
     real_git = shutil.which("git")
     subprocess.run([real_git, "init", "-q", str(tmp_path)], check=True)
     tools = tmp_path / "tools"
@@ -176,8 +171,6 @@ def test_unknown_initial_snapshot_does_not_attribute_seed_state_to_first_call():
     ],
 )
 async def test_snapshot_failure_is_not_a_clean_tree(result):
-    from resources_servers.agentic_if.episode.workspace import snapshot_workspace
-
     class Failed:
         async def exec(self, **kwargs):
             return result
@@ -188,8 +181,6 @@ async def test_snapshot_failure_is_not_a_clean_tree(result):
 
 @pytest.mark.asyncio
 async def test_snapshot_uses_replay_budget_for_a_large_initial_tree():
-    from resources_servers.agentic_if.episode.workspace import snapshot_workspace
-
     class Slow:
         async def exec(self, **kwargs):
             assert kwargs["timeout_s"] == 600

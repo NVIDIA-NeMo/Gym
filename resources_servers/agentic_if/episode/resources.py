@@ -22,26 +22,7 @@ from resources_servers.agentic_if.episode.agent_user import check_agent_user, is
 from resources_servers.agentic_if.episode.runtime import BoundSandbox
 
 
-class ResourcesSessionClient:
-    """One Resources Server session: requests send its cookies, keep any it sets, and must return a JSON object."""
-
-    client: ServerClient
-    server_name: str
-    cookies: dict[str, str]
-
-    async def _post(self, path: str, body: dict[str, JsonValue], **kwargs: object) -> dict[str, JsonValue]:
-        response = await self.client.post(
-            server_name=self.server_name, url_path=path, json=body, cookies=dict(self.cookies), **kwargs
-        )
-        await raise_for_status(response)
-        self.cookies.update({key: getattr(value, "value", value) for key, value in response.cookies.items()})
-        result = await get_response_json(response)
-        if not isinstance(result, dict):
-            raise ValueError(f"{self.server_name} {path} response must be a JSON object")
-        return result
-
-
-class SandboxTaskSession(ResourcesSessionClient):
+class SandboxTaskSession:
     """SWE and TB2.1 own their sandboxes through Gym's typed resources session; the episode only borrows them."""
 
     def __init__(
@@ -60,7 +41,7 @@ class SandboxTaskSession(ResourcesSessionClient):
         self.row = deepcopy(row)
         # Private IF checks never participate in resource preparation or verification.
         self.row.pop("agentic_if", None)
-        self.cookies = {}
+        self.cookies: dict[str, str] = {}
         self.client_session_id = client_session_id
         self.timeout_s = timeout_s
         self.episode_id = episode_id
@@ -73,6 +54,18 @@ class SandboxTaskSession(ResourcesSessionClient):
         self._preparation: asyncio.Task[None] | None = None
         self._closed = False
         self._finalization: asyncio.Task[dict[str, JsonValue]] | None = None
+
+    async def _post(self, path: str, body: dict[str, JsonValue], **kwargs: object) -> dict[str, JsonValue]:
+        """One request in the backend's session: send its cookies, keep any it sets; the reply must be an object."""
+        response = await self.client.post(
+            server_name=self.server_name, url_path=path, json=body, cookies=dict(self.cookies), **kwargs
+        )
+        await raise_for_status(response)
+        self.cookies.update({key: getattr(value, "value", value) for key, value in response.cookies.items()})
+        result = await get_response_json(response)
+        if not isinstance(result, dict):
+            raise ValueError(f"{self.server_name} {path} response must be a JSON object")
+        return result
 
     async def _bind(
         self,

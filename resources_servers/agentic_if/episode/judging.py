@@ -33,8 +33,7 @@ def vote_key(judge_hash: str, prompt: str, vote: object) -> str:
 
 def judge_prompt(body: Mapping[str, Any]) -> str:
     """The question of one judge request: its single user message."""
-    messages = body.get("input") or []
-    return str(messages[0].get("content")) if messages and isinstance(messages[0], Mapping) else json.dumps(body)
+    return str(body["input"][0]["content"])
 
 
 def judge_unreachable(error: JudgeError) -> bool:

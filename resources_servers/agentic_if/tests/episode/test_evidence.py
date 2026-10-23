@@ -59,9 +59,9 @@ def test_rejected_calls_keep_actor_interface_and_opencode_execution_facts():
             ),
         )
     )
-    evidence = opencode_evidence(source, tool_names={"read": "ReadSource"})
+    evidence = opencode_evidence(source)
     actual = evidence.steps[0].calls[0]
-    assert actual.model_tool == "ReadSource"
+    assert actual.model_tool == "read"
     assert actual.model_args == {"path": "/app/a.py", "extra": True}
     assert actual.args["path"] == "/app/a.py"
     assert actual.rejected

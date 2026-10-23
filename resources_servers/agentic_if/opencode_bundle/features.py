@@ -2,14 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Runtime features the bundle refuses because no supported row uses them.
 
-A row that needs one of these is refused when the bundle is compiled, so it can never run with a feature silently
-missing. Aliases, ``apply_patch`` and frozen error receipts in a continuation prefix are checked here; several user
-messages, ``max_output_tokens`` and ``instructions`` are request fields the OpenCode agent already rejects.
+A row that needs one is refused when the bundle is compiled, so it can never run with a feature silently missing:
+tool aliases, ``apply_patch``, and failed tool parts with ``nemo_gym_profile`` metadata (frozen error receipts) in a
+continuation prefix. Several user messages and a ``max_output_tokens`` request field are refused by the OpenCode agent,
+``instructions`` by row validation (``task_variants.runtime``).
 """
-
-from copy import deepcopy
-
-from pydantic import JsonValue
 
 from resources_servers.agentic_if.task_variants.runtime import ContinuationSpec, RuntimeSpec
 
@@ -18,21 +15,17 @@ class UnsupportedFeatureError(ValueError):
     """The row needs a runtime feature the OpenCode plugin bundle does not implement."""
 
 
-def prefix_receipts(continuation: ContinuationSpec | None) -> list[dict[str, JsonValue]]:
-    """Frozen error metadata in a continuation prefix (``nemo_gym_profile`` stamps on failed tool parts).
-
-    Moved from ``drivers/opencode_hooks.py``. The bundle does not restamp them, so a non-empty list is refused;
-    the empty list stays in the compiled profile so ``profile_sha256`` is unchanged for continuation rows.
-    """
+def _has_frozen_error_receipts(continuation: ContinuationSpec | None) -> bool:
+    """Whether a continuation prefix has failed tool parts stamped with ``nemo_gym_profile`` metadata."""
     if continuation is None:
-        return []
-    return [
-        {"call_id": part["callID"], "opencode_tool": part["tool"], "metadata": deepcopy(stamp)}
+        return False
+    return any(
+        part.get("type") == "tool"
+        and part.get("state", {}).get("status") == "error"
+        and (part["state"].get("metadata") or {}).get("nemo_gym_profile")
         for message in continuation.prefix_export["messages"]
         for part in message.get("parts", [])
-        if part.get("type") == "tool" and part.get("state", {}).get("status") == "error"
-        if (stamp := (part["state"].get("metadata") or {}).get("nemo_gym_profile"))
-    ]
+    )
 
 
 def check_supported(spec: RuntimeSpec) -> None:
@@ -43,7 +36,7 @@ def check_supported(spec: RuntimeSpec) -> None:
         raise UnsupportedFeatureError(f"tool aliases are not supported by the OpenCode bundle: {aliased}")
     if "apply_patch" in names:
         raise UnsupportedFeatureError("selecting apply_patch is not supported by the OpenCode bundle")
-    if prefix_receipts(spec.continuation):
+    if _has_frozen_error_receipts(spec.continuation):
         raise UnsupportedFeatureError(
             "frozen error receipts in a continuation prefix are not supported by the OpenCode bundle"
         )

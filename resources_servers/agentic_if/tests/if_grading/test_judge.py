@@ -15,29 +15,11 @@ from nemo_gym.openai_utils import NeMoGymResponse
 from resources_servers.agentic_if.if_grading import judge as judge_module
 from resources_servers.agentic_if.if_grading.configuration import config_hash, load_config
 from resources_servers.agentic_if.if_grading.judge import Judge
+from resources_servers.agentic_if.tests.support import judge_reply
 
 
 def reply(text: str) -> NeMoGymResponse:
-    return NeMoGymResponse.model_validate(
-        {
-            "id": "resp",
-            "object": "response",
-            "created_at": 0,
-            "model": "judge",
-            "parallel_tool_calls": False,
-            "tool_choice": "auto",
-            "tools": [],
-            "output": [
-                {
-                    "id": "msg",
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [{"type": "output_text", "text": text, "annotations": []}],
-                }
-            ],
-        }
-    )
+    return NeMoGymResponse.model_validate(judge_reply("judge", text, response_id="resp"))
 
 
 YES = '{"why":"It did.","answer":"yes"}'

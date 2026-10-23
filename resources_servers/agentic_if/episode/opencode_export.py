@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """OpenCode export projection for agentic IF evidence.
 
-Adapted from ``OpenCodeSandboxedAgent._opencode_export_to_output_items`` in
-``responses_api_agents/opencode_sandboxed_agent/app.py``; tool calls carry the arguments and results the model saw.
+The projection of ``OpenCodeSandboxedAgent._opencode_export_to_output_items``
+(``responses_api_agents/opencode_sandboxed_agent/app.py``), except that tool calls carry the arguments and results the
+model saw.
 """
 
 import json

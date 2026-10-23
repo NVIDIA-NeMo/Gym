@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The tool contracts of the pinned OpenCode binary, shared by row validation and the Environment Server.
+"""The tool contracts of the pinned OpenCode binary, shared by row validation and the plugin bundle.
 
 `data/opencode_builtin_schemas.json` is captured from the stock pinned binary, not authored: start it with
 `serve --pure` in an isolated directory and config, and keep the `parameters` schemas that its loopback
@@ -8,7 +8,7 @@
 OpenAI-compatible test provider with the model IDs `dummy_model` and `gpt-5` covers them all (the latter exposes
 `apply_patch` instead of `edit` and `write`); no inference call is needed. Record the binary's `--version` and
 SHA-256, which a test ties to the configured pin. The snapshot is the binary's contract, not a promise that every tool
-is offered on every request: the Environment Server presents the schemas each request actually carries.
+is offered on every request: the boundary plugin (``if-boundary.mjs``) presents the schemas each request carries.
 """
 
 import json

@@ -78,9 +78,9 @@ def test_the_agent_loads_the_bundle_the_resources_server_stages():
     assert tuple(AGENT["plugins"]) == tuple(opencode_bundle.PLUGIN_PATHS)
     assert AGENT["export_dir"] == opencode_bundle.EXPORT_DIR
     assert AGENT["session_import_path"] == opencode_bundle.SESSION_IMPORT_PATH
-    # OpenCode's limits and harness budget, as the benchmark always ran them.
+    # OpenCode's limits and the harness budget the benchmark's results depend on.
     assert (AGENT["context_window"], AGENT["max_output_tokens"], AGENT["timeout"]) == (131072, 131072, 10800)
-    # No tools map (it would re-enable skill and webfetch); the three denies the benchmark always had.
+    # No tools map (it would re-enable skill and webfetch), and the three denies.
     assert AGENT["opencode_config"]["tools"] is None
     assert AGENT["opencode_config"]["permission"] == {"webfetch": "deny", "websearch": "deny", "skill": "deny"}
 
@@ -123,7 +123,7 @@ def test_the_resolved_server_config_validates_with_absolute_artifacts_and_known_
     assert validated.artifacts_dir == Path(config["results_dir"]) / "agentic_if"
     assert validated.artifacts_dir.is_absolute()
     for backend in validated.task_resources.values():
-        assert "resources_servers" in config[backend.server.name]
+        assert "resources_servers" in config[backend.name]
     _, chosen = resolved(agentic_if_artifacts_dir=str(tmp_path / "job" / "agentic_if"))
     assert chosen["artifacts_dir"] == str(tmp_path / "job" / "agentic_if")
 

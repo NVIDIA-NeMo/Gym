@@ -1,8 +1,6 @@
 {
  "case": "derived-stream-without-terminal-choice",
  "kind": "gateway",
- "source": "derived from test_model_gateway.py::test_truncated_stream_is_not_a_completed_observation",
- "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
  "notes": "",
  "spec": {
   "schema_version": 1,

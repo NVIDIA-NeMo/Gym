@@ -1,17 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
-// The agentic IF model boundary, inside OpenCode 1.17.11: a port of the needed part of the Python model gateway at
-// commit 00be1884 (environment_servers/agentic_if/model_boundary.py, model_gateway.py, model_streaming.py; removed
-// since). It wraps the policy provider's HTTP call (the `config` hook sets provider.<id>.options.fetch) and, on every
-// model call:
+// The agentic IF model boundary, inside OpenCode 1.17.11. It wraps the policy provider's HTTP call (the `config` hook
+// sets provider.<id>.options.fetch) and, on every model call:
 //   - replaces the whole system prompt with the row's literal system text, read from the instructions file the OpenCode
 //     agent writes (config.instructions); with no instructions file OpenCode's own system prompt is left as is;
 //   - checks the exposed tool inventory against the row's selection (the `config` hook denies unselected tools) and
 //     applies the compiled tool descriptions and JSON-pointer parameter descriptions;
-//   - restores the model's own tool calls (raw arguments) in history and presents rejected calls as the Python gateway
-//     did, including historical rejected calls from a continuation prefix;
-//   - re-serializes streamed (SSE) and whole JSON replies exactly as the Python gateway did;
+//   - restores the model's own tool calls (raw arguments) in history and shows each rejected call's result as the tools
+//     its request offered, including rejected calls recorded in a continuation prefix;
+//   - re-serializes streamed (SSE) and whole JSON replies with Python's json semantics (numbers and text unchanged;
+//     tests/opencode_bundle/fixtures pin the bytes);
 //   - passes model-server errors to OpenCode unchanged and records them on the call: an HTTP error reply, or an error
 //     event inside a 200 stream (from that event on, the stream is forwarded as received);
 //   - records every call in receipts/model-calls.jsonl (records.py documents the lines), compaction calls as such.
@@ -43,7 +42,8 @@ const MAX_SSE_EVENT = 4 * 1024 * 1024;
 let callSequence = 0; // per process, shared by every instance of this module
 
 // ---------------------------------------------------------------------------------------------------------------
-// Python value semantics. Errors carry the Python exception type name the Python gateway recorded in its issues.
+// Python value semantics. A refused call is recorded under a Python exception type name (ValueError, KeyError, ...):
+// the evidence's boundary issues use those names (records.py).
 
 class PyError extends Error {
   constructor(type, message) {
@@ -238,7 +238,8 @@ function pyMin(a, b) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// JSON with Python's json.loads / json.dumps semantics, so re-serialized replies match the Python gateway byte for byte.
+// JSON with Python's json.loads / json.dumps semantics: floats and big integers keep their text, so what OpenCode
+// receives and what the records hold read back in Python unchanged.
 
 // float.__repr__: the shortest round-trip digits, positional for 1e-4 <= |x| < 1e16, otherwise exponent form.
 function pyFloatRepr(value) {
@@ -467,7 +468,8 @@ function decodeUtf8(bytes) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Presentation (model_boundary.py ModelBoundary.prepare and the reply mapping for OpenCode), needed subset.
+// Presentation: OpenCode's request is checked against the row's selection and given its descriptions and literal
+// system text; the reply's tool calls are observed for OpenCode.
 
 const SCHEMA_MAPS = new Set(["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"]);
 const SCHEMA_ARRAYS = new Set(["allOf", "anyOf", "oneOf", "prefixItems"]);
@@ -523,7 +525,7 @@ function describeParameters(schema, targets) {
   return result;
 }
 
-// {tool: alias} bindings of model_boundary.effective_tool_names, without aliases: the requested tools offered.
+// The requested tools OpenCode offered, in request order; a missing one is refused unless allowMissing (child sessions).
 function effectiveToolNames(available, requested, allowMissing) {
   const bindings = [];
   for (const logical of requested) {
@@ -533,25 +535,24 @@ function effectiveToolNames(available, requested, allowMissing) {
   return bindings;
 }
 
-function userPromptText(content) {
-  if (typeof content === "string") return content;
+function checkUserPrompt(content) {
+  if (typeof content === "string") return;
   if (
     !Array.isArray(content) ||
     content.some((part) => !isDict(part) || get(part, "type") !== "text" || typeof get(part, "text") !== "string")
   ) {
     throw valueError("OpenCode's user prompts must contain only Chat Completions text parts");
   }
-  return content.map((part) => part.text).join("");
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Streaming (model_streaming.py): hold each tool call's name until its arguments start, observe the model-visible
-// reply, and re-serialize every data event as json.dumps(..., ensure_ascii=False).
+// Streaming: hold each tool call's name until its arguments start, so OpenCode receives the whole name in one delta;
+// observe the model-visible reply, and re-serialize every data event as json.dumps(..., ensure_ascii=False).
 
 class ChatStream {
-  constructor(prepared, replyForOpenCode) {
+  constructor(prepared, observeReplyCalls) {
     this.prepared = prepared;
-    this.replyForOpenCode = replyForOpenCode;
+    this.observeReplyCalls = observeReplyCalls;
     this.pending = new Map();
     this.started = new Set();
     this.metadata = {};
@@ -560,13 +561,10 @@ class ChatStream {
   }
 
   flush(key) {
-    let call = this.pending.get(key);
+    const call = this.pending.get(key);
     this.pending.delete(key);
     if (!truthy(call.function.name)) throw valueError("streamed tool arguments have no function name");
-    if (this.prepared !== null) {
-      const wrapped = this.replyForOpenCode(this.prepared, { choices: [{ message: { tool_calls: [call] } }] });
-      call = wrapped.choices[0].message.tool_calls[0];
-    }
+    if (this.prepared !== null) this.observeReplyCalls(this.prepared, { choices: [{ message: { tool_calls: [call] } }] });
     this.started.add(key);
     return call;
   }
@@ -861,7 +859,7 @@ function writeRecord(entry) {
   fs.appendFileSync(RECORDS_FILE, dumps(entry, { compact: true, surrogates: "escape" }) + "\n");
 }
 
-// The issue name the Python gateway would have recorded.
+// The issue name recorded for a failed call: a Python exception type name.
 function issueName(error) {
   if (error instanceof UpstreamError) return error.issue;
   if (error instanceof PyError) return error.name;
@@ -879,7 +877,8 @@ function recordIssue(call, error) {
   }
 }
 
-// A failure of the upstream transport: recorded under the Python gateway's name, rethrown to OpenCode unchanged.
+// A failure of the upstream transport: recorded under an aiohttp exception name (ClientConnectionError,
+// ClientPayloadError, CancelledError), rethrown to OpenCode unchanged.
 class UpstreamError extends Error {
   constructor(issue, cause) {
     super(message(cause));
@@ -1001,25 +1000,21 @@ export const IfBoundary = async () => {
 
   const cfg = () => state.config;
 
-  const recordDispatch = (session, allowedNames, callId, modelName, opencodeName, allowed) => {
+  // The tools each call's request offered, by (session, call ID); null once the ID repeats.
+  const recordDispatch = (session, allowedNames, callId) => {
     if (typeof callId !== "string" || !callId) throw valueError("missing tool call identity");
     const key = pyKey(session) + "\u0000" + callId;
     if (state.dispatch.has(key)) {
       state.dispatch.set(key, null);
       throw valueError("duplicate tool call identity");
     }
-    state.dispatch.set(key, {
-      model_name: modelName,
-      opencode_name: opencodeName,
-      allowed,
-      available_names: sortedStrings(allowedNames),
-    });
+    state.dispatch.set(key, sortedStrings(allowedNames));
   };
 
   const prompts = (payload, child) => {
     let messages = has(payload, "messages") ? payload.messages : [];
     if (!child) {
-      for (const entry of iterate(messages)) if (get(entry, "role") === "user") userPromptText(get(entry, "content"));
+      for (const entry of iterate(messages)) if (get(entry, "role") === "user") checkUserPrompt(get(entry, "content"));
     }
     if (state.system !== null) {
       // One literal contract for every actor call, child sessions included.
@@ -1087,33 +1082,29 @@ export const IfBoundary = async () => {
     };
   };
 
-  // The reply mapping for OpenCode: no aliases, so names stay; OpenCode's lowercase repair is still an execution fact.
-  const replyForOpenCode = (prepared, payload) => {
-    const result = clone(payload);
+  // Observe a reply's tool calls (OpenCode receives the reply unchanged): record each call's dispatch, and the tool
+  // that runs a name OpenCode's lowercase repair accepts.
+  const observeReplyCalls = (prepared, payload) => {
     const calls = [];
-    for (const choice of iterate(get(result, "choices", []))) {
+    for (const choice of iterate(get(payload, "choices", []))) {
       const replyMessage = or(get(choice, "message"), {});
       for (const call of iterate(or(get(replyMessage, "tool_calls"), []))) calls.push([get(call, "id"), item(call, "function")]);
     }
     for (const [callId, fn] of calls) {
       const name = get(fn, "name");
       if (!truthy(name)) continue;
-      let allowed = typeof name === "string" && prepared.allowedNames.includes(name);
-      if (!allowed) {
+      if (!(typeof name === "string" && prepared.allowedNames.includes(name))) {
         pyKey(name);
         if (typeof name !== "string") throw new PyError("AttributeError", `'${typeName(name)}' object has no attribute 'lower'`);
         const lower = name.toLowerCase();
-        if (prepared.allowedNames.includes(lower)) {
-          assign(prepared.executionTools, name, prepared.executionTools[lower]);
-          allowed = true;
-        }
+        if (prepared.allowedNames.includes(lower)) assign(prepared.executionTools, name, prepared.executionTools[lower]);
       }
-      if (prepared.observeDispatch !== null) prepared.observeDispatch(callId, name, name, allowed);
+      if (prepared.observeDispatch !== null) prepared.observeDispatch(callId);
     }
-    return result;
   };
 
-  // ModelGateway._restore_rejected_calls.
+  // Restore the model's own tool calls in OpenCode's history; a rejected call's result names the tools its request
+  // offered (or, from a continuation prefix, the recorded ones).
   const restoreRejectedCalls = (outgoing, session, opencodeRequest) => {
     const config = cfg();
     if (config.tool_names === null) return;
@@ -1152,9 +1143,9 @@ export const IfBoundary = async () => {
           // Dispatch records exist for string call IDs only (recordDispatch refuses any other).
           const identity = item(call, "id");
           pyKey(identity);
-          const dispatch = typeof identity === "string" ? state.dispatch.get(pyKey(session) + "\u0000" + identity) : undefined;
-          if (dispatch === undefined || dispatch === null) throw valueError("missing rejected-call dispatch evidence");
-          availableNames = dispatch.available_names;
+          const offered = typeof identity === "string" ? state.dispatch.get(pyKey(session) + "\u0000" + identity) : undefined;
+          if (offered === undefined || offered === null) throw valueError("missing rejected-call dispatch evidence");
+          availableNames = offered;
         }
         if (matches.length !== 1 || !isDict(matches[0])) throw valueError("ambiguous rejected model call in OpenCode's history");
         assign(call, "function", clone(matches[0]));
@@ -1177,7 +1168,7 @@ export const IfBoundary = async () => {
     }
   };
 
-  // ModelGateway.forward, wrapped around the provider's fetch.
+  // One model call through the provider's fetch: check, present, forward and record it.
   const handle = async (input, init, inner, call) => {
     let observation = null;
     try {
@@ -1210,8 +1201,8 @@ export const IfBoundary = async () => {
         throw new PyError("JSONDecodeError", message(error));
       }
       if (!isDict(payload)) throw new PyError("AttributeError", `'${typeName(payload)}' object has no attribute 'get'`);
-      // Request kind as the if-request-kind plugin at 00be1884 set it: only a call with exactly one saved assistant
-      // has a kind.
+      // A call has a kind only when exactly one saved assistant owns it (chat.headers): the compaction agent's call is
+      // compaction; any other owned call, or one with tools, is an actor call; the rest (titles) pass unrecorded.
       const compaction = assistant !== null && identity[INTERNAL_AGENT] === "compaction";
       if (compaction && truthy(get(payload, "tools"))) throw valueError("OpenCode's compaction call requires an assistant identity and no tools");
       const actor = !compaction && (assistant !== null || truthy(get(payload, "tools")));
@@ -1260,8 +1251,8 @@ export const IfBoundary = async () => {
         throw new UpstreamError(error && error.name === "AbortError" ? "CancelledError" : "ClientConnectionError", error);
       }
       if (upstream.status >= 400) {
-        // Recorded as the Python gateway did; the reply itself reaches OpenCode unchanged, so OpenCode's own error
-        // handling (context overflow, retries) sees the real status.
+        // Recorded on the call's record (an issue when the call is not observed); the reply itself reaches OpenCode
+        // unchanged, so OpenCode's own error handling (context overflow, retries) sees the real status.
         if (observation !== null) {
           writeRecord({ kind: "transport_error", call, transport_error: { phase: "http_rejected", status: upstream.status } });
         } else recordIssue(call, new PyError("ClientResponseError", `model server returned HTTP ${upstream.status}`));
@@ -1281,7 +1272,7 @@ export const IfBoundary = async () => {
       } catch (error) {
         throw new UpstreamError(error && error.name === "AbortError" ? "CancelledError" : "ClientPayloadError", error);
       }
-      // aiohttp's response.json(): a JSON content type, stripped body, UTF-8, json.loads.
+      // A JSON reply: a JSON content type, the body stripped of surrounding whitespace, UTF-8, json.loads.
       const contentType = (upstream.headers.get("content-type") || "application/octet-stream").toLowerCase();
       if (!/^application\/(?:[\w.+-]+?\+)?json/.test(contentType.split(";")[0].trim())) {
         throw new PyError("ContentTypeError", `unexpected model reply content type ${contentType}`);
@@ -1293,10 +1284,10 @@ export const IfBoundary = async () => {
       while (start < end && [0x20, 0x09, 0x0a, 0x0d, 0x0b, 0x0c].includes(bytes[start])) start += 1;
       while (end > start && [0x20, 0x09, 0x0a, 0x0d, 0x0b, 0x0c].includes(bytes[end - 1])) end -= 1;
       const raw = end > start ? parseJson(decodeUtf8(bytes.subarray(start, end))) : null;
-      const result = prepared !== null ? replyForOpenCode(prepared, raw) : raw;
+      if (prepared !== null) observeReplyCalls(prepared, raw);
       observe(raw);
-      // Starlette's JSONResponse rendering.
-      const rendered = dumps(result, { compact: true, allowNan: false });
+      // Compact JSON, no NaN or Infinity.
+      const rendered = dumps(raw, { compact: true, allowNan: false });
       return new Response(rendered, { status: 200, headers: { "content-type": "application/json" } });
     } catch (error) {
       recordIssue(call, error);
@@ -1306,7 +1297,7 @@ export const IfBoundary = async () => {
 
   const streamReply = (upstream, prepared, observe, reportStreamError, call) => {
     const encoder = new TextEncoder();
-    const rewriter = new SseRewriter(new ChatStream(prepared, replyForOpenCode), observe, reportStreamError);
+    const rewriter = new SseRewriter(new ChatStream(prepared, observeReplyCalls), observe, reportStreamError);
     const reader = upstream.body ? upstream.body.getReader() : null;
     let finished = false;
     const fail = (controller, error) => {

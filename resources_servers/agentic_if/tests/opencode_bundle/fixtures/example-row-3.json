@@ -1,8 +1,6 @@
 {
  "case": "example-row-3",
  "kind": "gateway",
- "source": "resources_servers/agentic_if/data/example.jsonl line 4 (task_id 82b962c1fad2); request template = OpenCode 1.17.11 baseline request from the Phase 0 spike, paths sanitized",
- "code": "00be1884d931e3f083a548dc5ea6d231c74902e2",
  "spec": {
   "schema_version": 1,
   "harness": "opencode",

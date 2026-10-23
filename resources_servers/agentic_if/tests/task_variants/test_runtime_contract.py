@@ -41,7 +41,6 @@ def test_sealed_row_keeps_literal_messages_and_private_rubric_separate():
     assert row["responses_create_params"]["input"][0]["content"] == "Literal ${tool:read} and {value}."
     assert row["responses_create_params"]["input"][1]["content"] == "Repair the example."
     assert parsed.checks[0].rubric == "End with DONE."
-    assert "task_variant" not in row
     assert source == before
 
 
@@ -282,16 +281,15 @@ def test_prefix_event_receipts_are_rejected_not_ignored():
 def test_gym_collation_of_a_sealed_flat_row_keeps_its_content_identity():
     from nemo_gym.task_materialization import materialize_task
     from resources_servers.agentic_if.task_variants.builder import digest
-    from resources_servers.agentic_if.task_variants.materialization import sealed_task_input, validate_task_identity
+    from resources_servers.agentic_if.task_variants.materialization import sealed_task_input
 
     sealed = runtime.seal_runtime_row(base_row(), spec())
     collated = materialize_task({"task_id": digest(sealed)} | sealed, taskset="agentic_if:tests")
     # Collation takes the row's own id as the identity, ahead of instance_id, and keeps the field in task_input.
     assert collated["task_id"]["task_id"] == digest(sealed) == collated["task_input"]["task_id"]
-    validate_task_identity(collated)
     assert sealed_task_input(collated) == sealed
     runtime.validate_runtime(sealed_task_input(collated))
     forged = deepcopy(collated)
     forged["task_input"]["task_id"] = "0" * 64
     with pytest.raises(ValueError, match="identity"):
-        validate_task_identity(forged)
+        sealed_task_input(forged)

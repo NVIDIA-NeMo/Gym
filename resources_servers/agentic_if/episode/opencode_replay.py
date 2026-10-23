@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Restore a continuation's recorded prefix; no separate rollout or grading lifecycle.
+"""Restore a continuation's recorded prefix.
 
 The workspace half runs at seed: replay the prefix's shell commands, reset the repository and apply the recorded diff.
 The session half is OpenCode's: the harness imports the staged prefix export and continues it. Verification binds the
@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from pydantic import JsonValue
 
-from resources_servers.agentic_if.episode import opencode_prefix as replay
+from resources_servers.agentic_if.episode import opencode_prefix
 from resources_servers.agentic_if.episode.runtime import BoundSandbox
 from resources_servers.agentic_if.episode.workspace import WORKSPACE_DIFF
 from resources_servers.agentic_if.if_grading.contracts import SessionEvidence
@@ -82,7 +82,7 @@ async def restore_workspace(
     source = continuation.prefix_export
     workdir = sandbox.workdir or str(source["info"].get("directory") or ".")
     mismatches = []
-    commands = replay.recorded_commands(source, default_workdir=workdir)
+    commands = opencode_prefix.recorded_commands(source, default_workdir=workdir)
     remote = None
     touched = set()
     if continuation.workspace_diff.strip():
@@ -139,7 +139,7 @@ async def restore_prefix_workspace(sandbox: BoundSandbox, spec: RuntimeSpec) -> 
     continuation = spec.continuation
     if continuation is None:
         raise ValueError("a continuation prefix is required")
-    recorded = replay.recorded_workspace_diff(continuation.prefix_export)
+    recorded = opencode_prefix.recorded_workspace_diff(continuation.prefix_export)
     if recorded is not None and not workspace_patches_equal(recorded, continuation.workspace_diff):
         raise ValueError("continuation workspace diff disagrees with the recorded prefix")
     staging = f"/tmp/nemo-gym-agentic-if-replay-{uuid4().hex}"
@@ -198,12 +198,14 @@ def continued_session(
     OpenCode's import keeps the prefix's message IDs, so the prefix is the root's messages with those IDs. Workspace
     divergence and real tool-result divergence are distinct facts.
     """
-    prefix_ids = frozenset(replay.prefix_message_ids(continuation.prefix_export))
+    prefix_ids = frozenset(opencode_prefix.prefix_message_ids(continuation.prefix_export))
     messages = [message for message in (export or {}).get("messages") or [] if isinstance(message, dict)]
     restored = {"messages": [m for m in messages if (m.get("info") or {}).get("id") in prefix_ids]}
     result = dict(receipt)
     result["prefix_messages"] = len(restored["messages"])
-    expected = [state.get("output", state.get("error")) for _, state in replay.tool_parts(continuation.prefix_export)]
-    observed = [state.get("output", state.get("error")) for _, state in replay.tool_parts(restored)]
+    expected = [
+        state.get("output", state.get("error")) for _, state in opencode_prefix.tool_parts(continuation.prefix_export)
+    ]
+    observed = [state.get("output", state.get("error")) for _, state in opencode_prefix.tool_parts(restored)]
     result["tool_outputs_match"] = expected == observed
     return ContinuedSession(session_id, prefix_ids, result, dict(artifacts))

@@ -15,7 +15,6 @@ CALL = {"call_id": "c", "invocation_id": "i", "tool": "read", "model_tool": "rea
     "fields,match",
     [
         ({"unknown_rule": {}}, "Extra inputs"),
-        ({"instruction_text": "Append me to the prompt"}, "Extra inputs"),
         ({"rubric": None}, "rubric"),
         ({"rubric": ""}, "rubric"),
         ({"rubric": "   "}, "rubric"),

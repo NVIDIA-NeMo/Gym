@@ -80,10 +80,10 @@ class BundleReceipt:
     files: dict
 
 
-def seed_body(row, *, session="resources-1", episode=EPISODE):
+def seed_body(row, *, session="resources-1"):
     return ResourcesSeedSessionRequest(
         resources_session_id=session,
-        episode_id=episode,
+        episode_id=EPISODE,
         task_id=TaskId(taskset="agentic_if:tests", task_id=row["task_id"]),
         task_data=task_data(row),
     )
@@ -110,7 +110,6 @@ def world(tmp_path, monkeypatch):
     )
 
     async def connect(descriptor, *, provider):
-        sandbox.descriptor = descriptor
         return sandbox
 
     async def stage_bundle(io, *, spec, agent_user):
@@ -138,7 +137,6 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(resources, "create_provider", lambda config: SimpleNamespace())
     monkeypatch.setattr(opencode_bundle, "stage_bundle", stage_bundle)
     monkeypatch.setattr(opencode_bundle, "collect_bundle", collect_bundle)
-    monkeypatch.setattr(opencode_bundle, "SESSION_IMPORT_PATH", "/tmp/nemo-gym-agentic-if/prefix-export.json")
     monkeypatch.setattr(judge_module.time, "sleep", lambda seconds: None)
     state.server = make_server(state.artifacts, backends)
     return state
@@ -153,8 +151,8 @@ def make_server(artifacts, backends, **settings):
             "name": "agentic_if",
             "judge_model_server": {"type": "responses_api_models", "name": "judge"},
             "task_resources": {
-                "swe": {"server": {"type": "resources_servers", "name": "tasks"}},
-                "tb21": {"server": {"type": "resources_servers", "name": "tasks"}},
+                "swe": {"type": "resources_servers", "name": "tasks"},
+                "tb21": {"type": "resources_servers", "name": "tasks"},
             },
             "artifacts_dir": artifacts,
             "max_concurrent_grades": 1,
@@ -234,7 +232,6 @@ def test_runtime_files_resolve_under_the_gym_root_and_must_exist(world):
 @pytest.mark.parametrize("defect", ["task_receipt", "identity", "backend_disabled", "backend_rejects", "cwd"])
 async def test_an_invalid_row_is_a_terminal_422_and_leaves_nothing_allocated(world, tmp_path, defect):
     row = swe_row()
-    options = {}
     if defect == "task_receipt":
         row["instance_id"] = "another-task"
     elif defect == "identity":
@@ -243,7 +240,7 @@ async def test_an_invalid_row_is_a_terminal_422_and_leaves_nothing_allocated(wor
         world.server = make_server(
             tmp_path / "other",
             world.backends,
-            task_resources={"tb21": {"server": {"type": "resources_servers", "name": "tasks"}}},
+            task_resources={"tb21": {"type": "resources_servers", "name": "tasks"}},
         )
     elif defect == "backend_rejects":
         world.backends.seed_error = http_error(422)
@@ -255,7 +252,7 @@ async def test_an_invalid_row_is_a_terminal_422_and_leaves_nothing_allocated(wor
             await world.server.seed_session(caller(), body)
     else:
         with pytest.raises(HTTPException) as rejected:
-            await seed(world, row, **options)
+            await seed(world, row)
     assert rejected.value.status_code == 422
     assert not world.server._episodes
     seeded = len(world.backends.to("/seed_session"))
@@ -528,15 +525,10 @@ async def test_infrastructure_failures_are_masked_scored_rows(world, case, kind,
 
 @pytest.mark.asyncio
 async def test_a_verify_that_failed_before_recording_its_episode_is_not_repeated(world, monkeypatch):
-    save_json = app_module.save_json
-    failures = [OSError("No space left on device")]
+    def unwritable(path, payload):
+        raise OSError("No space left on device")
 
-    def unwritable_once(path, payload):
-        if failures:
-            raise failures.pop()
-        save_json(path, payload)
-
-    monkeypatch.setattr(app_module, "save_json", unwritable_once)
+    monkeypatch.setattr(app_module, "save_json", unwritable)
     row = swe_row()
     _, session_id = await seed(world, row)
     with pytest.raises(OSError):
@@ -850,11 +842,6 @@ def test_a_session_server_refuses_more_than_one_worker(tmp_path):
         make_server(tmp_path, Backends(), num_workers=2)
 
 
-def test_artifacts_dir_must_be_absolute(tmp_path):
-    with pytest.raises(ValidationError, match="absolute"):
-        make_server(Path("results/agentic_if"), Backends())
-
-
 def test_the_server_declares_stateless_reverification_and_no_ray():
     assert AgenticIFResourcesServerConfig.REVERIFY_MODE.value == "stateless"
     assert AgenticIFResourcesServer.ray_enabled is False
@@ -1107,7 +1094,7 @@ def real_bundle(world, monkeypatch):
     return world
 
 
-def leave_bundle_outputs(sandbox, staged, *, boundary_loaded=True, answer="DONE", system=None, configured_with=None):
+def leave_bundle_outputs(sandbox, staged, *, boundary_loaded=True, system=None, configured_with=None):
     """Write what OpenCode and the two plugins leave in the bundle when the run ends, as the real ones do.
 
     ``system`` is the system prompt the model calls carried; ``configured_with`` the instructions the boundary read
@@ -1115,13 +1102,13 @@ def leave_bundle_outputs(sandbox, staged, *, boundary_loaded=True, answer="DONE"
     """
     root = opencode_bundle.BUNDLE_ROOT
     files = staged["files"]
-    session = finished_session(answer)
+    session = finished_session()
     hooks = [
         {"kind": "loaded", "profile_sha256": staged["profile_sha256"]},
         {"kind": "plugin", "plugin": "if-profile", "plugin_sha256": files[f"{root}/if-profile.mjs"]},
     ]
     configured_with = system if configured_with is None else configured_with
-    record = final_call_record(answer)
+    record = final_call_record()
     if system is not None:
         record["request"]["messages"].insert(0, {"role": "system", "content": system})
     calls = [

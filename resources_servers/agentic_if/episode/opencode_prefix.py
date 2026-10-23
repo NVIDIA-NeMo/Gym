@@ -3,8 +3,8 @@
 """Read a continuation's recorded OpenCode prefix.
 
 A continuation row carries the OpenCode export of the session so far and the workspace diff at its cut.
-``opencode_replay`` re-runs the prefix's shell commands, restores the files and imports the export before the
-continuation's user message. These helpers are pure; ``opencode_replay`` does the sandbox work.
+``opencode_replay`` re-runs the prefix's shell commands and restores the files at seed; the harness imports the export
+(``session_import_path``). These helpers are pure; ``opencode_replay`` does the sandbox work.
 """
 
 import math

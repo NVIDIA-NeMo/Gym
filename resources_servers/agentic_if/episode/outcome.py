@@ -67,8 +67,8 @@ def execution_status(
 
     The OpenCode agent reports a harness timeout as an incomplete response. The root export tells a timeout apart from
     a stop at the output-token limit (``length``), an error the last turn recorded, and a content filter, which counts
-    as completed, as it did for the episode's own driver. A run that ended by itself keeps that driver's checks: no
-    assistant turn, a turn error or incomplete evidence is an ``error``.
+    as completed. A run that ended by itself is an ``error`` when it has no assistant turn, its last turn recorded an
+    error, or its evidence is incomplete.
     """
     assistants = _assistants(root_export)
     last = assistants[-1] if assistants else {}

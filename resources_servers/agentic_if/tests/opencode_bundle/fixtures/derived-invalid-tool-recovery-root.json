@@ -1,8 +1,6 @@
 {
  "case": "derived-invalid-tool-recovery-root",
  "kind": "gateway",
- "source": "derived from test_model_gateway.py::test_invalid_tool_recovery_lists_only_the_tools_offered_for_that_call, alias-free",
- "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
  "notes": "",
  "spec": {
   "schema_version": 1,

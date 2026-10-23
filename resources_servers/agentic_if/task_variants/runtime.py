@@ -210,6 +210,12 @@ def _validate_row(row: Mapping[str, object], spec: RuntimeSpec) -> list[dict]:
     systems = [message for message in messages if message["role"] == "system"]
     if len(systems) > 1:
         raise ValueError("input accepts at most one resolved system message")
+    _validate_sources(row, spec)
+    return messages
+
+
+def _validate_sources(row: Mapping[str, object], spec: RuntimeSpec) -> None:
+    """The task source, and a continuation's source receipts: checks that need no actor request."""
     if any(key in row for key in ("task_ref", "dataset_ref")):
         raise ValueError("package task references (task_ref, dataset_ref) are not a supported task source")
     if spec.continuation:
@@ -217,7 +223,6 @@ def _validate_row(row: Mapping[str, object], spec: RuntimeSpec) -> list[dict]:
             raise ValueError("continuation source task receipt does not match")
         if spec.continuation.source_tools_sha256 != digest(spec.tools.model_dump(mode="json")):
             raise ValueError("continuation source tools receipt does not match")
-    return messages
 
 
 def _receipt(row: Mapping[str, object], spec: RuntimeSpec, messages: list[dict]) -> InputReceipt:
@@ -258,4 +263,21 @@ def validate_runtime(row: Mapping[str, object]) -> RuntimeSpec:
     messages = _validate_row(row, spec)
     if spec.receipt is None or spec.receipt != _receipt(row, spec, messages):
         raise ValueError("IF input receipt does not match actor, task, or configuration")
+    return spec
+
+
+def validate_seed_runtime(row: Mapping[str, object]) -> RuntimeSpec:
+    """Validate a sealed row's configuration and the receipts that do not depend on the actor's request.
+
+    An Environment Server seeds with the task data only: the actor's ``responses_create_params`` reach the Resources
+    Server at verify, where ``validate_runtime`` checks every receipt.
+    """
+    spec = RuntimeSpec.model_validate(row.get("agentic_if"))
+    _validate_sources(row, spec)
+    if spec.receipt is None:
+        raise ValueError("IF input receipt is missing")
+    if spec.receipt.task_sha256 != backend_task_digest(dict(row)):
+        raise ValueError("IF input receipt does not match the task")
+    if spec.receipt.interfaces_sha256 != digest(installed_interfaces(spec.tools.tool_interfaces)):
+        raise ValueError("IF input receipt does not match the installed interfaces")
     return spec

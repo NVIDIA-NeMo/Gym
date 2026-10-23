@@ -33,13 +33,11 @@ agentic_if_resources:
       # The resources servers that own the task sandboxes, by the row's agentic_if.task_backend.
       task_resources:
         swe:
-          server:
-            type: resources_servers
-            name: scale_swe_resources_server
+          type: resources_servers
+          name: scale_swe_resources_server
         tb21:
-          server:
-            type: resources_servers
-            name: terminal_bench_2_1_resources_server
+          type: resources_servers
+          name: terminal_bench_2_1_resources_server
       # Each episode's evidence, receipts and task verdict, which re-verification reads. Rollout data: keep it private.
       # Absolute: the run's results_dir (which Gym makes absolute) unless agentic_if_artifacts_dir names another place.
       artifacts_dir: ${oc.select:agentic_if_artifacts_dir,${oc.select:results_dir,results}/agentic_if}
@@ -64,14 +62,14 @@ agentic_if_judge_model:
       # Each attempt of a judge call; a failed call is retried by the model server and then by the grader.
       upstream_request_timeout_seconds: 600
 
-# The harness. Its pinned offline runtime bundle (binary, ripgrep, plugin dependencies) is set by each run, since a
-# SHA-256 without its path is refused.
+# The harness. A run that pins the OpenCode binary sets its path and SHA-256 together (a SHA-256 without its path is
+# refused); benchmarks/agentic_if/config.yaml also stages ripgrep and the plugin dependencies.
 agentic_if_opencode_agent:
   # Moves the base instance, so no extra server starts.
   _inherit_from: opencode_agent
   responses_api_agents:
     opencode_agent:
-      # OpenCode's context, input and output limits, as the benchmark always ran them.
+      # OpenCode's context, input and output limits: the benchmark's budgets.
       context_window: 131072
       max_output_tokens: 131072
       # The harness budget of one episode.
@@ -90,7 +88,8 @@ agentic_if_opencode_agent:
       opencode_config:
         # No tools map: with the permission map's "*": allow it would expose skill and webfetch again.
         tools: null
-        # The default map plus the three denies the benchmark always had; tool selection is per row (the plugins).
+        # The default map plus three denies: webfetch, websearch and skill are never offered; tool selection is per
+        # row (the plugins).
         permission:
           webfetch: deny
           websearch: deny

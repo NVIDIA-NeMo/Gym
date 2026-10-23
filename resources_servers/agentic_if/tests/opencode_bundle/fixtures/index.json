@@ -1,286 +1,173 @@
 {
- "about": "Golden input -> output pairs of the Python model gateway at commit 00be1884 (environment_servers/agentic_if, removed since). Needed fixtures must match the boundary plugin byte for byte; dropped ones exercise features no sealed or example row uses. derive_fixtures.py documents how they were made.",
- "needed": [
+ "about": "Golden input -> output pairs for if-boundary.mjs: OpenCode's request, the model server's reply, what the plugin sends and returns, and the records it writes. test_golden_equivalence.py replays every fixture listed here and requires a byte-for-byte match.",
+ "cases": [
   {
    "case": "example-row-0",
-   "origin": "phase0-spike golden fixture of the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
-   "feature": "public example rows: OpenCode's own system prompt and tool inventory, real OpenCode 1.17.11 request, stream"
+   "feature": "real OpenCode 1.17.11 request and stream for a row without a system prompt or tool selection"
   },
   {
    "case": "example-row-1",
-   "origin": "phase0-spike golden fixture of the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
-   "feature": "public example rows: OpenCode's own system prompt and tool inventory, real OpenCode 1.17.11 request, stream"
+   "feature": "real OpenCode 1.17.11 request and stream for a row without a system prompt or tool selection"
   },
   {
    "case": "example-row-2",
-   "origin": "phase0-spike golden fixture of the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
-   "feature": "public example rows: OpenCode's own system prompt and tool inventory, real OpenCode 1.17.11 request, stream"
+   "feature": "real OpenCode 1.17.11 request and stream for a row without a system prompt or tool selection"
   },
   {
    "case": "example-row-3",
-   "origin": "phase0-spike golden fixture of the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
-   "feature": "public example rows: OpenCode's own system prompt and tool inventory, real OpenCode 1.17.11 request, stream"
+   "feature": "real OpenCode 1.17.11 request and stream for a row without a system prompt or tool selection"
   },
   {
    "case": "example-row-4",
-   "origin": "phase0-spike golden fixture of the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
-   "feature": "public example rows: OpenCode's own system prompt and tool inventory, real OpenCode 1.17.11 request, stream"
+   "feature": "real OpenCode 1.17.11 request and stream for a row without a system prompt or tool selection"
   },
   {
    "case": "prepare-text-blocks-framing",
-   "origin": "phase0-spike golden fixture of the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
    "feature": "OpenCode's text-part user content accepted unchanged"
   },
   {
    "case": "prepare-system-none-root",
-   "origin": "phase0-spike golden fixture of the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
    "feature": "no system text: OpenCode's system/developer messages kept"
   },
   {
    "case": "prepare-system-none-child",
-   "origin": "phase0-spike golden fixture of the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
    "feature": "no system text, child session"
   },
   {
    "case": "prepare-system-literal-root",
-   "origin": "phase0-spike golden fixture of the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
    "feature": "literal system text replaces system/developer and instructions"
   },
   {
    "case": "prepare-system-literal-child",
-   "origin": "phase0-spike golden fixture of the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
    "feature": "literal system text in a child session"
   },
   {
    "case": "prepare-empty-selection-refuses-exposed-tools",
-   "origin": "phase0-spike golden fixture of the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
    "feature": "inventory check refusal"
   },
   {
    "case": "gateway-compaction-json",
-   "origin": "phase0-spike golden fixture of the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
    "feature": "compaction bypass and record (JSON)",
    "normalize_aliases": true
   },
   {
    "case": "gateway-compaction-stream",
-   "origin": "phase0-spike golden fixture of the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
    "feature": "compaction bypass and record (stream)",
    "normalize_aliases": true
   },
   {
    "case": "gateway-auxiliary-title",
-   "origin": "phase0-spike golden fixture of the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
    "feature": "auxiliary call forwarded untouched, not recorded",
    "normalize_aliases": true
   },
   {
    "case": "gateway-max-completion-tokens",
-   "origin": "phase0-spike golden fixture of the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
    "feature": "max_completion_tokens sent as max_tokens"
   },
   {
    "case": "derived-auxiliary-title",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived from test_model_gateway.py::test_open_code_auxiliary_calls_are_not_actor_evidence_or_prompt_overrides"
+   "feature": "an auxiliary call (no saved assistant, no tools) is forwarded untouched and not recorded"
   },
   {
    "case": "derived-child-intersection",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived from test_model_boundary.py::test_child_permissions_are_intersected_not_expanded (child), alias-free"
+   "feature": "a child session may be offered a subset of the selected tools"
   },
   {
    "case": "derived-compaction-json",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived: OpenCode's compaction call bypasses actor presentation but is recorded (JSON)"
+   "feature": "OpenCode's compaction call bypasses actor presentation but is recorded (JSON)"
   },
   {
    "case": "derived-compaction-stream",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived: OpenCode's compaction call bypasses actor presentation but is recorded (stream)"
+   "feature": "OpenCode's compaction call bypasses actor presentation but is recorded (stream)"
   },
   {
    "case": "derived-descriptions-pointers-history",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived: model_boundary describe_parameters (pointers into properties, items, anyOf, $defs, tuple items), tool_choice, tool-message name removal, history restore"
+   "feature": "parameter descriptions at JSON pointers (properties, items, anyOf, $defs, tuple items), tool_choice, tool-message name removal, history restore"
   },
   {
    "case": "derived-duplicate-call-identity",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived: ModelGateway._record_dispatch refuses a duplicate tool call ID (stream)"
+   "feature": "a duplicate tool call ID in a stream is refused"
   },
   {
    "case": "derived-historical-rejected-call",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived from test_invalid_replay.py::test_captured_rejected_call_survives_export_and_continuation (invalid case)"
+   "feature": "a rejected call recorded in a continuation prefix is presented in the root session and refused in a child session"
   },
   {
    "case": "derived-http-rejection",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived: an HTTP rejection is retained without poisoning OpenCode's retry",
+   "feature": "an HTTP rejection is recorded without poisoning OpenCode's retry",
    "returned": "pass_through"
   },
   {
    "case": "derived-invalid-json-repair-selected",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived from test_model_gateway.py::test_selected_tool_json_repair_preserves_observed_arguments_without_changing_defaults"
+   "feature": "OpenCode's invalid-JSON repair: the model's raw arguments are restored in history (tools selected)"
   },
   {
    "case": "derived-invalid-json-repair-unrestricted",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived from test_model_gateway.py::test_selected_tool_json_repair_preserves_observed_arguments_without_changing_defaults"
+   "feature": "OpenCode's invalid-JSON repair: the model's raw arguments are restored in history (no selection)"
   },
   {
    "case": "derived-invalid-tool-recovery-child",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived from test_model_gateway.py::test_invalid_tool_recovery_lists_only_the_tools_offered_for_that_call, alias-free"
+   "feature": "an invalid tool call's result lists the tools its request offered (child session)"
   },
   {
    "case": "derived-invalid-tool-recovery-root",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived from test_model_gateway.py::test_invalid_tool_recovery_lists_only_the_tools_offered_for_that_call, alias-free"
+   "feature": "an invalid tool call's result lists the tools its request offered (root session)"
   },
   {
    "case": "derived-json-history-restore",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived from test_model_gateway.py::test_successful_invalid_alias_keeps_its_result_in_current_and_imported_history, alias-free"
+   "feature": "a JSON reply's tool calls are restored in later history"
   },
   {
    "case": "derived-json-number-and-text-fidelity",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived: the JSON reply as Starlette's JSONResponse rendered it"
+   "feature": "a JSON reply re-rendered as compact JSON with numbers and text unchanged"
   },
   {
    "case": "derived-lowercase-repair",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived: model_boundary reply mapping for OpenCode, lowercase branch, no aliases"
+   "feature": "OpenCode's lowercase tool-name repair is recorded in execution_tools"
   },
   {
    "case": "derived-missing-call-identity",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived: ModelGateway._record_dispatch refuses a tool call without an ID"
+   "feature": "a tool call without an ID is refused"
   },
   {
    "case": "derived-name-after-arguments",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived: model_streaming refuses a function name continued after its arguments started"
+   "feature": "a stream whose function name continues after its arguments started is refused"
   },
   {
    "case": "derived-non-text-user-content",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived: model_boundary refuses non-text user content in the root session"
+   "feature": "non-text user content in the root session is refused"
   },
   {
    "case": "derived-opencode-literal-system-and-history",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "phase0-spike fixture spike-boundary-cross-check (real OpenCode 1.17.11 requests), alias-free spec; single user message equal to OpenCode's joined user text"
+   "feature": "real OpenCode 1.17.11 requests with the row's literal system prompt, every tool selected and described, and raw tool-call arguments restored in history"
   },
   {
    "case": "derived-root-missing-selected-tool",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived from test_model_boundary.py::test_child_permissions_are_intersected_not_expanded (root), alias-free"
+   "feature": "a selected tool missing from the root session's request is refused"
   },
   {
    "case": "derived-stream-number-and-text-fidelity",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived: model_streaming re-serializes every data event with json.dumps(ensure_ascii=False)"
+   "feature": "every SSE data event re-serialized with numbers and text unchanged"
   },
   {
    "case": "derived-stream-split-name",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived from test_model_gateway.py::test_chat_stream_preserves_fragments_and_observes_model_visible_calls, alias-free"
+   "feature": "a tool-call name split across chunks reaches OpenCode whole"
   },
   {
    "case": "derived-stream-without-terminal-choice",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived from test_model_gateway.py::test_truncated_stream_is_not_a_completed_observation"
+   "feature": "a stream without a terminal choice is refused and records no response"
   },
   {
    "case": "derived-tool-choice-unselected",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived: model_boundary refuses a tool_choice that names an unselected tool"
+   "feature": "a tool_choice naming an unselected tool is refused"
   },
   {
    "case": "derived-unexpected-tools",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived: model_boundary inventory check (OpenCode exposed unexpected tools)"
+   "feature": "OpenCode exposing an unselected tool is refused"
   },
   {
    "case": "derived-unknown-parameter-target",
-   "origin": "derived: the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py), recorded by derive_fixtures.py",
-   "feature": "derived: model_boundary describe_parameters refuses a pointer to a missing property"
-  }
- ],
- "dropped": [
-  {
-   "case": "spike-boundary-cross-check",
-   "dropped": "aliases, split user turns, max_output_tokens",
-   "replaced_by": "derived-opencode-literal-system-and-history"
-  },
-  {
-   "case": "prepare-selected-aliases-descriptions",
-   "dropped": "aliases",
-   "replaced_by": "derived-descriptions-pointers-history"
-  },
-  {
-   "case": "prepare-lowercase-alias-repair",
-   "dropped": "alias case repair",
-   "replaced_by": "derived-lowercase-repair"
-  },
-  {
-   "case": "prepare-split-user-turns-with-framing",
-   "dropped": "splitting joined user turns",
-   "replaced_by": null
-  },
-  {
-   "case": "prepare-system-and-two-user-turns",
-   "dropped": "splitting joined user turns",
-   "replaced_by": "prepare-system-literal-root"
-  },
-  {
-   "case": "prepare-system-empty-root",
-   "dropped": "explicit empty system text (the agent writes no empty instructions file)",
-   "replaced_by": null
-  },
-  {
-   "case": "prepare-system-empty-child",
-   "dropped": "explicit empty system text (the agent writes no empty instructions file)",
-   "replaced_by": null
-  },
-  {
-   "case": "prepare-child-intersection",
-   "dropped": "aliases",
-   "replaced_by": "derived-child-intersection"
-  },
-  {
-   "case": "prepare-root-missing-selected-tool-refused",
-   "dropped": "aliases",
-   "replaced_by": "derived-root-missing-selected-tool"
-  },
-  {
-   "case": "prepare-max-output-tokens-clamp",
-   "dropped": "max_output_tokens cap",
-   "replaced_by": null
-  },
-  {
-   "case": "gateway-stream-split-alias",
-   "dropped": "aliases (reply mapping)",
-   "replaced_by": "derived-stream-split-name"
-  },
-  {
-   "case": "gateway-nonstream-alias-and-history-restore",
-   "dropped": "aliases (reply mapping)",
-   "replaced_by": "derived-json-history-restore"
-  },
-  {
-   "case": "gateway-invalid-tool-recovery-root",
-   "dropped": "aliases (names in the rejection text)",
-   "replaced_by": "derived-invalid-tool-recovery-root"
-  },
-  {
-   "case": "gateway-invalid-tool-recovery-child",
-   "dropped": "aliases (names in the rejection text)",
-   "replaced_by": "derived-invalid-tool-recovery-child"
+   "feature": "a parameter description pointing at a missing property is refused"
   }
  ]
 }

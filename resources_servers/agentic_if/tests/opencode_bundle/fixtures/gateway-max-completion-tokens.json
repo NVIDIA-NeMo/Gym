@@ -1,8 +1,6 @@
 {
  "case": "gateway-max-completion-tokens",
  "kind": "gateway",
- "source": "derived from model_gateway.py forward (max_completion_tokens)",
- "code": "00be1884d931e3f083a548dc5ea6d231c74902e2",
  "spec": {
   "schema_version": 1,
   "harness": "opencode",

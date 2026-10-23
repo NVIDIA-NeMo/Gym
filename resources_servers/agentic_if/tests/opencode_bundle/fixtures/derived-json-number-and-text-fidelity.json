@@ -1,8 +1,6 @@
 {
  "case": "derived-json-number-and-text-fidelity",
  "kind": "gateway",
- "source": "derived: the JSON reply as Starlette's JSONResponse rendered it",
- "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
  "notes": "",
  "spec": {
   "schema_version": 1,

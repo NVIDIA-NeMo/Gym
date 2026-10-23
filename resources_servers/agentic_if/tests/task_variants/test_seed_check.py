@@ -6,9 +6,14 @@ from copy import deepcopy
 
 import pytest
 
-from resources_servers.agentic_if.episode.seed_check import validate_seed_runtime
 from resources_servers.agentic_if.task_variants.builder import digest
-from resources_servers.agentic_if.task_variants.runtime import RuntimeSpec, seal_runtime_row, validate_runtime
+from resources_servers.agentic_if.task_variants.runtime import (
+    RuntimeSpec,
+    seal_runtime_row,
+    validate_runtime,
+    validate_seed_runtime,
+)
+from resources_servers.agentic_if.tests.support import task_data
 
 
 def sealed(**configuration):
@@ -18,18 +23,9 @@ def sealed(**configuration):
     )
 
 
-def seed_data(row):
-    return {key: value for key, value in row.items() if key != "responses_create_params"}
-
-
 def test_a_sealed_row_passes_at_seed_and_its_full_check_at_verify():
     row = sealed(tools={"tool_names": {"bash": "bash", "read": "read"}, "tool_interfaces": {}})
-    assert validate_seed_runtime(seed_data(row)) == validate_runtime(row)
-    # A row that still carries its request is checked in full.
-    tampered = deepcopy(row)
-    tampered["responses_create_params"]["input"][0]["content"] = "Tampered"
-    with pytest.raises(ValueError, match="receipt"):
-        validate_seed_runtime(tampered)
+    assert validate_seed_runtime(task_data(row)) == validate_runtime(row)
 
 
 @pytest.mark.parametrize(
@@ -43,7 +39,7 @@ def test_a_sealed_row_passes_at_seed_and_its_full_check_at_verify():
     ],
 )
 def test_each_request_independent_receipt_is_checked_at_seed(defect, message):
-    data = seed_data(sealed())
+    data = task_data(sealed())
     if defect == "task":
         data["instance_id"] = "another-task"
     elif defect == "receipt":
@@ -81,7 +77,7 @@ def test_a_continuation_must_continue_this_task_with_these_tools():
     from resources_servers.agentic_if.task_variants.tasks import backend_task_digest
 
     task = backend_task_digest({"instance_id": "task-a"})
-    data = seed_data(sealed(continuation=continuation_row(task=task)))
+    data = task_data(sealed(continuation=continuation_row(task=task)))
     assert validate_seed_runtime(data).continuation is not None
     for change, message in ((dict(task="1" * 64), "source task"), (dict(task=task, tools="2" * 64), "source tools")):
         with pytest.raises(ValueError, match=message):

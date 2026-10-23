@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from aiohttp import ClientResponseError
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, ValidationError, field_validator
+from pydantic import ConfigDict, Field, JsonValue, PrivateAttr, ValidationError, field_validator
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
@@ -66,7 +66,6 @@ from resources_servers.agentic_if.episode.judging import (
 from resources_servers.agentic_if.episode.opencode_replay import restore_prefix_workspace
 from resources_servers.agentic_if.episode.outcome import ExecutionStatus, Verdict, classify, execution_status
 from resources_servers.agentic_if.episode.resources import SandboxTaskSession
-from resources_servers.agentic_if.episode.seed_check import validate_seed_runtime
 from resources_servers.agentic_if.episode.session_evidence import (
     collection_failed,
     evidence_from_bundle,
@@ -81,21 +80,13 @@ from resources_servers.agentic_if.episode.workspace import (
 from resources_servers.agentic_if.if_grading.contracts import IFResult, ResolvedCheck, SessionEvidence
 from resources_servers.agentic_if.if_grading.engine import grade
 from resources_servers.agentic_if.if_grading.judge import Judge
-from resources_servers.agentic_if.task_variants.materialization import sealed_task_input, validate_task_identity
-from resources_servers.agentic_if.task_variants.runtime import RuntimeSpec, validate_runtime
+from resources_servers.agentic_if.task_variants.materialization import sealed_task_input
+from resources_servers.agentic_if.task_variants.runtime import RuntimeSpec, validate_runtime, validate_seed_runtime
 
 
 LOG = logging.getLogger(__name__)
 
 TaskBackend = Literal["swe", "tb21"]
-
-
-class TaskBackendSettings(BaseModel):
-    """One task backend: the Resources Server that owns its sandboxes through typed resources sessions."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    server: ResourcesServerRef
 
 
 class AgenticIFResourcesServerConfig(BaseResourcesServerConfig):
@@ -110,7 +101,7 @@ class AgenticIFResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     max_concurrent_grades: int = Field(default=8, gt=0)
     # The Resources Servers that own the task sandboxes, by the row's `agentic_if.task_backend`.
-    task_resources: dict[TaskBackend, TaskBackendSettings] = Field(min_length=1)
+    task_resources: dict[TaskBackend, ResourcesServerRef] = Field(min_length=1)
     # Per-episode evidence, receipts and verdicts: rollout data, keep it private. It backs re-verification.
     artifacts_dir: Path
     # Caps each command seed runs in the task sandbox (workspace staging, baseline, prefix replay).
@@ -320,16 +311,12 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
 
     def _validated_task(
         self, body: ResourcesSeedSessionRequest
-    ) -> tuple[dict[str, JsonValue], RuntimeSpec, TaskBackendSettings]:
+    ) -> tuple[dict[str, JsonValue], RuntimeSpec, ResourcesServerRef]:
         """The sealed task (its identity field removed), its configuration and its task backend; 422 if invalid."""
         try:
-            task = {"task_id": body.task_id.model_dump(mode="json"), "task_input": body.task_data}
-            content = sealed_task_input(task)
-            if not isinstance(content, Mapping):
-                raise ValueError("task_data must be an object")
-            if "responses_create_params" in content:
-                validate_task_identity(task)
-            content = dict(content)
+            content = dict(
+                sealed_task_input({"task_id": body.task_id.model_dump(mode="json"), "task_input": body.task_data})
+            )
             spec = validate_seed_runtime(content)
         except ValueError as error:
             detail = error.errors(include_input=False) if isinstance(error, ValidationError) else str(error)
@@ -344,12 +331,12 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
         episode: _Episode,
         body: ResourcesSeedSessionRequest,
         spec: RuntimeSpec,
-        backend: TaskBackendSettings,
+        backend: ResourcesServerRef,
     ) -> ResourcesSeedSessionResponse:
         """Seed the task backend, then prepare the borrowed sandbox for the actor, in the episode's order."""
         task = episode.task = SandboxTaskSession(
             client=self.server_client,
-            server_name=backend.server.name,
+            server_name=backend.name,
             row=episode.content,
             client_session_id=f"agentic-if-{episode.run_id}",
             timeout_s=self.config.sandbox_timeout_seconds,
@@ -371,7 +358,7 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
         agent_user = None if is_root_agent_user(sandbox.user) else sandbox.user
         staged = await bundle.stage(sandbox.transport, spec=spec, agent_user=agent_user)
         episode.profile_sha256 = staged.profile_sha256
-        episode.seed["bundle"] = staged.receipt
+        episode.seed["bundle"] = asdict(staged)
         if self.config.opencode_runtime_files:
             # After staging, which creates the bundle directory.
             episode.seed["runtime_files"] = await bundle.stage_runtime_files(
@@ -533,9 +520,7 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
             body.responses_create_params.model_dump(mode="json", exclude_unset=True)["input"]
         )
         try:
-            collected = await bundle.collect(
-                task.sandbox.transport, expected=episode.seed.get("bundle"), system=system
-            )
+            collected = await bundle.collect(task.sandbox.transport, expected=episode.seed["bundle"])
         # Deliberate boundary: an unreadable sandbox is this episode's recorded failure (session_lost), not a crash.
         except Exception as error:
             LOG.exception("Could not read the plugin bundle of agentic IF run %s", episode.run_id)
@@ -546,6 +531,7 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
                 evidence_from_bundle,
                 spec,
                 collected,
+                system=system,
                 profile_sha256=episode.profile_sha256,
                 seed=episode.seed,
                 directory=directory,

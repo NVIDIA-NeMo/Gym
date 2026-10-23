@@ -9,14 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from resources_servers.agentic_if.opencode_bundle import UnsupportedFeatureError, bundle_files, profile_sha256
+from resources_servers.agentic_if.opencode_bundle import UnsupportedFeatureError, bundle_files
 from resources_servers.agentic_if.opencode_bundle.boundary import (
     OPENCODE_EXTRA_TOOLS,
     compile_boundary,
     parameter_targets,
     prefix_model_calls,
 )
-from resources_servers.agentic_if.opencode_bundle.profile import compile_plants, compile_profile
+from resources_servers.agentic_if.opencode_bundle.profile import compile_plants, compile_profile, profile_sha256
 from resources_servers.agentic_if.task_variants.catalog import BUILTIN_TOOLS
 from resources_servers.agentic_if.task_variants.interfaces import installed_interfaces
 from resources_servers.agentic_if.task_variants.runtime import ContinuationSpec, RuntimeSpec
@@ -24,12 +24,13 @@ from resources_servers.agentic_if.task_variants.runtime import ContinuationSpec,
 from .specs import SPECS, continuation_spec, private_like_spec, unrestricted_spec
 
 
-# What the 00be1884 driver staged for each spec (fixtures/profile-goldens.json; derive_fixtures.py documents how).
+# The staged profile, plants and denies each spec compiles to (fixtures/profile-goldens.json): the profile is evidence
+# format, so its bytes must not drift.
 GOLDENS = json.loads((Path(__file__).with_name("fixtures") / "profile-goldens.json").read_text())["specs"]
 
 
 @pytest.mark.parametrize("name", sorted(SPECS))
-def test_profile_plants_and_denies_are_byte_identical_to_the_environment_server_driver(name: str) -> None:
+def test_profile_plants_and_denies_match_the_goldens(name: str) -> None:
     spec, golden = SPECS[name](), GOLDENS[name]
     profile = compile_profile(spec)
     assert profile == golden["profile"]

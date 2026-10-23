@@ -90,10 +90,10 @@ class BundleOutputs:
     event_records: list[dict[str, JsonValue]]
     """``receipts/hook-events-fired.jsonl``: the planted events' ``loaded``/``error`` line and their firings."""
     call_records: list[dict[str, JsonValue]]
-    """The boundary's model calls in the 00be1884 ``ModelGateway.observations`` format, in request order."""
+    """The boundary's observed model calls (``records.BoundaryRecords.observations``), in request order."""
     boundary_issues: list[str]
-    """The 00be1884 ``ModelGateway.issues``: exception type names; any issue made its episode an infrastructure
-    error."""
+    """Exception type names of the model calls the boundary refused or could not complete; any issue makes the
+    episode an infrastructure error."""
     boundary_receipts: list[dict[str, JsonValue]] = field(default_factory=list)
     """The boundary's ``loaded``/``load_error`` and ``configured``/``config_error`` lines, one per plugin instance."""
     gaps: list[str] = field(default_factory=list)
@@ -111,7 +111,8 @@ def bundle_files(spec: RuntimeSpec) -> dict[str, bytes]:
     return {
         PROFILE_PLUGIN: (SOURCE_DIR / PROFILE_PLUGIN).read_bytes(),
         BOUNDARY_PLUGIN: (SOURCE_DIR / BOUNDARY_PLUGIN).read_bytes(),
-        # json.dumps defaults, as the 00be1884 driver staged hook-config.json and hook-events.json.
+        # json.dumps defaults: the seed record keeps each staged file's digest (boundary.json's is also in the load
+        # receipt), and fixtures/profile-goldens.json pins the profile's bytes.
         PROFILE_CONFIG: json.dumps(compile_profile(spec)).encode(),
         PLANTS_CONFIG: json.dumps(compile_plants(spec)).encode(),
         BOUNDARY_CONFIG: json.dumps(compile_boundary(spec)).encode(),
@@ -218,35 +219,6 @@ class _Reader:
         return rows
 
 
-def _expected(expected: "BundleReceipt | Mapping[str, JsonValue] | None") -> dict[str, JsonValue] | None:
-    if expected is None:
-        return None
-    if isinstance(expected, BundleReceipt):
-        return {"profile_sha256": expected.profile_sha256, "boundary_sha256": expected.boundary_sha256} | {
-            "files": dict(expected.files)
-        }
-    return {key: expected.get(key) for key in ("profile_sha256", "boundary_sha256", "files")}
-
-
-async def _staged_digests(reader: _Reader) -> dict[str, JsonValue]:
-    """The digests of the files still staged in the sandbox, when the caller kept no ``BundleReceipt``."""
-    files, profile = {}, None
-    for name in (PROFILE_PLUGIN, BOUNDARY_PLUGIN, PROFILE_CONFIG, BOUNDARY_CONFIG):
-        data = await reader.read(name, gap=f"bundle_file_unavailable:{name}")
-        if data is not None:
-            files[f"{BUNDLE_ROOT}/{name}"] = _sha256(data)
-            if name == PROFILE_CONFIG:
-                try:
-                    profile = json.loads(data).get("profile_sha256")
-                except (ValueError, AttributeError):
-                    reader.gaps.append("bundle_file_unreadable:profile.json")
-    return {
-        "profile_sha256": profile,
-        "boundary_sha256": files.get(f"{BUNDLE_ROOT}/{BOUNDARY_CONFIG}"),
-        "files": files,
-    }
-
-
 async def _exports(io: SandboxIO, reader: _Reader, timeout: float) -> tuple[dict[str, dict], list[SessionInfo]]:
     """The agent's inventory (``sessions.json``) first, then each listed session's export.
 
@@ -276,7 +248,7 @@ async def _exports(io: SandboxIO, reader: _Reader, timeout: float) -> tuple[dict
         try:
             document = json.loads(data)
             identity = document["info"]["id"]
-            if not isinstance(document, dict) or not isinstance(identity, str) or not identity:
+            if not isinstance(identity, str) or not identity:
                 raise ValueError("the export names no session")
         except (ValueError, TypeError, KeyError):
             reader.gaps.append(f"export_unreadable:{session.id}")
@@ -360,7 +332,7 @@ def _check_receipts(
 async def collect_bundle(
     io: SandboxIO,
     *,
-    expected: BundleReceipt | Mapping[str, JsonValue] | None = None,
+    expected: Mapping[str, JsonValue],
     timeout: float = 120.0,
 ) -> BundleOutputs:
     """Read the exports, hook receipts, event records and boundary call records left in ``BUNDLE_ROOT``.
@@ -370,14 +342,13 @@ async def collect_bundle(
     Never raises for missing or unreadable parts: each is a named entry of ``gaps``.
     """
     reader = _Reader(io, timeout)
-    digests = _expected(expected) or await _staged_digests(reader)
     exports, sessions = await _exports(io, reader, timeout)
     hook_receipts = await reader.jsonl(f"receipts/{HOOK_RECEIPTS}", gap="hook_receipts")
     event_records = await reader.jsonl(f"receipts/{EVENT_RECEIPTS}", gap="event_records")
     call_rows = await reader.jsonl(f"receipts/{CALL_RECORDS}", gap="call_records")
     records = boundary_records(call_rows)
     gaps = reader.gaps + records.gaps
-    gaps += _check_receipts(digests, hook_receipts, records.loads, records.configurations)
+    gaps += _check_receipts(expected, hook_receipts, records.loads, records.configurations)
     gaps += [f"model_boundary_issue:{issue}" for issue in dict.fromkeys(records.issues)]
     return BundleOutputs(
         exports=exports,

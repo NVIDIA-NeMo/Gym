@@ -1,22 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The task input of a sealed row, and its content-digest identity, as Gym's episode routing carries them."""
+"""The task input of a sealed row, as Gym's episode routing carries it."""
 
 from collections.abc import Mapping
-
-from pydantic import BaseModel, ConfigDict
-
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from resources_servers.agentic_if.task_variants.builder import digest
-from resources_servers.agentic_if.task_variants.runtime import RuntimeSpec
-
-
-class AgenticIFTaskInput(BaseModel):
-    """Literal actor input, IF configuration, and the resource-owned fields of the backend task."""
-
-    model_config = ConfigDict(extra="allow")
-    responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    agentic_if: RuntimeSpec
 
 
 def sealed_task_input(task: Mapping[str, object]) -> object:
@@ -33,10 +19,3 @@ def sealed_task_input(task: Mapping[str, object]) -> object:
             raise ValueError("materialized task identity receipt does not match its content")
         return {key: value for key, value in content.items() if key != "task_id"}
     return content
-
-
-def validate_task_identity(task: Mapping[str, object]) -> None:
-    """Content-derived task identities must also hold at the execution boundary."""
-    identity = task.get("task_id")
-    if isinstance(identity, Mapping) and identity.get("task_id") != digest(sealed_task_input(task)):
-        raise ValueError("materialized task identity receipt does not match its content")

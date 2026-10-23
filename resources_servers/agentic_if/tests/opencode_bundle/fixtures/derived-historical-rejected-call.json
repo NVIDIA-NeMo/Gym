@@ -1,8 +1,6 @@
 {
  "case": "derived-historical-rejected-call",
  "kind": "gateway",
- "source": "derived from test_invalid_replay.py::test_captured_rejected_call_survives_export_and_continuation (invalid case)",
- "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
  "notes": "",
  "spec": {
   "schema_version": 1,

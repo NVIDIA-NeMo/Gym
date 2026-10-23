@@ -1,8 +1,6 @@
 {
  "case": "derived-lowercase-repair",
  "kind": "gateway",
- "source": "derived: model_boundary reply mapping for OpenCode, lowercase branch, no aliases",
- "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
  "notes": "",
  "spec": {
   "schema_version": 1,

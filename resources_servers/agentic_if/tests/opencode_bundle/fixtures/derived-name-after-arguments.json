@@ -1,8 +1,6 @@
 {
  "case": "derived-name-after-arguments",
  "kind": "gateway",
- "source": "derived: model_streaming refuses a function name continued after its arguments started",
- "code": "the Python gateway at commit 00be1884 (environment_servers/agentic_if/model_gateway.py)",
  "notes": "",
  "spec": {
   "schema_version": 1,

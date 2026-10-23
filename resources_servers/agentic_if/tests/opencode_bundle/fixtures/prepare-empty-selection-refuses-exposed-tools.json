@@ -1,8 +1,6 @@
 {
  "case": "prepare-empty-selection-refuses-exposed-tools",
  "kind": "prepare",
- "source": "environment_servers/agentic_if/tests/test_model_boundary.py: an empty selection exposes nothing and omitting it keeps OpenCode's default tools",
- "code": "00be1884d931e3f083a548dc5ea6d231c74902e2",
  "spec": {
   "schema_version": 1,
   "harness": "opencode",

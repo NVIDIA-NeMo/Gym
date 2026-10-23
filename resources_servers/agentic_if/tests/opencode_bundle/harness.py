@@ -22,7 +22,7 @@ BASE_URL = "http://model.test/ng-rollout/capture/v1"
 
 
 def sse_wire(events: list[dict]) -> bytes:
-    """The upstream bytes the 00be1884 gateway's test model server streamed for these events."""
+    """Upstream SSE bytes for these events: one CRLF-terminated ``data:`` event each, then ``data: [DONE]``."""
     wire = "".join("data: " + json.dumps(event) + "\r\n\r\n" for event in events) + "data: [DONE]\r\n\r\n"
     return wire.encode()
 
@@ -98,6 +98,7 @@ def run_boundary(
     profile_plugin: Path | None = None,
     global_probe: bool = False,
     bundle: Path | None = None,
+    provider_id: str | None = None,
 ) -> BoundaryRun:
     """Run the plugin over ``calls``; ``system`` is written to the instructions file the agent would write."""
     bundle = bundle or make_bundle(tmp_path, boundary)
@@ -118,6 +119,8 @@ def run_boundary(
         "global_probe": global_probe,
         "calls": calls,
     }
+    if provider_id is not None:
+        case["provider_id"] = provider_id
     case_file, result_file = tmp_path / "case.json", tmp_path / "result.json"
     case_file.write_text(json.dumps(case))
     finished = subprocess.run(

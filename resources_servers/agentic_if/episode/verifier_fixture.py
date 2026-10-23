@@ -29,8 +29,8 @@ def create_fixture_server() -> object:
         name="agentic_if",
         judge_model_server={"type": "responses_api_models", "name": "agentic_if_judge_model"},
         task_resources={
-            "swe": {"server": {"type": "resources_servers", "name": "scale_swe_resources_server"}},
-            "tb21": {"server": {"type": "resources_servers", "name": "terminal_bench_2_1_resources_server"}},
+            "swe": {"type": "resources_servers", "name": "scale_swe_resources_server"},
+            "tb21": {"type": "resources_servers", "name": "terminal_bench_2_1_resources_server"},
         },
         artifacts_dir=FIXTURE_DIR,
     )
