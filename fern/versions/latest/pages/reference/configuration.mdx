@@ -202,6 +202,23 @@ only a proxy running on that address. Deployments that previously relied on Uvic
 these options explicitly.
 </Warning>
 
+### Per-Worker Listening Sockets
+
+A server with `num_workers` above 1 runs that many Uvicorn worker processes. By default they share one listening
+socket, and whichever worker wakes first accepts the next connection. Under load this spreads connections unevenly,
+and because clients keep connections alive, a few workers can end up serving most of the traffic while the rest idle;
+on a busy model server the overloaded workers then delay every call they hold.
+
+On Linux, top-level `uvicorn_reuse_port` gives every worker its own listening socket on the server's port
+(`SO_REUSEPORT`), and the kernel spreads new connections evenly across the workers:
+
+```yaml
+uvicorn_reuse_port: true
+```
+
+The setting applies to every multi-worker server and has no effect on single-worker servers. It fails at startup on
+platforms other than Linux.
+
 ### Model Server Fields
 
 ```yaml
