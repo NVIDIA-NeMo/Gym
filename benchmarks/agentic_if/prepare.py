@@ -30,11 +30,11 @@ BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "agentic_if_benchmark.jsonl"
 
 DATASET_NAME = "agentic_if"
-DATASET_VERSION = "2.1.0"
+DATASET_VERSION = "2.2.0"
 ROWS_ARTIFACT = "agentic_if_benchmark.jsonl"
-ROWS_SHA256 = "6167213c22ee48a23b7e783d6ea8b6ec8998f4c5108c4f3cdb1129b1360196a0"  # pragma: allowlist secret
+ROWS_SHA256 = "c0610af8c40e16be4a75df39e4700aadb2b4f9d772a663641fb1878f7027e8ae"  # pragma: allowlist secret
 TESTS_ARTIFACT = "terminal-bench-tests.jsonl"
-TESTS_SHA256 = "947225ae43b18428f570d86eb81835ce337a16e371e6c0c269bf12f7e2ac97b2"  # pragma: allowlist secret
+TESTS_SHA256 = "e32d05a926e95a678bb95c415aaf69bd7a8d7e89f133d938ac31885068510881"  # pragma: allowlist secret
 RUNTIME_ARTIFACT = "opencode-runtime.jsonl"
 RUNTIME_SHA256 = "6a266abe92ff6e7e26508e73503f668ec29bf1e4fd2e4da8c31fe240ec3a4827"  # pragma: allowlist secret
 

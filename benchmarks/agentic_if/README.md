@@ -9,9 +9,9 @@ in OpenCode 1.17.11 with this configuration, not the model alone.
 
 ### Provenance
 
-- 586 tasks. Each pairs a real repository task (Scale-SWE) or terminal task (Terminal-Bench format) with synthetic
+- 585 tasks. Each pairs a real repository task (Scale-SWE) or terminal task (Terminal-Bench format) with synthetic
   instructions about how to do the work. Tasks that proved problematic or too easy were filtered out.
-- The task rows are internal. They live in Gym's dataset registry as dataset `agentic_if`, version `2.1.0`, with a
+- The task rows are internal. They live in Gym's dataset registry as dataset `agentic_if`, version `2.2.0`, with a
   second artifact that holds the `tests/` files of the terminal tasks and a third with OpenCode's ripgrep and plugin
   dependencies (see Settings). `prepare.py` pins all three by SHA-256. Data license: internal. Code: Apache-2.0. The
   offline OpenCode files are OpenCode (MIT), ripgrep (MIT or Unlicense) and the npm packages that
@@ -26,7 +26,8 @@ in OpenCode 1.17.11 with this configuration, not the model alone.
 - Tools: a per-row subset of OpenCode's built-in tools, with the descriptions and parameter descriptions the row sets.
   Web fetch, web search and skills are denied.
 - Sandbox: the task's own image. The `scale_swe` or `terminal_bench_2_1` resources server starts it; the `agentic_if`
-  resources server borrows it for the episode and lends it to the agent.
+  resources server borrows it for the episode and lends it to the agent. Every task image has `python3`, which
+  `opencode_agent` and the resources server's file staging run on.
 - Harness: `opencode_agent` runs OpenCode in that sandbox through `single_agent_turn`, with two plugins the resources
   server stages. A profile plugin applies the row's tool argument maps, read-before-edit guards and planted tool
   failures, and writes receipts. A boundary plugin applies the system prompt, tool selection and tool descriptions,
