@@ -730,12 +730,14 @@ def test_verify_of_a_session_this_server_never_held_is_masked_without_grading(mo
     create = AsyncMock(return_value=SimpleNamespace(stop=AsyncMock()))
     monkeypatch.setattr(server, "_create_sandbox", create)
 
-    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+    # Diagnostics a caller sends are not passed through, since no evaluation ran.
+    stale = {"eval_timed_out": True, "image_provenance": {"image": "stale"}}
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body() | stale)
 
     assert response.status_code == 200
     result = response.json()
     assert (result["reward"], result["mask_sample"], result["failure_kind"]) == (0.0, True, SESSION_LOST)
-    assert result["evaluation_completed"] is False
+    assert (result["evaluation_completed"], result["eval_timed_out"], result["image_provenance"]) == (False, False, {})
     create.assert_not_awaited()
 
 

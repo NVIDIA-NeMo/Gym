@@ -515,6 +515,8 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 | lost_session_verification("SWE-bench Pro task sandbox is no longer available")
                 | {
                     "evaluation_completed": False,
+                    "eval_timed_out": False,
+                    "image_provenance": {},
                     "resolved": False,
                     "patch_applied": False,
                     "eval_sandbox_start_time_taken": 0.0,
