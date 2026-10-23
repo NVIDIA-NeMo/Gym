@@ -11,8 +11,9 @@ The module depends on the build tool list and the repository variable only.
 
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from nemo_gym import _resolve_under_cwd_or_install
@@ -99,12 +100,28 @@ def build_options_from_overrides(overrides: list[str]) -> BuildOptions:
     from omegaconf import OmegaConf
     from omegaconf.errors import InterpolationResolutionError
 
-    from nemo_gym.global_config import (
-        CONFIG_PATHS_KEY_NAME,
-        GlobalConfigDictParser,
-        _load_config_yaml,
-        translate_interpolation_error,
-    )
+    from nemo_gym.global_config import translate_interpolation_error
+
+    merged = _merged_cli_config(overrides)
+    block = merged.get(BUILDS_KEY)
+    try:
+        resolved = OmegaConf.to_container(block, resolve=True) if block is not None else None
+    except InterpolationResolutionError as exc:
+        raise translate_interpolation_error(exc) from exc
+    return BuildOptions.from_config({BUILDS_KEY: resolved})
+
+
+def _merged_cli_config(overrides: list[str], config_files: Sequence[Path] = ()) -> Any:
+    """The configuration the command line names, merged but unresolved, before the run config exists.
+
+    The sources the user controls, in the global config's order: ``config_files``, then the files the
+    ``+config_paths`` tokens name (from ``--config`` and the asset selectors), then ``env.yaml``, then the
+    ``+``/``++`` overrides. Nothing is resolved here, so a provider block's credentials are not needed to
+    read a sibling key. The full global config is still parsed once, at dispatch, with the run config added.
+    """
+    from omegaconf import OmegaConf
+
+    from nemo_gym.global_config import CONFIG_PATHS_KEY_NAME, GlobalConfigDictParser, _load_config_yaml
 
     parser = GlobalConfigDictParser()
     saved_argv = sys.argv
@@ -120,10 +137,22 @@ def build_options_from_overrides(overrides: list[str]) -> BuildOptions:
     dotenv = _load_config_yaml(dotenv_path) if dotenv_path.exists() else OmegaConf.create({})
     config_paths = OmegaConf.merge(dotenv, cli).get(CONFIG_PATHS_KEY_NAME) or []
     _, extra_configs = parser.load_extra_config_paths([str(path) for path in config_paths])
-    merged = OmegaConf.merge(*extra_configs, dotenv, cli)
-    block = merged.get(BUILDS_KEY)
+    return OmegaConf.merge(*(_load_config_yaml(path) for path in config_files), *extra_configs, dotenv, cli)
+
+
+def _block_from_overrides(overrides: list[str], key: str, *, config_files: Sequence[Path] = ()) -> Any:
+    """The ``key`` node (dotted) of the configuration the command names, resolved; a scalar as it is, ``None`` when
+    absent. Only that node's own interpolations are evaluated, so a provider block's credentials are not needed
+    to read a sibling key. Merged as :func:`_merged_cli_config` does."""
+    from omegaconf import OmegaConf
+    from omegaconf.errors import InterpolationResolutionError
+
+    from nemo_gym.global_config import translate_interpolation_error
+
+    block = OmegaConf.select(_merged_cli_config(overrides, config_files), key, throw_on_resolution_failure=False)
+    if not OmegaConf.is_config(block):
+        return block
     try:
-        resolved = OmegaConf.to_container(block, resolve=True) if block is not None else None
+        return OmegaConf.to_container(block, resolve=True)
     except InterpolationResolutionError as exc:
         raise translate_interpolation_error(exc) from exc
-    return BuildOptions.from_config({BUILDS_KEY: resolved})

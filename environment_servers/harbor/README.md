@@ -83,19 +83,23 @@ Prepare decides one of three image modes per distinct Dockerfile.
   No build and no registry.
 - Build. Everything else: `COPY`, `ADD`, heredocs, BuildKit flags, multi-stage files. The task's
   `environment/` folder is the build context. Prepare builds it once, records it, and the task then runs in
-  pull mode from the built image. A `build:` or `pull_policy` the task's Compose file gives `main` (build args,
-  a target, a `dockerfile_inline`) applies to that build; at seed the recorded image stands in for them, so the
-  loader drops the two keys from every service prepare built before the Compose adapter, which starts images
-  only, sees the document. A task in pull or overlay mode whose file only restates `main`'s build (`context:
-  ${CONTEXT_DIR}` or `.`, `dockerfile: Dockerfile`, `pull`) has that section dropped too, as Harbor's own
-  template already supplies it; a build key Gym cannot apply without a build (`args`, `target`,
-  `dockerfile_inline`, another `dockerfile` or `context`) leaves the task in `skipped.json` naming the key.
-  `pull_policy` is dropped from every service in every mode, as the sandbox has no pull step to configure.
-  Prepare runs the adapter's field check on each Compose task's resolved document, so a field no provider
-  starts (`deploy`, `extra_hosts`, `platform`, a sidecar `build:` prepare recorded no build for) leaves that
-  task in `skipped.json` with the service and field named instead of failing every episode at seed. The same
-  check runs on the raw file of every task about to be built, before the build, so a refused task's context is
-  neither built nor pushed and a build that would fail for it cannot stop the preparation.
+  pull mode from the built image. A `build:` the task's Compose file gives `main` (build args, a target, a
+  `dockerfile_inline`) applies to that build; at seed the recorded image stands in for it, so the loader drops
+  the section, and a `pull_policy: build` naming it, from every service prepare built before the Compose
+  adapter, which starts images only, sees the document. A task in pull or overlay mode whose file only restates
+  `main`'s build (`context: ${CONTEXT_DIR}` or `.`, `dockerfile: Dockerfile`, `pull`) has that section dropped
+  too, as Harbor's own template already supplies it; a build key Gym cannot apply without a build (`args`,
+  `target`, `dockerfile_inline`, another `dockerfile` or `context`) leaves the task in `skipped.json` naming the
+  key.
+  A `pull_policy: build` goes with the build it names and is dropped with it (a built service's, a restated
+  `main`'s); every other `pull_policy` is the service's runtime pull policy and reaches the adapter (see the field
+  table below). Prepare runs the adapter's field check on each Compose task's resolved document, so a field no
+  provider starts (`deploy`, `extra_hosts`, `platform`, a sidecar `build:` prepare recorded no build for) leaves
+  that task in `skipped.json` with the service and field named instead of failing every episode at seed. The
+  check's first step, the key allow-list, also runs on the raw file of every task about to be built, before the
+  build, so a task refused by key is neither built nor pushed and a build that would fail for it cannot stop the
+  preparation. A value the check refuses (`count: all`, a `platform` other than the deployment's) is read from
+  the resolved document once the tasks load, after their builds, and leaves the task out the same way.
 
 Every other service of the task's `environment/docker-compose.yaml` with a `build:` section (a sidecar) is built
 too, whatever `main`'s mode, as Harbor's `docker compose build` builds it: from its own context and Dockerfile
@@ -645,6 +649,46 @@ strings. A bare `NAME` entry in a list-form `environment` takes the task variabl
 dropped when there is none. A missing
 file fails prepare with its name unless the entry says `required: false`. Error messages name the file and
 the line number and never repeat a line's content.
+
+## Compose service fields
+
+Beyond images, commands, `environment`, `depends_on`, `healthcheck`, `expose`/`ports`, `shm_size` and
+`cap_add`, a task's Compose services may use the fields below. Prepare gives each its meaning (or fails naming
+the field) before any sandbox starts, and the server re-reads the file through the same check at seed. Error
+messages read `<task>: environment/docker-compose.yaml: service '<name>' <field> ...`.
+
+| Field | Meaning in a sandbox group |
+|---|---|
+| `deploy.resources` | `limits.cpus`/`limits.memory` size the service's sandbox (then `reservations`, then the legacy `cpus`/`mem_limit`). `reservations.devices` with the `gpu` capability and a numeric `count` (or `device_ids`) becomes the service's GPU count; `count: all`, other capabilities, `limits.pids` and device `options` fail prepare. `replicas` must be 1; `restart_policy` is recorded like `restart`; every other `deploy` key names swarm scheduling and fails prepare. |
+| `restart` | Accepted (`no`, `always`, `on-failure[:n]`, `unless-stopped`) and recorded on the collection (`restart_policies`). Nothing restarts: the group starts each service once, and an exit is reported through the dependency gates, as before. |
+| `pull_policy` | `always`, `missing` (also `if_not_present`, `daily`, `weekly`, `every_<n>`, since the group keeps no pull history) or `never`. Applied per sandbox where the provider can (OpenSandbox's image pull policy extension, Docker's `--pull`) and recorded on the collection (`pull_policies`) otherwise, so the deployment's default pull behaviour applies. `build` is dropped with the build it names (a service prepare built, a pull or overlay `main` restating Harbor's template) and fails prepare on any other service. |
+| `platform` | Must match the deployment platform, which prepare and the server read from the same setting: the environment server's `sandbox_provider_options.platform` (`{os, arch}`, as `++harbor_environment_server.environment_servers.harbor.sandbox_provider_options.platform.arch=arm64` names it) when set, else `linux/amd64`. `x86_64` and `aarch64` are the usual aliases. Image configurations are still recorded for `linux/amd64` only, so a Compose task runs end to end on amd64 deployments today. |
+| `networks` | Custom networks map onto the group's one pod network as name scopes: a service resolves itself, the services sharing a network with it (by name and by their aliases on that network) and nothing else. Network declarations take `name`, `driver`, `external`, `attachable` and `labels` with no further meaning; `internal: true`, `ipam` with a configuration, `driver_opts` and `enable_ipv6: true` ask for isolation the pod does not provide and fail prepare, as do static `ipv4_address`/`ipv6_address` entries on a service; `internal: false` and `enable_ipv6: false` (Compose's defaults written out, as every kumo task does) ask for nothing and are accepted. |
+| `ports` | Short (`"8080"`, `"8080:80"`, `"127.0.0.1:8080:80/udp"`) and long syntax take one shape at prepare, so the adapter reads mappings. A service's ports are endpoints the provider allocates: a container port alone (or `published: 0`) is accepted; a fixed published port, a `host_ip`, a protocol other than TCP, a `mode` other than `ingress`, a port range or an unknown option fails prepare naming the service, the refusal the adapter used to make at seed for the long syntax only (a short `"8080:8080"` passed prepare and failed every episode). A service that only needs to be reached by its peers lists the port under `expose`. |
+| `extra_hosts` | Hostname-to-IP entries (list or mapping form) added to the service's hosts. `host-gateway` fails prepare. A sidecar whose image runs as a non-root user gets no host injection (the group resolves its peers through its environment URLs instead), so it cannot take them: prepare fails naming the service once the image configurations are recorded, and the adapter refuses the same document at seed. |
+| `post_start` | Hooks run once the service's command has started, in order, before the group waits for health (as Compose runs them). `command` (string through the shell, or argv), `user` (default: the service's), `working_dir` and `environment`. A hook that exits non-zero fails the seed with its index and output. `privileged` hooks and `pre_stop` fail prepare. |
+| `tmpfs`, `ulimits`, `sysctls`, `security_opt` | Behind a provider capability check (next paragraph). |
+
+GPU sidecars route per service: a service whose `deploy.resources` reserves GPUs runs on the `gpu_sandbox_provider`
+block when one is set, with that block's `default_metadata` and, with `request_gpu_type`, the task's
+`gpu_types[0]`, exactly as the main service does when `task.toml` declares GPUs. The task's own services keep
+following the task's declaration, so a CPU task with one GPU sidecar puts only that sidecar on the GPU block. Both
+blocks must be able to reach each other's sandboxes on the network. Everything about a sidecar on another block
+goes through that block's provider: its sandbox, its `network_mode` forwarding relay, and its volumes, which are
+seeded and mounted on that provider's `shared_storage`, so a volume shared with a service on the task's block
+needs the same root on both.
+
+**Capability check.** `tmpfs`, `ulimits`, `sysctls` and `security_opt` need a provider that implements
+`SupportsSandboxServiceOptions` and names the field in its `SERVICE_OPTION_FIELDS`. Prepare reads the deployment's
+provider names from the keys of the `sandbox:` block the command names (the `--sandbox` provider file and the
+configuration's own block) and, when `harbor_environment_server.environment_servers.harbor.gpu_sandbox_provider`
+names a GPU block, from that block's keys too (values are never resolved, so credentials are not needed). Each
+service is checked against the provider it will run on, the GPU block's for the services of a GPU-declaring task
+and for a sidecar that reserves GPUs, and prepare fails with
+`service '<name>' <field> is not supported by the <provider> sandbox provider` when that provider lacks it. Docker
+applies all four as `docker run` flags; OpenSandbox applies none (a pod exposes no tmpfs, ulimit, sysctl or
+security option through its API). When prepare cannot tell the provider, the adapter runs the same check against
+the live provider before creating any sandbox.
 
 ## Where settings live
 

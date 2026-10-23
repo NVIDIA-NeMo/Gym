@@ -24,6 +24,7 @@ moved tag cannot change the image under a recorded configuration; the entry stay
 the written reference, which is how the task loader and the Compose resolver look it up.
 """
 
+import json
 import logging
 import tomllib
 from collections.abc import Mapping
@@ -32,7 +33,14 @@ from typing import Any, Callable
 
 import yaml
 
-from nemo_gym.sandbox.compose_fields import ComposeSubstitutionError
+from nemo_gym.sandbox.compose_config import check_sidecar_extra_hosts
+from nemo_gym.sandbox.compose_fields import (
+    DEFAULT_PLATFORM,
+    ComposeFieldError,
+    ComposeSubstitutionError,
+    check_compose_fields,
+)
+from nemo_gym.sandbox.providers.registry import provider_service_option_fields
 from nemo_gym.tasks.harbor.compose_variables import (
     _warn_unset,
     compose_variables,
@@ -152,7 +160,7 @@ def with_built_images(document: dict[str, Any], images: Mapping[str, str]) -> di
             **{
                 key: value
                 for key, value in service.items()
-                if key != "build" and not (key == "pull_policy" and str(value).strip().lower() == "build")
+                if key != "build" and not (key == "pull_policy" and is_build_pull_policy(value))
             },
             "image": image,
         }
@@ -210,26 +218,36 @@ def without_restated_main_build(task: HarborTask, document: dict[str, Any]) -> t
         return document, None
     services = document.get("services") if isinstance(document, dict) else None
     main = services.get("main") if isinstance(services, dict) else None
-    if not isinstance(main, dict) or "build" not in main:
+    if not isinstance(main, dict):
         return document, None
-    reason = restated_main_build_reason(main["build"], context_dir=task.path / "environment")
-    if reason is not None:
-        return document, reason
-    services["main"] = {key: value for key, value in main.items() if key != "build"}
+    if "build" in main:
+        reason = restated_main_build_reason(main["build"], context_dir=task.path / "environment")
+        if reason is not None:
+            return document, reason
+    # Harbor's template gives that build ``pull_policy: build`` as well, so a file repeating it restates the template
+    # too; any other policy is main's runtime pull policy and stays for the field check and the adapter.
+    restated = {"build"} | ({"pull_policy"} if is_build_pull_policy(main.get("pull_policy")) else set())
+    if restated & set(main):
+        services["main"] = {key: value for key, value in main.items() if key not in restated}
     return document, None
 
 
-def without_pull_policy(document: dict[str, Any]) -> dict[str, Any]:
-    """``document`` with ``pull_policy`` removed from every service, for the sandbox Compose adapter.
+def is_build_pull_policy(value: Any) -> bool:
+    """Whether a service's ``pull_policy`` is Compose's ``build``, the one that names a build step, not a pull."""
+    return isinstance(value, str) and value.strip().lower() == "build"
 
-    The key tells ``docker compose`` when to pull or build an image before starting it (Harbor's template sets
-    ``pull_policy: build`` on ``main``; a task file may give a sidecar ``always`` or ``missing``). The sandbox
-    starts the recorded image it is given and has no pull step of its own to configure, so the key is dropped
-    from the document the sandbox receives, in every image mode, instead of being refused as an unsupported
-    field. ``build:`` is not touched here: a sidecar's is still refused (no provider starts a locally built
-    sidecar), a built service's is dropped by :func:`with_built_images` (the loader applies it for every service
-    prepare built, ``pull_policy`` included) and ``main``'s by :func:`without_restated_main_build` when it only
-    restates Harbor's build.
+
+def without_pull_policy(document: dict[str, Any]) -> dict[str, Any]:
+    """``document`` with ``pull_policy`` removed from every service.
+
+    For the raw-file screen prepare runs before a build (``prepare_builds.refused_before_build``), which reads
+    keys only and accepts this one whatever its value. The documents the loader and the server hand the field
+    check keep it: a service's ``always``, ``missing`` or ``never`` is the sandbox's pull policy, which the
+    adapter applies per sandbox where the provider can (``check_compose_fields`` normalizes the spelling), and
+    only the ``build`` policy, which names a build step rather than a pull, is dropped with the build it
+    belongs to, by :func:`with_built_images` for a service prepare built and by
+    :func:`without_restated_main_build` for a pull or overlay ``main`` restating Harbor's template. ``build:``
+    is not touched here either: a sidecar's is still refused (no provider starts a locally built sidecar).
     """
     services = document.get("services") if isinstance(document, dict) else None
     if isinstance(services, dict):
@@ -267,6 +285,72 @@ def compose_image_references(task: HarborTask) -> list[str]:
             )
         references.append(image)
     return list(dict.fromkeys(references))
+
+
+def task_declares_gpus(task: HarborTask) -> bool:
+    """Whether ``task.toml`` asks for GPUs (agent or verifier environment): the task then runs on the GPU block."""
+    verifier_environment = task.config.verifier.environment
+    return bool(task.config.environment.gpus or (verifier_environment is not None and verifier_environment.gpus))
+
+
+def _compose_field_error(task: HarborTask, exc: ComposeFieldError) -> ImageConfigError:
+    path = compose_file(task)
+    base_dir = path.parent if path is not None else task.path / "environment"
+    return ImageConfigError(f"{task.task_id}: {base_dir.name}/{path.name if path else ''}: {exc}")
+
+
+def check_task_compose_fields(
+    task: HarborTask,
+    document: dict[str, Any],
+    *,
+    provider: str | None = None,
+    gpu_provider: str | None = None,
+    platform: str = DEFAULT_PLATFORM,
+) -> dict[str, Any]:
+    """Give the service fields of a task's Compose document their meaning for a sandbox group; mutates ``document``.
+
+    See :func:`nemo_gym.sandbox.compose_config.check_compose_fields`: ``deploy.resources`` become sandbox
+    resources (GPUs included), ``restart`` and ``pull_policy`` take their recorded forms, ``platform`` must
+    be ``platform``, the one the deployment runs (``sandbox_provider_options.platform`` when set, else
+    linux/amd64, the one prepare records images for; see ``compose_config.deployment_platform``), ``networks``
+    and ``extra_hosts`` their mapping forms, ``post_start`` hooks are checked, and ``tmpfs``, ``ulimits``,
+    ``sysctls`` and ``security_opt`` must be among what the service's provider can apply. ``provider`` and
+    ``gpu_provider`` are sandbox provider names (such as ``opensandbox``) of the task's block and of the
+    ``gpu_sandbox_provider`` block; each service is checked against the one it runs on, as the server routes
+    it: the task's services run on ``gpu_provider`` when ``task.toml`` declares GPUs, and a sidecar that
+    reserves GPUs through ``deploy.resources`` runs there as well. Anything else raises
+    :class:`ImageConfigError` naming the task, the file and the field, so prepare leaves the task out before a
+    sandbox starts. Without a provider name the capability check runs at seed instead, against the live provider.
+
+    The document checked is the one the server hands the adapter (``environment_servers/harbor/app.py``,
+    ``_compose_document``): the services prepare built carrying their recorded images without ``build:`` or
+    ``pull_policy: build`` (:func:`with_built_images`, applied by the loader), and ``main``'s ``build:`` and
+    ``pull_policy: build`` dropped when they only restate Harbor's own build of the task's Dockerfile
+    (:func:`without_restated_main_build`; a build key Gym cannot apply without a build is this task's reason).
+    Every other ``pull_policy`` stays: it is the service's runtime pull policy, normalized here and applied by the
+    adapter where the provider can, and ``build`` on a service nothing built fails the check. A sidecar
+    ``build:`` prepare recorded no build for and any other key the adapter does not start are then refused by
+    the check's allow-list.
+    """
+    if task.built_image is None:
+        document, reason = without_restated_main_build(task, document)
+        if reason is not None:
+            raise _compose_field_error(task, ComposeFieldError("build", reason))
+    if gpu_provider is not None and task_declares_gpus(task):
+        provider = gpu_provider
+    fields = provider_service_option_fields(provider) if provider is not None else None
+    gpu_fields = provider_service_option_fields(gpu_provider) if gpu_provider is not None else None
+    try:
+        return check_compose_fields(
+            document,
+            platform=platform,
+            provider=provider,
+            service_option_fields=fields,
+            gpu_provider=gpu_provider,
+            gpu_service_option_fields=gpu_fields,
+        )
+    except ComposeFieldError as exc:
+        raise _compose_field_error(task, exc) from exc
 
 
 def dockerfile_base_images(folder: Path, *, select: Callable[[str], bool] | None = None) -> dict[str, list[str]]:
@@ -392,30 +476,58 @@ def record_compose_images(
     client: RegistryClient | None = None,
     skipped: dict[str, str] | None = None,
     platform: str | None = None,
+    sandbox_provider: str | None = None,
+    gpu_sandbox_provider: str | None = None,
+    compose_platform: str = DEFAULT_PLATFORM,
 ) -> Path | None:
     """Write ``compose-images.json`` in ``folder`` for the Compose tasks among ``tasks``.
 
-    Returns the file's path, or ``None`` when no task uses Compose. A task whose Compose file does not
-    resolve (an :class:`ImageConfigError` from :func:`load_compose_document`) does not stop the others:
-    with ``skipped`` given it is recorded there by task id with the reason and left out, otherwise one
-    :class:`ImageConfigError` at the end names every such task. An image the registry cannot resolve
-    still raises for the whole set, as :func:`record_image_configs` says.
+    Returns the file's path, or ``None`` when no task uses Compose. Each Compose document's service fields are
+    checked on the way (see :func:`check_task_compose_fields`), with ``sandbox_provider`` and
+    ``gpu_sandbox_provider`` naming the providers of the ``sandbox:`` and ``gpu_sandbox_provider`` blocks for the
+    capability check and ``compose_platform`` the deployment's, which a service's ``platform`` must match;
+    ``platform`` is the one the images are recorded for, as :func:`record_image_configs` takes it (the built images'
+    ``builds.platform``). A task whose Compose file does not resolve (an
+    :class:`ImageConfigError` from :func:`load_compose_document`) or carries a field the group cannot run does
+    not stop the others: with ``skipped`` given it is recorded there by task id with the reason and left out,
+    otherwise one :class:`ImageConfigError` at the end names every such task. Its images are still recorded, so
+    a fixed task file needs no new registry round-trip. Once the image configurations are recorded, a sidecar
+    whose image runs as a non-root user (which the group starts without host injection) must declare no
+    ``extra_hosts``, the way the adapter decides it at seed. An image the registry cannot resolve still raises
+    for the whole set, as :func:`record_image_configs` says.
     """
     references: dict[str, list[str]] = {}
     failures: dict[str, str] = {}
+    documents: list[tuple[HarborTask, dict[str, Any]]] = []
     for task in tasks:
         try:
-            task_references = compose_image_references(task)
+            document = load_compose_document(task)
+            if document is None:
+                continue
+            for reference in compose_image_references(task):
+                references.setdefault(reference, []).append(task.task_id)
+            check_task_compose_fields(
+                task, document, provider=sandbox_provider, gpu_provider=gpu_sandbox_provider, platform=compose_platform
+            )
         except ImageConfigError as exc:
             failures[task.task_id] = str(exc)
             continue
-        for reference in task_references:
-            references.setdefault(reference, []).append(task.task_id)
+        documents.append((task, document))
     if failures and skipped is None:
         raise ImageConfigError(f"{len(failures)} Compose task(s) do not resolve: " + "; ".join(failures.values()))
     if failures:
         skipped.update(failures)
-    return record_image_configs(references, folder, client=client, what="Compose image", platform=platform)
+    path = record_image_configs(references, folder, client=client, what="Compose image", platform=platform)
+    if path is not None:
+        recorded = json.loads(path.read_text())
+        for task, document in documents:
+            try:
+                check_sidecar_extra_hosts(document, recorded)
+            except ComposeFieldError as exc:
+                if skipped is None:
+                    raise _compose_field_error(task, exc) from exc
+                skipped[task.task_id] = str(_compose_field_error(task, exc))
+    return path
 
 
 def record_base_images(

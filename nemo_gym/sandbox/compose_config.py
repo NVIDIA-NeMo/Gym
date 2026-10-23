@@ -17,7 +17,7 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import urlsplit
 
-from nemo_gym.sandbox.compose_fields import _bytes
+from nemo_gym.sandbox.compose_fields import ComposeFieldError, _bytes, normalize_platform
 
 
 def _compose_literals(value: Any) -> Any:
@@ -143,23 +143,54 @@ def _peer_url(value: Any, services: dict) -> bool:
     return True
 
 
+def non_root_sidecar_users(document: dict, image_configs: dict) -> dict[str, str]:
+    """The sidecars whose recorded image ``USER`` is not root, with that user.
+
+    These are the services :func:`adapt_non_root_sidecars` keeps on their own user without host injection;
+    prepare uses the same predicate so what it accepts is what the group runs. ``image_configs`` is read
+    by reference and by pinned image, so the published document and the resolved one both work.
+    """
+    by_image = {record["image"]: record for record in image_configs.values() if "image" in record}
+    users: dict[str, str] = {}
+    for name, service in document["services"].items():
+        if name == "main" or not isinstance(service, dict):
+            continue
+        record = by_image.get(service.get("image")) or image_configs.get(service.get("image")) or {}
+        user = str((record.get("config") or {}).get("User") or "")
+        if user and user not in ("root", "0"):
+            users[name] = user
+    return users
+
+
+def check_sidecar_extra_hosts(document: dict, image_configs: dict) -> None:
+    """Refuse ``extra_hosts`` on a sidecar the group runs without host injection, naming the service.
+
+    A non-root sidecar gets no hosts file entries (see :func:`adapt_non_root_sidecars`), so host entries it
+    declares would be silently lost; the adapter rejects that document at seed. Prepare runs this check once
+    the image configurations are recorded, so the task fails there, with the same reason.
+    """
+    for name, user in non_root_sidecar_users(document, image_configs).items():
+        if document["services"][name].get("extra_hosts"):
+            raise ComposeFieldError(
+                "extra_hosts",
+                f"service {name!r} extra_hosts cannot be applied without host injection: the image runs as "
+                f"user {user!r}, so the sidecar takes no host entries",
+            )
+
+
 def adapt_non_root_sidecars(document: dict, image_configs: dict) -> dict:
     """Keep a sidecar on its image's default non-root user without host-file injection.
 
     A non-root process cannot edit ``/etc/hosts``, so peer names are resolved into the
     environment variables that carry ``http://<service>`` URLs instead, and the explicit
     ``user`` copied from image metadata is dropped so the provider does not try to ``su``
-    to the user it already runs as. Mutates and returns ``document``.
+    to the user it already runs as. Such a sidecar cannot take ``extra_hosts``
+    (:func:`check_sidecar_extra_hosts` raises first). Mutates and returns ``document``.
     """
+    check_sidecar_extra_hosts(document, image_configs)
     services = document["services"]
-    by_image = {record["image"]: record for record in image_configs.values()}
-    for name, service in services.items():
-        if name == "main":
-            continue
-        record = by_image.get(service.get("image")) or image_configs.get(service.get("image")) or {}
-        user = str((record.get("config") or {}).get("User") or "")
-        if not user or user in ("root", "0"):
-            continue
+    for name in non_root_sidecar_users(document, image_configs):
+        service = services[name]
         service.pop("user", None)
         peers = [key for key, value in (service.get("environment") or {}).items() if _peer_url(value, services)]
         options = {"hosts": []}
@@ -175,3 +206,11 @@ def opensandbox_shm_labels(document: dict, label: str = "nemo.nvidia.com/shm") -
         if service.get("shm_size") is not None:
             service.setdefault("labels", {})[label] = str(service["shm_size"])
     return document
+
+
+def deployment_platform(provider_options: Mapping[str, Any] | None) -> str:
+    """The platform a deployment runs, which a service's ``platform`` must match: the sandbox provider options'
+    ``platform`` (OpenSandbox's ``{os, arch}``) when set, else linux/amd64, the one prepare records images for.
+    Prepare and the server read it from the same ``sandbox_provider_options`` so the two checks agree: the
+    ``os/arch`` form of :func:`sandbox_platform`, the reader the image checks use."""
+    return normalize_platform("/".join(sandbox_platform(provider_options)))
