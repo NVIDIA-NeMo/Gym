@@ -90,6 +90,9 @@ jobs:
 
   unit_tests:
     name: Unit tests
+    permissions:
+      contents: read
+      id-token: write
     needs: [pre-flight, classify_changes]
     if: needs.classify_changes.outputs.docs_only != 'true'
     uses: ./.github/workflows/unit-tests.yml

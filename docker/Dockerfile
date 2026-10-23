@@ -238,32 +238,11 @@ RUN uv venv /opt/nemo-gym/cache/seed-venv && \
 # does (same discovery, requirements, and head-server pins), outside the source
 # tree, and deletes it; only the downloaded and built distributions stay.
 ARG NEMO_GYM_SEED_SERVER_ENVS=""
-ENV NLTK_DATA=/opt/nemo-gym/cache/nltk_data
 RUN <<"EOF" bash -exu
 if [[ -n "${NEMO_GYM_SEED_SERVER_ENVS:-}" ]]; then
     seed_venv_root="$(mktemp -d)"
     ng_test_all +setup_only=true +delete_venvs_after_each_test=true \
         "+uv_cache_dir=${UV_CACHE_DIR}" "+uv_venv_dir=${seed_venv_root}"
-    # IFBench also needs its pinned source and NLTK data outside the package
-    # cache. Fetch them while the build has network, using a disposable venv.
-    mkdir -p "${NLTK_DATA}"
-    uv venv "${seed_venv_root}/ifbench-data"
-    uv pip install --python "${seed_venv_root}/ifbench-data/bin/python" \
-        'nltk>=3.10.0' defusedxml regex
-    "${seed_venv_root}/ifbench-data/bin/python" - <<'PY'
-import os
-
-import defusedxml.ElementTree
-import regex
-import nltk
-
-from resources_servers.ifbench.setup_ifbench import ensure_ifbench
-
-# A build-user cache outside NLTK_DATA would be invisible to the runtime UID.
-nltk.data.path[:] = [os.environ["NLTK_DATA"]]
-ensure_ifbench()
-PY
-    chown -R "${RUNTIME_UID}:${RUNTIME_GID}" resources_servers/ifbench/.ifbench
     rm -rf "${seed_venv_root}"
     chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache/uv
 fi

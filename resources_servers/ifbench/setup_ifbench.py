@@ -24,11 +24,13 @@ and installed during `gym env start`. The `.installed` marker tracks whether the
 clone has been done.
 """
 
+import os
 import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from stat import S_IWUSR
 
 
 IFBENCH_COMMIT = "c6767a19bd82ac0536cab950f2f8f6bcc6fabe7c"  # pragma: allowlist secret
@@ -59,11 +61,17 @@ def _ensure_nltk_data() -> None:
     import regex  # noqa: F401
     import nltk  # isort: skip
 
+    download_dir = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "nltk_data"
+    if str(download_dir) not in nltk.data.path:
+        nltk.data.path.append(str(download_dir))
     for kind, resource in NLTK_RESOURCES.items():
         try:
             nltk.data.find(resource)
         except LookupError:
-            nltk.download(kind, quiet=True, raise_on_error=True)
+            # Supplied NLTK_DATA paths may be read-only. Download missing data
+            # into a private writable cache and leave mounted files untouched.
+            download_dir.mkdir(parents=True, exist_ok=True)
+            nltk.download(kind, download_dir=str(download_dir), quiet=True, raise_on_error=True)
             # Do not publish a successful setup marker for incomplete data.
             nltk.data.find(resource)
 
@@ -100,7 +108,7 @@ def _patch_spacy_download(instructions_py: Path) -> None:
         instructions_py.write_text(patched, encoding="utf-8")
 
 
-def ensure_ifbench() -> None:
+def ensure_ifbench(*, source_dir: Path | None = None) -> None:
     """Clone the IFBench repo if needed and make it importable.
 
     The .installed marker ensures we only clone once. Afterwards, apply any
@@ -118,15 +126,36 @@ def ensure_ifbench() -> None:
     if IFBENCH_DIR.exists():
         shutil.rmtree(IFBENCH_DIR)
 
-    print(f"Cloning IFBench @ {IFBENCH_COMMIT} ...")
-    subprocess.run(
-        ["git", "clone", "--quiet", IFBENCH_REPO, str(IFBENCH_DIR)],
-        check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(IFBENCH_DIR), "checkout", "--quiet", IFBENCH_COMMIT],
-        check=True,
-    )
+    data_root = os.environ.get("NEMO_GYM_TEST_DATA_ROOT")
+    if source_dir is None and data_root:
+        source_dir = Path(data_root) / "ifbench" / IFBENCH_COMMIT
+    if source_dir is not None and source_dir.is_dir():
+        revision = source_dir / "REVISION"
+        if not revision.is_file() or revision.read_text().strip() != IFBENCH_COMMIT:
+            raise ValueError(f"IFBench source revision does not match {IFBENCH_COMMIT}: {source_dir}")
+        # The shared source is read-only; apply setup patches to a private copy.
+        shutil.copytree(
+            source_dir,
+            IFBENCH_DIR,
+            ignore=shutil.ignore_patterns(".git", ".installed"),
+            copy_function=shutil.copyfile,
+        )
+        # copytree preserves directory modes; the private cache must also work
+        # when the supplied source has 0444 files and 0555 directories.
+        IFBENCH_DIR.chmod(IFBENCH_DIR.stat().st_mode | S_IWUSR)
+        for directory in IFBENCH_DIR.rglob("*"):
+            if directory.is_dir():
+                directory.chmod(directory.stat().st_mode | S_IWUSR)
+    else:
+        print(f"Cloning IFBench @ {IFBENCH_COMMIT} ...")
+        subprocess.run(
+            ["git", "clone", "--quiet", IFBENCH_REPO, str(IFBENCH_DIR)],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(IFBENCH_DIR), "checkout", "--quiet", IFBENCH_COMMIT],
+            check=True,
+        )
 
     # Disable the spaCy auto-download that runs at import time
     _patch_spacy_download(IFBENCH_DIR / "instructions.py")

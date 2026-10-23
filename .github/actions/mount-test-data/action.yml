@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Mount Gym test data
+description: Mount the versioned S3 test-data prefix read-only and check its inventory
+inputs:
+  role-duration-seconds:
+    description: Reader session lifetime covering the enclosing job deadline
+    required: false
+    default: "3600"
+runs:
+  using: composite
+  steps:
+    - name: Read-only S3 credentials
+      uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c # v4
+      with:
+        aws-region: us-east-1
+        role-to-assume: arn:aws:iam::766267172432:role/nemo-gym-test-data-reader
+        role-session-name: gym-test-data-${{ github.run_id }}
+        role-duration-seconds: ${{ inputs.role-duration-seconds }}
+    - name: Install pinned Mountpoint and mount test data
+      shell: bash
+      run: |
+        set -euo pipefail
+        package="${RUNNER_TEMP}/mount-s3.deb"
+        curl -fLSs --retry 3 \
+          https://s3.amazonaws.com/mountpoint-s3-release/1.23.0/x86_64/mount-s3-1.23.0-x86_64.deb \
+          -o "$package"
+        echo "4f476e6aaeb238c90fe4e67ffe47689c279ce2a9abdeebd00961271ba738df77  $package" | sha256sum -c -
+        sudo apt-get update
+        sudo apt-get install -y "$package"
+        root="${RUNNER_TEMP}/gym-test-data"
+        mkdir -p "$root"
+        mount-s3 nemo-ci-storage-31ff58e3-a555-4c8b-ad91-c453ce311bbd "$root" \
+          --region us-east-1 --prefix nemo-fw/TestData/nemo_gym/v1/ --read-only
+        echo "NEMO_GYM_TEST_DATA_ROOT=$root" >> "$GITHUB_ENV"
+        echo "NLTK_DATA=$root/nltk_data" >> "$GITHUB_ENV"
+        python3 scripts/ci/check_test_data.py "$root"
