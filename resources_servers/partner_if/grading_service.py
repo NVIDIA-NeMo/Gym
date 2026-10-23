@@ -9,6 +9,7 @@ import json
 from nemo_gym.failure_kinds import JUDGE_UNPARSEABLE
 from nemo_gym.judge import call_judge
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import ServerClient
 from resources_servers.partner_if.engine import aggregate, evaluate, reward_checks
 from resources_servers.partner_if.evidence import EvidenceBundle, EvidenceTooLarge
@@ -55,14 +56,18 @@ async def grade(
             receipt_request = request_payload(
                 items, evidence, responses_create_params, max_input_chars=max_input_chars
             )
+            # The judge grades the rollout and is not part of it: outside the rollout context its call stays out of
+            # the rollout's model-call capture, which gym-p0/v1 expects to hold only agent-owned calls. The
+            # request and reply stay on the row as receipts.
             async with semaphore:
-                receipt_response = await call_judge(
-                    server_client,
-                    server_name=server_name,
-                    url_path="/v1/responses",
-                    json=receipt_request,
-                    response_model=NeMoGymResponse,
-                )
+                with rollout_context(None):
+                    receipt_response = await call_judge(
+                        server_client,
+                        server_name=server_name,
+                        url_path="/v1/responses",
+                        json=receipt_request,
+                        response_model=NeMoGymResponse,
+                    )
             if receipt_response.status != "completed" or receipt_response.error or receipt_response.incomplete_details:
                 raise ValueError("Judge response was incomplete")
             if any(item.type not in {"message", "reasoning"} for item in receipt_response.output):

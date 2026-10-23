@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from nemo_gym.rollout_correlation import current_rollout_id, rollout_context
 from resources_servers.partner_if.app import VerifyRequest
 from resources_servers.partner_if.grading_contract import GradingContract
 from resources_servers.partner_if.llm import MAX_JUDGE_INPUT_CHARS
@@ -66,6 +67,35 @@ async def test_normal_text_resource_dispatches_deterministic_and_llm_items_toget
     assert result.reward == 1 and not result.mask_sample
     assert result.judge_protocol == "partner-if-evidence-v5.2"
     assert result.grading_result.items[1].quotes[0].quote == "HELLO"
+
+
+async def test_the_judge_runs_outside_the_rollout_so_its_call_is_not_captured_as_agent_evidence():
+    body = shared_request()
+    judgment = {
+        "items": [
+            {
+                "id": "semantic",
+                "passed": True,
+                "reason": "Greeting",
+                "evidence": "HELLO",
+                "references": [{"source": "answer", "start_line": 1, "end_line": 1}],
+            }
+        ]
+    }
+    seen_rollout_ids = []
+
+    async def judge(*args, **kwargs):
+        # ServerClient adds the rollout's capture prefix to a model call only while a rollout ID is current.
+        seen_rollout_ids.append(current_rollout_id())
+        return response(json.dumps(judgment))
+
+    with rollout_context("rollout-1"):
+        with patch("resources_servers.partner_if.grading_service.call_judge", side_effect=judge):
+            result = await server().verify(body)
+        assert current_rollout_id() == "rollout-1"
+    assert seen_rollout_ids == [None]
+    assert result.reward == 1
+    assert result.judge_request is not None and result.judge_response is not None
 
 
 async def test_invalid_shared_judge_output_preserves_receipts_and_remains_unscorable():
