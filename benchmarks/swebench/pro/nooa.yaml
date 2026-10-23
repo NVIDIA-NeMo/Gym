@@ -4,7 +4,6 @@ config_paths:
   - resources_servers/swebench_pro/configs/swebench_pro.yaml
   - responses_api_agents/nooa_agent/configs/nooa_agent.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
-  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 use_absolute_ip: true
 
@@ -18,9 +17,7 @@ swebench_pro_nooa_resources_server:
       allowed_agents: [nooa_agent]
       # Only the task sandbox is restricted; fresh grading sandboxes retain their settings.
       task_network_policy:
-        model_server:
-          type: responses_api_models
-          name: policy_model
+        model_server: ${swebench_pro_nooa_agent.responses_api_agents.nooa_agent.model_server}
       sandbox_config:
         provider_options:
           platform: {os: linux, arch: amd64}
@@ -42,7 +39,8 @@ swebench_pro_nooa_agent:
         execution_mode: sandboxed
       max_policy_calls: null
       # Built on the controller before seeding; task installation performs no downloads.
-      runtime_wheelhouse: ${oc.env:NOOA_SWE_RUNTIME_WHEELHOUSE}
+      runtime_wheelhouse: ${oc.env:NOOA_SWE_RUNTIME_WHEELHOUSE,null}
+      runtime_wheelhouse_required: true
 
 swebench_pro_nooa:
   _inherit_from: single_agent_turn_legacy

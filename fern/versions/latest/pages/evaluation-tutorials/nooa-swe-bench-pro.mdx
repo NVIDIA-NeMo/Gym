@@ -75,10 +75,12 @@ export NOOA_SWE_RUNTIME_WHEELHOUSE=/absolute/path/to/new-owned-runtime-bundle
 python -m responses_api_agents.nooa_agent.offline_runtime \
   --output "$NOOA_SWE_RUNTIME_WHEELHOUSE" --target x86_64/gnu
 python benchmarks/swebench/pro/prepare.py
-gym env start --config benchmarks/swebench/pro/nooa.yaml --config model-provider.yaml
+gym env start --config benchmarks/swebench/pro/nooa.yaml --config model-provider.yaml \
+  --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 gym eval run --no-serve \
   --config benchmarks/swebench/pro/nooa.yaml --config model-provider.yaml \
+  --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
   --input benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
   --output /tmp/nooa-swebench-pro.jsonl --limit 1 --concurrency 1 \
   +agent_name=swebench_pro_nooa_agent
@@ -87,9 +89,9 @@ gym eval run --no-serve \
 Use `model-provider.yaml` to supply the policy model and sandbox provider settings, and provide
 `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` privately. Pass the same recipe and overlay to both commands:
 `--no-serve` does not inherit routing from the running head server. The model-server host must be reachable
-from the sandbox. Restricted SWE tasks require an OpenSandbox deployment with `dns+nft` enforcement;
-unsupported providers fail explicitly. The policy allows all ports and routes on the model-server host,
-including any cohosted services. Preparation preserves upstream grading metadata in the shared flat dataset.
+from the sandbox; its reference is derived from the NOOA agent configuration. Restricted SWE tasks require
+an OpenSandbox deployment with `dns+nft` enforcement; unsupported providers fail explicitly. The policy
+allows all ports and routes on the model-server host, including any cohosted services. Preparation preserves upstream grading metadata in the shared flat dataset.
 The existing `single_agent_turn_legacy` adapter separates that metadata from the Responses request before
 invoking NOOA. See [NOOA SWE-bench Pro restricted networking](/main/agent-server/nooa-swe-networking) for offline
 build prerequisites and live isolation checks. Other SWE harnesses keep their existing network behavior.

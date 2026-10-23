@@ -15,3 +15,13 @@ Reserved keys in `responses_create_params.metadata`:
 
 
 Tasks with an external verifier (e.g. math) need none of these beyond an image.
+
+## Model endpoint
+
+The harness inside the sandbox calls the Gym model server named by `model_server` (its `host:port`), so the
+server's request handling, model-call capture and training token capture apply to every in-box call.
+
+Set `sandbox_model_base_url` only when the sandbox cannot reach that `host:port`, for example sandboxes on a
+cluster without a route to compute nodes. Point it at a relay, tunnel or gateway that forwards to the same
+model server. A URL that bypasses the model server (such as a backend vLLM or API URL) skips its handling and
+capture.

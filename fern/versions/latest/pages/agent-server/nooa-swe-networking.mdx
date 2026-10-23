@@ -22,9 +22,12 @@ requests and blocked literal-IP requests against the actual deployment. See
 [OpenSandbox egress controls](/main/infrastructure/sandbox/opensandbox-best-practices#egress-controls-are-off-by-default).
 
 The allowlist contains the advertised **Gym model-server host**, which proxies
-inference to the configured upstream model. It does not add package indexes,
+inference to the configured upstream model. NOOA uses the Gym Responses API; the Gym model adapter
+may call a different upstream protocol, such as Chat Completions. It does not add package indexes,
 GitHub, or the upstream model service to the task allowlist. Advertise a concrete
 host reachable from OpenSandbox; loopback and wildcard bind addresses are rejected.
+The policy model reference is derived from the NOOA agent's `model_server`, so overriding that
+reference also changes the permitted endpoint.
 The recipe uses `use_absolute_ip: true`, but a controller behind NAT still needs a
 reachable advertised host and firewall rules for its selected server ports.
 
@@ -38,6 +41,13 @@ The current helper is a host allowlist, not a model-request authorization bounda
 Only the OpenSandbox network-policy provider is supported for restricted tasks.
 Unsupported providers, unreachable endpoint configuration, and provider policy
 creation errors fail explicitly; they never trigger an unrestricted retry.
+Choose the provider explicitly with a provider config overlay. The NOOA recipe does not load
+OpenSandbox credentials when another provider is selected. Existing unrestricted local/Docker configurations
+remain available only when the user explicitly sets `task_network_policy: null`; restricted configurations
+never disable their policy automatically. An intentionally online runtime also needs
+`runtime_wheelhouse_required: false` and `runtime_wheelhouse: null`. These choices permit internet access
+and are unsuitable for a restricted evaluation.
+
 Configure the OpenSandbox deployment outside the task: no task environment variable
 can turn a DNS-only deployment into `dns+nft` enforcement.
 
@@ -47,6 +57,10 @@ Use a controller with Python 3.13.14 or newer, package/GitHub access, and Docker
 capable of running a Linux amd64 build container. Install Gym and the NOOA agent
 requirements in your controller environment. Docker builds the runtime; the
 benchmark task and grading sandboxes run on OpenSandbox.
+
+Prebuilding is intentional: Docker, package indexes, and GitHub are available on the build controller,
+not necessarily on the agent host or inside restricted task sandboxes. Startup reports a setup error
+when the required bundle path is unset; it does not attempt an online task installation.
 
 From the repository root, prepare a fresh bundle and the shared SWE dataset:
 
@@ -62,22 +76,30 @@ and all dependency wheels. Its manifest binds the source, Python and wheel check
 architecture, and builder glibc version. Task setup uses local wheels with
 `--no-index --no-deps` in a private prefix. It preserves the task image and its Python.
 Missing, incompatible, or corrupted bundles fail setup without an online fallback.
-Source or dependency changes require a fresh bundle directory. An existing bundle
+Source or dependency changes require a fresh bundle directory. An existing empty output directory is
+accepted; a nonempty incompatible directory is preserved and rejected. Use an absolute bundle path or
+`~/...` (expanded by both preparation and agent configuration). Relative agent paths are rejected because
+the server working directory differs from the preparation shell. An existing bundle
 can be checked with the same command plus `--validate-only`.
 
 The recipe selects Linux amd64. An arm64 platform overlay requires a matching
 `aarch64/gnu` bundle and compatible task images. Task glibc must be at least the
-builder version; musl targets are unsupported. Prepared bundles can be transferred
+builder version; the default `manylinux2014` builder uses glibc 2.17, permitting older glibc task images
+such as Ubuntu 18.04. A custom newer builder still requires its newer glibc; musl targets are unsupported. Prepared bundles can be transferred
 between controllers with matching source and target.
 
 Supply `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` privately, and configure
 `policy_base_url`, `policy_api_key`, and `policy_model_name` through Gym's normal
 `env.yaml` or CLI overrides. The Gym model-server host must be reachable from the
 sandbox. Set the NOOA agent's optional `context_window` to the model's known context
-size when needed; its context planner reserves the rollout's `max_output_tokens`.
+size when needed. The planner and outgoing request use the same output cap: explicit Gym
+`max_output_tokens` wins; otherwise NOOA's `max_tokens`, `max_completion_tokens`, or `max_output_tokens`,
+including an `extra_body` cap, is sent as `max_output_tokens`. Conflicting NOOA caps are rejected.
+When no cap is supplied, no request cap is invented; a planning fallback remains planning-only.
 
 ```bash
 gym env start --config benchmarks/swebench/pro/nooa.yaml \
+  --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml
 
 gym eval run --no-serve --agent swebench_pro_nooa_agent \
