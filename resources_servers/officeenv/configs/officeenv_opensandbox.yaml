@@ -1,0 +1,28 @@
+config_paths:
+- resources_servers/officeenv/configs/officeenv_sandbox.yaml
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+use_absolute_ip: true
+absolute_ip_server_types:
+- responses_api_models
+- resources_servers
+oe:
+  resources_servers:
+    officeenv:
+      sandbox_config:
+        image: python:3.12-bookworm@sha256:14a4933e6cef421424f7a66d89a3f4eafcbd0d90e0a822251f298e05132dc735
+        ttl_s: 7200
+        resources:
+          cpu: 2
+          memory_mib: 4096
+        env:
+          EXECD_API_GRACE_SHUTDOWN: 50ms
+        metadata:
+          nemo.nvidia.com/resources: custom
+      verified: false
+sandbox:
+  opensandbox:
+    setup:
+      commands:
+      - mkdir -p /workspace
+      - python3 -m pip install --no-cache-dir --root-user-action=ignore pandas==2.2.3
+        openpyxl==3.1.5

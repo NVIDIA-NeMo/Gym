@@ -1621,9 +1621,19 @@ class SimpleServer(BaseServer):
         instrument_fastapi_app(app)
 
     def get_session_middleware_key(self) -> str:
-        # This method is here to override in case we want to ever use an actual session middleware secret key.
-        # e.g. for an actual product.
+        # Names the session cookie and this server in logs and error text, so it is public.
+        # To sign sessions with a secret, override get_session_secret instead.
         return f"{self.__class__.__name__}___{self.config.name}"
+
+    def get_session_secret(self) -> str:
+        """The key that signs this server's session cookies and MCP session tokens.
+
+        The default is ``get_session_middleware_key()``, which anyone who knows the server's class and name can
+        compute. A server whose routes untrusted callers can reach, such as code in a sandbox the server lends,
+        returns a secret instead, so those callers cannot forge another session's cookie or token.
+        Only the signing changes: the cookie keeps its name.
+        """
+        return self.get_session_middleware_key()
 
     def setup_session_middleware(self, app: FastAPI) -> None:
         if getattr(app.state, "nemo_gym_session_middleware_installed", False):
@@ -1670,7 +1680,9 @@ class SimpleServer(BaseServer):
             return response
 
         session_middleware_key = self.get_session_middleware_key()
-        app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
+        app.add_middleware(
+            SessionMiddleware, secret_key=self.get_session_secret(), session_cookie=session_middleware_key
+        )
 
     def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
         @app.middleware("http")
@@ -1849,12 +1861,12 @@ repr(e): {repr(e)}"""
         if server.routes_sessions_to_owner and not is_multi_worker_main_proc:
             # Outside SessionMiddleware and the exception middleware:
             # a forwarded request is handled only by the worker that claims its session.
-            session_cookie = server.get_session_middleware_key()
             install_session_routing(
                 app,
                 socket_dir=session_socket_dir,
-                session_cookie=session_cookie,
-                secret_key=session_cookie,
+                session_cookie=server.get_session_middleware_key(),
+                # Reads the cookie as SessionMiddleware does, so with the same key.
+                secret_key=server.get_session_secret(),
                 **mcp_token_routing,
                 **server.claimed_session_routing(),
             )
