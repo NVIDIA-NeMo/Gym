@@ -110,7 +110,12 @@ from nemo_gym.token_id_capture import (
 from nemo_gym.token_id_capture.config import NonGeneratingRequest, token_id_capture_config
 from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
-from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolver
+from nemo_gym.token_id_capture.protocols import (
+    CaptureAdmissionError,
+    CaptureInputError,
+    CaptureLedger,
+    LineageResolver,
+)
 from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.store import make_token_store
 
@@ -209,11 +214,12 @@ def _request_messages(body: Any) -> list[dict]:
         turns = [m if isinstance(m, dict) else m.model_dump() for m in messages if m is not None]
     else:
         items = getter("input", None)
-        turns = (
-            [i if isinstance(i, dict) else i.model_dump() for i in items if i is not None]
-            if isinstance(items, list)
-            else []
-        )
+        if isinstance(items, str):
+            turns = [{"role": "user", "content": items}]
+        elif isinstance(items, list):
+            turns = [i if isinstance(i, dict) else i.model_dump() for i in items if i is not None]
+        else:
+            turns = []
     return _request_envelope(getter) + turns
 
 
@@ -308,11 +314,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     # Subclasses can declare successful metadata or health routes here.
     # Unknown successful routes fail closed during training-token capture.
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
+    _capture_lineage: LineageResolver | None = PrivateAttr(default=None)
     # Main process of a multi-worker policy server under checkpointing: coordinates the workers.
     _policy_coordinator: Optional[PolicyCoordinator] = PrivateAttr(default=None)
 
     async def _finalize_served_response(self, response: Any) -> None:
         """Finalize capture after conversion to the response returned to the client."""
+
+    def _validate_capture_request(
+        self, body: NeMoGymResponseCreateParamsNonStreaming | NeMoGymChatCompletionCreateParamsNonStreaming
+    ) -> None:
+        """Validate server-specific request options before recording capture intent."""
 
     async def _stream_served_response(self, response: Any, events: Iterable[str | bytes]) -> StreamingResponse:
         """Serialize buffered SSE before committing externally staged capture."""
@@ -348,7 +360,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         self.setup_session_middleware(app)
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        capture_ledger = install_model_call_capture(
+        self._capture_lineage = capture_ledger = install_model_call_capture(
             app,
             capture_config,
             model_server_name=self.config.name,
@@ -488,6 +500,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         retain their status before the stream starts. Other ``responses()`` failures become terminal
         ``response.failed`` events; bad-request validation still fails eagerly.
         """
+        context = current_capture_context()
+        if context is not None and context.framework_owned_context:
+            # ``stream: true`` is allowed: the streaming branch below makes exactly one
+            # non-streaming ``responses()`` call and re-emits the completed response as
+            # synthesized SSE, so the engine-bound request stays non-streaming (external
+            # capture refuses a streamed backend request) and ``_stream_served_response``
+            # finalizes the capture before the stream is committed. SSE-only harnesses
+            # such as the Codex CLI thereby run under framework-owned context. Server-held
+            # history is still refused: it hides part of the context from capture.
+            if body.get("previous_response_id") or body.get("conversation"):
+                raise HTTPException(status_code=422, detail="Framework context requires explicit history")
         if not body.get("stream"):
             params = _validate_responses_params(body)
             response = await self._invoke_responses(request, params)
@@ -549,6 +572,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         (e.g. ``"false"`` or ``1``) stays on the strict non-streaming path, which rejects the
         malformed ``stream`` with the same 422 as before.
         """
+        context = current_capture_context()
+        if context is not None and context.framework_owned_context and body.get("n") not in (None, 1):
+            raise HTTPException(status_code=422, detail="Framework context requires one Chat completion")
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
             response = await self._invoke_chat_completions(request, params)
@@ -650,9 +676,15 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Resolve the parent from the received request before dispatch.
         # Exact prefix supply and capture share this decision.
         if current_capture_context() is not None:
+            self._validate_capture_request(params)
             request_messages = _request_messages(params)
-            await resolve_parent(request_messages)
-            await register_call_intent()
+            try:
+                await resolve_parent(request_messages)
+                await register_call_intent()
+            except CaptureAdmissionError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            except CaptureInputError as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
         else:
             request_messages = None
         if "request" in inspect.signature(self.chat_completions).parameters:
@@ -695,10 +727,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # all of them.
         # Resolve the parent from the received request before dispatch.
         # Exact prefix supply and capture share this decision.
-        if current_capture_context() is not None:
+        context = current_capture_context()
+        if context is not None:
+            self._validate_capture_request(params)
             request_messages = _request_messages(params)
-            await resolve_parent(request_messages)
-            await register_call_intent()
+            try:
+                await resolve_parent(request_messages)
+                await register_call_intent()
+            except CaptureAdmissionError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            except CaptureInputError as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
         else:
             request_messages = None
         if "request" in inspect.signature(self.responses).parameters:
@@ -1300,6 +1339,8 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         or not context.external_staging
         or context.capture_admission is None
         or context.committed
+        or context.refused
+        or (context.framework_owned_context and not context.intent_registered)
         # A checkpoint gate owns a deferred row: it publishes it when the response starts,
         # and a call whose response never starts made no answer to record, so it is not poisoned.
         or context.deferred_commit is not None
@@ -1315,11 +1356,8 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         )
         return
     try:
-        await ledger.record_failure(
-            context.rollout_id,
-            context.model_call_id,
-            UNCOMMITTED_CALL_REASON,
-        )
+        # A disconnected caller must not cancel the write before it reaches the ledger.
+        await asyncio.shield(ledger.record_failure(context.rollout_id, context.model_call_id, UNCOMMITTED_CALL_REASON))
     except Exception:
         logger.exception(
             "Could not poison uncommitted call %s for rollout %s.",
@@ -1352,6 +1390,7 @@ class _CaptureMiddleware:
         lineage_store: LineageResolver | None = None,
         delta_records: bool = False,
         external_staging: bool = False,
+        framework_owned_context: bool = False,
         token_capture_enabled: bool = False,
         assistant_message_header: bytes | None = None,
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
@@ -1371,6 +1410,7 @@ class _CaptureMiddleware:
         # A framework inference worker owns record staging; the lineage store
         # doubles as the per-rollout capture ledger.
         self._external_staging = external_staging
+        self._framework_owned_context = framework_owned_context
         self._capture_ledger: CaptureLedger | None = (
             lineage_store if external_staging and isinstance(lineage_store, CaptureLedger) else None
         )
@@ -1415,6 +1455,18 @@ class _CaptureMiddleware:
         # Installed sinks are resolved for each request.
         token_sink = self._configured_sink or installed_token_sink() or self._token_store
         capture_wanted = token_capture_requested and (token_sink is not None or self._token_capture_enabled)
+        if (
+            capture_wanted
+            and self._framework_owned_context
+            and dialect is not None
+            and dialect not in ("responses", "chat")
+        ):
+            await Response(
+                content='{"detail":"Framework-owned context currently requires Responses or Chat"}',
+                status_code=422,
+                media_type="application/json",
+            )(scope, receive, send)
+            return
         if token_capture_requested and dialect is None and token_sink is not None:
             marked_incomplete = False
             response_started = False
@@ -1453,7 +1505,8 @@ class _CaptureMiddleware:
                 await send(message)
 
             try:
-                await self._app(scope, receive, _send_unobserved)
+                with rollout_context(rollout_from_path):
+                    await self._app(scope, receive, _send_unobserved)
             except asyncio.CancelledError:
                 if not known_non_generating and not response_started:
                     await _mark_unobserved_incomplete("was cancelled before starting a response")
@@ -1497,6 +1550,7 @@ class _CaptureMiddleware:
                 lineage_store=self._capture_ledger if self._external_staging else self._lineage_store,
                 delta_records=self._delta_records,
                 external_staging=self._external_staging,
+                framework_owned_context=self._framework_owned_context,
                 admitted_at=time.time(),
             )
             sink_token = set_token_sink(capture_context)
@@ -1802,6 +1856,9 @@ def install_model_call_capture(
         lineage_store=lineage_store,
         delta_records=(capture_settings.token_id_capture.delta_records if capture_settings is not None else False),
         external_staging=external_staging,
+        framework_owned_context=(
+            capture_settings.token_id_capture.framework_owned_context if capture_settings is not None else False
+        ),
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
         non_generating_requests=non_generating_requests,
     )

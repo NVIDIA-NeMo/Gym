@@ -237,3 +237,13 @@ async def test_client_rejects_a_manifest_for_a_different_rollout(monkeypatch):
 
     with pytest.raises(ValueError, match="r2"):
         await control.manifest("r1")
+
+
+@pytest.mark.asyncio
+async def test_closing_a_retired_rollout_does_not_recreate_its_ledger(client, ledger):
+    await ledger.begin_call("r1", "inflight")
+    await ledger.retire(["r1"])
+    response = client.post(f"{CONTROL_ROUTE_PREFIX}/rollouts/r1/close", headers=AUTH)
+    assert response.status_code == 410
+    with pytest.raises(RolloutRetiredError):
+        await ledger.manifest("r1")
