@@ -486,29 +486,16 @@ ensure_prefill_profiler() {
     # Install only in this worker's container; existing installations are reused.
     if ! (
         export DEBIAN_FRONTEND=noninteractive
-        # A full Ubuntu index refresh took 29 minutes on a profiling node.
-        # Only bootstrap absent tools; CUDA images normally already have these.
-        bootstrap_packages=()
-        command -v curl >/dev/null 2>&1 || bootstrap_packages+=(curl)
-        command -v gpg >/dev/null 2>&1 || bootstrap_packages+=(gnupg)
-        if (( \${#bootstrap_packages[@]} )); then
-            echo "Prefill profiling: bootstrapping missing tools: \${bootstrap_packages[*]}" >&2
-            apt-get update || exit 1
-            apt-get install -y --no-install-recommends --no-upgrade \
-                "\${bootstrap_packages[@]}" ca-certificates || exit 1
-        fi
+        apt-get update &&
+        apt-get install -y --no-install-recommends wget gnupg ca-certificates &&
         mkdir -p /usr/share/keyrings &&
-        curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 --retry 2 \
+        wget -qO- --timeout=30 --tries=3 \
             https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub \
             | gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-devtools-keyring.gpg &&
         printf '%s\\n' "deb [signed-by=/usr/share/keyrings/nvidia-devtools-keyring.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu\${VERSION_ID//./}/\$arch/ /" \
             | tee /etc/apt/sources.list.d/nvidia-devtools.list >/dev/null &&
-        # Keep other cached indexes for dependency resolution without refreshing
-        # Ubuntu mirrors or unrelated CUDA repositories on every GPU node.
-        apt-get update \
-            -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/nvidia-devtools.list \
-            -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 &&
-        apt-get install -y --no-install-recommends "\$package"
+        apt-get update &&
+        apt-get install -y --no-install-recommends "\$package" curl
     ); then
         echo "ERROR: \$title installation failed; check container write permissions and access to the Ubuntu/NVIDIA package repositories." >&2
         return 1
