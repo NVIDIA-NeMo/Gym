@@ -29,8 +29,6 @@ _PRIVATE_DIRECTORIES = ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_H
 REJECTED = 3
 # Seconds a pinned executable gets to answer ``--version``.
 _VERSION_CHECK_TIMEOUT = 60
-# Written last by ``--export``: each session's outcome, for the sandbox owner.
-EXPORT_STATUS = "export-status.json"
 
 
 class Rejected(Exception):
@@ -179,7 +177,7 @@ def _replace(path: Path, data: bytes) -> None:
 
 
 class ExportStatus(TypedDict):
-    """Outcome of ``--export``: one JSON line on stdout, and ``export-status.json`` in the export directory.
+    """Outcome of ``--export``, printed as one JSON line on stdout.
 
     Providers differ in what they keep of a command's stderr (OpenSandbox's background exec reports only the
     exit status there), so the outcome never depends on it.
@@ -211,7 +209,7 @@ def export_sessions(*, directory: Path, session_directory: Path, export_dir: Pat
     """Write every session's ``opencode export`` and this run's event log for the sandbox owner.
 
     ``sessions.json`` lists the stored session tree first, so the owner can tell a failed export from
-    an absent session; ``export-status.json`` comes last with each session's outcome. The CLI runs with
+    an absent session. The CLI runs with
     the run's private HOME/XDG directories and working directory but without its OpenCode configuration,
     so no plugin loads again. Failures are recorded in the returned status, not raised.
     """
@@ -229,9 +227,8 @@ def export_sessions(*, directory: Path, session_directory: Path, export_dir: Pat
     try:
         params = json.loads((directory / "input.json").read_text())
         export_dir.mkdir(parents=True, exist_ok=True)
-        # Never leave an earlier activation's inventory or outcome in place of this one.
-        for name in ("sessions.json", EXPORT_STATUS):
-            (export_dir / name).unlink(missing_ok=True)
+        # Never leave an earlier activation's inventory in place of this one.
+        (export_dir / "sessions.json").unlink(missing_ok=True)
         database = session_directory / "data/opencode/opencode.db"
         with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as source:
             rows = source.execute("select id, parent_id from session order by time_created, id").fetchall()
@@ -297,10 +294,6 @@ def export_sessions(*, directory: Path, session_directory: Path, export_dir: Pat
     except Exception as error:
         status["error"] = f"{type(error).__name__}: {error}"
     status["elapsed_seconds"] = round(time.monotonic() - started, 3)
-    try:
-        _replace(export_dir / EXPORT_STATUS, json.dumps(status).encode())
-    except OSError as error:
-        status["error"] = status["error"] or f"{EXPORT_STATUS} not written: {error}"
     return status
 
 

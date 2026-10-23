@@ -268,7 +268,6 @@ def test_export_writes_every_session_and_the_event_log_without_reloading_plugins
     assert sandbox_runner.export_failures(status) == []
     assert status["sessions"] == {session_id: "ok" for session_id in SESSIONS}
     assert status["event_log"] == "ok" and status["error"] is None and not status["deadline_exhausted"]
-    assert json.loads((exports / "export-status.json").read_text()) == status
     assert json.loads((exports / "sessions.json").read_text()) == [
         {"id": "ses_root", "parent_id": None},
         {"id": "ses_child", "parent_id": "ses_root"},
@@ -289,7 +288,6 @@ def test_export_writes_every_session_and_the_event_log_without_reloading_plugins
     assert sorted(path.name for path in exports.iterdir()) == sorted(
         [
             "sessions.json",
-            "export-status.json",
             "ses_root.events.jsonl",
             *(f"{session_id}.json" for session_id in SESSIONS),
         ]
@@ -315,9 +313,8 @@ def test_failed_session_export_is_reported_and_never_left_stale(tmp_path):
     finished, line = run_export(session, exports)
     assert finished.returncode == 1
     assert "OpenCode session export failed: ses_child: exit 1" in finished.stderr
-    # The same outcome reaches stdout and the owner's directory, whatever a provider keeps of stderr.
+    # The outcome reaches stdout, whatever a provider keeps of stderr.
     assert line["sessions"]["ses_child"] == "exit 1: Session not found: ses_child"
-    assert json.loads((exports / "export-status.json").read_text()) == line
 
 
 def test_unreadable_store_leaves_no_inventory_and_reports_why(tmp_path):
@@ -330,31 +327,10 @@ def test_unreadable_store_leaves_no_inventory_and_reports_why(tmp_path):
     assert status["error"].startswith("OperationalError: unable to open database file")
     assert status["sessions"] == {} and status["event_log"] == "not attempted"
     assert not (exports / "sessions.json").exists()
-    assert json.loads((exports / "export-status.json").read_text()) == status
     finished, line = run_export(session, exports)
     assert finished.returncode == 1
     assert "Traceback" not in finished.stderr
     assert line["error"].startswith("OperationalError")
-
-
-def test_status_from_an_earlier_activation_is_removed_before_exporting(tmp_path):
-    session, _, calls = export_fixture(tmp_path)
-    exports = tmp_path / "exports"
-    exports.mkdir()
-    (exports / "export-status.json").write_text('{"stale": true}')
-    probe = tmp_path / "status-probe"
-    probe.write_text(
-        f"#!{sys.executable}\nimport json, os, sys\n"
-        f"print(json.dumps({{'info': {{'stale': os.path.exists({str(exports / 'export-status.json')!r})}}}}))\n"
-    )
-    probe.chmod(0o755)
-    params = json.loads((session / "input.json").read_text())
-    params["command"][0] = str(probe)
-    (session / "input.json").write_text(json.dumps(params))
-    assert sandbox_runner.export_failures(export_all(session, exports)) == []
-    # While the CLI ran, an owner could not mistake the earlier outcome for this one.
-    assert json.loads((exports / "ses_root.json").read_text()) == {"info": {"stale": False}}
-    assert "stale" not in json.loads((exports / "export-status.json").read_text())
 
 
 def test_event_log_without_a_single_root_is_reported(tmp_path):

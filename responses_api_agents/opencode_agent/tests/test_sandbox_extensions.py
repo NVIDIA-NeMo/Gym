@@ -297,22 +297,6 @@ async def test_host_executable_is_checked_uploaded_and_dropped_after_install(set
     assert shlex.split(cleanup) == ["rm", "-f", "--", staged]
 
 
-@pytest.mark.parametrize("problem", ["mismatch", "missing"])
-def test_host_executable_problems_fail_before_connecting(setup, tmp_path, problem):
-    agent, sandbox = setup
-    binary = tmp_path / "opencode"
-    if problem == "mismatch":
-        binary.write_text("other bytes")
-    agent.config.sandbox_local_executable_path = str(binary)
-    agent.config.sandbox_executable_sha256 = PIN
-    response = seed_status(agent)
-    assert response.status_code == 422
-    expected = f"expected {PIN}, found " if problem == "mismatch" else "Cannot read sandbox_local_executable_path"
-    assert expected in response.json()["detail"]
-    sandbox.exec.assert_not_awaited()
-    assert not sandbox.files
-
-
 @pytest.mark.parametrize(("pinned", "code", "status"), [(True, 3, 422), (True, 1, 500), (False, 3, 500)])
 def test_only_a_rejected_pin_is_a_deterministic_setup_error(setup, pinned, code, status):
     agent, sandbox = setup
@@ -507,13 +491,11 @@ async def test_adapter_export_command_runs_the_runner_inside_the_sandbox(tmp_pat
     for session_id in ("ses_root", "ses_child"):
         assert json.loads((exports / f"{session_id}.json").read_text())["info"]["id"] == session_id
     assert (exports / "ses_root.events.jsonl").read_text() == '{"type": "step_start"}\n'
-    status = json.loads((exports / "export-status.json").read_text())
-    assert status["sessions"] == {"ses_root": "ok", "ses_child": "ok"} and status["event_log"] == "ok"
 
 
 @pytest.mark.parametrize("streams", ["separate", "merged", "dropped"])
 async def test_failed_session_reaches_the_gap_whatever_the_provider_keeps_of_stderr(tmp_path, streams):
-    state, exports = host_export_session(tmp_path, failing=["ses_child"], streams=streams)
+    state, _ = host_export_session(tmp_path, failing=["ses_child"], streams=streams)
     await asyncio.wait_for(state.write_exports(deadline=monotonic() + 30), 40)
     (gap,) = state.take_export_gaps()
     assert gap.code == "export_dir_write_failed"
@@ -522,9 +504,6 @@ async def test_failed_session_reaches_the_gap_whatever_the_provider_keeps_of_std
     assert "ses_child: exit 1: Session not found: ses_child" in gap.detail
     if streams == "merged":
         assert gap.detail.endswith("stderr: exit status 1")
-    # The owner reads the same outcome next to the exports.
-    status = json.loads((exports / "export-status.json").read_text())
-    assert status["sessions"] == {"ses_root": "ok", "ses_child": "exit 1: Session not found: ses_child"}
 
 
 EXPORT_STATUS_LINE = json.dumps(
@@ -1081,6 +1060,7 @@ def test_unusable_host_pin_refuses_the_seed_before_connecting(setup, caplog, tmp
     }[problem]
     assert refused(agent, caplog).startswith(expected)
     sandbox.exec.assert_not_awaited()
+    assert not sandbox.files
 
 
 INPUT_REFUSALS = {

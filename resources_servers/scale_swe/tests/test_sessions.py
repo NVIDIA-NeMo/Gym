@@ -80,10 +80,6 @@ class FakeSandbox:
             setattr(self, name, value)
 
 
-def fake_sandbox(**overrides) -> FakeSandbox:
-    return FakeSandbox(**overrides)
-
-
 def config(**overrides) -> ScaleSWEResourcesServerConfig:
     return ScaleSWEResourcesServerConfig(
         host="",
@@ -108,7 +104,7 @@ def server(monkeypatch, sandboxes) -> ScaleSWEResourcesServer:
     server = ScaleSWEResourcesServer(config=config(), server_client=MagicMock(spec=ServerClient))
 
     async def create(body, files=None):
-        sandboxes.append(fake_sandbox())
+        sandboxes.append(FakeSandbox())
         return sandboxes[-1]
 
     monkeypatch.setattr(server, "_create_sandbox", AsyncMock(side_effect=create))
@@ -132,7 +128,7 @@ def use_verifier_exec(monkeypatch, server, sandboxes, result: SandboxExecResult)
         return await verification.run_verification(**{**kwargs, "log_dir": None})
 
     async def create(body, files=None):
-        sandboxes.append(fake_sandbox())
+        sandboxes.append(FakeSandbox())
         if files:  # A verifier sandbox.
             sandboxes[-1].exec = AsyncMock(return_value=result)
         return sandboxes[-1]
@@ -201,7 +197,7 @@ async def test_typed_seed_returns_sandbox_access_and_binds_the_verify_cookie(ser
 
 @pytest.mark.asyncio
 async def test_failed_seed_stops_its_sandbox(server):
-    sandbox = fake_sandbox(serialize=AsyncMock(side_effect=OSError("provider unavailable")))
+    sandbox = FakeSandbox(serialize=AsyncMock(side_effect=OSError("provider unavailable")))
     server._create_sandbox.side_effect = None
     server._create_sandbox.return_value = sandbox
 
@@ -439,8 +435,8 @@ async def test_a_completed_zero_is_a_kept_measurement(server, grading):
 
 
 @pytest.mark.parametrize("case", ["no_verdict", "capture_failed", "exec_error"])
-async def test_cookie_path_verification_is_unchanged(server, grading, sandboxes, monkeypatch, case):
-    """An Agent's /run (the cookie path) keeps main's behavior: nothing is masked, and nothing is replayed."""
+async def test_cookie_path_verification_neither_masks_nor_replays(server, grading, sandboxes, monkeypatch, case):
+    """An Agent's /run (the cookie path) masks nothing and replays nothing."""
     request = SimpleNamespace(session={SESSION_ID_KEY: "cookie"})
     await server.seed_session(request, ScaleSWESeedSessionRequest.model_validate(ROW))
     if case == "no_verdict":
@@ -472,10 +468,10 @@ async def test_cookie_path_verification_is_unchanged(server, grading, sandboxes,
         assert result.error == "held-out test patch did not apply"
         assert grading.run.await_count == 2  # One inconclusive retry on a fresh sandbox.
     elif case == "exec_error":
-        # As on main, a provider failure of the eval exec is graded like any other run.
+        # A provider failure of the eval exec is graded like any other run.
         assert result.evaluation_completed is True
     else:
-        # The patch that could not be captured is graded as an empty one, as on main.
+        # The patch that could not be captured is graded as an empty one.
         assert result.evaluation_completed is True
         assert result.error == "Failed to extract model patch: git diff failed"
         assert grading.run.await_args.kwargs["inputs"].patch == ""
@@ -546,7 +542,7 @@ async def test_close_fences_a_seed_in_progress(server, sandboxes, close_waits):
     async def slow_create(body, files=None):
         entered.set()
         await release.wait()
-        sandboxes.append(fake_sandbox())
+        sandboxes.append(FakeSandbox())
         return sandboxes[-1]
 
     server._create_sandbox.side_effect = slow_create
@@ -631,7 +627,7 @@ async def test_slow_stop_at_close_is_waited_for_again_never_cut_short(server):
 @pytest.mark.parametrize("stop_failure", ["error", "slow"])
 async def test_failed_seed_cleanup_is_bounded_and_keeps_the_sandbox_for_close(server, stop_failure):
     server.config.sandbox_stop_timeout_seconds = 0.01
-    sandbox = fake_sandbox(exec=AsyncMock(side_effect=OSError("exec stream lost")))
+    sandbox = FakeSandbox(exec=AsyncMock(side_effect=OSError("exec stream lost")))
     release = asyncio.Event()
 
     async def stop():
@@ -713,7 +709,7 @@ async def test_seed_in_progress_at_shutdown_stops_its_own_sandbox(server, sandbo
     async def slow_create(body, files=None):
         entered.set()
         await release.wait()
-        sandboxes.append(fake_sandbox())
+        sandboxes.append(FakeSandbox())
         return sandboxes[-1]
 
     server._create_sandbox.side_effect = slow_create
@@ -930,7 +926,7 @@ async def test_shutdown_stops_a_busy_session_after_a_bounded_wait(server, sandbo
 )
 async def test_seed_without_a_base_commit_is_retryable_and_stops_its_sandbox(server, rev_parse):
     ok = SimpleNamespace(return_code=0, stdout=f"{BASE_COMMIT}\n", stderr="", error_type=None)
-    sandbox = fake_sandbox(
+    sandbox = FakeSandbox(
         exec=AsyncMock(side_effect=lambda command, **kwargs: rev_parse if "rev-parse HEAD" in command else ok)
     )
     server._create_sandbox.side_effect = None

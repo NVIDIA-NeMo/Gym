@@ -131,5 +131,5 @@ names the session for `/verify`, and `/close_session` ends it.
   progress gets that long to finish, and then its sandboxes are stopped anyway. A stop that fails is logged,
   and the provider's TTL reclaims the sandbox.
 
-The cookie path that an Agent's `/run` uses handles requests as before. It does not replay or mask, and the
-stops inside its requests are not bounded. Only the shutdown cleanup above applies to it.
+The cookie path that an Agent's `/run` uses does not replay or mask, and the stops inside its requests are not
+bounded. Only the shutdown cleanup above applies to it.

@@ -737,7 +737,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
           registered failure_kind.
         - Verifier sandbox stops are waited for within ``sandbox_stop_timeout_seconds``.
 
-        The cookie path keeps its original behavior.
+        The cookie path (an Agent's ``/run``) masks nothing and replays nothing.
         """
         extraction_error = None
         unreadable_patch = None

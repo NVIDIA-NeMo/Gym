@@ -317,7 +317,6 @@ async def run_verification(
             test_results=None,
             test_output=output,
             error=f"workdir {inputs.workdir} not present in the image",
-            exec_error_type=result.error_type,
         )
 
     target_ids = list(inputs.fail_to_pass) + list(inputs.pass_to_pass)

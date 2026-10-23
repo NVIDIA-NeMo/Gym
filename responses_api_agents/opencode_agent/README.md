@@ -246,8 +246,7 @@ Each artifact is pinned the same way: an existing file inside the sandbox
 (`sandbox_<item>_path`, for example on a mounted cache) or a file on the Gym host that
 seed uploads (`sandbox_local_<item>_path`), plus `sandbox_<item>_sha256`, which is
 required with either and is the only way to set one. A host file is hashed before any
-sandbox is touched, once per version of the file (resolved path, inode, size and
-modification time); inside the sandbox the adapter copies the file, hashes the copy and
+sandbox is touched; inside the sandbox the adapter copies the file, hashes the copy and
 uses only those bytes. A digest or health-check mismatch fails seed with 422. A missing
 in-sandbox file, or a health check that times out or is ended by a signal (such as the
 OOM killer's), is a retryable setup error. At most four host uploads run at once per
@@ -289,11 +288,7 @@ and before the session directory is removed, each activation's capture writes th
 - `<session id>.json`: `opencode export <session id>` for the root and every child
   session, each written atomically. A stale copy is removed before each export;
 - `<root id>.events.jsonl` (`<root id>.activation-<n>.events.jsonl` in continuation
-  sessions): the run's `--format json` event log, when one exists;
-- `export-status.json`, written last: each session ID mapped to `"ok"` or the reason its
-  export is missing, the event log's outcome (`"ok"`, `"absent"` or a reason), whether
-  the deadline ran out, any error that stopped the export, and the seconds it had and
-  used. A stale copy is removed first, so a missing file means the export did not finish.
+  sessions): the run's `--format json` event log, when one exists.
 
 The CLI runs with the session's private directories, from the task workdir, without the
 run's configuration, so no plugin loads again. Writing shares the capture step's budget
