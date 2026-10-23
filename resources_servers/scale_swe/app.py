@@ -239,12 +239,9 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                     yield state
             finally:
                 self._shutting_down = True
-                # Every sandbox still held, by an Environment Server session or a cookie session alike.
-                session_ids = (
-                    set(self._resources_sessions)
-                    | set(self._session_id_to_sandbox)
-                    | set(self._session_id_to_verifier_sandboxes)
-                )
+                # The sandboxes Environment Server sessions still hold. The cookie path keeps its behavior: what an
+                # Agent's /run still holds is left to the provider's TTL.
+                session_ids = set(self._resources_sessions) | set(self._session_id_to_verifier_sandboxes)
                 await asyncio.gather(*(self._shutdown_session(session_id) for session_id in session_ids))
 
         app.router.lifespan_context = lifespan

@@ -659,7 +659,7 @@ async def test_failed_stop_after_capture_leaves_the_sandbox_to_close(server, gra
     assert not server._session_id_to_sandbox
 
 
-async def test_shutdown_stops_every_held_sandbox_even_when_one_stop_fails(server, sandboxes, caplog):
+async def test_shutdown_stops_every_environment_server_sandbox_even_when_one_stop_fails(server, sandboxes, caplog):
     server.config.sandbox_stop_timeout_seconds = 0.01
     app = server.setup_webserver()
     lifespan = app.router.lifespan_context(app)
@@ -679,12 +679,14 @@ async def test_shutdown_stops_every_held_sandbox_even_when_one_stop_fails(server
     with caplog.at_level(logging.ERROR, logger=scale_swe_app.__name__):
         await asyncio.wait_for(lifespan.__aexit__(None, None, None), timeout=5)
 
-    # Shutdown returned without raising, did not wait out the slow stop, and reached every sandbox.
+    # Shutdown returned without raising, did not wait out the slow stop, and reached every Environment Server
+    # sandbox. The cookie path's sandbox is left to the provider's TTL, as before.
     assert monotonic() - started < 2
-    for sandbox in sandboxes:
-        sandbox.stop.assert_awaited_once()
+    failing.stop.assert_awaited_once()
+    slow.stop.assert_awaited_once()
+    cookie_sandbox.stop.assert_not_awaited()
     # A sandbox whose stop failed or ran long stays owned; the provider TTL reclaims it.
-    assert set(server._session_id_to_sandbox) == {"first", "second"}
+    assert set(server._session_id_to_sandbox) == {"first", "second", "cookie"}
     assert sum("provider TTL is the backstop" in record.getMessage() for record in caplog.records) == 2
     # Shutdown never cut the slow stop short; it finishes on its own.
     release.set()
