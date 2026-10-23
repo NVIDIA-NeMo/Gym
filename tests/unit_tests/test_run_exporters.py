@@ -67,3 +67,45 @@ def test_atif_exporter_reads_the_rollouts_from_the_run_artifacts(tmp_path: Path)
 
     assert result.state is ExportState.FAILED
     assert "missing.jsonl" in result.error
+
+
+def _atif_config(tmp_path: Path, output: Path) -> ExportAtifConfig:
+    return ExportAtifConfig(
+        rollouts_jsonl_fpath=tmp_path / "ignored.jsonl", output_dirpath=output, session_id="s", agent_version="1"
+    )
+
+
+def test_atif_exporter_reports_an_unusable_output_location_as_a_failed_result(tmp_path: Path) -> None:
+    rollouts = tmp_path / "rollouts.jsonl"
+    rollouts.write_text("{}\n")
+    (tmp_path / "blocked").write_text("a regular file where a directory is needed")
+
+    result = AtifExporter(_atif_config(tmp_path, tmp_path / "blocked" / "atif")).export(RunArtifacts(rollouts))
+
+    assert result.state is ExportState.FAILED
+    assert result.exit_code == 1
+    assert "blocked" in result.error
+    assert not (tmp_path / "blocked" / "atif").exists()
+
+
+def test_atif_exporter_reports_a_permission_error_as_failed_but_lets_a_bug_propagate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import nemo_gym.exporters.atif as atif_module
+
+    exporter = AtifExporter(_atif_config(tmp_path, tmp_path / "atif"))
+
+    def denied(config):
+        raise PermissionError("Permission denied: 'rollouts.jsonl'")
+
+    monkeypatch.setattr(atif_module, "export_rollouts_to_atif", denied)
+    result = exporter.export(RunArtifacts(tmp_path / "rollouts.jsonl"))
+    assert result.state is ExportState.FAILED
+    assert "Permission denied" in result.error
+
+    def bug(config):
+        raise RuntimeError("programming error")
+
+    monkeypatch.setattr(atif_module, "export_rollouts_to_atif", bug)
+    with pytest.raises(RuntimeError, match="programming error"):
+        exporter.export(RunArtifacts(tmp_path / "rollouts.jsonl"))

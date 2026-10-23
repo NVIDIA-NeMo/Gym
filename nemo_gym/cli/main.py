@@ -736,10 +736,6 @@ EXPORTER = Flag(
 
 def _eval_export(args: argparse.Namespace, overrides: list[str]) -> None:
     exporter = args.exporter
-    # argparse can capture the first bare Hydra override (`rollouts_jsonl_fpath=...`) in the optional EXPORTER slot.
-    if exporter and _is_positional_hydra_override(exporter):
-        overrides = [exporter, *overrides]
-        exporter = None
     if args.format is not None:
         print(
             "Warning: `--format` is deprecated; pass the exporter name instead: `gym eval export <exporter>`.",
@@ -752,7 +748,11 @@ def _eval_export(args: argparse.Namespace, overrides: list[str]) -> None:
     if exporter not in RUN_EXPORTERS:
         args._parser.error(f"unknown exporter {exporter!r}; choose from: {', '.join(RUN_EXPORTERS)}")
     # Exporter settings are new config keys, which Hydra only accepts with a leading `+`; let users omit it.
-    overrides = [f"+{token}" if re.match(r"[A-Za-z_][\w.]*=", token) else token for token in overrides]
+    # Hydra's own `hydra.*` settings already exist, so adding `+` would make Hydra reject them.
+    overrides = [
+        f"+{token}" if re.match(r"[A-Za-z_][\w.]*=", token) and not token.startswith(("hydra.", "hydra=")) else token
+        for token in overrides
+    ]
     dispatch("nemo_gym.cli.eval:export_run", [f"+exporter={exporter}", *overrides])
 
 
@@ -1872,6 +1872,12 @@ def main() -> None:
         if command.target is _eval_run and args.target and _is_positional_hydra_override(args.target):
             overrides = [args.target, *overrides]
             args.target = None
+
+        # Likewise for eval export's optional EXPORTER slot: restore the captured override ahead of the raw
+        # overrides but after the translated flags, so a flag and a raw override of one key keep their order.
+        if command.target is _eval_export and args.exporter and _is_positional_hydra_override(args.exporter):
+            overrides = [args.exporter, *overrides]
+            args.exporter = None
 
         # --config and the asset selectors all emit +config_paths; coalesce them into one token.
         overrides = _merge_config_paths(translated + overrides)
