@@ -8,7 +8,7 @@
 # Credentials stay in environment variables; generated env.yaml files never
 # contain the API key.
 #
-#   export AGENTENV_URL=http://<agentenv-control-plane>   # http, see below
+#   export AGENTENV_URL=https://<agentenv-control-plane>   # see note 2
 #   export AGENTENV_API_KEY=<key>
 #   export AGENTENV_TEMPLATE=osworld-slim
 #
@@ -21,9 +21,11 @@
 #     selects gateway routing, where the proxy picks the target from
 #     `X-Access-Token` / `E2b-Sandbox-Id` / `E2b-Sandbox-Port` headers. That
 #     token is minted per sandbox and is NOT the deployment API key.
-#  2. The control plane is addressed over http. A deployment serving a
-#     certificate signed by an internal CA makes the SDK abort with
-#     `invalid peer certificate: UnknownIssuer`.
+#  2. That deployment served http. A deployment serving a certificate signed
+#     by an internal CA makes the SDK abort with
+#     `invalid peer certificate: UnknownIssuer` unless SSL_CERT_FILE points at a
+#     bundle containing that CA (verified on 2026-09-25); OSWorld's guest
+#     forwarder also needs the CA in the agent environment's certifi bundle.
 #
 # OSWorld only understands one host plus four integer ports, so the adapter
 # gives each service a loopback forwarder that injects those headers and
