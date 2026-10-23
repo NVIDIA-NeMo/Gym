@@ -13,7 +13,7 @@ from time import time
 from typing import ClassVar
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import Field, JsonValue, PrivateAttr
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
@@ -23,7 +23,6 @@ from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
-    AgentSeedSessionResponse,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -119,28 +118,6 @@ class PoolAgent(SimpleResponsesAPIAgent):
         app.router.lifespan_context = lifespan
         return app
 
-    async def seed_agent_session(
-        self, request: Request, body: AgentSeedSessionRequest, response: Response = None
-    ) -> AgentSeedSessionResponse:
-        """Fence shutdown and track setup until its shared session record is settled."""
-        if self._shutting_down:
-            raise HTTPException(503, "Pool server is shutting down")
-        task = asyncio.current_task()
-        assert task is not None
-        self._seed_tasks.add(task)
-        try:
-            result = await super().seed_agent_session(request, body, response)
-            if self._shutting_down:
-                raise HTTPException(503, "Pool server shut down during session setup")
-            return result
-        finally:
-            try:
-                # A late setup must release its state even if the shutdown wait expired.
-                if self._shutting_down:
-                    await self._close_for_shutdown(body)
-            finally:
-                self._seed_tasks.discard(task)
-
     async def _close_for_shutdown(self, seed: AgentSeedSessionRequest) -> None:
         try:
             async with asyncio.timeout(self.config.session_close_timeout_seconds):
@@ -167,81 +144,91 @@ class PoolAgent(SimpleResponsesAPIAgent):
         await asyncio.gather(*(self._close_for_shutdown(seed) for seed in seeds))
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> PoolSession:
-        if any(access.required for access in self.effective_tool_accesses(body)):
-            raise HTTPException(422, "Pool does not yet enforce required external tool grant initialization")
-        if body.sandbox_access is not None and body.sandbox_access.user is not None:
-            raise HTTPException(422, "Pool does not yet support a SandboxAccess user override")
-        owns_sandbox = body.sandbox_access is None
-        if owns_sandbox:
-            if self.config.sandbox_provider is None:
-                raise HTTPException(422, "Pool requires SandboxAccess or a configured sandbox_provider")
-            provider_ref = self.config.sandbox_provider
-            workdir = self.config.sandbox_config.get("workdir") or "/app"
-        else:
-            if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
-                raise HTTPException(422, "Pool requires direct SandboxAccess")
-            provider_ref = body.sandbox_access.connection.provider_config_ref
-            workdir = body.sandbox_access.workdir
-        root = "/tmp/nemo-gym-pool-sessions"
-        if (
-            not isinstance(workdir, str)
-            or not workdir.startswith("/")
-            or ".." in workdir.split("/")
-            or workdir.rstrip("/") == ""
-            or root.startswith(workdir.rstrip("/") + "/")
-            or workdir == root
-            or workdir.startswith(root + "/")
-        ):
-            raise HTTPException(422, "Pool task workdir must be absolute and disjoint from session storage")
-        global_config = get_global_config_dict()
-        provider = create_provider(resolve_provider_config(provider_ref, global_config))
-        if owns_sandbox:
-            sandbox = AsyncSandbox(provider)
-        else:
-            try:
-                sandbox = await AsyncSandbox.connect(body.sandbox_access.connection.descriptor, provider=provider)
-            except BaseException:
-                await provider.aclose()
-                raise
-        state = PoolSession(
-            request=body,
-            provider_name=provider.name,
-            sandbox_id=sandbox.sandbox_id,
-            session=SandboxSession(
-                sandbox=sandbox,
-                session_dir=f"{root}/{uuid4().hex}",
-                workdir=workdir,
-                harness="Pool",
-                owns_sandbox=owns_sandbox,
-            ),
-        )
+        if self._shutting_down:
+            raise HTTPException(503, "Pool server is shutting down")
+        task = asyncio.current_task()
+        assert task is not None
+        self._seed_tasks.add(task)
         try:
+            if any(access.required for access in self.effective_tool_accesses(body)):
+                raise HTTPException(422, "Pool does not yet enforce required external tool grant initialization")
+            if body.sandbox_access is not None and body.sandbox_access.user is not None:
+                raise HTTPException(422, "Pool does not yet support a SandboxAccess user override")
+            owns_sandbox = body.sandbox_access is None
             if owns_sandbox:
-                settings = self.config.sandbox_config.copy()
-                metadata = settings.pop("metadata", {})
-                if not isinstance(metadata, dict):
-                    raise ValueError("Pool sandbox metadata must be a mapping")
-                settings["metadata"] = {
-                    **resolve_provider_metadata(provider_ref, global_config),
-                    **metadata,
-                    "agent_session_id": body.agent_session_id[:63],
-                }
-                settings.setdefault("workdir", workdir)
-                settings.setdefault("ttl_s", self.config.setup_timeout + self.config.timeout + 600)
-                await sandbox.start(SandboxSpec(**settings))
-                state.sandbox_id = sandbox.sandbox_id
-                result = await sandbox.exec(f"mkdir -p -- {quote(workdir)}", cwd="/", timeout_s=30)
-                if result.return_code != 0 or result.error_type:
-                    raise RuntimeError("Cannot prepare Pool task workdir")
-            await state.install(version=self.config.pool_version, timeout=self.config.setup_timeout)
-        except BaseException as error:
+                if self.config.sandbox_provider is None:
+                    raise HTTPException(422, "Pool requires SandboxAccess or a configured sandbox_provider")
+                provider_ref = self.config.sandbox_provider
+                workdir = self.config.sandbox_config.get("workdir") or "/app"
+            else:
+                if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
+                    raise HTTPException(422, "Pool requires direct SandboxAccess")
+                provider_ref = body.sandbox_access.connection.provider_config_ref
+                workdir = body.sandbox_access.workdir
+            root = "/tmp/nemo-gym-pool-sessions"
+            if (
+                not isinstance(workdir, str)
+                or not workdir.startswith("/")
+                or ".." in workdir.split("/")
+                or workdir.rstrip("/") == ""
+                or root.startswith(workdir.rstrip("/") + "/")
+                or workdir == root
+                or workdir.startswith(root + "/")
+            ):
+                raise HTTPException(422, "Pool task workdir must be absolute and disjoint from session storage")
+            global_config = get_global_config_dict()
+            provider = create_provider(resolve_provider_config(provider_ref, global_config))
+            if owns_sandbox:
+                sandbox = AsyncSandbox(provider)
+            else:
+                try:
+                    sandbox = await AsyncSandbox.connect(body.sandbox_access.connection.descriptor, provider=provider)
+                except BaseException:
+                    await provider.aclose()
+                    raise
+            state = PoolSession(
+                request=body,
+                provider_name=provider.name,
+                sandbox_id=sandbox.sandbox_id,
+                session=SandboxSession(
+                    sandbox=sandbox,
+                    session_dir=f"{root}/{uuid4().hex}",
+                    workdir=workdir,
+                    harness="Pool",
+                    owns_sandbox=owns_sandbox,
+                ),
+            )
             try:
-                await state.close(timeout=self.config.session_close_timeout_seconds)
-            except BaseException:
-                LOG.exception("Pool setup cleanup failed; retaining session for close")
-                raise AgentSessionSetupError(state, error=error) from error
-            raise
-        return state
+                if owns_sandbox:
+                    settings = self.config.sandbox_config.copy()
+                    metadata = settings.pop("metadata", {})
+                    if not isinstance(metadata, dict):
+                        raise ValueError("Pool sandbox metadata must be a mapping")
+                    settings["metadata"] = {
+                        **resolve_provider_metadata(provider_ref, global_config),
+                        **metadata,
+                        "agent_session_id": body.agent_session_id[:63],
+                    }
+                    settings.setdefault("workdir", workdir)
+                    settings.setdefault("ttl_s", self.config.setup_timeout + self.config.timeout + 600)
+                    await sandbox.start(SandboxSpec(**settings))
+                    state.sandbox_id = sandbox.sandbox_id
+                    result = await sandbox.exec(f"mkdir -p -- {quote(workdir)}", cwd="/", timeout_s=30)
+                    if result.return_code != 0 or result.error_type:
+                        raise RuntimeError("Cannot prepare Pool task workdir")
+                await state.install(version=self.config.pool_version, timeout=self.config.setup_timeout)
+                if self._shutting_down:
+                    raise HTTPException(503, "Pool server shut down during session setup")
+            except BaseException as error:
+                try:
+                    await state.close(timeout=self.config.session_close_timeout_seconds)
+                except BaseException:
+                    LOG.exception("Pool setup cleanup failed; retaining session for close")
+                    raise AgentSessionSetupError(state, error=error) from error
+                raise
+            return state
+        finally:
+            self._seed_tasks.discard(task)
 
     def _observations(self, state: PoolSession) -> AgentObservationBundle:
         artifacts = state.session.artifacts
@@ -347,6 +334,10 @@ class PoolAgent(SimpleResponsesAPIAgent):
             if parsed.exit_reason == "model_next_tool_call_http_error":
                 raise RuntimeError("Pool model request failed: " + parsed.exit_reason)
             timed_out = cleanup["timed_out"]
+            if parsed.exit_reason not in (None, "exit_tool_called"):
+                raise RuntimeError(f"Pool failed: reason={parsed.exit_reason}")
+            if timed_out and not parsed.output and not artifacts.completed_model_calls:
+                raise RuntimeError("Pool timed out before any model response completed")
             if not timed_out:
                 if cleanup["return_code"] not in (0, 4) or artifacts.exit_code not in (0, 4):
                     raise RuntimeError(

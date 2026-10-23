@@ -4,6 +4,7 @@ pool_agent:
   responses_api_agents:
     pool_agent:
       entrypoint: app.py
+      resources_server: null
       model_server:
         type: responses_api_models
         name: policy_model

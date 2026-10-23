@@ -81,29 +81,37 @@ def test_cache_hints_preserve_tool_schema_and_content():
     assert body["tools"][0]["function"]["parameters"]["properties"] == {"cache_control": {"type": "string"}}
 
 
-def test_proxy_preserves_upstream_errors():
+@pytest.mark.parametrize("status", [200, 429, 503])
+def test_proxy_preserves_upstream_status_and_counts_only_successes(tmp_path, status):
     class Reject(BaseHTTPRequestHandler):
         def log_message(self, *_args):
             pass
 
         def do_POST(self):
-            self.send_response(429)
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"error":"capacity"}')
 
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), Reject)
-    proxy = sandbox_runner.model_proxy(f"http://127.0.0.1:{upstream.server_port}/v1")
+    calls = tmp_path / "model_calls.json"
+    proxy = sandbox_runner.model_proxy(f"http://127.0.0.1:{upstream.server_port}/v1", calls_path=calls)
     threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in (upstream, proxy)]
     for thread in threads:
         thread.start()
     try:
         request = Request(f"http://127.0.0.1:{proxy.server_port}/v1/chat/completions", data=b'{"messages":[]}')
-        with pytest.raises(HTTPError) as caught:
-            urlopen(request, timeout=5)
-        assert caught.value.code == 429
-        assert caught.value.read() == b'{"error":"capacity"}'
-        caught.value.close()
+        if status == 200:
+            with urlopen(request, timeout=5) as response:
+                assert response.status == 200
+                assert response.read() == b'{"error":"capacity"}'
+        else:
+            with pytest.raises(HTTPError) as caught:
+                urlopen(request, timeout=5)
+            assert caught.value.code == status
+            assert caught.value.read() == b'{"error":"capacity"}'
+            caught.value.close()
+        assert json.loads(calls.read_text()) == {"completed": int(status == 200)}
     finally:
         for server in (proxy, upstream):
             server.shutdown()

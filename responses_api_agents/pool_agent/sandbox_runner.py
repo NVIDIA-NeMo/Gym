@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -30,14 +31,20 @@ def strip_cache_hints(body: dict[str, object]) -> None:
             tool["function"].pop("cache_control", None)
 
 
-def model_proxy(base_url: str, *, timeout: float = 300) -> ThreadingHTTPServer:
+def model_proxy(base_url: str, *, timeout: float = 300, calls_path: Path | None = None) -> ThreadingHTTPServer:
     """Bridge Pool's nonstreaming requests to Gym using a loopback-only threaded server."""
+
+    completed = 0
+    lock = threading.Lock()
+    if calls_path is not None:
+        calls_path.write_text(json.dumps({"completed": 0}))
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args: object) -> None:
             pass
 
         def do_POST(self) -> None:
+            nonlocal completed
             if self.path != "/v1/chat/completions":
                 self.send_error(404)
                 return
@@ -59,6 +66,13 @@ def model_proxy(base_url: str, *, timeout: float = 300) -> ThreadingHTTPServer:
                 with upstream:
                     status, payload = upstream.status, upstream.read()
                     content_type = upstream.headers.get("Content-Type", "application/json")
+                if 200 <= status < 300 and calls_path is not None:
+                    # Persist before delivery so a killed CLI cannot erase completed inference.
+                    with lock:
+                        completed += 1
+                        temporary = calls_path.with_suffix(".tmp")
+                        temporary.write_text(json.dumps({"completed": completed}))
+                        temporary.replace(calls_path)
             except Exception as error:
                 status, content_type = 502, "application/json"
                 payload = json.dumps({"error": str(error)}).encode()
@@ -101,7 +115,9 @@ def run(directory: Path, workdir: str) -> int:
         }
     )
     provider = config["model"]["provider"]["openai"]
-    proxy = model_proxy(provider["base_url"], timeout=float(config["http_timeout"][:-1]))
+    proxy = model_proxy(
+        provider["base_url"], timeout=float(config["http_timeout"][:-1]), calls_path=directory / "model_calls.json"
+    )
     provider["base_url"] = f"http://127.0.0.1:{proxy.server_port}/v1"
     config_path.write_text(json.dumps(config))
     env.update(
@@ -133,19 +149,47 @@ def run(directory: Path, workdir: str) -> int:
         "-f",
         str(directory / "prompt.txt"),
     ]
+    stopping = False
+
+    def interrupt(_signum: int, _frame: object) -> None:
+        nonlocal stopping
+        stopping = True
+
+    previous_handler = signal.signal(signal.SIGTERM, interrupt)
     thread = threading.Thread(target=proxy.serve_forever, daemon=True)
     thread.start()
     try:
         with (directory / "stdout.jsonl").open("w") as stdout, (directory / "stderr.log").open("w") as stderr:
-            result = subprocess.run(
-                command, cwd=workdir, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, check=False
-            )
+            if stopping:
+                return_code = -signal.SIGTERM
+            else:
+                process = subprocess.Popen(
+                    command, cwd=workdir, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr
+                )
+                while process.poll() is None:
+                    if stopping:
+                        try:
+                            process.terminate()
+                        except ProcessLookupError:
+                            pass
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=5)
+                        break
+                    try:
+                        process.wait(timeout=0.1)
+                    except subprocess.TimeoutExpired:
+                        pass
+                return_code = process.returncode
+        (directory / "exit.json").write_text(json.dumps(return_code))
+        return return_code
     finally:
         proxy.shutdown()
         proxy.server_close()
         thread.join(timeout=5)
-    (directory / "exit.json").write_text(json.dumps(result.returncode))
-    return result.returncode
+        signal.signal(signal.SIGTERM, previous_handler)
 
 
 def snapshot(directory: Path) -> None:

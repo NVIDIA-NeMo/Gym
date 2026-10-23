@@ -25,13 +25,18 @@ def test_bootstrap_without_bash(tmp_path, manager, missing, failure):
 
     for name in ("mkdir", "cat", "chmod", "tar", "sh", "bash"):
         if name not in missing:
-            (bindir / name).symlink_to(shutil.which(name))
+            source = shutil.which(name)
+            if source is None:
+                pytest.skip(f"Bootstrap test requires {name}")
+            (bindir / name).symlink_to(source)
     if "python3" not in missing:
         (bindir / "python3").symlink_to(sys.executable)
     executable("id", f"echo {1000 if failure == 'nonroot' else 0}\n")
     executable(
         manager,
-        'printf "%s\\n" "$*" >> "$TEST_ROOT/packages.log"\n' + ("exit 100\n" if failure == "package_install" else ""),
+        'printf "%s\\n" "$*" >> "$TEST_ROOT/packages.log"\n'
+        + ("exit 100\n" if failure == "package_install" else "")
+        + (f"/bin/ln -sf {sys.executable} {bindir / 'python3'}\n" if "python3" in missing else ""),
     )
     executable(
         "curl",
@@ -85,3 +90,31 @@ INSTALL
         assert packages.read_text().splitlines() == expected_commands
     else:
         assert not packages.exists()
+
+
+def test_old_python_fails_before_downloading_pool(tmp_path):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("mkdir", "cat", "chmod", "tar", "sh", "bash"):
+        source = shutil.which(name)
+        if source is None:
+            pytest.skip(f"Bootstrap test requires {name}")
+        (bindir / name).symlink_to(source)
+    curl = bindir / "curl"
+    curl.write_text("#!/bin/sh\necho unexpected download >&2\nexit 42\n")
+    curl.chmod(0o755)
+    python = bindir / "python3"
+    python.write_text(f"#!{sys.executable}\nimport sys\nsys.version_info = (3, 7, 0)\nexec(sys.argv[2])\n")
+    python.chmod(0o755)
+    root = tmp_path / "session"
+    result = subprocess.run(
+        ["/bin/sh", str(Path(__file__).parents[1] / "install_pool.sh"), str(root), "v1.0.16"],
+        env=os.environ | {"PATH": str(bindir)},
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+    )
+    assert result.returncode != 0
+    assert "Pool requires Python >=3.8" in result.stderr
+    assert not root.exists()

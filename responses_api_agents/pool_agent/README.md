@@ -100,44 +100,37 @@ message content, tool schemas, and upstream HTTP errors.
 | `timeout` | `900` | Agent execution budget in seconds, capped by the session's task budget. |
 | `session_close_timeout_seconds` | `60` | Bound in seconds for each supervised finalization phase, including artifact collection. |
 
-The supervisor stops the harness and confirms termination before collecting its
-trajectory. Pool is configured to leave background shell services available to the
-task environment. Identical activation retries share the same task. A disconnected
-caller does not cancel activation or installation. Close waits for installation;
-failed cleanup retains the session so a later close can retry. Server shutdown
-rejects new seeds and activations, waits up to `setup_timeout` for pending seeds,
-and drains retained sessions through the same ownership-aware close path. Shutdown
-close attempts are bounded by `session_close_timeout_seconds`; failed cleanup is
-logged and retained for retry, with provider TTL as the final fallback.
+The supervisor confirms harness termination before collecting the trajectory.
+Background shell services remain available to the task environment. Identical
+activation retries share the same task, and a disconnected caller does not cancel
+execution. Close and server shutdown release sessions; failed cleanup remains
+retryable.
 
-A confirmed execution timeout returns an `incomplete` response with available
-trajectory events and can proceed to verification. Startup, supervision, model,
-and artifact-collection failures propagate as errors. Pool's explicit task-failure
-exit code remains gradable when its trajectory is complete. A recorded model HTTP
-failure remains an error even if the supervisor also reports a timeout.
+Execution timeouts after model activity return an `incomplete` response with
+available trajectory events and can proceed to verification. A timeout before any
+model response completes raises an error. Startup, model, supervision, and
+artifact-collection failures also raise, even if a deadline fires at the same time.
+Pool's explicit task-failure exit code remains gradable with a complete trajectory.
 
 Gym's `agent_timeout_sec` request metadata can shorten the execution budget but
 cannot exceed either the configured timeout or the seeded task budget. Invalid
 budget values use that ceiling. Other request metadata remains unsupported.
-Runner identity is included as `runner_hostname` and `runner_pid` in response metadata
-when available. The PID identifies the Python wrapper that launches Pool.
-Activation failures log a bounded tail of the captured stderr and save available raw
-trajectory, stdout, stderr, exit status, and cleanup diagnostics in a private JSON file
-under `failure_artifacts_dir` (default: `results/pool-agent-failures`) on the agent host.
-The log records the file path. These files survive sandbox cleanup; manage their
-retention on the host, and use persistent storage if the host is ephemeral. Raw output
-can contain task data. Set `failure_artifacts_dir: null` to disable saving. Missing
-artifacts cannot be recovered, and a write failure is logged without replacing the
-original execution error or preventing cleanup.
+Increase `session_close_timeout_seconds` if large trajectories exceed the
+artifact-collection budget.
 
-Trajectory conversion preserves tool-call IDs and out-of-order results. Persisted
-thought events become reasoning items. Synthetic exit calls are omitted. Missing
-tool results and interrupted trajectory records are reported as observation gaps.
-Partial conversation evidence is available on close when it was captured successfully.
+Response metadata includes `runner_hostname` and `runner_pid` when available;
+the PID identifies the Python wrapper that launches Pool. Activation failures log
+a stderr tail and save available trajectory, stdout, stderr, exit status, and
+cleanup diagnostics under `failure_artifacts_dir` (default:
+`results/pool-agent-failures`) on the agent host. The log records the file path.
+These files survive sandbox cleanup and can contain task data. Manage their
+retention and use persistent storage for ephemeral hosts. Set
+`failure_artifacts_dir: null` to disable saving.
 
-Large trajectories may exceed the artifact-collection budget. Adjust
-`session_close_timeout_seconds` for the expected workload. A collection failure is
-reported as an error; it is not treated as a completed task.
+Trajectory conversion preserves tool-call IDs and out-of-order results, converts
+persisted thoughts to reasoning items, and omits synthetic exit calls. Missing
+tool results and interrupted records are reported as observation gaps. Captured
+partial conversation evidence remains available on close.
 
 ## Supported inputs and limitations
 

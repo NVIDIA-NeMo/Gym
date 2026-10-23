@@ -31,6 +31,7 @@ class PoolArtifacts:
     trajectory_error: str | None = None
     runner_hostname: str | None = None
     runner_pid: int | None = None
+    completed_model_calls: int = 0
 
 
 @dataclass
@@ -146,6 +147,11 @@ class PoolSession(AgentSessionState):
             runtime = {}
         hostname = runtime.get("hostname") if isinstance(runtime, dict) else None
         pid = runtime.get("pid") if isinstance(runtime, dict) else None
+        try:
+            model_calls = json.loads(await optional("model_calls.json"))
+        except ValueError:
+            model_calls = {}
+        completed = model_calls.get("completed") if isinstance(model_calls, dict) else None
         trajectory, trajectory_error = "", None
         try:
             result = await self.session.sandbox.exec(
@@ -167,6 +173,7 @@ class PoolSession(AgentSessionState):
             trajectory_error,
             runner_hostname=hostname if isinstance(hostname, str) and hostname else None,
             runner_pid=pid if type(pid) is int and pid > 0 else None,
+            completed_model_calls=completed if type(completed) is int and completed >= 0 else 0,
         )
 
     async def close(self, *, timeout: float) -> None:

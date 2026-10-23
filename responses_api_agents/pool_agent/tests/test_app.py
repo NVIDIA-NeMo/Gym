@@ -463,7 +463,7 @@ def receipt(**overrides):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("text", ["", events(event("tool_call.parsed", id="a", name="shell", args={})), complete()])
+@pytest.mark.parametrize("text", [events(event("tool_call.parsed", id="a", name="shell", args={})), complete()])
 async def test_confirmed_timeout_keeps_partial_output_gradable(text):
     server, session = agent(), state()
     session.session.cleanup = receipt(timed_out=True, return_code=-15)
@@ -635,36 +635,13 @@ async def test_lifespan_closes_sessions_using_their_ownership(owned):
     with pytest.raises(HTTPException):
         server._require_agent_session(session.request.agent_session_id)
     with pytest.raises(HTTPException) as error:
-        await server.seed_agent_session(fresh_request(), seed())
+        await server.seed_agent_session(
+            fresh_request(), seed().model_copy(update={"agent_session_id": "fresh-after-shutdown"})
+        )
     assert error.value.status_code == 503
     with pytest.raises(HTTPException) as error:
         await server.responses(request(), NeMoGymResponseCreateParamsNonStreaming(input="task"))
     assert error.value.status_code == 503
-
-
-@pytest.mark.asyncio
-async def test_shutdown_waits_for_setup_and_closes_late_session():
-    server, session = agent(), state()
-    session.session.owns_sandbox = True
-    entered, release = asyncio.Event(), asyncio.Event()
-
-    async def setup(body):
-        entered.set()
-        await asyncio.wait_for(release.wait(), timeout=5)
-        return session
-
-    with patch.object(PoolAgent, "_seed_agent_session_state", side_effect=setup):
-        seed_task = asyncio.create_task(server.seed_agent_session(fresh_request(), session.request))
-        await asyncio.wait_for(entered.wait(), timeout=5)
-        shutdown = asyncio.create_task(server._shutdown_sessions())
-        await asyncio.sleep(0)
-        assert not shutdown.done()
-        release.set()
-        with pytest.raises(HTTPException) as error:
-            await asyncio.wait_for(seed_task, timeout=5)
-        assert error.value.status_code == 503
-        await asyncio.wait_for(shutdown, timeout=5)
-    session.session.sandbox.stop.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -793,42 +770,47 @@ async def test_shutdown_during_installation_joins_before_stopping_sandbox():
 async def test_shutdown_setup_deadline_retains_installation_for_later_close():
     from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest
 
-    server = agent(setup_timeout=0.01, session_close_timeout_seconds=0.01)
-    session = state()
-    session.session.owns_sandbox = True
+    server = agent(
+        setup_timeout=0.01,
+        session_close_timeout_seconds=0.01,
+        sandbox_provider="sandbox",
+        sandbox_config={"image": "test", "workdir": "/repo"},
+    )
+    sandbox = AsyncMock()
+    sandbox.sandbox_id = "owned"
+    sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
+    provider = MagicMock()
+    provider.name = "docker"
     entered, release = asyncio.Event(), asyncio.Event()
 
     async def install(*args, **kwargs):
         entered.set()
         await asyncio.wait_for(release.wait(), timeout=5)
 
-    async def setup(body):
-        try:
-            await session.install(version="v1.0.16", timeout=1)
-        except BaseException as error:
-            raise AgentSessionSetupError(session, error=error) from error
-        return session
-
     with (
+        patch(APP + ".get_global_config_dict", return_value={}),
+        patch(APP + ".resolve_provider_config"),
+        patch(APP + ".resolve_provider_metadata", return_value={}),
+        patch(APP + ".create_provider", return_value=provider),
+        patch(APP + ".AsyncSandbox", return_value=sandbox),
         patch.object(PoolSession, "_install", side_effect=install),
-        patch.object(PoolAgent, "_seed_agent_session_state", side_effect=setup),
     ):
-        seeding = asyncio.create_task(server.seed_agent_session(fresh_request(), session.request))
+        body = seed(borrowed=False)
+        seeding = asyncio.create_task(server.seed_agent_session(fresh_request(), body))
         await asyncio.wait_for(entered.wait(), timeout=5)
         await asyncio.wait_for(server._shutdown_sessions(), timeout=1)
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(seeding, timeout=5)
-        session.session.sandbox.stop.assert_not_awaited()
-        assert server._session_records[session.request.agent_session_id].state is session
+        sandbox.stop.assert_not_awaited()
+        session = server._session_records[body.agent_session_id].state
+        assert isinstance(session, PoolSession)
         release.set()
         await asyncio.wait_for(session.installation_task, timeout=5)
         await server.close_agent_session(
             fresh_request(),
-            AgentCloseSessionRequest(
-                agent_session_id=session.request.agent_session_id, episode_id=session.request.episode_id
-            ),
+            AgentCloseSessionRequest(agent_session_id=body.agent_session_id, episode_id=body.episode_id),
         )
-    session.session.sandbox.stop.assert_awaited_once()
+    sandbox.stop.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -885,3 +867,57 @@ async def test_close_preserves_artifacts_collected_after_activation_failure(tmp_
     with patch.object(PoolSession, "close"):
         await server._close_agent_session_state(session)
     assert json.loads(session.failure_artifact_path.read_text())["artifacts"]["trajectory"] == "late output"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completed_calls", [0, 1])
+async def test_timeout_without_trajectory_requires_completed_model_response(completed_calls):
+    server, session = agent(), state()
+    session.session.cleanup = receipt(timed_out=True, return_code=-15)
+    artifacts = PoolArtifacts("", "", "", None, completed_model_calls=completed_calls)
+    with (
+        patch.object(PoolAgent, "model_endpoint", return_value=MagicMock(base_url="http://model/v1")),
+        patch.object(SandboxSession, "execute", return_value=artifacts),
+    ):
+        if not completed_calls:
+            with pytest.raises(RuntimeError, match="before any model response"):
+                await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+            assert session.failure == "RuntimeError"
+        else:
+            response = await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+            assert response.status == "incomplete" and response.output == []
+
+
+@pytest.mark.asyncio
+async def test_timeout_does_not_hide_unknown_terminal_failure():
+    server, session = agent(), state()
+    session.session.cleanup = receipt(timed_out=True, return_code=-15)
+    artifacts = PoolArtifacts(events(event("session.exit", reason="some_other_failure")), "", "", None)
+    with (
+        patch.object(PoolAgent, "model_endpoint", return_value=MagicMock(base_url="http://model/v1")),
+        patch.object(SandboxSession, "execute", return_value=artifacts),
+        pytest.raises(RuntimeError, match="some_other_failure"),
+    ):
+        await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime", ["bad", "[]", '{"hostname": 1, "pid": true}', '{"pid": -1}'])
+async def test_optional_runtime_schema_does_not_discard_trajectory(runtime):
+    session = state()
+    files = {
+        "trajectory.ndjson": complete(),
+        "exit.json": "0",
+        "runtime.json": runtime,
+        "model_calls.json": '{"completed": 1}',
+    }
+
+    async def read(sandbox, *, path):
+        return files.get(path.rsplit("/", 1)[-1], "")
+
+    session.session.sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
+    with patch("responses_api_agents.pool_agent.sandbox.read_text", side_effect=read):
+        artifacts = await session.collect()
+    assert artifacts.runner_hostname is None and artifacts.runner_pid is None
+    assert artifacts.trajectory == complete() and artifacts.exit_code == 0
+    assert artifacts.completed_model_calls == 1

@@ -22,8 +22,9 @@ if [ "$#" -gt 0 ]; then
         exit 1
     fi
 fi
+python3 -c 'import sys; assert sys.version_info >= (3, 8), "Pool requires Python >=3.8 in the sandbox"'
 mkdir -p "$root/bin"
-curl --connect-timeout 30 --max-time 120 -fsSL https://downloads.poolside.ai/pool/install.sh -o "$root/install.sh"
+curl --retry 3 --connect-timeout 30 --max-time 120 -fsSL https://downloads.poolside.ai/pool/install.sh -o "$root/install.sh"
 POOL_INSTALL_ACCEPT_EULA=1 POOL_INSTALL_UPDATE_PATH=0 POOL_INSTALL_SPLASH=0 \
     POOL_INSTALL_DIR="$root/bin" sh "$root/install.sh" "$version"
 installed=$("$root/bin/pool" --version)
