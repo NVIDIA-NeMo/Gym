@@ -21,6 +21,7 @@ or any backend.
 # Exporter name -> "module:class". Classes load on demand.
 RUN_EXPORTERS: dict[str, str] = {
     "atif": "nemo_gym.exporters.atif:AtifExporter",
+    "evalrdl": "nemo_gym.exporters.evalrdl:EvalRDLExporter",
     "mlflow": "nemo_gym.exporters.mlflow:MLflowExporter",
     "wandb": "nemo_gym.exporters.wandb:WandbExporter",
 }
