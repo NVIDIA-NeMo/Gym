@@ -21,6 +21,7 @@ from typing import Any
 
 import orjson
 
+from nemo_gym.config_types import ConfigError
 from nemo_gym.health.checks import (
     _INCOMPLETE_MODEL_CALL_GAPS,
     _LENGTH_LIMIT_FINISH_REASONS,
@@ -67,6 +68,12 @@ from nemo_gym.health.types import (
     _WorkerInput,
 )
 from nemo_gym.path_utils import failures_path_for, materialized_path_for
+from nemo_gym.rollout_recovery import manifest_path_for
+from nemo_gym.rollout_store import RolloutStore, raw_outcomes_are_selected
+
+
+class JournalHealthUnavailable(ConfigError):
+    """This history contains superseded outcomes and requires an exported projection."""
 
 
 _PROCESS_POOL_CHUNKS_PER_WORKER = 4
@@ -485,69 +492,84 @@ def _rollout_accounting(
     limits: RunHealthLimits,
     limits_source: LimitsSource | Mapping[str, LimitsSource],
     duplicated: int,
+    run_coverage: Sequence[Mapping[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
-    """Count the rollouts each input owed against those that landed, failed or left no row, and judge the run.
+    """Project managed runs from selected history; preserve raw accounting for legacy runs.
 
-    ``landed`` holds ``(input index, task index, rollout index)`` of every persisted record. Failures come
-    from each input's ``_failures.jsonl`` sidecar, where the last attempt of a rollout stands; one that
-    later landed is not failed. ``is_terminal_failure`` splits them into
-    final ones, which are not retried, and not final ones, which are; the split says nothing of the cause. ``failed`` is null when no input has a sidecar.
-    ``expected``, ``missing`` and ``healthy`` need the ``_materialized_inputs.jsonl`` inventory and
-    are null when an input has none. A run is healthy when nothing is missing, no rollout is
-    recorded twice, and each kind of failure with a configured limit stays below it as a share of expected.
-    The limits are off (None) by default, so failures alone never make a run unhealthy unless configured.
+    Managed ``missing`` means reserved attempts with no outcome. Never-dispatched
+    work and intentional omissions have their own categories. Final failures include
+    exhausted budgets as well as terminal outcomes. A stopped collector supplies its
+    in-memory coverage so this path never reloads large rollout records on SIGTERM.
     """
-    # Lazy: rollout_collection imports this module, and health workers need none of its dependencies.
     from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, is_terminal_failure
 
-    failed: dict[tuple[Any, ...], dict[str, Any]] = {}
+    expected = missing = not_started = omitted = final = not_final = 0
+    by_class: Counter[str] = Counter()
+    inventory_known = True
     any_sidecar = False
-    owed: set[tuple[Any, ...]] | None = set()
     for source_index, path in enumerate(paths):
+        coverage = run_coverage[source_index] if run_coverage is not None else None
+        if coverage is None and manifest_path_for(path).exists():
+            coverage = RolloutStore.read(path).coverage()
+        if coverage is not None:
+            expected += coverage["expected"]
+            missing += coverage["missing"]
+            not_started += coverage["not_started"]
+            omitted += coverage["intentionally_omitted"]
+            final += coverage["failed_final"]
+            not_final += coverage["failed_not_final"]
+            by_class.update(coverage["failed_by_class"])
+            any_sidecar = True
+            continue
+
+        # Legacy outputs have no manifest from which to recover attempt selection.
+        failed = {}
         if failures_path_for(path).is_file():
             any_sidecar = True
             for row in _jsonl_rows(failures_path_for(path)):
-                failed[(source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))] = row
-        if not materialized_path_for(path).is_file():
-            owed = None
-        elif owed is not None:
-            owed.update(
-                (source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))
+                failed[(row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))] = row
+        landed_here = {key[1:] for key in landed if key[0] == source_index}
+        for key in landed_here:
+            failed.pop(key, None)
+        if materialized_path_for(path).is_file():
+            owed = {
+                (row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))
                 for row in _jsonl_rows(materialized_path_for(path))
-            )
-    for key in landed:
-        failed.pop(key, None)
-    if owed is not None:
-        # Only owed rollouts count: an unreadable record or a sidecar row outside the inventory is not one.
-        failed = {key: row for key, row in failed.items() if key in owed}
-    expected = None if owed is None else len(owed)
-    missing = None if owed is None else len(owed - landed - failed.keys())
-    final = sum(is_terminal_failure(row) for row in failed.values())
-    not_final = len(failed) - final
+            }
+            failed = {key: row for key, row in failed.items() if key in owed}
+            expected += len(owed)
+            missing += len(owed - landed_here - failed.keys())
+        else:
+            inventory_known = False
+        final_here = sum(is_terminal_failure(row) for row in failed.values())
+        final += final_here
+        not_final += len(failed) - final_here
+        by_class.update(row.get(NG_FAILURE_CLASS_KEY) or "unknown" for row in failed.values())
+
     reasons = []
-    if expected == 0:
-        reasons.append("no rollouts expected")
-    elif expected is not None:
-        if missing:
-            reasons.append(f"missing {missing} of {expected}")
-        if duplicated:
-            reasons.append(f"{duplicated} records share a rollout identity")
+    if inventory_known:
+        if expected == 0:
+            reasons.append("no rollouts expected")
+        else:
+            if missing or not_started:
+                reasons.append(f"missing {missing + not_started} of {expected}")
+            if duplicated:
+                reasons.append(f"{duplicated} records share a rollout identity")
     return {
-        "expected": expected,
+        "expected": expected if inventory_known else None,
         "failed": {
-            "total": len(failed),
+            "total": final + not_final,
             "final": final,
             "not_final": not_final,
-            "by_class": dict(
-                sorted(Counter(row.get(NG_FAILURE_CLASS_KEY) or "unknown" for row in failed.values()).items())
-            ),
+            "by_class": dict(sorted(by_class.items())),
         }
         if any_sidecar
         else None,
-        "missing": missing,
-        "healthy": None if expected is None else not reasons,
+        "missing": missing if inventory_known else None,
+        "not_started": not_started if inventory_known else None,
+        "omitted": omitted,
+        "healthy": not reasons if inventory_known else None,
         "unhealthy_reasons": reasons,
-        # The limits the verdict was judged by, so a recheck reuses them and the decision can be reproduced.
         "limits": limits.summary(limits_source),
     }
 
@@ -641,16 +663,23 @@ def run_health_checks(
     ignored_checks: Sequence[str] = (),
     limits: RunHealthLimits = RunHealthLimits(),
     limits_source: LimitsSource | Mapping[str, LimitsSource] = "config",
+    run_coverage: Sequence[Mapping[str, Any] | None] | None = None,
 ) -> HealthCheckResult:
     """Run the RFC's map/group/reduce pipeline and write both reports."""
     ignored = frozenset(normalize_ignored_checks(ignored_checks))
-    paths = [rollout_paths] if isinstance(rollout_paths, Path) else list(rollout_paths)
+    paths = list([rollout_paths] if isinstance(rollout_paths, Path) else rollout_paths)
     if not paths:
         raise ValueError("at least one rollout JSONL path is required")
     for path in paths:
+        if not raw_outcomes_are_selected(path, artifacts=(path,)):
+            raise JournalHealthUnavailable(
+                "Health reports for histories with superseded outcomes are a follow-up to evaluation resume. "
+                "Run health checks on a merged selected-result projection from `gym eval aggregate`."
+            )
         if not path.is_file():
             raise FileNotFoundError(f"Rollout JSONL not found: {path}")
 
+    paths = [path.resolve() for path in paths]
     lines = _index_jsonl(paths)
     worker_inputs = [
         _WorkerInput(
@@ -704,6 +733,7 @@ def run_health_checks(
             limits=limits,
             limits_source=limits_source,
             duplicated=summary["run"]["issues"]["rollout_duplicate_identity"],
+            run_coverage=run_coverage,
         )
     )
     run_findings, run_coverage = _run_excessive_failures(artifacts, limits, ignored)
@@ -726,6 +756,7 @@ def write_provisional_summary(
     *,
     limits: RunHealthLimits = RunHealthLimits(),
     ignored_checks: Sequence[str] = (),
+    run_coverage: Mapping[str, Any] | None = None,
 ) -> Path:
     """Write the run accounting of a stopped run fast: ``rollouts.jsonl`` is not read, and the per-record checks
     are skipped.
@@ -740,6 +771,7 @@ def write_provisional_summary(
         limits=limits,
         limits_source="config",
         duplicated=0,
+        run_coverage=[run_coverage],
     )
     ignored = frozenset(normalize_ignored_checks(ignored_checks))
     run_findings, run_coverage = _run_excessive_failures(artifacts, limits, ignored)

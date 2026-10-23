@@ -155,9 +155,13 @@ def exit_cleanly_on_config_error(fn):
         from rich.markup import escape
 
         from nemo_gym.config_types import ConfigError
+        from nemo_gym.rollout_recovery import IncompleteEvaluationError
 
         try:
             return fn(*args, **kwargs)
+        except IncompleteEvaluationError as e:
+            rich.print(f"[yellow]Evaluation incomplete:[/yellow] {escape(str(e))}")
+            raise SystemExit(e.exit_code) from None
         except ConfigError as e:
             # escape() so '[...]' in the message (e.g. config_paths examples) isn't eaten as rich markup.
             rich.print(f"[red]Error:[/red] {escape(str(e))}")
