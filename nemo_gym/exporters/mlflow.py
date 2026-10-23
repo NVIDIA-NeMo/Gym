@@ -31,7 +31,7 @@ from mlflow.utils.validation import (
 )
 from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym.config_types import MLFlowConfig
+from nemo_gym.config_types import MLFlowConfig, MLflowExportConfig, RunExportConfig
 from nemo_gym.exporters.base import BaseExporter
 
 
@@ -112,6 +112,7 @@ class MLflowExporter(BaseExporter):
     """
 
     name: ClassVar[str] = "mlflow"
+    config_model: ClassVar[type[RunExportConfig]] = MLflowExportConfig
 
     CONFIG_ARTIFACT_FILE: ClassVar[str] = "global_config.json"
     # Can't write .jsonl: `log_table` accepts only .json/.parquet, and writes one table document.

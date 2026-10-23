@@ -430,9 +430,17 @@ class BenchmarkRunConfig(_StrictModel):
     # API key (when driver.policy_model is set) so the script can reach the served
     # model without repeating its address.
     command: str | None = None
+    # Post-run exports of this benchmark's rollouts, by exporter name (see `gym eval export`). Each value is that
+    # exporter's settings; they override `job.exports` setting by setting, and `null` drops an inherited export.
+    exports: dict[str, dict[str, Any] | None] = {}
 
     @model_validator(mode="after")
     def _validate_command(self) -> "BenchmarkRunConfig":
+        if self.command is not None and any(settings is not None for settings in self.exports.values()):
+            raise ValueError(
+                "A benchmark sets both `command` and `exports`, but an export reads the rollouts file `gym eval run` "
+                "writes, which `command` replaces. Drop `exports`, or run through `gym eval run`."
+            )
         if self.command is not None and self.run:
             raise ValueError(
                 "A benchmark sets both `command` and `run`, but `run` only configures `gym eval run`, which "
@@ -501,6 +509,9 @@ class DriverConfig(_HostEnvRefs, _StrictModel):
 class JobConfig(_StrictModel):
     # Remote base directory. Each submit creates a timestamped subdirectory here.
     output_path: str
+    # Post-run exports every benchmark runs by default, by exporter name; a benchmark's own `exports` override
+    # them. Benchmarks that run a `command` take none of them.
+    exports: dict[str, dict[str, Any] | None] = {}
 
 
 class OtelConfig(_StrictModel):
@@ -720,6 +731,13 @@ class SubmitConfig(_StrictModel):
                     # vLLM doesn't require auth; dummy key satisfies clients that require the header.
                     benchmark.run["policy_api_key"] = "dummy"  # pragma: allowlist secret
 
+        return self
+
+    @model_validator(mode="after")
+    def _validate_exports(self) -> "SubmitConfig":
+        from nemo_gym.orchestration.exports import validate_exports
+
+        validate_exports(self)
         return self
 
     def _validate_pd_services(self, compute: "ComputeConfig") -> None:
