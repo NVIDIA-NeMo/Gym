@@ -403,7 +403,7 @@ class ResourcesParticipant(CheckpointParticipant):
         """Whether ``session_id`` is a live session of an attempt that has not been retired.
 
         A session is open from the seed that starts it, or the restore that installs it,
-        until a ``/close_session`` or ``/verify`` ends it or a retire fences it.
+        until a ``/close_session`` or ``/verify`` ends it or a retire marks it.
         A replayable ``/verify`` whose caller closes the session afterwards leaves it open until that close.
         MCP exposure uses it while checkpointing is on to revoke a session's token once the session is closed.
         """

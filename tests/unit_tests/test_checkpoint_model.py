@@ -502,7 +502,7 @@ def _cutting_worker(cut: bool = True):
     return request_cut, requests
 
 
-async def test_undelivered_call_is_cut_and_continued_by_the_resent_call(tmp_path: Path) -> None:
+async def test_undelivered_call_is_cut_and_continued_by_the_reissued_call(tmp_path: Path) -> None:
     ledger = FileLineageStore(tmp_path / "before")
     await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r", staging_chain=("r/c1",)))
     request_cut, requests = _cutting_worker()
@@ -735,7 +735,7 @@ async def test_a_newer_cut_replaces_the_restored_cut_a_resumed_call_keeps_for_it
         ({"structured_outputs": {}}, "structured_outputs"),
     ],
 )
-def test_constrained_decoding_must_restart_instead_of_continuing_a_cut(body: dict, reason: str | None) -> None:
+def test_constrained_decoding_must_regenerate_instead_of_continuing_a_cut(body: dict, reason: str | None) -> None:
     from nemo_gym._checkpoint.model import generation_cut_regenerate_reason
 
     assert generation_cut_regenerate_reason(body) == reason
@@ -1672,6 +1672,30 @@ async def test_a_call_whose_capture_attaches_after_the_snapshot_cannot_land_its_
     assert prepared["phase"] == "prepared"
     assert '"c1"' in rows and contexts[0].model_call_id not in rows
     assert [row["model_call_id"] for row in export_rows("r")] == ["c1", contexts[0].model_call_id]
+
+
+@pytest.mark.parametrize(
+    "fields, error",
+    [
+        ({"checkpoint_policy": True}, "checkpoint_policy is now checkpoint.policy"),
+        ({"checkpoint_generation_cuts": True}, "checkpoint_generation_cuts is now checkpoint.generation_cuts"),
+        ({"checkpoint": {"polciy": True}}, "polciy"),
+    ],
+)
+def test_a_model_server_checkpoint_setting_outside_its_block_or_misspelled_fails_at_startup(
+    fields: dict, error: str
+) -> None:
+    from pydantic import ValidationError
+
+    from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig
+
+    with pytest.raises(ValidationError, match=error):
+        BaseResponsesAPIModelConfig.model_validate({"host": "", "port": 0, "entrypoint": "", "name": "m", **fields})
+    # The block itself is accepted.
+    config = BaseResponsesAPIModelConfig.model_validate(
+        {"host": "", "port": 0, "entrypoint": "", "name": "m", "checkpoint": {"policy": True, "generation_cuts": True}}
+    )
+    assert config.checkpoint.policy and config.checkpoint.generation_cuts
 
 
 def _model_server_starting(name: str, global_config: dict, ledger: FileLineageStore) -> None:

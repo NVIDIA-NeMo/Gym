@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from typing import Any
+import re
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import anyio
@@ -89,6 +90,25 @@ def _environment_server(**config_overrides: Any) -> _EnvironmentServer:
     config_values.update(config_overrides)
     config = BaseEnvironmentServerConfig(**config_values)
     return _EnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+@pytest.mark.parametrize(
+    "declarations, error",
+    [
+        ({"checkpoint_mode": "stateless"}, "checkpoint_mode='stateless'"),
+        ({"checkpoint_mode": "exportd"}, "checkpoint_mode='exportd'"),
+        ({"checkpoint_boundaries": True}, 'declare checkpoint_mode = "exported"'),
+    ],
+)
+def test_an_environment_server_with_an_unknown_or_replaced_checkpoint_declaration_fails_at_startup(
+    declarations: dict[str, Any], error: str
+) -> None:
+    annotations = {name: ClassVar[Any] for name in declarations}
+    server_type = type("Declared", (_EnvironmentServer,), {**declarations, "__annotations__": annotations})
+    config = _environment_server().config
+
+    with pytest.raises(ValueError, match=re.escape(error)):
+        server_type(config=config, server_client=MagicMock(spec=ServerClient)).setup_webserver()
 
 
 def test_environment_server_binds_concrete_schema_and_rejects_invalid_input() -> None:

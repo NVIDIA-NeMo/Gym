@@ -447,7 +447,7 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
 
     async def unclaimed(self) -> list[EpisodeId]:
         if self.restored_targets:
-            # An attempt any worker started is no longer pending.
+            # An attempt any worker started is no longer unclaimed.
             replies = await self._broadcast("unclaimed", {}, timeout=_MESSAGE_TIMEOUT_SECONDS)
             for reply in replies.values():
                 self.restored_targets &= set(reply["targets"])
@@ -458,7 +458,7 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
         the controller may still start the rollout over as this attempt.
 
         The ledger stays if another policy server sharing it has started the attempt.
-        The attempt stays pending until the ledger is handled, so a commit retried after a failure deletes again.
+        The attempt stays unclaimed until the ledger is handled, so a commit retried after a failure deletes again.
         """
         key = episode_id.capture_key
         if self.ledger is not None:
