@@ -133,4 +133,6 @@ task checks whether the model follows its instructions, graded against versioned
 
 For the exit-check evidence, turn on model-call capture with `++observability_enabled=true
 ++model_call_capture_dir=<absolute dir>`, then run `gym eval health-check <run dir>`. With OpenTelemetry on,
-add `sandbox` to the span groups to trace the tool and SWE sandboxes.
+add `sandbox` to the span groups to trace the tool and SWE sandboxes. The judge grades a rollout but is not part
+of it, so its calls stay out of the model-call capture: each row keeps the judge's request and reply in
+`judge_request` and `judge_response`, and checks on the judge's calls read them there.
