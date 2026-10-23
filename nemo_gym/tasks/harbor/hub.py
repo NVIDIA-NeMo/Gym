@@ -4,9 +4,9 @@
 """Resolve ``harbor:<dataset>[@<version>]`` through the Harbor registry.
 
 The registry is one JSON file listing datasets; each task entry names a git
-repository, a commit and a path. Fetching copies the task folders into Gym's shared
-datasets folder so that every server reads the same bytes and nothing downloads at
-run time. A ``HEAD`` pin is resolved to a commit before anything is copied.
+repository, a commit and a path. Fetching copies the task folders into Gym's pulled
+datasets folder, ``environments/harbor/`` in the checkout, so that every server reads the
+same bytes and nothing downloads at run time. A ``HEAD`` pin is resolved to a commit before anything is copied.
 """
 
 import json
@@ -20,6 +20,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.tasks.harbor.digest import content_hash
 from nemo_gym.tasks.harbor.manifest import (
     MANIFEST_FILE,
@@ -64,8 +65,12 @@ def is_hub_ref(target: str) -> bool:
 
 
 def datasets_dir() -> Path:
-    """Gym's shared datasets folder: ``$NEMO_GYM_DATASETS_DIR`` or ``./datasets``."""
-    return Path(os.environ.get(DATASETS_DIR_ENV) or Path.cwd() / "datasets").expanduser().resolve()
+    """Where pulled datasets live: ``$NEMO_GYM_DATASETS_DIR``, else ``environments/harbor/`` in the Gym checkout.
+
+    Each fetched dataset is one folder under it (``environments/harbor/<dataset>/``), gitignored there
+    next to the committed per-dataset entries, which keep only their README and YAML files.
+    """
+    return Path(os.environ.get(DATASETS_DIR_ENV) or PARENT_DIR / "environments" / "harbor").expanduser().resolve()
 
 
 @dataclass(frozen=True)

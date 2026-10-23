@@ -633,7 +633,8 @@ loopback exactly as on a run without a sandboxed harness. The oracle (`gym datas
 mini-SWE run their commands in the sandbox but call the model from the host, so nothing moves for them. A
 deployment that needs more servers reachable sets `absolute_ip_server_types` (or `default_host`, which applies
 to every server) explicitly; a config file or command-line override wins over the generated default.
-A registry fetch (`harbor:<dataset>`, below) reuses a task folder already in Gym's datasets folder when its
+
+A registry fetch (`harbor:<dataset>`, below) reuses a task folder already in Gym's pulled datasets folder (`environments/harbor/`) when its
 `manifest.toml` pin names the registry's `git_url` and `path` with a full commit SHA, the folder has a
 `task.toml`, and no symlink in it leaves the folder. The recorded commit is kept on purpose when the registry's
 entry moves (a deleted folder is fetched again at that commit), and the fetch does not hash the folder's content
@@ -641,7 +642,7 @@ entry moves (a deleted folder is fetched again at that commit), and the fetch do
 registry's current copy.
 
 `harbor:<dataset>[@<version>]` resolves the Harbor registry and fetches task folders into Gym's shared
-datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `./datasets`). `harbor:<org>/<name>[@<tag> | @sha256:<digest>]`
+datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `environments/harbor/` in the Gym checkout). `harbor:<org>/<name>[@<tag> | @sha256:<digest>]`
 fetches a package-store dataset instead (for example `harbor:terminal-bench/terminal-bench@4.0.0`): every task
 package is downloaded by content hash into `<name>/` (`latest`), `<name>-<tag>/` or `<name>-<12 digest chars>/` (a digest pin), checked against the content hash Harbor published for it and recorded in
 `manifest.toml`, whose per-task pins carry the task's package and that content hash, so a later fetch never mixes another package or a moved `latest` into the folder. A local task folder, or a folder of task folders, works the same way; task folders may be
@@ -708,7 +709,7 @@ gym eval run environment_servers/harbor/data/tasks --agent hermes_agent --sandbo
 The loader generates the task mapping and dataset rows for that run.
 
 `harbor:<dataset>[@<version>]` resolves the Harbor registry and fetches the task folders into Gym's shared
-datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `./datasets`). `harbor:<org>/<name>[@<tag> | @sha256:<digest>]`
+datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `environments/harbor/` in the Gym checkout). `harbor:<org>/<name>[@<tag> | @sha256:<digest>]`
 fetches a package-store dataset instead (for example `harbor:terminal-bench/terminal-bench@4.0.0`): every task
 package is downloaded by content hash into `<name>/` (`latest`), `<name>-<tag>/` or `<name>-<12 digest chars>/` (a digest pin), checked against Gym's task digest and recorded in
 `manifest.toml`. A local task folder, or a folder of task folders, works the same way.
