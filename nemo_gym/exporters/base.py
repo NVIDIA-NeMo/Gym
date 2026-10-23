@@ -86,6 +86,24 @@ class Exporter(ABC):
         """Export the run. Report an expected failure in the result; raise only for a bug."""
 
 
+def unexportable_reason(artifacts: RunArtifacts) -> Optional[str]:
+    """What is missing for the run to be exported faithfully, or None when it can be."""
+    rollouts = artifacts.rollouts_jsonl_fpath
+    if not rollouts.is_file():
+        return f"Rollouts file not found: {rollouts}"
+    aggregate_metrics = artifacts.aggregate_metrics_json_fpath
+    if not aggregate_metrics.is_file():
+        return f"Aggregate metrics not found: {aggregate_metrics}. Run `gym eval aggregate` first."
+    if aggregate_metrics.stat().st_mtime < rollouts.stat().st_mtime:
+        return f"Aggregate metrics {aggregate_metrics} are older than {rollouts}. Run `gym eval aggregate` again."
+    if not artifacts.resolved_config_yaml_fpath.is_file():
+        return (
+            f"Saved run config not found: {artifacts.resolved_config_yaml_fpath}. "
+            "The run predates saving it; re-run it, or export it live."
+        )
+    return None
+
+
 class BaseExporter(Exporter):
     """Sink for the run metadata a NeMo Gym eval produces: config, metrics, rollouts.
 
@@ -191,7 +209,7 @@ class BaseExporter(Exporter):
         marker = artifacts.exporter_run_id_fpath(self.name)
         if marker.exists():
             return ExportResult.skipped(reason="already exported", run_id=marker.read_text().strip())
-        unexportable = self._why_not_exportable(artifacts)
+        unexportable = unexportable_reason(artifacts)
         if unexportable is not None:
             return ExportResult.failed(unexportable)
 
@@ -214,24 +232,6 @@ class BaseExporter(Exporter):
         finally:
             self._exported_artifacts = None
         return ExportResult.succeeded(run_id=run_id, uploaded_rollouts=rollouts is not None)
-
-    @staticmethod
-    def _why_not_exportable(artifacts: RunArtifacts) -> Optional[str]:
-        """What is missing for the run to be exported faithfully, or None when it can be."""
-        rollouts = artifacts.rollouts_jsonl_fpath
-        if not rollouts.is_file():
-            return f"Rollouts file not found: {rollouts}"
-        aggregate_metrics = artifacts.aggregate_metrics_json_fpath
-        if not aggregate_metrics.is_file():
-            return f"Aggregate metrics not found: {aggregate_metrics}. Run `gym eval aggregate` first."
-        if aggregate_metrics.stat().st_mtime < rollouts.stat().st_mtime:
-            return f"Aggregate metrics {aggregate_metrics} are older than {rollouts}. Run `gym eval aggregate` again."
-        if not artifacts.resolved_config_yaml_fpath.is_file():
-            return (
-                f"Saved run config not found: {artifacts.resolved_config_yaml_fpath}. "
-                "The run predates saving it; re-run it, or export it live."
-            )
-        return None
 
     def _rollouts_to_upload(self, artifacts: RunArtifacts, saved_config: DictConfig) -> Optional[list[dict[str, Any]]]:
         """The rollouts a live run would have uploaded, or None when the run's upload intent is off.
