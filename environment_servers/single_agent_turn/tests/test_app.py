@@ -515,8 +515,14 @@ async def test_skip_verification_still_applies_the_agent_outcome_policy() -> Non
     assert [path for _, path, _ in client.calls][-1] == "/close_session"
 
 
-async def test_skip_verification_returns_empty_aggregate_metrics_without_calling_resources() -> None:
-    environment_server, client = _skipping_environment_server(environment={"skip_verification": True}, agent={})
+@pytest.mark.parametrize(
+    ("environment", "agent"),
+    [({"skip_verification": True}, {}), ({}, {"skip_verification": True})],
+)
+async def test_skip_verification_returns_empty_aggregate_metrics_without_calling_resources(
+    environment: dict[str, Any], agent: dict[str, Any]
+) -> None:
+    environment_server, client = _skipping_environment_server(environment=environment, agent=agent)
 
     with pytest.warns(RuntimeWarning, match="skip_verification=True"):
         metrics = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
@@ -910,6 +916,37 @@ async def test_an_episode_restored_at_close_agent_closes_and_verifies_without_in
 
     assert [path for _, path, _ in client.calls] == ["/v1/agent_sessions/close", "/verify", "/close_session"]
     assert response.result.reward == 1.0
+
+
+async def test_an_episode_restored_at_verify_with_skip_on_closes_without_verifying() -> None:
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+
+    environment_server, client = _skipping_environment_server(
+        environment={"skip_verification": True, "skip_verification_reward": 0.5}, agent={}
+    )
+    participant = EnvironmentParticipant()
+    environment_server._checkpoint = participant
+    request = _request()
+    participant.restore_records(
+        [
+            EpisodeRecord(
+                episode_id=request.episode_id.model_copy(update={"attempt": request.episode_id.attempt - 1}),
+                task_digest=task_digest(request.task.model_dump(mode="json")),
+                boundary={
+                    "next": "verify",
+                    "handles": {"resources_session_id": "resources-session", "agent_session_id": "agent-session"},
+                    "response": _agent_response().model_dump(mode="json"),
+                },
+            )
+        ]
+    )
+    # Only the final resources close remains.
+    del client.responses[:4]
+    response = await environment_server.run_request(request)
+
+    assert [path for _, path, _ in client.calls] == ["/close_session"]
+    assert response.result.reward == 0.5
+    assert response.result.model_dump()["verification_skipped"] is True
 
 
 class _HoldingClient(_Client):
