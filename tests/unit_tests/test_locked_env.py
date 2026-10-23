@@ -362,3 +362,38 @@ def test_environment_servers_retain_locked_local_gym_dependencies() -> None:
         if project.name in ("harbor", "swe_together"):
             assert "sandbox" in gym["extra"]
             assert {"tenacity", "opensandbox", "daytona", "e2b", "boto3"} <= packages.keys()
+
+
+@pytest.mark.parametrize(
+    "component,extra,dependency,version",
+    [
+        ("resources_servers/genrm_eval", "dev", "json-repair==0.30.3", "0.30.3"),
+        ("resources_servers/partner_if", "sandbox", "markdown-it-py>=3,<4", "3"),
+        ("responses_api_agents/partner_if_dispatcher", "dev", None, None),
+    ],
+)
+def test_imported_components_retain_managed_dependency_contracts(component, extra, dependency, version):
+    root = Path(__file__).resolve().parents[2]
+    project = root / component
+    manifest = tomllib.loads((project / "pyproject.toml").read_text())
+    lock = tomllib.loads((project / "uv.lock").read_text())
+    source = manifest["tool"]["uv"]["sources"]["nemo-gym"]
+    assert source["editable"]
+    assert (project / source["path"]).resolve() == root
+    assert not (project / "requirements.txt").exists()
+    packages = {package["name"]: package for package in lock["package"]}
+    component_package = packages[manifest["project"]["name"]]
+    assert component_package["source"] == {"virtual": "."}
+    gym = next(dependency for dependency in component_package["dependencies"] if dependency["name"] == "nemo-gym")
+    assert "dev" in gym["extra"]
+    assert extra in gym["extra"]
+    if dependency is not None:
+        assert dependency in manifest["project"]["dependencies"]
+        package_name = "json-repair" if project.name == "genrm_eval" else "markdown-it-py"
+        locked_version = packages[package_name]["version"]
+        if package_name == "json-repair":
+            assert locked_version == version
+        else:
+            assert locked_version.split(".")[0] == version
+    if extra == "sandbox":
+        assert {"tenacity", "opensandbox", "daytona", "e2b", "boto3"} <= packages.keys()

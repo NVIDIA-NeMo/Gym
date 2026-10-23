@@ -23,9 +23,9 @@ from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
     SingleAgentTurnResult,
-    _is_retryable_dependency_error,
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
+from nemo_gym.base_environment_server import is_retryable_dependency_error
 from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     ResourcesCloseSessionRequest,
@@ -397,9 +397,9 @@ def test_dependency_failure_reasons_are_bounded() -> None:
 
 
 def test_retry_requires_a_transient_dependency_error() -> None:
-    assert _is_retryable_dependency_error(TimeoutError()) is True
-    assert _is_retryable_dependency_error(ClientPayloadError("response body interrupted")) is True
-    assert _is_retryable_dependency_error(ValueError("invalid response")) is False
+    assert is_retryable_dependency_error(TimeoutError()) is True
+    assert is_retryable_dependency_error(ClientPayloadError("response body interrupted")) is True
+    assert is_retryable_dependency_error(ValueError("invalid response")) is False
 
 
 @pytest.mark.parametrize(("status", "retryable"), [(422, False), (409, False), (429, True), (500, True)])
@@ -409,7 +409,7 @@ def test_an_agent_seed_refusal_is_final_but_a_server_error_is_retried(status: in
         request_info=SimpleNamespace(real_url="http://agent/v1/agent_sessions"), history=(), status=status
     )
 
-    assert _is_retryable_dependency_error(refusal) is retryable
+    assert is_retryable_dependency_error(refusal) is retryable
 
 
 async def test_an_agent_seed_refusal_fails_the_episode_once_with_the_agents_reason() -> None:
