@@ -70,6 +70,7 @@ from nemo_gym.rollout_observability import (
     AgentObservationBundle,
     ModelCallRef,
     ObservationGap,
+    ToolCallObservation,
     TrajectoryRecord,
     TrajectoryToolCall,
     TrajectoryTurn,
@@ -671,10 +672,19 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     state.resources_cookies = dict(resources_server_cookies or {})
                 if trajectory is not None:
                     # A session returns agent evidence at close, where the Environment Server records it.
+                    # Its tool records drop their output, which rollout collection rejoins from the conversation.
                     previous = state.observations
+                    tool_observations = [
+                        ToolCallObservation.model_validate(tool.model_dump(exclude={"output"}))
+                        for tool in trajectory.tool_calls
+                    ]
                     state.observations = AgentObservationBundle(
                         source="simple_agent",
-                        records=[*(previous.records if previous else []), *trajectory.invocations],
+                        records=[
+                            *(previous.records if previous else []),
+                            *trajectory.invocations,
+                            *tool_observations,
+                        ],
                         gaps=[*(previous.gaps if previous else []), *trajectory.gaps],
                     )
 
