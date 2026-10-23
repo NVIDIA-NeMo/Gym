@@ -197,6 +197,13 @@ class SessionIgnoringSeedServer(StateServer):
     seed_session = SimpleResourcesServer.seed_session
 
 
+class SecretSigningServer(StateServer):
+    """Signs its sessions with a secret instead of its public name, as a server a sandbox can reach does."""
+
+    def get_session_secret(self) -> str:
+        return "a secret, not the server's name"
+
+
 class Worker:
     """One worker of a resources server, wired as run_webserver wires it; no socket directory means one worker."""
 
@@ -232,7 +239,7 @@ class Worker:
             self.app,
             socket_dir=socket_dir,
             session_cookie=self.cookie_name,
-            secret_key=self.cookie_name,
+            secret_key=self.server.get_session_secret(),
             **mcp_routing,
             **self.server.claimed_session_routing(),
         )
@@ -240,7 +247,7 @@ class Worker:
         self.client = TestClient(self.app, raise_server_exceptions=False)
 
     def session(self, response: Response) -> dict:
-        signer = itsdangerous.TimestampSigner(self.cookie_name)
+        signer = itsdangerous.TimestampSigner(self.server.get_session_secret())
         return json.loads(b64decode(signer.unsign(response.cookies[self.cookie_name].encode())))
 
     def post(self, path: str, *, cookie: Optional[str] = None, **kwargs) -> Response:
@@ -469,6 +476,21 @@ class TestTheSessionIdSources:
         # A later request with that cookie names the same session.
         assert a.post("/store", json={"value": 1}, cookie=seeded.cookies[b.cookie_name]).json() == {"worker": "b"}
         assert b.server.store == {"typed": 1}
+
+    def test_a_cookie_and_a_token_signed_with_the_servers_secret(self, socket_dir: str) -> None:
+        a = Worker("a", socket_dir, mcp=True, server_class=SecretSigningServer)
+        b = Worker("b", socket_dir, mcp=True, server_class=SecretSigningServer)
+        with a.client, b.client:
+            stored = a.post("/store", json={"value": 7})
+            session_id = a.session(stored)[SESSION_ID_KEY]
+            # A cookie signed with the server's public name names no session.
+            forged = _sign_cookie(b.cookie_name, {SESSION_ID_KEY: session_id})
+            assert b.post("/take", cookie=forged).json() == {"worker": "b", "value": None}
+            assert b.post("/take", cookie=stored.cookies[a.cookie_name]).json() == {"worker": "a", "value": 7}
+
+            token = a.post("/seed_session", json={}).json()["mcp"]["headers"][TOKEN_HEADER]
+            assert _mcp_payload(_mcp_call(b.client, "store", {"value": 5}, token)) == {"worker": "a"}
+            assert _mcp_payload(_mcp_call(b.client, "take", {}, token)) == {"worker": "a", "value": 5}
 
 
 class TestClaimCreation:

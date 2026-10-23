@@ -568,6 +568,26 @@ def test_a_token_minted_without_checkpointing_names_only_its_session_and_tools()
     assert token == mcp_session_token_serializer(server.get_session_middleware_key()).dumps(payload)
 
 
+class SecretSigned(Store):
+    def get_session_secret(self) -> str:
+        return "a secret, not the server's name"
+
+
+def test_a_server_with_its_own_secret_signs_its_tokens_with_it():
+    server = _server(SecretSigned)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        token = _seed(client)
+        _handshake(client)
+        payload = mcp_session_token_serializer("a secret, not the server's name").loads(token)
+        assert _payload(_call(client, "append", {"value": "x"}, token=token))["values"] == ["x"]
+        # The same claims signed with the server's public name are refused.
+        forged = mcp_session_token_serializer(server.get_session_middleware_key()).dumps(payload)
+        assert _call(client, "append", {"value": "y"}, token=forged)["isError"] is True
+        assert server.session_state[payload["sid"]] == ["x"]
+
+
 def test_a_token_minted_with_checkpointing_names_the_attempt_that_seeded_it():
     server = _server()
     server.server_client.global_config_dict = DictConfig({"checkpoint": {"enabled": True, "control_auth_token": "t"}})

@@ -629,7 +629,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         except UnicodeDecodeError:
             return None
         if self._mcp_token_serializer is None:
-            self._mcp_token_serializer = mcp_session_token_serializer(self.get_session_middleware_key())
+            self._mcp_token_serializer = mcp_session_token_serializer(self.get_session_secret())
         payload = mcp_session_token_payload(self._mcp_token_serializer, text)
         if not isinstance(payload, dict) or not isinstance(payload.get("sid"), str):
             return None
