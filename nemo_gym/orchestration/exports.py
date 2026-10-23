@@ -44,7 +44,7 @@ def _merge(defaults: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any
 def effective_exports(config: "SubmitConfig", benchmark_name: str) -> dict[str, dict[str, Any]]:
     """The exports a benchmark runs after its rollouts, by exporter name, with the submit config's own settings.
 
-    `job.exports` gives every benchmark a default; a benchmark's own `exports` override it setting by setting,
+    `job.export` gives every benchmark a default; a benchmark's own `export` override it setting by setting,
     and `null` for an exporter drops it for that benchmark. A benchmark that runs a `command` has no rollouts
     file for an exporter to read, so it takes none of the job-level defaults.
     """
@@ -52,9 +52,9 @@ def effective_exports(config: "SubmitConfig", benchmark_name: str) -> dict[str, 
     if benchmark.command is not None:
         return {}
     effective: dict[str, dict[str, Any]] = {
-        name: deepcopy(settings) for name, settings in config.job.exports.items() if settings is not None
+        name: deepcopy(settings) for name, settings in config.job.export.items() if settings is not None
     }
-    for name, settings in benchmark.exports.items():
+    for name, settings in benchmark.export.items():
         if settings is None:
             effective.pop(name, None)
         else:
@@ -108,7 +108,7 @@ def validate_exports(config: "SubmitConfig") -> None:
         exports = effective_exports(config, benchmark_name)
         if exports and on_kubernetes:
             raise ValueError(
-                f"Benchmark '{benchmark_name}' sets exports, which are not supported on Kubernetes compute yet."
+                f"Benchmark '{benchmark_name}' sets `export`, which is not supported on Kubernetes compute yet."
             )
         live = set(exporter_extras(benchmark.run))
         for name, settings in exports.items():

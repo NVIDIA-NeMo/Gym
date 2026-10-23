@@ -176,7 +176,7 @@ Each key under `driver.benchmarks` is a benchmark name. It must match `^[A-Za-z0
 | `run` | `{}` | Overrides forwarded to `gym eval run`. |
 | `command` | `null` | A shell script that runs **instead of** `gym eval run`. See [Custom Harness](/orchestration/how-to/custom-harness). Cannot be combined with `run` or `resumable`. |
 | `resumable` | `false` | `true` for auto-resume with defaults, or `{max_retries, max_walltime}` to tune it. See [Resumable Runs](/orchestration/how-to/resumable-runs). |
-| `exports` | `{}` | Exports of the finished run, by exporter name (`atif`, `mlflow`, `wandb`, `evalrdl`). Each value is that exporter's settings; they override `job.exports` setting by setting, and `null` drops an inherited export. Slurm only, and not combinable with `command`. See [exports](#exports). |
+| `export` | `{}` | Exports of the finished run, by exporter name (`atif`, `mlflow`, `wandb`, `evalrdl`). Each value is that exporter's settings; they override `job.export` setting by setting, and `null` drops an inherited export. Slurm only, and not combinable with `command`. See [export](#export). |
 
 `prepare` and `run` are nested mappings that are flattened to Hydra overrides: `{split: benchmark, config_paths: [a.yaml, b.yaml]}` becomes `+split=benchmark` and `+config_paths=[a.yaml,b.yaml]`, and nested keys become dotted paths.
 
@@ -199,14 +199,14 @@ Submit sets a few defaults on `run` that you can override:
 
 Asking for `resumable` on an executor that does not support it is an error rather than a silent no-op.
 
-### exports
+### export
 
 An export sends a finished benchmark run somewhere, using `gym eval export` as the last step of the benchmark's job. It runs in the same container as `gym eval run`, so it needs `gym_install` or an image that has Gym.
 
 ```yaml
 job:
   output_path: /lustre/me/gym-jobs
-  exports:
+  export:
     evalrdl:
       label: qwen-nightly
       tags: [nightly]
@@ -215,17 +215,17 @@ driver:
     EVALRDL_TOKEN: host:EVALRDL_TOKEN
   benchmarks:
     gpqa:
-      exports:
+      export:
         evalrdl: {label: qwen-gpqa}   # overrides the job-level label, keeps its tags
         mlflow:
           mlflow_tracking_uri: https://mlflow.example.com
           mlflow_experiment_name: gym
     aime24:
-      exports:
+      export:
         evalrdl: null                  # no EvalRDL export for this benchmark
 ```
 
-Each key is an exporter and each value its settings, as documented under [`gym eval export`](/reference/cli-commands#gym-eval-export). `job.exports` is the default for every benchmark. A benchmark's own `exports` override it setting by setting (a nested mapping such as `meta` merges), and `null` drops the export for that benchmark. A benchmark that runs a `command` takes none of the job-level defaults.
+Each key is an exporter and each value its settings, as documented under [`gym eval export`](/reference/cli-commands#gym-eval-export). `job.export` is the default for every benchmark. A benchmark's own `export` override it setting by setting (a nested mapping such as `meta` merges), and `null` drops the export for that benchmark. A benchmark that runs a `command` takes none of the job-level defaults.
 
 Submit fills in what only it knows, and the submit config may not set it: `rollouts_jsonl_fpath` and `result_json_fpath`. It also names things unless you do:
 
@@ -242,14 +242,14 @@ Credentials are settings too, and they end up in the job script on the cluster. 
 
 **Results.** Each export writes `<benchmark dir>/exports/<exporter>.result.json`. No file means the export was never attempted, `{"state": "running"}` means it was interrupted (for example at the time limit), and anything else is its final result (`state` is `succeeded`, `skipped` or `failed`, with `exit_code`, `error` and `detail`). An export whose result is `succeeded` or `skipped` is not repeated if the job runs it again; a failed or interrupted one is retried. To export again, delete its result file (and, for `mlflow` and `wandb`, the `<stem>_<exporter>_run_id` file next to the rollouts).
 
-**Validation.** Submit rejects, before anything is sent: an unknown exporter or setting, settings the exporter would not accept (for example a missing `agent_version` for `atif`, or an `mlflow` export without a tracking URI and experiment), an export on a benchmark that also enables the same live exporter in its `run` settings (the run would be logged twice), `exports` on a benchmark with a `command`, and exports on Kubernetes compute.
+**Validation.** Submit rejects, before anything is sent: an unknown exporter or setting, settings the exporter would not accept (for example a missing `agent_version` for `atif`, or an `mlflow` export without a tracking URI and experiment), an export on a benchmark that also enables the same live exporter in its `run` settings (the run would be logged twice), `export` on a benchmark with a `command`, and exports on Kubernetes compute.
 
 ## job
 
 | Field | Description |
 | --- | --- |
 | `output_path` | Base directory on the cluster. Each submit creates a timestamped subdirectory here. |
-| `exports` | Exports every benchmark runs after its rollouts, by exporter name. A benchmark's own `exports` override them. See [exports](#exports). |
+| `export` | Exports every benchmark runs after its rollouts, by exporter name. A benchmark's own `export` override them. See [export](#export). |
 
 ## otel
 
