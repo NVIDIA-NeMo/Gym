@@ -27,12 +27,30 @@ Gym automatically updates environment server references for an unambiguous top-l
 The script leaves those renames alone and declares a server only for an unfronted source agent.
 If the source's config is not migrated, Gym generates a legacy relay for the renamed agent,
 or reports it when `error_on_agent_without_environment_server` is enabled.
+
+`--switch-simple-agent` replaces each `legacy_agent` relay in front of a `simple_agent` in the given configs
+with a `single_agent_turn_legacy` server of the same name, so rows keep their routing.
+That server runs the episode in steps, so a crash repeats only the current step instead of the whole episode.
+It binds the agent's own Resources Server, as the relay did, and grants the agent direct HTTP access to its tools,
+the routes the agent's `/run` called. The server names no Resources Server itself, so it follows an agent rename.
+A relay stays when its agent binds no Resources Server, would get a grant `simple_agent` sessions reject
+(a required MCP tool access, or more than one direct HTTP tool access), or binds a Resources Server whose
+`seed_session` accepts only the legacy body, not the `ResourcesSeedSessionRequest` an Environment Server sends.
+The script lists each with its reason.
+A relay that inherits another relay keeps inheriting it, and the two must switch in the same run;
+the script refuses to switch either one alone.
+
+    # Report what would switch and what stays on the relay
+    python scripts/add_legacy_agent_environment_servers.py --switch-simple-agent benchmarks/aime24/ --check
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
+import re
 import sys
+import warnings
 from pathlib import Path
 
 import yaml
@@ -51,6 +69,36 @@ DECLARED = """
       entrypoint: app.py
       agent_server:
         type: responses_api_agents
+        name: {agent}
+"""
+
+RESOURCES_SERVERS_ROOT = REPO / "resources_servers"
+TYPED_SEED = "ResourcesSeedSessionRequest"
+RELAY = "legacy_agent"
+SWITCHED_AGENT_TYPE = "simple_agent"
+# Without a resources_server, the server binds its agent's, so it follows an `_inherit_from` agent rename.
+# The timeouts are the relay's own defaults, which the relay did not enforce and this server does.
+SWITCHED = """\
+{server}:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: {agent}
+      resources_tool_transports:
+      - direct_http
+      default_episode_timeout_seconds: 21600
+      cleanup_timeout_seconds: 180
+"""
+# A relay that inherits another keeps inheriting it, so the parent stays a template that composition consumes.
+# The parent switches in the same run, so the merge holds one environment server type.
+SWITCHED_CHILD = """\
+{server}:
+  _inherit_from: {parent}
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
         name: {agent}
 """
 
@@ -261,6 +309,232 @@ def append_blocks(text: str, blocks: list[str]) -> str:
     return (text if text.endswith("\n") or not text else text + "\n") + "".join(blocks)
 
 
+def _merged(base: dict, override: dict) -> dict:
+    merged = dict(base)
+    for key, value in override.items():
+        merged[key] = (
+            _merged(merged[key], value) if isinstance(value, dict) and isinstance(merged.get(key), dict) else value
+        )
+    return merged
+
+
+def run_documents(path: Path, loaded: dict[Path, dict | None]) -> list[tuple[Path, dict]]:
+    """Return the files one run of ``path`` merges, in Gym's merge order.
+
+    Includes come before the file that pulls them in, so the including file wins.
+    Instance names are unique only within a run, so each file is resolved with its own includes.
+    """
+    order: list[tuple[Path, dict]] = []
+    seen: set[Path] = set()
+
+    def visit(file: Path) -> None:
+        file = file.resolve()
+        if file in seen:
+            return
+        seen.add(file)
+        if file not in loaded:
+            try:
+                loaded[file] = load(file)
+            except UnreadableConfigError:
+                loaded[file] = None
+        document = loaded[file] or {}
+        for entry in document.get("config_paths") or []:
+            entry = Path(entry)
+            # Gym looks under the working directory, then its install root.
+            candidates = [entry] if entry.is_absolute() else [Path.cwd() / entry, REPO / entry]
+            visit(next((candidate for candidate in candidates if candidate.exists()), candidates[-1]))
+        order.append((file, document))
+
+    visit(path)
+    return order
+
+
+def resolved_instances(documents: list[dict]) -> dict[str, dict]:
+    """Map each top-level instance of one run to its body, merged across files and through `_inherit_from`."""
+    raw: dict[str, dict] = {}
+    for document in documents:
+        for name, instance in document.items():
+            if isinstance(instance, dict):
+                raw[name] = _merged(raw.get(name, {}), instance)
+
+    resolved: dict[str, dict] = {}
+
+    def resolve(name: str, seen: tuple[str, ...] = ()) -> dict:
+        if name in resolved:
+            return resolved[name]
+        instance = raw.get(name, {})
+        source = instance.get("_inherit_from")
+        own = {key: value for key, value in instance.items() if key != "_inherit_from"}
+        base = resolve(source, (*seen, name)) if isinstance(source, str) and source not in seen else {}
+        resolved[name] = _merged(base, own)
+        return resolved[name]
+
+    for name in raw:
+        resolve(name)
+    return resolved
+
+
+def relayed_agent(instance: dict) -> str | None:
+    """The agent a `legacy_agent` relay instance fronts, or None for any other instance."""
+    servers = instance.get("environment_servers") if isinstance(instance, dict) else None
+    if not isinstance(servers, dict) or set(servers) != {RELAY} or not isinstance(servers[RELAY], dict):
+        return None
+    return (servers[RELAY].get(AGENT_SERVER) or {}).get("name")
+
+
+def _seed_overrides(path: Path) -> list[ast.AsyncFunctionDef]:
+    try:
+        with warnings.catch_warnings():
+            # Some servers' sources have invalid escape sequences, which only the parser warns about.
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(path.read_text())
+    except (OSError, SyntaxError, ValueError):
+        return []
+    return [node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == "seed_session"]
+
+
+def seed_blocker(resources: dict) -> str | None:
+    """Why an Environment Server cannot seed this Resources Server instance, or None when it can.
+
+    An Environment Server seeds with a `ResourcesSeedSessionRequest` and expects its `resources_session_id` back.
+    The base `seed_session` does that. An override must accept the typed body, or read `resources_session_id`
+    from the raw request; one that takes only the legacy body would fail every seed.
+    The check reads the source, so a server passes it once it migrates.
+    """
+    servers = resources.get("resources_servers") or {}
+    if len(servers) != 1:
+        return None
+    implementation, config = next(iter(servers.items()))
+    directory = RESOURCES_SERVERS_ROOT / str(implementation)
+    entrypoint = directory / str((config or {}).get("entrypoint") or "app.py")
+    overrides = _seed_overrides(entrypoint) or [
+        override
+        for path in sorted(directory.rglob("*.py"))
+        if path != entrypoint and not {"tests", ".venv"} & set(path.parts)
+        for override in _seed_overrides(path)
+    ]
+    for override in overrides:
+        source = ast.unparse(override)
+        if TYPED_SEED not in source and "resources_session_id" not in source:
+            return f"resources server {implementation} seeds only the legacy body, not {TYPED_SEED}"
+    return None
+
+
+def switch_blocker(agent: dict, instances: dict[str, dict]) -> str | None:
+    """Why a `simple_agent` cannot leave the relay, or None when it can.
+
+    The switched server seeds the agent's Resources Server and grants direct HTTP access to it.
+    `simple_agent` sessions reject a required MCP grant and more than one direct HTTP grant,
+    counting the accesses its own config declares.
+    """
+    body = (agent.get("responses_api_agents") or {}).get(SWITCHED_AGENT_TYPE) or {}
+    resources = (body.get("resources_server") or {}).get("name")
+    if not resources or resources == "???":
+        return "the agent binds no resources server"
+    if (blocker := seed_blocker(instances.get(resources, {}))) is not None:
+        return blocker
+    accesses = [access for access in body.get("tool_accesses") or [] if isinstance(access, dict)]
+    mcp = [access.get("name") for access in accesses if access.get("kind") == "mcp" and access.get("required")]
+    if mcp:
+        return f"required MCP tool access: {', '.join(map(str, mcp))}"
+    direct = {f"{resources}.direct_http"} | {
+        str(access.get("name")) for access in accesses if access.get("kind", "direct_http") == "direct_http"
+    }
+    if len(direct) > 1:
+        return f"more than one direct HTTP tool access: {', '.join(sorted(direct))}"
+    return None
+
+
+def switch_plan(
+    documents: dict[Path, dict], loaded: dict[Path, dict | None]
+) -> tuple[dict[Path, list[tuple[str, str, str | None]]], list[tuple[Path, str, str]]]:
+    """Return ``(switches, kept)`` for the `simple_agent` relays declared in ``documents``.
+
+    ``switches`` maps each file to its ``(relay, agent, parent)`` replacements,
+    where ``parent`` is the relay's own `_inherit_from`, if any.
+    ``kept`` lists each ``(file, relay, reason)`` that stays on the relay.
+    """
+    switches: dict[Path, list[tuple[str, str, str | None]]] = {}
+    kept: list[tuple[Path, str, str]] = []
+    for path, document in documents.items():
+        run = run_documents(path, loaded)
+        instances = resolved_instances([run_document for _, run_document in run])
+        # A run that cannot load an include cannot be resolved, so none of its relays switch.
+        missing = [display(file) for file, _ in run if loaded[file] is None]
+        for name in document:
+            agent_name = relayed_agent(instances.get(name, {}))
+            agent = instances.get(agent_name or "", {})
+            if agent_name is None or not (missing or SWITCHED_AGENT_TYPE in (agent.get("responses_api_agents") or {})):
+                continue
+            blocker = f"cannot load included config: {', '.join(missing)}" if missing else switch_blocker(agent, instances)
+            if blocker is not None:
+                kept.append((path, name, blocker))
+                continue
+            parent = document[name].get("_inherit_from") if isinstance(document[name], dict) else None
+            switches.setdefault(path.resolve(), []).append((name, agent_name, parent))
+    return switches, kept
+
+
+def unpaired_relays(
+    switched: set[tuple[Path, str]], paths: list[Path], loaded: dict[Path, dict | None]
+) -> list[tuple[Path, str, str]]:
+    """Return each ``(file, child, parent)`` relay pair where only one of the two would switch.
+
+    Gym merges a child over its parent, so the pair would end up with two environment server types.
+    """
+    unpaired = []
+    for path in paths:
+        run = run_documents(path, loaded)
+        file, own = run[-1]
+        for name, instance in own.items():
+            parent = instance.get("_inherit_from") if isinstance(instance, dict) else None
+            if not isinstance(parent, str) or RELAY not in (instance.get("environment_servers") or {}):
+                continue
+            defined_in = [run_file for run_file, document in run if parent in document]
+            parent_switched = bool(defined_in) and (defined_in[-1], parent) in switched
+            if parent_switched != ((file, name) in switched):
+                unpaired.append((path, name, parent))
+    return unpaired
+
+
+def replace_stanza(text: str, name: str, block: str) -> str:
+    """Return ``text`` with top-level instance ``name`` replaced by ``block``.
+
+    Comments and blank lines after the instance belong to whatever follows, so they stay.
+    """
+    lines = text.splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines) if re.match(rf"{re.escape(name)}:\s*(#.*)?$", line))
+    end = next((i for i in range(start + 1, len(lines)) if re.match(r"[^\s#]", lines[i])), len(lines))
+    while end > start + 1 and (not lines[end - 1].strip() or lines[end - 1].lstrip().startswith("#")):
+        end -= 1
+    return "".join(lines[:start]) + block + "".join(lines[end:])
+
+
+def switch(documents: dict[Path, dict], *, check: bool) -> int:
+    """Replace the `simple_agent` relays in ``documents``; refuse a set that splits a parent and child relay."""
+    loaded: dict[Path, dict | None] = {path.resolve(): document for path, document in documents.items()}
+    switches, kept = switch_plan(documents, loaded)
+    switched = {(path, relay) for path, replacements in switches.items() for relay, *_ in replacements}
+    unpaired = unpaired_relays(switched, list(dict.fromkeys(repo_config_files() + list(documents))), loaded)
+    if unpaired:
+        for path, child, parent in unpaired:
+            print(f"{child} in {display(path)} inherits {parent}; switch both in one run", file=sys.stderr)
+        return 2
+
+    for path, replacements in switches.items():
+        if not check:
+            text = path.read_text()
+            for relay, agent, parent in replacements:
+                template = SWITCHED if parent is None else SWITCHED_CHILD
+                text = replace_stanza(text, relay, template.format(server=relay, agent=agent, parent=parent))
+            path.write_text(text)
+        print(f"{'would switch' if check else 'switched'} {len(replacements)} in {display(path)}")
+    for path, relay, reason in kept:
+        print(f"stays on the relay: {relay} in {display(path)}: {reason}")
+    print(f"\nfiles touched: {len(switches)}, relays switched: {len(switched)}, staying on the relay: {len(kept)}")
+    return 1 if (check and switches) else 0
+
+
 def display(path: Path) -> str:
     try:
         return str(path.resolve().relative_to(REPO))
@@ -277,6 +551,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Config files or directories to update. Default: this repository's configs.",
     )
     parser.add_argument("--check", action="store_true", help="Report what is missing without writing.")
+    parser.add_argument(
+        "--switch-simple-agent",
+        action="store_true",
+        help="Replace legacy_agent relays in front of simple_agent with single_agent_turn_legacy servers.",
+    )
     args = parser.parse_args(argv)
 
     targets = config_files_in(args.paths) if args.paths else repo_config_files()
@@ -290,6 +569,11 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if document is not None:
             documents[path] = document
+
+    if args.switch_simple_agent:
+        for message in unreadable:
+            print(f"could not update {message}", file=sys.stderr)
+        return 2 if unreadable else switch(documents, check=args.check)
 
     repo_documents = []
     for path in repo_config_files():
