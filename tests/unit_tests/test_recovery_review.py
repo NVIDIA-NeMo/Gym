@@ -152,10 +152,11 @@ def test_producer_specific_diagnostics_are_not_failure_reasons(field):
 
 @pytest.mark.parametrize("delivery", ["not_sent", "possibly_delivered", "delivered"])
 @pytest.mark.parametrize("terminal", [False, True])
-def test_only_delivered_nonterminal_failures_spend_budget(prepared_run, delivery, terminal):
+def test_only_delivered_nonterminal_failures_spend_budget(prepared_run, monkeypatch, delivery, terminal):
     output, prepare = prepared_run
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
-        row = store.pending(3)[0]
+        row = store.pending()[0]
         store.allocate_attempt(row)
         failure = RolloutFailure(
             episode_id=EpisodeId(rollout_id="0-0"),
@@ -166,6 +167,7 @@ def test_only_delivered_nonterminal_failures_spend_budget(prepared_run, delivery
         )
         store.record_outcome(row | collection._failure_compatibility_row(failure))
     read = RolloutStore.read(output)
+    assert read.manifest.max_rollout_attempts == 1
     assert read.coverage()["counted_failures"] == int(delivery != "not_sent" and not terminal)
     assert any(row["_ng_task_index"] == 0 for row in read.pending(1)) == (not terminal and delivery == "not_sent")
 
@@ -260,14 +262,15 @@ def reserve_then_die(output, pipe):
         from nemo_gym.rollout_records import RolloutRecords
 
         with RolloutStore(output, RolloutRecords.load(output, manifest)) as store:
-            row = store.pending(3)[0]
+            row = store.pending()[0]
             store.allocate_attempt(row)
             pipe.send(row["_ng_attempt_index"])
             os.kill(os.getpid(), signal.SIGKILL)
 
 
-def test_process_death_releases_lock_and_preserves_allocator(prepared_run):
+def test_process_death_releases_lock_and_preserves_allocator(prepared_run, monkeypatch):
     output, prepare = prepared_run
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
     RolloutStore.start_or_resume(output, prepare, resume=False)
     context = multiprocessing.get_context("spawn")
     receive, send = context.Pipe()
