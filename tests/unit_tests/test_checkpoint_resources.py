@@ -859,7 +859,7 @@ class LateFailingSeedServer(CounterServer):
         raise HTTPException(status_code=500, detail="the seed failed")
 
 
-async def test_a_retire_cut_short_while_a_seed_is_in_flight_still_fences_the_attempt_s_existing_session() -> None:
+async def test_a_retire_cut_short_while_a_seed_is_in_flight_still_marks_the_attempt_s_existing_session() -> None:
     server, client = make_server(LateFailingSeedServer)
     retire = control("retire", episode_ids=[{"rollout_id": "r"}])
     forget = control("forget", rollout_ids=["r"])
@@ -882,7 +882,7 @@ async def test_a_retire_cut_short_while_a_seed_is_in_flight_still_fences_the_att
         forgotten = await client.post("/ng-control/v1/checkpoint/forget", json=forget, headers=AUTH)
 
     assert cut_short.json()["error"]["code"] == "deadline_exceeded" and failed.status_code == 500
-    # The session the attempt had before the retire is fenced although the retire never got past the seed.
+    # The session the attempt had before the retire is marked although the retire never got past the seed.
     assert late.status_code == 409 and late.json()["error"]["code"] == "stale_attempt"
     assert not ready
     assert refused.status_code == 409 and refused.json()["error"]["code"] == "retire_incomplete"
@@ -890,7 +890,7 @@ async def test_a_retire_cut_short_while_a_seed_is_in_flight_still_fences_the_att
     assert forgotten.status_code == 200 and server._checkpoint.readiness().counts["sessions"] == 0
 
 
-async def test_a_retire_that_arrives_after_its_deadline_still_fences_the_attempt_s_sessions() -> None:
+async def test_a_retire_that_arrives_after_its_deadline_still_marks_the_attempt_s_sessions() -> None:
     server, client = make_server()
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
@@ -929,7 +929,7 @@ async def test_a_session_is_open_from_its_seed_until_a_close_or_a_verify_ends_it
     assert not participant.is_open("never-seeded")
 
 
-async def test_a_session_is_not_open_once_a_retire_fences_it_even_before_it_is_freed() -> None:
+async def test_a_session_is_not_open_once_a_retire_marks_it_even_before_it_is_freed() -> None:
     server, client = make_server()
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
