@@ -178,12 +178,17 @@ def test_successor_is_killed_if_its_dependency_can_never_be_met(tmp_path):
 
 
 @pytest.mark.parametrize("exit_code,continues", [("75:0", True), ("76:0", False)])
-def test_incomplete_evaluation_chain_obeys_retryability(tmp_path, exit_code, continues):
-    result = _run_prologue(tmp_path, ResumeConfig(max_retries=0), "FAILED", exit_code=exit_code)
-    assert result.returncode == 0, result.stdout
+@pytest.mark.parametrize("max_retries", [0, 3])
+def test_incomplete_evaluation_chain_obeys_retryability(tmp_path, exit_code, continues, max_retries):
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=max_retries), "FAILED", exit_code=exit_code)
+    assert result.returncode == (0 if continues else 1), result.stdout
     assert ("REACHED_WORK" in result.stdout) is continues
     assert (tmp_path / "sbatch_calls").exists() is continues
     assert not (tmp_path / ".gym_infra_retries").exists()
+    incomplete = tmp_path / INCOMPLETE_MARKER_NAME
+    assert incomplete.exists() is not continues
+    if not continues:
+        assert "no eligible retries" in incomplete.read_text()
 
 
 def test_retryable_evaluation_still_obeys_walltime_cap(tmp_path):
@@ -191,6 +196,7 @@ def test_retryable_evaluation_still_obeys_walltime_cap(tmp_path):
     assert result.returncode == 1
     assert "REACHED_WORK" not in result.stdout
     assert not (tmp_path / "sbatch_calls").exists()
+    assert "walltime cap" in (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
 
 
 def _sbatch_calls(tmp_path) -> list[str]:
