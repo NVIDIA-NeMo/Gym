@@ -34,7 +34,8 @@ Four overrides versus the parent:
      bidirectional A/B swap done by ``math_with_judge`` is skipped.
   4. Per-domain breakdown via ``compute_subset_metrics(field="domain")`` so
      the Tier-2 domain-stratified accuracy that Skills exposes through
-     ``subset_for_metrics=domain`` is preserved.
+     ``subset_for_metrics=domain`` is preserved. ``verify()`` carries each
+     row's ``domain`` into its response, since the parent's models drop it.
 
 Skills places ``{generation}`` in the judge prompt; we re-use that placeholder
 name when filling the YAML so the prompt is character-for-character identical.
@@ -58,6 +59,8 @@ from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,
     LibraryJudgeMathResourcesServerConfig,
+    LibraryJudgeMathVerifyRequest,
+    LibraryJudgeMathVerifyResponse,
 )
 
 
@@ -86,6 +89,14 @@ class PhysicsJudgeResourcesServerConfig(LibraryJudgeMathResourcesServerConfig):
     )
 
 
+class PhysicsJudgeVerifyRequest(LibraryJudgeMathVerifyRequest):
+    domain: Optional[str] = None
+
+
+class PhysicsJudgeVerifyResponse(LibraryJudgeMathVerifyResponse):
+    domain: Optional[str] = None
+
+
 class PhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
     """math_with_judge subclass with NeMo Skills' physics judge."""
 
@@ -106,6 +117,12 @@ class PhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         self._judge_prompt_config: PromptConfig = load_prompt_config(self.config.judge_prompt_path)
+
+    async def verify(self, body: PhysicsJudgeVerifyRequest) -> PhysicsJudgeVerifyResponse:
+        # The parent's models have no `domain`; carry it into the verify row, which is where
+        # compute_metrics reads it for the per-domain breakdown.
+        response = await super().verify(body)
+        return PhysicsJudgeVerifyResponse(**response.model_dump(), domain=body.domain)
 
     async def _verify_answer(
         self, question: str, expected_answer: str, generated_answer: str
