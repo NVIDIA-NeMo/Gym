@@ -23,7 +23,7 @@ from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym._checkpoint.steps import StepMode
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure, EpisodeId
-from nemo_gym.rollout_sampling import rollout_context
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SimpleServer
 
 

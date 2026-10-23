@@ -70,7 +70,7 @@ from nemo_gym.openai_utils import (
     PermanentEndpointError,
 )
 from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
-from nemo_gym.rollout_sampling import rollout_context
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.token_id_capture import (
     CaptureContext,
@@ -6589,7 +6589,7 @@ class TestSamplingOverrides:
     def test_token_override_wins_over_sampling_url_alias(
         self, override_field, requested_limit, use_completions_api, caplog
     ) -> None:
-        from nemo_gym.rollout_sampling import ModelCallSampling, model_sampling_base_url
+        from nemo_gym.rollout_correlation import ModelCallSampling, model_sampling_base_url
 
         server = self._server({override_field: 32}, use_completions_api=use_completions_api)
         provider = MagicMock()

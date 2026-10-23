@@ -64,6 +64,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.rollout_correlation import ModelCallSampling, model_sampling_base_url
 from nemo_gym.rollout_observability import (
     AgentEpisode,
     AgentInvocation,
@@ -72,7 +73,6 @@ from nemo_gym.rollout_observability import (
     SandboxObservation,
     TrajectoryRecord,
 )
-from nemo_gym.rollout_sampling import ModelCallSampling, model_sampling_base_url
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config

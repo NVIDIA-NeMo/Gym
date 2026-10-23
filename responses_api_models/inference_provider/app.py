@@ -40,7 +40,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.rollout_sampling import current_rollout_id
+from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 
 
@@ -54,7 +54,7 @@ class InferenceProviderConfig(BaseResponsesAPIModelConfig):
     extra_body: Dict[str, Any] = Field(default_factory=dict)
 
     correlate_via_user_field: bool = False
-    """Forward the current rollout id (see ``nemo_gym.rollout_sampling``) as
+    """Forward the current rollout id (see ``nemo_gym.rollout_correlation``) as
     the outbound request's standard OpenAI ``user`` field, so a downstream
     provider that inspects it can correlate per-turn calls back to the same
     rollout. A no-op for any provider that ignores ``user``. Never overrides

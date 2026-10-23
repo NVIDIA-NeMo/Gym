@@ -122,7 +122,7 @@ from nemo_gym.responses_converter import (
     _RESPONSE_NON_BOUNDARY_TYPES,
     _RESPONSE_OUTPUT_BOUNDARY_TYPES,
 )
-from nemo_gym.rollout_sampling import rollout_context
+from nemo_gym.rollout_correlation import rollout_context
 
 
 def _response_with_output(output: list) -> dict:

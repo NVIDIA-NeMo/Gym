@@ -48,7 +48,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.rollout_sampling import RolloutContextMiddleware
+from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import SESSION_ID_KEY, BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.session_routing import SessionKind

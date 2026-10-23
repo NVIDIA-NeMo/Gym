@@ -32,7 +32,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.rollout_sampling import rollout_context
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.swe_agents.app import (
     ActiveContainerCommand,

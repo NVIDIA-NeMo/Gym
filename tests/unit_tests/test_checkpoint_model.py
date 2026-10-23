@@ -37,7 +37,7 @@ from nemo_gym._checkpoint.model import (
 from nemo_gym.base_responses_api_model import _CaptureMiddleware
 from nemo_gym.chat_streaming import SSE_KEEPALIVE
 from nemo_gym.episode_types import EpisodeId
-from nemo_gym.rollout_sampling import RolloutContextMiddleware, current_rollout_id
+from nemo_gym.rollout_correlation import RolloutContextMiddleware, current_rollout_id
 from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
 from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
 from nemo_gym.token_id_capture.lineage import FileLineageStore

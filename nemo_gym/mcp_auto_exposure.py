@@ -103,7 +103,7 @@ from nemo_gym.base_resources_server import (
     mcp_session_token_payload,
     mcp_session_token_serializer,
 )
-from nemo_gym.rollout_sampling import current_episode_id
+from nemo_gym.rollout_correlation import current_episode_id
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
@@ -447,7 +447,7 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
         cls = m.cls
         if f"{cls.__module__}.{cls.__name__}" == "starlette.middleware.sessions.SessionMiddleware":
             continue  # Gym's SessionMiddleware — replaced by a materialized session on direct dispatch
-        if f"{cls.__module__}.{cls.__name__}" == "nemo_gym.rollout_sampling.RolloutContextMiddleware":
+        if f"{cls.__module__}.{cls.__name__}" == "nemo_gym.rollout_correlation.RolloutContextMiddleware":
             continue  # Correlation prefixes are handled before resource routes; direct MCP dispatch has no prefix.
         if f"{cls.__module__}.{cls.__name__}" == ("nemo_gym.server_utils.ClientDisconnectCancellationMiddleware"):
             continue  # Direct MCP dispatch has no client connection to monitor.

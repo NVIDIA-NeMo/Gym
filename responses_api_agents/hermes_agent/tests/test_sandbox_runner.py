@@ -27,8 +27,8 @@ from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE
 from nemo_gym.base_responses_api_model import CaptureStore, ModelCallCaptureConfig, install_model_call_capture
 from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose
 from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+from nemo_gym.rollout_correlation import ModelCallSampling, ModelSamplingMiddleware, model_sampling_base_url
 from nemo_gym.rollout_observability import AgentInvocation
-from nemo_gym.rollout_sampling import ModelCallSampling, ModelSamplingMiddleware, model_sampling_base_url
 from nemo_gym.server_utils import ServerClient
 from resources_servers.example_mcp_weather.app import (
     ExampleMCPWeatherResourcesServer,

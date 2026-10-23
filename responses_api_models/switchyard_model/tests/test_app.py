@@ -35,7 +35,7 @@ from pytest import MonkeyPatch
 import nemo_gym.server_utils as server_utils
 import responses_api_models.switchyard_model.app as app_module
 from nemo_gym.config_types import TOKEN_CAPTURE_PATH_SEGMENT
-from nemo_gym.rollout_sampling import ModelCallSampling, model_sampling_base_url
+from nemo_gym.rollout_correlation import ModelCallSampling, model_sampling_base_url
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.switchyard_model.app import (
     NeMoGymAsyncOpenAI,

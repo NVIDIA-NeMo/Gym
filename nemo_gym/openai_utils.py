@@ -193,7 +193,7 @@ from pydantic import (
 )
 from typing_extensions import TypedDict
 
-from nemo_gym.rollout_sampling import current_rollout_id
+from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import (
     MAX_NUM_TRIES,
     ClientResponse,

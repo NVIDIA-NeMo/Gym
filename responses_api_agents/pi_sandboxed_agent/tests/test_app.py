@@ -23,8 +23,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from nemo_gym.rollout_correlation import ModelCallSampling
 from nemo_gym.rollout_observability import AgentInvocation, SandboxObservation, ToolCallObservation
-from nemo_gym.rollout_sampling import ModelCallSampling
 from nemo_gym.sandbox.agent_tools import restricted_network_policy
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.testing.rollout_sampling import assert_model_sampling

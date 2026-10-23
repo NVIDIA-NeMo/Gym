@@ -21,8 +21,8 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY
-from nemo_gym.rollout_sampling import maybe_rollout_id_from_run_body
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnRequest,

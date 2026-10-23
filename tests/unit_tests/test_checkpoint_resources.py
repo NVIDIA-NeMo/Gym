@@ -1414,7 +1414,7 @@ async def test_a_restart_only_seed_waits_again_when_a_new_checkpoint_closes_befo
 @pytest.mark.parametrize("path", ["/ng-rollout/r/seed_session", "/close_session", "/verify"])
 async def test_a_session_change_survives_a_disconnect_once_the_reply_has_started(path: str) -> None:
     from nemo_gym._checkpoint.resources import ResourcesCheckpointMiddleware
-    from nemo_gym.rollout_sampling import rollout_context
+    from nemo_gym.rollout_correlation import rollout_context
 
     server, _ = make_server()
     participant = server._checkpoint

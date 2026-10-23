@@ -74,8 +74,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
-from nemo_gym.rollout_sampling import maybe_rollout_id_from_run_body, rollout_context
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,

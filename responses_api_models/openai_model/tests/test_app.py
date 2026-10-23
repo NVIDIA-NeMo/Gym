@@ -32,7 +32,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     PermanentEndpointError,
 )
-from nemo_gym.rollout_sampling import ModelSamplingMiddleware
+from nemo_gym.rollout_correlation import ModelSamplingMiddleware
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.openai_model import app as openai_model_module
 from responses_api_models.openai_model.app import (

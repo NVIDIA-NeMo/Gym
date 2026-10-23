@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_model import CaptureStore, ModelCallCaptureConfig
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
     AgentObservationBundle,
@@ -22,7 +23,6 @@ from nemo_gym.rollout_observability import (
     join_assistant_message_calls,
     join_model_call_observations,
 )
-from nemo_gym.rollout_sampling import maybe_rollout_id_from_run_body
 
 
 logger = logging.getLogger(__name__)

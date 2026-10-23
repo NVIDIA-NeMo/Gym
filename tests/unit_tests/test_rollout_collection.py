@@ -110,8 +110,8 @@ from nemo_gym.rollout_collection import (
     is_terminal_failure,
     loads_jsonl_line,
 )
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_reverification import RolloutReverificationConfig
-from nemo_gym.rollout_sampling import maybe_rollout_id_from_run_body
 from nemo_gym.server_utils import ClientDisconnectCancellationMiddleware, ServerClient
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
