@@ -116,7 +116,9 @@ model: claude-sonnet-4-5
   commands Cline may run (e.g. `{allow: ["python3 *"], deny: ["sudo *"]}`); empty means unrestricted
 - `cline_version`: `cline` npm version installed on a clean machine (shipped pinned to `3.0.55`;
   the event parser was validated against it, so treat a bump as a deliberate change: raise it,
-  re-run the tests and a live eval, then commit). `null` installs `@latest`
+  re-run the tests and a live eval, then commit). `null` installs `@latest`. By default every `cline`
+  call Gym makes sets `CLINE_NO_AUTO_UPDATE=1`, so Cline's self-update cannot replace the pinned
+  install mid-run; an explicit `env: {CLINE_NO_AUTO_UPDATE: "0"}` re-enables it
 
 See `configs/cline_agent.yaml`.
 

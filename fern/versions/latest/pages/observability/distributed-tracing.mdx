@@ -87,7 +87,9 @@ Inside a rollout, every call a Gym model server makes to its inference backend c
 `X-Request-Id: <rollout id>-<8 hex chars>`. vLLM uses that header as its request id and records it
 as `gen_ai.request.id` on its request span and in its request log, so an engine span or log line
 can be matched to a rollout directly, without walking the trace. A caller's own `X-Request-Id`
-header is kept.
+header is kept. In a submitted job with `vllm_traces: true`, the job's collector also copies the rollout
+id into `nemo.gym.rollout.id` on the engine span, so it groups per rollout like every other Gym span
+(see [Collector for Submitted Jobs](/main/observability/eval-submit-collector)).
 
 ## Span Kinds
 
