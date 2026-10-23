@@ -7,11 +7,19 @@ from unittest.mock import MagicMock
 
 import anyio
 import pytest
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError, InvalidURL
 from fastapi import Body
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from nemo_gym.base_environment_server import BaseEnvironmentServer, BaseEnvironmentServerConfig, CleanupContext
+from nemo_gym.base_environment_server import (
+    BaseEnvironmentServer,
+    BaseEnvironmentServerConfig,
+    CleanupContext,
+    dependency_failure,
+    is_retryable_dependency_error,
+    is_retryable_dependency_status,
+)
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import (
     BaseEpisodeRequest,
@@ -488,3 +496,74 @@ async def test_an_episode_is_untracked_even_if_its_cleanup_is_cancelled() -> Non
 
     assert participant.readiness().blocker_count == 0
     assert participant.export_records(None) == []
+
+
+@pytest.mark.parametrize(
+    ("status", "retryable"),
+    [
+        (400, False),
+        (401, False),
+        (404, False),
+        (409, False),
+        (413, False),
+        (422, False),
+        (408, True),
+        (425, True),
+        (429, True),
+        (500, True),
+        (503, True),
+        (599, True),
+    ],
+)
+def test_dependency_statuses_retry_only_timeouts_rate_limits_and_server_errors(status: int, retryable: bool) -> None:
+    assert is_retryable_dependency_status(status) is retryable
+    assert is_retryable_dependency_error(ClientResponseError(MagicMock(), (), status=status)) is retryable
+
+
+@pytest.mark.parametrize(
+    ("error", "retryable"),
+    [
+        (ClientConnectionError("refused"), True),
+        (ClientPayloadError("connection dropped mid-body"), True),
+        (TimeoutError("timed out"), True),
+        (InvalidURL("not a url"), False),
+        (ValueError("reply failed validation"), False),
+    ],
+)
+def test_only_transport_failures_retry_without_a_status(error: Exception, retryable: bool) -> None:
+    assert is_retryable_dependency_error(error) is retryable
+
+
+class _EvidenceFailure(EpisodeFailure):
+    partial_response: str | None = None
+
+
+def test_dependency_failure_keeps_the_dependencys_reason_and_classifies_it() -> None:
+    refusal = ClientResponseError(MagicMock(), (), status=422, message="Unprocessable Content")
+    refusal.response_content = b'{"detail":"agent does not support sandbox access"}'
+
+    failure = dependency_failure(
+        refusal, failure_model=_EvidenceFailure, stage="agent", partial_response="partial"
+    ).failure
+
+    assert type(failure) is _EvidenceFailure
+    assert failure.stage == "agent"
+    assert failure.terminal is True
+    assert failure.failure_reason.startswith("422, message='Unprocessable Content'")
+    assert "agent does not support sandbox access" in failure.failure_reason
+    assert failure.partial_response == "partial"
+
+
+def test_dependency_failure_names_the_error_type_bounds_the_reason_and_honors_terminal() -> None:
+    failure = dependency_failure(
+        TimeoutError("x" * 3000), failure_model=EpisodeFailure, stage="cleanup", name_error_type=True
+    ).failure
+    assert failure.terminal is False
+    assert failure.failure_reason.startswith("TimeoutError: xxx")
+    assert len(failure.failure_reason) == 2000
+
+    forced = dependency_failure(
+        TimeoutError("timed out"), failure_model=EpisodeFailure, stage="cleanup", terminal=True
+    ).failure
+    assert forced.terminal is True
+    assert forced.failure_reason == "timed out"

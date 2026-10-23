@@ -955,6 +955,8 @@ class PiAgent(SimpleResponsesAPIAgent):
         cached_tokens: int | None = 0
         terminal_error = None
         context_overflow = False
+        compaction_started = False
+        recovery_error = None
         stop_reasons = []
         mcp_setup_failure = None
         messages = []
@@ -963,6 +965,16 @@ class PiAgent(SimpleResponsesAPIAgent):
                 context_overflow = event.get("context_overflow") is True
             elif event.get("type") == "ng_gym_mcp_setup_failed":
                 mcp_setup_failure = str(event.get("error") or "")
+            elif event.get("type") == "compaction_start":
+                compaction_started = True
+            elif event.get("type") == "compaction_end":
+                # Pi recovers from an overflow by compacting, then retrying. A compaction that started and failed (a 503,
+                # a dropped connection) ends the run with no retry. Pi's verdict that the retry overflowed again comes
+                # with no start.
+                failure = event.get("errorMessage")
+                if compaction_started and event.get("reason") == "overflow" and isinstance(failure, str):
+                    recovery_error = failure
+                compaction_started = False
             message = event.get("message") or {}
             if event.get("type") == "message_end":
                 messages.append(message)
@@ -999,6 +1011,13 @@ class PiAgent(SimpleResponsesAPIAgent):
         runtime = state.runtime_info
         assert cleanup is not None
         model_limit = bool(stop_reasons and stop_reasons[-1] == "error" and context_overflow)
+        compaction_failure = None
+        if recovery_error and stop_reasons and stop_reasons[-1] == "error":
+            # Pi's overflow recovery failed on its compaction call, so the failed call was never retried, even when
+            # Gym does not count its error as an overflow. Pi wraps the compaction call's error in its own message,
+            # which classify_outcome leaves unknown: retryable by default, even if that call hit the context limit.
+            model_limit, terminal_error = False, recovery_error
+            compaction_failure = {"stopReason": "error", "errorMessage": recovery_error}
         if model_limit or (stop_reasons and stop_reasons[-1] == "aborted"):
             # Expected model limits/interruptions do not invalidate partial work.
             # They must not erase an independently confirmed worker or cleanup failure.
@@ -1097,7 +1116,8 @@ class PiAgent(SimpleResponsesAPIAgent):
             if not execution_error and _reported_model_error(
                 assistant, cleanup, will_retry=terminal.get("willRetry") is True
             ):
-                return self.report_outcome(response, assistant)
+                # Classify a failed compaction call, not the overflow it was recovering from.
+                return self.report_outcome(response, compaction_failure or assistant)
             raise RuntimeError(f"Pi agent failed: {error}")
         return response
 
