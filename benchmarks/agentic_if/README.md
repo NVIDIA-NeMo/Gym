@@ -26,8 +26,8 @@ in OpenCode 1.17.11 with this configuration, not the model alone.
 - Tools: a per-row subset of OpenCode's built-in tools, with the descriptions and parameter descriptions the row sets.
   Web fetch, web search and skills are denied.
 - Sandbox: the task's own image. The `scale_swe` or `terminal_bench_2_1` resources server starts it; the `agentic_if`
-  resources server borrows it for the episode and lends it to the agent. Every task image has `python3`, which
-  `opencode_agent` and the resources server's file staging run on.
+  resources server borrows it for the episode and lends it to the agent. Every task image has `python3` and `bash`,
+  which `opencode_agent` needs offline, and the resources server's file staging runs on `python3`.
 - Harness: `opencode_agent` runs OpenCode in that sandbox through `single_agent_turn`, with two plugins the resources
   server stages. A profile plugin applies the row's tool argument maps, read-before-edit guards and planted tool
   failures, and writes receipts. A boundary plugin applies the system prompt, tool selection and tool descriptions,
