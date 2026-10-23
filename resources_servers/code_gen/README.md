@@ -38,7 +38,7 @@ Where each part runs:
 | `sandbox/sandbox_runner.py` | Only in the sandbox; uploaded with every verification. |
 | `lcb_integration/__init__.py`, `correctness.py`, `testing_util.py` | The grading harness: on a Ray worker by default, or uploaded next to the runner when `sandbox_provider` is set. |
 | `sandbox/Dockerfile` | Builds the sandbox image; not uploaded. |
-| Everything else, including `app.py` and `sandbox_execution.py` (which does the upload) | Only in the Gym server. |
+| Everything else, including the server entrypoints and `sandbox_execution.py` (which does the upload) | Only in the Gym server. |
 
 1. Build and push the runtime image. It uses the same uv-managed CPython build as this server's
    environment, and the same numpy, scipy and pandas versions, which candidates can import. With
@@ -57,6 +57,7 @@ Where each part runs:
        --model-type openai_model \
        --config resources_servers/code_gen/configs/code_gen.yaml \
        --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+       ++code_gen.resources_servers.code_gen.entrypoint=sandbox_app.py \
        ++code_gen.resources_servers.code_gen.sandbox_provider=sandbox
    ```
 
@@ -71,10 +72,17 @@ Where each part runs:
    code_gen:
      resources_servers:
        code_gen:
+         entrypoint: sandbox_app.py
          sandbox_provider: sandbox
          sandbox_config:
            image: <registry>/code-gen-verifier@sha256:<digest>
    ```
+
+   `sandbox_app.py` runs the same verifier without declaring a Ray dependency to Gym's
+   launcher. It requires a sandbox provider so a configuration error cannot fall back
+   to Ray workers. `app.py` retains the Ray-capable entrypoint for existing configs.
+   The server environment still installs its shared requirements, but this path does
+   not import Ray; the parent Gym CLI does not need the `ray` extra either.
 
    Keys left out keep the server's defaults below.
 
