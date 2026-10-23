@@ -221,18 +221,18 @@ def test_full_test_server_setup_exposes_uv_in_current_and_later_steps(tmp_path: 
     calls = tmp_path / "uv-calls"
     installer = tmp_path / "install-uv.sh"
     installer.write_text(
-        "mkdir -p \"$HOME/.local/bin\"\n"
+        'mkdir -p "$HOME/.local/bin"\n'
         "cat > \"$HOME/.local/bin/uv\" <<'UV'\n"
         "#!/bin/sh\n"
-        "echo \"$*\" >> \"$UV_TEST_CALLS\"\n"
-        "case \"$1\" in\n"
+        'echo "$*" >> "$UV_TEST_CALLS"\n'
+        'case "$1" in\n'
         "  --version) echo 'uv 0.11.29' ;;\n"
         "  venv) mkdir -p .venv/bin; : > .venv/bin/activate ;;\n"
         "  sync) ;;\n"
         "  *) exit 2 ;;\n"
         "esac\n"
         "UV\n"
-        "chmod +x \"$HOME/.local/bin/uv\"\n"
+        'chmod +x "$HOME/.local/bin/uv"\n'
     )
     # Replace network and system package setup, not the workflow's PATH handling.
     for name, body in {"curl": 'cat "$UV_TEST_INSTALLER"', "bash": "exit 0"}.items():
