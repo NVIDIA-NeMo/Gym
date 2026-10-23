@@ -1193,7 +1193,13 @@ vllm() { echo 'unexpected server launch'; }
         # Stub every system mutation: installation must never touch the test host.
         stubs = r"""
 command() {
-    if [[ "$*" == "-v $PREFILL_PROFILE_TOOL" ]]; then [[ -f installed ]]; else builtin command "$@"; fi
+    if [[ "$*" == "-v $PREFILL_PROFILE_TOOL" ]]; then
+        [[ -f installed ]]
+    elif [[ "$*" == '-v curl' && "$TEST_BOOTSTRAP" == yes && ! -f bootstrapped ]]; then
+        return 1
+    else
+        builtin command "$@"
+    fi
 }
 source() {
     if [[ "$1" == /etc/os-release ]]; then ID=ubuntu; VERSION_ID=24.04; else builtin source "$@"; fi
@@ -1204,20 +1210,30 @@ apt-get() {
     echo "$*" >> apt_calls
     if [[ "$TEST_FAILURE" == apt ]]; then return 42; fi
     if [[ " $* " == *" $TEST_PACKAGE "* && "$TEST_FAILURE" != missing ]]; then touch installed; fi
+    if [[ " $* " == *' curl '* ]]; then touch bootstrapped; fi
 }
 mkdir() { [[ "$*" == '-p /usr/share/keyrings' ]]; }
-wget() { echo public-key; }
+curl() { echo public-key; [[ "$TEST_FAILURE" != download ]]; }
 gpg() { cat > key; [[ "$TEST_FAILURE" != key ]]; }
 tee() { cat > repository; }
 nsys() { echo "$*" >> nsys_calls; }
 ncu() { nsys "$@"; }
 """
-        for (tool, package), (arch, failure) in product(
+        for (tool, package), (arch, failure, bootstrap) in product(
             (("nsys", "nsight-systems-cli"), ("ncu", "nsight-compute")),
-            (("arm64", "none"), ("amd64", "none"), ("arm64", "apt"), ("arm64", "key"), ("arm64", "missing")),
+            (
+                ("arm64", "none", "no"),
+                ("amd64", "none", "no"),
+                ("arm64", "none", "yes"),
+                ("arm64", "apt", "no"),
+                ("arm64", "apt", "yes"),
+                ("arm64", "key", "no"),
+                ("arm64", "download", "no"),
+                ("arm64", "missing", "no"),
+            ),
         ):
-            with self.subTest(tool=tool, arch=arch, failure=failure):
-                for name in ("installed", "apt_calls", "repository", "key", "nsys_calls"):
+            with self.subTest(tool=tool, arch=arch, failure=failure, bootstrap=bootstrap):
+                for name in ("installed", "bootstrapped", "apt_calls", "repository", "key", "nsys_calls"):
                     (Path(self.workdir) / name).unlink(missing_ok=True)
                 status, _, stderr = self.run_shell(
                     stubs + setup + "\nensure_prefill_profiler\nensure_prefill_profiler\n",
@@ -1226,18 +1242,25 @@ ncu() { nsys "$@"; }
                         "TEST_FAILURE": failure,
                         "PREFILL_PROFILE_TOOL": tool,
                         "TEST_PACKAGE": package,
+                        "TEST_BOOTSTRAP": bootstrap,
                     },
                 )
-                apt_calls = (Path(self.workdir) / "apt_calls").read_text().splitlines()
+                apt_log = Path(self.workdir) / "apt_calls"
+                apt_calls = apt_log.read_text().splitlines() if apt_log.exists() else []
                 if failure == "none":
                     self.assertEqual(status, 0, stderr)
+                    bootstrap_calls = (
+                        ["update", "install -y --no-install-recommends --no-upgrade curl ca-certificates"]
+                        if bootstrap == "yes"
+                        else []
+                    )
                     self.assertEqual(
                         apt_calls,
-                        [
-                            "update",
-                            "install -y --no-install-recommends wget gnupg ca-certificates",
-                            "update",
-                            f"install -y --no-install-recommends {package} curl",
+                        bootstrap_calls
+                        + [
+                            "update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/nvidia-devtools.list "
+                            "-o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0",
+                            f"install -y --no-install-recommends {package}",
                         ],
                     )
                     self.assertEqual(
@@ -1250,7 +1273,7 @@ ncu() { nsys "$@"; }
                     self.assertNotEqual(status, 0)
                     self.assertFalse((Path(self.workdir) / "nsys_calls").exists())
                     self.assertIn("installation completed" if failure == "missing" else "installation failed", stderr)
-                    self.assertEqual(len(apt_calls), {"apt": 1, "key": 2, "missing": 4}[failure])
+                    self.assertEqual(len(apt_calls), {"apt": 1, "key": 0, "download": 0, "missing": 2}[failure])
 
     def test_prefill_profile_cancels_pending_trigger_when_server_exits(self) -> None:
         _, command = self.generate_commands()
