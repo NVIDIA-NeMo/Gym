@@ -102,6 +102,10 @@ def _empty_response() -> dict[str, Any]:
     ).model_dump(mode="json")
 
 
+class SandboxEvaluationFailed(RuntimeError):
+    """In-box grading failed after the harness ran. Never scored as a failed harness run."""
+
+
 def resolve_agent(name: str) -> tuple[str, str, str]:
     try:
         return _AGENTS[name]
@@ -296,15 +300,19 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 "url_prefix": self.url_path_for_run("", body),
             }
             token = _RUN_CONTEXT.set(run_context)
+            scored_failure = False
             try:
                 try:
                     agent_resp = await self.responses(request, body.responses_create_params)
                     agent_resp_json = agent_resp.model_dump(mode="json")
+                except SandboxEvaluationFailed:
+                    raise
                 except Exception:
                     if not self.config.score_failed_runs:
                         raise
                     LOG.warning("harness run failed, scoring it as an empty response", exc_info=True)
-                    await self._close_run_sandbox(run_context)
+                    # a stateful verifier may still read the resource-owned sandbox, close it after /verify
+                    scored_failure = True
                     agent_resp_json = _empty_response()
                 verify_resp = await self.server_client.post(
                     server_name=self.config.resources_server.name,
@@ -313,7 +321,10 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                     cookies=cookies,
                 )
                 await raise_for_status(verify_resp)
-                return HarnessAgentVerifyResponse.model_validate(await get_response_json(verify_resp))
+                result = HarnessAgentVerifyResponse.model_validate(await get_response_json(verify_resp))
+                if scored_failure:
+                    await self._close_run_sandbox(run_context)
+                return result
             except BaseException:
                 await self._close_run_sandbox(run_context)
                 raise
@@ -480,11 +491,16 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 await self._download_json(handle, self._box_path(handle, "/work/response.json"))
             )
 
-            grade_raw = meta.get("sandbox_eval")
-            grade_spec = json.loads(grade_raw) if isinstance(grade_raw, str) else grade_raw
-            if grade_spec:
-                reward = await self._grade_in_box(handle, grade_spec)
-                resp.metadata = (resp.metadata or {}) | {"sandbox_reward": str(reward)}
+            try:
+                grade_raw = meta.get("sandbox_eval")
+                grade_spec = json.loads(grade_raw) if isinstance(grade_raw, str) else grade_raw
+                if grade_spec:
+                    reward = await self._grade_in_box(handle, grade_spec)
+                    resp.metadata = (resp.metadata or {}) | {"sandbox_reward": str(reward)}
+            except Exception as exc:
+                if not self.config.score_failed_runs:
+                    raise
+                raise SandboxEvaluationFailed(str(exc)) from exc
             return resp
         finally:
             if not descriptor:

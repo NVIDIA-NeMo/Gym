@@ -33,6 +33,7 @@ from responses_api_agents.harness_agent.app import (
     HarnessAgent,
     HarnessAgentConfig,
     HarnessAgentRunRequest,
+    SandboxEvaluationFailed,
     resolve_agent,
     stage_and_run_eval,
 )
@@ -276,10 +277,17 @@ async def test_verify_failure_closes_resource_sandbox():
 
 async def test_failed_run_is_verified_as_empty_response_when_scored():
     agent = _make_agent(score_failed_runs=True)
-    agent.server_client.post = AsyncMock(side_effect=[MagicMock(cookies={}), MagicMock(cookies={})])
     handle = MagicMock(provider_name="opensandbox")
     agent._provider.connect = AsyncMock(return_value=handle)
     agent._provider.close = AsyncMock()
+
+    async def post(**kwargs):
+        if kwargs["url_path"] == "/verify":
+            # a stateful verifier reads the resource-owned sandbox, so it must still be up
+            agent._provider.close.assert_not_awaited()
+        return MagicMock(cookies={})
+
+    agent.server_client.post = AsyncMock(side_effect=post)
     body = HarnessAgentRunRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"),
     )
@@ -298,6 +306,46 @@ async def test_failed_run_is_verified_as_empty_response_when_scored():
     verified = agent.server_client.post.await_args_list[1].kwargs
     assert verified["url_path"] == "/verify"
     assert verified["json"]["response"]["output"] == []
+    agent._provider.close.assert_awaited_once_with(handle)
+
+
+@pytest.mark.parametrize("score_failed_runs", [True, False])
+@pytest.mark.parametrize("error", ["eval command failed: grader crashed", "reward file is empty"])
+async def test_grading_failure_is_not_scored_as_failed_run(score_failed_runs, error):
+    agent = _make_agent(score_failed_runs=score_failed_runs)
+    agent._gym_tar = None
+    agent.server_client.post = AsyncMock(return_value=MagicMock(cookies={}))
+    handle = MagicMock(provider_name="opensandbox")
+    agent._provider.connect = AsyncMock(return_value=handle)
+    agent._provider.exec = AsyncMock(
+        side_effect=[
+            SandboxExecResult("", "", 0),
+            SandboxExecResult("/testbed\n", "", 0),
+            SandboxExecResult("", "", 0),
+            SandboxExecResult("RUNNER_DONE", "", 0),
+        ]
+    )
+    agent._provider.upload_file = AsyncMock()
+    agent._provider.download_file = AsyncMock(side_effect=lambda _, __, path: path.write_text(json.dumps(_response())))
+    agent._provider.close = AsyncMock()
+    body = HarnessAgentRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+            input="hello", metadata={"sandbox_eval": json.dumps({"eval_command": "false"})}
+        ),
+    )
+    with (
+        patch.object(agent, "_sandbox_model_url", return_value="https://model.example"),
+        patch.object(agent, "_grade_in_box", new=AsyncMock(side_effect=RuntimeError(error))),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch(
+            "responses_api_agents.harness_agent.app.get_response_json",
+            new=AsyncMock(return_value={"sandbox_handle": "box-1"}),
+        ),
+        pytest.raises(RuntimeError, match=error) as raised,
+    ):
+        await agent.run(MagicMock(cookies={}), body)
+    assert isinstance(raised.value, SandboxEvaluationFailed) is score_failed_runs
+    assert [c.kwargs["url_path"] for c in agent.server_client.post.await_args_list] == ["/seed_session"]
     agent._provider.close.assert_awaited_once_with(handle)
 
 
