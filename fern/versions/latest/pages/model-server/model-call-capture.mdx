@@ -264,6 +264,61 @@ Agents based on `SimpleResponsesAPIAgent` can add the prefix with these helpers:
 The prefixed self-call route (`/ng-rollout/{rollout_id}/v1/responses`) is registered on every agent by
 default.
 
+### Clients with a fixed base URL
+
+A long-lived client, such as an agent that a resources server runs during verification, may not be able
+to change its base URL for each rollout. It can name the rollout in the `x-ng-rollout-id` header
+instead. Gym model servers and resources servers accept the header in place of the prefix. A request
+that carries both must name the same rollout, and a malformed header is refused with HTTP 400. The
+header does not request training token capture; use the `training-token-capture` prefix for that.
+
+SDKs that accept headers per call need nothing else. With the OpenAI SDK, pass the rollout id on each
+request:
+
+```python
+response = client.responses.create(
+    model="policy_model", input="...", extra_headers={"x-ng-rollout-id": rollout_id}
+)
+```
+
+For a client that cannot set headers per call, `nemo_gym.rollout_correlation.add_rollout_id_header`
+sets the header from the current rollout, only on requests to the base URLs you list. It never adds the
+header twice, and leaves a request unchanged when no rollout is active, so the model server forwards that
+call without capture.
+
+```python
+import functools
+
+import httpx
+import requests
+from requests.adapters import HTTPAdapter
+
+from nemo_gym.rollout_correlation import add_rollout_id_header, add_rollout_id_header_async
+
+model_base_urls = ["http://model-server:8000"]
+
+# httpx, synchronous and asynchronous clients
+client = httpx.Client(event_hooks={"request": [functools.partial(add_rollout_id_header, base_urls=model_base_urls)]})
+async_client = httpx.AsyncClient(
+    event_hooks={"request": [functools.partial(add_rollout_id_header_async, base_urls=model_base_urls)]}
+)
+
+
+# requests
+class RolloutIdAdapter(HTTPAdapter):
+    def send(self, request, **kwargs):
+        add_rollout_id_header(request, base_urls=model_base_urls)
+        return super().send(request, **kwargs)
+
+
+session = requests.Session()
+session.mount("http://", RolloutIdAdapter())
+```
+
+With observability or checkpointing on, Gym sets the current rollout for every request it sends to a
+resources server for that rollout, including `/verify`. Clients created once and shared across
+concurrent rollouts therefore tag each request with the rollout it belongs to.
+
 ## Add agent-side evidence
 
 Model-call capture is one input to Gym's broader rollout-evidence pipeline. Supported harnesses can
