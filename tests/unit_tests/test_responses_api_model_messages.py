@@ -19,14 +19,20 @@ around the server's own ``responses()``. These tests use minimal fake servers to
 default mapping for both ``responses()`` signatures (with and without a leading ``request``).
 """
 
+import json
 from time import time
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+import pytest
 from fastapi import Body, Request
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
+from nemo_gym.base_responses_api_model import (
+    BaseResponsesAPIModelConfig,
+    SimpleResponsesAPIModel,
+    _soften_max_tokens_stop_reason,
+)
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -93,12 +99,31 @@ class _RequestAwareModel(SimpleResponsesAPIModel):
         raise NotImplementedError
 
 
-def _config() -> BaseResponsesAPIModelConfig:
-    return BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name="")
+class _TruncatedModel(SimpleResponsesAPIModel):
+    """A server whose responses are cut off by a server-side max_output_tokens cap."""
+
+    config: BaseResponsesAPIModelConfig
+    model_config = {"arbitrary_types_allowed": True}
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        response = _build_response("partial answer").model_dump()
+        response.update(status="incomplete", incomplete_details={"reason": "max_output_tokens"})
+        return NeMoGymResponse.model_validate(response)
+
+    async def chat_completions(
+        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+    ) -> NeMoGymChatCompletion:
+        raise NotImplementedError
 
 
-def _client(model_cls) -> TestClient:
-    server = model_cls(config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+def _config(**kwargs) -> BaseResponsesAPIModelConfig:
+    return BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name="", **kwargs)
+
+
+def _client(model_cls, **config_kwargs) -> TestClient:
+    server = model_cls(
+        config=_config(**config_kwargs), server_client=MagicMock(spec=ServerClient, global_config_dict={})
+    )
     return TestClient(server.setup_webserver()), server
 
 
@@ -150,3 +175,45 @@ class TestDefaultMessagesRoute:
         assert "event: message_start" in body
         assert "event: content_block_delta" in body
         assert "event: message_stop" in body
+
+
+class TestAnthropicMaxTokensAsEndTurn:
+    _BODY = {"model": "claude-x", "max_tokens": 32000, "messages": [{"role": "user", "content": "hi"}]}
+
+    def test_max_tokens_stop_reason_is_kept_by_default(self) -> None:
+        client, _ = _client(_TruncatedModel)
+        resp = client.post("/v1/messages", json=self._BODY)
+        assert resp.status_code == 200
+        assert resp.json()["stop_reason"] == "max_tokens"
+
+    def test_flag_reports_truncated_turn_as_end_turn(self) -> None:
+        client, _ = _client(_TruncatedModel, anthropic_max_tokens_as_end_turn=True)
+        resp = client.post("/v1/messages", json=self._BODY)
+        assert resp.status_code == 200
+        assert resp.json()["stop_reason"] == "end_turn"
+        assert resp.json()["content"] == [{"type": "text", "text": "partial answer"}]
+
+    def test_flag_applies_to_streamed_responses(self) -> None:
+        client, _ = _client(_TruncatedModel, anthropic_max_tokens_as_end_turn=True)
+        resp = client.post("/v1/messages", json={**self._BODY, "stream": True})
+        assert resp.status_code == 200
+        stop_reasons = [
+            json.loads(line[len("data:") :])["delta"]["stop_reason"]
+            for line in resp.text.splitlines()
+            if line.startswith("data:") and '"message_delta"' in line
+        ]
+        assert stop_reasons == ["end_turn"]
+
+    def test_truncated_turn_with_tool_calls_becomes_tool_use(self) -> None:
+        response = {
+            "stop_reason": "max_tokens",
+            "content": [{"type": "text", "text": "x"}, {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}],
+        }
+        _soften_max_tokens_stop_reason(response)
+        assert response["stop_reason"] == "tool_use"
+
+    @pytest.mark.parametrize("reason", ["end_turn", "tool_use", "refusal", "stop_sequence"])
+    def test_other_stop_reasons_are_untouched(self, reason: str) -> None:
+        response = {"stop_reason": reason, "content": []}
+        _soften_max_tokens_stop_reason(response)
+        assert response["stop_reason"] == reason
