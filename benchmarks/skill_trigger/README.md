@@ -1,6 +1,6 @@
 # Skill opening across agent harnesses
 
-**Design draft: this benchmark is not runnable yet.** This proposal defines the measurement and implementation gates for adding a skill-opening benchmark to Gym. It does not register a benchmark or report new model results.
+**Implementation draft: this benchmark is not runnable yet.** Source preparation and its tests are implemented. Harness adapters, scoring, and live migration checks remain pending. This draft does not register a benchmark or report new model results.
 
 The question is whether a model opens the relevant skill instructions when a task calls for them. Task-performance benchmarks measure whether work gets done; this benchmark measures an earlier step. Opening instructions is not evidence that the agent followed them or completed the task.
 
@@ -12,7 +12,23 @@ The target release contains 110 positive prompts drawn from 35 BioNeMo skills, 5
 
 Each task retains its prompt, source, intended skill, and catalog identity. Full skill directories are made available; expected targets and evaluation labels are hidden. Catalog membership must remain identical across harnesses for a given task. Catalogs may differ between tasks; replacing them with a union catalog changes the experiment.
 
-Source revisions, prompt adaptations, distribution terms, and exact task counts must be reviewed and published before runnable onboarding. Download upstream content reproducibly with notices intact rather than copying an opaque archive. An unavailable or unlicensed source blocks release; it does not justify silently changing the benchmark.
+Source revisions, prompt adaptations, distribution terms, and exact task counts must be reviewed before runnable onboarding. [selection.json](selection.json) pins each prompt, target version, source reference, and ordered catalog; [pilot.json](pilot.json) freezes nine representative cases. Download upstream content reproducibly with notices intact rather than copying an opaque archive. An unavailable or unlicensed source blocks release; it does not justify silently changing the benchmark.
+
+## Source preparation status
+
+All 110 prompt bytes and target versions have been compared to the reference experiment. All 186 distinct skill-directory hashes, across 43 catalogs, match the reference, including companion skills. Provenance is recorded as 13 upstream trigger cases, 22 adapted completion cases, 50 authored SkillsBench trigger cases, and 25 adaptations of Addy's ranking tests. Wording changes are recorded separately from changes to label semantics.
+
+**Full packaging is blocked by file-level license questions affecting nine cases.** Ten bundled document-skill licenses restrict copying and redistribution. One additional JAX skill declares a proprietary license but omits the referenced license file; a companion PubChem skill declares its license unknown. The affected targets are `rdkit`, `jax-skills`, `xlsx`, `senior-data-engineer`, `pdf`, `pptx`, `file-organizer`, `image-ocr`, and `video-frame-extraction`. Several affected files are companion skills. Removing them changes the benchmark and requires an explicit revision. The Apache-2.0 root license of SkillsBench does not resolve these file-level conflicts.
+
+The exact paths, hashes, and reasons are retained in `selection.json` under `release_blockers`. Audit mode validates all inputs and writes metadata without copying skill catalogs:
+
+```bash
+python -m benchmarks.skill_trigger.prepare --fetch --audit-only \
+    --output benchmarks/skill_trigger/data/source-audit
+python -m pytest --confcutdir=benchmarks/skill_trigger/tests benchmarks/skill_trigger/tests/test_prepare.py
+```
+
+Use a new output directory for each preparation. Normal preparation refuses unresolved blockers. Only a `prepared-release` artifact may eventually be packaged for execution; `source-audit` is metadata only. The manifest contains labels and original prompt provenance and must remain outside the agent sandbox. Copies of root and nested attribution notices accompany permitted prepared catalogs. No scientific software or model weights referenced by a skill are downloaded or executed during preparation.
 
 ## Scoring
 
