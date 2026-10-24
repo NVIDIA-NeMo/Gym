@@ -52,12 +52,12 @@ The beta implementation uses the legacy Python route-bundle path:
 routes:
   policy_model:
     type: model
+    token_capture_engine: vllm
     target:
       model: actual-model-served-by-vllm
       base_url: http://vllm-host:8000/v1
       api_key: dummy
       format: openai
-      token_capture_engine: vllm
 ```
 
 ```bash
