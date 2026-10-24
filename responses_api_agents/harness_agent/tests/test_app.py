@@ -107,6 +107,7 @@ def test_config_defaults():
     cfg = _config()
     assert cfg.sandbox_image == "python:3.12-slim"
     assert cfg.sandbox_python == "python3"
+    assert cfg.score_failed_runs is False
 
 
 def test_registry_exposes_all_harness_agents():
@@ -270,6 +271,33 @@ async def test_verify_failure_closes_resource_sandbox():
     ):
         with pytest.raises(RuntimeError, match="verify failed"):
             await agent.run(MagicMock(cookies={}), body)
+    agent._provider.close.assert_awaited_once_with(handle)
+
+
+async def test_failed_run_is_verified_as_empty_response_when_scored():
+    agent = _make_agent(score_failed_runs=True)
+    agent.server_client.post = AsyncMock(side_effect=[MagicMock(cookies={}), MagicMock(cookies={})])
+    handle = MagicMock(provider_name="opensandbox")
+    agent._provider.connect = AsyncMock(return_value=handle)
+    agent._provider.close = AsyncMock()
+    body = HarnessAgentRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+    )
+    with (
+        patch.object(HarnessAgent, "responses", new=AsyncMock(side_effect=RuntimeError("runner died"))),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch(
+            "responses_api_agents.harness_agent.app.get_response_json",
+            new=AsyncMock(
+                side_effect=[{"sandbox_handle": "box-1"}, body.model_dump() | {"response": _response(), "reward": 0.0}]
+            ),
+        ),
+    ):
+        result = await agent.run(MagicMock(cookies={}), body)
+    assert result.reward == 0.0
+    verified = agent.server_client.post.await_args_list[1].kwargs
+    assert verified["url_path"] == "/verify"
+    assert verified["json"]["response"]["output"] == []
     agent._provider.close.assert_awaited_once_with(handle)
 
 
