@@ -19,6 +19,6 @@ longbench_v2_n3_1m_mcqa_simple_agent:
 longbench_v2_n3_1m_mcqa_environment_server:
   _inherit_from: mcqa_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: longbench_v2_n3_1m_mcqa_simple_agent

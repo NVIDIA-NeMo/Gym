@@ -57,6 +57,6 @@ responses_create_params:
 lmarena_v3_benchmark_environment_server:
   _inherit_from: lmarena_v3_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: lmarena_v3_benchmark_agent
