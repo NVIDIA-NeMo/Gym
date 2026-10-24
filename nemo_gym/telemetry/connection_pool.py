@@ -18,6 +18,7 @@ from aiohttp.connector import Connection
 from aiohttp.tracing import Trace
 
 from nemo_gym.telemetry.gym_metrics import (
+    record_http_connection_pool_connect_duration,
     record_http_connection_pool_queue_duration,
     register_http_connection_pool_connect_counter,
 )
@@ -239,6 +240,27 @@ class QueueTimedTCPConnector(TCPConnector):
         with _CONNECT_COUNTS_LOCK:
             _CONNECT_COUNTS[server_name] = _CONNECT_COUNTS.get(server_name, 0) + 1
         return await super().connect(req, *args, **kwargs)
+
+    async def _create_connection(self, req: ClientRequest, traces: list[Trace], timeout: Any) -> Any:
+        """Open one new connection, recording how long DNS, TCP, and TLS setup took.
+
+        Reused connections never reach this method, so it records only connections the pool had to open.
+        `test_create_connection_override_matches_aiohttp_signature` fails if aiohttp changes this private method.
+        """
+        started_at = time.perf_counter()
+        outcome = "failed"
+        try:
+            protocol = await super()._create_connection(req, traces, timeout)
+            outcome = "ok"
+            return protocol
+        finally:
+            try:
+                record_http_connection_pool_connect_duration(
+                    (time.perf_counter() - started_at) * 1000.0, outcome=outcome, server_name=_SERVER_NAME.get()
+                )
+            except Exception:
+                # Diagnostics must never alter request, timeout, or cancellation behavior.
+                logger.debug("Failed to record aiohttp connection-setup telemetry", exc_info=True)
 
     async def _wait_for_available_connection(self, key: ConnectionKey, traces: list[Trace]) -> None:
         queue_constraint = _connector_queue_constraint(self)

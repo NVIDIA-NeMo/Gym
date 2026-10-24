@@ -104,6 +104,28 @@ config_paths:
   - resources_servers/weather/config.yaml
 ```
 
+### Malformed `head_server` Values
+
+```
+nemo_gym.config_types.HeadServerConfigMalformedError: 'head_server' is invalid: head_server.port (Input should be a valid integer, unable to parse string as an integer).
+`head_server.host` must be a hostname or IP; `head_server.port` and, if set, `head_server.num_workers` must be integers. Set them in a config or as overrides, e.g.:
+  ++head_server.host=127.0.0.1 ++head_server.port=11000
+```
+
+**When**: A `head_server` field has the wrong type — typically a `++head_server.port=` override that is not an
+integer, or an explicit `host: null` — or the whole block was given as something other than a mapping
+(`++head_server=foo`, `++head_server=false`, `'++head_server=[]'`), which reports
+`'head_server' must be a mapping ...` instead. Either key may be omitted (Gym fills the default), as may the whole
+block, but a value that is present must be well-typed.
+
+**Fix**: Give `host` a hostname or IP and `port` an integer, in the config or on the command line:
+
+```yaml
+head_server:
+  host: 127.0.0.1
+  port: 11000
+```
+
 ### No Server Instances Configured
 
 ```
@@ -149,7 +171,7 @@ Configuration Warnings: Almost-Servers Detected
 - Invalid `license` value in dataset configs
 - Missing required fields for the server type
 
-**Fix**: Check the validation error path (for example, `resources_servers -> example_server -> domain`) and update the field with a valid value. Refer to [configuration-reference](/reference/configuration) for valid field values.
+**Fix**: Check the validation error path (for example, `resources_servers -> example_server -> domain`) and update the field with a valid value. Refer to [Configuration](/reference/configuration) for valid field values.
 
 #### Bypass Strict Validation
 
@@ -269,10 +291,11 @@ Start it with: `gym env start`. If it is already running on a different host or 
 **When**: `gym eval run --no-serve` collects against servers that are already running, and found nothing
 listening at the head server address in its config. Either no `gym env start` is running, or it was started
 with a different head server address than this command is using. That address is `head_server.host` /
-`head_server.port` (default `127.0.0.1:11000`). When `head_server.host` is not set, the host is the machine's
-IP address if [`use_absolute_ip`](/reference/configuration#multi-node-configuration) is `true`, and otherwise
-`default_host` (default `127.0.0.1`), so a `gym env start` run with either setting can listen on a different
-address than a command run without it.
+`head_server.port` (default `127.0.0.1:11000`). When `head_server.host` is not set, an explicit
+`default_host` takes precedence. If neither host setting is supplied,
+[`use_absolute_ip`](/reference/configuration#multi-node-configuration) selects the machine's resolved IP
+address when `true`, or `127.0.0.1` when `false`. A `gym env start` run with different host settings can
+therefore listen on a different address than the collecting command expects.
 
 **Fix**: Check which head server address `gym env start` used (from its config and overrides), then run
 `gym env status` with matching overrides before concluding that nothing is running. `gym env status` only
