@@ -115,6 +115,9 @@ jobs:
           echo "UV_CACHE_DIR=$UV_CACHE_DIR" >> "$GITHUB_ENV"
           bash scripts/ci/install_test_dependencies.sh
           curl -LsSf "$UV_INSTALL_URL" | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          uv --version
           uv venv
           source .venv/bin/activate
           uv sync --extra dev

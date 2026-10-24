@@ -109,6 +109,7 @@ def test_config_defaults():
     assert cfg.sandbox_image == "python:3.12-slim"
     assert cfg.sandbox_python == "python3"
     assert cfg.score_failed_runs is False
+    assert cfg.require_tool_call is False
 
 
 def test_registry_exposes_all_harness_agents():
@@ -347,6 +348,45 @@ async def test_grading_failure_is_not_scored_as_failed_run(score_failed_runs, er
     assert isinstance(raised.value, SandboxEvaluationFailed) is score_failed_runs
     assert [c.kwargs["url_path"] for c in agent.server_client.post.await_args_list] == ["/seed_session"]
     agent._provider.close.assert_awaited_once_with(handle)
+
+
+@pytest.mark.parametrize(
+    ("output", "reward"),
+    [
+        ([], 0.0),
+        (
+            [
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "42"}],
+                }
+            ],
+            0.0,
+        ),
+        ([{"type": "function_call", "call_id": "c1", "name": "bash", "arguments": "{}"}], 1.0),
+        ([{"type": "custom_tool_call", "call_id": "c1", "name": "apply_patch", "input": ""}], 1.0),
+    ],
+)
+async def test_require_tool_call_zeroes_runs_without_tool_calls(output, reward):
+    agent = _make_agent(require_tool_call=True)
+    agent.server_client.post = AsyncMock(side_effect=[MagicMock(cookies={}), MagicMock(cookies={})])
+    body = HarnessAgentRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+    )
+    response = NeMoGymResponse.model_validate(_response() | {"output": output})
+    with (
+        patch.object(HarnessAgent, "responses", new=AsyncMock(return_value=response)),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch(
+            "responses_api_agents.harness_agent.app.get_response_json",
+            new=AsyncMock(side_effect=[{}, body.model_dump() | {"response": response.model_dump(), "reward": 1.0}]),
+        ),
+    ):
+        result = await agent.run(MagicMock(cookies={}), body)
+    assert result.reward == reward
+    assert result.harness_pre_gate_reward == 1.0
 
 
 @pytest.mark.parametrize("exception_type", [RuntimeError, asyncio.CancelledError])

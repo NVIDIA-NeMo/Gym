@@ -168,6 +168,9 @@ class HarnessAgentConfig(BaseResponsesAPIAgentConfig):
     # Score a crashed harness run (sandbox OOM, runner error, context overflow) as an empty
     # response instead of failing /run, so one pathological prompt cannot end a training run.
     score_failed_runs: bool = False
+    # Zero the reward of a run that made no tool call, so a direct answer that skips the harness earns nothing.
+    # The verifier's own score stays in harness_pre_gate_reward.
+    require_tool_call: bool = False
 
 
 class HarnessAgentRunRequest(BaseRunRequest):
@@ -321,7 +324,15 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                     cookies=cookies,
                 )
                 await raise_for_status(verify_resp)
-                result = HarnessAgentVerifyResponse.model_validate(await get_response_json(verify_resp))
+                verify_json = await get_response_json(verify_resp)
+                if self.config.require_tool_call:
+                    verify_json["harness_pre_gate_reward"] = verify_json.get("reward")
+                    if not any(
+                        isinstance(item, dict) and item.get("type") in ("function_call", "custom_tool_call")
+                        for item in agent_resp_json.get("output") or []
+                    ):
+                        verify_json["reward"] = 0.0
+                result = HarnessAgentVerifyResponse.model_validate(verify_json)
                 if scored_failure:
                     await self._close_run_sandbox(run_context)
                 return result
