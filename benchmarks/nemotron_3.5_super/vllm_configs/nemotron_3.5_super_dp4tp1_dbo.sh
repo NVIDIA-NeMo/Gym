@@ -1,6 +1,8 @@
 #!/bin/bash
 
 NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-5}"
+# Use 0 for a matching eager control run before comparing throughput.
+ENABLE_PREFILL_DBO="${ENABLE_PREFILL_DBO:-1}"
 
 # Optional detailed Nsight Systems capture on PD prefill nodes only.
 # PROFILE_PREFILL=1 auto-installs nsys if needed in root Ubuntu containers.
@@ -24,7 +26,7 @@ export VLLM_USE_V2_MODEL_RUNNER=1
 
 export VLLM_USE_RUST_FRONTEND=1
 
-# @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
+# DBO currently supports the VL checkpoint's text-only decoder path.
 # @bxyu-nvidia: We set --prefix-match-unit 128 because the Mooncake store prefill lookup gets more expensive the smaller this number is
 # and caused prefill bottlenecks as a result when using Mooncake.
 VLLM_COMMON_ARGS=(
@@ -47,7 +49,7 @@ VLLM_COMMON_ARGS=(
     --mamba-ssm-cache-dtype float32
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
-    --skip-mm-profiling
+    --language-model-only
     --data-parallel-size 4
     --data-parallel-size-local 4
     --tensor-parallel-size 1
@@ -61,10 +63,9 @@ VLLM_COMMON_ARGS=(
 # @bxyu-nvidia: We set num_speculative_tokens_per_batch_size to 0 here since prefill does not need to speculate any tokens, it just needs to know that we are speculating.
 VLLM_PREFILL_ARGS=(
     --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS},\"num_speculative_tokens_per_batch_size\":[[1,1024,0]]}"
-    # MRV2 captures a one-token graph for the zero-draft schedule, but Mamba's
-    # full-graph capture requires 1 + num_speculative_tokens. Keep prefill
-    # piecewise until that dynamic-speculation capture path supports Mamba.
-    --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
+    # Initial hybrid DBO validation runs eager; graph support is a later step.
+    --enforce-eager
+    --compilation-config '{"cudagraph_mode":"NONE"}'
     --kv-transfer-config '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
@@ -89,13 +90,14 @@ VLLM_PREFILL_ARGS=(
             ]
         }
     }'
-    --max-cudagraph-capture-size 1200
     --max-num-batched-tokens 16960
     --max-num-seqs 256
     --all2all-backend allgather_reducescatter
     --moe-backend flashinfer_trtllm
-    --enable-dbo
 )
+if [[ "${ENABLE_PREFILL_DBO}" == "1" ]]; then
+    VLLM_PREFILL_ARGS+=(--enable-dbo)
+fi
 # @bxyu-nvidia: We set "enable_lookup": false for the Mooncake store connector because the prefill worker handles the prefix cache lookup and decode just needs to receive the transferred kv cache.
 VLLM_DECODE_ARGS=(
     --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS}}"
