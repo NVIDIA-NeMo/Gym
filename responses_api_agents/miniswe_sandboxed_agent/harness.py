@@ -115,6 +115,7 @@ def project_native_trajectory(trajectory: dict) -> tuple[list[dict], list[dict]]
 class MiniSWEConfig(BaseModel):
     step_limit: int = Field(default=0, ge=0)
     step_timeout_sec: int = Field(default=600, gt=0)
+    enable_view_image: bool = False
 
 
 class HarnessOutcome(BaseModel):
@@ -166,6 +167,8 @@ class MiniSWEHarness:
     async def setup(self) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         await self._install_miniswe()
+        if self.config.enable_view_image:
+            await self._install_view_image()
         result = await self.sandbox.exec("command -v setsid", user=self.context.user, cwd=self.context.workdir)
         if result.return_code:
             raise RuntimeError("mini-SWE requires setsid for process cleanup")
@@ -214,6 +217,29 @@ class MiniSWEHarness:
                 f"\nTask MCP tools (JSON schemas): {listed.stdout}\n"
                 f"Call with: {cli} call SERVER TOOL 'JSON_ARGUMENTS'.\n"
             )
+
+    async def _install_view_image(self) -> None:
+        remote = self.remote_directory
+        for name in ("view_image.py", "vision_model.py"):
+            await self.sandbox.upload(Path(__file__).with_name("runtime") / name, f"{remote}/{name}")
+        command_path = remote + "/image-tools/view_image"
+        wrapper = f'#!/bin/sh\nexec {quote(remote + "/venv/bin/python")} {quote(remote + "/view_image.py")} "$@"\n'
+        local_wrapper = self.directory / "view_image"
+        local_wrapper.write_text(wrapper)
+        await self.sandbox.upload(local_wrapper, remote + "/view_image-wrapper")
+        result = await self.sandbox.exec(
+            f"mkdir -p {quote(remote + '/image-tools')} && "
+            f"cp {quote(remote + '/view_image-wrapper')} {quote(command_path)} && chmod +x {quote(command_path)}",
+            user=self.context.user,
+            timeout_s=self.context.setup_timeout_sec,
+        )
+        if result.return_code != 0 or result.error_type is not None:
+            raise RuntimeError(f"Experimental image command installation failed: {result.stderr}")
+        self.extra_instruction += (
+            "\nVision is available through bash: run `view_image PATH` to inspect an image file. "
+            "The image will appear in your next observation. Use this to inspect visual references "
+            "instead of printing or decoding pixel values. Supported formats: PNG, JPEG, GIF, WebP.\n"
+        )
 
     async def _install_miniswe(self) -> None:
         remote = self.remote_directory
@@ -342,6 +368,13 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             },
         }
         local_config = self.directory / "config.yaml"
+        vision_environment = ""
+        if self.config.enable_view_image:
+            payload["model"]["model_class"] = "vision_model.VisionResponseModel"
+            vision_environment = (
+                f"export PATH={quote(remote + '/image-tools')}:$PATH; "
+                f"export PYTHONPATH={quote(remote)}${{PYTHONPATH:+:$PYTHONPATH}}; "
+            )
         local_config.write_text(json.dumps(payload))
         command = (
             f"echo $$ >> {quote(remote + '/processes')}; "
@@ -349,6 +382,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             "export MSWEA_CONFIGURED=true MSWEA_SILENT_STARTUP=true LITELLM_LOCAL_MODEL_COST_MAP=true "
             "MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT=1; "
             f"export MSWEA_GLOBAL_CONFIG_DIR={quote(remote + '/config')}; "
+            f"{vision_environment}"
             f"exec {quote(remote + '/venv/bin/python')} -m minisweagent.run.mini "
             f"-c mini.yaml -c {quote(remote + '/config.yaml')} -o {quote(remote + '/trajectory.json')} "
             f"> {quote(remote + '/agent.log')} 2>&1"
@@ -451,6 +485,8 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             else None,
         )
         extra = {"harness_version": info.get("mini_version")}
+        if self.config.enable_view_image:
+            extra["experimental_features"] = ["view_image"]
         if native_trajectory is not None:
             extra["mini_swe_trajectory"] = native_trajectory
             termination.artifacts = [str(self.directory / "trajectory.json")]
