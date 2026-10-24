@@ -52,13 +52,22 @@ async def test_invalid_runtime_preserves_output_and_confirmed_close(setup, runti
 @pytest.mark.parametrize(
     "invalid", [{"cleanup_confirmed": 1}, {"cleanup_confirmed": "true"}, {"cleanup_confirmed": False}]
 )
-async def test_bad_cleanup_keeps_state_retryable_without_reading_runtime(setup, invalid):
+async def test_unconfirmed_receipt_skips_runtime_and_distinguishes_terminal_failure(setup, invalid):
     state, sandbox, payload = await session(setup)
     sandbox.result.update(invalid)
     with pytest.raises(RuntimeError):
         await state.execute(payload, timeout=5, close_timeout=1)
     assert state.session.cleanup is None
     assert state.runtime_info is None
+    if invalid["cleanup_confirmed"] is False:
+        await state.close(1)
+        assert state.session.closed
+        assert state.session.termination_error is not None
+        assert state.session.capture_error is state.session.termination_error
+        assert state.runtime_info is None
+        sandbox.disconnect.assert_awaited_once()
+        sandbox.stop.assert_not_awaited()
+        return
     with pytest.raises(RuntimeError):
         await state.close(1)
     assert not state.session.closed

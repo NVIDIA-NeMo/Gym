@@ -57,16 +57,26 @@ def _model(client: NeMoGymAsyncOpenAI, **config_overrides: Any) -> VLLMModel:
 
 
 @pytest.mark.parametrize(
-    "endpoint,reasoning_field",
+    "endpoint,reasoning_field,tool_call,last_turn_edit",
     [
-        (endpoint, field)
-        for endpoint in ("responses", "chat/completions", "messages")
-        for field in (None, "reasoning", "reasoning_content", "inline")
+        (endpoint, field, tool_call, "text")
+        for endpoint, field in [
+            (endpoint, field)
+            for endpoint in ("responses", "chat/completions", "messages")
+            for field in (None, "reasoning", "reasoning_content", "inline")
+        ]
+        + [("responses", "refusal"), ("messages", "refusal")]
+        for tool_call in (False, True)
     ]
-    + [("responses", "refusal"), ("messages", "refusal")],
+    + [
+        ("responses", field, True, edit)
+        for field in (None, "reasoning", "reasoning_content", "inline", "refusal")
+        for edit in ("arguments", "name", "id", "add", "remove")
+    ],
 )
-@pytest.mark.parametrize("tool_call", [False, True])
-def test_external_staging_resolves_served_reasoning_history(tmp_path, endpoint, reasoning_field, tool_call) -> None:
+def test_external_staging_resolves_served_reasoning_history(
+    tmp_path, endpoint, reasoning_field, tool_call, last_turn_edit
+) -> None:
     """Echoing served output must preserve capture ancestry across API conversion."""
     records = {}
 
@@ -79,6 +89,7 @@ def test_external_staging_resolves_served_reasoning_history(tmp_path, endpoint, 
 
     capture = RolloutTokenCapture(sink=Sink(), weight_version_fn=lambda: 7)
     admissions = []
+    consumed_prefixes = []
 
     async def complete(**body):
         admission = CaptureAdmission.model_validate(body[NG_CAPTURE_FIELD]) if NG_CAPTURE_FIELD in body else None
@@ -99,6 +110,7 @@ def test_external_staging_resolves_served_reasoning_history(tmp_path, endpoint, 
         if admission is not None:
             prefix = [token for key in admission.staging_chain for token in records[key].token_ids_delta]
             active = capture.begin_call(admission, prefix_token_ids=prefix)
+            consumed_prefixes.append(prefix)
             coords = capture.complete_call(
                 active,
                 prompt_token_ids=prefix + [10 * index],
@@ -180,20 +192,48 @@ def test_external_staging_resolves_served_reasoning_history(tmp_path, endpoint, 
         manifest = asyncio.run(ledger.manifest("reasoning-rollout"))
         assert len(manifest["records"]) == 3
         assert not manifest["failures"]
-        # Parent verification must still reject edits to the last served answer.
+        # Only argument rewrites may reuse the last served turn's original tokens.
         last_answer = history[-3 if tool_call else -2]
-        if last_answer.get("type") == "function_call":
+        if last_turn_edit == "arguments":
             last_answer["arguments"] = '{"changed": true}'
+        elif last_turn_edit == "name":
+            last_answer["name"] = "different_tool"
+        elif last_turn_edit == "id":
+            last_answer["call_id"] = "different_id"
+        elif last_turn_edit == "add":
+            history.insert(-2, {"role": "assistant", "content": "uncaptured answer"})
+        elif last_turn_edit == "remove":
+            history.remove(last_answer)
+        elif endpoint == "responses":
+            # Edit the text/refusal item even when the response ends in a tool call.
+            last_message = next(item for item in reversed(history) if item.get("role") == "assistant")
+            last_message["content"] = [{"type": "output_text", "text": "different answer"}]
         else:
             last_answer["content"] = "different answer"
+        original_parent = admissions[-1].model_call_id
+        original_keys = tuple(records)
         with TestClient(app) as client:
             response = client.post(f"/ng-rollout/reasoning-rollout/training-token-capture/v1/{endpoint}", json=body)
         assert response.status_code == 200, response.text
-        assert admissions[-1] is None
         manifest = asyncio.run(ledger.manifest("reasoning-rollout"))
-        assert len(manifest["records"]) == 3
-        assert manifest["failures"]
-        assert ledger.record.await_count == 3
+        if last_turn_edit == "arguments":
+            assert admissions[-1] is not None
+            assert admissions[-1].mode == "token_in"
+            assert admissions[-1].parent_call_id == original_parent
+            assert tuple(admissions[-1].staging_chain) == original_keys
+            assert admissions[-1].prev_len == 6
+            # The worker used all three original staged segments as the prompt prefix;
+            # no tokens reconstructed from the rewritten arguments replaced them.
+            assert consumed_prefixes[-1] == [10, 101, 20, 102, 30, 103]
+            assert [token for key in original_keys for token in records[key].token_ids_delta] == consumed_prefixes[-1]
+            assert records[f"reasoning-rollout/{admissions[-1].model_call_id}"].token_ids_delta == [40, 104]
+            assert len(manifest["records"]) == 4
+            assert not manifest["failures"]
+        else:
+            assert admissions[-1] is None
+            assert len(consumed_prefixes) == 3
+            assert len(manifest["records"]) == 3
+            assert manifest["failures"]
     finally:
         asyncio.run(ledger.close())
 
@@ -431,6 +471,8 @@ def _simulate_two_workers(
     assert entries[1].parent_call_id == entries[0].model_call_id
     assert entries[1].prefix_requested is True
     assert entries[1].prefix_supplied is True
+    # The engine's chat finish reason survives the vLLM chat path into the record.
+    assert [entry.finish_reason for entry in entries] == ["stop", "stop"]
 
     assert first_context.parent_resolution is not None
     assert first_context.parent_resolution.status == ParentResolutionStatus.ROOT

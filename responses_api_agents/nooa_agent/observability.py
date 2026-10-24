@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
@@ -48,6 +48,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from responses_api_agents.nooa_agent.gym_llm import GymModelCall, RolloutLLMState
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 
 
 def _json_output(value: Any) -> str:
@@ -81,10 +82,11 @@ class GymTraceHooks:
     calls without installing global exporters or patching agent construction.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, on_progress: Callable[[], None] | None = None) -> None:
         self._current: ContextVar[str] = ContextVar("gym_nooa_invocation", default="root")
         self._invocations: dict[str, AgentInvocation] = {}
         self._events: list[GymModelCall | _ToolCall] = []
+        self._on_progress = on_progress
 
     def _invocation(self, identity: str) -> AgentInvocation:
         return self._invocations.setdefault(identity, AgentInvocation(invocation_id=identity))
@@ -145,6 +147,8 @@ class GymTraceHooks:
             record.output = {"error": str(exception), "error_type": record.error_type}
         elif record.status == "incomplete":
             record.status = "completed"
+        if self._on_progress is not None:
+            self._on_progress()
 
     @contextmanager
     def resource_call(self, name: str, arguments: dict[str, Any]) -> Iterator[TrajectoryToolCall]:
@@ -177,7 +181,20 @@ class GymTraceHooks:
             return None
         return self._start_tool(tool_name, arguments, str(kwargs.get("tool_call_id") or execution_id))
 
-    after_tool_execution = after_code_execution
+    def after_tool_execution(
+        self,
+        *,
+        context: Any,
+        result: Any,
+        exception: BaseException | None,
+        tool_name: str = "",
+        **kwargs: Any,
+    ) -> None:
+        self.after_code_execution(context=context, result=result, exception=exception, **kwargs)
+        if tool_name == "return_result" and self._on_progress is not None:
+            # Value validation is a completed tool boundary, but its arbitrary
+            # Python return value is not an external action or serialized output.
+            self._on_progress()
 
     def before_generation(self, **_: Any) -> None:
         pass
@@ -202,8 +219,9 @@ class GymTraceHooks:
         task_id: str,
         rollout_id: str,
         default_model: str = "nooa",
+        partial: bool = False,
     ) -> tuple[AgentEpisode, TrajectoryRecord]:
-        """Project captured facts without interpreting the invocation adapter."""
+        """Project evidence, omitting pending tool outputs only in partial snapshots."""
 
         invocations = {key: record.model_copy(deep=True) for key, record in self._invocations.items()}
         output: list[Any] = []
@@ -263,7 +281,9 @@ class GymTraceHooks:
                     )
                 )
             else:
-                record = event.observation.model_copy(deep=True)
+                # NOOA execution results can retain module objects in their REPL locals.
+                # Copy the observation shell; output is replaced with serialized evidence below.
+                record = event.observation.model_copy()
                 invocation = invocations[record.invocation_id]
                 record.output = visible_outputs.get((record.invocation_id, record.tool_call_id), record.output)
                 if not any(
@@ -278,6 +298,12 @@ class GymTraceHooks:
                     )
                     invocation.conversation.append(call_item)
                     output.append(call_item)
+                if partial and record.completed_at is None:
+                    # A sibling tool may still be running at a checkpoint. Keep
+                    # its start event without inventing a completed/null output.
+                    record.output = None
+                    tools.append(record)
+                    continue
                 result_item = NeMoGymFunctionCallOutput(
                     call_id=record.tool_call_id,
                     output=_json_output(record.output),
@@ -305,6 +331,7 @@ class GymTraceHooks:
             gaps=list(state.gaps),
         )
         usages = [call.response.usage if call.response is not None else None for call in state.calls]
+        latest_response = next((call.response for call in reversed(state.calls) if call.response is not None), None)
         episode = AgentEpisode(
             response=NeMoGymResponse(
                 id=f"nooa-{rollout_id}",
@@ -312,6 +339,7 @@ class GymTraceHooks:
                 model=create_params.model or default_model,
                 object="response",
                 output=output,
+                incomplete_details=latest_response.incomplete_details if latest_response is not None else None,
                 tools=create_params.tools,
                 tool_choice=create_params.tool_choice,
                 parallel_tool_calls=create_params.parallel_tool_calls,
@@ -378,7 +406,7 @@ def finalize_observation_gaps(
     observations: AgentObservationBundle,
     *,
     extra_gaps: list[ObservationGap] | None = None,
-    termination_reason: str | None = None,
+    termination_reason: NOOATerminationReason | None = None,
     termination_error: str | None = None,
 ) -> AgentObservationBundle:
     """Merge lifecycle-only observation gaps onto the Gym projection."""
