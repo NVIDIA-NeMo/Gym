@@ -118,6 +118,8 @@ R2E-Gym rows without test lists are graded
 with R2E-Gym's own rule: the test-status map from the run's short test summary must
 equal the row's `expected_output_json` exactly. The grading transcript is saved as
 `eval_output.txt` next to the rollout artifacts.
+Before running an R2E-Gym image's `run_tests.sh`, the grader
+links the image's `/r2e_tests` into `/testbed`, as R2E-Gym's own runtime does.
 
 Resolved patches receive reward `1`; other completed attempts receive `0`.
 Agent timeouts, evaluation timeouts, sandbox failures, and accidental successes
