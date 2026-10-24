@@ -1,6 +1,6 @@
 # Skill opening across agent harnesses
 
-**Implementation draft: this benchmark is not runnable yet.** Source preparation, scoring, trace conversion, shared budgets, and inference transport have component tests. Codex/Hermes launch profiles are ported; runtime collection, complete harness adapters, and live migration checks remain pending. This draft does not register a benchmark or report new model results.
+**Implementation draft: this benchmark is not runnable yet.** Source preparation, scoring, trace conversion, shared budgets, inference transport, and the host-side Harbor verifier have component tests. Codex/Hermes launch profiles are ported; runtime collection, complete harness adapters, and live migration checks remain pending. This draft does not register a benchmark or report new model results.
 
 The question is whether a model opens the relevant skill instructions when a task calls for them. Task-performance benchmarks measure whether work gets done; this benchmark measures an earlier step. Opening instructions is not evidence that the agent followed them or completed the task.
 
@@ -44,7 +44,18 @@ The shared implementation is under [`environments/skill_trigger`](../../environm
 
 Trajectory conversion reuses Harbor 0.24.0's Pi, Codex, and Hermes converters. The wrapper checks call/result IDs and rejects dropped or invented records. Converted trajectories support Gym interoperability; canonical traces remain the scoring source. The shared request allowance counts retries and child requests together, anchors time to prompt release, and cancels streams at the absolute deadline. These components are not yet connected to live adapters; their tests do not prove sandbox isolation or end-to-end correctness.
 
-The trial-scoped gateway uses Gym's shared HTTP client with transport retries and redirects disabled. It records original and forwarded requests, response bytes, and provider status outside the agent-visible logs. Tests use local HTTP endpoints to check stream preservation, errors, deadlines, and blocked requests. The Codex/Hermes launcher waits for host authorization after profile setup; Codex guidance requires effective model metadata, while Hermes guidance changes only `tool_use_enforcement`. Actual session attribution, observer startup, Pi execution, and complete lifecycle wiring remain to be implemented.
+The trial-scoped gateway uses Gym's shared HTTP client with transport retries and redirects disabled. It records original and forwarded requests, response bytes, and provider status outside the agent-visible logs. Tests use local HTTP endpoints to check stream preservation, errors, deadlines, and blocked requests. The Codex/Hermes launcher waits for host authorization after profile setup; Codex guidance requires effective model metadata, while Hermes guidance changes only `tool_use_enforcement`. Session attribution, Pi execution, and complete lifecycle wiring remain to be implemented.
+
+The custom Harbor verifier reads a pinned prepared release and private host evidence outside Harbor's mounted trial logs. It checks the prompt and complete catalog files, rejects audit-only or blocked releases, and returns an explicit binary `reward`. Missing evidence and provider errors raise; an agent-written `reward.json` cannot substitute for the host record. Each attempt is recorded once and retained independently of Harbor trial cleanup. The adapter must still establish that these directories are not mounted into the sandbox.
+
+The Linux Docker component smoke checks per-trial observation, read-only instructions, observer isolation, and termination of agent processes while preserving the container keepalive. It uses synthetic text and no model. Run it explicitly with an existing Python-containing image:
+
+```bash
+python -m environments.skill_trigger.tests.docker_smoke \
+    --image YOUR_PINNED_PYTHON_IMAGE --output /tmp/skill-container-smoke.json
+```
+
+This is not the clean-clone benchmark smoke or proof of end-to-end harness equivalence.
 
 For the offline tests, install Gym's development dependencies and `harbor==0.24.0`, then run from the checkout root:
 
