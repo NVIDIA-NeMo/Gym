@@ -397,7 +397,12 @@ class AnthropicConverter:
                     NeMoGymResponseReasoningItem(
                         id=f"rs_{uuid4().hex}",
                         summary=[NeMoGymSummary(text=block.get("thinking", ""), type="summary_text")],
-                        encrypted_content=block.get("signature"),
+                        # The placeholder is wire-only: it never reached the model, so it is not opaque reasoning to forward.
+                        encrypted_content=(
+                            None
+                            if _PLACEHOLDER_SIGNATURE and block.get("signature") == _PLACEHOLDER_SIGNATURE
+                            else block.get("signature")
+                        ),
                         type="reasoning",
                     )
                 )

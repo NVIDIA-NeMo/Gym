@@ -26,6 +26,7 @@ from anthropic.types import Message
 
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.responses_converter import ResponsesConverter
 
 
 PNG_DATA_URL = "data:image/png;base64,aGVsbG8="  # "hello"
@@ -202,6 +203,37 @@ class TestAnthropicRequestToResponses:
         assert item.type == "reasoning"
         assert item.summary[0].text == "hmm"
         assert item.encrypted_content == "sig-1"
+
+    def _replay(self, thinking_block: dict) -> NeMoGymResponseCreateParamsNonStreaming:
+        return _converter().anthropic_request_to_responses(
+            {
+                "max_tokens": 10,
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": [thinking_block, {"type": "text", "text": "ok"}]},
+                    {"role": "user", "content": "next"},
+                ],
+            }
+        )
+
+    def test_placeholder_signature_is_dropped_on_replay(self, monkeypatch) -> None:
+        # The placeholder never reached the model, so replay must not forward it as opaque reasoning, which the
+        # Chat Completions conversion behind vLLM rejects.
+        monkeypatch.setattr("nemo_gym.anthropic_converter._PLACEHOLDER_SIGNATURE", "gym-unsigned")
+        params = self._replay({"type": "thinking", "thinking": "step", "signature": "gym-unsigned"})
+        reasoning = params.input[1]
+        assert reasoning.type == "reasoning"
+        assert reasoning.summary[0].text == "step"
+        assert reasoning.encrypted_content is None
+        chat = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(params)
+        assistant = [m for m in chat.messages if m["role"] == "assistant"]
+        assert len(assistant) == 1
+        assert "step" in assistant[0]["content"] and assistant[0]["content"].endswith("ok")
+
+    def test_real_signature_survives_replay_with_placeholder_set(self, monkeypatch) -> None:
+        monkeypatch.setattr("nemo_gym.anthropic_converter._PLACEHOLDER_SIGNATURE", "gym-unsigned")
+        params = self._replay({"type": "thinking", "thinking": "step", "signature": "sig-1"})
+        assert params.input[1].encrypted_content == "sig-1"
 
     def test_tools_and_tool_choice_variants(self) -> None:
         conv = _converter()
