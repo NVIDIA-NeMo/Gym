@@ -196,6 +196,11 @@ async def _run_shell(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    # Providers whose HTTP goes through Gym's global aiohttp client (e2b,
+    # opensandbox) lazily load the global config from sys.argv with Hydra, where
+    # our "--config" is an ambiguous prefix of Hydra's own options. The flags are
+    # already consumed above, so hide them.
+    sys.argv[1:] = []
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         print("sandbox shell requires an interactive stdin and stdout", file=sys.stderr)
         return 2

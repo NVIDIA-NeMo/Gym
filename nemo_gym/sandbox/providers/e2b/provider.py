@@ -49,10 +49,13 @@ from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxExecResult,
     SandboxHandle,
+    SandboxPtySession,
+    SandboxPtySpec,
     SandboxSpec,
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.e2b._sdk import require_e2b_sdk
+from nemo_gym.sandbox.providers.e2b.pty import E2BPtySession, validate_pty_spec
 
 
 LOGGER = logging.getLogger(__name__)
@@ -471,6 +474,13 @@ class E2BProvider:
         except Exception:  # noqa: BLE001 - status must not raise for transient issues
             return SandboxStatus.UNKNOWN
         return SandboxStatus.RUNNING if running else SandboxStatus.STOPPED
+
+    async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> SandboxPtySession:
+        """Open an interactive terminal through the SDK's ``sandbox.pty``."""
+        validate_pty_spec(spec)
+        e2b = _require_e2b_sdk()
+        sandbox = self._sandbox(handle)
+        return await E2BPtySession(sandbox, spec, pty_size=e2b.PtySize).start()
 
     async def close(self, handle: SandboxHandle) -> None:
         e2b = _require_e2b_sdk()
