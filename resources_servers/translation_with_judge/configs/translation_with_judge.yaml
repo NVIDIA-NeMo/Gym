@@ -1,0 +1,56 @@
+# Judge endpoint. Points at any OpenAI-Responses-compatible server, e.g. a
+# self-hosted vLLM or SGLang instance (see README for launch commands).
+# Override on the CLI if it moves, e.g.:
+#   ++translation_judge_base_url=http://<host>:<port>/v1
+translation_judge_base_url: http://localhost:8005/v1
+translation_judge_api_key: EMPTY
+translation_judge_model_name: openai/gpt-oss-120b
+
+# Resources server: owns this environment's task verification (verify()) and reward.
+translation_with_judge_resources_server:          # instance name — how agents/CLI refer to this server
+  resources_servers:                              # server type: resources_servers | responses_api_agents | responses_api_models
+    translation_with_judge:                        # implementation directory under resources_servers/
+      entrypoint: app.py                        # server entry module
+      domain: translation                        # task domain; one of: math, coding, agent, knowledge,
+                                                #   instruction_following, long_context, safety, games, translation,
+                                                #   e2e, rlhf, other. Change 'other' to the closest fit.
+      verified: false                           # set true once the benchmark has been baselined and reviewed
+      description: Machine-translation verifier scored by an LLM judge (adequacy + fluency, 0-100), with sentence-BLEU/chrF as diagnostics. Focused on Indic-language pairs.
+      value: Improves multilingual translation quality against LLM-judged adequacy and fluency, not just n-gram overlap, with dedicated tokenizer support for Indic scripts.
+
+      judge_model_server:                       # the model server the judge calls to score each translation
+        type: responses_api_models
+        name: translation_judge_model
+      judge_responses_create_params:
+        input: []                               # overwritten per-call in app.py; kept here for extra params, e.g. max_output_tokens
+        max_output_tokens: 1024
+      strip_reasoning: true                     # drop a <think>...</think> preamble from the policy model's output before scoring
+
+# Agent server config specifies the agent server to run and any additional components of the environment such as resources servers
+translation_with_judge_simple_agent:               # this agent instance's name — pass as --agent to gym eval run
+  responses_api_agents:
+    simple_agent:                               # built-in agent: runs the model with tool calls (up to max_steps); swap for your own agent dir
+      entrypoint: app.py
+      resources_server:                         # the resources server this agent interacts with for tools, state and verification
+        type: resources_servers
+        name: translation_with_judge_resources_server
+      model_server:                             # the model that answers; 'policy_model' is resolved from a model config
+        type: responses_api_models
+        name: policy_model
+      datasets:                                 # one block per split: train | validation | example
+      - name: example                           # 5 rows committed to git for quick smoke tests, from FLORES-200 devtest (CC-BY-SA 4.0)
+        type: example
+        jsonl_fpath: resources_servers/translation_with_judge/data/example.jsonl
+        num_repeats: 1
+        license: Creative Commons Attribution-ShareAlike 4.0 International
+
+# Judge model server: any OpenAI-Responses-compatible endpoint. Defaults to a
+# self-hosted vLLM/SGLang gpt-oss-120b server (see README for the launch command);
+# swap openai_base_url/openai_model to point at a different judge.
+translation_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${translation_judge_base_url}
+      openai_api_key: ${translation_judge_api_key}
+      openai_model: ${translation_judge_model_name}
