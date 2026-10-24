@@ -1,0 +1,12 @@
+# Training JSONL embeds patch/test content from an internal dataset -- not ours to redistribute
+# via this repo. Distributed offline; there is no prepare script for it here.
+#
+# example.jsonl/example_rollouts.jsonl are the one exception, and are NOT drawn from the internal
+# dataset: CI's data-validation gate (gym env test +should_validate_data=true) requires a
+# committed sample, so these 5 rows are synthetic fixtures built from SWE-Gym/SWE-Gym (MIT
+# licensed, public) instead -- same wire shape (patch/test_patch/FAIL_TO_PASS/PASS_TO_PASS as real
+# pytest node ids), reformatted with a synthetic `delivery`/`image_ref`/`workdir`/`test_command`
+# so they exercise the same verification pipeline without publishing any real Swemer content.
+*.jsonl
+!example.jsonl
+!example_rollouts.jsonl

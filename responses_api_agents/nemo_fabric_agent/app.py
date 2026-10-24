@@ -3,6 +3,8 @@
 
 import json
 import logging
+import os
+import sys
 import tempfile
 from asyncio import Semaphore
 from contextlib import nullcontext
@@ -29,7 +31,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    NeMoGymSummary,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
@@ -196,6 +200,14 @@ def _fabric_output_items(output: dict[str, Any], response_text: str) -> list[Any
                     )
                 )
                 continue
+            reasoning = message.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning:
+                items.append(
+                    NeMoGymResponseReasoningItem(
+                        id=f"rs_{uuid4().hex}",
+                        summary=[NeMoGymSummary(text=reasoning, type="summary_text")],
+                    )
+                )
             text = _content_text(message.get("content"))
             if text:
                 items.append(
@@ -444,6 +456,9 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                 mcp_servers=mcp_servers or {},
                 skills=_skill_paths(skills_path),
             )
+            # Fabric otherwise starts Python adapters on VIRTUAL_ENV's interpreter, which in R2E-style task images is
+            # the repo's venv and lacks the adapter. This agent's interpreter has the adapters installed.
+            os.environ.setdefault("ADAPTER_PYTHON", sys.executable)
             result = await Fabric().run(
                 fabric_config,
                 base_dir=workspace,

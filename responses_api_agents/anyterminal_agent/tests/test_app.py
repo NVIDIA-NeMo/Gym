@@ -33,6 +33,7 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME, TOKEN_ID_CAPTURE_BLOCK
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
@@ -244,7 +245,7 @@ class TestReadTaskMeta:
 # ── AnyTerminalAgent._setup_params ──────────────────────────────────────────────────
 
 
-def _make_setup_agent(tmp_path: Path, **config_overrides) -> AnyTerminalAgent:
+def _make_setup_agent(tmp_path: Path, model_server_url: str = "", **config_overrides) -> AnyTerminalAgent:
     # model_post_init has heavy side effects (deps install, provider resolution) that
     # _setup_params doesn't touch, so bypass it and set only what _setup_params reads.
     with patch.object(AnyTerminalAgent, "model_post_init", lambda self, context: None):
@@ -252,7 +253,7 @@ def _make_setup_agent(tmp_path: Path, **config_overrides) -> AnyTerminalAgent:
     agent._server = AnyTerminalServerConfig(
         run_session_id="test_session",
         base_results_dir=tmp_path / "results",
-        model_server_url="",
+        model_server_url=model_server_url,
         nemo_gym_root=PARENT_DIR,
         agent_deps_dir=tmp_path,
     )
@@ -260,6 +261,38 @@ def _make_setup_agent(tmp_path: Path, **config_overrides) -> AnyTerminalAgent:
 
 
 class TestSetupParams:
+    SEGMENT = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+
+    def test_model_url_unchanged_without_rollout_id_or_traces(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path, model_server_url="http://model-host:8000")
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        assert agent._setup_params(body).model_server_url == "http://model-host:8000"
+
+    def test_model_url_carries_trace_context_without_rollout_id(self, tmp_path: Path, monkeypatch) -> None:
+        # Capture off, traces on: the harness still gets the current span in the URL.
+        from nemo_gym import server_utils
+
+        monkeypatch.setattr(server_utils, "trace_context_path_segment", lambda: self.SEGMENT)
+        agent = _make_setup_agent(tmp_path, model_server_url="http://model-host:8000")
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        assert agent._setup_params(body).model_server_url == f"http://model-host:8000{self.SEGMENT}"
+        assert agent._setup_params(body, rollout_id="3-1").model_server_url == (
+            f"http://model-host:8000/ng-rollout/3-1{self.SEGMENT}"
+        )
+
+    def test_explicit_sandbox_model_url_is_never_decorated(self, tmp_path: Path, monkeypatch) -> None:
+        from nemo_gym import server_utils
+
+        monkeypatch.setattr(server_utils, "trace_context_path_segment", lambda: self.SEGMENT)
+        agent = _make_setup_agent(
+            tmp_path, model_server_url="http://model-host:8000", sandbox_model_base_url="http://sandbox-host:9000"
+        )
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        assert agent._setup_params(body, rollout_id="3-1").model_server_url == "http://model-host:8000"
+
     def test_uses_per_task_timeout_by_default(self, tmp_path: Path) -> None:
         agent = _make_setup_agent(tmp_path)
         body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path), "agent_timeout_sec": "900"})
@@ -303,6 +336,24 @@ class TestSetupParams:
     def test_global_agent_timeout_rejects_zero(self) -> None:
         with pytest.raises(ValidationError, match="global_agent_timeout"):
             _config(global_agent_timeout=0)
+
+    def test_model_server_url_carries_the_training_capture_prefix(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path, model_server_url="http://policy:8000", token_id_capture=True)
+        agent.server_client.global_config_dict = {TOKEN_ID_CAPTURE_BLOCK: {"enabled": True}}
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        params = agent._setup_params(body, rollout_id="7-2")
+
+        assert params.model_server_url == "http://policy:8000/ng-rollout/7-2/training-token-capture"
+
+    def test_model_server_url_keeps_the_plain_rollout_prefix_without_capture(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path, model_server_url="http://policy:8000")
+        agent.server_client.global_config_dict = {OBSERVABILITY_ENABLED_KEY_NAME: True}
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        params = agent._setup_params(body, rollout_id="7-2")
+
+        assert params.model_server_url == "http://policy:8000/ng-rollout/7-2"
 
 
 # ── _instruction_from_input ───────────────────────────────────────────────────────
@@ -888,3 +939,60 @@ class TestStageTests:
 
         assert not (staging_tests / "stale.sh").exists()
         assert (staging_tests / "fresh.sh").exists()
+
+
+# ── AnyTerminalAgent._inner_responses ───────────────────────────────────────────────
+
+
+class TestInnerResponses:
+    async def _inner_response(self, tmp_path: Path, saved_response: dict | None):
+        agent = _make_setup_agent(tmp_path)
+        params = _make_instance_config(tmp_path)
+        if saved_response is not None:
+            (params.persistent_dir / "response.json").write_text(json.dumps(saved_response))
+        remote = MagicMock()
+        remote.options.return_value.remote = AsyncMock(return_value=None)
+        with (
+            patch("responses_api_agents.anyterminal_agent.app._run_remote", remote),
+            patch.object(AnyTerminalAgent, "_ray_resource_opts", return_value={}),
+        ):
+            return await agent._inner_responses(params)
+
+    async def test_keeps_the_inner_agents_usage(self, tmp_path: Path) -> None:
+        usage = {
+            "input_tokens": 5300,
+            "input_tokens_details": {"cached_tokens": 4096},
+            "output_tokens": 812,
+            "output_tokens_details": {"reasoning_tokens": 300},
+            "total_tokens": 6112,
+        }
+        saved = {
+            "id": "resp_inner",
+            "created_at": 0,
+            "model": "inner",
+            "object": "response",
+            "output": [
+                {
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "done", "annotations": []}],
+                }
+            ],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+            "usage": usage,
+        }
+
+        response = await self._inner_response(tmp_path, saved)
+
+        assert response.usage.model_dump(mode="json") == usage
+        assert response.output[0].content[0].text == "done"
+
+    async def test_usage_is_unknown_without_a_saved_response(self, tmp_path: Path) -> None:
+        response = await self._inner_response(tmp_path, None)
+
+        assert response.output == []
+        assert response.usage is None

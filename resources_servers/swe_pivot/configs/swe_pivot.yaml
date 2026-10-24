@@ -39,3 +39,11 @@ swe_pivot_tool_simulation_agent:
         type: example
         jsonl_fpath: resources_servers/swe_pivot/data/example.jsonl
         license: Apache 2.0
+
+swe_pivot_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swe_pivot_tool_simulation_agent

@@ -33,6 +33,14 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+# Separator between a namespace tool's group name and a member tool's name when
+# the group is flattened into plain function tools for a chat-completions
+# engine (``nemo_gym.responses_streaming``). Defined here because terminal
+# attribution needs it to strip the group name from a recorded call, and this
+# package must not import the server stack.
+NAMESPACE_TOOL_DELIMITER = "__"
+
+
 # These fields carry token metadata on a served response.
 # ``routed_experts`` is optional for MoE backends.
 TOKEN_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_probs", "routed_experts")
@@ -135,6 +143,12 @@ class TokenEntry(BaseModel):
     # The response id returned to the client for this model call.
     # Terminal attribution uses it to match the agent's final response to these captured tokens.
     response_id: str | None = None
+    # Why generation stopped, usually in the Chat Completions vocabulary: ``stop``, ``length``,
+    # ``tool_calls``, or ``content_filter``. ``response_finish_reason`` derives it from either
+    # served payload shape, and other engine values pass through unchanged; only ``length`` and
+    # ``content_filter`` are consumed. ``None`` means the payload stated no reason or the record
+    # predates this field.
+    finish_reason: str | None = None
     # This non-semantic timestamp helps diagnose retries and sibling branches.
     created_at: float = 0.0
 
@@ -266,11 +280,28 @@ def response_to_output_items(payload: dict) -> list[dict]:
 
     Responses payloads already carry ``output``.
     Chat payloads carry ``choices[*].message``.
+    Anthropic Messages payloads carry top-level assistant content.
     Wrap each assistant message as a Responses ``message`` item.
     """
     output = payload.get("output")
     if isinstance(output, list) and output:
         return [item for item in output if isinstance(item, dict)]
+    if payload.get("type") == "message" and payload.get("role") == "assistant":
+        reasoning_items: list[dict] = []
+        message_content: list[Any] = []
+        for block in payload.get("content") or []:
+            if not isinstance(block, dict) or block.get("type") not in {"thinking", "redacted_thinking"}:
+                message_content.append(block)
+                continue
+            reasoning_item: dict[str, Any] = {"type": "reasoning", "summary": []}
+            if block.get("type") == "thinking" and isinstance(block.get("thinking"), str):
+                reasoning_item["summary"] = [{"type": "summary_text", "text": block["thinking"]}]
+            elif block.get("type") == "redacted_thinking" and block.get("data") is not None:
+                reasoning_item["encrypted_content"] = block["data"]
+            reasoning_items.append(reasoning_item)
+        if message_content:
+            reasoning_items.append({"type": "message", "role": "assistant", "content": message_content})
+        return reasoning_items
     items: list[dict] = []
     for choice in payload.get("choices") or []:
         message = (choice or {}).get("message") or {}
@@ -281,6 +312,98 @@ def response_to_output_items(payload: dict) -> list[dict]:
         item.setdefault("role", "assistant")
         items.append(item)
     return items
+
+
+# ``incomplete_details.reason`` values of a Responses payload, keyed to the chat finish
+# reasons that ``nemo_gym.responses_converter`` maps onto them.
+_INCOMPLETE_REASON_TO_FINISH_REASON = {"max_output_tokens": "length", "content_filter": "content_filter"}
+# The reverse direction: the Responses ``incomplete_details.reason`` a rebuilt response reports for
+# its terminal call's finish reason. ``stop`` and ``tool_calls`` are complete endings and map to nothing.
+_FINISH_REASON_TO_INCOMPLETE_REASON = {"length": "max_output_tokens", "content_filter": "content_filter"}
+
+# The Chat Completions finish reason behind each Anthropic Messages ``stop_reason``: the inverse of
+# the table ``nemo_gym.anthropic_converter`` applies when it serves a Responses payload as a
+# Messages response.
+_STOP_REASON_TO_FINISH_REASON = {
+    "end_turn": "stop",
+    "stop_sequence": "stop",
+    "tool_use": "tool_calls",
+    "max_tokens": "length",
+    "model_context_window_exceeded": "length",
+    "refusal": "content_filter",
+}
+
+# Responses output items that the converter builds from a chat message's tool calls.
+_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call"})
+
+
+def incomplete_reason_for_finish_reason(finish_reason: str | None) -> str | None:
+    """Return the ``incomplete_details.reason`` a response that stopped for ``finish_reason`` reports.
+
+    ``length`` becomes ``max_output_tokens`` and ``content_filter`` stays ``content_filter``, the
+    verdict the Responses converter gives a chat completion that ended the same way. A complete
+    ending (``stop``, ``tool_calls``), an unknown reason, and ``None`` return ``None``.
+    """
+    return _FINISH_REASON_TO_INCOMPLETE_REASON.get(finish_reason)
+
+
+def apply_capture_incomplete_verdict(response: dict, incomplete_reason: str | None) -> bool:
+    """Put the capture's truncation verdict on a harness response, under one precedence rule.
+
+    ``incomplete_reason`` is the ``incomplete_details.reason`` the capture derived for the
+    delivered chain: ``incomplete_reason_for_finish_reason`` of the terminal call's finish reason
+    on the local path, ``staging.rebuild.LinearizedRow.incomplete_reason`` under worker custody.
+    ``None`` means the chain ended on its own and leaves the response alone. The verdict is
+    written only when the harness reported no status or ``completed``: a harness that reported
+    ``incomplete`` or ``failed`` itself gave the more specific verdict and keeps its ``status`` and
+    ``incomplete_details``. Returns whether the response changed. Gym's delivery and a framework
+    that rebuilds from staged records both apply this rule, so a rollout gets the same verdict
+    whichever placement captured it.
+    """
+    if incomplete_reason is None or response.get("status") not in (None, "completed"):
+        return False
+    response["status"] = "incomplete"
+    response["incomplete_details"] = {"reason": incomplete_reason}
+    return True
+
+
+# Attribution-trail token ``resolve_terminal`` appends when the terminal call was chosen among
+# token-identical calls that recorded different finish reasons, with no witness singling one out.
+# The local projection and the staged rebuild withhold the truncation verdict when the trail
+# carries it, because the verdict would otherwise depend on which twin drew the smaller call id.
+FINISH_REASON_DISAGREEMENT_REASON = "finish_reason_disagreement"
+
+
+def response_finish_reason(payload: dict) -> str | None:
+    """Return why a served response stopped, in the Chat Completions vocabulary.
+
+    A chat payload states it directly as ``choices[0].finish_reason``.
+    An Anthropic Messages payload states ``stop_reason``; map it back through the converter's table.
+    A Responses payload carries no finish reason.
+    The converter maps ``length`` and ``content_filter`` to ``incomplete_details.reason``; reverse that map.
+    A completed Responses payload stopped at a tool call (``tool_calls``) or at the end of its text (``stop``).
+    Return ``None`` when the payload is none of these shapes or is incomplete without a stated reason.
+    """
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        reason = first.get("finish_reason")
+        return reason if isinstance(reason, str) else None
+    if payload.get("type") == "message" and "stop_reason" in payload:
+        stop_reason = payload.get("stop_reason")
+        return _STOP_REASON_TO_FINISH_REASON.get(stop_reason) if isinstance(stop_reason, str) else None
+    output = payload.get("output")
+    if not isinstance(output, list):
+        return None
+    details = payload.get("incomplete_details")
+    reason = details.get("reason") if isinstance(details, dict) else None
+    if isinstance(reason, str):
+        return _INCOMPLETE_REASON_TO_FINISH_REASON.get(reason, reason)
+    if payload.get("status") not in (None, "completed"):
+        return None
+    if any(isinstance(item, dict) and item.get("type") in _TOOL_CALL_ITEM_TYPES for item in output):
+        return "tool_calls"
+    return "stop"
 
 
 def strip_token_fields(items: list[dict]) -> tuple[list[dict], int | None]:

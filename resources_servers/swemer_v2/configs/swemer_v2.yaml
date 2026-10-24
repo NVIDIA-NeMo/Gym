@@ -1,0 +1,67 @@
+# Resources server for Swemer's Agentic-v2 SWE task packages.
+#
+# Unlike the other SWE resources servers, rows are NOT prepared from a public dataset: this is an
+# internal dataset, distributed offline as data/swemer_v2_training.jsonl. See the README.
+#
+# Grading covers the swe_bench_ext-backed framework list in verification.SUPPORTED_FRAMEWORKS (the same set
+# swemer_v1 uses). It began as 5 (pytest, go, jest, mocha, vitest) and was widened on 2026-10-08 once
+# a 2026-10 delivery supplied cargo/junit/gtest/ctest/bun rows to golden-patch validate the other parsers.
+# Frameworks outside the list are rejected at prepare time rather than silently mis-graded.
+swemer_v2_resources_server:
+  resources_servers:
+    swemer_v2:
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      evaluation_timeout: 1800
+      is_verifying_golden_patch: false
+      apply_anti_cheating: true
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        # Phase 1 spans Go builds and npm-installed JS/TS suites (jest/mocha/vitest), which are
+        # install/compile-bound like SWE-rebench's non-Python rows -- same sizing as that server.
+        resources:
+          cpu: 8
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        metadata:
+          benchmark: swemer-v2
+
+# Golden-patch validation: grade the dataset's own patch instead of an agent's. A row whose
+# golden patch does not resolve is a broken row, and scoring an agent against it measures noise.
+# Run it with resources_servers/swemer_v2/apply_golden_patch.py.
+swemer_v2_golden_patch_resources_server:
+  resources_servers:
+    swemer_v2:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      evaluation_timeout: 1800
+      is_verifying_golden_patch: true
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 8
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        metadata:
+          benchmark: swemer-v2-golden-patch

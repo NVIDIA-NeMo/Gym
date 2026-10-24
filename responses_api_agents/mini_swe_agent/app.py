@@ -90,6 +90,7 @@ def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
 
 
 class MiniSWEAgent(SimpleResponsesAPIAgent):
+    ray_enabled = True
     config: MiniSWEAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)

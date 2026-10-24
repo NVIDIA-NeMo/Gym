@@ -46,3 +46,11 @@ harbor_agent:
       harbor_verifier_max_timeout: null
       harbor_timeout_multiplier: null
       harbor_jobs_dir: "responses_api_agents/harbor_agent/jobs"
+
+harbor_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: harbor_agent

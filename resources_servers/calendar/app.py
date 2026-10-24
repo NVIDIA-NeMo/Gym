@@ -40,6 +40,10 @@ class CalendarResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class CalendarResourcesServer(SimpleResourcesServer):
+    # Each verification checks the response against the request alone: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: CalendarResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
