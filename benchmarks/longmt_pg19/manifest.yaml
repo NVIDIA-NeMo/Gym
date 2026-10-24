@@ -1,0 +1,31 @@
+name: longmt_pg19
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: Document-level MT verifier for pg19 books using the SEGALE pipeline (ersatz
+  segment → LASER2 embed → vecalign align → COMETKiwi score)
+modality: text
+licensing: unknown
+authors:
+- jeffwillette
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: longmt_eval
+agent_server: simple_agent
+datasets:
+- name: pg19_benchmark
+  type: benchmark
+  jsonl_fpath: benchmarks/longmt_pg19/data/pg19_benchmark.jsonl
+  prepare_script: benchmarks/longmt_pg19/prepare.py
+  prompt_config: benchmarks/prompts/generic/longmt.yaml
+  num_repeats: 5
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/generic/longmt.yaml
+lifecycle: active

@@ -1,0 +1,21 @@
+# GDPval-AA v2 pins that CANNOT be installed on aarch64.
+#
+# The reference sandbox Artificial Analysis publishes is x86_64 (E2B). These
+# four distributions publish x86_64 wheels only, and no source distribution, so
+# there is nothing to build from on arm64. Every other pin in the manifest is
+# either an aarch64 wheel (406 of 419) or an sdist we compile in %post (9).
+#
+# Determined by querying the PyPI JSON API for each pinned version and
+# inspecting the released files, not by trial and error. Re-derive with the same
+# probe if the manifest is refreshed; do not extend this list to paper over a
+# build failure that is actually a missing system library.
+#
+# An x86_64 build installs the full manifest and ignores this file.
+aspose-words==26.3.0
+cadquery-ocp==7.8.1.1.post1
+cadquery_vtk==9.3.1
+nlopt==2.10.0
+# cadquery itself has an aarch64-compatible wheel but declares a hard
+# dependency on cadquery-ocp, so the resolver cannot satisfy it without the
+# line above. Excluded as a consequence, not on its own merit.
+cadquery==2.7.0

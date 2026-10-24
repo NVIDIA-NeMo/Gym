@@ -46,6 +46,7 @@ from nemo_gym.token_id_capture.builder import (
 from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
 from nemo_gym.token_id_capture.consumer import (
     clear_token_captures_for_rollouts,
+    mask_incomplete_when_attributed_from_config,
     token_id_capture_dirs_from_config,
     trajectories_for_rollout,
     trajectories_from_source,
@@ -64,6 +65,8 @@ from nemo_gym.token_id_capture.protocols import (
     LineageMatch,
     LineageResolution,
     LineageResolver,
+    TokenCaptureFrozenError,
+    TokenCaptureRetiredError,
     TokenCaptureSnapshot,
     TokenSink,
     TokenSource,
@@ -82,9 +85,11 @@ from nemo_gym.token_id_capture.records import (
     UNRESOLVED_PARENT_REASON,
     ParentResolutionStatus,
     TokenEntry,
+    apply_capture_incomplete_verdict,
     compute_digest,
     cumulative_tokens,
     extract_token_fields,
+    incomplete_reason_for_finish_reason,
     stamp_lineage,
 )
 from nemo_gym.token_id_capture.sink import (
@@ -120,6 +125,8 @@ __all__ = [
     "compute_digest",
     "cumulative_tokens",
     "stamp_lineage",
+    "incomplete_reason_for_finish_reason",
+    "apply_capture_incomplete_verdict",
     "TokenCaptureStore",
     "validate_rollout_id",
     "make_token_store",
@@ -131,6 +138,8 @@ __all__ = [
     "LineageMatch",
     "LineageResolution",
     "LineageResolver",
+    "TokenCaptureFrozenError",
+    "TokenCaptureRetiredError",
     "install_lineage_store",
     "installed_lineage_store",
     "TokenCaptureSnapshot",
@@ -168,4 +177,5 @@ __all__ = [
     "clear_token_captures_for_rollouts",
     "trajectories_from_source",
     "token_id_capture_dirs_from_config",
+    "mask_incomplete_when_attributed_from_config",
 ]

@@ -25,3 +25,11 @@ math_formal_lean_simple_agent:
         type: train
         jsonl_fpath: resources_servers/math_formal_lean/data/nemotron_clean_easy.jsonl
         license: Apache 2.0
+
+math_formal_lean_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: math_formal_lean_simple_agent

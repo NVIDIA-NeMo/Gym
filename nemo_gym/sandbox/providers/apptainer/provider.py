@@ -24,6 +24,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping
@@ -51,9 +52,17 @@ INSTANCE_NAME_PREFIX = "nemo-gym-"
 READY_PROBE_COMMAND = "printf apptainer-sandbox-ready"
 READY_PROBE_EXPECTED = "apptainer-sandbox-ready"
 SANDBOX_RUNTIME_RETURN_CODE = 125
-# Best-effort stderr markers indicating apptainer itself (not the user's command)
-# failed to run the command. Apptainer prefixes its own fatal errors with "FATAL:".
-APPTAINER_RUNTIME_ERROR_MARKERS = ("fatal:", "no instance found", "instance not found", "does not exist")
+# Exit code apptainer uses when it fails on its own (CLI / starter error).
+APPTAINER_FATAL_RETURN_CODE = 255
+# Apptainer logs its own failures as lines starting with "FATAL:" / "ERROR:" (the
+# starter pads the level, e.g. "FATAL   :"). Match that line format only: plain
+# substrings such as "fatal:" or "does not exist" also appear in the user's own
+# stderr (git, test runners) and would turn ordinary command failures into
+# sandbox errors. "ERROR:" lines are also printed by pip / pytest, so they only
+# count together with apptainer's exit code.
+APPTAINER_FATAL_LINE = re.compile(r"^FATAL\s*:\s", re.MULTILINE)
+APPTAINER_ERROR_LINE = re.compile(r"^ERROR\s*:\s", re.MULTILINE)
+APPTAINER_RUNTIME_ERROR_MARKERS = ("no instance found", "instance not found")
 APPTAINER_MISSING_INSTANCE_MARKERS = ("no instance found", "instance not found", "does not exist")
 APPTAINER_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 APPTAINER_ENV_FILE_READONLY = frozenset({"EUID", "GID", "HOME", "IFS", "OPTIND", "PWD", "UID"})
@@ -200,10 +209,19 @@ def _to_sandbox_status(state: str | None) -> SandboxStatus:
     return SandboxStatus.UNKNOWN
 
 
-def _is_runtime_failure(stderr: str) -> bool:
-    """Best-effort: did apptainer itself fail to run the command (vs the command failing)?"""
+def _is_runtime_failure(stderr: str, return_code: int | None = None) -> bool:
+    """Best-effort: did apptainer itself fail to run the command (vs the command failing)?
+
+    Only apptainer's own output counts: a ``FATAL:`` line, a missing-instance message,
+    or an ``ERROR:`` line together with apptainer's exit code 255. Anything the user's
+    command prints (git ``fatal: ...``, ``... does not exist``) is a command failure.
+    """
+    if APPTAINER_FATAL_LINE.search(stderr):
+        return True
     low = stderr.lower()
-    return any(marker in low for marker in APPTAINER_RUNTIME_ERROR_MARKERS)
+    if any(marker in low for marker in APPTAINER_RUNTIME_ERROR_MARKERS):
+        return True
+    return return_code == APPTAINER_FATAL_RETURN_CODE and APPTAINER_ERROR_LINE.search(stderr) is not None
 
 
 def _is_missing_instance(stderr: str) -> bool:
@@ -556,6 +574,54 @@ class ApptainerProvider:
             )
         shutil.rmtree(inst.staging_dir, ignore_errors=True)
 
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        """Share a local instance with another Gym worker on the same host/UID.
+
+        This is a trusted control-plane descriptor, not a portable lease. The
+        receiving worker needs the same staging filesystem and Apptainer config.
+        Either handle can stop the instance; callers must coordinate ownership.
+        """
+        inst = handle.raw
+        return {
+            "provider": self.name,
+            "sandbox_id": inst.name,
+            "hostname": socket.gethostname(),
+            "uid": os.getuid(),
+            "staging_dir": str(inst.staging_dir),
+            "mount_point": inst.mount_point,
+            "image": inst.image,
+            "env": dict(inst.env),
+        }
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        if descriptor.get("provider") != self.name:
+            raise ValueError("Apptainer requires a full serialized descriptor, not a bare sandbox id")
+        if descriptor.get("hostname") != socket.gethostname() or descriptor.get("uid") != os.getuid():
+            raise ValueError("Apptainer reconnect requires the same host and UID as the creator")
+        name = descriptor["sandbox_id"]
+        staging = Path(descriptor["staging_dir"])
+        if not staging.is_absolute() or not staging.is_dir():
+            raise ValueError("Apptainer staging directory is unavailable")
+        mount_point = descriptor["mount_point"]
+        if not isinstance(mount_point, str) or not mount_point.startswith("/"):
+            raise ValueError("Invalid Apptainer mount point")
+        env = dict(descriptor.get("env", {}))
+        _serialize_env_file(env)  # Validate keys and values before accepting the descriptor.
+        handle = SandboxHandle(
+            sandbox_id=name,
+            provider_name=self.name,
+            raw=_ApptainerInstance(
+                name=name,
+                staging_dir=staging,
+                mount_point=mount_point,
+                image=descriptor["image"],
+                env=env,
+            ),
+        )
+        if await self.status(handle) != SandboxStatus.RUNNING:
+            raise RuntimeError(f"Apptainer instance {name} is not running")
+        return handle
+
     async def exec(
         self,
         handle: SandboxHandle,
@@ -616,7 +682,7 @@ class ApptainerProvider:
                 error_type="timeout",
             )
 
-        if code != 0 and _is_runtime_failure(err):
+        if code != 0 and _is_runtime_failure(err, code):
             return SandboxExecResult(
                 stdout=out,
                 stderr=err,

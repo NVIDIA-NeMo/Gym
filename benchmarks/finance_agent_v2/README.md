@@ -28,8 +28,9 @@ resources server on externally generated SDG data, so there is no
 ## Setup
 
 Everything goes in `env.yaml` at the repo root, which is gitignored. Nothing is
-hardcoded in the committed configs, and only the policy endpoint is required for a
-run: a tool key left unset registers its tool as unavailable instead of failing
+hardcoded in the committed configs. A run needs the policy endpoint and
+`sec_api_key`, since the benchmark runs `edgar_search` against sec-api.io. Any
+other tool key left unset registers its tool as unavailable instead of failing
 startup.
 
 The judge is a **separate** server from the policy on purpose. If the policy graded

@@ -265,9 +265,8 @@ async def test_runtime_loader_sets_integration_once_per_sdk_module(monkeypatch: 
 
 async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(monkeypatch: pytest.MonkeyPatch) -> None:
     import httpx
-    from httpx_aiohttp import AiohttpTransport
 
-    from nemo_gym.server_utils import get_global_aiohttp_client
+    from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
 
     sdk_module = _fake_sdk_module()
     sdk_module.__path__ = []
@@ -302,10 +301,13 @@ async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(monkeypatc
     control_transport = client_async_module.get_transport(config)
     envd_transport = sandbox_main_module.get_transport(config)
 
-    assert isinstance(control_transport, AiohttpTransport)
-    assert isinstance(envd_transport, AiohttpTransport)
-    assert control_transport.client is get_global_aiohttp_client
-    assert envd_transport.client is get_global_aiohttp_client
+    assert isinstance(control_transport, GymAiohttpTransport)
+    assert isinstance(envd_transport, GymAiohttpTransport)
+    proxy = httpx.Proxy("http://proxy.example:8080", auth=("user", "password"))
+    assert client_async_module.get_transport(types.SimpleNamespace(proxy=proxy)).proxy is proxy
+    assert str(client_async_module.get_transport(types.SimpleNamespace(proxy="http://proxy.example")).proxy.url) == (
+        "http://proxy.example"
+    )
     with pytest.raises(ValueError, match="HTTP or HTTPS proxy"):
         client_async_module.get_transport(types.SimpleNamespace(proxy="socks5h://proxy.example:1080"))
 
@@ -321,9 +323,8 @@ async def test_real_sdk_user_agent_and_call_shapes() -> None:
     e2b = pytest.importorskip("e2b", reason="e2b optional sandbox dependency is not installed")
     from e2b.api import client_async
     from e2b.sandbox_async import main as sandbox_async
-    from httpx_aiohttp import AiohttpTransport
 
-    from nemo_gym.server_utils import get_global_aiohttp_client
+    from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
 
     installed_match = re.match(r"^(\d+)\.(\d+)", version("e2b"))
     assert installed_match is not None
@@ -337,8 +338,7 @@ async def test_real_sdk_user_agent_and_call_shapes() -> None:
     assert f"nemo-gym/{nemo_gym_version}" in products
     envd_client = sandbox_async.get_envd_api(connection, "https://sandbox.example")
     for transport in (client_async.get_transport(connection), envd_client._transport):
-        assert isinstance(transport, AiohttpTransport)
-        assert transport.client is get_global_aiohttp_client
+        assert isinstance(transport, GymAiohttpTransport)
     await envd_client.aclose()
 
     inspect.signature(e2b.AsyncSandbox.create).bind(

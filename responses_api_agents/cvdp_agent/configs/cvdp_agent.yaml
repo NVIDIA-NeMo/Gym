@@ -22,3 +22,11 @@ cvdp_agent:
           artifact_fpath: gym_cvdp_1.0.4_nonagentic_code_generation_no_commercial.jsonl
         license: Apache 2.0
         num_repeats: 5
+
+cvdp_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: cvdp_agent

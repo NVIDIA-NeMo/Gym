@@ -250,6 +250,11 @@ def _is_missing_container(stderr: str) -> bool:
     return any(marker in low for marker in DOCKER_MISSING_CONTAINER_MARKERS)
 
 
+def _user_flag(user: str | int) -> str:
+    """``--user`` value: root/0 becomes 0, anything else is passed as written (``name``, ``uid``, ``uid:gid``)."""
+    return "0" if user == "root" or user == 0 else str(user)
+
+
 class DockerProvider:
     """Sandbox provider backed by the local Docker CLI / daemon."""
 
@@ -313,6 +318,8 @@ class DockerProvider:
             argv.append("--init")
         if spec.workdir:
             argv += ["-w", spec.workdir]
+        # spec.user is not passed to `docker run`: in overlay mode the user may not exist in the base image
+        # yet. The sandbox facade applies it to every exec instead (see AsyncSandbox.default_user).
         for key, value in spec.env.items():
             argv += ["--env", f"{key}={value}"]
         if cfg.apply_resource_limits:
@@ -371,6 +378,49 @@ class DockerProvider:
             await self._cleanup_failed_create_handle(handle)
             raise
         return handle
+
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        """Return a descriptor for reattaching to this container by id.
+
+        Docker recovers image and shell from the running container on connect,
+        and ``docker exec`` runs inside the container's own environment, so the
+        id alone is enough; ``AsyncSandbox.serialize()`` layers the declared
+        ports on top. ``scope`` is unused by the Docker provider.
+        """
+        return {"sandbox_id": handle.sandbox_id}
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        """Create a handle for an existing running container, rediscovering its
+        image and shell via the Docker CLI.
+
+        ``sandbox_id`` is required. ``AsyncSandbox.serialize()`` adds a
+        top-level ``ports`` key from the original spec; read it back here so
+        ``endpoint()`` still works after reconnecting.
+        """
+        name = descriptor.get("sandbox_id")
+        if not name:
+            raise DockerCreateError("docker connect requires a sandbox_id")
+
+        code, out, err = await self._run(
+            [self._binary, "inspect", "--format", "{{.State.Running}}\t{{.Config.Image}}", str(name)],
+            timeout_s=self._exec_config.default_timeout_s,
+        )
+        if code != 0:
+            raise DockerCreateError(f"cannot connect to container {name!r}: {err.strip() or out.strip()}")
+        running, _, image = out.strip().partition("\t")
+        if running != "true":
+            raise DockerCreateError(f"cannot connect to container {name!r}: it is not running")
+
+        return SandboxHandle(
+            sandbox_id=str(name),
+            provider_name=self.name,
+            raw=_DockerContainer(
+                name=str(name),
+                image=image,
+                shell=await self._resolve_shell(str(name)),
+                published_ports=tuple(descriptor.get("ports") or ()),
+            ),
+        )
 
     async def _resolve_shell(self, name: str) -> str:
         """Configured exec shell, else bash when the image has it (for conda `source`), else sh."""
@@ -452,7 +502,7 @@ class DockerProvider:
         for key, value in merged_env.items():
             flags += ["--env", f"{key}={value}"]
         if user is not None:
-            flags += ["--user", "0" if user == "root" or user == 0 else str(user)]
+            flags += ["--user", _user_flag(user)]
         flags += list(self._exec_config.extra_exec_args)
 
         argv = [self._binary, "exec", *flags, inst.name, inst.shell, "-c", command]

@@ -26,3 +26,10 @@ mrcr_n3_1m_benchmark_simple_agent:
         # `type: train`/`validation`. To actually get N rollouts per task,
         # pass `--num-repeats N` on the `gym eval run --no-serve` CLI.
         num_repeats: 1
+
+mrcr_n3_1m_benchmark_environment_server:
+  _inherit_from: mrcr_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: mrcr_n3_1m_benchmark_simple_agent

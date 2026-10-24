@@ -1,11 +1,11 @@
-# Serve ONLY the rolemrc resources server (the /verify scorer), for driving
-# from nemo-evaluator via the gym:// environment adapter:
+# Serve ONLY the rolemrc resources server (the /verify scorer), for driving from
+# an external evaluation harness that owns the policy model and generation:
 #
 #   ng_run "+config_paths=[resources_servers/rolemrc/configs/rolemrc_serve.yaml]"
 #
 # Reference mode needs no model server — verify() computes ROUGE/BLEU/METEOR/
-# BERTScore locally. nemo-evaluator owns the policy model and generation; it
-# POSTs the model's answer to this server's /verify. See README.md.
+# BERTScore locally. The caller POSTs the model's answer to /verify and gets the
+# per-row reward plus the individual metrics back. See README.md.
 rolemrc:
   resources_servers:
     rolemrc:

@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import os
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -423,6 +425,27 @@ def test_fabric_output_items_single_turn_is_one_message() -> None:
     assert items[0]["content"][0]["text"] == "42"
 
 
+def test_fabric_output_items_preserve_mini_swe_reasoning_and_submission() -> None:
+    output = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": "Verify the result before submitting.",
+                "tool_calls": [{"id": "c1", "function": {"name": "bash", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n42"},
+            {"role": "exit", "content": "42"},
+        ],
+    }
+    items = [item.model_dump() for item in _fabric_output_items(output, "42")]
+    assert [item["type"] for item in items] == ["reasoning", "function_call", "function_call_output", "message"]
+    assert items[0]["summary"][0]["text"] == "Verify the result before submitting."
+    assert items[1]["call_id"] == items[2]["call_id"] == "c1"
+    assert items[2]["output"] == "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n42"
+    assert items[3]["content"][0]["text"] == "42"
+
+
 def test_fabric_output_items_reads_openai_tool_call_shape() -> None:
     """hermes reports {call_id, function: {name, arguments}} rather than LangChain's {id, name, args}."""
     output = {
@@ -491,3 +514,31 @@ def test_fabric_output_items_reads_claude_sdk_event_blocks() -> None:
     assert items[0]["arguments"] == '{"command": "echo hi"}'
     assert items[0]["call_id"] == items[1]["call_id"] == "tu1"
     assert items[1]["output"] == "hi"
+
+
+@pytest.mark.parametrize("preset", [None, "/opt/adapter/bin/python"])
+def test_fabric_runs_python_adapters_on_the_agent_interpreter(preset: str | None, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ADAPTER_PYTHON", preset or "unset")
+    if preset is None:
+        monkeypatch.delenv("ADAPTER_PYTHON")
+    agent = _agent(cwd=str(tmp_path))
+    agent.server_client.global_config_dict = {
+        "policy_model": {"responses_api_models": {"policy_model": {"host": "127.0.0.1", "port": 9002}}}
+    }
+    agent.server_client._build_server_base_url.side_effect = lambda config: f"http://{config['host']}:{config['port']}"
+    failed = _FakeResult()
+    failed.status = "failed"
+    failed.error = MagicMock(message="stop here")
+    seen: list[str | None] = []
+
+    async def run(*args, **kwargs):
+        seen.append(os.environ.get("ADAPTER_PYTHON"))
+        return failed
+
+    fabric = MagicMock()
+    fabric.run = AsyncMock(side_effect=run)
+    with patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric):
+        with pytest.raises(RuntimeError, match="stop here"):
+            asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="question")))
+
+    assert seen == [preset or sys.executable]
