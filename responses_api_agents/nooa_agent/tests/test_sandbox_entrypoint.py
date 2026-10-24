@@ -40,6 +40,7 @@ def payload() -> entrypoint.SandboxInput:
         model_server_name="policy",
         max_policy_calls=3,
         context_window=262144,
+        media_inputs=("image",),
     )
 
 
@@ -122,6 +123,7 @@ async def test_child_preserves_evidence_and_classifies_outcome(monkeypatch, outc
     artifact = await entrypoint.execute(p)
     assert runner_factory.call_args.kwargs["max_policy_calls"] == limit
     assert runner_factory.call_args.kwargs["context_window"] == 262144
+    assert runner_factory.call_args.kwargs["media_inputs"] == ("image",)
     assert artifact.observations.gaps[0].code == "test"
     assert artifact.model_cookies == {"model": "new"}
     assert artifact.resource_cookies == {"resource": "new"}

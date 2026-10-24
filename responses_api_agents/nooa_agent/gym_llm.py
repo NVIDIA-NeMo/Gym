@@ -34,6 +34,7 @@ from nooa.unifiedllm import (
     UnifiedLLM,
 )
 from nooa.unifiedllm.limits import REPLY_CAP_KEYS, ContextLimits
+from nooa.unifiedllm.unifiedllm import ResponsesClient
 from pydantic import BaseModel
 
 from nemo_gym.config_types import ModelServerRef
@@ -216,6 +217,22 @@ def _portable_assistant_items(response: LLMResponse) -> list[dict[str, Any]]:
     return items
 
 
+# NOOA added explicit media inputs after the revision this stack pins; older NOOA never emits media blocks.
+_TRANSFORM_CONTENT_BLOCKS = getattr(ResponsesClient, "_transform_content_blocks", None)
+
+
+def _responses_blocks(blocks: list[dict[str, Any]], text_kind: str = "input_text") -> list[dict[str, Any]]:
+    """Convert NOOA's portable content blocks to Responses input blocks, as NOOA's ResponsesClient does."""
+    if _TRANSFORM_CONTENT_BLOCKS is None:
+        return blocks
+    converted = _TRANSFORM_CONTENT_BLOCKS(blocks, text_kind)
+    for block in converted:
+        if block.get("type") == "input_image":
+            # Gym's request schema requires detail; "auto" is the Responses API default.
+            block.setdefault("detail", "auto")
+    return converted
+
+
 def _responses_input(
     messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
     gaps: list[ObservationGap] | None = None,
@@ -258,11 +275,12 @@ def _responses_input(
             result.append(_dump(message))
             continue
         if message.get("role") == "tool":
+            output = message.get("content", "")
             result.append(
                 {
                     "type": "function_call_output",
                     "call_id": message["tool_call_id"],
-                    "output": message.get("content", ""),
+                    "output": _responses_blocks(output) if isinstance(output, list) else output,
                 }
             )
             continue
@@ -296,7 +314,11 @@ def _responses_input(
                     }
                 )
             continue
-        result.append(_dump(message))
+        message = _dump(message)
+        if isinstance(message.get("content"), list):
+            text_kind = "output_text" if message.get("role") == "assistant" else "input_text"
+            message = {**message, "content": _responses_blocks(message["content"], text_kind)}
+        result.append(message)
     return result, "\n\n".join(instructions) or None
 
 
@@ -353,8 +375,11 @@ class GymResponsesLLM(UnifiedLLM):
         on_response: Callable[[], None] | None = None,
         sampling_overrides: dict[str, Any] | None = None,
         context_window: int | None = None,
+        media_inputs: tuple[str, ...] = (),
     ) -> None:
-        super().__init__(model=model, context_window=context_window)
+        # Pass media_inputs only when set, so text-only configs keep working with NOOA revisions that predate it.
+        media = {"media_inputs": media_inputs} if media_inputs else {}
+        super().__init__(model=model, context_window=context_window, **media)
         self._server_client = server_client
         self._model_server_name = model_server_name
         self._model_url_path = model_url_path
@@ -416,6 +441,10 @@ class GymResponsesLLM(UnifiedLLM):
     ) -> LLMResponse:
         try:
             limits = self.get_context_limits(kwargs)
+            # NOOA's own clients apply the media policy in their acall; this adapter replaces that path.
+            prepare_media = getattr(self, "_prepare_media_messages", None)
+            if prepare_media is not None:
+                messages = prepare_media(messages, {})
             input_items, instructions = _responses_input(
                 messages, gaps=self._state.gaps, replay_scope=self._gym_replay_scope
             )
