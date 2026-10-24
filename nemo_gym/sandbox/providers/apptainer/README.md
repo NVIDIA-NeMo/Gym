@@ -20,6 +20,29 @@ where Docker is unavailable).
   image name such as `ubuntu:22.04`.
 - Running commands as a different user needs Apptainer **`--fakeroot`** support.
   CPU/memory limits need cgroups delegation. See [Limitations](#limitations).
+- A writable **`APPTAINER_CONFIGDIR`** (default `~/.apptainer`), where `instance start`
+  keeps per-instance state. If it is unset and `~/.apptainer` is not writable (e.g. a
+  read-only or full home mount inside a container), the provider points its apptainer
+  subprocesses at `<tempdir>/nemo-gym-apptainer-config-<uid>` instead. It creates
+  that directory with mode `0700`, rejects symlinks and directories owned by another
+  user, and checks that it can create a subdirectory and write a non-empty file.
+  If no usable fallback exists, it leaves the default unchanged; Apptainer may
+  still fail to start.
+
+The config-directory probe runs once per provider construction. Passing a provider
+mapping to `Sandbox` or `AsyncSandbox` constructs a new provider for each sandbox,
+so each sandbox probes again and logs a warning if it selects the fallback. The
+result is not cached across providers: free space, quota, permissions, and fallback
+directory availability can change while the server process is running. Each
+provider keeps its selected environment for its lifetime so commands use the same
+instance-state directory.
+
+To avoid repeated probes on a shared home filesystem, set a non-empty
+`APPTAINER_CONFIGDIR` to a writable directory before starting Gym. An explicit
+setting is honored without probing or selecting a fallback; ensuring that it stays
+writable is then the caller's responsibility. Use the same setting for manual
+`apptainer instance list` or `apptainer instance stop` commands to find Gym's
+instances.
 
 ## Quick start
 
