@@ -1,0 +1,43 @@
+use_absolute_ip: true
+config_paths:
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+qwen_code_agent:
+  responses_api_agents:
+    qwen_code_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      concurrency: 32
+      timeout: 3600
+      # Swarm knobs (see README): subagents false is the solo control.
+      subagents: true
+      subagent_model: null
+      subagent_model_server: null
+      max_subagent_depth: null
+      max_parallel_agents: null
+      agent_team: false
+      max_session_turns: null
+      approval_mode: yolo
+      qwen_version: 0.25.1
+      runtime_archive: ${oc.env:QWEN_CODE_RUNTIME_ARCHIVE,null}
+      execution_failure_reward_zero: true
+      artifacts_dir: ${oc.env:QWEN_CODE_ARTIFACTS_DIR,results/qwen_code}
+      sandbox_provider: sandbox
+      network_access: model_only
+      sandbox_config:
+        image: python:3.12-slim
+        ttl_s: 7200
+        ready_timeout_s: 1200
+        # Must exist in the image.
+        workdir: /root
+        entrypoint: [sleep, infinity]
+        resources:
+          cpu: 2
+          memory_mib: 4096
+        env:
+          EXECD_API_GRACE_SHUTDOWN: 50ms
