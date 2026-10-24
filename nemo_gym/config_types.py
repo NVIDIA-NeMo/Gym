@@ -14,6 +14,7 @@
 # limitations under the License.
 import warnings
 from argparse import ArgumentParser
+from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
@@ -221,6 +222,11 @@ class UnsupportedAgentOverrideError(ConfigError, ValueError):
 class HeadServerUnreachableError(ConfigError, ValueError):
     """Nothing answered at the configured head server address, so the merged config could not be fetched
     from it (the head server is not running, or `head_server.host` / `head_server.port` point elsewhere)."""
+
+
+class PromptConfigMalformedError(ConfigError, ValueError):
+    """A prompt config file is not valid YAML, or is not a mapping with a `user` template (and an optional `system`
+    one)."""
 
 
 ########################################
@@ -802,25 +808,19 @@ def maybe_get_server_instance_config(
 
 def is_almost_server(server_type_config_dict: Any) -> bool:
     """Detects if a config looks like a server but might fail validation."""
-    from nemo_gym.global_config import ENTRYPOINT_KEY_NAME
+    from nemo_gym.global_config import ENTRYPOINT_KEY_NAME, SERVER_TYPE_KEYS
 
     if not isinstance(server_type_config_dict, DictConfig):
         return False
 
     # Check for server type.
-    server_type_keys = [
-        "responses_api_models",
-        "resources_servers",
-        "responses_api_agents",
-        "environment_servers",
-    ]
-    has_server_type = any(key in server_type_config_dict for key in server_type_keys)
+    has_server_type = any(key in server_type_config_dict for key in SERVER_TYPE_KEYS)
 
     if not has_server_type:
         return False
 
     # Check for entrypoint presence.
-    for server_type_key in server_type_keys:
+    for server_type_key in SERVER_TYPE_KEYS:
         if server_type_key in server_type_config_dict:
             inner_dict = server_type_config_dict[server_type_key]
             if isinstance(inner_dict, DictConfig):
@@ -855,6 +855,28 @@ class ExporterConfig(BaseModel):
     def is_available(self) -> bool:
         """Whether every field the backend needs to connect is set."""
         raise NotImplementedError
+
+
+REMOVED_ROLLOUT_OPTIONS = {
+    "retry_invalid_judge_responses": (
+        "A verifier that cannot produce a usable judgement now returns a `judge_failed` row; recover those "
+        "with `gym eval reverify --judge-failed-only`."
+    ),
+}
+
+
+class RemovedRolloutOptionsMixin(BaseModel):
+    """Reject rollout options that no longer exist, which pydantic would otherwise drop without a word."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_rollout_options(cls, data):
+        # The CLI passes an OmegaConf DictConfig, which is a Mapping but not a dict.
+        if isinstance(data, Mapping):
+            for name, hint in REMOVED_ROLLOUT_OPTIONS.items():
+                if name in data:
+                    raise ConfigError(f"`{name}` was removed. {hint}")
+        return data
 
 
 DEPRECATED_UPLOAD_ROLLOUTS_KEY = "upload_rollouts_to_wandb"
@@ -982,3 +1004,4 @@ class AggregateMetrics(BaseModel):
 # the capture middleware in base_responses_api_model.py strips this prefix before routing.
 ROLLOUT_PATH_PREFIX = "ng-rollout"
 TOKEN_CAPTURE_PATH_SEGMENT = "training-token-capture"
+TRACE_CONTEXT_PATH_SEGMENT = "ng-trace"

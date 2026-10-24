@@ -78,11 +78,12 @@ def write_participant_state(
     checkpoint_id: str,
     records: Iterable[dict[str, Any]],
     stop: Optional[WriteStop] = None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], int]:
     """Write ``records`` and then the manifest that publishes them.
 
     ``stop`` aborts the write before the next record and before publishing,
     so nothing is published once the checkpoint was resumed.
+    Returns the manifest and the size of the records file in bytes, counted as it is written.
     """
     try:
         return _write(checkpoint_dir, kind, instance, checkpoint_id, records, stop or WriteStop())
@@ -97,7 +98,7 @@ def _write(
     checkpoint_id: str,
     records: Iterable[dict[str, Any]],
     stop: WriteStop,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], int]:
     directory = participant_dir(checkpoint_dir, kind=kind, instance=instance)
     manifest_path = directory / "manifest.json"
     directory.mkdir(parents=True, exist_ok=True)
@@ -108,7 +109,7 @@ def _write(
     for parent in (checkpoint_dir / "gym" / kind, checkpoint_dir / "gym", checkpoint_dir):
         _fsync_dir(parent)
     digest = hashlib.sha256()
-    count = 0
+    count = size = 0
     descriptor, temporary = tempfile.mkstemp(dir=directory, prefix=".records.jsonl.")
     try:
         with os.fdopen(descriptor, "wb") as handle:
@@ -117,6 +118,7 @@ def _write(
                 handle.write(line := _record_line(record))
                 digest.update(line)
                 count += 1
+                size += len(line)
             handle.flush()
             os.fsync(handle.fileno())
         records_file = f"records-{digest.hexdigest()}.jsonl"
@@ -138,15 +140,16 @@ def _write(
         raise
     if created:
         _fsync_dir(directory)
-        return manifest
+        return manifest, size
     existing = _load_manifest(manifest_path)
     if existing != manifest:
         if existing.get("records_file") != records_file:
             (directory / records_file).unlink(missing_ok=True)
         raise CheckpointStateError(f"{manifest_path} already holds a different commit")
     # The write that published it may have failed before syncing the directory, so this success makes it durable too.
+    # Its records file has the same digest as this write's, so it has the same size.
     _fsync_dir(directory)
-    return existing
+    return existing, size
 
 
 def _record_line(record: dict[str, Any]) -> bytes:
@@ -166,12 +169,13 @@ def read_participant_state(
     kind: str,
     instance: str,
     select: Optional[Callable[[Any], Any]] = None,
-) -> tuple[dict[str, Any], list[Any]]:
+) -> tuple[dict[str, Any], list[Any], int]:
     """Read and verify a participant's records in one streaming pass.
 
     ``select`` maps each stored record to what to keep, or ``None`` to drop it,
     so a restore holds only the records it installs.
     The digest and record count always cover the whole file.
+    Returns the manifest, the records kept, and the size of the whole records file in bytes.
     """
     directory = participant_dir(checkpoint_dir, kind=kind, instance=instance)
     try:
@@ -182,7 +186,7 @@ def read_participant_state(
 
 def _read(
     directory: Path, kind: str, instance: str, select: Optional[Callable[[Any], Any]]
-) -> tuple[dict[str, Any], list[Any]]:
+) -> tuple[dict[str, Any], list[Any], int]:
     manifest_path = directory / "manifest.json"
     if not manifest_path.exists():
         raise CheckpointStateError(f"missing manifest {manifest_path}")
@@ -198,12 +202,13 @@ def _read(
         raise CheckpointStateError(f"{manifest_path} names an invalid records file {records_file!r}")
     records_path = directory / records_file
     digest = hashlib.sha256()
-    count = 0
+    count = size = 0
     records = []
     with records_path.open("rb") as handle:
         for line in handle:
             digest.update(line)
             count += 1
+            size += len(line)
             try:
                 record = json.loads(line)
             except ValueError as error:
@@ -216,7 +221,7 @@ def _read(
         raise CheckpointStateError(f"{records_path} does not match its manifest digest")
     if count != manifest.get("record_count"):
         raise CheckpointStateError(f"{manifest_path} expects {manifest.get('record_count')!r} records, found {count}")
-    return manifest, records
+    return manifest, records, size
 
 
 def _load_manifest(path: Path) -> dict[str, Any]:

@@ -21,6 +21,7 @@ call is exercised via a fake metrics-scrape stub.
 
 import asyncio
 import math
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -35,6 +36,7 @@ from app import (
     _compute_std_metrics,
     _parse_sglang_metrics,
     _parse_vllm_metrics,
+    _request_acceptance_metrics,
     _weighted_delta_average,
 )
 
@@ -139,10 +141,171 @@ def _make_server(**kwargs):
         host="127.0.0.1",
         port=12345,
         entrypoint="app.py",
-        **kwargs,
+        **({"metrics_source": "prometheus"} | kwargs),
     )
     server = SpeedBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
     return server
+
+
+def test_local_model_benchmark_resolves_without_backend_url(monkeypatch):
+    from omegaconf import OmegaConf
+
+    from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+
+    monkeypatch.chdir(Path(__file__).resolve().parents[3])
+    name = "Qwen3-30B-A3B-Instruct-2507-ngram-specdec"
+    config = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+            initial_global_config_dict=OmegaConf.create(
+                {
+                    "config_paths": [
+                        "benchmarks/speed-bench/config_qualitative.yaml",
+                        f"responses_api_models/local_vllm_model/configs/Qwen/{name}.yaml",
+                    ],
+                    "policy_model": {"_inherit_from": name},
+                }
+            ),
+        )
+    )
+    OmegaConf.to_container(config, resolve=True)
+    assert "policy_base_url" not in config
+    assert config.speed_bench_qualitative_resources_server.resources_servers.speed_bench.metrics_source == "response"
+
+
+def _request_metrics(histogram, drafted):
+    return {
+        "speculative_decoding": {
+            "num_spec_steps": sum(histogram),
+            "num_draft_tokens": drafted,
+            "num_accepted_draft_tokens": sum(i * count for i, count in enumerate(histogram)),
+            "num_spec_tokens": len(histogram) - 1,
+            "acceptance_histogram": histogram,
+        }
+    }
+
+
+def _response_body(metrics):
+    from app import SpeedBenchVerifyRequest
+
+    return SpeedBenchVerifyRequest.model_validate(
+        {
+            "responses_create_params": {"input": "test"},
+            "response": {
+                "id": "resp-test",
+                "created_at": 123,
+                "model": "test",
+                "object": "response",
+                "output": [],
+                "tools": [],
+                "tool_choice": "auto",
+                "parallel_tool_calls": True,
+                "usage": {
+                    "input_tokens": 5,
+                    "output_tokens": 10,
+                    "total_tokens": 15,
+                    "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                },
+                "metrics": metrics,
+            },
+        }
+    )
+
+
+def test_response_metrics_average_requests_across_turns_and_draft_lengths():
+    summary = _request_acceptance_metrics(
+        {
+            "requests": [
+                _request_metrics([1, 0, 0, 3], 12),
+                _request_metrics([6, 0], 6),
+            ]
+        }
+    )
+    assert summary["num_drafts"] == 5
+    assert summary["draft_tokens"] == 9
+    assert summary["accepted_tokens"] == 4.5
+    assert summary["acceptance_length"] == pytest.approx(2.125)
+    assert summary["acceptance_rate"] == pytest.approx(37.5)
+    assert summary["acceptance_histogram"] == pytest.approx([0.625, 0, 0, 0.375])
+    assert summary["per_position_acceptance_rates"] == pytest.approx([0.375, 0.375, 0.375])
+
+
+@pytest.mark.parametrize("missing", [None, {}, {"speculative_decoding": None}])
+def test_response_metrics_do_not_hide_missing_turns(missing):
+    assert _request_acceptance_metrics({"requests": [_request_metrics([0, 1], 1), missing]}) is None
+
+
+def test_response_metrics_reject_inconsistent_histogram():
+    metrics = _request_metrics([0, 1], 1)
+    metrics["speculative_decoding"]["num_spec_steps"] = 2
+    with pytest.raises(ValueError, match="histogram"):
+        _request_acceptance_metrics(metrics)
+
+
+@pytest.mark.asyncio
+async def test_response_mode_verifies_without_a_url_or_scraping(monkeypatch):
+    s = _make_server(metrics_source="response", snapshot_at_init=True)
+
+    def no_scrape():
+        pytest.fail("response mode must not scrape metrics")
+
+    monkeypatch.setattr(s, "_scrape_metrics", no_scrape)
+    result = await s.verify(
+        _response_body(
+            {
+                "requests": [_request_metrics([1, 0, 0, 3], 12)],
+                "generation_started_at": 100.0,
+                "generation_finished_at": 102.5,
+                "generation_duration": 2.5,
+            }
+        )
+    )
+    assert result.num_generated_tokens == 10
+    assert result.gen_seconds == 2.5
+    assert result.generation_started_at == 100.0
+    assert result.acceptance_length == 3.25
+    assert result.acceptance_rate == 75.0
+    assert not result.spec_decode_unavailable
+
+
+@pytest.mark.asyncio
+async def test_zero_step_requests_do_not_dilute_defined_rates_or_histograms():
+    s = _make_server(metrics_source="response")
+    calls = [_request_metrics([0, 0, 0, 0], 0), _request_metrics([0, 1], 1)]
+    row = await s.verify(_response_body({"requests": calls}))
+    result = s.compute_metrics([[row.model_dump()]])
+    assert result["spec_num_requests"] == 2
+    assert result["spec_num_drafts"] == 0.5
+    assert result["spec_draft_tokens"] == 0.5
+    assert result["spec_accepted_tokens"] == 0.5
+    assert result["spec_acceptance_length"] == 2
+    assert result["spec_acceptance_rate"] == 100
+    assert result["spec_acceptance_histogram"] == [0, 1]
+    assert result["spec_per_position_acceptance_rates"] == [1]
+    zero = await s.verify(_response_body({"requests": calls[:1]}))
+    zero_result = s.compute_metrics([[zero.model_dump()]])
+    assert zero_result["spec_acceptance_histogram"] is None
+    assert zero_result["spec_per_position_acceptance_rates"] is None
+    assert not zero_result["spec_decode_unavailable"]
+
+
+@pytest.mark.asyncio
+async def test_repeat_statistics_use_request_means_with_unequal_turn_counts():
+    s = _make_server(metrics_source="response")
+    good = _request_metrics([0, 0, 0, 100], 300)
+    bad = _request_metrics([1, 0], 1)
+    tasks = []
+    for runs in [([good, bad], [good]), ([bad], [bad, bad])]:
+        tasks.append([(await s.verify(_response_body({"requests": calls}))).model_dump() for calls in runs])
+    result = s.compute_metrics(tasks)
+    assert result["spec_acceptance_length"] == 2
+    assert result["spec_acceptance_length_avg"] == 2
+    assert result["spec_acceptance_length_std_dev_across_runs"] == 0
+    assert result["spec_acceptance_length_std_err_across_runs"] == 0
+    assert result["spec_acceptance_rate_avg"] == pytest.approx(100 / 3)
 
 
 def test_resolve_metrics_url_strips_v1_suffix():
