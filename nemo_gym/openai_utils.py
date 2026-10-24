@@ -276,7 +276,8 @@ class NeMoGymSummary(Summary):
 class NeMoGymResponseReasoningItem(BaseModel):
     id: str
     # Override the Iterable to avoid lazy iterators in Pydantic validation.
-    summary: List[NeMoGymSummary]
+    # Providers may omit summary when only encrypted reasoning is supplied; validate it as empty.
+    summary: List[NeMoGymSummary] = Field(default_factory=list)
     type: Literal["reasoning"] = "reasoning"
     encrypted_content: Optional[str] = None
     content: Optional[List[ReasoningContent]] = None
