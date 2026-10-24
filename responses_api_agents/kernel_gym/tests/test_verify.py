@@ -17,6 +17,7 @@ def _run_verifier(
     result=None,
     cuda_available: bool = True,
     cuda_error: Exception | None = None,
+    driver_error: Exception | None = None,
     evaluator_error: Exception | None = None,
 ):
     workspace = tmp_path / "workspace"
@@ -32,6 +33,8 @@ def _run_verifier(
     )
     torch.device = Mock(return_value="cuda:0")
     torch.float32 = "float32"
+    triton_runtime = ModuleType("triton.runtime")
+    triton_runtime.driver = SimpleNamespace(active=SimpleNamespace(get_current_device=Mock(side_effect=driver_error)))
     evaluator = ModuleType("kernelbench.eval")
     evaluator.eval_kernel_against_ref = Mock(return_value=result, side_effect=evaluator_error)
     pathlib = ModuleType("pathlib")
@@ -39,7 +42,14 @@ def _run_verifier(
     script = Path(__file__).parents[1] / "verify.py"
     with patch.dict(
         sys.modules,
-        {"torch": torch, "kernelbench": ModuleType("kernelbench"), "kernelbench.eval": evaluator, "pathlib": pathlib},
+        {
+            "torch": torch,
+            "triton": ModuleType("triton"),
+            "triton.runtime": triton_runtime,
+            "kernelbench": ModuleType("kernelbench"),
+            "kernelbench.eval": evaluator,
+            "pathlib": pathlib,
+        },
     ):
         runpy.run_path(str(script))
     return json.loads((logs / "result.json").read_text()), float((logs / "reward.txt").read_text()), evaluator
@@ -64,6 +74,15 @@ def test_verifier_preserves_retryable_compilation_failure(tmp_path: Path) -> Non
     assert result["evaluation_completed"] is False
     assert "retryable compilation" in result["error"]
     assert reward == 0
+
+
+def test_verifier_masks_missing_triton_compiler(tmp_path: Path) -> None:
+    result, reward, evaluator = _run_verifier(tmp_path, driver_error=RuntimeError("Failed to find C compiler"))
+
+    assert result["evaluation_completed"] is False
+    assert "C compiler" in result["error"]
+    assert reward == 0
+    evaluator.eval_kernel_against_ref.assert_not_called()
 
 
 @pytest.mark.parametrize(
