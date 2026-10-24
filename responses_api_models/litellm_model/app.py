@@ -16,10 +16,13 @@
 
 Startup verifies the proxy version through ``GET /health/readiness/details``. Virtual keys
 scoped to ``llm_api_routes`` get 401/403 there, so the fallback reads the proxy's
-``x-litellm-version`` response header from a one-token ``POST /v1/chat/completions`` against
-the configured model. ``GET /v1/models`` is not usable for this: real deployments answer it
-without the header (only LLM-call responses carry it). The probe is a billed one-token call;
-operators who object to it can instead grant the key the health route.
+``x-litellm-version`` response header from a one-token ``POST /v1/responses`` against the
+configured model. ``GET /v1/models`` is not usable for this: real deployments answer it
+without the header (only LLM-call responses carry it). ``POST /v1/chat/completions`` is not
+used either: its error path omits the header (LiteLLM 1.105.x), so a model-side 4xx would
+block startup even on a safe proxy, whereas the Responses API error path keeps it. The probe
+is a billed one-token call; operators who object to it can instead grant the key the health
+route.
 """
 
 import asyncio
@@ -195,7 +198,9 @@ _MIN_SAFE_VERSION_TUPLE = (1, 83, 0)
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(.*)$")
 # Virtual keys scoped to ``llm_api_routes`` cannot call the health route; fall back to the
 # ``x-litellm-version`` response header that the proxy attaches to LLM-call responses. Non-LLM
-# routes such as ``/v1/models`` answer without it, so the probe is a one-token chat completion.
+# routes such as ``/v1/models`` answer without it, so the probe is a one-token LLM call. It goes
+# to ``/v1/responses`` rather than ``/v1/chat/completions``: the chat-completion exception path
+# drops the header (LiteLLM 1.105.x), the Responses API exception path keeps it.
 _HEALTH_FORBIDDEN_STATUSES = frozenset({401, 403})
 _VERSION_HEADER = "x-litellm-version"
 _ALLOWED_VERSION_SUFFIX_RE = re.compile(r"^(?:|-stable(?:\.patch\.\d+)?|\.post\d+)$")
@@ -222,24 +227,32 @@ class LiteLLMModelServer(SimpleModelServer):
     config: LiteLLMModelServerConfig
 
     async def _version_from_probe_header(self, base_url: str, headers: Dict[str, str]) -> str:
-        """Read ``x-litellm-version`` from a one-token chat completion when the health route is forbidden.
+        """Read ``x-litellm-version`` from a one-token ``POST /v1/responses`` when the health route is forbidden.
 
         LiteLLM virtual keys scoped to ``llm_api_routes`` get 401/403 on
         ``/health/readiness/details``. The proxy attaches ``x-litellm-version`` to LLM-call
         responses only (``GET /v1/models`` answers without it), so probe the configured model
-        with the cheapest possible chat completion. The header is read whatever the HTTP status
-        is: a 4xx from the model (for example a thinking model rejecting ``max_tokens=1``) still
-        carries the proxy header. Only a missing header or a transport failure fails closed.
+        with the cheapest possible Responses API call. The header is read whatever the HTTP
+        status is: a model-side 4xx (for example a thinking model rejecting a one-token budget)
+        still carries the proxy header on this route. Only a missing header or a transport
+        failure fails closed.
+
+        Chat completions is deliberately not used. In LiteLLM 1.105.x the chat-completion
+        exception path omits the version argument to the error handler, so a model-side 4xx on
+        ``POST /v1/chat/completions`` answers without ``x-litellm-version`` and would block
+        startup even when the proxy version is safe. The ``/v1/responses`` exception path passes
+        the version, so its error responses keep the header.
         """
-        probe_url = f"{base_url}/v1/chat/completions"
+        probe_url = f"{base_url}/v1/responses"
         probe_body = {
             "model": self.config.openai_model,
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1,
+            "input": "ping",
+            "max_output_tokens": 1,
         }
         logger.warning(
-            "LiteLLM proxy health route is forbidden for this key; sending a billed one-token probe "
-            "(POST %s, model=%s, max_tokens=1) to read the %s header. Grant the key the health route to avoid it.",
+            "LiteLLM proxy health route is forbidden for this key; sending a billed one-token POST /v1/responses "
+            "probe (%s, model=%s, max_output_tokens=1) to read the %s header. "
+            "Grant the key the health route to avoid it.",
             probe_url,
             self.config.openai_model,
             _VERSION_HEADER,
@@ -255,8 +268,8 @@ class LiteLLMModelServer(SimpleModelServer):
                 f"Cannot enforce minimum safe version >= {_MIN_SAFE_VERSION}."
             )
         logger.info(
-            "LiteLLM proxy version %s read from the %s header of the one-token probe (status=%s) "
-            "because the health route is forbidden for this key",
+            "LiteLLM proxy version %s read from the %s header of the one-token POST /v1/responses probe "
+            "(status=%s) because the health route is forbidden for this key",
             version,
             _VERSION_HEADER,
             resp.status,
