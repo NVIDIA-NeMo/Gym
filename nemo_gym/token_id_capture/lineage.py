@@ -53,6 +53,7 @@ from typing import TYPE_CHECKING, Any
 import orjson
 
 from nemo_gym.episode_types import EpisodeId
+from nemo_gym.token_id_capture import capture_metrics
 from nemo_gym.token_id_capture.fingerprint import (
     FINGERPRINT_VERSION,
     assistant_fingerprint,
@@ -459,6 +460,11 @@ class LineageIndex:
         self._max_rollouts = max_rollouts
         self._max_tokens = max_tokens
         self._rollouts: dict[str, RolloutLineage] = {}
+        capture_metrics.track_cache_owner(self)
+
+    def cache_sizes(self) -> list[tuple[str, int]]:
+        """Sizes for the token-capture cache metric, read at metric export, not per call."""
+        return [("lineage_index_rollouts", len(self._rollouts)), ("lineage_index_tokens", self.total_tokens)]
 
     def for_rollout(self, rollout_id: str) -> RolloutLineage:
         lineage = self._rollouts.get(rollout_id)
@@ -669,6 +675,11 @@ class IncrementalLineageStore:
         # Fixed lock striping bounds synchronization metadata.
         # Hash collisions only serialize unrelated rollouts.
         self._rollout_locks = tuple(threading.Lock() for _ in range(256))
+        capture_metrics.track_cache_owner(self)
+
+    def cache_sizes(self) -> list[tuple[str, int]]:
+        """Sizes for the token-capture cache metric, read at metric export, not per call."""
+        return [("lineage_rollouts", len(self._cache)), ("lineage_materialized_tokens", self._materialized_tokens)]
 
     # -- hooks ----------------------------------------------------------------
     def _fetch_new_entries(self, rollout_id: str, cursor: Any) -> tuple[list[tuple[TokenEntry, Any]], Any]:
@@ -874,6 +885,9 @@ class FileLineageStore(IncrementalLineageStore):
         self._ledger_root.mkdir(parents=True, exist_ok=True)
         self._ledger_cache: dict[str, tuple[int, int, list[dict]]] = {}
 
+    def cache_sizes(self) -> list[tuple[str, int]]:
+        return [*super().cache_sizes(), ("ledger_rollouts", len(getattr(self, "_ledger_cache", ())))]
+
     def _read_locked(self, rollout_id: str):
         return self._store._locked(rollout_id, shared=True)
 
@@ -1062,6 +1076,10 @@ class FileLineageStore(IncrementalLineageStore):
         await asyncio.to_thread(self._record, commit)
 
     def _record(self, commit: CaptureLedgerCommit) -> None:
+        with capture_metrics.timed("ledger.record.in_thread", component=self, tokens=commit.record.cum_len):
+            self._record_row(commit)
+
+    def _record_row(self, commit: CaptureLedgerCommit) -> None:
         request_items = list(commit.request_items)
         model_call_id = commit.record.model_call_id
         # Custody rows are token-free: the chained ``chain_hash`` covers
@@ -1116,11 +1134,12 @@ class FileLineageStore(IncrementalLineageStore):
         return await asyncio.to_thread(self._manifest, rollout_id)
 
     def _manifest(self, rollout_id: str) -> dict:
-        with self._locked(rollout_id):
-            rows = list(self._read(rollout_id))
-            if not rows and self._is_retired(rollout_id):
-                raise RolloutRetiredError(f"rollout {rollout_id} is retired")
-        return _manifest_from_rows(rollout_id, rows)
+        with capture_metrics.timed("ledger.manifest.in_thread", component=self):
+            with self._locked(rollout_id):
+                rows = list(self._read(rollout_id))
+                if not rows and self._is_retired(rollout_id):
+                    raise RolloutRetiredError(f"rollout {rollout_id} is retired")
+            return _manifest_from_rows(rollout_id, rows)
 
     async def has_rows(self, rollout_id: str) -> bool:
         return await asyncio.to_thread(self._has_rows, rollout_id)
@@ -1137,6 +1156,10 @@ class FileLineageStore(IncrementalLineageStore):
         return await asyncio.to_thread(self._retire, rollout_ids)
 
     def _retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+        with capture_metrics.timed("ledger.retire.in_thread", component=self):
+            return self._retire_ledgers(rollout_ids)
+
+    def _retire_ledgers(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         from nemo_gym.token_id_capture.store import validate_rollout_ids
 
         rollout_ids = validate_rollout_ids(rollout_ids)
@@ -1158,7 +1181,8 @@ class FileLineageStore(IncrementalLineageStore):
     def _delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         from nemo_gym.token_id_capture.store import validate_rollout_ids
 
-        return self._remove(validate_rollout_ids(rollout_ids), unretire=True)
+        with capture_metrics.timed("ledger.delete.in_thread", component=self):
+            return self._remove(validate_rollout_ids(rollout_ids), unretire=True)
 
     def mark_started(self, rollout_id: str) -> None:
         """Record, for every server sharing this ledger, that a restored attempt has started.
