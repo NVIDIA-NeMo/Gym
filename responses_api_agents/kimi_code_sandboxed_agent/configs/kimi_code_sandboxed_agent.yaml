@@ -1,0 +1,47 @@
+kimi_code_sandboxed_agent:
+  responses_api_agents:
+    kimi_code_sandboxed_agent:
+      entrypoint: app.py
+      num_workers: 4
+      concurrency: 64
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      token_id_capture: true
+      # Optional second model server for Agent/AgentSwarm children (the Kimi [secondary_model] pool default).
+      subagent_model_server: null
+      subagent_model_force: false
+      # false hides Agent and AgentSwarm (solo control).
+      subagents: true
+      swarm_max_concurrency: null
+      max_steps_per_turn: null
+      print_max_turns: null
+      # Kimi K3 accepts low, high and max only.
+      thinking_effort: null
+      max_context_size: 262144
+      permission_rules: []
+      kimi_config: {}
+      kimi_version: 2.1.1
+      # Host path of the linux release binary (kimi-code-linux-x64 or -arm64 from
+      # https://code.kimi.com/kimi-code/binaries/<version>/manifest.json). Required with restricted network_access.
+      kimi_binary_path: ${oc.env:KIMI_CODE_BINARY,null}
+      timeout: 7200
+      execution_failure_reward_zero: false
+      artifacts_dir: ${oc.env:KIMI_CODE_ARTIFACTS_DIR,results/kimi_code}
+      network_access: inherit
+      tool_servers: []
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: python:3.13-bookworm
+        ttl_s: 9000
+        ready_timeout_s: 1200
+        workdir: /tmp
+        entrypoint: [sleep, infinity]
+        resources:
+          cpu: 2
+          memory_mib: 8192
+        env:
+          EXECD_API_GRACE_SHUTDOWN: 50ms
