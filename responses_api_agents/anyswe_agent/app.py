@@ -203,7 +203,11 @@ def _record_test_status(statuses: Dict[str, Dict[str, str]], test: str, status: 
         matches = statuses.setdefault(alias, {})
         # Keep concrete identities separate so a shortened name must be unambiguous. A failing result for the
         # same identity takes precedence over PASSED/XFAIL in either verbose output or the later summary.
-        if test not in matches or matches[test] in ("PASSED", "XFAIL"):
+        # SKIPPED is the weakest record: pytest prints one node id twice when a data-driven case exists in two
+        # files (mypy's suites), once SKIPPED and once PASSED in either order, and a SKIPPED that stuck graded
+        # such passing patches 0.
+        current = matches.get(test)
+        if current is None or current == "SKIPPED" or (current in ("PASSED", "XFAIL") and status != "SKIPPED"):
             matches[test] = status
 
 

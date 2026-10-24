@@ -102,6 +102,17 @@ class TestR2EGrading:
         assert _r2e_resolved(instance, log) is True
         assert _r2e_resolved(instance, log.replace("test_attributes PASSED", "test_attributes FAILED")) is False
 
+    def test_a_duplicate_skipped_record_does_not_hide_a_pass_but_a_failure_still_wins(self) -> None:
+        # mypy's data-driven suites print one node id twice when the case exists in two .test files.
+        test = "mypy/test/testfinegrained.py::FineGrainedSuite::testDeletionOfSubmoduleTriggersImportFrom1"
+        instance = {"FAIL_TO_PASS": [test]}
+        for first, second in (("PASSED", "SKIPPED"), ("SKIPPED", "PASSED")):
+            log = f"{test} {first} [ 48%]\n{test} {second} [ 48%]\n"
+            assert _r2e_resolved(instance, log) is True
+        assert _r2e_resolved(instance, f"{test} SKIPPED [ 48%]\n") is False
+        for first, second in (("PASSED", "FAILED"), ("FAILED", "PASSED"), ("SKIPPED", "ERROR")):
+            assert _r2e_resolved(instance, f"{test} {first} [ 1%]\n{test} {second} [ 2%]\n") is False
+
     def test_r2e_expected_output_is_an_exact_status_match(self) -> None:
         log = (
             "=== short test summary info ===\n"
