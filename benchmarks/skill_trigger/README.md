@@ -135,6 +135,8 @@ Set the release manifest hash, model name and endpoint, image, task paths, and D
 
 `--engine gym-ray` on the synthetic smoke exercises the catalog guard and actual Ray worker, using a disposable local runtime that is shut down afterward. The successful Pi check preserved catalog provenance, returned skill text, and reward. It does not exercise the HTTP server or collector persistence and uses no real model.
 
+`--engine gym-http` additionally starts the actual FastAPI agent and legacy relay on loopback, dispatches through Ray, and uses Gym's collector to persist results. Synthetic Pi success, miss, and provider-error checks distinguish scored 1, scored 0, and an unscored failure. Inspect the result and failure files: a failed bridge response carries a placeholder zero, but the collector excludes it from scored rows. This focused check injects the resolved config; it does not test head-server discovery, Gym's process supervisor, aggregation, or the complete catalog-runner CLI. No real model or frozen benchmark task is used.
+
 ## Implementation and acceptance checklist
 
 - [ ] Publish reviewed task selection, pinned sources, attribution, adaptation provenance, and deterministic preparation for all 110 cases.

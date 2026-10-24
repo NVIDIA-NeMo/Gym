@@ -235,9 +235,9 @@ async def smoke(
         gym_response = None
         bridge_error = None
         result = None
-        if engine in {"gym-job", "gym-ray"}:
+        if engine in {"gym-job", "gym-ray", "gym-http"}:
             # Both paths use the real bridge; gym-ray also crosses its worker boundary.
-            # Neither starts the HTTP agent server or rollout collector.
+            # gym-http additionally crosses HTTP and persists collector results.
             from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
             from nemo_gym.skills import load_skill_directory
             from responses_api_agents.harbor_agent_general.app import HarborAgentConfig, HarborRunRequest
@@ -275,7 +275,7 @@ async def smoke(
                     "skills_ref": load_skill_directory(str(release / "catalogs/synthetic")).model_dump(),
                 }
             )
-            if engine == "gym-ray":
+            if engine in {"gym-ray", "gym-http"}:
                 import ray
 
                 ray_dir = tempfile.mkdtemp(prefix="skill-ray-")
@@ -289,7 +289,14 @@ async def smoke(
                     _temp_dir=ray_dir,
                 )
                 ray_started = True
-                gym_response = await bridge.run(body)
+                if engine == "gym-http":
+                    from environments.skill_trigger.tests.http_collection import collect_http
+
+                    gym_response = await collect_http(
+                        root=root, release=release, config=bridge_config, expect_failure=scenario == "provider-error"
+                    )
+                else:
+                    gym_response = await bridge.run(body)
                 results = list((root / "jobs").glob("*/*/result.json"))
                 if gym_response.response.status == "failed":
                     bridge_error = gym_response.model_dump().get("error")
@@ -374,7 +381,7 @@ async def smoke(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--engine", choices=["harbor-trial", "gym-job", "gym-ray"], default="harbor-trial")
+    parser.add_argument("--engine", choices=["harbor-trial", "gym-job", "gym-ray", "gym-http"], default="harbor-trial")
     parser.add_argument("--image", required=True)
     parser.add_argument("--gateway-host", required=True)
     parser.add_argument("--gateway-port", type=int, default=0)
