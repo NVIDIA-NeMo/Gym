@@ -28,6 +28,7 @@ routing.
 
 import asyncio
 import fcntl
+import hashlib
 import inspect
 import json
 import logging
@@ -35,10 +36,11 @@ import os
 import re
 import time
 from abc import abstractmethod
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, ClassVar, Iterable, Literal, NotRequired, Optional, TypedDict
+from typing import Any, ClassVar, Iterable, Literal, Mapping, NotRequired, Optional, TypedDict
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -85,7 +87,7 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import rollout_context, scope_with_routed_path
+from nemo_gym.rollout_correlation import current_rollout_id, rollout_context, scope_with_routed_path
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
@@ -313,6 +315,18 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "JSON-escape it inside the arguments object."
         ),
     )
+
+    # /v1/messages only. A generation that ends with reasoning but no text or tool call (e.g. a
+    # reasoning model that stops inside an unclosed <think>) converts to a thinking-only Anthropic
+    # message. Clients such as the Claude Code CLI then append a "no visible output, please continue"
+    # nudge and re-send a rewritten history. With N > 0 the server instead answers such a turn with a
+    # retryable HTTP 529 overloaded_error, so the client SDK re-issues the unchanged request; after N
+    # retries for the same rollout and request body the thinking-only message is returned as before.
+    # Unprefixed requests are served normally because retries have no stable rollout identity.
+    # The tally is per model instance and server process; up to N retries per uvicorn worker.
+    # 0 (default) disables.
+    anthropic_thinking_only_max_retries: int = Field(default=0, ge=0)
+
     # Only the policy instance drains during a partial-rollout checkpoint.
     # Judge and simulator instances keep serving so accepted tool and verifier calls can finish.
     checkpoint_policy: bool = False
@@ -320,6 +334,53 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     # so a restored call continues it instead of regenerating.
     # Requires external token staging on workers that implement the generation-cut endpoint.
     checkpoint_generation_cuts: bool = False
+
+
+# A logical retry must identify its rollout; a body alone cannot distinguish
+# independent samples of the same prompt. Retain only bounded, active retry state.
+_THINKING_ONLY_RETRIES_MAX_KEYS = 4096
+_THINKING_ONLY_RETRIES_IDLE_SECONDS = 3600
+
+
+def _has_visible_output(anthropic_response: Mapping[str, Any]) -> bool:
+    """True when an Anthropic message carries a non-empty text block or a tool_use block."""
+    for block in anthropic_response.get("content") or []:
+        block_type = block.get("type")
+        if block_type == "tool_use":
+            return True
+        if block_type == "text" and (block.get("text") or "").strip():
+            return True
+    return False
+
+
+def _thinking_only_retry_key(body: Mapping[str, Any]) -> Optional[tuple[str, str]]:
+    """Identify a request across SDK retries without coupling unrelated rollouts."""
+    rollout_id = current_rollout_id()
+    if rollout_id is None:
+        # Anonymous/cookie-less clients have no stable identity across requests.
+        # Retrying them would either share a global budget or restart it forever.
+        return None
+    digest = hashlib.sha256(orjson.dumps(body, option=orjson.OPT_SORT_KEYS, default=str)).hexdigest()
+    return rollout_id, digest
+
+
+def _thinking_only_retry_response() -> Response:
+    """Anthropic-format error that the Anthropic SDKs retry.
+
+    The SDK retries on ``x-should-retry: true`` and on every status >= 500 (529 is Anthropic's
+    ``overloaded_error``), honoring a short ``retry-after``. The decision is made on the HTTP status
+    before any body is read, so ``stream: true`` requests are retried the same way.
+    """
+    payload = {
+        "type": "error",
+        "error": {"type": "overloaded_error", "message": "model returned a thinking-only turn; retry"},
+    }
+    return Response(
+        content=orjson.dumps(payload),
+        status_code=529,
+        media_type="application/json",
+        headers={"x-should-retry": "true", "retry-after": "1"},
+    )
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -332,6 +393,32 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
     # Main process of a multi-worker policy server under checkpointing: coordinates the workers.
     _policy_coordinator: Optional[PolicyCoordinator] = PrivateAttr(default=None)
+    _thinking_only_retries: OrderedDict[tuple[str, str], tuple[int, float]] = PrivateAttr(default_factory=OrderedDict)
+
+    def _thinking_only_retry_due(self, key: tuple[str, str], max_retries: int) -> bool:
+        """Spend one retry from this model instance's per-rollout/body budget.
+
+        No await separates reading and updating the tally, so simultaneous requests
+        on the serving event loop cannot lose increments. Workers have separate budgets.
+        """
+        now = time.monotonic()
+        while self._thinking_only_retries:
+            _, (_, updated) = next(iter(self._thinking_only_retries.items()))
+            if now - updated < _THINKING_ONLY_RETRIES_IDLE_SECONDS:
+                break
+            self._thinking_only_retries.popitem(last=False)
+        previous = self._thinking_only_retries.pop(key, None)
+        if previous is None:
+            if len(self._thinking_only_retries) >= _THINKING_ONLY_RETRIES_MAX_KEYS:
+                # Do not evict another active request and reset its retry limit.
+                return False
+            seen = 0
+        else:
+            seen = previous[0]
+        if seen >= max_retries:
+            return False
+        self._thinking_only_retries[key] = (seen + 1, now)
+        return True
 
     async def _finalize_served_response(self, response: Any) -> None:
         """Finalize capture after conversion to the response returned to the client."""
@@ -710,6 +797,19 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         response = await self._invoke_responses(request, params)
         model_name = body.get("model") or response.model
         anthropic_response = _ANTHROPIC_CONVERTER.responses_to_anthropic_response(response, model=model_name)
+        max_retries = self.config.anthropic_thinking_only_max_retries
+        if max_retries > 0:
+            key = _thinking_only_retry_key(body)
+            if key is not None:
+                if anthropic_response.get("stop_reason") == "end_turn" and not _has_visible_output(anthropic_response):
+                    if self._thinking_only_retry_due(key, max_retries):
+                        logger.warning("Thinking-only turn on /v1/messages; answering HTTP 529 so the client retries")
+                        # The sampled generation must not leave an uncommitted capture call.
+                        await self._finalize_served_response(anthropic_response)
+                        return _thinking_only_retry_response()
+                else:
+                    # A completed retry must not consume a later call's allowance.
+                    self._thinking_only_retries.pop(key, None)
         if body.get("stream"):
             return await self._stream_served_response(
                 anthropic_response,
