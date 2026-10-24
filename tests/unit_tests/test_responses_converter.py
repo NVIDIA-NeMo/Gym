@@ -817,6 +817,40 @@ def test_responses_to_chat_completion_rejects_deferred_tool(converter: Responses
 
 
 @pytest.mark.parametrize(
+    "tool",
+    [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "parameters": {},
+            "strict": True,
+            "defer_loading": True,
+        },
+        {
+            "type": "custom",
+            "name": "shell",
+            "defer_loading": True,
+        },
+    ],
+    ids=["function", "custom"],
+)
+def test_drop_unrepresentable_request_fields_declares_deferred_tool_eagerly(converter: ResponsesConverter, tool: dict):
+    """A deferred tool is one the client hides until a search loads it.
+
+    This path has no search step, so under the drop flag the definition is sent with the
+    request rather than losing the tool. The default path refuses it instead.
+    """
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(input="hi", tools=[tool]),
+        drop_unrepresentable_request_fields=True,
+    )
+
+    assert len(params.tools) == 1
+    assert "defer_loading" not in params.tools[0]
+    assert tool["name"] in json.dumps(params.tools[0])
+
+
+@pytest.mark.parametrize(
     ("chat_tool", "responses_tool"),
     [
         (
@@ -984,6 +1018,71 @@ def test_responses_to_chat_completion_rejects_responses_only_allowed_tool_refere
 
     with pytest.raises(NotImplementedError, match="tool reference"):
         converter.responses_to_chat_completion_create_params(params)
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        {"type": "web_search_preview"},
+        {"type": "file_search", "vector_store_ids": ["vs_1"]},
+    ],
+    ids=["web_search", "file_search"],
+)
+def test_responses_to_chat_completion_rejects_hosted_tool(converter: ResponsesConverter, tool: dict):
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", tools=[tool])
+
+    with pytest.raises(NotImplementedError, match="tool type"):
+        converter.responses_to_chat_completion_create_params(params)
+
+
+def test_drop_unrepresentable_request_fields_drops_hosted_tools(converter: ResponsesConverter):
+    """A hosted tool runs on the provider's side and cannot reach a model served elsewhere.
+
+    Under the drop flag the request proceeds with the tools the model can actually call, rather
+    than failing every client that declares web search next to them. The default path refuses.
+    """
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input="hi",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "parameters": None,
+                    "strict": None,
+                },
+                {"type": "web_search_preview"},
+            ],
+        ),
+        drop_unrepresentable_request_fields=True,
+    )
+
+    assert [tool["function"]["name"] for tool in params.tools] == ["get_weather"]
+
+
+def test_output_text_accepts_null_annotations():
+    output_text = NeMoGymResponseOutputText.model_validate({"type": "output_text", "text": "hi", "annotations": None})
+
+    assert output_text.annotations == []
+
+
+def test_assistant_message_accepts_null_routed_experts():
+    """A dense model returns no routing, and a client replays the field as it received it."""
+    params = NeMoGymChatCompletionCreateParamsNonStreaming(
+        model="my-model",
+        messages=[
+            {
+                "role": "assistant",
+                "content": "hi",
+                "prompt_token_ids": [1, 2],
+                "generation_token_ids": [3],
+                "generation_log_probs": [-0.1],
+                "routed_experts": None,
+            }
+        ],
+    )
+
+    assert params.messages[0]["routed_experts"] is None
 
 
 @pytest.mark.parametrize("tools_kwargs", [{}, {"tools": []}], ids=["tools_absent", "tools_empty"])
