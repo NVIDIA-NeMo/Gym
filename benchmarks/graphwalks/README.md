@@ -44,6 +44,13 @@ python benchmarks/graphwalks/prepare.py \
     --output_fpath benchmarks/graphwalks/data/graphwalks_llama_128k_benchmark.jsonl
 ```
 
+For parallel token counting with the default preparation script, pass
+`+prepare_script_args.num_workers=64` to `gym eval prepare --benchmark graphwalks`,
+or `--num_workers 64` when running `benchmarks/graphwalks/prepare.py` directly.
+Each worker loads its own tokenizer. Select a count that fits the allocated CPU
+and memory budget; the default is one worker. Rows retain source order, prompt
+corrections, token counts, and length filtering regardless of the worker count.
+
 ## Start environment
 
 ```bash

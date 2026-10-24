@@ -42,6 +42,8 @@ directly::
 
 import argparse
 import json
+from contextlib import nullcontext
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -56,6 +58,8 @@ DEFAULT_OUTPUT_FPATH = DATA_DIR / "mrcr_benchmark.jsonl"
 
 DEFAULT_TOKENIZER_NAME = "o200k_base"
 DEFAULT_MAX_CONTEXT_TOKENS: Optional[int] = None  # no filter by default
+_worker_token_counter: Optional[Callable[[str], int]] = None
+_worker_tokenizer_name: Optional[str] = None
 
 
 def _build_token_counter(tokenizer_name: str) -> Callable[[str], int]:
@@ -83,34 +87,62 @@ def _count_message_tokens(messages: list[dict], count_one: Callable[[str], int])
     return sum(count_one(m["content"]) for m in messages)
 
 
+def _initialize_worker(tokenizer_name: str) -> None:
+    global _worker_token_counter, _worker_tokenizer_name
+    _worker_token_counter = None
+    _worker_tokenizer_name = tokenizer_name
+
+
+def _prepare_entry(entry: dict) -> dict:
+    global _worker_token_counter
+    if _worker_token_counter is None:
+        if _worker_tokenizer_name is None:
+            raise RuntimeError("MRCR preparation worker has no tokenizer name")
+        # Load in the task so failures propagate to the parent instead of
+        # repeatedly killing and respawning pool initializers.
+        _worker_token_counter = _build_token_counter(_worker_tokenizer_name)
+    messages = json.loads(entry["prompt"])
+    return {
+        "responses_create_params": {"input": messages},
+        "expected_answer": entry["answer"],
+        "random_string_to_prepend": entry["random_string_to_prepend"],
+        "n_needles": entry["n_needles"],
+        "n_tokens": _count_message_tokens(messages, _worker_token_counter),
+    }
+
+
 def prepare(
     tokenizer_name: str = DEFAULT_TOKENIZER_NAME,
     max_context_tokens: Optional[int] = DEFAULT_MAX_CONTEXT_TOKENS,
     output_fpath: Path = DEFAULT_OUTPUT_FPATH,
+    *,
+    num_workers: int = 1,
 ) -> Path:
+    """Prepare rows in source order with one tokenizer per worker process."""
+    if type(num_workers) is not int or num_workers < 1:
+        raise ValueError("num_workers must be a positive integer")
     output_fpath = Path(output_fpath)
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
     dataset = load_dataset("openai/mrcr", split="train")
-    count_one = _build_token_counter(tokenizer_name)
+    if num_workers == 1:
+        _initialize_worker(tokenizer_name)
+    # Spawn avoids inheriting initialized tokenizer thread pools from a caller.
+    workers = (
+        get_context("spawn").Pool(num_workers, initializer=_initialize_worker, initargs=(tokenizer_name,))
+        if num_workers > 1
+        else nullcontext()
+    )
 
     kept = 0
     skipped_tokens = 0
-    with output_fpath.open("w", encoding="utf-8") as fout:
-        for entry in tqdm(dataset, desc="Preparing MRCR"):
-            messages = json.loads(entry["prompt"])
-            n_tokens = _count_message_tokens(messages, count_one)
-            if max_context_tokens is not None and n_tokens > max_context_tokens:
+    with workers as pool, output_fpath.open("w", encoding="utf-8") as fout:
+        samples = pool.imap(_prepare_entry, dataset, chunksize=1) if pool else map(_prepare_entry, dataset)
+        for sample in tqdm(samples, total=len(dataset), desc="Preparing MRCR"):
+            if max_context_tokens is not None and sample["n_tokens"] > max_context_tokens:
                 skipped_tokens += 1
                 continue
 
-            sample = {
-                "responses_create_params": {"input": messages},
-                "expected_answer": entry["answer"],
-                "random_string_to_prepend": entry["random_string_to_prepend"],
-                "n_needles": entry["n_needles"],
-                "n_tokens": n_tokens,
-            }
             fout.write(json.dumps(sample) + "\n")
             kept += 1
 
@@ -145,6 +177,12 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=1,
+        help="Tokenizer worker processes; output retains source order. Default: 1",
+    )
+    parser.add_argument(
         "--output_fpath",
         type=Path,
         default=DEFAULT_OUTPUT_FPATH,
@@ -156,4 +194,9 @@ def _parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = _parse_args()
     cap = args.max_context_tokens if (args.max_context_tokens is None or args.max_context_tokens >= 0) else None
-    prepare(tokenizer_name=args.tokenizer_name, max_context_tokens=cap, output_fpath=args.output_fpath)
+    prepare(
+        tokenizer_name=args.tokenizer_name,
+        max_context_tokens=cap,
+        output_fpath=args.output_fpath,
+        num_workers=args.num_workers,
+    )

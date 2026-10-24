@@ -46,6 +46,8 @@ directly::
 import argparse
 import json
 import re
+from contextlib import nullcontext
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -60,6 +62,8 @@ DEFAULT_OUTPUT_FPATH = DATA_DIR / "graphwalks_benchmark.jsonl"
 
 DEFAULT_TOKENIZER_NAME = "o200k_base"
 DEFAULT_MAX_CONTEXT_TOKENS: Optional[int] = None  # no filter by default
+_worker_token_counter: Optional[Callable[[str], int]] = None
+_worker_tokenizer_name: Optional[str] = None
 
 _BFS_PATTERN = re.compile(r"Perform a BFS from node (\S+) with depth (\d+)")
 _BFS_REPLACEMENT = (
@@ -85,47 +89,75 @@ def _build_token_counter(tokenizer_name: str) -> Callable[[str], int]:
         return lambda text: len(hf_tokenizer.encode(text, add_special_tokens=False))
 
 
+def _initialize_worker(tokenizer_name: str) -> None:
+    global _worker_token_counter, _worker_tokenizer_name
+    _worker_token_counter = None
+    _worker_tokenizer_name = tokenizer_name
+
+
+def _prepare_entry(entry: dict) -> tuple[dict, bool]:
+    global _worker_token_counter
+    if _worker_token_counter is None:
+        if _worker_tokenizer_name is None:
+            raise RuntimeError("GraphWalks preparation worker has no tokenizer name")
+        # Task initialization propagates failures instead of respawning failed workers.
+        _worker_token_counter = _build_token_counter(_worker_tokenizer_name)
+    prompt_text = entry["prompt"]
+    answer_nodes = list(entry["answer_nodes"])
+
+    # Skills fix #1: disambiguate BFS depth before counting tokens.
+    prompt_text = _BFS_PATTERN.sub(_BFS_REPLACEMENT, prompt_text)
+
+    # Skills fix #2: strip the queried node from its own parents answer.
+    match = _PARENTS_PATTERN.search(prompt_text)
+    target = match.group(1) if match else None
+    cleaned_self_parent = target is not None and target in answer_nodes
+    if cleaned_self_parent:
+        answer_nodes.remove(target)
+
+    return {
+        "responses_create_params": {"input": [{"role": "user", "content": prompt_text}]},
+        "expected_answer": json.dumps(sorted(answer_nodes)),
+        "problem_type": entry["problem_type"],
+        "n_tokens": _worker_token_counter(prompt_text),
+        "prompt_chars": entry["prompt_chars"],
+    }, cleaned_self_parent
+
+
 def prepare(
     tokenizer_name: str = DEFAULT_TOKENIZER_NAME,
     max_context_tokens: Optional[int] = DEFAULT_MAX_CONTEXT_TOKENS,
     output_fpath: Path = DEFAULT_OUTPUT_FPATH,
+    *,
+    num_workers: int = 1,
 ) -> Path:
+    """Prepare rows in source order with one tokenizer per worker process."""
+    if type(num_workers) is not int or num_workers < 1:
+        raise ValueError("num_workers must be a positive integer")
     output_fpath = Path(output_fpath)
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
     dataset = load_dataset("openai/graphwalks", split="train")
-    count_tokens = _build_token_counter(tokenizer_name)
+    if num_workers == 1:
+        _initialize_worker(tokenizer_name)
+    # Spawn avoids inheriting initialized tokenizer thread pools from a caller.
+    workers = (
+        get_context("spawn").Pool(num_workers, initializer=_initialize_worker, initargs=(tokenizer_name,))
+        if num_workers > 1
+        else nullcontext()
+    )
 
     kept = 0
     skipped_tokens = 0
     skipped_self_parent = 0
-    with output_fpath.open("w", encoding="utf-8") as fout:
-        for entry in tqdm(dataset, desc="Preparing GraphWalks"):
-            prompt_text = entry["prompt"]
-            answer_nodes = list(entry["answer_nodes"])
-
-            # Skills fix #1: disambiguate BFS depth.
-            prompt_text = _BFS_PATTERN.sub(_BFS_REPLACEMENT, prompt_text)
-
-            # Skills fix #2: strip the queried node from its own parents answer.
-            m = _PARENTS_PATTERN.search(prompt_text)
-            target = m.group(1) if m else None
-            if target is not None and target in answer_nodes:
-                answer_nodes.remove(target)
-                skipped_self_parent += 1
-
-            n_tokens = count_tokens(prompt_text)
-            if max_context_tokens is not None and n_tokens > max_context_tokens:
+    with workers as pool, output_fpath.open("w", encoding="utf-8") as fout:
+        samples = pool.imap(_prepare_entry, dataset, chunksize=1) if pool else map(_prepare_entry, dataset)
+        for sample, cleaned_self_parent in tqdm(samples, total=len(dataset), desc="Preparing GraphWalks"):
+            skipped_self_parent += int(cleaned_self_parent)
+            if max_context_tokens is not None and sample["n_tokens"] > max_context_tokens:
                 skipped_tokens += 1
                 continue
 
-            sample = {
-                "responses_create_params": {"input": [{"role": "user", "content": prompt_text}]},
-                "expected_answer": json.dumps(sorted(answer_nodes)),
-                "problem_type": entry["problem_type"],
-                "n_tokens": n_tokens,
-                "prompt_chars": entry["prompt_chars"],
-            }
             fout.write(json.dumps(sample, ensure_ascii=False) + "\n")
             kept += 1
 
@@ -161,6 +193,12 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=1,
+        help="Tokenizer worker processes; output retains source order. Default: 1",
+    )
+    parser.add_argument(
         "--output_fpath",
         type=Path,
         default=DEFAULT_OUTPUT_FPATH,
@@ -172,4 +210,9 @@ def _parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = _parse_args()
     cap = args.max_context_tokens if (args.max_context_tokens is None or args.max_context_tokens >= 0) else None
-    prepare(tokenizer_name=args.tokenizer_name, max_context_tokens=cap, output_fpath=args.output_fpath)
+    prepare(
+        tokenizer_name=args.tokenizer_name,
+        max_context_tokens=cap,
+        output_fpath=args.output_fpath,
+        num_workers=args.num_workers,
+    )
