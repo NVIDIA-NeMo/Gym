@@ -25,7 +25,7 @@ from pathlib import Path
 from shlex import join, quote
 from tempfile import TemporaryDirectory
 from time import time
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 from uuid import uuid4
 
 from fastapi import Request
@@ -82,6 +82,8 @@ class PiSandboxedAgentVerifyResponse(PiAgentVerifyResponse):
 
 class PiSandboxedAgent(PiAgent):
     config: PiSandboxedAgentConfig
+    # The harness runs inside the task sandbox and calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
 
     def model_post_init(self, __context: Any) -> None:
         # Pi is preinstalled in the sandbox image, never installed on the Gym host.
@@ -138,7 +140,9 @@ class PiSandboxedAgent(PiAgent):
         *,
         rollout_id: str | None = None,
         collect_observations: bool = True,
+        timeout: float | None = None,
     ) -> tuple[list[Any], dict[str, int], str, list[tuple[float, dict[str, Any]]]]:
+        timeout = self.config.timeout if timeout is None else timeout
         context = _RUN.get()
         if context is None:
             raise RuntimeError("Pi sandbox execution requires a seeded /run request")
@@ -196,7 +200,7 @@ class PiSandboxedAgent(PiAgent):
             result = await sandbox.exec(
                 command=f"{join(['python3', remote + '/capture.py', remote + '/events.jsonl', *cmd])} > {quote(stdout_path)} 2> {quote(stderr_path)}",
                 env=env,
-                timeout_s=self.config.timeout,
+                timeout_s=timeout,
             )
         except Exception as exc:
             error_type = type(exc).__name__

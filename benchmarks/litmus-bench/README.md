@@ -1,24 +1,47 @@
-# Litmus-Bench v0.1
+# Litmus-Bench
 
-[Litmus-Bench v0.1](https://huggingface.co/datasets/nvidia/Nemotron-RL-litmus-bench-v0.1)
-evaluates direct-answer molecular-property reasoning on 482 held-out questions.
-It uses the reusable [`litmus_agent`](../../resources_servers/litmus_agent/README.md)
-verifier; see that documentation for answer extraction and scoring behavior.
+[Litmus-Bench](https://huggingface.co/datasets/nvidia/Nemotron-RL-litmus-bench-v0.2)
+evaluates direct-answer molecular-property and ADME reasoning with the reusable
+[`litmus_agent`](../../resources_servers/litmus_agent/README.md) verifier.
 
-The pinned v0.1 test split contains no tool-use questions. Its prompts already
-encode either boxed or double-parentheses answers through `use_box_format`, so
-the benchmark applies no additional prompt template. The matching Hugging Face
-train split is registered by the `litmus_agent` environment configuration.
+The published `validation.jsonl` contains 2,056 held-out questions. The combined
+benchmark retains every row; subset configs select rows by `question_family`:
+
+| Subset | Question families | Questions | Config |
+| --- | --- | ---: | --- |
+| Tier 1/2 | `tier1_rdkit`, `tier2_rdkit` | 1,000 | `config_tier12.yaml` |
+| ADME direct | `tier5_admet_direct` | 598 | `config_adme_direct.yaml` |
+| ADME analogue | `tier5_admet_analog` | 358 | `config_adme_analogue.yaml` |
+| ADME comparison | `tier5_admet_comparison` | 100 | `config_adme_comparison.yaml` |
+
+Prompts already specify the answer format. Preparation preserves each row's
+`output_regex`, `answer_type`, optional `match` rule, `question_license`,
+`question_family`, and `metadata` provenance. It removes only `agent_ref` so Gym
+can assign the configured agent. No rows are dropped or answers rounded.
+The resource-server configs register all 47,118 questions in the published
+`train.jsonl`, including both molecular-property and ADME questions.
 
 ## Prepare
 
 ```bash
 gym eval prepare --benchmark litmus-bench
+
+# Optional individual subsets:
+gym eval prepare --config benchmarks/litmus-bench/config_tier12.yaml
+gym eval prepare --config benchmarks/litmus-bench/config_adme_direct.yaml
+gym eval prepare --config benchmarks/litmus-bench/config_adme_analogue.yaml
+gym eval prepare --config benchmarks/litmus-bench/config_adme_comparison.yaml
 ```
 
-This downloads the pinned test release, validates its 482 rows, removes the
-obsolete source `agent_ref`, and writes the gitignored artifact to
-`benchmarks/litmus-bench/data/litmus-bench_benchmark.jsonl`.
+Preparation downloads the held-out file, verifies its SHA-256, row count, schema,
+and question-family counts, then writes gitignored datasets under `data/`.
+A `.source.json` sidecar records the source and prepared-content fingerprints;
+Gym rebuilds cached artifacts when these do not match. Re-run preparation after
+updating the checkout, before evaluating an existing local benchmark file.
+
+For an exact local copy, pass `+prepare_script_args.source_dir=/path/to/release`;
+that directory must contain the published `validation.jsonl`. The same checks
+apply. Source selection and content pins live in `prepare.py`.
 
 ## Evaluate
 
@@ -30,126 +53,64 @@ gym eval run \
   --output results/litmus-bench.jsonl
 ```
 
-The benchmark config uses five rollouts per question. Override `--num-repeats`
-only when intentionally changing the evaluation protocol. It sets
-`max_output_tokens` to 131,072 as an upper bound for long reasoning traces; the
-effective generation budget is also limited by the model context window minus
-the prompt. Use `--max-output-tokens` to select a smaller budget for a run.
+All benchmark configs use five rollouts per question. The combined and Tier 1/2
+configs allow up to 131,072 output tokens; ADME configs default to 8,192. The
+model context window also limits the effective generation budget. Override
+`--max-output-tokens` as needed. Dataset repeats and `--num-repeats` multiply,
+so do not also pass `--num-repeats 5` for these benchmark splits.
 
-## License
+## Examples
 
-Dataset: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+Ten-question samples from the published held-out data are committed under
+`data/examples/`: five Tier 1 plus five Tier 2 questions, and ten per ADME
+category, taking the first rows in source order. All examples are direct-answer
+questions. The resource server's
+`data/example.jsonl` contains one question from each of the five families.
 
-## ADME Tier-5 runs
-
-The `adme_tier5_{direct,analogue,comparison}_sub10` exports use the same
-`litmus_agent` verifier. They contain Gym-formatted prompts, answer-extraction
-regexes, and per-row scoring tolerances, so no domain-specific resources server
-or agent is needed. `prepare_adme_tier5.py` validates the rows, removes stale
-`agent_ref` values, and materializes one benchmark artifact at a time.
-
-Ten-question examples for each category are committed under `data/examples`.
-For larger splits, set `ADME_TIER5_SOURCE_DIR` to the directory containing the
-exported JSONL files. Select the source split with `ADME_TIER5_SPLIT`
-(`validation` by default).
-
-Prepare the committed examples through Gym:
-
-```bash
-ADME_TIER5_SPLIT=example gym eval prepare --config benchmarks/litmus-bench/config_adme_direct.yaml
-ADME_TIER5_SPLIT=example gym eval prepare --config benchmarks/litmus-bench/config_adme_analogue.yaml
-ADME_TIER5_SPLIT=example gym eval prepare --config benchmarks/litmus-bench/config_adme_comparison.yaml
-```
-
-Running `ADME_TIER5_SPLIT=example python
-benchmarks/litmus-bench/prepare_adme_tier5.py` directly prepares all three.
-
-### NVIDIA inference gateway
-
-The gateway exposes Chat Completions, so use Gym's `vllm_model` bridge. Keep the
-credential in the environment and let OmegaConf resolve it at runtime so the
-secret is not exposed in the process command line:
+Start the resource server and model bridge, then pass a bundled example as
+explicit input with `--no-serve`. For NVIDIA's inference gateway:
 
 ```bash
 : "${NVIDIA_API_KEY:?Set NVIDIA_API_KEY first}"
 
-gym eval run \
-  --config benchmarks/litmus-bench/config_adme_direct.yaml \
+gym env start \
+  --resources-server litmus_agent \
   --model-type vllm_model \
   --model-url https://inference-api.nvidia.com \
   --model azure/openai/gpt-5.5 \
-  --split benchmark \
-  --output results/adme-tier5-direct_gpt55_rollouts.jsonl \
+  '++policy_api_key=${oc.env:NVIDIA_API_KEY}' \
+  ++policy_model.responses_api_models.vllm_model.extra_body.reasoning_effort=medium
+```
+
+In another terminal:
+
+```bash
+gym eval run --no-serve \
+  --agent litmus_agent_agent \
+  --input benchmarks/litmus-bench/data/examples/litmus-tier12_example.jsonl \
+  --output results/litmus-tier12-example.jsonl \
+  --num-repeats 1 \
   --concurrency 8 \
-  --max-output-tokens 8192 \
-  '++policy_api_key=${oc.env:NVIDIA_API_KEY}' \
-  ++policy_model.responses_api_models.vllm_model.extra_body.reasoning_effort=medium
+  --max-output-tokens 8192
 ```
 
-Each config already requests five rollouts per question; do not also pass
-`--num-repeats 5`, which would multiply the protocol to 25. Repeat with the
-analogue and comparison configs. A single `gym eval run` starts the environment,
-collects rollouts, and scores them.
+For ADME examples, use
+`data/examples/adme-tier5-<subset>_example.jsonl`, where `<subset>` is `direct`,
+`analogue`, or `comparison`. Give each run its own output file. Explicit input
+files use `--num-repeats` directly; increase it for repeated-rollout profiling.
 
-Reward profiling consumes the materialized inputs written beside the rollout
-file, not the original prepared benchmark file:
+Reward profiling consumes the materialized inputs written beside the rollout:
 
 ```bash
 gym eval profile \
-  --inputs results/adme-tier5-direct_gpt55_rollouts_materialized_inputs.jsonl \
-  --rollouts results/adme-tier5-direct_gpt55_rollouts.jsonl
+  --inputs results/litmus-tier12-example_materialized_inputs.jsonl \
+  --rollouts results/litmus-tier12-example.jsonl
 ```
 
-Use multiple repeats for meaningful per-task reward variance.
+## License
 
-## Paired Tier 1/2 example
-
-`config_tier12.yaml` provides a small paired tool-vs-no-tool Litmus benchmark
-with ten unique questions: five Tier 1 and five Tier 2. Every question appears
-once as `direct` and once as `mcp-python`; the prompt, expected answer,
-extraction contract, and pair identifier are identical between arms. The tool
-arm advertises `stateful_python_code_exec`.
-
-Prepare the committed example through Gym:
-
-```bash
-gym eval prepare --config benchmarks/litmus-bench/config_tier12.yaml
-```
-
-The tool arm uses OpenSandbox with an RDKit-capable image. Export the
-OpenSandbox and NVIDIA inference credentials before running:
-
-```bash
-export OPENSANDBOX_DOMAIN="<opensandbox-domain>"
-export OPENSANDBOX_API_KEY="<opensandbox-key>"
-export NVIDIA_API_KEY="<NVIDIA-inference-key>"
-
-: "${OPENSANDBOX_DOMAIN:?Set OPENSANDBOX_DOMAIN}"
-: "${OPENSANDBOX_API_KEY:?Set OPENSANDBOX_API_KEY}"
-: "${NVIDIA_API_KEY:?Set NVIDIA_API_KEY}"
-
-gym eval run \
-  --config benchmarks/litmus-bench/config_tier12.yaml \
-  --model-type vllm_model \
-  --model azure/openai/gpt-5.5 \
-  --model-url https://inference-api.nvidia.com \
-  --split benchmark \
-  --output results/litmus-tier12-paired/rollouts.jsonl \
-  --num-repeats "${NUM_REPEATS:-1}" \
-  --concurrency "${CONCURRENCY:-1}" \
-  --temperature 1 \
-  --max-output-tokens 4096 \
-  '++policy_api_key=${oc.env:NVIDIA_API_KEY}' \
-  ++policy_model.responses_api_models.vllm_model.extra_body.reasoning_effort=medium
-```
-
-Set `--num-repeats` as needed for profiling. Direct rows do not create a
-sandbox; tool sandboxes are created lazily.
-
-Profile the paired results using the materialized inputs written by the run:
-
-```bash
-gym eval profile \
-  --inputs results/litmus-tier12-paired/rollouts_materialized_inputs.jsonl \
-  --rollouts results/litmus-tier12-paired/rollouts.jsonl
-```
+Tier 1/2 rows declare `CC-BY-SA-4.0`; ADME rows declare `OpenMDW-1.1`.
+The combined benchmark and training configs record both as
+`CC-BY-SA-4.0 AND LicenseRef-OpenMDW-1.1`. The `LicenseRef` spelling represents
+the dataset's OpenMDW license in Gym's SPDX-expression field; each source row's
+`question_license` is retained unchanged. See the linked dataset card for terms.

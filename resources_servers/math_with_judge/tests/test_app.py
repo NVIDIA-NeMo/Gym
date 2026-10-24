@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from math_verify.errors import TimeoutException
 from pytest import approx, fixture, mark, raises, skip
+from sympy import sympify
 
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ModelServerRef
@@ -35,12 +36,15 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.telemetry.resources_operations import ResourcesOperation
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,
     LibraryJudgeMathResourcesServerConfig,
     LibraryJudgeMathVerifyRequest,
     _extract_last_boxed_answer,
+    _extract_unboxed_answer_candidate,
+    _prepare_format_tolerant_response,
     _run_math_verify,
 )
 
@@ -82,6 +86,31 @@ def _sleeping_library_verifier_process(result_connection: Any) -> None:
 
     try:
         time.sleep(60)
+    finally:
+        result_connection.close()
+
+
+def _extract_adversarial_answers(result_connection: Any) -> None:
+    try:
+        response = "x" + " " * 64_000 + "y"
+        result_connection.send(
+            [_extract_unboxed_answer_candidate(prefix + response) for prefix in ("", "Answer: ", "उत्तर: ")]
+            + [
+                _extract_unboxed_answer_candidate(prefix + " " * 64_000 + "by substitution")
+                for prefix in ("Answer", "**Answer**", "उत्तर")
+            ]
+            + [_extract_unboxed_answer_candidate("Answer: not 18\n" * 64_000)]
+        )
+    finally:
+        result_connection.close()
+
+
+def _verify_tolerant_answer_in_process(config: dict, generated: str, result_connection: Any) -> None:
+    server = LibraryJudgeMathResourcesServer(
+        config=LibraryJudgeMathResourcesServerConfig(**config), server_client=MagicMock(spec=ServerClient)
+    )
+    try:
+        result_connection.send(asyncio.run(server._verify_answer("question", "14", generated)))
     finally:
         result_connection.close()
 
@@ -171,6 +200,232 @@ class TestApp:
     async def test_reverify_mode(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
         assert await resources_server.get_reverify_mode() == ReverifyMode.STATELESS
+
+    def test_extract_unboxed_answer_candidate(self) -> None:
+        assert _extract_unboxed_answer_candidate("Work\n**Answer:** 18") == "18"
+        assert _extract_unboxed_answer_candidate("Work\n### Final answer\n\\(\\frac{1}{2}\\)") == r"\(\frac{1}{2}\)"
+        assert _extract_unboxed_answer_candidate("गणना\n**उत्तर:** 42") == "42"
+        assert _extract_unboxed_answer_candidate("इसलिए उत्तर है 1।") == "1"
+        assert _extract_unboxed_answer_candidate("इस प्रकार न्यूनतम मान 9 है।") == "इस प्रकार न्यूनतम मान 9 है"
+        assert _extract_unboxed_answer_candidate("<|THINK|>work</|THINK|>\n18") == "18"
+        assert _extract_unboxed_answer_candidate("A long response with no separately stated value at all.") is None
+
+    def test_prepare_format_tolerant_response(self) -> None:
+        assert _prepare_format_tolerant_response(r"\boxed{१८}") == r"\boxed{18}"
+        assert _prepare_format_tolerant_response("Final answer\n$$\n\\boxed{\\dfrac{९}{२५६}\n$$") == (
+            "Final answer\n$$\n\\boxed{\\dfrac{9}{256}}$$"
+        )
+        assert _prepare_format_tolerant_response(r"\boxed{\frac{1}{2}}") == r"\boxed{\frac{1}{2}}"
+
+    def test_adversarial_answer_extraction_is_bounded(self) -> None:
+        if "fork" not in mp.get_all_start_methods():
+            skip("This regression test requires fork.")
+        ctx = mp.get_context("fork")
+        parent, child = ctx.Pipe(duplex=False)
+        process = ctx.Process(target=_extract_adversarial_answers, args=(child,))
+        process.start()
+        child.close()
+        try:
+            # A process deadline catches event-loop-blocking regex regressions
+            # without hanging the test worker. The old cleanup takes tens of seconds.
+            assert parent.poll(3.0), "Answer extraction blocked on whitespace or repeated negated labels"
+            assert parent.recv() == [None] * 7
+        finally:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=1.0)
+            parent.close()
+
+    @mark.parametrize(
+        ("generated", "expected", "reward", "extracted"),
+        [
+            ("Answer: 18 (since x must be positive)", "18", 1.0, "18"),
+            ("उत्तर: 18 सेमी", "18", 1.0, "18"),
+            ("Answer: 18\nCorrection.\nउत्तर: 19 सेमी", "18", 0.0, "19"),
+            ("Answer: 18\nCorrection.\nउत्तर: 19 सेमी", "19", 1.0, "19"),
+            ("Intermediate $18$\nFinal answer: 19 (not $18$)", "18", 0.0, "19"),
+            ("Intermediate $18$\nFinal answer: 19 (not $18$)", "19", 1.0, "19"),
+            ("Final Answer\n$$\n\\frac{1}{2}\n$$", r"\frac{1}{2}", 1.0, "1/2"),
+            ("### Final Answer\n\\[\n\\frac{1}{2}\n\\]", r"\frac{1}{2}", 1.0, "1/2"),
+            ("Intermediate $18$\nFinal Answer\n$$\n19\n$$", "18", 0.0, "19"),
+            ("Intermediate $18$\nFinal Answer\n$$\n19\n$$", "19", 1.0, "19"),
+            ("Work\n$$\n\\frac{1}{2}\n$$", r"\frac{1}{2}", 1.0, "1/2"),
+            ("Work\n\\[\n\\frac{1}{2}\n\\]", r"\frac{1}{2}", 1.0, "1/2"),
+            ("We check the answer by substitution:\n2 * 3 = 6\nHence x = 3.", "3", 1.0, "3"),
+            ("We check the answer by substitution:\n2 * 3 = 6\nHence x = 3.", "6", 0.0, "3"),
+            ("Answer by substitution:\n2 * 3 = 6\nHence x = 3.", "3", 1.0, "3"),
+            ("Answer: p - q", "p - q", 1.0, "p - q"),
+            ("Answer: (3, 4)", "(3,4)", 1.0, "Interval.open(3, 4)"),
+            ("Answer: (0, 1]", "(0,1]", 1.0, "Interval.Lopen(0, 1)"),
+            ("- Answer: 18", "18", 1.0, "18"),
+            ("- Answer: 18", "-18", 0.0, "18"),
+            ("Answer: $3$ and $4$", "3,4", 1.0, "{3, 4}"),
+            ("Work\n$3$ and $4$", "3,4", 1.0, "{3, 4}"),
+            ("Intermediate $18$\nFinal Answer\n$$\n19", "18", 0.0, None),
+            ("Intermediate $18$\nFinal Answer\n$$\n$$", "18", 0.0, None),
+            ("Intermediate $18$\nFinal Answer\n" + "x" * 513 + "\n18", "18", 0.0, None),
+            ("Answer: 18\nCorrection.\nउत्तर: 19", "18", 0.0, "19"),
+            ("Answer: 18\nCorrection.\nउत्तर: 19", "19", 1.0, "19"),
+            ("Intermediate $18$\nFinal answer: no solution", "18", 0.0, None),
+            ("Intermediate $18$\nFinal answer: $19$", "19", 1.0, "19"),
+            ("Intermediate $18$\n19", "18", 0.0, "19"),
+            ("Intermediate $18$\n19", "19", 1.0, "19"),
+        ],
+    )
+    async def test_tolerant_verifier_grades_only_selected_unboxed_answer(
+        self,
+        config: LibraryJudgeMathResourcesServerConfig,
+        generated: str,
+        expected: str,
+        reward: float,
+        extracted: str | None,
+    ) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        server = LibraryJudgeMathResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False, "format_tolerant_answer_extraction": True}),
+            server_client=server_client,
+        )
+        # Exercise the production symbolic verifier, not a mocked reward.
+        actual_reward, actual_extracted, library_reward, judge = await server._verify_answer(
+            "question", expected, generated
+        )
+        assert actual_reward == library_reward == reward
+        if extracted is not None:
+            assert actual_extracted == extracted
+        else:
+            # math-verify can interpret prose as a symbolic product; it must
+            # never recover the discarded intermediate value.
+            assert actual_extracted != "18"
+        assert judge is None
+        server_client.post.assert_not_called()
+
+    @mark.parametrize(
+        "generated",
+        [
+            "Answer: - 18",
+            "Answer - 18",
+            "Answer:\n- 18",
+            "**Answer:** **- 18**",
+            "उत्तर: - १८",
+            "- Answer: - 18",
+            "* Answer: - 18",
+            "Work\n- 18",
+            "Answer: - 18 cm",
+        ],
+    )
+    @mark.parametrize(("expected", "reward"), [("-18", 1.0), ("18", 0.0)])
+    async def test_tolerant_verifier_preserves_spaced_unary_minus(self, config, generated, expected, reward):
+        server = LibraryJudgeMathResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False, "format_tolerant_answer_extraction": True}),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        assert await server._verify_answer("question", expected, generated) == (reward, "-18", reward, None)
+
+    @mark.parametrize(
+        "correction",
+        ["Correction: the answer is 19.", "After recalculating, the final answer is 19."],
+    )
+    @mark.parametrize(("expected", "reward"), [("18", 0.0), ("19", 1.0)])
+    async def test_tolerant_verifier_uses_later_explicit_correction(self, config, correction, expected, reward):
+        server = LibraryJudgeMathResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False, "format_tolerant_answer_extraction": True}),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        assert await server._verify_answer("question", expected, "Answer: 18\n" + correction) == (
+            reward,
+            "19",
+            reward,
+            None,
+        )
+
+    @mark.parametrize(
+        ("generated", "selected", "incidental"),
+        [
+            ("Final answer: 18, since the result is divisible by 3", "18", "3"),
+            ("Answer: 19\nWe verified the answer is not 18.", "19", "18"),
+            ("Answer: 19\nIf the answer is 18, the equation would not hold.", "19", "18"),
+            ("Answer: 19\nSuppose the result is 18 for a contradiction.", "19", "18"),
+            ("Answer: 19\nCorrection: the answer is not 18.", "19", "18"),
+            ("Answer: 19\nAfter recalculating, the final answer is not 18.", "19", "18"),
+            ("Answer: 19\nThe answer is not 18.", "19", "18"),
+            ("Answer: 19\nCorrection: if the answer is 18, a contradiction follows.", "19", "18"),
+            ("Answer: 19\nCorrection: the answer is possibly 18.", "19", "18"),
+        ],
+    )
+    @mark.parametrize("use_incidental_reference", [False, True])
+    async def test_tolerant_verifier_ignores_nonanswer_statements(
+        self, config, generated, selected, incidental, use_incidental_reference
+    ):
+        client = MagicMock(spec=ServerClient)
+        server = LibraryJudgeMathResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False, "format_tolerant_answer_extraction": True}),
+            server_client=client,
+        )
+        expected = incidental if use_incidental_reference else selected
+        reward = 0.0 if use_incidental_reference else 1.0
+        assert await server._verify_answer("question", expected, generated) == (reward, selected, reward, None)
+        client.post.assert_not_called()
+
+    @mark.parametrize("unit", [r"\text{ cm}", r" \text{ cm}", r"\mathrm{cm}", r" \mathrm{cm}"])
+    @mark.parametrize(("expected", "reward"), [(r"\frac{1}{2}", 1.0), ("2", 0.0)])
+    async def test_tolerant_verifier_preserves_latex_command_arguments(self, config, unit, expected, reward):
+        server = LibraryJudgeMathResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False, "format_tolerant_answer_extraction": True}),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        assert await server._verify_answer("question", expected, r"Answer: \frac{1}{2}" + unit) == (
+            reward,
+            "1/2",
+            reward,
+            None,
+        )
+
+    @mark.parametrize("suffix", [" cm", " (since each term is half)", r"\text{ cm}", r" \text{ cm}"])
+    def test_tolerant_verifier_repeated_commands_are_bounded(self, config, suffix):
+        if "fork" not in mp.get_all_start_methods():
+            skip("This regression test requires fork.")
+        config = config.model_copy(update={"should_use_judge": False, "format_tolerant_answer_extraction": True})
+        generated = "Answer: " + "+".join([r"\frac{1}{2}"] * 28) + suffix
+        ctx = mp.get_context("fork")
+        parent, child = ctx.Pipe(duplex=False)
+        process = ctx.Process(target=_verify_tolerant_answer_in_process, args=(config.model_dump(), generated, child))
+        process.start()
+        child.close()
+        try:
+            assert parent.poll(3.0), "Answer preparation blocked on repeated LaTeX commands"
+            reward, extracted, library_reward, judge = parent.recv()
+            assert reward == library_reward == 1.0
+            assert sympify(extracted) == 14
+            assert judge is None
+        finally:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=1.0)
+            parent.close()
+
+    async def test_unboxed_answer_fallback_is_opt_in(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
+        strict_server = LibraryJudgeMathResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False}),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        assert await strict_server._verify_answer("question", "18", "**उत्तर:** 18") == (
+            approx(0.0),
+            None,
+            approx(0.0),
+            None,
+        )
+
+        fallback_server = LibraryJudgeMathResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False, "format_tolerant_answer_extraction": True}),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        reward, extracted_answer, library_reward, judge_evaluations = await fallback_server._verify_answer(
+            "question", "18", "**उत्तर:** १८"
+        )
+        assert reward == approx(1.0)
+        assert extracted_answer == "18"
+        assert library_reward == approx(1.0)
+        assert judge_evaluations is None
 
     async def test_verify(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
@@ -436,13 +691,16 @@ class TestApp:
         process.start()
         child_connection.close()
 
+        operation = ResourcesOperation()
         try:
             assert await LibraryJudgeMathResourcesServer._wait_for_library_verifier_process(
                 process,
                 result_connection,
                 0.01,
+                operation=operation,
             ) == (approx(0.0), None)
             assert not process.is_alive()
+            assert operation.outcome == "timeout"
         finally:
             if process.is_alive():
                 process.kill()

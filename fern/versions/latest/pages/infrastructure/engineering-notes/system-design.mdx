@@ -167,7 +167,7 @@ sequenceDiagram
     Env-->>Client: Result with reward
 ```
 
-A native Environment Server takes over more of the episode. For example, [`single_agent_turn`](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/single_agent_turn) seeds the Resources and agent sessions itself, asks the agent for one response, calls `/verify`, and closes both sessions. The agent only generates the response and calls tools.
+An Environment Server that drives agent sessions takes over more of the episode. For example, [`single_agent_turn`](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/single_agent_turn) seeds the Resources and agent sessions itself, asks the agent for one response, calls `/verify`, and closes both sessions. The agent only generates the response and calls tools.
 
 **Key Design Points:**
 
