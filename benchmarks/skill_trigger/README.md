@@ -1,6 +1,6 @@
 # Skill opening across agent harnesses
 
-**Implementation draft: this benchmark is not runnable yet.** Source preparation, scoring, trace conversion, and shared-budget components have offline tests. Runtime collection, harness adapters, and live migration checks remain pending. This draft does not register a benchmark or report new model results.
+**Implementation draft: this benchmark is not runnable yet.** Source preparation, scoring, trace conversion, shared budgets, and inference transport have component tests. Codex/Hermes launch profiles are ported; runtime collection, complete harness adapters, and live migration checks remain pending. This draft does not register a benchmark or report new model results.
 
 The question is whether a model opens the relevant skill instructions when a task calls for them. Task-performance benchmarks measure whether work gets done; this benchmark measures an earlier step. Opening instructions is not evidence that the agent followed them or completed the task.
 
@@ -43,6 +43,8 @@ The initial comparison uses three forwarded model requests including retries, 12
 The shared implementation is under [`environments/skill_trigger`](../../environments/skill_trigger). It extracts successful model-visible tool results, checks session lineage and observation coverage, and preserves the original excerpt-matching rules, including Pi's UTF-16 character counting. Exact-file reads can disambiguate shared text; shell output must identify a skill by its content. Invalid evidence raises an error rather than producing a zero.
 
 Trajectory conversion reuses Harbor 0.24.0's Pi, Codex, and Hermes converters. The wrapper checks call/result IDs and rejects dropped or invented records. Converted trajectories support Gym interoperability; canonical traces remain the scoring source. The shared request allowance counts retries and child requests together, anchors time to prompt release, and cancels streams at the absolute deadline. These components are not yet connected to live adapters; their tests do not prove sandbox isolation or end-to-end correctness.
+
+The trial-scoped gateway uses Gym's shared HTTP client with transport retries and redirects disabled. It records original and forwarded requests, response bytes, and provider status outside the agent-visible logs. Tests use local HTTP endpoints to check stream preservation, errors, deadlines, and blocked requests. The Codex/Hermes launcher waits for host authorization after profile setup; Codex guidance requires effective model metadata, while Hermes guidance changes only `tool_use_enforcement`. Actual session attribution, observer startup, Pi execution, and complete lifecycle wiring remain to be implemented.
 
 For the offline tests, install Gym's development dependencies and `harbor==0.24.0`, then run from the checkout root:
 
