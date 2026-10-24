@@ -16,6 +16,7 @@ import asyncio
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from nemo_gym.base_resources_server import (
@@ -129,7 +130,7 @@ class TestApp:
             )
         )
         assert repeated_close == close
-        with pytest.raises(ValueError, match="already closed"):
+        with pytest.raises(HTTPException, match="already closed") as refused:
             await server.seed_session(
                 ResourcesSeedSessionRequest(
                     resources_session_id="resources-session",
@@ -138,10 +139,12 @@ class TestApp:
                     task_data={},
                 )
             )
+        assert refused.value.status_code == 409
 
     def test_follows_the_session_contract(self) -> None:
+        server = self._server()
         check_resources_session_contract(
-            self._server().setup_webserver(),
+            server.setup_webserver(),
             ResourcesSeedSessionRequest(
                 resources_session_id="contract-session",
                 episode_id=EpisodeId(rollout_id="rollout", attempt=0),
@@ -149,6 +152,7 @@ class TestApp:
                 task_data={},
             ),
             keeps_state=True,
+            holds_state=lambda resources_session_id: resources_session_id in server._session_episodes,
         )
 
     def test_close_route_releases_the_session(self) -> None:
@@ -177,4 +181,18 @@ class TestApp:
         assert close.status_code == 200
         # The route reached this server's close, not the base default, so the session was released.
         assert resources_session_id not in server._session_episodes
-        assert resources_session_id in server._closed_session_ids
+        assert server._fence.closed_episode(resources_session_id) == episode_id
+
+    def test_close_of_a_closed_session_naming_another_episode_is_refused(self) -> None:
+        server = self._server()
+        client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+        episode_id = EpisodeId(rollout_id="rollout", attempt=0)
+
+        def close(episode: EpisodeId) -> int:
+            body = ResourcesCloseSessionRequest(resources_session_id="resources-session", episode_id=episode)
+            return client.post("/close_session", json=body.model_dump(mode="json")).status_code
+
+        assert close(episode_id) == 200
+        assert close(EpisodeId(rollout_id="other", attempt=0)) == 409
+        # The refused close leaves the record of the episode that closed the session.
+        assert server._fence.closed_episode("resources-session") == episode_id

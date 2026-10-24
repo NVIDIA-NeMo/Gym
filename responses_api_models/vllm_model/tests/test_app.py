@@ -7510,3 +7510,64 @@ def test_a_backend_without_a_control_url_fails_its_cut_instead_of_guessing_a_roo
     assert model.generation_cut_control_root("http://worker-0:8000/v1") == "http://control-0:9000"
     with raises(ValueError, match="no generation_cut_control_url is configured for backend http://worker-9:8000/v1"):
         model.generation_cut_control_root("http://worker-9:8000/v1")
+
+
+def _custom_tool_config(**overrides: Any) -> VLLMModelConfig:
+    return VLLMModelConfig(
+        **{
+            "host": "0.0.0.0",
+            "port": 8080,
+            "entrypoint": "",
+            "name": "policy",
+            "base_url": "http://worker-0:8000/v1",
+            "api_key": "dummy_key",  # pragma: allowlist secret
+            "model": "dummy_model",
+            "return_token_id_information": False,
+            "uses_reasoning_parser": False,
+        }
+        | overrides
+    )
+
+
+def test_get_converter_forwards_the_custom_tool_strategy() -> None:
+    model = VLLMModel(
+        config=_custom_tool_config(custom_tool_strategy="function_bridge"),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    assert model.get_converter().custom_tool_strategy == "function_bridge"
+
+
+def test_function_bridge_is_rejected_with_the_native_responses_route() -> None:
+    with raises(ValueError, match="custom_tool_strategy=function_bridge is not supported with is_responses_native"):
+        _custom_tool_config(custom_tool_strategy="function_bridge", is_responses_native=True)
+
+
+def test_streaming_sanitize_applies_the_configured_custom_tool_strategy() -> None:
+    # The helper is the one shared by every `/v1/responses` dispatch (the compaction
+    # server's included), so this pins the config-to-sanitizer wiring for all of them.
+    def body() -> dict:
+        return {
+            "model": "policy",
+            "stream": True,
+            "tools": [],
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "id": "at_1",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "exec", "description": "Run JavaScript."}],
+                },
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+            ],
+        }
+
+    bridged = VLLMModel(
+        config=_custom_tool_config(custom_tool_strategy="function_bridge"),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    cleaned, _ = bridged._sanitize_streaming_responses_body(body())
+    assert [(tool["type"], tool["name"]) for tool in cleaned["tools"]] == [("custom", "exec")]
+
+    passthrough = VLLMModel(config=_custom_tool_config(), server_client=MagicMock(spec=ServerClient))
+    cleaned, _ = passthrough._sanitize_streaming_responses_body(body())
+    assert cleaned["tools"] == []

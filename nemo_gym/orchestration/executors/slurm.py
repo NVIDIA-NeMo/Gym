@@ -266,7 +266,8 @@ class SlurmExecutor(BaseExecutor):
                         f'(set -o noclobber; : > {_RESUBMIT_LOCK}) 2>/dev/null || fail "another resubmit holds '
                         f'$PWD/{_RESUBMIT_LOCK}; remove it if no resubmit is running"',
                         f"trap 'rm -f {_RESUBMIT_LOCK}' EXIT",
-                        "workdirs=$(squeue --me --noheader --format=%Z) || fail 'squeue failed'",
+                        # --all: without it squeue does not list jobs, ours included, in a hidden partition.
+                        "workdirs=$(squeue --me --all --noheader --format=%Z) || fail 'squeue failed'",
                         'for d in $workdirs; do [ "$d" != "$PWD" ] || '
                         'fail "A job of this run is still pending or running in $PWD."; done',
                         # Only the built-in runner's fresh start deletes rollouts; its job.sh lists
