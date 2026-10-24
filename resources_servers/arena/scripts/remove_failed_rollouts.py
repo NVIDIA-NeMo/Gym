@@ -24,9 +24,12 @@ def is_failed_rollout(row: dict) -> bool:
     # Self-comparisons intentionally have no judgments.
     if row.get("self_comparison"):
         return False
-    # v3 deliberately scores responses stopped at the output limit as zero.
+    # Generation-limit and reasoning-only outputs are deliberate zeros, not failed judging.
     incomplete_reason = ((row.get("response") or {}).get("incomplete_details") or {}).get("reason")
-    if row.get("category") == "lmarena_v3" and incomplete_reason == "max_output_tokens":
+    reasoning_only = bool(row.get("policy_reasoning")) and not row.get("policy_answer")
+    if row.get("category") in {"lmarena_v3", "vision_arena_v1"} and (
+        incomplete_reason == "max_output_tokens" or (incomplete_reason is None and reasoning_only)
+    ):
         return False
 
     games = row.get("games") or []

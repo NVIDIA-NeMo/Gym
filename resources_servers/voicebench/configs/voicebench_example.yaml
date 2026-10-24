@@ -1,0 +1,43 @@
+voicebench:
+  resources_servers:
+    voicebench:
+      entrypoint: app.py
+      domain: e2e
+      verified: false
+      description: Synthetic text smoke examples for the VoiceBench legacy MCQ scorer
+      subset: openbookqa
+      scoring_type: mcq
+      scoring_version: legacy_v1
+      seed: null
+      expected_num_rows: 5
+      expected_sample_ids_file: null
+      judge_model_server: null
+      judge_prompt_file: null
+      judge_temperature: 0.5
+      judge_top_p: 0.95
+      judge_max_tokens: 1024
+      judge_n: 3
+      judge_max_concurrency: 40
+voicebench_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: voicebench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/voicebench/data/example.jsonl
+        license: Apache 2.0
+
+voicebench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: voicebench_simple_agent

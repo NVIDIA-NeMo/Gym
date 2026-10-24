@@ -185,6 +185,31 @@ def test_verification_is_retry_safe_and_deterministic() -> None:
     assert verify_and_linearize(receipt, snapshots) == verify_and_linearize(receipt, snapshots)
 
 
+def test_the_linearized_row_reports_the_terminal_finish_reason() -> None:
+    # Only the terminal row decides the rebuilt response's verdict: the root's ``length`` stop did
+    # not end the chain, because the terminal call extended it. A manifest written before the
+    # column existed reports no reason.
+    receipt, snapshots = _branched()
+    rows = {row.model_call_id: row for row in receipt.manifest}
+
+    def with_reasons(root: str | None, main: str | None) -> RolloutReceipt:
+        manifest = [
+            rows["root"].model_copy(update={"finish_reason": root}),
+            rows["sibling"],
+            rows["main"].model_copy(update={"finish_reason": main}),
+        ]
+        return receipt.model_copy(update={"manifest": manifest})
+
+    complete = verify_and_linearize(with_reasons("length", "stop"), snapshots)
+    assert (complete.terminal_finish_reason, complete.incomplete_reason) == ("stop", None)
+    cut = verify_and_linearize(with_reasons("stop", "length"), snapshots)
+    assert (cut.terminal_finish_reason, cut.incomplete_reason) == ("length", "max_output_tokens")
+    filtered = verify_and_linearize(with_reasons("stop", "content_filter"), snapshots)
+    assert (filtered.terminal_finish_reason, filtered.incomplete_reason) == ("content_filter", "content_filter")
+    unstated = verify_and_linearize(receipt, snapshots)
+    assert (unstated.terminal_finish_reason, unstated.incomplete_reason) == (None, None)
+
+
 def test_extras_commitments_cover_the_selected_chain_in_order() -> None:
     receipt, snapshots = _branched()
     row = verify_and_linearize(receipt, snapshots)
@@ -473,3 +498,52 @@ def test_a_capture_key_outside_the_restore_lineage_is_rejected(capture_key: str)
     with pytest.raises(ReceiptVerificationError) as raised:
         verify_and_linearize(receipt, snapshots)
     assert raised.value.code == "foreign_capture_key"
+
+
+def test_a_finish_reason_disagreement_in_the_attribution_trail_withholds_the_verdict() -> None:
+    """Identical retries are one delivered chain but can record different finish reasons.
+
+    When attribution could not single one of them out, it names the smallest call id and appends
+    ``finish_reason_disagreement`` to the trail; the rebuild must then give no verdict instead of
+    one that flips with the naming, as the local capture path does.
+    """
+    root = _snapshot("root", token_ids=[10, 11, 12], masks=[0.0, 0.0, 1.0], logprobs=[0.0, 0.0, -0.1])
+    twins = {
+        name: _snapshot(
+            name,
+            parent_call_id="root",
+            prev_len=3,
+            token_ids=[20, 21],
+            masks=[0.0, 1.0],
+            logprobs=[0.0, -0.2],
+            parent=root,
+        )
+        for name in ("main", "twin")
+    }
+    snapshots = [root, twins["main"], twins["twin"]]
+    finish_reasons = {"main": "length", "twin": "stop"}
+
+    def receipt_for(terminal: str, trail: str | None) -> RolloutReceipt:
+        receipt = _receipt(snapshots, terminal=terminal)
+        manifest = [
+            row.model_copy(update={"finish_reason": finish_reasons.get(row.model_call_id)}) for row in receipt.manifest
+        ]
+        return receipt.model_copy(
+            update={"manifest": manifest, "terminal_selection": "content", "terminal_attribution_reason": trail}
+        )
+
+    # Without the token the named row decides, so the verdict follows the call-id order.
+    assert verify_and_linearize(receipt_for("main", "corroborated_by=content"), snapshots).incomplete_reason == (
+        "max_output_tokens"
+    )
+    assert verify_and_linearize(receipt_for("twin", "corroborated_by=content"), snapshots).incomplete_reason is None
+    # With it the verdict is withheld whichever twin the receipt names; the recorded reason stays reported.
+    for terminal in ("main", "twin"):
+        row = verify_and_linearize(
+            receipt_for(terminal, "corroborated_by=content,finish_reason_disagreement"), snapshots
+        )
+        assert row.finish_reason_resolved is False
+        assert row.terminal_finish_reason == finish_reasons[terminal]
+        assert row.incomplete_reason is None
+    # A receipt without a trail, from a framework that records none, resolves as before.
+    assert verify_and_linearize(receipt_for("main", None), snapshots).finish_reason_resolved is True

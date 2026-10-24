@@ -2,9 +2,8 @@ claude_code_agent:
   responses_api_agents:
     claude_code_agent:
       entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: ???
+      resources_server: null  # set a ResourcesServerRef for the legacy /run endpoint
+      model_server: null  # Gym model-server ref, or use anthropic_base_url directly
       concurrency: 32
       model: claude-sonnet-4-6
       anthropic_api_key: ${anthropic_api_key}
@@ -14,8 +13,17 @@ claude_code_agent:
       system_prompt: null
       allowed_tools: null
       disallowed_tools: null
-      claude_code_version: null
+      claude_code_version: null  # sandbox sessions require an exact version, e.g. "2.1.108"
       # Runtime capabilities. Defaults keep the runtime isolated/reproducible.
       bare: true  # set false to auto-discover skills, hooks, plugins, MCP, memory, CLAUDE.md
       mcp_config: null  # path to an MCP server config file (--mcp-config); works even with bare: true
       settings: null  # path to a settings JSON layered into the per-run CLAUDE_CONFIG_DIR
+      # Sandbox sessions install/reuse a versioned runtime inside the task sandbox.
+      # The optional local runtime installs lazily on the first unseeded call.
+      sandbox_provider: null  # top-level provider ref; unused with borrowed SandboxAccess
+      sandbox_config: {}  # SandboxSpec for owned execution, e.g. {image: ubuntu:24.04, workdir: /app}
+      sandbox_local_executable_path: null  # optional native Linux binary on the Gym host
+      sandbox_executable_path: null  # optional native binary already inside the sandbox
+      sandbox_executable_sha256: null  # required trusted SHA-256 for either supplied binary option
+      sandbox_install_timeout_seconds: 600
+      session_close_timeout_seconds: 60

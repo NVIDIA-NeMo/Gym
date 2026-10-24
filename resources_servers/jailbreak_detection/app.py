@@ -187,6 +187,11 @@ class JailbreakDetectionResourcesServer(SimpleResourcesServer):
     An LLM judge evaluates whether the policy model's response is safe or unsafe.
     """
 
+    # Each verification is one safety judge call: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
+
     config: JailbreakDetectionConfig
 
     def setup_webserver(self) -> FastAPI:

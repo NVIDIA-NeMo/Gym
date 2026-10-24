@@ -18,244 +18,70 @@ import copy
 import json
 import logging
 import os
+import re
 import shutil
-import subprocess
 import tempfile
 from asyncio import Semaphore
+from collections.abc import Mapping
 from contextlib import suppress
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from shlex import quote
 from time import monotonic, time
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
+from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionResponse,
+    AgentSeedSessionRequest,
+    AgentSessionSetupError,
+    AgentSessionState,
+    BaseResponsesAPIAgentConfig,
+    Body,
+    SimpleResponsesAPIAgent,
+)
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
-    NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap
+from nemo_gym.rollout_observability import (
+    AgentEpisode,
+    AgentObservationBundle,
+    ObservationGap,
+    SandboxObservation,
+)
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
+from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
+from responses_api_agents.claude_code_agent.parsing import _extract_instruction, _invocation_outcome, parse_stream_json
+from responses_api_agents.claude_code_agent.runtime import install_sandbox_runtime
+from responses_api_agents.claude_code_agent.sandbox import (
+    ClaudeCodeSandboxSession,
+    parse_artifact_observations,
+)
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
 
 
 LOG = logging.getLogger(__name__)
 
 
-def _extract_text(content: list[Any]) -> str:
-    return "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
-
-
-def _extract_thinking(content: list[Any]) -> str:
-    parts = []
-    for b in content:
-        if not isinstance(b, dict):
-            continue
-        if b.get("type") in ("thinking", "reasoning"):
-            parts.append(b.get("thinking") or b.get("text") or "")
-    return "\n".join(p for p in parts if p)
-
-
-def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
-    """Convert claude -p --output-format=stream-json stdout into (output_items, usage)."""
-    raw_events: list[dict] = []
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            raw_events.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-
-    output_items: list[Any] = []
-    pending_calls: dict[str, dict] = {}
-    buffered_think: str | None = None
-    total_input = 0
-    total_output = 0
-    num_turns: Optional[int] = None
-    result_metadata: dict[str, Any] = {}
-    compacting_sessions: set[str] = set()
-    compaction_attempts: list[dict[str, str]] = []
-
-    for event in raw_events:
-        etype = event.get("type")
-
-        if etype == "result":
-            usage = event.get("usage") or {}
-            total_input += int(usage.get("input_tokens") or 0)
-            total_output += int(usage.get("output_tokens") or 0)
-            # Claude Code's authoritative turn counter (what --max-turns bounds).
-            if event.get("num_turns") is not None:
-                num_turns = int(event["num_turns"])
-            if isinstance(event.get("subtype"), str):
-                result_metadata["subtype"] = event["subtype"]
-            if isinstance(event.get("is_error"), bool):
-                result_metadata["is_error"] = event["is_error"]
-            duration_ms = event.get("duration_ms")
-            if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool) and duration_ms >= 0:
-                result_metadata["duration_ms"] = float(duration_ms)
-
-        elif etype == "assistant":
-            message = event.get("message", {})
-            content = message.get("content") or []
-            usage = message.get("usage") or {}
-            total_input += int(usage.get("input_tokens") or 0)
-            total_output += int(usage.get("output_tokens") or 0)
-
-            if not isinstance(content, list):
-                content = []
-
-            think = _extract_thinking(content)
-            if think:
-                buffered_think = (buffered_think + "\n" + think) if buffered_think else think
-
-            text = _extract_text(content)
-            if text:
-                if buffered_think:
-                    text = f"<think>\n{buffered_think}\n</think>\n\n{text}"
-                    buffered_think = None
-                output_items.append(
-                    NeMoGymResponseOutputMessage(
-                        id=f"msg-{len(output_items)}",
-                        content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
-                        role="assistant",
-                        status="completed",
-                        type="message",
-                    )
-                )
-
-            for block in content:
-                if not isinstance(block, dict) or block.get("type") != "tool_use":
-                    continue
-                call_id = block.get("id") or f"call-{uuid4().hex[:8]}"
-                input_data = block.get("input") or {}
-                arguments = json.dumps(input_data) if isinstance(input_data, dict) else str(input_data)
-                pending_calls[call_id] = {"name": block.get("name", ""), "call_id": call_id, "arguments": arguments}
-
-        elif etype == "user":
-            message = event.get("message", {})
-            content = message.get("content") or []
-            if not isinstance(content, list):
-                continue
-
-            for block in content:
-                if not isinstance(block, dict) or block.get("type") != "tool_result":
-                    continue
-                tool_id = block.get("tool_use_id", "")
-                call_info = pending_calls.pop(tool_id, None)
-                if call_info:
-                    output_items.append(
-                        NeMoGymResponseFunctionToolCall(
-                            arguments=call_info["arguments"],
-                            call_id=tool_id,
-                            name=call_info["name"],
-                            type="function_call",
-                            id=tool_id,
-                            status="completed",
-                        )
-                    )
-                result_content = block.get("content") or ""
-                if isinstance(result_content, list):
-                    result_text = _extract_text(result_content)
-                else:
-                    result_text = str(result_content)
-                output_items.append(
-                    NeMoGymFunctionCallOutput(
-                        type="function_call_output",
-                        call_id=tool_id,
-                        output=result_text,
-                        status="completed",
-                    )
-                )
-
-        elif etype == "system" and event.get("subtype") == "status":
-            session_id = event.get("session_id")
-            if not isinstance(session_id, str) or not session_id:
-                continue
-            if event.get("status") == "compacting":
-                compacting_sessions.add(session_id)
-                continue
-            compact_result = event.get("compact_result")
-            if compact_result in {"failed", "success"}:
-                if compact_result == "failed":
-                    compaction_attempts.append({"invocation_id": session_id, "outcome": "failed"})
-                compacting_sessions.discard(session_id)
-
-    compaction_attempts.extend(
-        {"invocation_id": session_id, "outcome": "unknown"} for session_id in compacting_sessions
-    )
-    metadata: dict = {"input_tokens": total_input, "output_tokens": total_output}
-    if num_turns is not None:
-        metadata["num_turns"] = num_turns
-    if compaction_attempts:
-        metadata["compaction_attempts"] = compaction_attempts
-    metadata.update(result_metadata)
-    return output_items, metadata
-
-
-def _invocation_outcome(metadata: dict[str, Any], returncode: int | None) -> tuple[str, str | None]:
-    subtype = metadata.get("subtype")
-    if subtype == "error_max_turns":
-        return "incomplete", subtype
-    if metadata.get("is_error") is True or (isinstance(subtype, str) and subtype.startswith("error_")):
-        return "failed", subtype if isinstance(subtype, str) else "agent_error"
-    if returncode not in (0, None):
-        return "failed", f"process_exit_{returncode}"
-    if subtype == "success":
-        return "completed", None
-    return "incomplete", "result_missing"
-
-
-def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
-    """Return (user_message, system_message) from a responses body input list."""
-    items = list(body_input)
-    system_message: Optional[str] = None
-
-    if items:
-        first = items[0]
-        role = getattr(first, "role", None) or (first.get("role") if isinstance(first, dict) else None)
-        if role == "system":
-            content = getattr(first, "content", None) or (first.get("content") if isinstance(first, dict) else None)
-            if isinstance(content, list):
-                content = "".join(
-                    (p.get("text", "") if isinstance(p, dict) else getattr(p, "text", "")) for p in content
-                )
-            system_message = content or ""
-            items = items[1:]
-
-    user_message = ""
-    for item in reversed(items):
-        role = getattr(item, "role", None) or (item.get("role") if isinstance(item, dict) else None)
-        if role == "user":
-            content = getattr(item, "content", None) or (item.get("content") if isinstance(item, dict) else None)
-            if isinstance(content, list):
-                content = "".join(
-                    (p.get("text", "") if isinstance(p, dict) else getattr(p, "text", "")) for p in content
-                )
-            user_message = content or ""
-            break
-
-    return user_message, system_message
-
-
 class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
+    resources_server: Optional[ResourcesServerRef] = None
     # When model_server is set, ANTHROPIC_BASE_URL is resolved from the Gym model
     # server's URL (requires the server to expose POST /v1/messages).
     # When None, anthropic_base_url is used directly.
@@ -279,6 +105,15 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     mcp_config: Optional[str] = None
     settings: Optional[str] = None
 
+    # Used only when an episode does not supply a borrowed SandboxAccess.
+    sandbox_provider: str | None = None
+    sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    sandbox_executable_path: str | None = None
+    sandbox_local_executable_path: str | None = None
+    sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
+    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+
 
 class ClaudeCodeAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
@@ -296,17 +131,32 @@ class ClaudeCodeAgentVerifyResponse(BaseVerifyResponse):
 class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     config: ClaudeCodeAgentConfig
     sem: Semaphore = None
+    _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
     _static_mcp_config: Optional[dict[str, Any]] = PrivateAttr(default=None)
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
-        ensure_claude_code(self.config.claude_code_version)
+
+    async def _ensure_local_runtime(self) -> None:
+        if self._local_setup_task is None:
+            self._local_setup_task = asyncio.create_task(
+                asyncio.to_thread(ensure_claude_code, self.config.claude_code_version)
+            )
+            self._local_setup_task.add_done_callback(self._clear_failed_local_setup)
+        task = self._local_setup_task
         try:
-            ver = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=10).stdout.strip()
-            LOG.warning("claude-code version: %s", ver or "(unknown)")
-        except Exception as exc:
-            LOG.warning("could not determine claude-code version: %s", exc)
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if self._local_setup_task is task:
+                self._local_setup_task = None
+            raise
+
+    def _clear_failed_local_setup(self, task: asyncio.Task[None]) -> None:
+        if (task.cancelled() or task.exception() is not None) and self._local_setup_task is task:
+            self._local_setup_task = None
 
     def _resolve_base_url(self) -> str:
         if self.config.model_server:
@@ -441,6 +291,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         When ``rollout_id`` is set and a model server is configured, the per-rollout capture prefix is
         applied to ANTHROPIC_BASE_URL so the CLI's streaming /v1/messages calls correlate to this rollout.
         """
+        await self._ensure_local_runtime()
         base_url = self._resolve_call_base_url(rollout_id)
         # Keep full model name for local/custom endpoints; strip provider prefix for real Anthropic API.
         model = self.config.model if base_url else self.config.model.split("/")[-1]
@@ -494,13 +345,16 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         proc.kill()
                 stdout, _ = await communication
                 LOG.warning("claude-code timed out after %ds", self.config.timeout)
-                _, run_metadata = parse_stream_json(stdout.decode(errors="replace"))
+                # Keep the actual partial work so capture can corroborate the terminal call.
+                output_items, run_metadata = parse_stream_json(
+                    stdout.decode(errors="replace"), fold_thinking=not self._token_id_capture_enabled()
+                )
                 run_metadata.update(
                     status="incomplete",
                     error_type="timeout",
                     duration_ms=(monotonic() - process_started_at) * 1000,
                 )
-                return [], model, run_metadata
+                return output_items, model, run_metadata
             except asyncio.CancelledError:
                 if proc.returncode is None:
                     with suppress(ProcessLookupError):
@@ -513,7 +367,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
             stdout_text = stdout.decode(errors="replace")
             LOG.debug("claude-code stdout (%d chars): %s", len(stdout), stdout_text[:2000])
-            output_items, run_metadata = parse_stream_json(stdout_text)
+            output_items, run_metadata = parse_stream_json(
+                stdout_text, fold_thinking=not self._token_id_capture_enabled()
+            )
             run_metadata.setdefault("duration_ms", (monotonic() - process_started_at) * 1000)
             status, error_type = _invocation_outcome(run_metadata, proc.returncode)
             run_metadata["status"] = status
@@ -602,9 +458,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
-        user_message, input_system = _extract_instruction(body.input)
-        system_parts = [p for p in [self.config.system_prompt, input_system] if p]
-        system_prompt = "\n\n".join(system_parts) if system_parts else None
+        user_message, system_prompt = self._conversation_input(body)
 
         output_items, model_name, run_metadata = await self._run_claude_code(
             user_message,
@@ -615,6 +469,30 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             observation_collector=observation_collector,
         )
 
+        return self._response_from_output(body, output_items, model_name, run_metadata)
+
+    def _conversation_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str | None]:
+        """Use the established local last-user/leading-system prompt contract in both modes."""
+        items = (
+            [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
+        )
+        prompt, input_system = _extract_instruction(items)
+        system = "\n\n".join(part for part in (self.config.system_prompt, input_system) if part) or None
+        return prompt, system
+
+    def _configured_skills_path(self) -> str | None:
+        skills = getattr(self.server_client, "global_config_dict", {}).get("skills")
+        return skills.get("path") if isinstance(skills, Mapping) else None
+
+    def _response_from_output(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        output_items: list[Any],
+        model_name: str,
+        run_metadata: dict[str, Any],
+        *,
+        status: str | None = None,
+    ) -> NeMoGymResponse:
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
             for item in output_items
@@ -633,8 +511,16 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         input_tokens = run_metadata.get("input_tokens", 0)
         output_tokens = run_metadata.get("output_tokens", 0)
 
+        # Under capture, name the response by the last served id so terminal attribution can match it directly.
+        terminal_response_id = run_metadata.get("terminal_response_id")
+        response_id = (
+            terminal_response_id
+            if self._token_id_capture_enabled() and isinstance(terminal_response_id, str) and terminal_response_id
+            else f"resp_{uuid4().hex}"
+        )
         return NeMoGymResponse(
-            id=f"resp_{uuid4().hex}",
+            **({"status": status} if status is not None else {}),
+            id=response_id,
             created_at=int(time()),
             model=model_name,
             object="response",
@@ -651,11 +537,277 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             ),
         )
 
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> ClaudeCodeSandboxSession:
+        """Install/reuse the harness runtime before the first activation."""
+        if any(access.required for access in self.effective_tool_accesses(body)):
+            raise HTTPException(
+                422, "Claude sandbox execution uses native tools; required remote tools are unsupported"
+            )
+        version = self.config.claude_code_version
+        if not version or not re.fullmatch(r"\d+\.\d+\.\d+", version):
+            raise HTTPException(422, "Claude sandbox execution requires an exact claude_code_version")
+        if self.config.sandbox_executable_path and self.config.sandbox_local_executable_path:
+            raise HTTPException(422, "Choose either sandbox_executable_path or sandbox_local_executable_path")
+        if (
+            self.config.sandbox_executable_path or self.config.sandbox_local_executable_path
+        ) and not self.config.sandbox_executable_sha256:
+            raise HTTPException(422, "A supplied Claude binary requires sandbox_executable_sha256")
+        access = body.sandbox_access
+        owns_sandbox = access is None
+        if owns_sandbox and not self.config.sandbox_provider:
+            raise HTTPException(422, "Claude requires sandbox_access or a configured sandbox_provider")
+        spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config}) if owns_sandbox else None
+        workdir = access.workdir if access else spec.workdir
+        path = PurePosixPath(workdir or "")
+        if (
+            not path.is_absolute()
+            or ".." in path.parts
+            or "\x00" in workdir
+            or path in (PurePosixPath("/"), PurePosixPath("/tmp"))
+            or str(path).startswith(("/tmp/nemo-gym-claude-sessions", "/tmp/nemo-gym-claude-runtime-"))
+        ):
+            raise HTTPException(
+                422, "Claude sandbox workdir must be absolute and separate from runtime/session storage"
+            )
+        if self.config.timeout <= 0:
+            raise HTTPException(422, "Claude sandbox execution timeout must be positive")
+        provider_ref = access.connection.provider_config_ref if access else self.config.sandbox_provider
+        provider = create_provider(resolve_provider_config(provider_ref, self.server_client.global_config_dict))
+        if owns_sandbox:
+            sandbox = AsyncSandbox(provider)
+        else:
+            try:
+                sandbox = await AsyncSandbox.connect(access.connection.descriptor, provider=provider)
+            except BaseException:
+                await provider.aclose()
+                raise
+        directory = f"/tmp/nemo-gym-claude-sessions/{uuid4().hex}"
+        runtime = f"/tmp/nemo-gym-claude-runtime-{version}"
+        state = ClaudeCodeSandboxSession(
+            request=body,
+            runtime=runtime,
+            session=SandboxSession(
+                sandbox=sandbox,
+                session_dir=directory,
+                workdir=workdir,
+                harness="Claude Code",
+                owns_sandbox=owns_sandbox,
+            ),
+        )
+        try:
+            async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
+                if owns_sandbox:
+                    await sandbox.start(spec)
+                    result = await sandbox.exec(f"mkdir -p -- {quote(workdir)}", cwd="/", timeout_s=30)
+                    self._check_sandbox_setup(result)
+                result = await sandbox.exec(
+                    f"test -d {quote(workdir)} && umask 077 && mkdir -p {quote(directory)}/config",
+                    cwd="/",
+                    timeout_s=30,
+                )
+                self._check_sandbox_setup(result)
+                for name in ("sandbox_runner.py", "install_claude_runtime.py"):
+                    await sandbox.upload(Path(__file__).with_name(name), f"{directory}/{name}")
+                await install_sandbox_runtime(
+                    sandbox,
+                    version=version,
+                    directory=directory,
+                    runtime=runtime,
+                    timeout=self.config.sandbox_install_timeout_seconds,
+                    source=self.config.sandbox_executable_path,
+                    local_source=self.config.sandbox_local_executable_path,
+                    expected=self.config.sandbox_executable_sha256,
+                )
+            return state
+        except BaseException as error:
+            try:
+                await state.close(self.config.session_close_timeout_seconds)
+            except BaseException:
+                raise AgentSessionSetupError(state, error=error) from error
+            raise
+
+    @staticmethod
+    def _check_sandbox_setup(result: SandboxExecResult) -> None:
+        if result.return_code != 0 or result.error_type:
+            details = "\n".join(part for part in (result.stderr, result.stdout) if part)
+            raise RuntimeError(
+                f"Claude sandbox setup failed (exit={result.return_code}, error={result.error_type}): {details[-16000:]}"
+            )
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        """Confirm cleanup and return a bundle even when no activation ran."""
+        assert isinstance(state, ClaudeCodeSandboxSession)
+        await state.close(self.config.session_close_timeout_seconds)
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            cleanup_confirmed=state.session.cleanup_confirmed,
+            agent_observations=state.observations
+            or AgentObservationBundle(
+                source="claude_code",
+                gaps=[ObservationGap(code="agent_activation_interrupted")],
+            ),
+        )
+
+    def _validate_sandbox_request(self, body: NeMoGymResponseCreateParamsNonStreaming) -> None:
+        supported = {"input", "model"}
+        for name, field in type(body).model_fields.items():
+            value = getattr(body, name)
+            if name in supported or (name in {"stream", "background"} and value is False):
+                continue
+            if name == "metadata" and value is not None and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
+                continue
+            if value != field.get_default(call_default_factory=True):
+                raise HTTPException(422, f"Claude sandbox execution does not support request field {name}")
+        models = {None, "", self.config.model}
+        if self.config.model_server:
+            models.add(self.config.model_server.name)
+        if body.model not in models or body.model_extra:
+            raise HTTPException(422, "Claude sandbox model is selected by agent/model-server configuration")
+        if not isinstance(body.input, str):
+            roles = [getattr(item, "role", None) for item in body.input]
+            if roles not in (["user"], ["system", "user"]):
+                raise HTTPException(
+                    422, "Claude sandbox execution accepts one user message with an optional leading system message"
+                )
+            for item in body.input:
+                if not isinstance(item.content, str) and any(
+                    (part.get("type") if isinstance(part, dict) else part.type) != "input_text"
+                    for part in item.content
+                ):
+                    raise HTTPException(422, "Claude sandbox input requires text messages")
+
+    async def _sandbox_response(
+        self,
+        state: ClaudeCodeSandboxSession,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        prompt: str,
+        system: str | None,
+    ) -> NeMoGymResponse:
+        directory = state.session.session_dir
+        base_url = self._resolve_call_base_url(state.request.episode_id.capture_key)
+        model = self.config.model if base_url else self.config.model.split("/")[-1]
+        env = {
+            "CLAUDE_CONFIG_DIR": directory + "/config",
+            "IS_SANDBOX": "1",
+            "ANTHROPIC_API_KEY": "gym" if self.config.model_server else self.config.anthropic_api_key or "EMPTY",
+            "ANTHROPIC_MODEL": model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+            "CLAUDE_CODE_SUBAGENT_MODEL": model,
+            "DISABLE_AUTOUPDATER": "1",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        }
+        if base_url:
+            env.update(
+                ANTHROPIC_BASE_URL=base_url,
+                ANTHROPIC_AUTH_TOKEN="gym" if self.config.model_server else self.config.anthropic_api_key or "local",
+            )
+        artifacts = None
+        failure = None
+        try:
+            # Close can fence the staging phase just as it fences the execution phase.
+            async with self.sem:
+                mcp_config = directory + "/mcp.json" if self.config.mcp_config else None
+                skills_path = self._configured_skills_path()
+                command = self._build_command(
+                    model, prompt, system, mcp_config=mcp_config, skills_active=bool(skills_path)
+                )
+                command[0] = state.runtime + "/claude"
+                artifacts = await state.execute(
+                    {
+                        "directory": directory,
+                        "command": command,
+                        "cwd": state.session.workdir,
+                        "env": env,
+                        "settings": self._build_settings(),
+                        "mcp_config": self._get_static_mcp_config() if mcp_config else None,
+                        "skills_path": skills_path,
+                    },
+                    timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
+                    close_timeout=self.config.session_close_timeout_seconds,
+                )
+        except BaseException as error:
+            failure = error
+            artifacts = state.session.artifacts
+        items, run_metadata = ([], {})
+        if artifacts is not None:
+            items, run_metadata = await asyncio.to_thread(
+                parse_stream_json,
+                artifacts.events,
+                fold_thinking=not self._token_id_capture_enabled(),
+            )
+        cleanup = state.session.cleanup
+        if cleanup and cleanup["timed_out"]:
+            status, reason = "incomplete", "timeout"
+        elif isinstance(failure, asyncio.CancelledError):
+            status, reason = "incomplete", "cancelled"
+        elif failure is not None:
+            status, reason = "failed", "sandbox_error"
+        else:
+            status, reason = _invocation_outcome(run_metadata, cleanup["return_code"] if cleanup else None)
+        if artifacts is not None:
+            state.observations = await asyncio.to_thread(
+                parse_artifact_observations,
+                artifacts,
+                model_ref=self.config.model_server,
+                status=status,
+                error_type=reason,
+                run_metadata=run_metadata,
+            )
+        else:
+            state.observations = AgentObservationBundle(
+                source="claude_code", gaps=[ObservationGap(code="agent_artifact_unavailable")]
+            )
+        if state.runtime_info is None:
+            state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
+        if cleanup:
+            access = state.request.sandbox_access
+            state.observations.records.append(
+                SandboxObservation(
+                    role="agent",
+                    provider=access.connection.provider_config_ref if access else self.config.sandbox_provider,
+                    outcome=(
+                        "timeout"
+                        if cleanup["timed_out"]
+                        else "cancelled"
+                        if reason == "cancelled"
+                        else "failed"
+                        if status == "failed"
+                        else "completed"
+                    ),
+                    exit_code=cleanup["return_code"],
+                    error_type=reason,
+                )
+            )
+        if failure is not None:
+            raise failure
+        return self._response_from_output(body, items, model, run_metadata, status=status)
+
     async def responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        session_id = self._agent_session_id_from_request(request)
+        if session_id is not None:
+            state = self._require_agent_session(session_id)
+            assert isinstance(state, ClaudeCodeSandboxSession)
+            if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
+                raise HTTPException(409, "Claude activation does not match the seeded session and rollout")
+            if state.session.closing:
+                raise HTTPException(409, "Claude session is closing")
+            self._validate_sandbox_request(body)
+            prompt, system = self._conversation_input(body)
+            if state.task is None:
+                state.activation_request = body.model_copy(deep=True)
+                state.task = asyncio.create_task(
+                    self._sandbox_response(state, state.activation_request, prompt=prompt, system=system)
+                )
+            elif body != state.activation_request:
+                raise HTTPException(409, "Claude sandbox sessions support one activation; retry the same request")
+            return (await asyncio.shield(state.task)).model_copy(deep=True)
         return await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
 
     async def _create_episode(
@@ -704,6 +856,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         return AgentEpisode(response=response, observations=observations)
 
     async def run(self, request: Request, body: ClaudeCodeAgentRunRequest) -> ClaudeCodeAgentVerifyResponse:
+        if self._agent_session_id_from_request(request) is not None:
+            raise HTTPException(409, "Claude Code sandbox sessions must use EnvironmentServer /run")
+        if self.config.resources_server is None:
+            raise HTTPException(422, "Local Claude Code /run requires resources_server")
         async with self.sem:
             cookies = request.cookies
 

@@ -21,12 +21,14 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import FastAPI
 from pydantic import ConfigDict, Field, PrivateAttr
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from resources_servers.competitive_coding_challenges.ccc_eval import CCCEvaluator
 
@@ -76,6 +78,17 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
     return "\n".join(texts).strip()
 
 
+def _resolve_test_file(test_file: str) -> str:
+    """Find a relative ``test_file`` from the server dir, or else from the Gym root.
+
+    The server runs from its own directory, but benchmark configs such as ``benchmarks/ioi/config.yaml`` give
+    paths relative to the Gym root.
+    """
+    if os.path.isabs(test_file) or os.path.exists(test_file) or not (PARENT_DIR / test_file).exists():
+        return test_file
+    return str(PARENT_DIR / test_file)
+
+
 class CompetitiveCodingChallengesResourcesServerConfig(BaseResourcesServerConfig):
     # These fields are populated from the NeMo-Gym config tree, so they can be
     # overridden from `run_grpo_nemo_gym.py` via Hydra CLI args instead of being
@@ -90,6 +103,10 @@ class CompetitiveCodingChallengesResourcesServerConfig(BaseResourcesServerConfig
 
 
 class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
+    # Each submission is evaluated on its own: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: CompetitiveCodingChallengesResourcesServerConfig
 
     _evaluator: Optional[CCCEvaluator] = PrivateAttr(default=None)
@@ -280,7 +297,7 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
         if os.path.abspath(self.config.shared_dir) == "/tmp":
             LOG.warning(
                 "CCC shared_dir is /tmp. If the resources server and sandbox run in separate containers, "
-                "/tmp may not be visible to both. Set SHARED_TEMP_DIR to a path mounted into both containers."
+                "/tmp may not be visible to both. Set CCC_SHARED_TEMP_DIR to a path mounted into both containers."
             )
 
         print(
@@ -291,7 +308,7 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
 
         self._evaluator = CCCEvaluator(
             config={
-                "test_file": self.config.test_file,
+                "test_file": _resolve_test_file(self.config.test_file),
                 "test_batch_size": self.config.test_batch_size,
                 "time_scale": self.config.time_scale,
                 "shared_dir": self.config.shared_dir,
@@ -322,6 +339,8 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
 
         reward = 0.0
         details: dict[str, Any] = {}
+        failure_kind = None
+        failure_reason = None
         try:
             evaluation_entry = {
                 "competition_id": body.competition_id,
@@ -334,8 +353,14 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
                 evaluation_entry["total_time"] = payload["total_time"]
             details = await self._evaluator.eval_single(evaluation_entry)
             reward = self._compute_reward(body, details)
+            if details.get("infra_error"):
+                failure_kind, failure_reason = PROVIDER_UNAVAILABLE, details["infra_error"]
+        except UnicodeEncodeError as e:
+            # The generated code cannot be written as UTF-8 (a lone surrogate): the model's output, so it stays scored.
+            details = {"error": str(e)}
         except Exception as e:
             details = {"error": str(e)}
+            failure_kind, failure_reason = VERIFIER_ERROR, str(e)
 
         if LOG_JSONL_PATH:
             await self._append_log_jsonl(
@@ -352,6 +377,9 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
             **payload,
             reward=reward,
             details=details,
+            mask_sample=failure_kind is not None,
+            failure_kind=failure_kind,
+            failure_reason=failure_reason,
             num_tests_run=details.get("num_tests_run", 0),
             total_test_execution_time_s=details.get("total_test_execution_time_s", 0.0),
             mean_test_execution_time_s=details.get("mean_test_execution_time_s", 0.0),
