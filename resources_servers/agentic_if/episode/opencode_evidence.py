@@ -36,10 +36,11 @@ def visible_assistant_text(text: str) -> str:
     return text.split("<think>", 1)[0]
 
 
-def refused(tool: str, status: object, output: object) -> bool:
-    """The harness refused a call before running it, because its arguments do not fit the tool's schema (the
-    profile plugin's error text). The evidence marks such a call `rejected`."""
-    return status == "error" and str(output).startswith("The %s tool was called with invalid arguments" % tool)
+def refused(tool: str, status: object, error: object) -> bool:
+    """The harness refused a call before running it, because its arguments do not fit the tool's schema. Read from
+    OpenCode's own error text: the profile plugin may show the model other words. The evidence marks such a call
+    `rejected`."""
+    return status == "error" and str(error).startswith("The %s tool was called with invalid arguments" % tool)
 
 
 def _object(value: object) -> dict[str, JsonValue]:
@@ -205,7 +206,7 @@ def opencode_evidence(
                         model_tool=tool,
                         model_args=model_args,
                         args=_arguments(tool, state, model_args, (interfaces or {}).get(tool, {})),
-                        rejected=tool == "invalid" or refused(tool, state.get("status"), output),
+                        rejected=tool == "invalid" or refused(tool, state.get("status"), state.get("error")),
                     )
                 )
                 if state.get("status") not in {"completed", "error"}:

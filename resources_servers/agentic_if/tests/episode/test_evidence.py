@@ -69,6 +69,25 @@ def test_rejected_calls_keep_actor_interface_and_opencode_execution_facts():
     assert evidence.steps[1].error
 
 
+def test_a_rejected_call_stays_rejected_when_the_model_was_shown_other_words():
+    source = export(
+        message(
+            "a",
+            "assistant",
+            call(
+                "bad",
+                status="error",
+                output=None,
+                error="The read tool was called with invalid arguments: filePath",
+                metadata={"nemo_gym_profile": {"model_error": "read failed: Invalid arguments: path"}},
+            ),
+        )
+    )
+    evidence = opencode_evidence(source)
+    assert evidence.steps[0].calls[0].rejected
+    assert evidence.steps[1].output == "read failed: Invalid arguments: path"
+
+
 def test_installed_interface_normalization_keeps_nested_args_fixed_values_and_false():
     args = {"location": {"file": "/app/x"}, "oldText": "old", "newText": "new", "all": False}
     source = export(message("a", "assistant", call("edit", "edit", input=args)))
