@@ -5501,6 +5501,41 @@ class TestRolloutCollection:
         ]
         assert (tmp_path / "output_resubmit_offset").read_text() == "2\n"
 
+    @pytest.mark.parametrize("missing", ["output", "materialized inputs"])
+    async def test_a_resume_with_nothing_to_resume_starts_the_tracking_run_over(
+        self, tmp_path: Path, empty_global_config: MagicMock, monkeypatch: pytest.MonkeyPatch, missing: str
+    ) -> None:
+        """The exporters reopened the run recorded next to the output, but collection starts the output anew."""
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(
+            orjson.dumps({"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}) + b"\n"
+        )
+        output_fpath = tmp_path / "output.jsonl"
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result(_CompletedRollout(row=example, result={"reward": 1.0}, rollout_latency_ms=None))
+                    futures.append(future)
+                return futures
+
+        base = dict(input_jsonl_fpath=str(input_fpath), output_jsonl_fpath=str(output_fpath), disable_aggregation=True)
+        await Helper().run_from_config(RolloutCollectionConfig(**base, resume_from_cache=False))
+        exporter = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [exporter])
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_rollouts", MagicMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_metrics", MagicMock())
+
+        config = RolloutCollectionConfig(**base, resume_from_cache=True)
+        await Helper().run_from_config(config)
+        exporter.start_over.assert_not_called()
+
+        (output_fpath if missing == "output" else config.materialized_jsonl_fpath).unlink()
+        await Helper().run_from_config(config)
+        exporter.start_over.assert_called_once_with()
+
     @pytest.mark.parametrize("resume_from_cache", [False, True])
     async def test_run_from_config_creates_missing_output_dir(
         self, tmp_path: Path, empty_global_config: MagicMock, resume_from_cache: bool

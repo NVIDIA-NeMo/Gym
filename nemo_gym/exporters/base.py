@@ -43,6 +43,10 @@ class BaseExporter(ABC):
 
     def __init__(self, global_config_dict: DictConfig) -> None:
         self.global_config_dict = global_config_dict
+        # Whether `setup` reopened the run recorded next to the output.
+        self.reopened = False
+        # Set by `start_over`: the output starts anew, so the recorded run is not reopened.
+        self._starting_over = False
 
     @abstractmethod
     def setup(self) -> None:
@@ -77,6 +81,33 @@ class BaseExporter(ABC):
     def export_rollouts(self, rollouts: list[dict[str, Any]]) -> None:
         self._guard("rollouts", self._log_rollouts, rollouts)
 
+    def start_over(self) -> None:
+        """Track the output in a new run after all.
+
+        Rollout collection calls this when it was asked to resume its output but found nothing to resume and starts it
+        anew, before it logs any rollout. A no-op unless `setup` reopened the recorded run.
+        """
+        if self.reopened:
+            self._guard("a new run", self._start_over)
+
+    def _start_over(self) -> None:
+        try:
+            self._close_reopened()
+        except Exception as e:
+            # Leaving the old run as it was is best effort; the output gets a run of its own either way.
+            logger.warning(
+                f"Exporter {self.name} could not restore the reopened run; starting a new one anyway: {e}",
+                exc_info=True,
+            )
+        self._starting_over = True
+        self.setup()
+        self.export_config()
+
+    def _close_reopened(self) -> None:
+        """Close the reopened run. A backend that marks a run when it reopens it undoes that mark here, and lets go
+        of the run first, so that nothing more reaches it even when closing fails."""
+        self.teardown()
+
     def _guard(self, what: str, fn, *args) -> None:
         try:
             fn(*args)
@@ -96,8 +127,20 @@ class BaseExporter(ABC):
         return output.with_name(f"{output.stem}_{self.name}_run_id")
 
     def _recorded_run_id(self) -> Optional[str]:
+        """The run to reopen: the one recorded next to the output, when this run continues that output.
+
+        A resume continues it, and so does a resubmit (collection turns it into a resume, after the exporters have
+        opened) and a judge-failure recovery that appends to it. A fresh run into the same output starts its rollouts
+        anew, so it starts a new tracking run too, as does a resume that finds nothing to resume (`start_over`).
+        """
         run_id_fpath = self._run_id_fpath()
-        if run_id_fpath is None or not run_id_fpath.exists():
+        config = self.global_config_dict
+        continues = (
+            config.get("resume_from_cache")
+            or config.get("resubmit")
+            or (config.get("judge_failed_only") and config.get("append"))
+        )
+        if self._starting_over or run_id_fpath is None or not run_id_fpath.exists() or not continues:
             return None
         return run_id_fpath.read_text().strip()
 
