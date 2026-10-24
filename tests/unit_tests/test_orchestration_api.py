@@ -472,3 +472,16 @@ def test_command_benchmark_without_resumable_is_accepted():
     driver = {**DRIVER, "benchmarks": {"gsm8k": {"command": "bash run.sh", "resumable": False}}}
     config = SubmitConfig.model_validate(_config(driver=driver))
     assert config.driver.benchmarks["gsm8k"].resume_config is None
+
+
+@pytest.mark.parametrize("name", ["", "9INVALID", "HAS-DASH", "A,B", "A=VALUE", "A;echo injected", "LINE\nBREAK"])
+def test_driver_container_env_rejects_non_names(name: str) -> None:
+    with pytest.raises(ValidationError, match="container_env entries must be environment variable names"):
+        SubmitConfig.model_validate(_config(driver={**DRIVER, "container_env": [name]}))
+
+
+def test_driver_container_env_keeps_valid_host_names() -> None:
+    names = ["UV_CONSTRAINT", "_PRIVATE", "mixed_CASE_2"]
+    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "container_env": names}))
+    assert config.driver.container_env == names
+    assert SubmitConfig.model_validate(_config()).driver.container_env == []
