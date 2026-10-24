@@ -1,13 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Opt-in tool image/video transport over the stock vLLM model server."""
+"""Opt-in tool image/video transport over the stock vLLM model server.
 
+Also sends local video paths, which NeMo-RL Gym rows use, as file:// URLs: vLLM reads
+local media only from file:// URLs under --allowed-local-media-path.
+"""
+
+from pathlib import Path
 from typing import Any
 
 from nemo_gym.responses_converter import ResponsesConverter, ResponsesConverterState
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.app import VLLMModel
+
+
+def _local_video_as_file_url(part: Any) -> Any:
+    """Return an ``input_video`` part with an absolute local path as a file:// URL."""
+    if not isinstance(part, dict) or part.get("type") != "input_video":
+        return part
+    key = "video_url" if "video_url" in part else "video"
+    source = part.get(key)
+    if isinstance(source, str) and source.startswith("/"):
+        return {**part, key: Path(source).as_uri()}
+    if isinstance(source, dict) and str(source.get("url", "")).startswith("/"):
+        return {**part, key: {**source, "url": Path(source["url"]).as_uri()}}
+    return part
 
 
 class ToolMediaConverter(ResponsesConverter):
@@ -16,6 +34,18 @@ class ToolMediaConverter(ResponsesConverter):
     Other model servers use the shared converter. This adapter is for a vLLM
     backend explicitly validated for tool-role media.
     """
+
+    def _format_message(
+        self,
+        m: dict,
+        state: ResponsesConverterState,
+        *,
+        drop_unrepresentable_request_fields: bool = False,
+    ) -> None:
+        content = m.get("content")
+        if isinstance(content, list):
+            m = {**m, "content": [_local_video_as_file_url(part) for part in content]}
+        super()._format_message(m, state, drop_unrepresentable_request_fields=drop_unrepresentable_request_fields)
 
     def _format_function_call_output(
         self,

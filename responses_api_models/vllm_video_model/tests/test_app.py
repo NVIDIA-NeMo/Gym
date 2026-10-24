@@ -52,6 +52,28 @@ def test_media_stays_in_original_tool_result(parts):
     assert returned[0].output == parts
 
 
+@pytest.mark.parametrize(
+    ("source", "url"),
+    [
+        ("/videos/a b.mp4", "file:///videos/a%20b.mp4"),
+        ("file:///videos/a.mp4", "file:///videos/a.mp4"),
+        (VIDEO, VIDEO),
+    ],
+)
+def test_local_video_paths_are_sent_as_file_urls(source, url):
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {
+                "role": "user",
+                "content": [{"type": "input_video", "video_url": source}, {"type": "input_text", "text": "Q"}],
+            }
+        ]
+    )
+    converter = ToolMediaConverter(return_token_id_information=False)
+    chat = converter.responses_to_chat_completion_create_params(params).model_dump(exclude_none=True)
+    assert chat["messages"][0]["content"][0] == {"type": "video_url", "video_url": {"url": url}}
+
+
 def test_generic_converter_still_refuses_tool_video():
     converter = ResponsesConverter(return_token_id_information=False)
     with pytest.raises(NotImplementedError, match="input_video"):
