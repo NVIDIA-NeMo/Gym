@@ -4,6 +4,7 @@
 
 import asyncio
 import shlex
+import shutil
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -159,6 +160,39 @@ async def test_exec_preserves_exit_output_and_quotes_env_and_user(backend):
     assert wrapped[:4] == ["su", "worker", "-s", "/bin/bash"]
     assert shlex.split(wrapped[-1])[1] == "VALUE=x'; touch /bad"
     assert kwargs == {"cwd": "/work space", "timeout_seconds": 42}
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is required for execution-backed checks")
+@pytest.mark.parametrize(
+    "command, env, expected_code, expected_output",
+    [
+        ("printf ok", {"PATH": "/opt/app/bin"}, 0, "ok"),
+        ("printf '%s' \"$PATH\"", {"PATH": "/opt/app/bin"}, 0, "/opt/app/bin"),
+        ("printf '%s' \"$VALUE\"; exit 7", {"PATH": "/opt/app/bin", "VALUE": "x'; touch /bad"}, 7, "x'; touch /bad"),
+        ("printf no-env", None, 0, "no-env"),
+    ],
+)
+async def test_exec_runs_with_restricted_path(backend, command, env, expected_code, expected_output):
+    sandbox, _, provider = backend
+
+    async def execute(argv, **kwargs):
+        process = await asyncio.create_subprocess_exec(
+            shutil.which("bash"),
+            *argv[1:],
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        return SimpleNamespace(
+            stdout=stdout.decode(errors="replace"),
+            stderr=stderr.decode(errors="replace"),
+            returncode=process.returncode,
+        )
+
+    sandbox.exec.side_effect = execute
+    result = await provider.exec(SandboxHandle("cw-test", "cwsandbox", sandbox), command, env=env)
+    assert (result.return_code, result.stdout, result.stderr) == (expected_code, expected_output, "")
 
 
 @pytest.mark.asyncio
