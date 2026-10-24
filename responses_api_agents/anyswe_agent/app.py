@@ -207,8 +207,18 @@ def _record_test_status(statuses: Dict[str, Dict[str, str]], test: str, status: 
             matches[test] = status
 
 
-def _r2e_summary_test_name(text: str) -> str:
+def _r2e_summary_test_name(text: str, known_tests: set[str]) -> str:
     """Remove pytest's failure explanation without truncating a parameter ID containing `` - ``."""
+    # PASSED and verbose lines expose the complete identity without a diagnostic suffix.
+    # Prefer those identities: arbitrary parameter IDs need not have balanced brackets.
+    if text in known_tests:
+        return text
+    end = len(text)
+    while (separator := text.rfind(" - ", 0, end)) >= 0:
+        candidate = text[:separator].strip()
+        if candidate in known_tests:
+            return candidate
+        end = separator
     depth = 0
     for i, character in enumerate(text):
         if character == "[":
@@ -222,15 +232,20 @@ def _r2e_summary_test_name(text: str) -> str:
 
 def _r2e_resolved(instance: Dict[str, Any], log: str) -> bool:
     statuses: Dict[str, Dict[str, str]] = {}
-    for raw_line in log.splitlines():
-        # Strip ANSI escapes from the whole line first: with color on, pytest prints
-        # "\x1b[32mPASSED\x1b[0m r2e_tests/test_1.py::\x1b[1mtest_x\x1b[0m".
-        line = _ANSI_ESCAPE.sub("", raw_line).strip()
+    lines = [_ANSI_ESCAPE.sub("", line).strip() for line in log.splitlines()]
+    known_tests = set()
+    for line in lines:
+        fields = line.split(maxsplit=1)
+        if len(fields) == 2 and fields[0] == "PASSED":
+            known_tests.add(fields[1])
+        if verbose := _VERBOSE_TEST_LINE.match(line):
+            known_tests.add(verbose.group(1))
+    for line in lines:
         fields = line.split(maxsplit=1)
         if len(fields) > 1 and fields[0] in _TEST_STATUSES:
             # PASSED lines have no diagnostic suffix. Parameter IDs are arbitrary text, including unmatched
             # brackets and " - ", so parsing them as a failure explanation loses valid identities.
-            name = fields[1] if fields[0] == "PASSED" else _r2e_summary_test_name(fields[1])
+            name = fields[1] if fields[0] == "PASSED" else _r2e_summary_test_name(fields[1], known_tests)
             _record_test_status(statuses, name, fields[0])
             continue
         # pytest's verbose per-test line "<node id> STATUS [ 42%]", for runners that suppress the -rA summary.

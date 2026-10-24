@@ -126,7 +126,10 @@ including an expected teardown `ERROR` after a passing test body. This legacy
 encoding can merge distinct parameter IDs; restoring their identity requires a
 dataset format decision. Explicit test lists use their separate identity rules;
 passing summary lines preserve arbitrary brackets in parameter IDs. Failure
-summary parsing still has limits for unmatched brackets in parameter IDs.
+diagnostics are removed by matching complete names observed in passing or verbose
+lines first, so teardown errors retain the same identity even with unmatched
+brackets in parameter IDs. Failure-only names still inherit pytest's text-format
+ambiguity when no complete identity was observed.
 
 Before running an R2E-Gym image's `run_tests.sh`, the grader links the image's
 `/r2e_tests` into `/testbed`, as R2E-Gym's own runtime does.

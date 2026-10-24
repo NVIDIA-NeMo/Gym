@@ -71,6 +71,23 @@ def test_real_pytest_teardown_error_can_match_expected_error(tmp_path):
     assert not _r2e_expected_resolved({"test_x": "PASSED"}, log)
 
 
+@pytest.mark.parametrize("parameter_id", ["a] - b", "a[ - b", "x - y] - z"])
+def test_real_pytest_teardown_failure_overrides_passing_parameter(tmp_path, parameter_id):
+    log = _pytest_log(
+        tmp_path,
+        "import pytest\n@pytest.fixture(autouse=True)\ndef resource():\n    yield\n"
+        "    raise RuntimeError('teardown failed')\n"
+        f"@pytest.mark.parametrize('value',[0],ids=[{parameter_id!r}])\n"
+        "def test_x(value):\n    assert True\n",
+        1,
+    )
+    required = {"FAIL_TO_PASS": [f"test_probe.py::test_x[{parameter_id}]"]}
+    assert not _r2e_resolved(required, log)
+    # Duplicate observations retain the failure even when a retry prints PASSED later.
+    summary = log.split("short test summary info", 1)[1].splitlines()[1:-1]
+    assert not _r2e_resolved(required, "\n".join(reversed(summary)))
+
+
 @pytest.mark.parametrize("passing", [True, False])
 def test_real_pytest_preserves_upstream_encoded_parameter(tmp_path, passing):
     log = _pytest_log(
