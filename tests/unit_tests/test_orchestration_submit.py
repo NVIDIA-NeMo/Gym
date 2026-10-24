@@ -21,7 +21,7 @@ from pytest import MonkeyPatch
 import nemo_gym.orchestration.submit as submit_module
 from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
-from nemo_gym.orchestration.jobs import SubmissionRecord
+from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
 
 
 COMPUTE = {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}}
@@ -49,6 +49,9 @@ class _StubExecutor(BaseExecutor):
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
         type(self).last_run_config = config
         return None
+
+    def resubmit(self, record: SubmissionRecord, benchmark: str) -> BenchmarkJob:  # pragma: no cover - unused
+        raise NotImplementedError
 
 
 def test_submit_raises_when_resumable_on_unsupported_executor(monkeypatch: MonkeyPatch):

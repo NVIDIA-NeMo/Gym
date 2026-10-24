@@ -8,12 +8,12 @@ runtime=$1
 codex_version=$2
 node_version=22.19.0
 [[ "$codex_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'An exact Codex version is required' >&2; exit 1; }
-[ "$(uname -s)" = Linux ] || { echo 'Native Codex requires Linux' >&2; exit 1; }
-python3 -c 'import sys; assert sys.version_info >= (3, 8), "Native Codex requires Python >=3.8"'
+[ "$(uname -s)" = Linux ] || { echo 'Codex in the task sandbox requires Linux' >&2; exit 1; }
+python3 -c 'import sys; assert sys.version_info >= (3, 8), "Codex in the task sandbox requires Python >=3.8"'
 case "$(uname -m)" in
   x86_64) arch=x64 ;;
   aarch64) arch=arm64 ;;
-  *) echo 'Native Codex supports Linux x86_64/aarch64 sandboxes only' >&2; exit 1 ;;
+  *) echo 'Codex in the task sandbox supports Linux x86_64/aarch64 sandboxes only' >&2; exit 1 ;;
 esac
 platform="linux-${arch}"
 node_dist="https://nodejs.org/dist/v${node_version}"
@@ -24,19 +24,19 @@ elif [[ "$(ldd --version 2>&1 || true)" == *musl* ]]; then
   platform=linux-x64-musl
   node_dist="https://unofficial-builds.nodejs.org/download/release/v${node_version}"
 else
-  echo 'Native Codex requires glibc or musl; could not identify sandbox libc' >&2
+  echo 'Codex in the task sandbox requires glibc or musl; could not identify sandbox libc' >&2
   exit 1
 fi
 
 install_packages() {
-  [ "$(id -u)" = 0 ] || { echo "Native Codex requires $*: preinstall them or use a root image." >&2; exit 1; }
+  [ "$(id -u)" = 0 ] || { echo "Codex in the task sandbox requires $*: preinstall them or use a root image." >&2; exit 1; }
   if command -v apk >/dev/null 2>&1; then
     apk add --no-cache "$@"
   elif command -v apt-get >/dev/null 2>&1; then
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
   else
-    echo "Native Codex requires $*: preinstall them (automatic installation requires apt-get or apk)." >&2
+    echo "Codex in the task sandbox requires $*: preinstall them (automatic installation requires apt-get or apk)." >&2
     exit 1
   fi
 }

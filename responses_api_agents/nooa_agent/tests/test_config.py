@@ -169,7 +169,5 @@ def test_episode_policy_is_not_agent_configuration(field: str) -> None:
         agent_config(**{field: 1})
 
 
-def test_agent_sessions_require_one_worker() -> None:
-    assert agent_config(num_workers=1).num_workers == 1
-    with pytest.raises(ValidationError, match="num_workers=1"):
-        agent_config(num_workers=2)
+def test_several_workers_are_accepted() -> None:
+    assert agent_config(num_workers=2).num_workers == 2
