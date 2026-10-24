@@ -61,6 +61,15 @@ def test_argument_reserialization_is_tolerated_but_argument_changes_are_not():
     assert assistant_fingerprint([base]) != assistant_fingerprint([changed])
 
 
+def test_arguments_with_an_integer_wider_than_64_bits_still_fingerprint():
+    base = {"type": "function_call", "call_id": "c1", "name": "f", "arguments": '{"a": %d, "b": 2}' % 2**70}
+    reserialized = dict(base, arguments='{"b":2,"a":%d}' % 2**70)
+    changed = dict(base, arguments='{"a": %d, "b": 2}' % (2**70 + 1))
+    assert assistant_fingerprint([base]) not in ("", None)
+    assert assistant_fingerprint([base]) == assistant_fingerprint([reserialized])
+    assert assistant_fingerprint([base]) != assistant_fingerprint([changed])
+
+
 def test_reasoning_items_are_excluded():
     # A harness need not echo standalone reasoning items; including them would
     # make the fingerprint depend on dialect and echo behavior.
