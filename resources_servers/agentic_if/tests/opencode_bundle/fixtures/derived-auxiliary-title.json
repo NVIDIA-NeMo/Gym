@@ -1,0 +1,102 @@
+{
+ "case": "derived-auxiliary-title",
+ "kind": "gateway",
+ "notes": "",
+ "spec": {
+  "schema_version": 1,
+  "harness": "opencode",
+  "task_backend": "swe",
+  "tools": {
+   "tool_names": {
+    "bash": "bash"
+   },
+   "tool_descriptions": {},
+   "tool_parameter_descriptions": {},
+   "tool_interfaces": {}
+  },
+  "workspace_files": {},
+  "events": [],
+  "checks": [],
+  "provenance": {}
+ },
+ "params": {
+  "input": [
+   {
+    "content": "Literal",
+    "role": "system",
+    "type": "message"
+   },
+   {
+    "content": "Fix it",
+    "role": "user",
+    "type": "message"
+   }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": []
+ },
+ "calls": [
+  {
+   "headers": {
+    "x-session-id": "root"
+   },
+   "opencode_request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "Generate a title"
+     },
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ]
+   },
+   "upstream_reply": {
+    "json": {
+     "id": "title",
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "Title"
+       },
+       "finish_reason": "stop"
+      }
+     ]
+    }
+   },
+   "returned": {
+    "json": {
+     "id": "title",
+     "choices": [
+      {
+       "message": {
+        "role": "assistant",
+        "content": "Title"
+       },
+       "finish_reason": "stop"
+      }
+     ]
+    }
+   },
+   "error": null,
+   "outgoing_request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "Generate a title"
+     },
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ]
+   },
+   "opencode_request_unchanged": true
+  }
+ ],
+ "observations": [],
+ "issues": []
+}

@@ -39,6 +39,7 @@ from resources_servers.scale_swe.verification import (
     drop_test_patch_files,
     extract_statuses,
     grade,
+    infrastructure_failure,
     run_verification,
     slice_test_output,
     unique_test_files,
@@ -279,8 +280,8 @@ class TestDropTestPatchFiles:
 
 
 class _FakeSandbox:
-    def __init__(self, stdout: str, return_code: int = 0) -> None:
-        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=return_code)
+    def __init__(self, stdout: str | None, return_code: int = 0, error_type: str | None = None) -> None:
+        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=return_code, error_type=error_type)
         self.commands: list[str] = []
 
     async def exec(self, command: str, timeout_s=None):
@@ -327,6 +328,42 @@ class TestRunVerification:
         )
         result = await run_verification(sandbox=_FakeSandbox(log), inputs=_inputs(pass_to_pass=[]))
         assert result.resolved is True  # would be masked by the install-time "FAILED" if unsliced
+
+
+class TestInfrastructureFailure:
+    """Finished runs that never tested the patch; an Environment Server session treats them as no verdict."""
+
+    @pytest.mark.asyncio
+    async def test_a_provider_failure_without_an_exit_status_did_not_test_the_patch(self) -> None:
+        result = await run_verification(
+            sandbox=_FakeSandbox(None, return_code=125, error_type="sandbox"), inputs=_inputs(pass_to_pass=[])
+        )
+        assert result.completed and result.exec_error_type == "sandbox"
+        assert infrastructure_failure(result) == "verifier exec ended without an exit status (sandbox)"
+
+    @pytest.mark.asyncio
+    async def test_a_script_that_never_reached_the_tests_did_not_test_the_patch(self) -> None:
+        result = await run_verification(
+            sandbox=_FakeSandbox("bash: /tmp/nemo_gym_eval.sh: No such file or directory\n", return_code=127),
+            inputs=_inputs(),
+        )
+        assert infrastructure_failure(result) == "eval script stopped before the tests started"
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_stays_a_verdict_even_without_output(self) -> None:
+        # A test the patch made hang must still score 0; a provider may return no output on timeout.
+        result = await run_verification(
+            sandbox=_FakeSandbox(None, return_code=124, error_type="timeout"), inputs=_inputs()
+        )
+        assert result.completed and not result.resolved
+        assert infrastructure_failure(result) is None
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_reached_the_tests_is_a_verdict(self) -> None:
+        log = f"{TEST_OUTPUT_BEGIN}\nFAILED {F2P_SCRIPT_NAME}::test_thing\n{TEST_OUTPUT_END}"
+        result = await run_verification(sandbox=_FakeSandbox(log, return_code=1), inputs=_inputs(pass_to_pass=[]))
+        assert result.completed and not result.resolved
+        assert infrastructure_failure(result) is None
 
 
 class TestVerifyResponseShape:

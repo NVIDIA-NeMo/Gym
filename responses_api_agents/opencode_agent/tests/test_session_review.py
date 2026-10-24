@@ -114,6 +114,8 @@ def test_observation_parse_failure_preserves_response(setup, caplog):
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
         closed.raise_for_status()
     assert "observation_capture_failed" in {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
+    # With no parsed session, close sends no trajectory, so collection keeps its call-built turns.
+    assert "trajectory" not in closed.json()
     assert "Failed to parse OpenCode observations" in caplog.text
 
 

@@ -334,3 +334,17 @@ def test_reseeding_running_executable_publishes_a_separate_inode(sandbox):
             process.wait(timeout=10)
     assert not list(target.parent.glob(".opencode-*"))
     assert not (root / "download.log").exists() and not (root / "packages.log").exists()
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+def test_pinned_ripgrep_replaces_the_best_effort_package_install(sandbox, pinned):
+    root, env = sandbox
+    (root / "bin/rg").unlink()
+    (root / "runtime").mkdir()
+    cached = root / "runtime/opencode"
+    cached.write_text("#!/bin/bash\necho 1.17.11\n")
+    cached.chmod(0o755)
+    result = run_installer(root, env | ({"NG_OPENCODE_SKIP_RIPGREP": "1"} if pinned else {}))
+    assert result.returncode == 0, result.stderr
+    assert (root / "packages.log").exists() is not pinned
+    assert ("ripgrep" in result.stderr or (root / "bin/rg").exists()) is not pinned

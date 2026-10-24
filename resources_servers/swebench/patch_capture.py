@@ -183,10 +183,28 @@ async def prepare_git_for_commits(sandbox: Any, workdir: str, log_prefix: str = 
         print(f"[{log_prefix}] git identity setup failed: {exc}", flush=True)
 
 
+class CaptureCommandError(RuntimeError):
+    """A capture command exited non-zero in the agent's sandbox.
+
+    ``error_type`` is the exec result's: ``None`` when git itself failed on the repository the agent left, and set
+    (such as "timeout" or "sandbox") when the provider reported no exit status.
+    """
+
+    def __init__(self, message: str, *, return_code: int, error_type: str | None) -> None:
+        super().__init__(message)
+        self.return_code = return_code
+        self.error_type = error_type
+
+
 async def _exec(sandbox: Any, command: str, *, timeout_s: int = 300) -> Any:
     result = await sandbox.exec(command, timeout_s=timeout_s)
     if result.return_code != 0:
-        raise RuntimeError(result.stderr or result.stdout or f"exit {result.return_code}")
+        raise CaptureCommandError(
+            result.stderr or result.stdout or f"exit {result.return_code}",
+            return_code=result.return_code,
+            # Sandboxes are duck-typed here, and some test doubles return results without error_type.
+            error_type=getattr(result, "error_type", None),
+        )
     return result
 
 
@@ -199,8 +217,8 @@ async def capture_model_patch(
     drop_sections: Callable[[str, Iterable[str]], str] | None = None,
 ) -> PatchCapture:
     """Capture the agent's patch from its sandbox per ``mode``. ``drop_sections(patch, paths)``
-    strips files that were already untracked before the agent started. Raises ``RuntimeError``
-    when git fails; an agent that left nothing yields an empty patch."""
+    strips files that were already untracked before the agent started. Raises ``CaptureCommandError``
+    (a ``RuntimeError``) when git fails; an agent that left nothing yields an empty patch."""
     if mode not in PATCH_CAPTURE_MODES:
         raise ValueError(f"unknown patch_capture_mode {mode!r}; expected one of {PATCH_CAPTURE_MODES}")
     started = time()

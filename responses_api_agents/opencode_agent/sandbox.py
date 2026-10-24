@@ -3,23 +3,33 @@
 """OpenCode artifacts and request state over the shared sandbox lifecycle."""
 
 import asyncio
+import functools
 import json
 import logging
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
+from time import monotonic
+from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
+from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
 from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, TrajectoryRecord
+from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.sandbox.utils import read_text, upload_text
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
 from responses_api_agents.opencode_agent.observability import scope_opencode_activation
+
+
+# The runner is a script the adapter uploads into the sandbox. Its export-status helpers are imported only where an
+# export result is read, so importing the adapter does not import the runner.
+if TYPE_CHECKING:
+    from responses_api_agents.opencode_agent.sandbox_runner import ExportStatus
 
 
 LOG = logging.getLogger(__name__)
@@ -57,6 +67,48 @@ def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
         return None
 
 
+@functools.cache
+def _export_status_adapter() -> TypeAdapter:
+    from responses_api_agents.opencode_agent.sandbox_runner import ExportStatus
+
+    return TypeAdapter(ExportStatus)
+
+
+def _export_status(result: SandboxExecResult) -> "ExportStatus | None":
+    """The runner's one-line export status, from stdout or wherever the provider put the command's output."""
+    for stream in (result.stdout, result.stderr):
+        for line in reversed((stream or "").splitlines()):
+            if line.startswith("{"):
+                try:
+                    return _export_status_adapter().validate_json(line)
+                except ValidationError:
+                    continue
+    return None
+
+
+def _export_failure(result: SandboxExecResult, *, budget: float) -> str:
+    """Why ``--export`` failed: the runner's status first, then what the provider kept of its output.
+
+    OpenSandbox's background exec, for one, returns stderr merged into stdout and only the exit status as stderr.
+    """
+    from responses_api_agents.opencode_agent.sandbox_runner import export_failures
+
+    parts = [f"exit={result.return_code}, error={result.error_type}, exec budget {budget:.1f} s"]
+    status = _export_status(result)
+    if status is None:
+        parts.append(f"no export status; stdout: {(result.stdout or '')[-1000:]}")
+    else:
+        exported = sum(outcome == "ok" for outcome in status["sessions"].values())
+        parts.append(
+            f"{exported} of {len(status['sessions'])} sessions exported in {status['elapsed_seconds']} of "
+            f"{status['budget_seconds']} s{', deadline exhausted' if status['deadline_exhausted'] else ''}"
+        )
+        parts.extend(export_failures(status))
+    if result.stderr:
+        parts.append(f"stderr: {result.stderr[-1000:]}")
+    return "; ".join(parts)
+
+
 @dataclass
 class OpenCodeSandboxSession(AgentSessionState):
     """Keep OpenCode HOME/history under ``conversation_directory`` across launches.
@@ -86,6 +138,8 @@ class OpenCodeSandboxSession(AgentSessionState):
     trajectory: TrajectoryRecord | None = None
     activation_trajectory: TrajectoryRecord | None = None
     activation_id: int | None = None
+    export_dir: str | None = None
+    _export_gaps: list[ObservationGap] = field(default_factory=list, init=False, repr=False)
     _retained_activations: dict[int, tuple[AgentObservationBundle, TrajectoryRecord | None]] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -244,8 +298,66 @@ class OpenCodeSandboxSession(AgentSessionState):
             ],
         )
 
+    def take_export_gaps(self) -> list[ObservationGap]:
+        """Hand over export failures recorded since the last call, so each is reported once."""
+        gaps, self._export_gaps = self._export_gaps, []
+        return gaps
+
     async def collect_artifacts(self, *, timeout: float) -> str:
-        """Snapshot only after cleanup; keep observations before sandbox release."""
+        """Snapshot only after cleanup; keep observations before sandbox release.
+
+        With ``export_dir``, the owner's copies are written after the capture, whether or not it
+        succeeded, and inside this step's budget, so exporting can neither fail the capture nor delay
+        release. A failed export becomes an observation gap.
+        """
+        if self.export_dir is None:
+            return await self._capture_artifacts(timeout=timeout)
+        # Leave a tenth of the budget so the capture result returns before the step's own timeout.
+        export_deadline = monotonic() + timeout * 0.9
+        try:
+            return await self._capture_artifacts(timeout=timeout)
+        finally:
+            await self.write_exports(deadline=export_deadline)
+
+    async def write_exports(self, *, deadline: float) -> None:
+        """Write every OpenCode session's ``opencode export`` and the event log to ``export_dir``.
+
+        Runs only after confirmed termination, before the session directory is removed. Failures,
+        including an exhausted budget, are recorded as an ``export_dir_write_failed`` gap that names
+        each failed session from the runner's status line.
+        """
+        assert self.export_dir is not None
+        try:
+            budget = deadline - monotonic()
+            if budget <= 0:
+                raise TimeoutError("no time left in the artifact collection budget")
+            # The runner stops first, so it reports each session's outcome before its exec times out.
+            runner_budget = budget - min(5.0, 0.1 * budget)
+            exec_timeout = asyncio.timeout(budget)
+            try:
+                async with exec_timeout:
+                    result = await self.session.sandbox.exec(
+                        f"{quote(self.python_executable)} -I {quote(self.persistent_directory + '/sandbox_runner.py')} "
+                        f"--export {quote(self.session.session_dir)} {quote(self.persistent_directory)} "
+                        f"{quote(self.export_dir)} {runner_budget:.3f}",
+                        cwd=self.session.workdir,
+                        timeout_s=budget,
+                    )
+            except TimeoutError:
+                if not exec_timeout.expired():
+                    raise
+                raise TimeoutError(
+                    f"the export exec did not return within {budget:.1f} s (runner deadline {runner_budget:.1f} s)"
+                ) from None
+            if result.return_code != 0 or result.error_type:
+                raise RuntimeError(_export_failure(result, budget=budget))
+        except Exception as error:
+            LOG.warning("OpenCode session exports for %s are incomplete", self.export_dir, exc_info=True)
+            self._export_gaps.append(
+                ObservationGap(code="export_dir_write_failed", detail=f"{type(error).__name__}: {error}"[:2500])
+            )
+
+    async def _capture_artifacts(self, *, timeout: float) -> str:
         previous_session_id = self.harness_session_id
         try:
             self.stderr = (await self.read_text("stderr.log"))[-16000:]
@@ -257,6 +369,8 @@ class OpenCodeSandboxSession(AgentSessionState):
             if self.stderr:
                 raise RuntimeError(format_error_message(str(error), stderr=self.stderr)) from error
             raise
+        # Messages that predate this activation (earlier activations, an imported prefix) are history, not output.
+        scoped = self.is_continuation or bool(self.message_ids)
         if self.is_continuation:
             export_text = await self._read_export()
             export = json.loads(export_text)
@@ -267,6 +381,8 @@ class OpenCodeSandboxSession(AgentSessionState):
                 raise RuntimeError("OpenCode resumed a different OpenCode session")
             self.harness_session_id = harness_session_id
             self.message_ids = export["message_ids"]
+        elif scoped:
+            export = json.loads(await self._read_export())
         try:
             self.activation_log = await self.read_text("stdout.jsonl")
         except Exception:
@@ -285,7 +401,7 @@ class OpenCodeSandboxSession(AgentSessionState):
                     trajectory,
                     require_terminal_finish=True,
                     model_ref=self.model_ref,
-                    message_ids=set(export.get("activation_message_ids", [])) if self.is_continuation else None,
+                    message_ids=set(export.get("activation_message_ids", [])) if scoped else None,
                 )
                 if self.is_continuation:
                     assert self.activation_id is not None
@@ -299,6 +415,7 @@ class OpenCodeSandboxSession(AgentSessionState):
                     self.activation_trajectory = trajectory
                 else:
                     self.observations = observations
+                    self.trajectory = trajectory
         except Exception:
             LOG.exception("Failed to parse OpenCode observations")
             observations = AgentObservationBundle(
