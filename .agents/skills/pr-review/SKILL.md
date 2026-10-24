@@ -208,7 +208,13 @@ are not universal requirements.
   or caller depends on, not implementation details such as private helpers,
   call counts, or internal data layout. Flag tests that duplicate existing
   coverage, assert only that mocks were called, or would keep passing if the
-  behavior they claim to cover broke.
+  behavior they claim to cover broke. Check that fixtures and mocks preserve
+  the production behavior that matters, and challenge tests that repeat the
+  implementation, inspect source text, or assert incidental call sequences.
+  Recommend simplifying or removing a test when its maintenance cost outweighs
+  its protection. Internal-invariant tests, mocks, and negative cases are
+  appropriate when they protect a real correctness or performance
+  requirement; do not reject a test merely for being a unit test.
 - **Missing coverage.** New environments, verifiers, and changed verify()
   logic need tests. Before asking for a new test, check the existing tests;
   if the path is already covered, cite that test instead.
@@ -240,8 +246,10 @@ diff changes, look at the unchanged code that depends on it:
 - Sibling implementations of the same contract (other servers or adapters)
   that the change should have updated too.
 
-Anchor each such finding on the unchanged line that is now wrong, and say
-which change in the diff broke it. In a follow-up review, apply this only to
+Search for the affected symbols and assumptions, then read the actual paths;
+a symbol match alone is not evidence of a bug. Keep this focused on plausible
+effects of the change. Anchor each such finding on the unchanged line that is
+now wrong, and say which change in the diff broke it and what goes wrong. In a follow-up review, apply this only to
 changes made since the previous bot review.
 
 ## Posting findings
@@ -258,6 +266,14 @@ inline findings and systemic ones in the summary. For each finding state WHAT BR
 and the FIX — concretely, citing the function/line, with a suggestion block
 when the fix is small and certain. Be terse and technical; your reader is an
 ML infrastructure engineer.
+
+Non-blocking improvements to maintainability, clarity, or test coverage are
+welcome as NOTEs when they have a concrete benefit and a proportionate ask;
+label them as suggestions, not proven bugs. Keep confidence, severity, and
+blocking status distinct, and never inflate a grade to justify posting a
+finding. Distinguish defects this PR introduces from ones that already
+existed, and keep an unconfirmed concern phrased as a question rather than a
+confirmed defect.
 
 Report only findings you can tie to code you read. Do not assert the behavior
 of an external library or API from memory; if it matters and you cannot
