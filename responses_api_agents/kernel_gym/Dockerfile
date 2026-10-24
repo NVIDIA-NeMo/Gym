@@ -6,8 +6,9 @@ ARG KERNELBENCH_COMMIT=423217d9fda91e0c2d67e4a43bf62f96f6d104f1
 RUN apt-get update && apt-get install -y --no-install-recommends curl git xz-utils && rm -rf /var/lib/apt/lists/*
 RUN git clone https://github.com/ScalingIntelligence/KernelBench.git /opt/KernelBench \
     && git -C /opt/KernelBench checkout "$KERNELBENCH_COMMIT" \
-    && pip install --no-cache-dir ninja pydra-config python-dotenv openai \
-    && pip install --no-cache-dir --no-deps --ignore-requires-python -e /opt/KernelBench
+    && pip install --no-cache-dir ninja pydra-config python-dotenv openai litellm \
+    && pip install --no-cache-dir --no-deps --ignore-requires-python -e /opt/KernelBench \
+    && LITELLM_LOCAL_MODEL_COST_MAP=True python -c "from kernelbench.eval import eval_kernel_against_ref"
 
 COPY pyproject.toml README.md LICENSE /opt/Gym/
 COPY nemo_gym /opt/Gym/nemo_gym

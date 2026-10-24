@@ -13,7 +13,8 @@ from fastapi import Request, Response
 
 
 sys.path[:0] = ["/trajectories_mount/agent_src", "/opt/Gym"]
-os.environ["PATH"] = "/opt/agent/bin:" + os.environ.get("PATH", "")
+# Keep the image's CUDA Python as the default for the agent's terminal tools.
+os.environ["PATH"] = os.environ.get("PATH", "") + ":/opt/agent/bin"
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef  # noqa: E402
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming  # noqa: E402

@@ -3,11 +3,10 @@
 import json
 import shutil
 import sys
-import tarfile
-import tempfile
 import time
 import uuid
 from asyncio import Semaphore
+from dataclasses import replace
 from pathlib import Path
 from traceback import format_exc
 from typing import Any, Dict, Optional
@@ -76,6 +75,7 @@ class KernelBenchMetrics(BaseModel):
     container_timed_out: bool = False
     sandbox_failed: bool = False
     mask_sample: bool = False
+    evaluation_completed: bool = False
 
     ray_queue_time: Optional[float] = None
     agent_run_time: Optional[float] = None
@@ -134,6 +134,7 @@ class KernelGymConfig(BaseResponsesAPIAgentConfig):
     kb_agent_timeout: int = 1800
     global_agent_timeout: Optional[int] = Field(default=None, gt=0)
     kb_eval_timeout: int = 300
+    inconclusive_verification_retries: int = Field(default=1, ge=0)
     kb_sandbox_ttl: int = 7200
     concurrency: int = 256
     results_dir: Optional[Path] = None
@@ -179,186 +180,139 @@ class KernelGymAgent(SimpleResponsesAPIAgent):
 
     async def _run_kernel(self, cfg: KernelGymInstanceConfig) -> bool:
         cfg.verifier_dir.mkdir(parents=True, exist_ok=True)
-        staging_tests = cfg.persistent_dir / "staging" / "tests"
-        staging_tests.parent.mkdir(parents=True, exist_ok=True)
-        t0 = time.time()
-
-        sandbox = AsyncSandbox(
-            cfg.sandbox_provider,
-            SandboxSpec(
-                image=cfg.container.removeprefix("docker://"),
-                ttl_s=cfg.kb_sandbox_ttl,
-                workdir=cfg.problem_info.get("workdir"),
-                metadata=cfg.sandbox_default_metadata,
-                resources=SandboxResources(
-                    cpu=float(cfg.problem_info["cpus"]) if cfg.problem_info.get("cpus") else None,
-                    memory_mib=int(cfg.problem_info["memory_mb"]) if cfg.problem_info.get("memory_mb") else None,
-                    disk_gib=max(1, round(int(cfg.problem_info["storage_mb"]) / 1024))
-                    if cfg.problem_info.get("storage_mb")
-                    else None,
-                    gpu=int(cfg.problem_info.get("gpus") or 1),
-                    gpu_type=cfg.problem_info.get("gpu_type"),
-                ),
+        task_dir = _task_dir(cfg.problem_info["task_dir"])
+        reference = (task_dir / "reference.py").read_text()
+        files = {
+            "/workspace/reference.py": reference,
+            "/workspace/solution.py": (task_dir / "solution.py").read_text(),
+            "/trajectories_mount/instruction.txt": (cfg.persistent_dir / "instruction.txt").read_text(),
+            "/trajectories_mount/agent_runner.py": (cfg.persistent_dir / "agent_runner.py").read_text(),
+        }
+        if cfg.agent_server_module == "responses_api_agents.simple_agent.app":
+            for name in ("__init__.py", "app.py"):
+                files[f"/trajectories_mount/agent_src/responses_api_agents/simple_agent/{name}"] = (
+                    ROOT.parent / "simple_agent" / name
+                ).read_text()
+        spec = SandboxSpec(
+            image=cfg.container.removeprefix("docker://"),
+            ttl_s=cfg.kb_sandbox_ttl,
+            workdir=cfg.problem_info.get("workdir"),
+            metadata=cfg.sandbox_default_metadata,
+            files=files,
+            resources=SandboxResources(
+                cpu=float(cfg.problem_info["cpus"]) if cfg.problem_info.get("cpus") else None,
+                memory_mib=int(cfg.problem_info["memory_mb"]) if cfg.problem_info.get("memory_mb") else None,
+                disk_gib=max(1, round(int(cfg.problem_info["storage_mb"]) / 1024))
+                if cfg.problem_info.get("storage_mb")
+                else None,
+                gpu=int(cfg.problem_info.get("gpus") or 1),
+                gpu_type=cfg.problem_info.get("gpu_type"),
             ),
         )
-        agent_timed_out = container_timed_out = False
-        sandbox_failed = False
+        t0 = time.time()
+        agent_timed_out = container_timed_out = sandbox_failed = evaluation_completed = False
         agent_run_time = eval_run_time = None
-        try:
-            await sandbox.start()
-            result = await sandbox.exec("mkdir -p /workspace /trajectories_mount /logs/verifier", user="root")
-            if result.return_code != 0:
-                raise RuntimeError(result.stderr or "failed to create sandbox directories")
-
-            task_dir = _task_dir(cfg.problem_info["task_dir"])
-            for local, remote in (
-                (cfg.persistent_dir / "instruction.txt", "/trajectories_mount/instruction.txt"),
-                (cfg.persistent_dir / "agent_runner.py", "/trajectories_mount/agent_runner.py"),
-                (task_dir / "reference.py", "/workspace/reference.py"),
-                (task_dir / "solution.py", "/workspace/solution.py"),
-            ):
-                await sandbox.upload(local, remote)
-
-            if cfg.agent_server_module == "responses_api_agents.simple_agent.app":
-                await sandbox.exec(
-                    "mkdir -p /trajectories_mount/agent_src/responses_api_agents/simple_agent", user="root"
-                )
-                source_root = Path(__file__).parents[1]
-                for local, remote in (
-                    (
-                        source_root / "simple_agent" / "__init__.py",
-                        "/trajectories_mount/agent_src/responses_api_agents/simple_agent/__init__.py",
-                    ),
-                    (
-                        source_root / "simple_agent" / "app.py",
-                        "/trajectories_mount/agent_src/responses_api_agents/simple_agent/app.py",
-                    ),
-                ):
-                    await sandbox.upload(local, remote)
-
-            env = {
-                "KB_MODEL_URL": cfg.model_server_url,
-                "KB_MODEL_NAME": cfg.model_name,
-                "KB_AGENT_MODULE": cfg.agent_server_module,
-                "KB_AGENT_CLASS": cfg.agent_server_class,
-                "KB_AGENT_CONFIG_CLASS": cfg.agent_config_class,
-                "KB_AGENT_KWARGS": json.dumps(cfg.agent_kwargs),
-                "KB_BODY": cfg.body.model_dump_json(),
-            }
-            agent_started = time.time()
-            result = await sandbox.exec(
-                cfg.agent_command_str or "",
-                timeout_s=cfg.kb_agent_timeout,
-                user="root",
-                env=env,
-            )
-            agent_run_time = time.time() - agent_started
-            agent_timed_out = result.error_type == "timeout" or (
-                result.return_code == -1 and agent_run_time >= cfg.kb_agent_timeout
-            )
-            sandbox_failed = result.error_type == "sandbox"
-            (cfg.persistent_dir / "agent_result.json").write_text(
-                json.dumps(
-                    {
-                        "return_code": result.return_code,
-                        "error_type": result.error_type,
-                        "stdout": result.stdout,
-                        "stderr": result.stderr,
-                    }
-                )
-            )
-            if result.return_code != 0:
-                detail = result.stderr or result.stdout or ""
-                print(f"[{cfg.task_name}] agent exit {result.return_code}: {detail[-2000:]}", flush=True)
-
-            shutil.copytree(task_dir / "tests", staging_tests)
-            with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as temporary:
-                archive = Path(temporary.name)
-            try:
-                with tarfile.open(archive, "w:gz") as tar:
-                    tar.add(staging_tests, arcname=".")
-                await sandbox.upload(archive, "/tmp/kernel-gym-tests.tar.gz")
-            finally:
-                archive.unlink(missing_ok=True)
-            result = await sandbox.exec(
-                "mkdir -p /trajectories_mount/staging/tests && "
-                "tar -xzf /tmp/kernel-gym-tests.tar.gz -C /trajectories_mount/staging/tests",
-                timeout_s=300,
-                user="root",
-            )
-            if result.return_code != 0:
-                raise RuntimeError(result.stderr or "failed to stage verifier")
-
-            eval_started = time.time()
-            result = await sandbox.pty.exec(
-                "rm -rf /tests && ln -s /trajectories_mount/staging/tests /tests && "
-                "printf '[pytest]\\naddopts =\\n' > /pytest.ini && bash /tests/test.sh",
-                timeout_s=cfg.kb_eval_timeout,
-                user="root",
-                pty=False,
-                detach=True,
-                poll_interval_s=15,
-            )
-            eval_run_time = time.time() - eval_started
-            container_timed_out = result.error_type == "timeout"
-            if result.return_code != 0:
-                print(f"[{cfg.task_name}] eval exit {result.return_code}", flush=True)
-
-            for remote, local in (
-                ("/workspace/solution.py", cfg.persistent_dir / "solution.py"),
-                ("/logs/verifier/reward.txt", cfg.verifier_dir / "reward.txt"),
-                ("/logs/verifier/result.json", cfg.verifier_dir / "result.json"),
-                ("/logs/verifier/test-stdout.txt", cfg.verifier_dir / "test-stdout.txt"),
-            ):
-                await sandbox.download(remote, local)
-            try:
-                await sandbox.download("/trajectories_mount/response.json", cfg.persistent_dir / "response.json")
-            except Exception:
-                pass
-        except Exception as e:
-            sandbox_failed = True
-            print(f"[{cfg.task_name}] sandbox run failed: {e}", flush=True)
-        finally:
-            try:
-                await sandbox.stop()
-            except Exception as e:
-                sandbox_failed = True
-                print(f"[{cfg.task_name}] sandbox cleanup failed: {e}", flush=True)
-            shutil.rmtree(cfg.persistent_dir / "staging", ignore_errors=True)
-
-        total_run_time = time.time() - t0
-
-        reward_path = cfg.verifier_dir / "reward.txt"
-        resolved = False
-        if reward_path.exists():
-            try:
-                resolved = float(reward_path.read_text().strip()) > 0
-            except (ValueError, OSError):
-                pass
-
         verifier = {}
-        result_path = cfg.verifier_dir / "result.json"
-        if result_path.exists():
-            try:
-                verifier = json.loads(result_path.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
+        try:
+            async with AsyncSandbox(cfg.sandbox_provider, spec) as sandbox:
+                await sandbox.start()
+                env = {
+                    "KB_MODEL_URL": cfg.model_server_url,
+                    "KB_MODEL_NAME": cfg.model_name,
+                    "KB_AGENT_MODULE": cfg.agent_server_module,
+                    "KB_AGENT_CLASS": cfg.agent_server_class,
+                    "KB_AGENT_CONFIG_CLASS": cfg.agent_config_class,
+                    "KB_AGENT_KWARGS": json.dumps(cfg.agent_kwargs),
+                    "KB_BODY": cfg.body.model_dump_json(),
+                }
+                agent_started = time.time()
+                result = await sandbox.exec(
+                    cfg.agent_command_str or "",
+                    timeout_s=cfg.kb_agent_timeout,
+                    user="root",
+                    env=env,
+                )
+                agent_run_time = time.time() - agent_started
+                agent_timed_out = result.error_type == "timeout"
+                (cfg.persistent_dir / "agent_result.json").write_text(
+                    json.dumps(
+                        {
+                            "return_code": result.return_code,
+                            "error_type": result.error_type,
+                            "stdout": result.stdout,
+                            "stderr": result.stderr,
+                        }
+                    )
+                )
+                if result.return_code != 0 or result.error_type is not None:
+                    raise RuntimeError(f"Agent execution failed: {result.error_type or result.return_code}")
+                await sandbox.download("/workspace/solution.py", cfg.persistent_dir / "solution.py")
+                await sandbox.download("/trajectories_mount/response.json", cfg.persistent_dir / "response.json")
 
+            # Only the submitted source crosses this boundary. The agent can change its
+            # entire filesystem, including Python, the reference, and verifier outputs.
+            verifier_files = {
+                "/workspace/reference.py": reference,
+                "/workspace/solution.py": (cfg.persistent_dir / "solution.py").read_text(),
+                **{
+                    f"/tests/{path.relative_to(task_dir / 'tests').as_posix()}": path.read_text()
+                    for path in (task_dir / "tests").rglob("*")
+                    if path.is_file()
+                },
+            }
+            eval_started = time.time()
+            for attempt in range(cfg.inconclusive_verification_retries + 1):
+                try:
+                    async with AsyncSandbox(cfg.sandbox_provider, replace(spec, files=verifier_files)) as sandbox:
+                        await sandbox.start()
+                        result = await sandbox.exec("bash /tests/test.sh", timeout_s=cfg.kb_eval_timeout, user="root")
+                        container_timed_out = result.error_type == "timeout"
+                        (cfg.verifier_dir / f"execution-{attempt}.json").write_text(
+                            json.dumps(
+                                {
+                                    "return_code": result.return_code,
+                                    "error_type": result.error_type,
+                                    "stdout": result.stdout,
+                                    "stderr": result.stderr,
+                                }
+                            )
+                        )
+                        if result.return_code != 0 or result.error_type is not None:
+                            raise RuntimeError(f"Verifier execution failed: {result.error_type or result.return_code}")
+                        for name in ("reward.txt", "result.json", "test-stdout.txt"):
+                            await sandbox.download(f"/logs/verifier/{name}", cfg.verifier_dir / name)
+                        verifier = json.loads((cfg.verifier_dir / "result.json").read_text())
+                        if verifier.get("evaluation_completed") is False:
+                            raise RuntimeError(verifier.get("error") or "Verifier did not complete")
+                    evaluation_completed = True
+                    container_timed_out = False
+                    break
+                except Exception as error:
+                    if attempt == cfg.inconclusive_verification_retries:
+                        raise
+                    print(f"[{cfg.task_name}] retrying inconclusive verification: {error}", flush=True)
+            eval_run_time = time.time() - eval_started
+        except Exception as error:
+            sandbox_failed = True
+            print(f"[{cfg.task_name}] sandbox run failed: {error}", flush=True)
+
+        resolved = bool(evaluation_completed and verifier.get("correctness") and verifier.get("speedup", 0) > 1)
         metrics = KernelBenchMetrics(
-            ray_queue_time=time.time() - cfg.ray_queue_timestamp,
+            ray_queue_time=t0 - cfg.ray_queue_timestamp,
             resolved=resolved,
             compiled=verifier.get("compiled"),
             correctness=verifier.get("correctness"),
             runtime=verifier.get("runtime"),
             ref_runtime=verifier.get("ref_runtime"),
             speedup=verifier.get("speedup"),
+            evaluation_completed=evaluation_completed,
             agent_timed_out=agent_timed_out,
             container_timed_out=container_timed_out,
             sandbox_failed=sandbox_failed,
-            mask_sample=bool(container_timed_out or agent_timed_out or sandbox_failed),
+            mask_sample=not evaluation_completed,
             agent_run_time=agent_run_time,
             eval_run_time=eval_run_time,
-            total_run_time=total_run_time,
+            total_run_time=time.time() - t0,
         )
         update_metrics(cfg.metrics_fpath, metrics.model_dump())
         return resolved
