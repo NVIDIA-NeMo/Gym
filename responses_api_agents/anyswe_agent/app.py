@@ -525,9 +525,19 @@ gc='git gc --prune=now --quiet'
 command -v timeout >/dev/null 2>&1 && gc="timeout {int(timeout_s)} $gc"
 if ! $gc; then
   echo '>>>>> git gc failed or exceeded the budget; replacing history with a single commit'
+  tracked_files=$(mktemp)
+  trap 'rm -f "$tracked_files"' 0
+  g ls-files --cached -z > "$tracked_files"
   rm -rf .git
   g init -q
   g add -A
+  # Force-add previously tracked files even if ignore rules now match them.
+  # NUL-delimited literal paths preserve whitespace and Git pathspec characters.
+  xargs -0 -r sh -c 'for file do
+    if [ -e "$file" ] || [ -L "$file" ]; then
+      git --literal-pathspecs add -f -- "$file" || exit 1
+    fi
+  done' sh < "$tracked_files"
   g -c user.email=anyswe@localhost -c user.name=anyswe -c commit.gpgsign=false commit -q -m base --allow-empty
 fi
 g rev-parse --verify HEAD >/dev/null

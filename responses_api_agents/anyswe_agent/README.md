@@ -117,6 +117,8 @@ unreachable objects are pruned. If pruning takes longer than
 `sanitize_git_history_timeout_s` (default 300), the history is replaced by a
 single commit of the current tree. The option is off by default. Grading runs in
 a fresh sandbox and is unaffected.
+The fallback preserves existing tracked files even when ignore rules match them,
+so subsequent agent edits remain visible to patch capture.
 
 Sanitization requires a standalone repository with its own Git directory and
 object store. Linked worktrees, repositories with sibling worktrees, external or

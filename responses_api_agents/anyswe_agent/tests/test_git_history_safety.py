@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from responses_api_agents.anyswe_agent.agent_runner import _extract_patch, _snapshot_repo
 from responses_api_agents.anyswe_agent.app import AnySweAgent
 
 
@@ -138,3 +139,40 @@ def test_failed_fallback_cannot_report_success(tmp_path: Path, monkeypatch: pyte
     )
     assert result.returncode != 0
     assert "git history sanitized:" not in result.stdout
+
+
+def test_fallback_preserves_ignored_tracked_files_for_patch_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, _, _ = _repo(tmp_path)
+    unusual_name = "tracked [name]\nfile.py"
+    (repo / ".gitignore").write_text("*.py\n")
+    (repo / unusual_name).write_text("before\n")
+    (repo / "deleted.py").write_text("deleted before cleanup\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "add", "-f", "--", unusual_name, "deleted.py")
+    _git(repo, "commit", "-qm", "track ignored files")
+    (repo / "deleted.py").unlink()
+    (repo / "cache.py").write_text("ignored and never tracked\n")
+    real_git = shutil.which("git")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text('#!/bin/sh\nif [ "$1" = gc ]; then exit 1; fi\n' + f'exec {shlex.quote(real_git)} "$@"\n')
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+
+    subprocess.run(["sh", "-c", AnySweAgent._git_history_sanitizer_script(str(repo), 60)], check=True)
+    index_path = tmp_path / "capture-index"
+    baseline = _snapshot_repo(repo, index_path)
+    (repo / "lib.py").write_text("agent fix\n")
+    (repo / unusual_name).write_text("after\n")
+    patch = _extract_patch(repo, index_path, baseline)
+
+    assert b"+agent fix\n" in patch
+    assert b"+after\n" in patch
+    assert set(_git(repo, "ls-files", "-z").stdout.rstrip("\0").split("\0")) == {
+        ".gitignore",
+        "lib.py",
+        unusual_name,
+    }
