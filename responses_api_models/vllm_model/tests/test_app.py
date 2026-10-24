@@ -75,6 +75,7 @@ from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.token_id_capture import (
     CaptureContext,
     InMemoryLineageStore,
+    ParentResolutionStatus,
     TokenCaptureStore,
     reset_token_sink,
     resolve_parent,
@@ -1059,6 +1060,166 @@ class TestApp:
                 "code": "context_length_exceeded",
             }
         }
+
+    @staticmethod
+    def _engine_window_refusal() -> ClientResponseError:
+        """vLLM's refusal of a request whose output budget does not fit beside its prompt.
+
+        The body names ``max_tokens`` and the context window, so the envelope carries
+        ``context_length_exceeded``.
+        """
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = (
+            b"{\"error\":{\"message\":\"'max_tokens' or 'max_completion_tokens' is too large: 4000. This model's "
+            b"maximum context length is 4096 tokens and your request has 1000 input tokens (4000 > 4096 - 1000). "
+            b'Please reduce the length of the input prompt or the number of requested output tokens.",'
+            b'"type":"BadRequestError","param":null,"code":400}}'
+        )
+        return error
+
+    def _post_captured(self, server: VLLMModel, store: TokenCaptureStore, path: str, body: dict):
+        """Send one captured request through the real dispatch, which registers the call intent."""
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        token = set_token_sink(CaptureContext(rollout_id="r0", model_call_id="mc-1", token_sink=store))
+        try:
+            return TestClient(app).post(path, json=body)
+        finally:
+            reset_token_sink(token)
+
+    def _post_captured_chat_completion(self, server: VLLMModel, store: TokenCaptureStore, *, stream: bool = False):
+        body: dict = {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]}
+        if stream:
+            body["stream"] = True
+        return self._post_captured(server, store, "/v1/chat/completions", body)
+
+    @mark.parametrize(
+        "route",
+        [
+            "chat-completions",
+            "completions",
+            "chat-stream-before-headers",
+            "chat-stream-after-keepalive",
+            "responses",
+            "responses-stream",
+        ],
+    )
+    def test_a_captured_rollout_records_the_propagated_refusal_and_freezes_complete(
+        self, monkeypatch: MonkeyPatch, tmp_path, route: str
+    ) -> None:
+        # The dispatch registers the call's capture intent before the engine is called. The refused
+        # call generates nothing, so no token record resolves that intent; the refusal record does,
+        # and it tells a consumer the rollout ended at the context window rather than at the
+        # harness's own stopping point. Codex and OpenCode stream by default, so the record must
+        # also be written on the streaming paths: before the headers are committed the refusal is
+        # the same HTTP 400, and after the chat keepalive it is an SSE error event on a 200 that
+        # carries the same envelope, recorded from inside the dispatch task.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(
+            monkeypatch, propagate_context_overflow_errors=True, use_completions_api=route == "completions"
+        )
+        refusal = self._engine_window_refusal()
+        if route == "chat-stream-after-keepalive":
+            monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+
+            async def slow_refusal(**_kwargs):
+                await asyncio.sleep(0.05)
+                raise refusal
+
+            engine_call = AsyncMock(side_effect=slow_refusal)
+        else:
+            engine_call = AsyncMock(side_effect=refusal)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = engine_call
+        mock_client.create_completion = engine_call
+        server._clients = [mock_client]
+
+        if route.startswith("responses"):
+            body = {
+                "model": "dummy_model",
+                "input": [{"role": "user", "content": "hi"}],
+                "stream": route == "responses-stream",
+            }
+            response = self._post_captured(server, store, "/v1/responses", body)
+        else:
+            response = self._post_captured_chat_completion(server, store, stream=route.startswith("chat-stream"))
+
+        if route == "chat-stream-after-keepalive":
+            assert response.status_code == 200
+            assert response.text.startswith(": keep-alive")
+            error_lines = [line for line in response.text.splitlines() if line.startswith("data: ")]
+            assert json.loads(error_lines[-1][len("data: ") :])["error"]["code"] == "context_length_exceeded"
+        else:
+            assert response.status_code == 400
+            assert response.json()["error"]["code"] == "context_length_exceeded"
+        snapshot = store.freeze_now("r0")
+        assert snapshot.entries == ()
+        assert snapshot.incomplete is False
+        (record,) = snapshot.engine_refusals
+        assert (record.model_call_id, record.code) == ("mc-1", "context_length_exceeded")
+        assert record.created_at > 0
+        # The dispatch resolved the request's lineage before the engine was called; a request with
+        # no model-authored history is a root, and the record carries that decision.
+        assert (record.parent_call_id, record.parent_resolution) == (None, ParentResolutionStatus.ROOT)
+
+    def test_a_max_tokens_only_400_is_a_refusal_without_a_code(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        # A 400 that names only the output-token parameter is still a request the engine refused
+        # before generating, so it resolves the capture intent like any refusal. Its record carries
+        # no code because the envelope carried none: compaction is not the remedy.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = (
+            b'{"error":{"message":"max_tokens must be at least 1, got 0.","type":"BadRequestError",'
+            b'"param":null,"code":400}}'
+        )
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+
+        response = self._post_captured_chat_completion(server, store)
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] is None
+        snapshot = store.freeze_now("r0")
+        assert snapshot.incomplete is False
+        assert [(record.model_call_id, record.code) for record in snapshot.engine_refusals] == [("mc-1", None)]
+
+    def test_the_absorbed_overflow_records_no_refusal(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        # Without propagate_context_overflow_errors the caller sees an exhausted generation, not a
+        # refusal, so nothing is recorded as refused.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=False)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=self._engine_window_refusal())
+        server._clients = [mock_client]
+
+        response = self._post_captured_chat_completion(server, store)
+
+        assert response.status_code == 200
+        assert store.freeze_now("r0").engine_refusals == ()
+
+    def test_an_uncaptured_request_is_still_refused_and_records_nothing(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        # A request outside a captured rollout has no rollout to record against.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=self._engine_window_refusal())
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 400
+        assert list(store.root.iterdir()) == []
 
     @mark.parametrize("use_completions_api", [False, True])
     def test_an_engine_error_the_server_does_not_handle_is_logged_with_its_body(

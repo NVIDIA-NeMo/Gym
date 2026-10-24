@@ -112,7 +112,7 @@ from nemo_gym.token_id_capture.config import NonGeneratingRequest, token_id_capt
 from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
 from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolver
-from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.token_id_capture.records import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -130,9 +130,6 @@ _SSE_KEEPALIVE = SSE_KEEPALIVE
 # answers with OpenAI's error envelope, and the chat-SSE error event reports it with the same
 # message and code.
 PROPAGATED_REFUSAL_CODE_ATTRIBUTE = "nemo_gym_propagated_refusal_code"
-# OpenAI's error code for a request that exceeds the model's context window; OpenAI-compatible
-# harnesses (Codex, OpenCode) compact their history and retry when they see it.
-CONTEXT_LENGTH_EXCEEDED_ERROR_CODE = "context_length_exceeded"
 
 
 def is_propagated_refusal(error: BaseException) -> bool:
@@ -1326,7 +1323,10 @@ def _record(
 
 
 async def _fail_uncommitted_external_call(context: CaptureContext | None) -> None:
-    """Record a failure when an admitted worker call returns without commit coordinates."""
+    """Record a failure when an admitted worker call returns without commit coordinates.
+
+    A call the engine refused is skipped: ``capture_engine_refusal`` already wrote its definite reason.
+    """
     if (
         context is None
         or not context.external_staging
@@ -1335,6 +1335,7 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         # A checkpoint gate owns a deferred row: it publishes it when the response starts,
         # and a call whose response never starts made no answer to record, so it is not poisoned.
         or context.deferred_commit is not None
+        or context.engine_refusal_recorded
         or context.lineage_store is None
     ):
         return
