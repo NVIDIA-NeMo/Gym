@@ -244,10 +244,14 @@ jobs:
           source .venv/bin/activate
           ng_init_resources_server +entrypoint=resources_servers/hello_world
           test -f resources_servers/hello_world/app.py
-          test -f resources_servers/hello_world/requirements.txt
+          test -f resources_servers/hello_world/pyproject.toml
           test -f resources_servers/hello_world/configs/hello_world.yaml
           test -d resources_servers/hello_world/tests
-          grep -q "nemo-gym" resources_servers/hello_world/requirements.txt
+          grep -q "nemo-gym" resources_servers/hello_world/pyproject.toml
+          # Scaffolding emits dependency metadata; resolve and verify the lock before setup.
+          uv lock --project resources_servers/hello_world
+          uv lock --check --project resources_servers/hello_world
+          test -f resources_servers/hello_world/uv.lock
           echo '{"responses_create_params":{"input":[{"role":"user","content":"Hello!"}]},"expected_answer":"Mock response.","verifier_metadata":{}}' \
             > resources_servers/hello_world/data/example.jsonl
 

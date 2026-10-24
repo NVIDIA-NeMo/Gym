@@ -27,6 +27,7 @@ def _scaffold_entry(
 ) -> EnvironmentCatalogEntry:
     monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
     asset = scaffold_environment(root=tmp_path, kind="environment", name=name).asset_dir
+    (tmp_path / "resources_servers" / name / "uv.lock").touch()
     return EnvironmentCatalogEntry(
         name=name,
         path=asset,
@@ -48,6 +49,21 @@ async def test_verifies_manifest_resources_server_in_process(tmp_path: Path, mon
     assert report.fixture_path == str(tmp_path / "resources_servers/sample/tests/verifier_cases.jsonl")
     assert [case.kind for case in report.cases] == ["full_reward", "zero_reward", "malformed"]
     assert report.to_dict()["cases"][0]["observed_rewards"] == (1.0,)
+
+
+@pytest.mark.parametrize("manifest", ["requirements.txt", "pyproject.toml"])
+async def test_custom_verifier_does_not_require_a_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manifest: str
+) -> None:
+    entry = _scaffold_entry(tmp_path, monkeypatch)
+    server = tmp_path / "resources_servers/sample"
+    (server / "uv.lock").unlink()
+    if manifest == "requirements.txt":
+        (server / "pyproject.toml").unlink()
+        (server / manifest).write_text("nemo-gym\n")
+    report = await verify_environment(entry)
+    assert report.resources_server == "sample"
+    assert [case.kind for case in report.cases] == ["full_reward", "zero_reward", "malformed"]
 
 
 async def test_expected_reward_updates_are_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

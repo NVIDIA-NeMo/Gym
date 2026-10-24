@@ -1,3 +1,0 @@
--e nemo-gym[dev] @ ../..
-tiktoken
-json-repair==0.30.3

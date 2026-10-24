@@ -28,7 +28,7 @@ Before starting, determine which type of benchmark you're adding:
 - Agent's `/run` endpoint wraps the external library
 - Pre-process from Gym schema to library input, post-process back to `BaseVerifyResponse`
 - Reproduce publicly reported numbers with the original repo first, then reproduce again after Gym integration
-- Add the dependency in `requirements.txt`
+- Add the dependency in `pyproject.toml` and commit its `uv.lock`
 
 ## Workflow
 
@@ -47,7 +47,8 @@ resources_servers/my_benchmark/
 ├── configs/my_benchmark.yaml
 ├── data/.gitignore
 ├── tests/test_app.py
-├── requirements.txt
+├── pyproject.toml
+├── uv.lock
 └── README.md
 ```
 

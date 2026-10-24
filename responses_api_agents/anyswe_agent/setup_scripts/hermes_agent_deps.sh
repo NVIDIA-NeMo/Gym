@@ -9,9 +9,14 @@ source "$SCRIPT_DIR/_portable_python.sh"
 : "${NEMO_GYM_ROOT:?NEMO_GYM_ROOT must be set}"
 
 # Pin must match hermes_agent/app.py's AIAgent API; override only for experiments.
-HERMES_REQ="$NEMO_GYM_ROOT/responses_api_agents/hermes_agent/requirements.txt"
-HERMES_SPEC="${HERMES_SPEC:-$(sed -n 's/^hermes-agent @ //p' "$HERMES_REQ")}"
-: "${HERMES_SPEC:?could not read hermes-agent pin from $HERMES_REQ}"
+HERMES_PROJECT="$NEMO_GYM_ROOT/responses_api_agents/hermes_agent/pyproject.toml"
+if [ -z "${HERMES_SPEC:-}" ]; then
+    # Read this canonical single-line TOML dependency before Python is provisioned.
+    HERMES_SPEC="$(sed -n '/^[[]project[]]$/,/^[[]/ {
+        s/^[[:space:]]*"hermes-agent @ \([^"]*\)"[,[:space:]]*$/\1/p
+    }' "$HERMES_PROJECT")"
+fi
+: "${HERMES_SPEC:?could not read hermes-agent pin from $HERMES_PROJECT}"
 
 install_portable_python
 install_nemo_gym_deps

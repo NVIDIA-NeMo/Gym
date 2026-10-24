@@ -1,5 +1,0 @@
--e nemo-gym[dev] @ ../../
-numpy
-pillow
-requests
-scipy

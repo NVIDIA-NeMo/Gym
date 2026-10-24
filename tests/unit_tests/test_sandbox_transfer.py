@@ -129,7 +129,7 @@ async def test_transfer_preserves_target_permissions_and_task_file_modes(tmp_pat
     secret.write_text("private")
     secret.chmod(0o600)
 
-    class LocalSandbox:
+    class LocalSandbox(RootLikeSandbox):
         async def upload(self, local, remote):
             # A top-level '.' would restore source metadata onto the receiving directory.
             with tarfile.open(local) as archive:
@@ -138,15 +138,7 @@ async def test_transfer_preserves_target_permissions_and_task_file_modes(tmp_pat
 
         async def exec(self, command, *, cwd, timeout_s, user):
             assert user == "root"
-            process = await asyncio.create_subprocess_exec(
-                "bash", "-c", command, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_s)
-            return SandboxExecResult(
-                stdout=stdout.decode(errors="replace"),
-                stderr=stderr.decode(errors="replace"),
-                return_code=process.returncode,
-            )
+            return await super().exec(command, cwd=cwd, timeout_s=timeout_s, user=user)
 
     await upload_dir(LocalSandbox(), source, str(target))
     assert stat.S_IMODE(target.stat().st_mode) == 0o777
@@ -188,7 +180,9 @@ async def test_transfer_works_with_busybox_tar_which_has_no_no_overwrite_dir_opt
             shutil.copyfile(local, remote)
 
         async def exec(self, command, *, cwd, timeout_s, user):
-            return await busybox_sh(command)
+            assert user == "root"
+            # Match root's tar extraction even when this fixture runs as an unprivileged user.
+            return await busybox_sh(f"umask 0; {command}")
 
     probe = await busybox_sh("tar --no-overwrite-dir --help >/dev/null 2>&1 && echo gnu || echo busybox")
     assert probe.stdout.strip() == "busybox", "the symlinked tar must be BusyBox's for this test to mean anything"
@@ -445,7 +439,7 @@ async def test_restored_directory_replaces_what_the_target_held(tmp_path):
 
 @pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
 async def test_single_file_artifacts_keep_their_mode_bits_both_ways(tmp_path):
-    sandbox, agent, host, verifier = LocalSandbox(), tmp_path / "agent", tmp_path / "host", tmp_path / "verifier"
+    sandbox, agent, host, verifier = RootLikeSandbox(), tmp_path / "agent", tmp_path / "host", tmp_path / "verifier"
     agent.mkdir()
     tool = agent / "tool.sh"
     tool.write_text("#!/bin/sh\nprintf built")

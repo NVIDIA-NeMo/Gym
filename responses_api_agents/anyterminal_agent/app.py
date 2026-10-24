@@ -286,9 +286,17 @@ class GymAgentHarnessProcessor(BaseModel):
         sentinel = deps_dir / ".installed"
         script = agent_dir / "scripts" / f"{self._agent_key}_deps.sh"
         shared = self._parent / "setup_scripts" / "_portable_python.sh"
-        reqs = agent_dir / "requirements.txt"
-
-        recipe_src = b"".join(p.read_bytes() for p in (script, shared, reqs) if p.exists()) or b"no-script"
+        sources = (
+            script,
+            shared,
+            agent_dir / "pyproject.toml",
+            agent_dir / "uv.lock",
+            # The portable helper installs Gym and its dependencies from this checkout.
+            PARENT_DIR / "pyproject.toml",
+            PARENT_DIR / "uv.lock",
+            PARENT_DIR / "setup.py",
+        )
+        recipe_src = b"".join(p.read_bytes() for p in sources if p.exists()) or b"no-script"
         recipe = hashlib.sha256(recipe_src).hexdigest()
         if sentinel.exists() and sentinel.read_text().strip() == recipe:
             print(f"Agent deps already at {deps_dir}", flush=True)

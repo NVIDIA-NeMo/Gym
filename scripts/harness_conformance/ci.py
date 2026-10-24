@@ -8,6 +8,7 @@ import importlib
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from .feedback import failure_details, reproduction
@@ -98,10 +99,14 @@ def install_runtime(harness: str) -> None:
     import yaml
 
     adapter = ROOT / "responses_api_agents" / f"{harness}_agent"
-    override_flag = ["--override", "overrides.txt"] if (adapter / "overrides.txt").exists() else []
-    subprocess.run(["uv", "pip", "install", *override_flag, "-r", "requirements.txt"], cwd=adapter, check=True)
+    subprocess.run(
+        ["uv", "sync", "--locked", "--project", str(adapter)],
+        env=os.environ | {"UV_PROJECT_ENVIRONMENT": sys.prefix},
+        cwd=adapter,
+        check=True,
+    )
     if harness in ("hermes", "stirrup"):
-        return  # Hermes' pinned runtime is in its requirements; Stirrup installs its runtime in the task sandbox.
+        return  # Hermes is pinned in its component lock; Stirrup provisions the task sandbox.
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())
     config = defaults[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
     if harness == "opencode":

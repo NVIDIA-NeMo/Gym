@@ -87,7 +87,7 @@ The driver is one more `srun --overlap` step, in `driver.container`, with the be
 
 Inside one `bash -c`, in order:
 
-1. If `gym_install` is set: install `uv`, clone the repository to a temporary directory, check out `ref`, create a virtual environment, and `uv pip install -e .` (with the `telemetry` extra when Gym telemetry is on). The step changes into the checkout so a benchmark's relative paths resolve.
+1. If `gym_install` is set: install `uv`, clone the repository to a temporary directory, check out `ref`, create a virtual environment, and `uv sync --locked` (with `--extra telemetry` when Gym telemetry is on). The step changes into the checkout so a benchmark's relative paths resolve.
 2. If `prepare` is non-empty: `gym eval prepare <overrides>`.
 3. `gym eval run` with `+output_jsonl_fpath=<benchmark dir>/artifacts/rollouts.jsonl`, `--model-type <policy_model_type>` when a policy is set, and the flattened `run` overrides. Or, when the benchmark has a `command`, that script instead.
 

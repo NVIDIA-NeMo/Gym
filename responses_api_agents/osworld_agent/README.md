@@ -126,7 +126,7 @@ service endpoints, status, and cleanup.
 This agent intentionally installs the immutable
 [`JeffPengCoder/OSWorld`](https://github.com/JeffPengCoder/OSWorld) fork at
 commit `f32ab2b74e3ea66e6a8eb0d87876a12ce93904d5`, as declared in
-[`requirements.txt`](requirements.txt). That revision starts from upstream
+[`pyproject.toml`](pyproject.toml). That revision starts from upstream
 OSWorld `83e85344` and includes the `nv-gym` provider overlay, proxy-runtime
 repair, logging hardening, VLC gateway-auth fallback, the per-environment
 provider contract, opt-in setup/evaluator return-code semantics, and the
@@ -375,21 +375,10 @@ gym eval run --no-serve
 
 The installer targets only the managed OSWorld agent venv. It does not modify
 the system Python, Gym's root venv, the model server, or the OSWorld VM. The
-installer reads the same `[pip].torch-backend` setting from `uv.toml` as
-`gym env prefetch`, so `torch` and `torchvision` come from the same CPU/CUDA
-wheel family. A plain
-PyPI `torchvision` install is not equivalent: it can appear version-compatible
-with an existing CPU `torch` while failing to load native operators such as
-`torchvision::nms`. The managed environment excludes OSWorld's Azure, Aliyun,
-and Volcengine VM
-provisioning SDKs: this adapter supports direct Docker plus Gym Docker and
-OpenSandbox lifecycle, and none of those paths imports the excluded providers.
-The pinned OSWorld task/setup/evaluator code remains installed unchanged. The
-public `benchmarks/osworld/tools/start_control.sh` wrapper checks that the
-required package versions are importable and fails with the exact setup
-commands when this explicit step has been omitted. The agent entrypoint repeats
-that non-mutating check so a direct `gym env start` also fails early and
-actionably; neither path installs packages automatically.
+installer synchronizes `runtime/uv.lock` with `uv sync --locked --inexact`,
+which preserves the base agent environment while adding the explicitly opted-in
+packages. The runtime project binds both Torch wheels to the CPU index. Commit
+both runtime manifest and lock when changing these optional packages.
 
 Choose a model-specific agent composition during preparation. For example:
 

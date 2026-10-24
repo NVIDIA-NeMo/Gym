@@ -16,6 +16,7 @@ import asyncio
 import importlib
 import json
 import logging
+import os
 import signal
 import site
 import subprocess
@@ -25,6 +26,7 @@ from collections.abc import Sequence
 from copy import deepcopy
 from multiprocessing import Pool
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Dict, List, Tuple
 
 from omegaconf import DictConfig, OmegaConf, open_dict
@@ -32,7 +34,7 @@ from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import PARENT_DIR, WORKING_DIR, _resolve_under_cwd_or_install
 from nemo_gym.benchmarks import (
     BenchmarkConfig,
     discover_benchmarks,
@@ -210,6 +212,7 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
     ```
     """
 
+    uv_venv_dir: Path = Field(default=WORKING_DIR, description="Writable root for isolated preparation environments")
     use_cached_prepared_benchmarks: bool = Field(
         default=False, description="Skip benchmark preparation if the prepared file is already present"
     )
@@ -225,11 +228,18 @@ def _multiprocess_benchmark_prepare_fn(args):
     benchmark_config: BenchmarkConfig
     prepare_module_path: str
     prepare_script_args: Dict[str, Any]
-    (benchmark_config, prepare_module_path, prepare_script_args) = args
+    (benchmark_config, prepare_module_path, prepare_script_args, python) = args
 
     print(f"Preparing dataset: {benchmark_config.name}")
 
-    module = importlib.import_module(prepare_module_path)
+    if python is not None:
+        _run_isolated_prepare(
+            python, prepare_module_path, "prepare", Path(benchmark_config.dataset.jsonl_fpath), prepare_script_args
+        )
+        return
+    from nemo_gym.cli._prepare_worker import load_preparer
+
+    module = load_preparer(prepare_module_path)
     output_fpath = module.prepare(**prepare_script_args)
     expected_output_fpath = Path(benchmark_config.dataset.jsonl_fpath).absolute()
     if output_fpath.absolute() != expected_output_fpath:
@@ -265,6 +275,76 @@ def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:
         raise ConfigError(
             f"Could not install prepare_dependencies for dataset '{benchmark_config.name}': {' '.join(dependencies)}"
         ) from exc
+
+
+def _prepare_environment(benchmark_config: "BenchmarkConfig", venv_root: Path | None = None) -> Path | None:
+    """Use explicit dependency arguments as before, or sync an isolated locked project."""
+    from nemo_gym.cli._locked_env import sync_environment
+
+    dataset = benchmark_config.dataset
+    if dataset.prepare_dependencies:
+        # Explicit arguments retain their existing meaning, including editable installs
+        # and requirements-file options. Do not silently ignore caller overrides.
+        _install_prepare_dependencies(benchmark_config)
+        return None
+    if dataset.prepare_project is None:
+        return None
+    project = _resolve_under_cwd_or_install(dataset.prepare_project).resolve()
+    venv = project / ".venv"
+    if venv_root is not None:
+        try:
+            relative = project.relative_to(PARENT_DIR.resolve())
+        except ValueError:
+            import hashlib
+
+            relative = Path("external") / (project.name + "-" + hashlib.sha256(str(project).encode()).hexdigest()[:12])
+        venv = venv_root.absolute() / "preparation" / relative / ".venv"
+    try:
+        sync_environment(project, venv, sys.executable, [], [])
+    except (FileNotFoundError, RuntimeError, subprocess.CalledProcessError) as exc:
+        raise ConfigError(
+            f"Could not sync locked prepare_project for dataset '{benchmark_config.name}': {exc}"
+        ) from exc
+    return venv / "bin/python"
+
+
+def _run_isolated_prepare(python: Path, module: str, action: str, expected: Path, args: dict) -> dict:
+    """Keep preparer stdout visible and pass structured results over a separate file."""
+    worker = Path(__file__).with_name("_prepare_worker.py")
+    if module.endswith(".py"):
+        root = Path(module).parent
+    else:
+        relative = Path(*module.split(".")).with_suffix(".py")
+        script = _resolve_under_cwd_or_install(relative)
+        root = script.parents[len(relative.parts) - 1]
+    with TemporaryDirectory(prefix="gym-prepare-") as tmp:
+        result = Path(tmp) / "result.json"
+        subprocess.run(
+            [
+                str(python),
+                str(worker),
+                "--root",
+                str(root.absolute()),
+                "--module",
+                module,
+                "--action",
+                action,
+                "--expected",
+                str(expected.absolute()),
+                "--args",
+                json.dumps(args),
+                "--result",
+                str(result),
+            ],
+            check=True,
+            env=os.environ
+            | {
+                "NEMO_GYM_PREPARE_VENV": str(python.parent.parent),
+                "VIRTUAL_ENV": str(python.parent.parent),
+                "PATH": str(python.parent) + os.pathsep + os.environ.get("PATH", ""),
+            },
+        )
+        return json.loads(result.read_text())
 
 
 def _datasets_to_prepare(global_config_dict: DictConfig) -> List[BenchmarkConfig]:
@@ -337,37 +417,55 @@ def _prepare_datasets(datasets: Sequence[BenchmarkConfig], prepare_benchmark_con
     prepare_script_missing: List[BenchmarkConfig] = []
     prepare_function_missing: List[BenchmarkConfig] = []
 
-    validated: List[Tuple[BenchmarkConfig, str]] = []
+    validated: List[Tuple[BenchmarkConfig, str, dict, Path | None]] = []
     already_prepared: List[BenchmarkConfig] = []
     for benchmark_config in datasets:
         prepare_script = benchmark_config.dataset.prepare_script
         if prepare_script is None:
             raise ConfigError(f"Dataset {benchmark_config.name!r} has no prepare_script")
-        prepare_script_path = Path(prepare_script)
+        prepare_script_path = _resolve_under_cwd_or_install(prepare_script)
         if not prepare_script_path.exists():
             prepare_script_missing.append(benchmark_config)
             continue
 
-        prepare_module_path = ".".join(prepare_script_path.with_suffix("").parts)
-        _install_prepare_dependencies(benchmark_config)
-        module = importlib.import_module(prepare_module_path)
-        if not hasattr(module, "prepare"):
-            prepare_function_missing.append(benchmark_config)
-            continue
-
-        is_already_prepared = Path(benchmark_config.dataset.jsonl_fpath).exists()
-        if prepare_benchmark_config.use_cached_prepared_benchmarks and is_already_prepared:
-            is_current = getattr(module, "is_prepared_data_current", None)
-            if callable(is_current) and not is_current(benchmark_config.dataset.jsonl_fpath):
-                print(
-                    f"The cached file for {benchmark_config.name} ({benchmark_config.dataset.jsonl_fpath}) "
-                    "is out of date, so it will be prepared again."
-                )
-            else:
+        prepare_module_path = (
+            str(prepare_script)
+            if Path(prepare_script).is_absolute()
+            else ".".join(Path(prepare_script).with_suffix("").parts)
+        )
+        python = _prepare_environment(benchmark_config, prepare_benchmark_config.uv_venv_dir)
+        if python is not None:
+            probe = _run_isolated_prepare(
+                python,
+                prepare_module_path,
+                "inspect",
+                Path(benchmark_config.dataset.jsonl_fpath),
+                {"check_cache": prepare_benchmark_config.use_cached_prepared_benchmarks},
+            )
+            if not probe["has_prepare"]:
+                prepare_function_missing.append(benchmark_config)
+                continue
+            if probe["cache_current"]:
                 already_prepared.append(benchmark_config)
                 continue
+        else:
+            from nemo_gym.cli._prepare_worker import load_preparer
 
-        validated.append((benchmark_config, prepare_module_path, dict(prepare_benchmark_config.prepare_script_args)))
+            module = load_preparer(prepare_module_path)
+            if not hasattr(module, "prepare"):
+                prepare_function_missing.append(benchmark_config)
+                continue
+            is_already_prepared = Path(benchmark_config.dataset.jsonl_fpath).exists()
+            if prepare_benchmark_config.use_cached_prepared_benchmarks and is_already_prepared:
+                is_current = getattr(module, "is_prepared_data_current", None)
+                if not callable(is_current) or is_current(benchmark_config.dataset.jsonl_fpath):
+                    already_prepared.append(benchmark_config)
+                    continue
+                print(f"The cached file for {benchmark_config.name} is out of date, so it will be prepared again.")
+
+        validated.append(
+            (benchmark_config, prepare_module_path, dict(prepare_benchmark_config.prepare_script_args), python)
+        )
 
     if already_prepared:
         already_prepared_str = "".join(f"- {bc.name}: {bc.dataset.jsonl_fpath}\n" for bc in already_prepared)

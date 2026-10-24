@@ -357,7 +357,7 @@ def _resolve_server_dir(rel_path: Path) -> Path:
     lets ``gym env test`` find and run built-in (and plugin) servers from any cwd, not just a repo checkout.
     """
     return _resolve_under_cwd_or_install(
-        rel_path, validator=lambda d: (d / "requirements.txt").exists() or (d / "pyproject.toml").exists()
+        rel_path, validator=lambda d: any((d / name).is_file() for name in ("pyproject.toml", "requirements.txt"))
     )
 
 

@@ -172,7 +172,7 @@ Kept as a plain, lintable module rather than a string template.
   nemo_gym into `$DEPS_DIR`. (Leading underscore = sourced helper, not run directly.)
   - `claude_code_agent_deps.sh` — adds portable Node + the `@anthropic-ai/claude-code` CLI.
   - `hermes_agent_deps.sh` — adds the `hermes-agent` Python package (version pinned from
-  `responses_api_agents/hermes_agent/requirements.txt`).
+  `responses_api_agents/hermes_agent/pyproject.toml`).
   - `opencode_agent_deps.sh`: adds portable Node and the pinned `opencode-ai` CLI.
 - `**configs/cvdp_agent_generic_claude.yaml**`, `**configs/cvdp_agent_generic_hermes.yaml**`,
 `**configs/cvdp_agent_generic_opencode.yaml**`

@@ -1,18 +1,18 @@
 # Keep this server's resolver independent from any enclosing checkout. In the
 # complete training image Gym is a member of /opt/nemo-rl's uv workspace, whose
 # trainer dependencies are intentionally incompatible with this CPU agent venv.
-# setup_command.py passes this file explicitly via --config-file because
-# --project has no effect in the `uv pip` interface.
+# The component is an independent uv project, synced from its committed uv.lock.
 required-version = ">=0.11.25"
 constraint-dependencies = [
+    "ray==2.58.0",
     "grpcio>=1.81.0rc1",
     "msgpack>=1.2.1",
 ]
 
 # Mirror Gym's public resolver policy because an explicit config file does not
-# inherit the checkout's [tool.uv] table. The OSWorld opt-in installer uses
-# --no-config to add runtime packages deliberately after env prefetch, but
-# reads the backend from this file so its torchvision wheel matches torch.
+# inherit the checkout's [tool.uv] table. The separately locked opt-in runtime
+# project also selects CPU torch and torchvision wheels, without inheriting
+# these exclusions of the optional runtime packages.
 override-dependencies = [
     "spacy>=3.8.13",
     "opencv-python-headless; sys_platform == 'never'",
@@ -24,12 +24,16 @@ override-dependencies = [
     "wcwidth; sys_platform == 'never'",
     "gprof2dot; sys_platform == 'never'",
     "pathspec; sys_platform == 'never'",
-
-    # Role-local repairs for legacy OSWorld dependency metadata.
     "grpcio-status==1.71.2",
     "protobuf==5.29.6",
+    "torch==2.11.0",
+    "matplotlib==3.10.6",
+    "pillow==12.3.0",
+    "opencv-python; sys_platform == 'never'",
+    "opencv-contrib-python; sys_platform == 'never'",
 ]
 exclude-dependencies = [
+    "agp-client",
     "fasttext-wheel",
     "alembic",
     "blinker",
@@ -47,12 +51,6 @@ exclude-dependencies = [
     "werkzeug",
     "waitress",
     "diskcache",
-
-    # The pinned OSWorld package declares every cloud VM provisioning SDK as
-    # an unconditional dependency. This server supports direct Docker and Gym
-    # Sandbox (Docker/OpenSandbox) lifecycle instead; those paths never import
-    # the Azure, Aliyun, or Volcengine providers. Avoid resolving their large,
-    # generated SDK trees into each managed agent venv.
     "azure-identity",
     "azure-mgmt-compute",
     "azure-mgmt-network",

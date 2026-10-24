@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "gym-container-opt-in-codecs"
+version = "0.0.0"
+requires-python = ">=3.13.14,<3.14"
+dependencies = [
+    "opencv-python-headless==5.0.0.93",
+    "pynvvideocodec==2.0.4",
+    "torchcodec==0.16.0",
+    "torchvision==0.26.0",
+    "torchaudio==2.11.0",
+    "pycountry==26.2.16",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = []

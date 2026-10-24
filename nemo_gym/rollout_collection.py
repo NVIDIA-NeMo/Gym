@@ -42,7 +42,6 @@ import orjson
 from aiohttp import ClientError
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
-from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
@@ -96,6 +95,7 @@ from nemo_gym.path_utils import (
     materialized_path_for,
     resubmit_offset_path_for,
 )
+from nemo_gym.progress_utils import tqdm
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (

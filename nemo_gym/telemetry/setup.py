@@ -391,8 +391,10 @@ def server_venv_requirements() -> list:
     runs the pinned commit. Reading the installed distribution's ``direct_url.json``
     makes that skew impossible by construction instead of by keeping two pins in sync.
 
-    Returns an empty list when telemetry is off or nemo-lens is not installed, so a
-    normal run's venvs are byte-for-byte what they are today.
+    The locked component installer selects the telemetry extra and checks these
+    parent requirements against the resulting environment. A version or source
+    mismatch fails with lock-update guidance rather than an unlocked fallback.
+    Returns an empty list when telemetry is off or nemo-lens is not installed.
     """
     if not is_telemetry_env_enabled():
         return []

@@ -35,7 +35,7 @@ Ray isn't included by default. To run environments that use Ray, such as `local_
 git clone https://github.com/NVIDIA-NeMo/Gym.git
 cd Gym
 uv venv --python 3.13.14 && source .venv/bin/activate
-uv sync
+uv sync --locked
 ```
 
 Add `--extra ray` to `uv sync` to run environments that use Ray.
@@ -133,3 +133,45 @@ Run your first evaluation.
 </Card>
 
 </Cards>
+
+## Component dependency locks
+
+Repository-managed servers have their own `pyproject.toml` and committed
+`uv.lock`, enforced by CI. `gym env start`, `gym env prefetch`, and `gym env test`
+prefer `uv sync --locked`, including when `uv_venv_dir` places the virtual
+environment outside the checkout. Components are not combined into one workspace.
+Existing custom components with `requirements.txt` or an unlocked `pyproject.toml`
+retain their previous setup, discovery, and onboarding behavior without migration.
+
+A stale component lock fails setup; sync errors do not trigger an unlocked retry.
+After intentionally editing managed dependencies, run `uv lock` in that directory
+and commit both files. Do not use `--frozen` to hide a stale lock.
+
+If a successful locked sync does not satisfy inherited parent requirements, setup
+automatically uses compatibility resolution against the component's dependency
+metadata without changing its committed project or lock. This propagates parent-only
+sandbox provider plugins (including their exact sources and dependencies) and the
+parent's compatible OpenAI version. Ray constraints also act as overrides and apply
+only to components that require Ray. The resulting environment is checked again;
+unresolvable requirements or source mismatches still fail explicitly. Telemetry
+retains its selected extra. No user configuration changes are required.
+
+Wheel installations carry the source metadata needed for relative Gym dependencies;
+the installer reconstructs that metadata beside the writable component environment
+without modifying site-packages or resolving a different Gym version from PyPI.
+Custom indexes and prerelease policy belong in the project used to generate the
+lock, not in a startup-only dependency override.
+
+### Benchmark preparation
+
+A dataset that needs additional preparation dependencies declares `prepare_project`
+pointing at an isolated project with `pyproject.toml` and `uv.lock`. Gym syncs it with
+`uv sync --locked` and imports/runs the preparer in that environment, including its
+cache-freshness hook, without installing packages into the running Gym interpreter.
+
+Existing `dataset.prepare_dependencies` configs remain supported unchanged. These
+arguments are passed to `uv pip install --python <running Gym interpreter>` before
+importing the preparer, including editable installs and requirements-file options.
+When nonempty, `prepare_dependencies` takes precedence over `prepare_project`, so
+existing config overrides keep their behavior. Use `prepare_project` for a
+reproducible locked environment; migrating existing preparation configs is optional.

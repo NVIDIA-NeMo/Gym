@@ -1,3 +1,0 @@
--e nemo-gym[dev] @ ../../
-git+https://github.com/microsoft/tale-suite.git@train_test_splits#egg=tale-suite
-

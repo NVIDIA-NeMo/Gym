@@ -25,7 +25,7 @@ The prompt is applied at run time from `benchmarks/prompts/eval/assaybench/paper
 ## Verification
 
 Everything that decides a score is the authors' own code, imported from the `assaybench` PyPI package
-(pinned to 0.2.0 in `requirements.txt`) rather than reimplemented:
+(pinned to 0.2.0 in `pyproject.toml`) rather than reimplemented:
 
 1. The gene list is read out of the reply the way the reference harness read it (**Prompt**, below), then
    split on commas by the harness's `parse_genes_from_output` — vendored verbatim in `gene_parsing.py`, since

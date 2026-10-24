@@ -637,7 +637,7 @@ class ExternalBenchmarkAgent(SimpleResponsesAPIAgent):
         )
 ```
 
-Add the dependency in `requirements.txt`. If needs are more complex than pip packages, use `setup.py` or `pyproject.toml`.
+Add the dependency in `pyproject.toml`, then run `uv lock` and commit `uv.lock`.
 
 Reproduction requirement: run the original repo first, reproduce published numbers, then integrate into Gym and reproduce again. This decouples Gym integration bugs from benchmark bugs.
 

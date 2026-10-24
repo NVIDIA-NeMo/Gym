@@ -17,9 +17,9 @@ RUN_EVAL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/run_eval.sh"
 CLEANUP_RUN_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/cleanup_run.sh"
 OPENSANDBOX_CLEANUP_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/cleanup_opensandbox_run.py"
 OSWORLD_AGENT_CONFIG = REPO_ROOT / "responses_api_agents/osworld_agent/configs/osworld_agent.yaml"
-OSWORLD_AGENT_REQUIREMENTS = REPO_ROOT / "responses_api_agents/osworld_agent/requirements.txt"
+OSWORLD_AGENT_REQUIREMENTS = REPO_ROOT / "responses_api_agents/osworld_agent/pyproject.toml"
 OSWORLD_AGENT_APP = REPO_ROOT / "responses_api_agents/osworld_agent/app.py"
-OSWORLD_AGENT_OVERRIDES = REPO_ROOT / "responses_api_agents/osworld_agent/overrides.txt"
+OSWORLD_AGENT_OVERRIDES = REPO_ROOT / "responses_api_agents/osworld_agent/pyproject.toml"
 OSWORLD_RUNTIME_DEPS_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/install_optional_runtime_deps.sh"
 OSWORLD_RUNTIME_DEPS_CHECKER = REPO_ROOT / "responses_api_agents/osworld_agent/runtime_dependencies.py"
 
@@ -121,11 +121,15 @@ def test_start_control_requires_explicit_osworld_runtime_setup() -> None:
 
 
 def test_managed_osworld_agent_installs_opensandbox_sdk() -> None:
-    requirements = OSWORLD_AGENT_REQUIREMENTS.read_text(encoding="utf-8").splitlines()
-    overrides = OSWORLD_AGENT_OVERRIDES.read_text(encoding="utf-8").splitlines()
+    import tomllib
+
+    project = tomllib.loads(OSWORLD_AGENT_REQUIREMENTS.read_text(encoding="utf-8"))
+    requirements = project["project"]["dependencies"]
+    overrides = project["tool"]["uv"]["override-dependencies"]
     runtime_script = OSWORLD_RUNTIME_DEPS_SCRIPT.read_text(encoding="utf-8")
 
-    assert "-e nemo-gym[dev] @ ../../" in requirements
+    assert "nemo-gym[dev]" in requirements
+    assert project["tool"]["uv"]["sources"]["nemo-gym"] == {"path": "../..", "editable": True}
     assert "opensandbox>=0.1.15" in requirements
     assert "tenacity>=9.1.4" in requirements
     assert not any(line.startswith("cryptography") for line in requirements)

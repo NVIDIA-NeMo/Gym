@@ -130,7 +130,7 @@ def test_standalone_resources_server_keeps_its_combined_composition(tmp_path: Pa
         "configs/shared.yaml",
         "data/.gitignore",
         "example.jsonl",
-        "requirements.txt",
+        "pyproject.toml",
         "tests/__init__.py",
         "tests/test_app.py",
         "tests/verifier_cases.jsonl",
@@ -800,3 +800,31 @@ shared_model:
             reward_range=(0, 1),
             higher_is_better=True,
         )
+
+
+def test_wheel_workflow_checks_scaffold_project_and_creates_lock(tmp_path):
+    """The wheel smoke workflow must exercise the same lock-before-setup scaffold contract."""
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/full-test-suite.yml").read_text())
+    steps = [step for job in workflow["jobs"].values() for step in job.get("steps", [])]
+    command = next(step["run"] for step in steps if step.get("name") == "Test ng_init_resources_server")
+    server = tmp_path / "resources_servers/hello_world"
+    scaffold_resources_server(directory=server)
+    assert (server / "pyproject.toml").is_file()
+    assert not (server / "uv.lock").exists()
+    assert "test -f resources_servers/hello_world/pyproject.toml" in command
+    assert "test -f resources_servers/hello_world/requirements.txt" not in command
+    assert "uv lock --project resources_servers/hello_world" in command
+    assert "uv lock --check --project resources_servers/hello_world" in command
+    assert "test -f resources_servers/hello_world/uv.lock" in command
+
+
+def test_onboarding_docs_generate_lock_before_first_test():
+    root = Path(__file__).resolve().parents[2]
+    docs = (root / "fern/versions/latest/pages/contribute/environments/new-environment.mdx").read_text()
+    example = docs.split("## Onboarding Example: Hello World", 1)[1].split("The scaffold creates", 1)[0]
+    assert example.index("gym env init") < example.index("uv lock --project resources_servers/my_eval")
+    assert example.index("uv lock --project resources_servers/my_eval") < example.index("gym env test my_eval")
+    testing = docs.split("### 4. Testing", 1)[1].split("### 5.", 1)[0]
+    assert testing.index("uv lock --project resources_servers/my_eval") < testing.index("gym env test my_eval")
+    assert "Commit both `pyproject.toml` and `uv.lock`" in testing

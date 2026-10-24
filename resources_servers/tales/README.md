@@ -8,7 +8,7 @@ training and evaluation across five text-adventure frameworks: `textworld`,
 
 ## Install
 
-`tale-suite` is pinned in `requirements.txt` (installed automatically with the server's
+`tale-suite` is pinned in `pyproject.toml` (installed automatically with the server's
 venv). `textworld_express` and `scienceworld` need a JRE/JDK (they launch a Java gateway
 via py4j); `textworld`, `alfworld`, and `jericho` run without it. The Java binary must be on
 the server process's `PATH`.
