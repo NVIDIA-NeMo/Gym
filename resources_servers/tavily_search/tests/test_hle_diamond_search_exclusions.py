@@ -23,7 +23,7 @@ import pytest
 from benchmarks.hle_diamond import build_search_exclusions as module
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DIAMOND_POLICY = REPO_ROOT / "benchmarks" / "hle_diamond" / "search_exclusions.json"
 HLE_POLICY = REPO_ROOT / "benchmarks" / "hle" / "search_exclusions.json"
 

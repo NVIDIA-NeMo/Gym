@@ -52,7 +52,7 @@ from resources_servers.equivalence_llm_judge.app import (
 from responses_api_agents.simple_agent.app import SimpleAgentVerifyResponse
 
 
-REPO_ROOT = Path(__file__).parents[2]
+REPO_ROOT = Path(__file__).parents[3]
 HLE_DIAMOND_DIR = REPO_ROOT / "benchmarks" / "hle_diamond"
 HLE_JUDGE_PROMPT = REPO_ROOT / "benchmarks" / "hle" / "prompts" / "judge.txt"
 HLE_DIAMOND_PROMPTS = HLE_DIAMOND_DIR / "prompts"
