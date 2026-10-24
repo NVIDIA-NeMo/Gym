@@ -120,6 +120,10 @@ def test_config_validation() -> None:
         docker_provider.DockerCreateConfig(start_timeout_s=0)
     with pytest.raises(ValueError, match="pids_limit"):
         docker_provider.DockerCreateConfig(pids_limit=0)
+    with pytest.raises(ValueError, match="transport_retries"):
+        docker_provider.DockerCreateConfig(transport_retries=-1)
+    with pytest.raises(ValueError, match="transport_retry_delay_s"):
+        docker_provider.DockerCreateConfig(transport_retry_delay_s=-1)
     with pytest.raises(ValueError, match="publish_host"):
         docker_provider.DockerCreateConfig(publish_host="localhost")
     with pytest.raises(ValueError, match="default_timeout_s"):
@@ -190,6 +194,18 @@ def test_is_missing_container() -> None:
     assert docker_provider._is_missing_container("No such container: x") is True
     assert docker_provider._is_missing_container("Error: No such object: y") is True
     assert docker_provider._is_missing_container("permission denied") is False
+
+
+def test_is_create_transport_failure() -> None:
+    assert docker_provider._is_create_transport_failure("Cannot connect to the Docker daemon") is True
+    assert docker_provider._is_create_transport_failure("read: connection reset by peer") is True
+    assert docker_provider._is_create_transport_failure("invalid reference format") is False
+
+
+def test_is_name_conflict() -> None:
+    conflict = 'Conflict. The container name "/nemo-gym-x" is already in use by container "0123456789abcdef".'
+    assert docker_provider._is_name_conflict(conflict) is True
+    assert docker_provider._is_name_conflict("the container name is invalid") is False
 
 
 def test_coerce_str_list() -> None:
@@ -368,12 +384,150 @@ async def test_create_run_timeout_cleans_up(fake_binary: str, monkeypatch: pytes
     def responder(argv: list[str]) -> tuple[int, str, str]:
         if "run" in argv:
             raise TimeoutError("slow")
+        if "inspect" in argv:
+            return (1, "", "No such object")
         return (0, "", "")
 
-    provider, rec = _make_provider(monkeypatch, responder)
+    provider, rec = _make_provider(
+        monkeypatch,
+        responder,
+        create={"transport_retries": 0, "transport_retry_delay_s": 0},
+    )
     with pytest.raises(docker_provider.DockerCreateError, match="timed out"):
         await provider.create(SandboxSpec(image="ubuntu:22.04"))
     assert any(c["argv"][:3] == [FAKE_BINARY, "rm", "-f"] for c in rec.calls)
+
+
+async def test_create_recovers_container_after_lost_run_response(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if "run" in argv:
+            return (1, "", "Cannot connect to the Docker daemon")
+        if "inspect" in argv:
+            return (0, "1\tubuntu:22.04\trunning\n", "")
+        if "exec" in argv:
+            return (0, docker_provider.READY_PROBE_EXPECTED, "")
+        return (0, "", "")
+
+    provider, rec = _make_provider(
+        monkeypatch,
+        responder,
+        create={"transport_retries": 2, "transport_retry_delay_s": 0},
+    )
+    handle = await provider.create(SandboxSpec(image="ubuntu:22.04"))
+
+    assert handle.raw.image == "ubuntu:22.04"
+    assert sum("run" in call["argv"] for call in rec.calls) == 1
+    assert any("inspect" in call["argv"] for call in rec.calls)
+    assert not any(call["argv"][:3] == [FAKE_BINARY, "rm", "-f"] for call in rec.calls)
+
+
+async def test_create_finishes_start_after_run_leaves_owned_container_created(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = False
+
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        nonlocal started
+        if "run" in argv:
+            return (1, "cid\n", 'error during connect: Post "/containers/cid/start": EOF')
+        if "start" in argv:
+            started = True
+            return (1, "", 'error during connect: Post "/containers/cid/start": EOF')
+        if "inspect" in argv:
+            state = "running" if started else "created"
+            return (0, f"1\tubuntu:22.04\t{state}\n", "")
+        if "exec" in argv:
+            return (0, docker_provider.READY_PROBE_EXPECTED, "")
+        return (0, "", "")
+
+    provider, rec = _make_provider(
+        monkeypatch,
+        responder,
+        create={"transport_retries": 2, "transport_retry_delay_s": 0},
+    )
+    handle = await provider.create(SandboxSpec(image="ubuntu:22.04"))
+
+    assert handle.raw.image == "ubuntu:22.04"
+    assert sum("run" in call["argv"] for call in rec.calls) == 1
+    assert sum("start" in call["argv"] for call in rec.calls) == 1
+    assert sum("inspect" in call["argv"] for call in rec.calls) >= 2
+    assert not any(call["argv"][:3] == [FAKE_BINARY, "rm", "-f"] for call in rec.calls)
+
+
+async def test_create_removes_owned_created_container_when_start_cannot_recover(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if "run" in argv:
+            return (1, "cid\n", 'error during connect: Post "/containers/cid/start": EOF')
+        if "start" in argv:
+            return (1, "", "port is already allocated")
+        if "inspect" in argv:
+            return (0, "1\tubuntu:22.04\tcreated\n", "")
+        return (0, "", "")
+
+    provider, rec = _make_provider(
+        monkeypatch,
+        responder,
+        create={"transport_retries": 0, "transport_retry_delay_s": 0},
+    )
+    with pytest.raises(docker_provider.DockerCreateError, match="exact-name reconciliation"):
+        await provider.create(SandboxSpec(image="ubuntu:22.04"))
+
+    assert any("start" in call["argv"] for call in rec.calls)
+    assert any(call["argv"][:3] == [FAKE_BINARY, "rm", "-f"] for call in rec.calls)
+
+
+async def test_create_retries_same_name_when_transport_fails_before_create(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_attempts = 0
+
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        nonlocal run_attempts
+        if "run" in argv:
+            run_attempts += 1
+            if run_attempts == 1:
+                return (1, "", "Cannot connect to the Docker daemon")
+            return (0, "cid", "")
+        if "inspect" in argv:
+            return (1, "", "No such object")
+        if "exec" in argv:
+            return (0, docker_provider.READY_PROBE_EXPECTED, "")
+        return (0, "", "")
+
+    provider, rec = _make_provider(
+        monkeypatch,
+        responder,
+        create={"transport_retries": 1, "transport_retry_delay_s": 0},
+    )
+    handle = await provider.create(SandboxSpec(image="ubuntu:22.04"))
+
+    run_calls = [call["argv"] for call in rec.calls if "run" in call["argv"]]
+    assert len(run_calls) == 2
+    assert run_calls[0] == run_calls[1]
+    assert handle.sandbox_id == run_calls[0][4]
+
+
+async def test_create_refuses_to_reconcile_unowned_name(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if "run" in argv:
+            return (1, "", "Cannot connect to the Docker daemon")
+        if "inspect" in argv:
+            return (0, "0\tubuntu:22.04\trunning\n", "")
+        return (0, "", "")
+
+    provider, rec = _make_provider(
+        monkeypatch,
+        responder,
+        create={"transport_retries": 0, "transport_retry_delay_s": 0},
+    )
+    with pytest.raises(docker_provider.DockerCreateError, match="ownership/image mismatch"):
+        await provider.create(SandboxSpec(image="ubuntu:22.04"))
+
+    assert not any(call["argv"][:3] == [FAKE_BINARY, "rm", "-f"] for call in rec.calls)
 
 
 async def test_create_probe_failure_cleans_up(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
