@@ -65,8 +65,8 @@ SCENARIOS = (
     ),
     Scenario(
         "model_error",
-        "A terminal model HTTP 400 still reaches verification and retains an unmasked zero grade.",
-        evidence=("TE-1", "TE-2", "TE-4", "TE-6", "TE-7", "TE-8"),
+        "A terminal model HTTP 400 is reported to the EnvironmentServer with its error and retained evidence.",
+        evidence=("TE-1", "TE-2", "TE-4", "TE-7", "TE-8"),
         tool_steps=0,
         http_errors=(400,),
         terminal_error=True,

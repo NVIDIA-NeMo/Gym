@@ -84,6 +84,9 @@ class SwemerV1ResourcesServerConfig(BaseResourcesServerConfig):
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
     apply_anti_cheating: bool = True
+    # Write the Maven Central mirror to ~/.m2/settings.xml in the agent and eval sandboxes. Turn off for providers
+    # that mount their own read-only settings.xml, e.g. one that already mirrors Maven Central.
+    overwrite_maven_settings: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]
 
@@ -267,7 +270,9 @@ class SwemerV1ResourcesServer(SimpleResourcesServer):
 
         # Mirror files here too, not just the verification sandbox: an agent building/testing its
         # own changes hits the same Maven Central rate limit otherwise.
-        sandbox = await self._create_sandbox(body, files=mirror_files())
+        sandbox = await self._create_sandbox(
+            body, files=mirror_files(maven_settings=self.config.overwrite_maven_settings)
+        )
         await self._ensure_git_repo(sandbox, body.workdir)
         if self.config.apply_anti_cheating:
             await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swemer_v1")
@@ -304,7 +309,7 @@ class SwemerV1ResourcesServer(SimpleResourcesServer):
         inputs = self._inputs(body, patch)
         log_dir = Path(__file__).parent / "logs" / body.instance_id
 
-        files = verification_files(inputs)
+        files = verification_files(inputs, overwrite_maven_settings=self.config.overwrite_maven_settings)
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
         start_time_taken = 0.0
         verification_time_taken = 0.0

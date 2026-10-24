@@ -5,6 +5,39 @@ knowledge-work tasks scored by an LLM judge against per-task rubrics. This
 benchmark wires the Stirrup-based agent (`responses_api_agents/stirrup_agent`)
 to the GDPVal resources server (`resources_servers/gdpval`).
 
+## How it works
+
+```
+┌──────────────────────┐  1. seed session        ┌─────────────────────────────┐
+│  Environment server  │  4. /verify             │   GDPVal resources server   │
+│                      │ ──────────────────────► │ reference files, task tools,│
+└──────────┬───────────┘                         │ judging                     │
+           │ 2. seed agent session               └──────┬───────────────▲──────┘
+           │    (sandbox + tool access)                 │ owns          │ task tools
+           ▼                                            ▼               │
+┌──────────────────────┐  3. installs Stirrup,   ┌──────────────────────┴──────┐
+│    Stirrup agent     │     runs the episode    │        Task sandbox         │
+│                      │ ──────────────────────► │ /root, Stirrup loop,        │
+└──────────────────────┘                         │ code_exec                   │
+                                                 └──────────────┬──────────────┘
+                                                                │ model calls
+                                                                ▼
+                                                 ┌─────────────────────────────┐
+                                                 │        Model server         │
+                                                 └─────────────────────────────┘
+```
+
+1. The environment server seeds a resources session: the resources server downloads the task's reference files,
+   starts a sandbox from the image built from `resources_servers/gdpval/containers/Dockerfile` and uploads the files under `/root`.
+2. The environment server seeds the Stirrup agent with access to that sandbox and to the resources server's task tools.
+3. The agent installs Stirrup in the sandbox and runs the episode there. Shell commands (`code_exec`) run in the
+   sandbox; the task tools (`finish`, `abandon_task_finish`, `web_search`, `fetch_web_page`) are calls to the
+   resources server, and `finish` checks the submitted files exist.
+4. `/verify` copies the submitted files to `task_<id>/repeat_<n>/` under `persist_deliverables_dir`, stops the sandbox
+   and judges the files, against the rubric or a reference model's deliverables.
+
+Each output line holds `responses_create_params`, the agent's `response`, the `reward` and the `judge_response`.
+
 ## Prepare data
 
 Downloads `openai/gdpval` from HuggingFace and writes
@@ -37,6 +70,17 @@ Required environment variables for the judge:
   [multi-judge panel](#multi-judge-panel) is disabled); defaults to
   `gcp/google/gemini-3.1-pro-preview`
 - `HF_TOKEN` — for downloading reference files (avoids HF anonymous rate limits)
+
+The task sandbox runs on OpenSandbox:
+
+- `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` — the OpenSandbox endpoint and key
+- `GDPVAL_SANDBOX_IMAGE` — the sandbox image (see `resources_servers/gdpval/README.md`)
+- `TAVILY_API_KEY` — for the `web_search` and `fetch_web_page` tools
+- `PERSIST_DELIVERABLES_DIR` — an absolute directory for the persisted deliverables. There is no default, so runs
+  do not share one by accident
+
+The agent runs inside the sandbox and calls the model and resources servers from there, so pass
+`++use_absolute_ip=true` when the servers' default addresses are not reachable from the sandbox.
 
 By default deliverables are graded by a **panel** of judges (GPT-5.5, Gemini 3.1
 Pro Preview, Claude Opus 4.8), one sampled per call. See
@@ -146,8 +190,8 @@ finite. Until then the next stage is not planned:
 - If a row is still retryable or was never dispatched, the run writes its
   rollouts and aggregate metrics (degraded, with no `comparison/eval_elo`), logs
   that it stopped, and exits 0. Continue with `--resume`, or set
-  `++multistage.retry_inprocess=true` to retry `timeout_exceeded` and
-  `transient` rows in the same process, up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`
+  `++multistage.retry_inprocess=true` to retry rows the environment server
+  reports as retryable in the same process, up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`
   (default 3) attempts per row.
 - If no row is left to retry (the rest are terminal or out of attempts), the run
   writes its rollouts and then fails, without aggregate metrics. That needs a
@@ -171,17 +215,17 @@ This example requires at least 90% of all planned calibration rows, at least 50%
 of each selected reference's assigned rows, and at least one judged row for every
 selected reference. The ELO fit must be finite and include every selected
 reference. A row that could still be retried is waived only when its latest
-persisted failure class is in `waivable_failure_classes`, which defaults to
-`[timeout_exceeded]`; `transient` is the only other allowed class.
-`tolerate_unresolved: true` waives any persisted failure class, including
+persisted failure is an agent timeout (`agent_timeout`) or an environment-server
+failure outside the agent stage, such as a dependency outage. A crash in the
+agent stage is never retried in process, and is waived only with
+`tolerate_unresolved: true`, which waives any persisted failure class, including
 agent-server outages (`agent_request_failed`), so set the coverage floors tight.
-It also accepts a missing reference deliverable (`reference_missing`) straight
-away. Otherwise GDPVal retries it across `--resume` launches for up to
-`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS` (default 3) attempts before it becomes an
-omission; `transport_assignment_repair` with `reference_availability_only: true`
-avoids it when a stage is planned. Undispatched or drained
-rows always keep the stage open. Terminal and max-attempt omissions still count
-against every coverage floor.
+A missing reference deliverable (`reference_missing`) is terminal: the row is an
+omission from the first launch, with or without `tolerate_unresolved`, and
+`--resume` does not retry it. `transport_assignment_repair` with
+`reference_availability_only: true` avoids it when a stage is planned.
+Undispatched or drained rows always keep the stage open. Terminal and
+max-attempt omissions still count against every coverage floor.
 
 For a freshly planned policy-enabled stage, task-to-reference assignments are
 balanced before dispatch. When the policy is added while resuming an existing
@@ -207,31 +251,45 @@ still scored, but reports `final_stage_degraded: 1` and no flat headline.
 ++multistage.stages='[{num_tasks: 45, partial_completion: {...}}, {num_tasks: 220, num_models: 4, partial_completion: {min_success_fraction: 0.95, min_per_reference_success_fraction: 0.5, min_successful_rows_per_reference: 1}}]'
 ```
 
-### Fresh vs. cached deliverables
+### Deliverables and re-judging
 
-- **Fresh** (generate deliverables): set `PERSIST_DELIVERABLES_DIR` to an
-  absolute path. The agent persists each deliverable to `persist_deliverables_dir`
-  and rejects a relative path at startup, including the config's fallback
-  `output/gdpval/deliverables`. A task that recurs in a later stage is judged
-  from its cached deliverable instead of re-running the policy.
-- **Cached / judge-only** (score existing deliverables, no policy GPUs): set the
-  `JUDGE_ONLY` and `PERSIST_DELIVERABLES_DIR` env vars so the agent skips the
-  policy and scores the cached deliverables:
+`/verify` persists each deliverable to `task_<id>/repeat_<n>/` under the GDPVal
+resources server's `persist_deliverables_dir` (`PERSIST_DELIVERABLES_DIR`, required). Use
+an absolute path; `transport_assignment_repair` requires one. A task that recurs
+in a later stage is judged from its persisted deliverable instead of re-running
+the policy.
+
+To judge a finished run's deliverables again, for example with a different judge
+panel, judge settings or references, use `gym eval reverify` on its output. It
+starts only the resources server and its judges, without the policy or a
+sandbox; each row's `deliverables_dir` names its persisted deliverable. A
+multi-stage run writes `<output stem>_materialized_inputs.jsonl` with every
+stage's rows, so each stage is judged again against the references it was
+assigned; the adaptive reference selection is not re-run.
 
 ```bash
-JUDGE_ONLY=true \
-PERSIST_DELIVERABLES_DIR=/path/to/deliverables_cache \
-gym eval run \
-    --model-type vllm_model --benchmark gdpval --split benchmark \
-    --output results/gdpval_multistage.jsonl \
+gym eval reverify \
+    --benchmark gdpval \
     ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
-    ++multistage.enabled=true \
-    ++multistage.stages='[{num_tasks: 45}, {num_models: 4}]'
+    --inputs results/gdpval_multistage_materialized_inputs.jsonl \
+    --rollouts results/gdpval_multistage.jsonl \
+    --output results/gdpval_multistage_reverified.jsonl
 ```
 
-  The cache must contain a `task_<id>/repeat_<n>/` dir for every repeat the run
-  requests (the benchmark defaults to `num_repeats: 1`, i.e. `repeat_0`; raise it
-  with `++...datasets.0.num_repeats=N` and the cache needs `repeat_0`…`repeat_{N-1}`).
+In rubric mode, a verification without a usable judgement goes to the failures
+file as `judge_failed`, and `gym eval reverify --judge-failed-only` judges it
+again. In comparison mode a judging failure is a retryable environment-server
+failure. In a multi-stage run, a retry (in process with
+`multistage.retry_inprocess`, or on `--resume`) judges the persisted deliverable
+again without the policy. A single-pass `--resume` runs the policy again and
+replaces the persisted deliverable, and `--judge-failed-only` does not cover
+comparison mode.
+
+To collect deliverables without judging them, for example for a reference set,
+set `++gdpval_resources_server.resources_servers.gdpval.judge_deliverables=false`.
+`/verify` still persists each deliverable, then returns `reward: 0.0` with
+`mask_sample: true`, so the rows stay in the output with their
+`deliverables_dir` and aggregation skips them.
 
 ### Full run as a single stage
 
@@ -249,14 +307,14 @@ full run:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `stages` | *(required)* | List of `{num_tasks?, num_models?, seed?, partial_completion?}` (or `"[num_tasks]:[num_models]:seed"` strings). `num_tasks` omitted ⇒ full task set; `num_models` omitted ⇒ all references. `partial_completion` is an opt-in policy with overall/per-reference success floors (see [above](#accepting-partial-calibration-after-timeouts)); on the final stage it sets the floor below which the headline is reported as degraded. Keys: `min_success_fraction` (default `1.0`), `min_per_reference_success_fraction` (`1.0`), `min_successful_rows_per_reference` (`1`), `waivable_failure_classes` (`[timeout_exceeded]`) and `tolerate_unresolved` (`false`). |
+| `stages` | *(required)* | List of `{num_tasks?, num_models?, seed?, partial_completion?}` (or `"[num_tasks]:[num_models]:seed"` strings). `num_tasks` omitted ⇒ full task set; `num_models` omitted ⇒ all references. `partial_completion` is an opt-in policy with overall/per-reference success floors (see [above](#accepting-partial-calibration-after-timeouts)); on the final stage it sets the floor below which the headline is reported as degraded. Keys: `min_success_fraction` (default `1.0`), `min_per_reference_success_fraction` (`1.0`), `min_successful_rows_per_reference` (`1`) and `tolerate_unresolved` (`false`). |
 | `column` | `[occupation]` | Dataset column(s) the task sample is drawn proportionally over. |
 | `distribution_path` | *(auto)* | Reuse/write the task-distribution JSON here; built from the dataset when absent. |
 | `dataset_path` | *(prepared dataset)* | Dataset the distribution is built from. |
 | `nested_tasks` | `false` | `true` makes each stage's task sample a superset of the previous; default samples each stage independently. |
 | `seed` | *(none)* | Seed for reproducible task sampling, per-task reference assignment, and reference selection. |
 | `reuse_cached_deliverables` | `true` | Judge a task's cached deliverable in later stages instead of re-running the policy. |
-| `retry_inprocess` | `false` | Retry `timeout_exceeded` and `transient` rows in the same process, up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`; other retryable rows wait for `--resume`. |
+| `retry_inprocess` | `false` | Retry rows the environment server reports as retryable in the same process, up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`; other retryable rows wait for `--resume`. |
 | `replace_transport_ineligible_tasks` | `false` | In strict, sampled non-final stages, replace a task rejected by every judge's deterministic transport preflight with an unused task from the same distribution bucket. The replacement keeps the same reference assignment. Full/final stages are unchanged. |
 | `transport_assignment_repair` | unset | Reassign tasks between a stage's references before dispatch; see [Transport-aware reference assignment](#transport-aware-reference-assignment). |
 
@@ -276,11 +334,10 @@ no `finish_params.json` for it. Turn it on with `enabled: true`:
 | `reference_availability_only` | `false` | Skip the size checks and only move tasks away from references with no `finish_params.json` for the task. |
 
 - Without `reference_availability_only`, only a task whose candidate
-  deliverable already exists under the agent's `persist_deliverables_dir` (which
-  must be absolute) when its stage is planned can move. With an empty
-  deliverables directory that is only a task an earlier stage already produced,
-  so the repair is meant for judge-only runs and reruns over an existing
-  deliverables cache.
+  deliverable already exists under the GDPVal resources server's
+  `persist_deliverables_dir` (which must be absolute) when its stage is planned
+  can move. On a fresh run that is only a task an earlier stage already
+  produced.
 - `reference_availability_only: true` needs no candidate deliverable, so it also
   works on a fresh run.
 - A task it cannot place keeps its reference and is listed in the stage's plan
@@ -309,13 +366,10 @@ gym eval run \
     ++multistage.stages='[{num_tasks: 45, partial_completion: {min_success_fraction: 0.9, min_per_reference_success_fraction: 0.5, min_successful_rows_per_reference: 1}}, {num_tasks: 220, num_models: 4}]'
 ```
 
-Add `RERUN_INCOMPLETE=true` with the same `PERSIST_DELIVERABLES_DIR` when an
-unfinished task must resume or reuse its policy deliverable. A task whose
-deliverable already **finished** on disk (marked by `finish_params.json`) skips
-the policy rollout and is judged from cache; a task that never finished is
-re-rolled. `rerun_incomplete` also reuses **cached judgements** keyed by the
-task's assigned reference. Each stage's sampled tasks and per-task reference
-assignment are recorded in the stage journal (and re-derived deterministically
+A resume dispatches the rows that did not finish again. A row that failed during
+verification, or that a later stage was reusing, is judged again from its
+persisted deliverable; any other row runs the policy again. Each stage's sampled tasks and per-task
+reference assignment are recorded in the stage journal (and re-derived deterministically
 from the stage seed for older plans), so they replay identically on resume. Use
 the same `multistage.seed` so an unplanned stage draws the same tasks.
 
@@ -324,22 +378,19 @@ is tied to a fingerprint of the dataset rows and task distribution; the stage
 list, seeds, `nested_tasks`, `column`, `reuse_cached_deliverables` and
 `transport_assignment_repair`; the reference ids and ELOs (not the contents of
 their deliverable directories); `num_repeats` and the other result-affecting
-rollout settings; and every server setting except endpoints, API keys, headers,
-`rerun_incomplete` and `concurrency`. A changed fingerprint, or a run without
+rollout settings; and every server setting except endpoints, API keys, headers
+and `concurrency`. A changed fingerprint, or a run without
 `--resume`, starts fresh and renames the old rollouts, failure sidecar, journal
 and aggregate metrics to `<file>.stale.<ns>`. A stage restart moves the rows it
 drops to `<file>.pruned.<ns>`. Neither is deleted; remove them by hand.
 `partial_completion`, `retry_inprocess` and `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS` are
 not fingerprinted, so they can be added or changed on a resume (except a
-policy already accepted as partial; see below). Cached judgements
-(`RERUN_INCOMPLETE`) are keyed by the same fingerprint.
+policy already accepted as partial; see below).
 
 After a stage has been accepted as partial, its policy, included evidence, and
 omitted keys are frozen. Changing or removing that policy on `--resume` fails
 closed; start a fresh output path if you intentionally want a different
-calibration decision. See
-[Task Re-run Mode](../../responses_api_agents/stirrup_agent/README.md#task-re-run-mode)
-for the full semantics.
+calibration decision.
 
 ## Agent settings
 
@@ -351,10 +402,95 @@ The benchmark config sets these Stirrup agent keys on
 | Key | GDPVal | Stirrup default | Meaning |
 |-----|--------|-----------------|---------|
 | `context_window_tokens` | `262144` | `262144` | Model context window used to size each call's `max_completion_tokens` and to decide when Stirrup compacts the context. It replaces the window Stirrup derived from the request's `max_output_tokens`, which now only lowers the per-call cap `max_completion_tokens_cap` (default `64000`). |
-| `min_completion_tokens` | `8192` | `1024` | Floor on each call's `max_completion_tokens`. GDPVal tasks routinely need multi-thousand-token scripts: a 1,024-token completion cannot hold a useful tool call and can start a sticky `code_exec({})` loop after long reasoning turns. `max_completion_tokens_cap` always applies, and when the tokenizer renders the full prompt the remaining context is also a strict bound. |
+| `min_completion_tokens` | `8192` | `1024` | Floor on each call's `max_completion_tokens`. GDPVal tasks routinely need multi-thousand-token scripts: a 1,024-token completion cannot hold a useful tool call and can start a sticky `code_exec({})` loop after long reasoning turns. `max_completion_tokens_cap` always applies. |
 | `prompt_estimator_truncate_history_thinking` | unset | unset | Prompt estimator only; never sent to the model. Set it to `true` for checkpoints whose chat template drops reasoning from assistant turns before the last user turn, so the estimate matches. |
 | `min_compaction_summary_words` | `50` | `1` | Minimum words in a context-compaction summary, which rejects near-empty summaries that would erase progress on long sessions. After 3 rejected attempts the agent raises an error instead of replacing its history. |
 | `truncation_recovery` | `true` | `false` | After a call spends its whole completion budget without a usable tool call, run the next call with thinking disabled and a one-time instruction to act now. The budget is unchanged and the instruction is not recorded in the trajectory. Disabling thinking needs a model server that forwards request `chat_template_kwargs` (`forward_request_chat_template_kwargs: true` on `vllm_model`); otherwise only the instruction is sent. |
+
+## Run another harness
+
+`benchmarks/gdpval/pi.yaml` runs [Pi](../../responses_api_agents/pi_agent/README.md) in place of Stirrup, with the
+same resources server, judges and multi-stage driver as `config.yaml`:
+
+```bash
+export PERSIST_DELIVERABLES_DIR=$PWD/output/gdpval_pi/deliverables
+gym eval prepare --benchmark gdpval/pi
+gym eval run \
+    --model-type vllm_model \
+    --benchmark gdpval/pi \
+    --split benchmark \
+    --output results/gdpval_pi.jsonl \
+    --model-url <vllm_base_url> \
+    --model-api-key <vllm_api_key> \
+    --model <served_model_name> \
+    ++policy_model.responses_api_models.vllm_model.propagate_context_overflow_errors=true \
+    '++policy_model.responses_api_models.vllm_model.sampling_overrides={temperature: 1.0, top_p: 0.95}'
+```
+
+- Pi runs in the task sandbox the resources server lends it, with `/root` as its working directory. It installs
+  Node.js and Pi there at the start of each episode, from nodejs.org and the npm registry.
+- It calls `finish`, `abandon_task_finish`, `web_search` and `fetch_web_page` over MCP: the resources server sets
+  `expose_tools_over_mcp: true` and the environment server sets `resources_tool_transports: [mcp]`. The model sees
+  them as `gdpval_resources_server_<tool>`, and rollouts record the calls as `mcp__gdpval_resources_server__<tool>`.
+- The rows come from `data/gdpval_benchmark_harness_neutral.jsonl`, written by `prepare_harness_neutral.py`: the same
+  tasks without the tool list, which session harnesses reject, rendered with `prompts/harness-neutral.yaml`.
+- `propagate_context_overflow_errors=true` passes the model server's context-length error to Pi, which then compacts
+  its context and continues. By default `vllm_model` returns an empty, length-capped completion instead, and the
+  episode ends at the context limit without a submission. With `openai_model`, set
+  `propagate_upstream_http_status_codes: [400]` (by default it returns HTTP 500).
+- Pi sends no temperature or top_p, so the engine's defaults apply unless the model server sets them.
+  `sampling_overrides` above pins the Stirrup agent's values; with `openai_model`, put them in `extra_body`.
+- Pi rejects sampling and output limits in the request, so every row fails if `gym eval run` gets `--temperature`,
+  `--top-p` or `--max-output-tokens`. Change Pi's own settings, such as `max_output_tokens`, with
+  `++gdpval_pi_agent.responses_api_agents.pi_agent.<key>=<value>`.
+- Deliverables are stored by task and repeat only, so give each run its own `PERSIST_DELIVERABLES_DIR`, for example
+  by changing `gdpval_pi` in the export above. A run into another run's directory replaces that run's files, and
+  re-judging the earlier run then judges the later one's.
+- A Pi run that reaches its `timeout` before a successful `finish` is judged as an empty submission and is not
+  retried. Stirrup reports a timeout with `stop_reason: wall_time`, which GDPVal masks as `agent_timeout` and
+  `--resume` reruns; Pi does not set it yet. So a timeout counts against Pi's score, but not against Stirrup's.
+- The prompt and the harness differ from the certified Stirrup setup, so these are not AA v2 scores.
+
+`benchmarks/gdpval/codex.yaml` runs [Codex](../../responses_api_agents/codex_agent/README.md) the same way. Codex sends
+no sampling or output limit to a Gym model server, so set them on the model server, for example on `openai_model` in
+front of vLLM:
+
+```bash
+export PERSIST_DELIVERABLES_DIR=$PWD/output/gdpval_codex/deliverables
+gym eval prepare --benchmark gdpval/codex
+gym eval run \
+    --model-type openai_model \
+    --benchmark gdpval/codex \
+    --split benchmark \
+    --output results/gdpval_codex.jsonl \
+    --model-url <vllm_base_url> \
+    --model-api-key <vllm_api_key> \
+    --model <served_model_name> \
+    '++policy_model.responses_api_models.openai_model.extra_body={temperature: 1.0, top_p: 0.95, max_output_tokens: 32768}' \
+    '++policy_model.responses_api_models.openai_model.propagate_upstream_http_status_codes=[400]'
+```
+
+- The rows, the task tools and the deliverables directory work as for Pi, and these are not AA v2 scores either.
+  Codex installs Node.js and Codex in the task sandbox at the start of each episode, from nodejs.org and the npm
+  registry (about 190 MB). The model sees the tools as `mcp__gdpval_resources_server__<tool>`, and rollouts record
+  the calls by the tool name alone, such as `finish`. Codex keeps about 12 KB of each tool result, so the model sees
+  only the start and end of a long `fetch_web_page` result.
+- `extra_body` pins the Stirrup agent's temperature and top_p and limits each model call to 32,768 output tokens.
+- Codex checks `model_auto_compact_token_limit` after each reply that calls a tool, so the context can pass it by
+  about a reply and its tool output before Codex compacts, and the compaction call reserves 32,768 tokens for its own
+  reply. So keep the limit at about the window minus twice the output limit or lower: `codex.yaml` uses 196,608 for
+  a 262,144-token window. A near-full reply with a large tool result can still overflow the compaction call, and the
+  run then fails.
+- Codex does not compact on a context-length error; the run fails. `propagate_upstream_http_status_codes: [400]`
+  makes it fail within seconds with vLLM's message. By default `openai_model` returns HTTP 500, and Codex sends the
+  request 30 times before failing with a "high demand" error.
+- `finish` does not end a Codex run: Codex continues until the model replies without a tool call, and a later
+  `finish` or `abandon_task_finish` replaces the recorded call. The files are collected when the run ends, so a run
+  that fails after `finish`, for example on a context-length error, is not judged.
+- The Codex agent rejects sampling and output limits in the request, so every row fails if `gym eval run` gets
+  `--temperature`, `--top-p` or `--max-output-tokens`. Change Codex's own settings, such as `model_context_window`
+  and `model_auto_compact_token_limit` for another window, with
+  `++gdpval_codex_agent.responses_api_agents.codex_agent.<key>=<value>`.
 
 ## Multi-judge panel
 
@@ -414,8 +550,8 @@ draws the same judges: `(task_id, "rubric")` for rubric mode and
 `(task_id, ref_id, ref_repeat)` for comparison. Set `JUDGE_SAMPLING_SEED` (or
 `++gdpval_resources_server.resources_servers.gdpval.judge_sampling_seed=<int>`)
 to additionally shift the whole stream. This makes multi-stage ELO reruns
-replayable per stage — combined with `RERUN_INCOMPLETE` the reselected reference
-subset draws the same panel members it did originally.
+replayable per stage: `gym eval reverify` draws the same panel members for each
+task and reference as the original run.
 
 ### Audio / video routing
 
@@ -478,7 +614,7 @@ Before trials are sampled, a deterministic preflight removes any member that
 cannot carry the matchup within its limits; `images_and_text` members are also
 removed when the matchup's pages and images exceed `judge_max_images_per_request`.
 If every member is removed for every reference matchup, the row fails with the
-terminal class `transport_ineligible` (retried on `--resume`).
+terminal class `transport_ineligible`, which `--resume` does not retry.
 
 Rubric mode samples from the same panel but sends every member the server-level
 `judge_media_mode` (`native_pdf` by default). It ignores the per-member
@@ -509,7 +645,7 @@ Fields on `gdpval_resources_server.resources_servers.gdpval`:
 | `judge_reference_files_recursive` | `false` | Comparison only: include files in subdirectories of the task's `reference_files/`. Submission directories stay shallow. |
 | `judge_reference_files_from_eval` | `false` | Comparison only: read `reference_files/` from the eval task directory instead of each reference model's directory. Enable only after validating those prepared inputs. |
 | `strict_comparison_trials` | `false` | See [How sampling works](#how-sampling-works). |
-| `count_eval_missing_as_loss`, `missing_eval_task_ids` | `false`, `[]` | Comparison, multi-stage `stage_index` 1 only (indices start at 0): a listed task whose eval deliverable has no `finish_params.json` is scored as a loss against every reference instead of failing. Set the same two fields on `gdpval_stirrup_agent` so judge-only runs forward those tasks to the resources server. |
+| `count_eval_missing_as_loss`, `missing_eval_task_ids` | `false`, `[]` | Comparison, multi-stage `stage_index` 1 only (indices start at 0): a listed task whose eval deliverable has no `finish_params.json` is scored as a loss against every reference instead of failing. |
 | `judge_handles_audio`, `judge_handles_video` | `false` | Audio/video capability of the single judge when `judge_panel` is `null`. |
 | `on_missing_av_judge` | `warn` | See [Audio / video routing](#audio--video-routing). |
 
@@ -673,10 +809,8 @@ After `gym eval run` returns, the resources server's
 `results/<output>_metrics.json`:
 
 - Rubric mode: `mean/reward` (pass@1 equivalent), computed over rows with a
-  usable judge response. Rows flagged `invalid_judge_response` are left out and
-  counted in `rubric/aggregate_rows_total`, `rubric/aggregate_rows_included`,
-  `rubric/legacy_invalid_rows_excluded` and
-  `rubric/aggregate_rows_included_fraction`.
+  usable judge response. The others go to the failures file as `judge_failed`;
+  `gym eval reverify --judge-failed-only` judges them again.
 - Comparison mode: `comparison/wins`, `comparison/losses`, `comparison/ties`,
   `comparison/judged`, `comparison/win_rate` (omitted when no vote was judged),
   `comparison/eval_elo`, `comparison/normalized_elo`
@@ -689,3 +823,51 @@ After `gym eval run` returns, the resources server's
   names it. If that stage is missing, incomplete or has no finite fit, the
   headline is withheld and `comparison/final_stage_degraded` is `1`. Rows without
   the field keep the **last** observed stage as the headline.
+
+## Migrating from earlier versions
+
+The task sandbox, the task tools, the deliverables and the failure labels moved from the Stirrup agent to the
+GDPVal resources server, so configs and commands written for the previous version need changes.
+
+**Do not `--resume` or re-judge outputs written before this change.** Multi-stage rows now offset the task index
+by stage, and failures use new labels (see below), so old rows and failure files do not pair with new ones. Rerun
+the benchmark, or use `gym eval reverify` on new output only.
+
+Regenerate the prepared data with `gym eval prepare --benchmark gdpval`. The prompt now comes from
+`prompts/default-stirrup.yaml` and rows carry a `reference_files_str` field, so an old
+`data/gdpval_benchmark.jsonl` fails with a missing-field error.
+
+### Removed Stirrup options
+
+Passing any of these to the Stirrup agent now fails at startup. Remove them from configs, overrides and
+scripts.
+
+| Removed | Replacement |
+|---------|-------------|
+| `judge_only` / `JUDGE_ONLY` | `gym eval reverify`, see [Deliverables and re-judging](#deliverables-and-re-judging) |
+| `execute_only` / `EXECUTE_ONLY` | `judge_deliverables: false` on the GDPVal resources server |
+| `rerun_incomplete` / `RERUN_INCOMPLETE` | `--resume`, then `gym eval reverify --judge-failed-only` for failed judgements |
+| `persist_deliverables_dir` | `persist_deliverables_dir` on the resources server (`PERSIST_DELIVERABLES_DIR`) |
+| `tavily_api_key`, `tavily_max_sweeps` | the same keys on the resources server |
+| `gdpval_container_path` / `GDPVAL_CONTAINER_PATH` | `GDPVAL_SANDBOX_IMAGE`, see below |
+| `system_prompt_template`, `user_prompt_template` / `SYSTEM_PROMPT_TEMPLATE`, `USER_PROMPT_TEMPLATE` | `prompt_config` on the dataset (`prompts/`) |
+
+The environment variables above are no longer read by the benchmark config. Setting one does nothing, so a run
+that used to skip the policy (`JUDGE_ONLY=true`) now runs it.
+
+### Other changes
+
+- **Sandbox:** the resources server starts an OpenSandbox sandbox and the agent runs inside it, instead of
+  Apptainer. Set `OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY` and `GDPVAL_SANDBOX_IMAGE`.
+- **Tavily:** `TAVILY_API_KEY` is required and read by the resources server. Without a key the agent used to fall
+  back to Stirrup's built-in web tools; now startup fails.
+- **Deliverables directory:** `PERSIST_DELIVERABLES_DIR` is required. The `output/gdpval/deliverables` default is gone.
+- **Timeouts:** `STIRRUP_PER_TASK_TIMEOUT_S` is no longer read; the agent's `sandbox_runner_timeout_seconds`
+  (default 12600) replaces it. The environment server also sets `default_episode_timeout_seconds: 18000`,
+  `max_concurrent_episodes: 32` and `queue_timeout_seconds: 86400`.
+- **Rollout options:** the benchmark config no longer sets `retry_terminal_timeouts` or
+  `retry_invalid_judge_responses`. `+retry_invalid_judge_responses` no longer exists in core; passing it to `gym eval run` or `gym eval reverify` fails.
+- **Failure labels:** a rubric verification without a usable judgement is reported as `judge_failed` (it was
+  `judge_invalid`), and `gym eval reverify --judge-failed-only` recovers it.
+- **Multi-stage runs:** a reused deliverable is now judged through the resources server's `/verify` instead of
+  by the agent.

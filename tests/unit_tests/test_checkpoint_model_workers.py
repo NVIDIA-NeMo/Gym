@@ -606,3 +606,74 @@ async def test_each_worker_publishes_a_call_s_ledger_row_only_once_its_response_
         delivered[0].model_call_id,
         held[0].model_call_id,
     ]
+
+
+async def crash(link: PolicyWorkerLink) -> None:
+    """Drop the worker's connection the way a killed process does: without telling the coordinator."""
+    link._disconnecting = True
+    link._channel.close()
+    await asyncio.gather(link._reader_task, return_exceptions=True)
+
+
+async def wait_for_workers(coordinator: PolicyCoordinator, count: int) -> None:
+    async with asyncio.timeout(5):
+        while len(coordinator.participant.workers) != count:
+            await asyncio.sleep(0.01)
+
+
+def worker_logs(caplog: pytest.LogCaptureFixture) -> list[tuple[str, str]]:
+    return [
+        (record.levelname, record.getMessage())
+        for record in caplog.records
+        if record.name == "nemo_gym._checkpoint.model_workers" and "policy worker" in record.getMessage()
+    ]
+
+
+async def test_workers_are_logged_by_pid_as_they_join_and_a_lost_one_as_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger="nemo_gym._checkpoint.model_workers")
+    async with deployment() as (coordinator, (_, second)):
+        await crash(second)
+        await wait_for_workers(coordinator, 1)
+        # uvicorn starts a replacement.
+        replacement = worker_link(coordinator.socket_path)
+        await replacement.connect()
+        try:
+            await wait_for_workers(coordinator, 2)
+        finally:
+            await replacement.disconnect()
+
+    pid = os.getpid()
+    assert worker_logs(caplog)[:4] == [
+        ("INFO", f"policy worker 1 (pid {pid}) joined; 1 of 2 workers connected"),
+        ("INFO", f"policy worker 2 (pid {pid}) joined; 2 of 2 workers connected"),
+        ("WARNING", f"policy worker 2 (pid {pid}) was lost; 1 of 2 workers connected; no checkpoint was open"),
+        ("INFO", f"policy worker 3 (pid {pid}) joined; 2 of 2 workers connected"),
+    ]
+
+
+async def test_a_worker_lost_during_a_checkpoint_is_logged_as_blocking_its_commit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger="nemo_gym._checkpoint.model_workers")
+    async with deployment() as (coordinator, (_, second)):
+        await coordinator.controller.prepare(CheckpointRequest(**control()))
+        await crash(second)
+        await wait_for_workers(coordinator, 1)
+        await coordinator.controller.resume(CheckpointRequest(**control()))
+
+    lost = f"policy worker 2 (pid {os.getpid()}) was lost; 1 of 2 workers connected; the open checkpoint cannot commit"
+    assert ("WARNING", lost) in worker_logs(caplog)
+
+
+async def test_a_worker_that_stops_cleanly_is_not_reported_as_lost(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("INFO", logger="nemo_gym._checkpoint.model_workers")
+    async with deployment() as (coordinator, (_, second)):
+        await second.disconnect()
+        await wait_for_workers(coordinator, 1)
+        # Still a departure: what the worker served is unknown to a later restore.
+        assert coordinator.participant.worker_left
+
+    assert ("INFO", f"policy worker 2 (pid {os.getpid()}) stopped") in worker_logs(caplog)
+    assert not [entry for entry in worker_logs(caplog) if entry[0] == "WARNING"]

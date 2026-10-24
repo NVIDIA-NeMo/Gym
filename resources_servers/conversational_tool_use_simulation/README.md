@@ -8,10 +8,10 @@ scenario artifacts are produced by independent Responses API agents.
 | Component | Implementation | Responsibility |
 | --- | --- | --- |
 | Rollout simulation | `app.py` | Simulate users and tools, maintain session state, and verify trajectories |
-| Domain generation | `responses_api_agents/conversational_tool_use/domain_generation` | Generate domain candidates |
-| Policy/tool generation | `responses_api_agents/conversational_tool_use/policy_tool_generation` | Generate, refine, validate, and judge policies and tools |
-| Scenario generation | `responses_api_agents/conversational_tool_use/scenario_generation` | Generate customer scenarios |
-| Policy agent | `responses_api_agents/conversational_tool_use/simulation` | Run the policy-model conversation loop |
+| Domain generation | `responses_api_agents/conversational_tool_use_domain_generation` | Generate domain candidates |
+| Policy/tool generation | `responses_api_agents/conversational_tool_use_policy_tool_generation` | Generate, refine, validate, and judge policies and tools |
+| Scenario generation | `responses_api_agents/conversational_tool_use_scenario_generation` | Generate customer scenarios |
+| Policy agent | `responses_api_agents/conversational_tool_use_simulation` | Run the policy-model conversation loop |
 
 The generation agents are connected through standard Gym rollout JSONL and explicit materialization steps:
 
@@ -82,6 +82,8 @@ Verification is message-level:
 - user failures are labeled `user_failure`
 - tool-result failures are labeled `tool_failure`
 - agent failures are labeled `agent_failure`
+- user failures, tool-result failures, judge generation errors, and policy message-generation errors set
+  `mask_sample: true`, because the reward does not measure the policy; agent failures keep `mask_sample: false`
 
 Final verification state is synchronized before the response is built. The top-level reward, invalid reasons, failure
 labels, judge diagnostics, and judge-generation error therefore agree with the verification objects stored in
@@ -116,7 +118,7 @@ matching the policy-visible transcript. The items retain their shared `response_
 When Gym observability is enabled, the policy, user-simulator, tool-simulator, and judge calls all inherit the rollout
 correlation prefix. Standard model-call captures therefore remain attached to the rollout that caused them.
 
-This is intended to be used with `responses_api_agents/conversational_tool_use/simulation`.
+This is intended to be used with `responses_api_agents/conversational_tool_use_simulation`.
 
 The rollout cap is owned by that agent as `max_agent_steps` and counts policy-model responses. The resource server no
 longer applies a competing message-count limit. If the final policy response contains tool calls,
@@ -146,6 +148,7 @@ The verification and retry controls are:
 | `enable_termination` | `true` | In `message` verification, checks user and tool-result messages first and stops later judge stages after a failure. When `false`, every message and the complete agent conversation are judged. It does not affect combined verification. |
 | `verification_type` | `message` | `message` performs staged per-message checks followed by an agent-conversation check. `complete_trajectory_combined_evaluation` sends the full trajectory through one combined user/agent/environment evaluation. |
 | `enforce_transfer_ground_truth` | `true` | Compares observed transfer behavior with `customer_scenario.outside_policy_scope`. A mismatch deterministically receives reward `0` and skips the LLM judge; a match continues through normal verification. |
+| `fallback_first_user_message` | `true` | When the user simulator cannot produce the first user message (a generation error, or, when nothing precedes it in the conversation, a message that already contains `###STOP###` or `###TRANSFER###`), uses `customer_scenario.reason_for_contact` instead, or a generic request when that is empty or contains either marker. Each fallback is recorded in `result.source_artifacts.first_user_message_fallbacks`. When `false`, the trajectory ends as invalid instead; when the user speaks first (the agent's default), that leaves no policy output to train on. Later user turns are unaffected. |
 
 `user_responses_create_params`, `tool_simulator_responses_create_params`, and `judge_responses_create_params` own the
 sampling parameters sent to those three logical roles. Their model-server references may point to one shared model, as

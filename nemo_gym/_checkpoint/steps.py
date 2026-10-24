@@ -14,6 +14,8 @@ A step that is still running when a checkpoint closes admission has one of two m
   The episode counts as parked at the boundary before the step;
   the step keeps running and the owner parks at the next boundary until resume.
   After a crash the step runs again from the earlier boundary.
+  A step that raises while a checkpoint is open leaves the episode with no boundary,
+  parked until resume before the error propagates.
   Use it only for steps declared safe to re-run, such as idempotent seeds, pure or judge-based verification,
   and agent activations, which continue from the agent's own boundaries.
 
@@ -65,6 +67,13 @@ def seed_verify_mode(headers: Optional[Mapping[str, str]]) -> StepMode:
 CHECKPOINT_RESTART_HEADER = "x-ng-checkpoint-restart"
 
 
+# A caller that closes its resources session with /close_session after verifying sends this on /verify.
+# A replayable verification then leaves the session tracked until that close,
+# so a checkpoint that keeps the caller's boundary from before the verification still exports the session.
+# Without it, a /verify ends the session, as it does for a caller that never closes.
+CHECKPOINT_CLOSE_FOLLOWS_HEADER = "x-ng-checkpoint-close-follows"
+
+
 def seed_restarts(headers: Optional[Mapping[str, str]]) -> bool:
     """Whether a seed reply says its session cannot be captured, so its episode must start over after a crash."""
     return (headers or {}).get(CHECKPOINT_RESTART_HEADER) == "1"
@@ -83,6 +92,8 @@ class _Episode:
     restart: bool = False
     resume: asyncio.Event = field(default_factory=asyncio.Event)
     suspended_remaining: Optional[float] = None
+    # Set when the owner's final cleanup starts: a retire then waits for the episode without cancelling it.
+    finishing: bool = False
 
     def suspend_deadline(self) -> None:
         if self.deadline is None or self.deadline.when() is None or self.suspended_remaining is not None:
@@ -93,8 +104,13 @@ class _Episode:
     def resume_deadline(self) -> None:
         if self.suspended_remaining is None or self.deadline is None:
             return
-        self.deadline.reschedule(asyncio.get_running_loop().time() + self.suspended_remaining)
-        self.suspended_remaining = None
+        remaining, self.suspended_remaining = self.suspended_remaining, None
+        try:
+            self.deadline.reschedule(asyncio.get_running_loop().time() + remaining)
+        except RuntimeError:
+            # The episode's deadline scope has already exited, for example while a failing step unwinds;
+            # there is nothing left to time, and raising here would hide the original error.
+            pass
 
 
 def _blocks(episode: _Episode) -> bool:
@@ -166,6 +182,16 @@ class EpisodeSteps:
         continuation, episode.continuation = episode.continuation, None
         return continuation
 
+    def finishing(self, key: str) -> None:
+        """The episode's protocol is over and its owner is releasing what it created.
+
+        A retire from here on waits for the episode but does not cancel its task: the owner's cleanup,
+        which closes the episode's sessions, must run to completion.
+        """
+        episode = self._episodes.get(key)
+        if episode is not None:
+            episode.finishing = True
+
     async def end(self, key: str) -> None:
         episode = self._episodes.get(key)
         if episode is not None:
@@ -202,18 +228,45 @@ class EpisodeSteps:
         if mode == "replay" and self.closed:
             episode.suspend_deadline()
         await self._changed()
+        completed = False
         try:
             yield
+            completed = True
         finally:
             if self._episodes.get(key) is episode:
-                if mode == "replay" and self.closed:
+                if mode == "replay" and self.closed and completed:
                     # The checkpoint already counts this episode at the boundary before the step; it stays there,
                     # not a blocker, until its next boundary parks it with the step's result.
                     pass
+                elif mode == "replay" and self.closed:
+                    # The step raised, so the episode is failing, and its cleanup may close its sessions before the
+                    # commit.
+                    # Continuing it from the boundary before the step would need those sessions, so it is exported
+                    # with no boundary and starts over from its input after a crash.
+                    # It stays out of the blockers, so one failure does not fail the whole checkpoint.
+                    episode.boundary = None
+                    # It parks there until resume, so its cleanup, its end, and its reply wait for the commit.
+                    await self._park_failed(key, episode)
                 else:
+                    # A step that raised has no next boundary: the episode is failing, so it blocks until it ends.
                     self._set_state(episode, "running")
                     episode.resume_deadline()
             await self._changed()
+
+    async def _park_failed(self, key: str, episode: _Episode) -> None:
+        """Hold an episode whose replay step raised during a checkpoint at its null boundary until resume.
+
+        The step's error propagates afterwards.
+        A retire stops the wait, since the episode is being stopped anyway.
+        """
+        self._set_state(episode, "parked")
+        episode.resume.clear()
+        await self._changed()
+        while self.closed and not episode.retired:
+            await episode.resume.wait()
+            episode.resume.clear()
+        if self._episodes.get(key) is episode:
+            self._set_state(episode, "running")
 
     def close(self) -> None:
         self.closed = True
@@ -259,7 +312,7 @@ class EpisodeSteps:
         return list(self._episodes)
 
     async def retire(self, key: str) -> None:
-        """Stop the episode and wait until its task has ended.
+        """Stop the episode: cancel it unless its final cleanup already started, then wait until it has ended.
 
         The episode stays tracked until then, so if this wait is cut short,
         a later retire finds it and waits again, and a duplicate start of the same attempt is refused.
@@ -275,8 +328,8 @@ class EpisodeSteps:
         self._blocking += _blocks(episode) - blocked
         episode.resume.set()
         if episode.task is not None and episode.task is not asyncio.current_task():
-            # Cancel once: cancelling again would interrupt the cleanup the first cancellation started.
-            if first:
+            # Cancel once, and never once the final cleanup started: cancelling would interrupt that cleanup.
+            if first and not episode.finishing:
                 episode.task.cancel()
             await asyncio.wait([episode.task])
         self._forget(key, episode)
