@@ -353,9 +353,9 @@ def resolve_agent(agent: str) -> AgentSelection:
     """Map ``--agent NAME[/FLAVOR]`` to ``responses_api_agents/<NAME>/configs/<FLAVOR>.yaml``.
 
     ``NAME`` may omit a trailing ``_agent`` or ``_sandboxed_agent`` (``simple`` selects ``simple_agent``).
-    A short name that matches two harnesses, such as ``hermes`` (``hermes_agent`` and
-    ``hermes_sandboxed_agent``) or ``terminus_2``, is refused with both full names, so a run never
-    lands on the wrong harness by default.
+    A short name that matches two harnesses, such as ``terminus_2`` (``terminus_2_agent`` and
+    ``terminus_2_sandboxed_agent``), is refused with both full names, so a run never lands on the
+    wrong harness by default.
     """
     name, _, flavor = agent.partition("/")
     candidates = [name] if name.endswith("_agent") else [name, f"{name}_agent", f"{name}_sandboxed_agent"]

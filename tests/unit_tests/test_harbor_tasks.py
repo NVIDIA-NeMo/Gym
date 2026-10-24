@@ -1515,10 +1515,11 @@ class TestCli:
         assert selection.instance_name == "simple_agent"
         assert selection.impl_name == "simple_agent"
         assert selection.config_path.name == "simple_agent.yaml"
-        # `hermes` and `terminus_2` each match two harnesses; the caller has to pick.
-        for ambiguous in ("hermes", "terminus_2"):
-            with pytest.raises(ValueError, match="ambiguous"):
-                resolve_agent(ambiguous)
+        # `terminus_2` matches two harnesses; the caller has to pick.
+        with pytest.raises(ValueError, match="ambiguous"):
+            resolve_agent("terminus_2")
+        # `hermes` matches only `hermes_agent` now that the sandboxed adapter is removed.
+        assert resolve_agent("hermes").impl_name == "hermes_agent"
         terminus = resolve_agent("terminus_2_sandboxed_agent")
         assert terminus.instance_name == "terminus_2_sandboxed_agent"
         assert terminus.impl_name == "terminus_2_sandboxed_agent"
@@ -1576,7 +1577,6 @@ class TestCli:
             "pi_agent",
             "openclaw_agent",
             "hermes_agent",
-            "hermes_sandboxed_agent",
             "miniswe_sandboxed_agent",
             "opencode_sandboxed_agent",
             "pi_sandboxed_agent",
