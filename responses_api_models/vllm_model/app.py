@@ -117,7 +117,8 @@ def _set_aside_unlisted_reasoning_effort(request: Request, body: Dict[str, Any])
     return body
 
 
-# Dynamo `nvext.engine_data` keys, mapped to the message fields that carry them to Gym.
+# NeMo RL's Dynamo engine writes these `nvext.engine_data` keys (Dynamo forwards them as-is);
+# mapped to the message fields that carry them to Gym.
 _DYNAMO_ENGINE_DATA_FIELDS = {
     "prompt_token_ids": "prompt_token_ids",
     "completion_token_ids": "generation_token_ids",
@@ -592,13 +593,31 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     @model_validator(mode="after")
     def _validate_dynamo_frontend(self) -> "VLLMModelConfig":
-        # The dialect covers only the chat completions call; the frontend rejects required_prefix_token_ids.
+        # The dialect covers only the chat completions call; the frontend rejects required_prefix_token_ids,
+        # and return_token_ids (sent for request_prompt_and_generation_token_ids) is not a field it accepts.
         if self.dynamo_frontend and (
-            self.use_completions_api or self.is_responses_native or self.supply_prefix_token_ids
+            self.use_completions_api
+            or self.is_responses_native
+            or self.supply_prefix_token_ids
+            or self.request_prompt_and_generation_token_ids
         ):
             raise ValueError(
                 "dynamo_frontend is not supported with use_completions_api, is_responses_native, "
-                "or supply_prefix_token_ids"
+                "supply_prefix_token_ids, or request_prompt_and_generation_token_ids (the frontend rejects "
+                "the return_token_ids field it sends)"
+            )
+        # The frontend reads `reasoning` as an alias of `reasoning_content` and rejects a message that carries
+        # both (`400 duplicate field 'reasoning'`). Checked after validation, so the NEMO_GYM_REASONING_FIELD
+        # default is covered too.
+        if (
+            self.dynamo_frontend
+            and self.uses_reasoning_parser
+            and not self.preserve_reasoning_in_assistant_content
+            and self.reasoning_field == "both"
+        ):
+            raise ValueError(
+                "dynamo_frontend needs reasoning_field: reasoning_content; with 'both' (from config or "
+                "NEMO_GYM_REASONING_FIELD), every echoed reasoning turn fails with 400 duplicate field 'reasoning'"
             )
         return self
 
@@ -1289,13 +1308,17 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise RuntimeError(f"`{self.config.name}` got a Dynamo response without nvext.engine_data.")
         missing = [field for field in _DYNAMO_ENGINE_DATA_FIELDS if not isinstance(engine_data.get(field), list)]
         if missing:
-            # Dynamo omits completion_logprobs when their count does not match the completion tokens.
+            # NeMo RL's engine omits completion_logprobs when vLLM returned no logprobs for the call.
             raise RuntimeError(
                 f"`{self.config.name}` got Dynamo nvext.engine_data without a list for: {', '.join(missing)}."
             )
-        chat_completion_dict["choices"][0]["message"].update(
+        message = chat_completion_dict["choices"][0]["message"]
+        message.update(
             {message_field: engine_data[field] for field, message_field in _DYNAMO_ENGINE_DATA_FIELDS.items()}
         )
+        # Present only with router replay on, as the native endpoint attaches it; not a required key.
+        if "routed_experts" in engine_data:
+            message["routed_experts"] = engine_data["routed_experts"]
 
     def _splice_audio_from_metadata(self, body_dict: Dict[str, Any], metadata: Dict[str, Any]) -> None:
         """Move audio metadata into content blocks on the most recent user message."""

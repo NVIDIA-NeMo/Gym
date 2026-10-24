@@ -1629,8 +1629,26 @@ class TestApp:
                 "mismatched generation token IDs and log probabilities",
             ),
             (True, None, None),
+            (
+                False,
+                {
+                    "prompt_token_ids": [1, 2],
+                    "completion_token_ids": [3],
+                    "completion_logprobs": [-0.5],
+                    # Router replay: the base64 routes envelope, as the native endpoint attaches it.
+                    "routed_experts": "cm91dGVz",
+                },
+                None,
+            ),
         ],
-        ids=["token-information", "missing-engine-data", "missing-logprobs", "logprob-count-mismatch", "capture"],
+        ids=[
+            "token-information",
+            "missing-engine-data",
+            "missing-logprobs",
+            "logprob-count-mismatch",
+            "capture",
+            "routed-experts",
+        ],
     )
     async def test_dynamo_frontend_dialect(self, monkeypatch: MonkeyPatch, capture, engine_data, error) -> None:
         # The Dynamo frontend rejects unknown top-level fields and returns tokens only under
@@ -1751,6 +1769,42 @@ class TestApp:
             assert message["prompt_token_ids"] == [1, 2]
             assert message["generation_token_ids"] == [3]
             assert message["generation_log_probs"] == [-0.5]
+            assert message.get("routed_experts") == engine_data.get("routed_experts")
+
+    @mark.parametrize(
+        ("settings", "error"),
+        [
+            # The frontend rejects the return_token_ids field this flag sends.
+            ({"request_prompt_and_generation_token_ids": True}, "return_token_ids"),
+            # An echoed reasoning turn would carry both `reasoning` and its alias.
+            ({"uses_reasoning_parser": True, "reasoning_field": "both"}, "duplicate field 'reasoning'"),
+            ({"uses_reasoning_parser": True, "reasoning_field": "reasoning_content"}, None),
+            (
+                {
+                    "uses_reasoning_parser": True,
+                    "reasoning_field": "both",
+                    "preserve_reasoning_in_assistant_content": True,
+                },
+                None,
+            ),
+        ],
+    )
+    def test_dynamo_frontend_rejects_settings_it_cannot_serve(self, settings, error) -> None:
+        fields = {
+            "host": "0.0.0.0",
+            "port": 8081,
+            "base_url": "http://dynamo/v1",
+            "api_key": "dummy_key",  # pragma: allowlist secret
+            "model": "dummy_model",
+            "entrypoint": "",
+            "name": "",
+            "dynamo_frontend": True,
+            "return_token_id_information": True,
+            "uses_reasoning_parser": False,
+            **settings,
+        }
+        with raises(ValueError, match=error) if error else nullcontext():
+            VLLMModelConfig(**fields)
 
     def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
         workers = [self._setup_server(monkeypatch) for _ in range(2)]
