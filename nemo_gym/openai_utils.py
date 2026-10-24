@@ -1453,7 +1453,10 @@ CHAT_REQUEST_IGNORED_CLIENT_FIELDS = frozenset({"aws_region_name"})
 
 
 class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # Inbound requests carry vendor extensions this schema does not enumerate, and the engines
+    # they are forwarded to understand them. Rejecting the request loses the caller's field and
+    # the whole conversation with it; forwarding what we do not model is the proxy's job.
+    model_config = ConfigDict(extra="allow")
 
     @model_validator(mode="before")
     @classmethod
