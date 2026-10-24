@@ -1,0 +1,5 @@
+# GEOBench-VLM questions and images are evaluation-only and are not
+# redistributed (see DATA-ATTESTATION.md). Only the synthetic example is committed.
+data/*.jsonl
+!data/example.jsonl
+data/*rollouts*
