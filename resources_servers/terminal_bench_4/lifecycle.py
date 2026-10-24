@@ -238,10 +238,20 @@ async def finalize_session(session, *, grade):
             await restore(session.verifier_environment, session.directory / "artifacts")
             session.subphase = "verifier_execution"
             session.persist()
+            timeout_sec = session.config.environment.verifier_timeout_sec(session.task)
+            if timeout_sec != session.task.config.verifier.timeout_sec:
+                session.diagnostics.append(
+                    {
+                        "operation": "verifier_timeout_override",
+                        "package_timeout_sec": session.task.config.verifier.timeout_sec,
+                        "timeout_sec": timeout_sec,
+                    }
+                )
             session.result["verifier_result"] = await run_verifier(
                 session.verifier_environment,
                 session.directory,
                 session.diagnostics,
+                timeout_sec=timeout_sec,
             )
         finally:
             session.result["verifier"]["finished_at"] = now()
