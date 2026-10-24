@@ -57,6 +57,14 @@ VLLM_COMMON_ARGS=(
     --use-replayssm
     --replayssm-buffer-len 16
 )
+# Diagnostic run only: record allocator stacks on both prefill and decode workers.
+# Stops after GYM_ALLOCATION_TRACE_STEPS serving steps (default 120).
+if [[ "${TRACE_ALLOCATIONS:-0}" == 1 ]]; then
+    allocation_trace_module_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+    export PYTHONPATH="${allocation_trace_module_dir}${PYTHONPATH:+:${PYTHONPATH}}"
+    export GYM_ALLOCATION_TRACE_DIR="${GYM_ALLOCATION_TRACE_DIR:-${SLURM_SUBMIT_DIR:-$PWD}/results/allocation-traces/${SLURM_JOB_ID:-local}}"
+    VLLM_COMMON_ARGS+=(--worker-cls allocation_trace_worker.AllocationTraceWorker)
+fi
 # @bxyu-nvidia: Lease duration is set to 180s since to give nodes a chance to pick up the request. Helps with resilience.
 # @bxyu-nvidia: We set num_speculative_tokens_per_batch_size to 0 here since prefill does not need to speculate any tokens, it just needs to know that we are speculating.
 VLLM_PREFILL_ARGS=(
