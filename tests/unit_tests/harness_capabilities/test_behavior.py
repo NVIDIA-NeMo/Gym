@@ -153,3 +153,48 @@ def test_missing_output_witness_cannot_qualify_artifacts(behavior_episode):
     assert checks["tools.witness_output"]["reasons"] == [
         "retained tool output differs from the independent tool witness"
     ]
+
+
+@pytest.mark.parametrize(
+    "mutation,failed",
+    [
+        (None, None),
+        ("missing", "tools.witness_ids"),
+        ("name", "tools.witness_request"),
+        ("arguments", "tools.witness_request"),
+        ("exit_code", "tools.witness_status"),
+        ("outputs", "tools.witness_output"),
+    ],
+)
+def test_additional_native_executions_require_complete_independent_witnesses(behavior_episode, mutation, failed):
+    record, witness = behavior_episode
+    trajectory = record["ng_trajectory"]
+    original = trajectory["tool_calls"][0]
+    trajectory["tool_calls"].append({**original, "tool_call_id": "native-prefill"})
+    conversation = trajectory["invocations"][0]["conversation"]
+    conversation.extend(
+        [
+            {**item, "call_id": "native-prefill"}
+            for item in list(conversation)
+            if item.get("call_id") == original["tool_call_id"]
+        ]
+    )
+    native = {**witness["tool_calls"][0], "id": "native-prefill"}
+    witness["native_tool_calls"] = [native]
+    if mutation == "missing":
+        witness["native_tool_calls"] = []
+    elif mutation == "name":
+        native["name"] = "wrong-tool"
+    elif mutation == "arguments":
+        native["arguments"] = {"code": "not executed"}
+    elif mutation == "exit_code":
+        native["exit_code"] = 7
+    elif mutation == "outputs":
+        native["outputs"] = ["not observed"]
+    options = dict(http_errors=(), terminal_error=False, tool_steps=2, expected_reward=0.0, fingerprint=fingerprint)
+    checks = {check["id"]: check for check in inspect_behavior(witness, record, **options)}
+    assert checks["tools.executed"]["status"] == "pass"
+    if failed:
+        assert checks[failed]["status"] == "fail"
+    else:
+        assert all(check["status"] != "fail" for check in checks.values())

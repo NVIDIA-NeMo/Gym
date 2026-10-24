@@ -6,6 +6,7 @@
 from enum import StrEnum
 from types import FrameType
 
+from aiohttp import ClientResponseError
 from nooa.errors import GenerationError, LoopDetectedError
 from nooa.strategies.codeact import CodeActSession, CodeActStrategy
 from nooa.strategies.predict import PredictStrategy
@@ -25,6 +26,7 @@ class NOOATerminationReason(StrEnum):
     MAX_OUTPUT_TOKENS_EXCEEDED = "max_output_tokens_exceeded"
     LOOP_DETECTED = "loop_detected"
     INVALID_POLICY_OUTPUT = "invalid_policy_output"
+    MODEL_REJECTED = "model_rejected"
     TIMEOUT_EXCEEDED = "timeout_exceeded"
     CANCELLED = "cancelled"
     INFRASTRUCTURE_ERROR = "infrastructure_error"
@@ -74,13 +76,19 @@ def _is_codeact_loop_stop(error: BaseException) -> bool:
     )
 
 
-def policy_termination(error: BaseException | None) -> tuple[NOOATerminationReason | None, str | None]:
+def policy_termination(
+    error: BaseException | None, *, model_error: BaseException | None = None
+) -> tuple[NOOATerminationReason | None, str | None]:
     """Recognize gradable native stops without hiding cleanup or outer failures."""
     seen: set[int] = set()
     while isinstance(error, Exception) and id(error) not in seen:
         seen.add(id(error))
         if cleanup_errors(error):
             break
+        if error is model_error and isinstance(error, ClientResponseError) and error.status in {400, 413, 422}:
+            # Only this invocation's model rejection is gradable; unrelated HTTP
+            # failures and cleanup errors retain their infrastructure semantics.
+            return NOOATerminationReason.MODEL_REJECTED, str(error)
         if isinstance(error, OutputTokenLimitExceeded):
             return NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED, str(error)
         if isinstance(error, PolicyCallBudgetExceeded):

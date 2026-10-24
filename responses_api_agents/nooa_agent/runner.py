@@ -25,6 +25,7 @@ from threading import Lock
 from typing import Any, Protocol
 from uuid import uuid4
 
+from aiohttp import ClientResponseError
 from nooa.runtime.hooks import hooks_scope
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
@@ -68,6 +69,7 @@ class NOOARunResult:
     termination_reason: NOOATerminationReason | None = None
     termination_error: str | None = None
     trajectory: TrajectoryRecord | None = None
+    model_status_code: int | None = None
 
 
 class NOOARunFailure(RuntimeError):
@@ -200,10 +202,10 @@ class InProcessNOOARunner:
                 return_value = await self._invocation_adapter(agent, request.responses_create_params)
         except BaseException as error:
             failure = error
-            termination_reason, termination_error = policy_termination(error)
+            termination_reason, termination_error = policy_termination(error, model_error=state.fatal_error)
 
         fatal_error = dispatcher.fatal_error
-        if state.fatal_error is not None:
+        if state.fatal_error is not None and termination_reason is not NOOATerminationReason.MODEL_REJECTED:
             # A budget or output error after an unrecovered transport failure
             # still lacks a valid rollout to grade. Keep the terminal cause.
             termination_reason = None
@@ -236,6 +238,12 @@ class InProcessNOOARunner:
             termination_reason=termination_reason,
             termination_error=termination_error,
             trajectory=trajectory,
+            # Retain the upstream status only after the model identity and cleanup
+            # guards established a terminal rejection; do not parse diagnostics.
+            model_status_code=state.fatal_error.status
+            if termination_reason is NOOATerminationReason.MODEL_REJECTED
+            and isinstance(state.fatal_error, ClientResponseError)
+            else None,
         )
         if failure is not None and termination_reason is None:
             if isinstance(failure, asyncio.CancelledError):
