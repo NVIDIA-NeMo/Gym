@@ -278,7 +278,17 @@ async def test_verify_failure_closes_resource_sandbox():
     ("output", "reward"),
     [
         ([], 0.0),
-        ([{"type": "message", "id": "msg_1", "role": "assistant", "content": [{"type": "output_text", "text": "42"}]}], 0.0),
+        (
+            [
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "42"}],
+                }
+            ],
+            0.0,
+        ),
         ([{"type": "function_call", "call_id": "c1", "name": "bash", "arguments": "{}"}], 1.0),
         ([{"type": "custom_tool_call", "call_id": "c1", "name": "apply_patch", "input": ""}], 1.0),
     ],
