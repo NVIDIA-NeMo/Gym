@@ -34,7 +34,19 @@ from harbor.trial.trial import Trial
 from benchmarks.skill_trigger.prepare import digest, encode, tree_digest
 
 
-async def smoke(*, output: Path, image: str, gateway_host: str, gateway_port: int, harness: str) -> None:
+async def smoke(
+    *,
+    output: Path,
+    image: str,
+    gateway_host: str,
+    gateway_port: int,
+    harness: str,
+    node_binary: str,
+    api: str,
+    scenario: str,
+) -> None:
+    if harness != "pi" and (api != "openai-responses" or scenario != "success"):
+        raise ValueError("Additional scripted scenarios currently exercise Pi only")
     root = output.resolve()
     root.mkdir(parents=True, exist_ok=False)
     release = root / "release"
@@ -95,8 +107,8 @@ timeout_sec = 30
 build_timeout_sec = 300
 cpus = 1
 memory_mb = 768
-network_mode = "allowlist"
-allowed_hosts = [{json.dumps(gateway_host)}]
+network_mode = {json.dumps("no-network" if harness == "pi" else "allowlist")}
+allowed_hosts = {"[]" if harness == "pi" else json.dumps([gateway_host])}
 """)
     calls = []
 
@@ -104,18 +116,23 @@ allowed_hosts = [{json.dumps(gateway_host)}]
         payload = await request.json()
         calls.append(payload)
         (root / ("provider-" + str(len(calls)) + ".json")).write_text(json.dumps(payload, indent=2))
+        if scenario == "provider-error":
+            return web.json_response({"error": {"message": "Scripted provider failure"}}, status=503)
+        should_read = scenario == "request-limit" or (scenario == "success" and len(calls) == 1)
         output = (
             [
                 {
                     "type": "function_call",
-                    "id": "fc-synthetic",
-                    "call_id": "call-synthetic",
-                    "name": "skill_view",
-                    "arguments": '{"name":"synthetic"}',
+                    "id": f"fc-synthetic-{len(calls)}",
+                    "call_id": f"call-synthetic-{len(calls)}",
+                    "name": "read" if harness == "pi" else "skill_view",
+                    "arguments": '{"path":"/skills/synthetic/SKILL.md"}'
+                    if harness == "pi"
+                    else '{"name":"synthetic"}',
                     "status": "completed",
                 }
             ]
-            if len(calls) == 1
+            if should_read
             else [
                 {
                     "type": "message",
@@ -143,6 +160,34 @@ allowed_hosts = [{json.dumps(gateway_host)}]
         }
         stream = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
         await stream.prepare(request)
+        if api == "openai-completions":
+            delta = (
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": f"call-synthetic-{len(calls)}",
+                            "type": "function",
+                            "function": {"name": "read", "arguments": '{"path":"/skills/synthetic/SKILL.md"}'},
+                        }
+                    ],
+                }
+                if should_read
+                else {"role": "assistant", "content": "Done."}
+            )
+            for chunk_delta, finish in [(delta, None), ({}, "tool_calls" if should_read else "stop")]:
+                chunk = {
+                    "id": f"chat-{len(calls)}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": "test-model",
+                    "choices": [{"index": 0, "delta": chunk_delta, "finish_reason": finish}],
+                }
+                await stream.write(("data: " + json.dumps(chunk) + "\n\n").encode())
+            await stream.write(b"data: [DONE]\n\n")
+            await stream.write_eof()
+            return stream
         events = [{"type": "response.created", "response": {**response, "status": "in_progress", "output": []}}]
         for index, item in enumerate(output):
             events += [
@@ -161,12 +206,16 @@ allowed_hosts = [{json.dumps(gateway_host)}]
         return stream
 
     app = web.Application()
-    app.router.add_post("/v1/responses", responses)
+    app.router.add_post("/v1/responses" if api == "openai-responses" else "/v1/chat/completions", responses)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, gateway_host, 0)
     await site.start()
     port = runner.addresses[0][1]
+    # This standalone CLI uses argparse, not Gym's Hydra command parser.
+    from nemo_gym.server_utils import GlobalAIOHTTPAsyncClientConfig, set_global_aiohttp_client
+
+    set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
     os.environ["SYNTHETIC_PROVIDER_KEY"] = "dummy-not-a-real-key"
     try:
         kwargs = dict(
@@ -178,7 +227,7 @@ allowed_hosts = [{json.dumps(gateway_host)}]
                 "trial_name": "synthetic-" + uuid.uuid4().hex[:8],
                 "trials_dir": str(root / "trials"),
                 "agent": {
-                    "import_path": "environments.skill_trigger.hermes:HermesSkillAgent",
+                    "import_path": "environments.skill_trigger.agent:SkillAgent",
                     "model_name": "test-model",
                     "kwargs": {
                         **kwargs,
@@ -186,6 +235,15 @@ allowed_hosts = [{json.dumps(gateway_host)}]
                         "api_key_env": "SYNTHETIC_PROVIDER_KEY",
                         "gateway_host": gateway_host,
                         "gateway_port": gateway_port,
+                        **(
+                            {
+                                "provider": "openai" if api == "openai-responses" else "nvidia",
+                                "api": api,
+                                "node_binary": node_binary,
+                            }
+                            if harness == "pi"
+                            else {}
+                        ),
                     },
                 },
                 "environment": {"type": "docker", "cpu_enforcement_policy": "ignore"},
@@ -198,17 +256,32 @@ allowed_hosts = [{json.dumps(gateway_host)}]
         trial = await Trial.create(config)
         result = await trial.run()
         (root / "result.json").write_text(result.model_dump_json(indent=2))
+        records = list((root / "private").glob("*/evidence.json"))
+        evidence = json.loads(records[0].read_text())["evidence"] if len(records) == 1 else {}
         summary = {
             "kind": "synthetic-harbor-smoke",
             "model_inference": False,
+            "harness": harness,
+            "api": api,
+            "scenario": scenario,
             "root": str(root),
             "provider_requests": len(calls),
+            "outcome": evidence.get("outcome"),
+            "finished_at": evidence.get("finished_at"),
             "exception": result.exception_info.model_dump(mode="json") if result.exception_info else None,
             "rewards": result.verifier_result.rewards if result.verifier_result else None,
         }
         (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
         print(json.dumps(summary, indent=2))
-        assert not result.exception_info and result.verifier_result.rewards == {"reward": 1}, summary
+        if scenario == "provider-error":
+            assert result.exception_info and summary["rewards"] is None and len(calls) == 1, summary
+            assert evidence.get("outcome") == "provider_error", summary
+        else:
+            expected_reward = 0 if scenario == "miss" else 1
+            expected_outcome = "routing_horizon" if scenario == "request-limit" else "completed"
+            expected_requests = {"success": 2, "miss": 1, "request-limit": 3}[scenario]
+            assert not result.exception_info and summary["rewards"] == {"reward": expected_reward}, summary
+            assert evidence.get("outcome") == expected_outcome and len(calls) == expected_requests, summary
     finally:
         await runner.cleanup()
         from nemo_gym.server_utils import get_global_aiohttp_client, is_global_aiohttp_client_setup
@@ -223,6 +296,11 @@ if __name__ == "__main__":
     parser.add_argument("--image", required=True)
     parser.add_argument("--gateway-host", required=True)
     parser.add_argument("--gateway-port", type=int, default=0)
-    parser.add_argument("--harness", choices=["hermes", "hermes_guidance"], default="hermes")
+    parser.add_argument("--harness", choices=["pi", "hermes", "hermes_guidance"], default="hermes")
+    parser.add_argument("--node-binary", default="node")
+    parser.add_argument("--api", choices=["openai-responses", "openai-completions"], default="openai-responses")
+    parser.add_argument(
+        "--scenario", choices=["success", "miss", "request-limit", "provider-error"], default="success"
+    )
     args = parser.parse_args()
     asyncio.run(smoke(**vars(args)))

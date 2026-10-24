@@ -216,3 +216,21 @@ def test_manifest_hash_and_harbor_prompt_are_bound(tmp_path, prepared):
             trial_paths=verifier.trial_paths,
             environment=None,
         )
+
+
+def test_pi_catalog_paths_keep_prepared_order(prepared):
+    folder = prepared / "catalogs/catalog/alpha"
+    folder.mkdir()
+    body = "---\nname: alpha\ndescription: Another skill\n---\nInstructions for the companion skill."
+    (folder / "SKILL.md").write_text(body)
+    files = [("SKILL.md", digest(body.encode()))]
+    manifest = json.loads((prepared / "manifest.json").read_text())
+    catalog = manifest["catalogs"]["catalog"]
+    catalog["members"].append({"name": "alpha", "files": files, "mounted_sha256": tree_digest(files)})
+    catalog["sha256"] = digest(encode(catalog["members"]))
+    manifest["cases"][0]["catalog_sha256"] = catalog["sha256"]
+    (prepared / "manifest.json").write_bytes(encode(manifest))
+    case = load_case(**inputs(prepared))
+    assert list(case.sources) == ["target", "alpha"]
+    assert [path.name for path in case.skill_directories] == ["target", "alpha"]
+    assert all(path.is_relative_to(prepared) for path in case.skill_directories)

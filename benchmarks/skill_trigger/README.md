@@ -1,6 +1,6 @@
 # Skill opening across agent harnesses
 
-**Implementation draft: this benchmark is not runnable yet.** Source preparation, scoring, trace conversion, shared budgets, inference transport, and the host-side Harbor verifier have component tests. Codex/Hermes launch profiles are ported, and a Hermes Harbor adapter is in development. Successful end-to-end execution, Pi/Codex adapters, and live migration checks remain pending. This draft does not register a benchmark or report new model results.
+**Implementation draft: this benchmark is not runnable yet.** Source preparation, scoring, trace conversion, shared budgets, inference transport, and the host-side Harbor verifier have component tests. Codex/Hermes launch profiles are ported. The shared Pi/Hermes adapter has passed synthetic Pi integration through Harbor; Codex collection, successful Hermes integration, and live migration checks remain pending. This draft does not register a benchmark or report new model results.
 
 The question is whether a model opens the relevant skill instructions when a task calls for them. Task-performance benchmarks measure whether work gets done; this benchmark measures an earlier step. Opening instructions is not evidence that the agent followed them or completed the task.
 
@@ -74,15 +74,20 @@ docker build -t gym-skill-harnesses:local environments/skill_trigger
 
 The Dockerfile checks the Codex release checksum and retains the exact Hermes Git revision. Codex, Hermes, and Hermes-guidance startup were exercised in this image with networking disabled and stopped before prompt release. This is profile validation, not a scored rollout; Codex-guidance startup still needs its effective model catalog.
 
-The developing Hermes adapter uses Harbor's Docker lifecycle, independent observation, the shared inference gateway, canonical messages, ATIF conversion, and the host verifier. A synthetic integration command is available:
+The shared adapter uses Harbor's Docker lifecycle, independent file observation, the inference gateway, canonical traces, ATIF conversion, and the host verifier. Pi's SDK runs on the host with Docker-backed tools and no network in the task container. Hermes runs inside the container and needs an explicitly reachable gateway.
+
+For Pi, install Node 22 or later and the pinned SDK dependencies, then run the synthetic smoke:
 
 ```bash
+npm ci --ignore-scripts --prefix environments/skill_trigger
 LITELLM_LOCAL_MODEL_COST_MAP=True python -m environments.skill_trigger.tests.harbor_smoke \
-    --image gym-skill-harnesses:local --gateway-host YOUR_DOCKER_REACHABLE_HOST_IP \
-    --output /tmp/new-skill-harbor-smoke
+    --image gym-skill-harnesses:local --harness pi --gateway-host 127.0.0.1 \
+    --output /tmp/new-skill-pi-smoke
 ```
 
-This uses a local scripted provider and synthetic instructions, not a model API or benchmark case. **It has not passed end to end yet.** The first integrated attempt was blocked by the test host's firewall and remained unscored with zero forwarded requests. The gateway now has an authenticated readiness check before prompt release. An optional `--gateway-port` permits an operator-approved fixed port; the test does not alter firewall rules.
+The smoke uses a local scripted provider and synthetic instructions, not model inference or a benchmark case. Pi's successful-read and missed-read paths passed with both `openai-responses` and `openai-completions`; three-request stops preserve earlier successful reads, and scripted provider failures remain unscored. Select the API with `--api` and a boundary case with `--scenario miss`, `request-limit`, or `provider-error`. Each attempt needs a new output directory. This is integration evidence, not the live migration comparison or a clean-clone acceptance run.
+
+For Hermes, use `--harness hermes` or `hermes_guidance` and a Docker-reachable host address. Its integrated test remains blocked by the test host's firewall. An authenticated readiness check detects unreachable gateways before prompt release; `--gateway-port` permits an operator-approved fixed port. The test does not alter firewall rules.
 
 Harbor's task CPU field accepts whole numbers. The frozen half-CPU limit is enforced by Docker Compose with Harbor's CPU override disabled (`cpu_enforcement_policy: ignore`); the adapter checks the actual running container still has 0.5 CPU and 768 MiB. The networking path also needs the migration comparison: the prior experiment documented an earlier header timeout in Harbor's sidecar, separate from the 120-second trial limit. Do not silently change that behavior and label the result a historical reproduction.
 
