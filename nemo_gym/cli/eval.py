@@ -799,13 +799,24 @@ def health_check_rollouts(
 
 
 @exit_cleanly_on_config_error
-def export_rollouts_as_atif() -> None:  # pragma: no cover
-    from nemo_gym.atif_export import ExportAtifConfig, export_rollouts_to_atif
+def export_run() -> None:  # pragma: no cover
+    from nemo_gym.exporters import load_run_exporter_class
+    from nemo_gym.exporters.base import ExportState
+    from nemo_gym.run_artifacts import RunArtifacts
+    from nemo_gym.run_exporter_registry import DEFAULT_RUN_EXPORTER
 
-    config = ExportAtifConfig.model_validate(get_global_config_dict())
-    result = export_rollouts_to_atif(config)
-    print(f"Exported {result.trajectory_count} ATIF trajectory file(s) to {result.output_dirpath}")
-    print(f"Manifest: {result.manifest_fpath}")
+    global_config_dict = get_global_config_dict()
+    name = global_config_dict.get("exporter") or DEFAULT_RUN_EXPORTER
+    exporter_class = load_run_exporter_class(name)
+    exporter = exporter_class(exporter_class.config_model.model_validate(global_config_dict))
+    result = exporter.export(RunArtifacts(exporter.config.rollouts_jsonl_fpath))
+
+    print(f"Export {name}: {result.state.value}")
+    for key, value in result.detail.items():
+        print(f"  {key}: {value}")
+    if result.state is ExportState.FAILED:
+        print(f"Error: {result.error}", file=sys.stderr)
+        raise SystemExit(result.exit_code)
 
 
 @exit_cleanly_on_config_error
