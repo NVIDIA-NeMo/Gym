@@ -37,7 +37,8 @@ def _r2e_image_layout(root: Path) -> tuple[Path, Path]:
 
 
 def _run(script: str, cwd: Path) -> str:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    # CI sets PY_COLORS=1; colored output would split the "PASSED <test id>" lines the grader parses.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")} | {"PY_COLORS": "0"}
     proc = subprocess.run(["bash", "-c", script], cwd=cwd, env=env, capture_output=True, text=True, timeout=120)
     return proc.stdout + proc.stderr
 
