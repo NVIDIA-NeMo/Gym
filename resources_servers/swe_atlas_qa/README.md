@@ -83,9 +83,9 @@ swe_atlas_qa_agent:
 Use the same tasks and grader when comparing harnesses. Their CLI commands, model configuration, dependencies,
 and libc compatibility remain harness-specific.
 
-Each harness that completed this benchmark has a config in `benchmarks/swe_atlas_qa/`
-(`claude_code`, `cline`, `codex`, `kilocode`, `mini_swe`, `openclaw`, `opencode`, `pi`, `prime`, `simple_strands`,
-and `terminus_2`). Each holds the settings used to run that harness on three tasks, including Alpine k6, with GLM-5.2.
+Each harness has a config in `benchmarks/swe_atlas_qa/` (`claude_code`, `cline`, `codex`, `deepagents`, `hermes`,
+`kilocode`, `mini_swe`, `openclaw`, `opencode`, `pi`, `prime`, `simple_strands`, and `terminus_2`). Each holds the
+settings used to run that harness on three tasks, including Alpine k6, with GLM-5.2 or DeepSeek-V4.1-Flash.
 Version pins and paths inside `/work/gym_mount` must match your bundle.
 
 ```bash
@@ -93,9 +93,9 @@ gym eval run --config benchmarks/swe_atlas_qa/claude_code.yaml --split benchmark
   --output runs/swe-atlas/claude_code.jsonl ++route_failures_to_sidecar=true
 ```
 
-`hermes` currently rejects the request `metadata` that every row carries. `deepagents` writes `/logs/agent/answer.txt`
-inside its virtual filesystem rooted at `/app`, so the answer is not collected. Both need adapter fixes before they can
-score this benchmark.
+`deepagents` treats its working directory as the root of a virtual filesystem, so with `/app` the answer would land at
+`/app/logs/agent/answer.txt`. Its config sets `cwd: /`, which needs `harness_agent` to keep an explicit `agent_kwargs`
+working directory (#5051).
 
 ## Scoring and validation
 
