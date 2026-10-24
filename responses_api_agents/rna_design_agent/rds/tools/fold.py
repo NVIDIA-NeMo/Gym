@@ -204,7 +204,7 @@ def _fold_state(sequence: str, state, engine: str) -> str:
     ),
     cost=Cost.CHEAP,
     model=SwitchMatchIn,
-    needs=("secondary_structure",),
+    needs=("secondary_structure", "states"),
 )
 def score_switch_match(inp: SwitchMatchIn) -> dict:
     from ..structure import compare, to_pairs

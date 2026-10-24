@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..registry import tool
-from ..spec import Cost, field
+from ..spec import Cost, EnvironmentFault, field
 
 
 PREAMBLE = '''"""Written by the agent. Prints {"sequences": [...]} and nothing else."""
@@ -52,7 +52,7 @@ def _sandbox_command(script: Path, argument: str, scratch: Path) -> tuple[list[s
         # `--unshare-all` also cuts the network, which enroot alone does not.
         rootfs = os.environ.get("RDS_SANDBOX_ROOTFS", "")
         if not rootfs or not Path(rootfs).is_dir():
-            raise RuntimeError(
+            raise EnvironmentFault(
                 "RDS_SANDBOX=bwrap needs RDS_SANDBOX_ROOTFS pointing at an "
                 f"unpacked image directory; {rootfs or '<unset>'} is not one."
             )
@@ -127,7 +127,7 @@ def _sandbox_command(script: Path, argument: str, scratch: Path) -> tuple[list[s
         if argument:
             command.append(argument)
         return command, "subprocess"
-    raise RuntimeError(
+    raise EnvironmentFault(
         f"no sandbox for RDS_SANDBOX={mode}: docker and bwrap were not found, and agent-written code does not "
         "run unisolated by default. Install one, or set RDS_SANDBOX=subprocess to run it as this user with "
         "network access."
@@ -354,7 +354,7 @@ def code_call(inp: CallCodeIn) -> dict:
     saved = _toolbox() / f"{inp.name}.py"
     if not saved.is_file():
         have = sorted(p.stem for p in _toolbox().glob("*.py"))
-        raise FileNotFoundError(
+        raise ValueError(
             f"no saved tool named {inp.name!r}"
             + (
                 f"; you have: {', '.join(have)}"

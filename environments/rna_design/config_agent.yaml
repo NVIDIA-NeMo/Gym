@@ -10,7 +10,6 @@ rna_design_agent:
         name: policy_model
       arm: agent
       worker_python: ${oc.env:RNA_WORKER_PYTHON,null}
-      token_id_capture: true
       max_tokens: 8192
       rollout_timeout_s: 3600
       max_concurrent_rollouts: 8

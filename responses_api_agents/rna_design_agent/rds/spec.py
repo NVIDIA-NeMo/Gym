@@ -30,6 +30,11 @@ from typing import Any
 _JSON_TYPES: dict[Any, str] = {str: "string", int: "integer", float: "number", bool: "boolean"}
 
 
+class EnvironmentFault(RuntimeError):
+    """A tool could not run on this machine (a missing checkout or sandbox, a crashed dependency), whatever it was
+    asked. A campaign it interrupts measures nothing about the model."""
+
+
 class Cost(enum.Enum):
     """What a call costs, so the budget needs no tool names."""
 
@@ -127,6 +132,10 @@ class ToolSpec:
     needs: frozenset[str] = frozenset()
     #: The steps a composite performs. It is offered instead of its steps, never alongside them.
     steps: tuple[str, ...] = ()
+
+    @property
+    def group(self) -> str:
+        return self.name.split(".", 1)[0]
 
     @property
     def llm_name(self) -> str:

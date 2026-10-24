@@ -115,13 +115,16 @@ class CampaignState:
         self.round = 0
 
     # --- candidates ---------------------------------------------------
-    def add_candidates(self, sequences: list[str], source: str) -> int:
-        """Insert sequences, ignoring ones already seen. Returns how many are new."""
+    def add_candidates(self, sequences: list[str], source: str, limit: int | None = None) -> int:
+        """Insert sequences, ignoring ones already seen, at most `limit` new ones. Returns how many are new."""
         before = self.count()
-        self.db.executemany(
-            "INSERT OR IGNORE INTO candidates(sequence, round, source) VALUES (?, ?, ?)",
-            [(s, self.round, source) for s in sequences],
-        )
+        for sequence in sequences:
+            if limit is not None and self.count() - before >= limit:
+                break
+            self.db.execute(
+                "INSERT OR IGNORE INTO candidates(sequence, round, source) VALUES (?, ?, ?)",
+                (sequence, self.round, source),
+            )
         self.db.commit()
         return self.count() - before
 

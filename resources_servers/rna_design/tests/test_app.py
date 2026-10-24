@@ -172,7 +172,11 @@ def test_a_late_reply_from_an_abandoned_call_is_not_taken_for_the_next(tmp_path:
 
     async def scenario() -> dict:
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, str(script), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE
+            sys.executable,
+            str(script),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         worker = ToolWorker(proc, timeout_s=0.5)
         with pytest.raises(asyncio.TimeoutError):
@@ -224,14 +228,69 @@ def test_designs_written_by_the_harness_are_scored_like_the_agents(tmp_path: Pat
 
 
 @needs_eternafold
-def test_a_rollout_whose_every_call_failed_is_masked(tmp_path: Path) -> None:
+def test_calls_that_fail_on_the_models_own_arguments_score_zero(tmp_path: Path) -> None:
+    """Scoring an empty pool is the model's mistake, not the environment's, so it is measured as 0."""
     pytest.importorskip("mcp")
     with _client(tmp_path) as client:
         token = _seed(client)
         _call(client, token, "score_fold_match", {"sequences": "@unscored", "target": TARGET["name"]}, rid=2)
         result = _verify(client)
-    assert result["tool_calls"] == 1 and result["tool_failures"] == 1 and result["pool_size"] == 0
-    assert result["mask_sample"] is True and result["failure_kind"] == "agent_run_error"
+    assert result["tool_calls"] == 1 and result["tool_failures"] == 1 and result["environment_faults"] == 0
+    assert result["mask_sample"] is False and result["reward"] == 0.0
+
+
+def test_the_model_cannot_set_operator_fields_or_exceed_the_round_budget(tmp_path: Path) -> None:
+    """Hidden from the schema is not enough: the worker refuses an operator field, and every call spends a round."""
+    with _client(tmp_path) as client:
+        assert client.post("/seed_session", json=SEED).status_code == 200
+        refused = client.post("/report_rules", json={"rules": [], "out_dir": str(tmp_path / "escape")}).json()
+        valid = {"sequences": ["G" * TARGET["length"]], "target": TARGET["name"]}
+        replies = [client.post("/score_constraints", json=valid).json() for _ in range(12)]
+        _verify(client)
+    assert "out_dir is set by the operator" in refused["error"] and not (tmp_path / "escape").exists()
+    # the refused call was round 1 of 12, so the twelfth call here is the thirteenth round
+    assert "error" not in replies[10] and "rounds" in replies[11]["error"]
+
+
+def test_a_reply_larger_than_64_kib_still_verifies(tmp_path: Path) -> None:
+    with _client(tmp_path) as client:
+        assert client.post("/seed_session", json=SEED).status_code == 200
+        client.post("/report_rules", json={"rules": [], "notes": "x" * 70_000})
+        result = _verify(client)
+    assert result["tool_calls"] == 1
+
+
+def test_closing_a_worker_stops_the_processes_it_started(tmp_path: Path) -> None:
+    """gRNAde runs as the tool worker's child. Ending the session must end it too."""
+    import asyncio
+    import time
+
+    from resources_servers.rna_design.app import ToolWorker
+
+    pid_file = tmp_path / "child.pid"
+    script = tmp_path / "parent.py"
+    script.write_text(
+        "import subprocess, sys, time\n"
+        f"child = subprocess.Popen(['sleep', '60'])\nopen({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(60)\n"
+    )
+
+    async def scenario() -> int:
+        proc = await asyncio.create_subprocess_exec(sys.executable, str(script), start_new_session=True)
+        while not pid_file.exists() or not pid_file.read_text():
+            await asyncio.sleep(0.05)
+        await ToolWorker(proc, timeout_s=1).close()
+        return int(pid_file.read_text())
+
+    child = asyncio.run(scenario())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    raise AssertionError(f"process {child} outlived its tool worker")
 
 
 @needs_eternafold

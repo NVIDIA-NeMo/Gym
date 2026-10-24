@@ -51,15 +51,16 @@ class Campaign:
         self.state.record("campaign_start", controller="harness", rank_by=self.rank_by, budget=self.budget.snapshot())
 
     def call(self, tool: str, arguments: dict) -> dict:
-        if tool not in self.allowed:
-            raise ValueError(f"{tool} is not offered for this task; available: {', '.join(sorted(self.allowed))}")
         spent = self.budget.exhausted()
         if spent:
             raise RuntimeError(f"the budget is spent ({spent}); no further tool calls run")
         self.state.round += 1
+        self.budget.charge(rounds=1)
         # The same event the campaign loop writes, so the transcript and call count agree.
         self.state.record("action", tool=tool, arguments=arguments, rationale="")
-        apply_tool_call(tool, arguments, self.state, self.budget, self.rank_by, self.objective, self.failures)
+        apply_tool_call(
+            tool, arguments, self.state, self.budget, self.rank_by, self.objective, self.failures, self.allowed
+        )
         return self.view()
 
     def view(self) -> dict:
@@ -76,7 +77,7 @@ class Campaign:
     def score(self) -> dict:
         pool = [row["sequence"] for row in self.state.candidates()]
         truth = ground_truth(pool, self.campaign)
-        transcript, tool_calls, tool_errors = worker.read_trace(Path(self.state.dir))
+        transcript, tool_calls, tool_errors, environment_faults = worker.read_trace(Path(self.state.dir))
         self.state.record("campaign_end", controller="harness", reason="harness_done", rounds=self.state.round)
         return {
             "best": truth["best"],
@@ -91,6 +92,7 @@ class Campaign:
             "rounds": self.state.round,
             "tool_calls": tool_calls,
             "tool_failures": tool_errors,
+            "environment_faults": environment_faults,
             "transcript": transcript,
         }
 

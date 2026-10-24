@@ -103,14 +103,15 @@ def ground_truth(sequences: list[str], campaign: Campaign) -> dict:
         if value is not None:
             rows.append({"sequence": row["sequence"], "value": float(value)})
 
-    gates: dict[str, dict[str, bool]] = {}
+    gate_values: dict[str, dict[str, Any]] = {}
     for gate in campaign.scoring.gates:
         gate_tool, gate_path = _tool_of(gate)
         result = _dispatch_scorer(gate_tool, sequences, campaign)
         for row in result["results"]:
-            gates.setdefault(row["sequence"], {})[gate] = bool(_path_value(row, gate_path))
+            gate_values.setdefault(row["sequence"], {})[gate] = _path_value(row, gate_path)
 
-    passing = [r for r in rows if all(gates.get(r["sequence"], {}).get(g, False) for g in campaign.scoring.gates)]
+    # The same rule the campaign ranks by: a value, or a {"min", "max"} range, per gate.
+    passing = [r for r in rows if campaign.scoring.passes_gates(gate_values.get(r["sequence"], {}))]
     ranked = sorted(passing, key=lambda r: r["value"], reverse=campaign.scoring.direction == "max")
     best = ranked[0]["value"] if ranked else None
     return {

@@ -19,9 +19,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from ..spec import EnvironmentFault
+
 
 def resolve(name: str, default: str) -> Path:
     path = Path(os.environ.get(name, default))
     if not path.exists():
-        raise FileNotFoundError(f"{name} not found at {path}, set {name} to where it is")
+        raise EnvironmentFault(f"{name} not found at {path}, set {name} to where it is")
     return path

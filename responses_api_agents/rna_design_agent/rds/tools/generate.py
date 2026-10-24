@@ -27,7 +27,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..registry import tool
-from ..spec import Cost, field
+from ..spec import Cost, EnvironmentFault, field
 from ..targets import TARGETS
 from ._grnade_shim import _placeholder_pdb
 
@@ -213,7 +213,7 @@ def generate_grnade(inp: GRNAdeIn) -> dict:
 
     repo = Path(os.environ.get("GRNADE_REPO", "/opt/geometric-rna-design"))
     if not repo.exists():
-        raise FileNotFoundError(f"gRNAde repo not found at {repo}; set GRNADE_REPO")
+        raise EnvironmentFault(f"gRNAde repo not found at {repo}; set GRNADE_REPO")
     work = Path(tempfile.mkdtemp(prefix="grnade_"))
     # Use a backbone only when the task supplies one. An explicit structure argument still wins.
     # Test the string, not the path: Path("") is ".", which exists.
@@ -225,9 +225,11 @@ def generate_grnade(inp: GRNAdeIn) -> dict:
     mode = inp.mode or ("3d" if given and structure.exists() else "2d")
     if not given or not structure.exists():
         if mode != "2d":
-            raise FileNotFoundError(
+            missing = (
                 f"target structure not found at {structure!r}; pass --structure, set RDS_GRNADE_PDB, or use mode='2d'"
             )
+            # A path the model passed is its own mistake. One the operator set up is the machine's.
+            raise ValueError(missing) if inp.structure else EnvironmentFault(missing)
         # 2d mode ignores coordinates, but design.py still loads a PDB for the sequence and length.
         structure = _placeholder_pdb(target, work / "placeholder.pdb")
     checkpoint = os.environ.get("RDS_GRNADE_CKPT", "checkpoints/gRNAde_drop3d@0.75_maxlen@500.h5")
@@ -313,7 +315,7 @@ def generate_grnade(inp: GRNAdeIn) -> dict:
     )
     produced = sorted((work / "designs").glob("designs_*.csv"))
     if result.returncode != 0 or not produced:
-        raise RuntimeError(
+        raise EnvironmentFault(
             f"gRNAde exited {result.returncode} and wrote {len(produced)} files\n"
             f"--- stdout tail ---\n{result.stdout[-1200:]}\n"
             f"--- stderr tail ---\n{result.stderr[-1200:]}"

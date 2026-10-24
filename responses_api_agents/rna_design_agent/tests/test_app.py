@@ -210,6 +210,127 @@ def test_servers_starting_together_build_eternafold_once(tmp_path: Path, monkeyp
     assert errors == [] and len(builds) == 1
 
 
+class TestReviewFixes:
+    """The campaign rules a tool call must obey, whichever harness made it."""
+
+    def _campaign(self, tmp_path: Path, **limits):
+        from responses_api_agents.rna_design_agent.rds.budget import Budget, Limits
+        from responses_api_agents.rna_design_agent.rds.state import CampaignState
+        from responses_api_agents.rna_design_agent.rds.targets import from_dict, register
+
+        register(from_dict({"name": "review_hairpin", "length": 12, "target_structure": "((((...))))."}))
+        return CampaignState(tmp_path / "run"), Budget(Limits(**limits))
+
+    def test_a_model_cannot_run_a_tool_the_task_does_not_offer(self, tmp_path: Path) -> None:
+        from responses_api_agents.rna_design_agent.rds.runner import Action, run_campaign
+
+        class Offered:
+            name = "model"
+            allowed = {"score.constraints"}
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def next_action(self, view):
+                self.calls += 1
+                if self.calls > 1:
+                    return Action("stop", {})
+                return Action("generate.inverse_fold", {"n": 3, "target": "review_hairpin"})
+
+        state, budget = self._campaign(tmp_path)
+        summary = run_campaign(Offered(), state, budget, rank_by="m", max_rounds=5)
+        assert state.count() == 0 and "is not offered" in summary["failures"][0]
+        state.close()
+
+    def test_one_call_cannot_admit_more_designs_than_the_budget_allows(self, tmp_path: Path) -> None:
+        from responses_api_agents.rna_design_agent.rds.runner import apply_tool_call
+
+        state, budget = self._campaign(tmp_path, candidates=2)
+        failures: list[str] = []
+        arguments = {"n": 5, "target": "review_hairpin"}
+        apply_tool_call("generate.inverse_fold", arguments, state, budget, "m", {"target_length": 12}, failures)
+        assert state.count() == 2 and budget.spend.candidates == 2 and "budget is full" in failures[-1]
+        state.close()
+
+    def test_a_sequence_that_is_not_rna_never_enters_the_pool(self, tmp_path: Path) -> None:
+        from responses_api_agents.rna_design_agent.rds.runner import apply_tool_call
+
+        state, budget = self._campaign(tmp_path)
+        failures: list[str] = []
+        sequences = ["N" * 12, "GGGGAAACCCCA"]
+        arguments = {"sequences": sequences, "target": "review_hairpin"}
+        apply_tool_call("score.constraints", arguments, state, budget, "m", {"target_length": 12}, failures)
+        assert [row["sequence"] for row in state.candidates()] == ["GGGGAAACCCCA"]
+        assert "dropped 1 sequences that are not 12 nt of A, C, G and U" in failures[-1]
+        state.close()
+
+    def test_final_scoring_applies_each_gates_declared_rule(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from responses_api_agents.rna_design_agent.rds import evaluate
+        from responses_api_agents.rna_design_agent.rds.campaign import Campaign, Scoring
+
+        rows = {"results": [{"sequence": "GGGG", "passed": True, "match": {"f1": 1.0}}]}
+        monkeypatch.setattr(evaluate, "dispatch", lambda tool, arguments: rows)
+
+        def best(gates: dict) -> float | None:
+            scoring = Scoring(primary="score.fold_match.match.f1", gates=gates)
+            target = {"name": "gate_target", "length": 4, "target_structure": "(..)"}
+            return evaluate.ground_truth(
+                ["GGGG"], Campaign(name="c", target="inline", scoring=scoring, inline_target=target)
+            )["best"]
+
+        assert best({"fold.eternafold.passed": True}) == 1.0
+        assert best({"fold.eternafold.passed": False}) is None
+
+    def test_scorers_that_cannot_run_are_neither_offered_nor_scheduled(self) -> None:
+        from responses_api_agents.rna_design_agent.rds.campaign import (
+            Campaign,
+            Scoring,
+            applicable_tools,
+            default_cycle,
+        )
+        from responses_api_agents.rna_design_agent.rds.targets import from_dict, register
+
+        target = {"name": "single_state", "length": 12, "target_structure": "((((...))))."}
+        register(from_dict(target))
+        campaign = Campaign(
+            name="c", target="inline", scoring=Scoring(primary="score.fold_match.match.f1"), inline_target=target
+        )
+        offered = {spec.name for spec in applicable_tools(campaign)}
+        deep = {tool for tool, _ in default_cycle(campaign, depth="full")}
+        assert "score.switch_match" not in offered and "score.switch_match" not in deep
+        assert "score.rule_obedience" not in deep
+
+    @pytest.mark.asyncio
+    async def test_a_timed_out_rollout_stops_the_processes_its_worker_started(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time
+
+        import responses_api_agents.rna_design_agent.app as agent_app
+
+        pid_file = tmp_path / "child.pid"
+        script = tmp_path / "worker.py"
+        script.write_text(
+            "import subprocess, time\n"
+            f"child = subprocess.Popen(['sleep', '60'])\nopen({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+            "time.sleep(60)\n"
+        )
+        monkeypatch.setattr(agent_app, "_WORKER", script)
+        started = time.monotonic()
+        out = await _agent(tmp_path, rollout_timeout_s=1)._run_worker({})
+        # A survivor holding the worker's pipes would also hold the rollout open until it exits.
+        assert out["error_type"] == "Timeout" and time.monotonic() - started < 10
+        child = int(pid_file.read_text())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        raise AssertionError(f"process {child} outlived its timed-out worker")
+
+
 class TestPrepare:
     def test_every_suite_expands(self) -> None:
         for path in sorted((AGENT_DIR / "suites").glob("*.yaml")):
@@ -317,7 +438,26 @@ class TestRun:
 
         assert out.tool_calls == 2 and out.tool_failures == 2 and out.pool_size == 0
         assert out.mask_sample is True and out.failure_kind == "agent_run_error"
-        assert "failed: FileNotFoundError" in out.response.output[0].content[0].text
+        assert out.environment_faults == 2
+        assert "failed: EnvironmentFault" in out.response.output[0].content[0].text
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_failed_on_the_models_own_arguments_scores_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Scoring an empty pool is the model's mistake, so the run is measured as 0, not masked."""
+        stub = _ScriptedModelServer(
+            [("score_fold_match", {"sequences": "@unscored", "target": "eterna100_v1_57"})] * 2
+        )
+        agent = _agent(tmp_path, arm="agent", model_name="stub")
+        monkeypatch.setattr(RnaDesignAgent, "stub_url", stub.base_url, raising=False)
+        try:
+            out = await agent.run(MagicMock(cookies={}), _request("rnainvbench_eterna100_v1", "eterna100_v1_57"))
+        finally:
+            stub.close()
+
+        assert out.tool_calls == 2 and out.tool_failures == 2 and out.environment_faults == 0
+        assert out.mask_sample is False and out.reward == 0.0
 
     @pytest.mark.asyncio
     async def test_the_worker_runs_under_the_configured_python(self, tmp_path: Path) -> None:

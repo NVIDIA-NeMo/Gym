@@ -22,8 +22,10 @@ same reward as the agent.
 import asyncio
 import json
 import logging
+import os
 import re
 import shutil
+import signal
 import sys
 import tempfile
 import time
@@ -94,6 +96,7 @@ class RnaDesignVerifyResponse(BaseVerifyResponse):
     rounds: int = 0
     tool_calls: int = 0
     tool_failures: int = 0
+    environment_faults: int = 0
     transcript: list[str] = Field(default_factory=list)
 
 
@@ -123,7 +126,7 @@ class ToolWorker:
 
     async def close(self) -> None:
         if self.proc.returncode is None:
-            self.proc.kill()
+            os.killpg(self.proc.pid, signal.SIGKILL)  # the worker and the gRNAde runs it started
             await self.proc.wait()
         if self.scratch:
             shutil.rmtree(self.scratch, ignore_errors=True)
@@ -203,6 +206,8 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+            limit=2**26,  # one reply is one JSON line, and a transcript can pass asyncio's 64 KiB default
         )
         worker = ToolWorker(proc, self.config.call_timeout_s, scratch=None if self.config.work_dir else run_dir)
         opened = await worker.ask(
@@ -271,9 +276,9 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
         elif not result["solved"] and API_ERROR.search(last_text):
             # The endpoint failed partway, so an unsolved pool says nothing about the model. A solved one still counts.
             failure = "the model endpoint failed during the rollout"
-        elif result["tool_calls"] > 0 and result["tool_failures"] == result["tool_calls"] and not result["pool_size"]:
-            # Every tool call raised and nothing was designed, so the tools never worked. Same rule as the agent.
-            failure = "every tool call failed and no design was produced"
+        elif not result["solved"] and result["environment_faults"]:
+            # A tool the machine could not run. Calls that failed on the model's own arguments are measured.
+            failure = f"{result['environment_faults']} tool call(s) could not run on this machine"
         else:
             failure = None
         return RnaDesignVerifyResponse(
@@ -288,6 +293,7 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
                     "rounds",
                     "tool_calls",
                     "tool_failures",
+                    "environment_faults",
                     "transcript",
                 )
             },

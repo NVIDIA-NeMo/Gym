@@ -79,7 +79,7 @@ def score_rollout(job: dict[str, Any]) -> dict[str, Any]:
 
     run = result["run"]
     tokens = result.get("tokens") or {}
-    transcript, tool_calls, tool_errors = read_trace(run_dir)
+    transcript, tool_calls, tool_errors, environment_faults = read_trace(run_dir)
     return {
         "transcript": transcript,
         "tool_calls": tool_calls,
@@ -97,13 +97,15 @@ def score_rollout(job: dict[str, Any]) -> dict[str, Any]:
         "rounds": run["rounds"],
         "stop_reason": run["reason"],
         "tool_failures": tool_errors,
+        "environment_faults": environment_faults,
         "code": run["code"],
     }
 
 
-def read_trace(run_dir: Path) -> tuple[list[str], int, int]:
-    """One line per round (tool, arguments, any error), plus the tool call count and how many raised."""
-    lines, calls, errors = [], 0, 0
+def read_trace(run_dir: Path) -> tuple[list[str], int, int, int]:
+    """One line per round (tool, arguments, any error), the tool call count, how many raised, and how many of those
+    the machine caused."""
+    lines, calls, errors, environment = [], 0, 0, 0
     for line in (run_dir / "trace.jsonl").read_text().splitlines():
         event = json.loads(line)
         if event["kind"] == "action" and event["tool"] != "stop":
@@ -111,8 +113,9 @@ def read_trace(run_dir: Path) -> tuple[list[str], int, int]:
             lines.append(f"round {event['round']}: {event['tool']} {json.dumps(event.get('arguments'))}")
         elif event["kind"] == "tool_error":
             errors += 1
+            environment += bool(event.get("environment"))
             lines.append(f"  failed: {event['error']}: {event['message']}")
-    return lines, calls, errors
+    return lines, calls, errors, environment
 
 
 def main() -> int:

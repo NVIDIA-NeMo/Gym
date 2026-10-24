@@ -19,7 +19,9 @@ import asyncio
 import importlib.util
 import json
 import logging
+import os
 import shutil
+import signal
 import sys
 import tempfile
 import time
@@ -99,6 +101,7 @@ class RnaDesignVerifyResponse(BaseVerifyResponse):
     stop_reason: Optional[str] = None
     tool_calls: int = 0
     tool_failures: int = 0
+    environment_faults: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
     top: list[str] = Field(default_factory=list)
@@ -163,13 +166,14 @@ class RnaDesignAgent(SimpleResponsesAPIAgent):
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,  # its own process group, so gRNAde goes with it when it is killed
         )
         try:
             out, err = await asyncio.wait_for(
                 proc.communicate(json.dumps(job).encode()), timeout=self.config.rollout_timeout_s
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            os.killpg(proc.pid, signal.SIGKILL)
             await proc.wait()
             return {
                 "ok": False,
@@ -177,7 +181,7 @@ class RnaDesignAgent(SimpleResponsesAPIAgent):
                 "error": f"rollout exceeded {self.config.rollout_timeout_s}s",
             }
         except asyncio.CancelledError:
-            proc.kill()
+            os.killpg(proc.pid, signal.SIGKILL)
             await proc.wait()
             raise
         # The worker prints one JSON line last. Anything before it is library output.
@@ -238,17 +242,18 @@ class RnaDesignAgent(SimpleResponsesAPIAgent):
 
         result = out["result"]
         result.pop("transcript")
-        # Every tool call raised and nothing was designed: an environment fault, so mask it.
-        broken = (
-            result["tool_calls"] > 0 and result["tool_failures"] == result["tool_calls"] and not result["pool_size"]
-        )
+        # A tool the machine could not run leaves an unsolved campaign unmeasured, so mask it. Calls that failed on
+        # the model's own arguments are part of what is measured.
+        broken = not result["solved"] and result["environment_faults"] > 0
         return RnaDesignVerifyResponse(
             **base,
             **result,
             reward=1.0 if result["solved"] else 0.0,
             mask_sample=broken,
             failure_kind=failure_kinds.AGENT_RUN_ERROR if broken else None,
-            failure_reason="every tool call failed and no design was produced" if broken else None,
+            failure_reason=f"{result['environment_faults']} tool call(s) could not run on this machine"
+            if broken
+            else None,
             wall_seconds=round(time.time() - started, 1),
         )
 

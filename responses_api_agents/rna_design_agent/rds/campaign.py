@@ -231,7 +231,9 @@ def applicable_tools(campaign: Campaign) -> list:
     supplied = target.provides if target else frozenset()
     if campaign.disclosure == "leaky":
         # Every capability token, whether the task supplied it or not.
-        supplied = frozenset({"secondary_structure", "backbone_3d", "ligand", "wild_type", "sequence_constraints"})
+        supplied = frozenset(
+            {"secondary_structure", "backbone_3d", "ligand", "wild_type", "sequence_constraints", "states"}
+        )
     elif campaign.disclosure != "strict":
         raise ValueError(f"unknown disclosure {campaign.disclosure!r}; expected strict or leaky")
     allowed = set(campaign.tools)
@@ -309,8 +311,8 @@ def default_cycle(
             if spec.group not in ("score", "struct", "fold") or spec.name in scored_by:
                 continue
             fields = {f.name for f in dataclasses.fields(spec.model)}
-            if "sequences" not in fields:
-                continue  # a scorer that reads a prior tool's directory
+            if "sequences" not in fields or "rules_file" in fields:
+                continue  # it reads a prior tool's output, which this cycle never writes
             step = {"sequences": "@unscored"}
             if "target" in fields:
                 step["target"] = target

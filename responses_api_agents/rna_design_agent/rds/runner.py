@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+import subprocess
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -23,7 +25,7 @@ from typing import Any, Protocol
 
 from . import registry
 from .budget import Budget
-from .spec import Cost
+from .spec import Cost, EnvironmentFault
 from .state import CampaignState, StateView
 
 
@@ -115,6 +117,10 @@ def _only(controller: Controller, tool: str):
         controller.allowed = allowed
 
 
+#: What a failure caused by the machine looks like. Anything else a tool raises is the request's fault.
+ENVIRONMENT_FAULTS = (EnvironmentFault, ImportError, MemoryError, subprocess.SubprocessError)
+
+
 def apply_tool_call(
     tool: str,
     arguments: dict[str, Any],
@@ -123,18 +129,35 @@ def apply_tool_call(
     rank_by: str,
     objective: dict[str, Any] | None,
     failures: list[str],
+    offered: set[str] | None = None,
 ) -> Any:
     """Run one tool call against a campaign and fold its result into the state. Returns the tool's result.
 
-    Shared by the campaign loop and by harnesses that call tools one at a time.
+    Shared by the campaign loop and by harnesses that call tools one at a time. `offered` is set for a call a model
+    chose: it must name an offered tool and may not set an operator field. None means an operator-written control.
     """
     started = time.monotonic()
     try:
+        if offered is not None:
+            spec = registry.get(tool)
+            if spec.name not in offered:
+                raise ValueError(f"{tool} is not offered for this task; available: {', '.join(sorted(offered))}")
+            fixed = {f.name for f in dataclasses.fields(spec.model) if f.metadata.get("operator")} & set(arguments)
+            if fixed:
+                raise ValueError(f"{', '.join(sorted(fixed))} is set by the operator, not in a tool call")
         result = registry.dispatch(tool, _expand_selectors(arguments, state, rank_by, tool))
     except Exception as exc:  # a failing tool is data, not a crash
+        environment = isinstance(exc, ENVIRONMENT_FAULTS)
         failures.append(f"{tool}: {type(exc).__name__}: {exc}")
         budget.charge(tool_calls=1)
-        state.record("tool_error", tool=tool, arguments=arguments, error=type(exc).__name__, message=str(exc))
+        state.record(
+            "tool_error",
+            tool=tool,
+            arguments=arguments,
+            error=type(exc).__name__,
+            message=str(exc),
+            environment=environment,
+        )
         raise
 
     elapsed = time.monotonic() - started
@@ -148,13 +171,16 @@ def apply_tool_call(
 
     produced = _sequences_from(result)
     length = (objective or {}).get("target_length")
-    if length:
-        wrong = [s for s in produced if len(s) != length]
-        if wrong:
-            # A design for the wrong puzzle is not a design, so it never enters the population.
-            produced = [s for s in produced if len(s) == length]
-            failures.append(f"{tool}: dropped {len(wrong)} sequences of the wrong length (target is {length} nt)")
-    added = state.add_candidates(produced, source=tool)
+    # A design for the wrong puzzle, or not written in RNA, is not a design, so it never enters the population.
+    wrong = [s for s in produced if (length and len(s) != length) or set(s) - set("ACGU")]
+    if wrong:
+        produced = [s for s in produced if s not in wrong]
+        rna = f"{length} nt of A, C, G and U" if length else "written in A, C, G and U"
+        failures.append(f"{tool}: dropped {len(wrong)} sequences that are not {rna}")
+    room = budget.limits.candidates - budget.spend.candidates if budget.limits.candidates else None
+    added = state.add_candidates(produced, source=tool, limit=room)
+    if room is not None and added == room and len(produced) > added:
+        failures.append(f"{tool}: the candidate budget is full, so the rest of this call's designs were not admitted")
     budget.charge(candidates=added)
     scored = state.score(_scores_from(result))
     state.record("state_update", added=added, scored=scored, total=state.count())
@@ -238,7 +264,8 @@ def run_campaign(
             break
 
         try:
-            apply_tool_call(action.tool, action.arguments, state, budget, rank_by, objective, failures)
+            offered = getattr(controller, "allowed", None)
+            apply_tool_call(action.tool, action.arguments, state, budget, rank_by, objective, failures, offered)
         except Exception:  # recorded as a failure inside, and the campaign goes on
             continue
 

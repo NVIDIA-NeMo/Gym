@@ -75,6 +75,8 @@ class Target:
             supplied.add("ligand")
         if self.conserved or self.fixed_prefix:
             supplied.add("sequence_constraints")
+        if self.states:
+            supplied.add("states")
         return frozenset(supplied)
 
 

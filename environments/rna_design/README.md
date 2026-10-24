@@ -9,7 +9,9 @@ target.
 - **Benchmark:** eight fixed suites built from the published [RNAInvBench](https://github.com/COLA-Laboratory/RNAInvBench)
   sets: Eterna100 v1 and v2, Rfam learn and Taneda, ArchiveII, and three anta sets (1,694 targets in all). Three
   model-free baselines run on the same budget.
-- **Training environment:** any compatible training dataset, similar to the benchmark sources.
+- **Training environment:** any compatible training dataset, similar to the benchmark sources. Train on the Claude Code
+  workload: its model calls go through the Gym model server, which records the token IDs. Agent mode starts every round
+  from a fresh prompt, so it is for evaluation.
 
 The code is in [`responses_api_agents/rna_design_agent`](../../responses_api_agents/rna_design_agent/README.md) (the
 fixed workflow, agent loop and tools) and [`resources_servers/rna_design`](../../resources_servers/rna_design/README.md) (the same
@@ -72,8 +74,8 @@ gym eval run --no-serve --environment rna_design --model-type vllm_model --agent
 `1.0` if the best design that passes the gates reaches the suite's `pass_threshold` on its primary metric, else
 `0.0`. Most suites need an exact fold (1.0). The pseudoknotted ones (ArchiveII, anta pseudo) need 0.8 of the
 crossing pairs. A rollout that measured nothing about the model is masked instead of scored: a timeout, a crashed
-worker, every tool call failing, a model that was never reached, or a model endpoint that failed partway with
-nothing solved.
+worker, a tool that could not run on this machine, a model that was never reached, or a model endpoint that failed
+partway with nothing solved. Calls that fail on the model's own arguments count against it.
 
 gRNAde and RibonanzaNet-SS run on the first GPU whenever the worker can see one. On Linux `prepare.py --setup` installs
 the CUDA 12.8 build of torch, so starting Gym on a GPU node is all it takes. EternaFold runs on CPU. On CPU only, long
