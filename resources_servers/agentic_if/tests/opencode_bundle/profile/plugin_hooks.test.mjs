@@ -90,6 +90,9 @@ await assert.rejects(
   const g = (...a) => execFileSync("git", ["-C", repo, ...a], { encoding: "utf8" });
   g("init", "-q"); g("config", "user.email", "t@t"); g("config", "user.name", "t");
   fs.writeFileSync(path.join(repo, "a.py"), "x = 1\n"); g("add", "a.py"); g("commit", "-qm", "base");
+  // The base tree seed records beside the plugin; every workspace diff is taken against it.
+  const base = g("rev-parse", "HEAD^{tree}").trim();
+  fs.writeFileSync(path.join(process.env.IF_BUNDLE, "workspace.json"), JSON.stringify({ base_tree: base }));
   fs.writeFileSync(path.join(repo, "a.py"), "x = 2\n"); fs.writeFileSync(path.join(repo, "new.py"), "y = 3\n");
   const repoHooks = await IfProfile({ directory: repo });
   const res = { title: "", output: "ok", metadata: {} };

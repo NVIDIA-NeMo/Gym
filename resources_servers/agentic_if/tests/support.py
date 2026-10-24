@@ -189,9 +189,13 @@ def final_call_record(answer="DONE", *, session="ses_root", message_id="a1"):
 # ---------------------------------------------------------------------------------------------- sandbox doubles
 
 
+WORKSPACE_BASE = "a" * 40
+"""The base tree ``Transport`` reports for the task's repository."""
+
+
 class Transport:
-    """A connected task sandbox: records every command and answers the identity and cwd probes; anything else (the Git
-    baseline included) prints nothing."""
+    """A connected task sandbox: records every command and answers the identity, cwd and workspace base probes;
+    anything else (the Git baseline included) prints nothing."""
 
     def __init__(self):
         self.calls = []
@@ -210,6 +214,8 @@ class Transport:
             output = "0\n"
         elif command == "id -u && id -g":
             output = f"{self.uid}\n1001\n"
+        elif "HEAD^{tree}" in command:
+            output = WORKSPACE_BASE + "\n"
         elif "getent passwd" in command:
             output = "/home/agent\n/bin/bash\n"
         elif command.startswith("pwd -P &&"):

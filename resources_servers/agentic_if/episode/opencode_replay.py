@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Restore a continuation's recorded prefix.
 
-The workspace half runs at seed: replay the prefix's shell commands, reset the repository and apply the recorded diff.
+The workspace half runs at seed: replay the prefix's shell commands, reset the files to the episode's base tree and
+apply the recorded diff, which is taken against that tree.
 The session half is OpenCode's: the harness imports the staged prefix export and continues it. Verification binds the
 continued root session back to the prefix it restored (``continued_session``).
 """
@@ -16,7 +17,7 @@ from pydantic import JsonValue
 
 from resources_servers.agentic_if.episode import opencode_prefix
 from resources_servers.agentic_if.episode.runtime import BoundSandbox, private_staging, upload_text
-from resources_servers.agentic_if.episode.workspace import WORKSPACE_DIFF
+from resources_servers.agentic_if.episode.workspace import workspace_diff_command
 from resources_servers.agentic_if.if_grading.contracts import SessionEvidence
 from resources_servers.agentic_if.task_variants.runtime import ContinuationSpec, RuntimeSpec
 
@@ -43,26 +44,20 @@ def workspace_patches_equal(left: str, right: str) -> bool:
     return True
 
 
-async def _workspace_diff(sandbox: BoundSandbox, *, exclude: tuple[str, ...] = ()) -> str:
-    command = WORKSPACE_DIFF
-    if exclude:
-        paths = " ".join(quote(":(top,literal,exclude)" + path) for path in exclude)
-        command = command.replace(
-            "git diff --binary --full-index",
-            f"git diff --binary --full-index -- . {paths}",
-        )
-    current = await sandbox.exec(command=command, timeout_s=600)
+async def _workspace_diff(sandbox: BoundSandbox, *, base: str, exclude: tuple[str, ...] = ()) -> str:
+    current = await sandbox.exec(command=workspace_diff_command(base, exclude=exclude), timeout_s=600)
     if current.return_code != 0 or current.error_type:
         raise RuntimeError("cannot record replay workspace diff")
     return current.stdout or ""
 
 
 async def restore_workspace(
-    sandbox: BoundSandbox, spec: RuntimeSpec, continuation: ContinuationSpec, *, staging: str
+    sandbox: BoundSandbox, spec: RuntimeSpec, continuation: ContinuationSpec, *, base: str, staging: str
 ) -> dict[str, JsonValue]:
     """Restore recorded repository state after replaying shell environment effects.
 
-    ``staging`` is a directory the task identity can read, outside the repository, for the recorded patch.
+    ``base`` is the episode's base tree, which the recorded diff is taken against. ``staging`` is a directory of the
+    task identity, outside the repository, for the patches.
     """
     source = continuation.prefix_export
     workdir = sandbox.workdir or str(source["info"].get("directory") or ".")
@@ -98,17 +93,22 @@ async def restore_workspace(
         observed = ((result.stdout or "") + (result.stderr or "")).strip()
         if result.return_code != 0 or observed != recorded.output.strip():
             mismatches.append(index)
-    # This is a fresh, resource-owned task sandbox, never the host checkout.
-    checkout = " ".join(quote(":(top,literal,exclude)" + path) for path in untouched)
-    clean = " ".join("-e " + quote("/" + path) for path in untouched)
-    reset = await sandbox.exec(command=f"git checkout -- . {checkout} && git clean -fdq {clean}", timeout_s=600)
+    # Back to the base tree: undo, as a patch, what the replayed commands left in the files. The index they may have
+    # staged stays as it is; the recorded diff describes the files whatever was staged. This is a fresh,
+    # resource-owned task sandbox, never the host checkout.
+    replayed = quote(f"{staging}/replayed.patch")
+    reset = await sandbox.exec(
+        command=f"( {workspace_diff_command(base, exclude=untouched)} ) > {replayed} && "
+        f"{{ [ ! -s {replayed} ] || git apply -R --binary --whitespace=nowarn {replayed}; }}",
+        timeout_s=600,
+    )
     if reset.return_code != 0 or reset.error_type:
         raise RuntimeError("cannot reset the sandbox repository before restoring the prefix")
     if continuation.workspace_diff.strip():
         applied = await sandbox.exec(command=f"git apply --binary --whitespace=nowarn {quote(remote)}", timeout_s=600)
         if applied.return_code != 0 or applied.error_type:
             raise RuntimeError("recorded prefix workspace diff does not apply")
-    current = await _workspace_diff(sandbox, exclude=untouched)
+    current = await _workspace_diff(sandbox, base=base, exclude=untouched)
     return {
         "mode": "restore",
         "replayed_commands": len(commands),
@@ -117,19 +117,24 @@ async def restore_workspace(
     }
 
 
-async def restore_prefix_workspace(sandbox: BoundSandbox, spec: RuntimeSpec) -> dict[str, JsonValue]:
+async def restore_prefix_workspace(
+    sandbox: BoundSandbox, spec: RuntimeSpec, *, base: str | None
+) -> dict[str, JsonValue]:
     """The seed half of a continuation: check the recorded diff, then restore the workspace as the task identity.
 
-    The patch is staged in a private directory of the task identity, removed once the restore is done.
+    ``base`` is the episode's base tree (``workspace_base``). The patches are staged in a private directory of the task
+    identity, removed once the restore is done.
     """
     continuation = spec.continuation
     if continuation is None:
         raise ValueError("a continuation prefix is required")
+    if base is None:
+        raise RuntimeError("a continuation needs a Git repository in the task's working directory")
     recorded = opencode_prefix.recorded_workspace_diff(continuation.prefix_export)
     if recorded is not None and not workspace_patches_equal(recorded, continuation.workspace_diff):
         raise ValueError("continuation workspace diff disagrees with the recorded prefix")
     async with private_staging(sandbox, "replay") as staging:
-        return await restore_workspace(sandbox, spec, continuation, staging=staging)
+        return await restore_workspace(sandbox, spec, continuation, base=base, staging=staging)
 
 
 @dataclass(frozen=True)

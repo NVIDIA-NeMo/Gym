@@ -50,6 +50,7 @@ from resources_servers.agentic_if.task_variants.runtime import RuntimeSpec, seal
 from resources_servers.agentic_if.task_variants.tasks import backend_task_digest
 from resources_servers.agentic_if.tests.support import (
     JUDGED,
+    WORKSPACE_BASE,
     Backends,
     LocalTransport,
     Transport,
@@ -195,6 +196,10 @@ async def test_seed_lends_the_backend_sandbox_after_preparing_the_workspace_and_
     # The baseline is taken as the task identity before the bundle is staged.
     assert any("git rev-parse --is-inside-work-tree" in call["command"] for call in world.sandbox.calls)
     assert world.timeline[-1] == "stage" and world.staged[0].agent_user is None
+    # The profile plugin's workspace diffs take the base tree seed observed.
+    (episode,) = world.server._episodes.values()
+    assert episode.seed["workspace_base"] == WORKSPACE_BASE
+    assert json.loads(world.sandbox.uploads[opencode_bundle.WORKSPACE_BASE_PATH]) == {"base_tree": WORKSPACE_BASE}
     assert world.staged[0].spec == validate_runtime({k: v for k, v in row.items() if k != "task_id"})
     again, _ = await seed(world, row)
     assert again == reply and len(world.backends.to("/seed_session")) == 1
@@ -216,7 +221,8 @@ async def test_seed_stages_the_configured_runtime_files_for_the_agent(world, tmp
     assert world.sandbox.uploads[f"{root}/rg"] == b"ripgrep"
     assert world.sandbox.uploads[f"{root}/plugin-dependencies.tar.gz"] == b"dependencies"
     chmods = [call for call in world.sandbox.calls if call["command"].startswith(f"chmod 0644 {root}/")]
-    assert len(chmods) == 2 and all(call["user"] == "root" for call in chmods)
+    # The runtime files and the workspace base the profile plugin reads.
+    assert len(chmods) == 3 and all(call["user"] == "root" for call in chmods)
 
 
 def test_runtime_files_resolve_under_the_gym_root_and_must_exist(world):

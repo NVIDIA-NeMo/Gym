@@ -148,7 +148,11 @@ def repository(path, files):
 
 
 async def restore(tmp_path, sandbox, files, *, workspace_diff="", staging=None):
-    """Restore a recorded prefix and its workspace diff over the staged `files`; returns the receipt."""
+    """Restore a recorded prefix and its workspace diff over the staged `files`, with a staging directory outside
+    the repository; returns the receipt."""
+    if staging is None:
+        staging = tmp_path.parent / (tmp_path.name + "-staging")
+        staging.mkdir()
 
     prefix = exported("root")
     prefix["info"]["directory"] = str(tmp_path)
@@ -159,7 +163,8 @@ async def restore(tmp_path, sandbox, files, *, workspace_diff="", staging=None):
         source_task_sha256="a" * 64,
         source_tools_sha256="b" * 64,
     )
-    return await restore_workspace(sandbox, spec(files), continuation, staging=str(staging or tmp_path))
+    base = subprocess.check_output(["git", "-C", str(tmp_path), "rev-parse", "HEAD^{tree}"], text=True).strip()
+    return await restore_workspace(sandbox, spec(files), continuation, base=base, staging=str(staging))
 
 
 @pytest.mark.asyncio

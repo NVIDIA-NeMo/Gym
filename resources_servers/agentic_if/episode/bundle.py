@@ -75,6 +75,16 @@ async def stage_runtime_files(transport: AsyncSandbox, paths: Sequence[Path]) ->
     return staged
 
 
+async def stage_workspace_base(transport: AsyncSandbox, base: str | None) -> None:
+    """Write the episode's base tree where the profile plugin reads it, readable by every identity. None (no Git
+    worktree at seed) leaves the plugin's tool receipts without workspace diffs."""
+    path = opencode_bundle.WORKSPACE_BASE_PATH
+    await BundleSandboxIO(transport).upload_bytes(path, json.dumps({"base_tree": base}).encode())
+    mode = await transport.exec(f"chmod 0644 {quote(path)}", user="root", timeout_s=30)
+    if mode.return_code != 0 or mode.error_type:
+        raise RuntimeError("cannot stage the workspace base for the profile plugin")
+
+
 async def stage_session_import(transport: AsyncSandbox, prefix_export: Mapping[str, JsonValue]) -> str:
     """Write a continuation's recorded prefix where the harness imports it, readable by every identity."""
     path = opencode_bundle.SESSION_IMPORT_PATH

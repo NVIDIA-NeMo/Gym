@@ -16,6 +16,7 @@ Sandbox layout (``BUNDLE_ROOT``)::
     receipts/                         hook-applied.jsonl, hook-events-fired.jsonl, model-calls.jsonl
     exports/                          the agent's ``export_dir``
     prefix-export.json                the agent's ``session_import_path`` (continuation rows; the Resources Server)
+    workspace.json                    the base tree of the profile plugin's workspace diffs (the Resources Server)
 """
 
 from resources_servers.agentic_if.opencode_bundle.bundle import (
@@ -31,6 +32,7 @@ from resources_servers.agentic_if.opencode_bundle.layout import (
     EXPORT_DIR,
     PLUGIN_PATHS,
     SESSION_IMPORT_PATH,
+    WORKSPACE_BASE_PATH,
 )
 
 
@@ -39,6 +41,7 @@ __all__ = [
     "EXPORT_DIR",
     "PLUGIN_PATHS",
     "SESSION_IMPORT_PATH",
+    "WORKSPACE_BASE_PATH",
     "BundleReceipt",
     "UnsupportedFeatureError",
     "bundle_files",

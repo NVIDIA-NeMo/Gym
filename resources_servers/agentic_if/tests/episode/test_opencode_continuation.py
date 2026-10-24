@@ -17,6 +17,7 @@ from resources_servers.agentic_if.episode.opencode_replay import (
     restore_workspace,
 )
 from resources_servers.agentic_if.episode.runtime import BoundSandbox
+from resources_servers.agentic_if.episode.workspace import workspace_base
 from resources_servers.agentic_if.task_variants.runtime import ContinuationSpec, RuntimeSpec
 from resources_servers.agentic_if.tests.support import REPLAY_RECEIPT, LocalTransport, exported
 
@@ -28,7 +29,8 @@ async def test_empty_workspace_diff_accepts_none_or_empty_output(output):
         async def exec(self, **kwargs):
             return SandboxExecResult(stdout=output, stderr=None, return_code=0)
 
-    assert await _workspace_diff(BoundSandbox(EmptyOutput(), user="agent", workdir="/app", timeout_s=60)) == ""
+    sandbox = BoundSandbox(EmptyOutput(), user="agent", workdir="/app", timeout_s=60)
+    assert await _workspace_diff(sandbox, base="0" * 40) == ""
 
 
 def repository(path):
@@ -90,7 +92,8 @@ async def test_restore_replays_shell_as_agent_and_restores_binary_diff(tmp_path,
     staging = tmp_path / "staging"
     staging.mkdir()
     spec = RuntimeSpec(harness="opencode", task_backend="swe")
-    receipt = await restore_workspace(sandbox, spec, continuation(prefix, diff), staging=str(staging))
+    base = git("rev-parse", "HEAD^{tree}").strip()
+    receipt = await restore_workspace(sandbox, spec, continuation(prefix, diff), base=base, staging=str(staging))
     assert (repo / "new.bin").read_bytes() == binary
     assert (repo / "file").read_text() == "before"
     assert receipt["workspace_matches_diff"] is True
@@ -105,7 +108,7 @@ async def test_restore_replays_shell_as_agent_and_restores_binary_diff(tmp_path,
 async def test_seed_restore_checks_the_recorded_diff_and_removes_its_staging(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
-    repository(repo)
+    base = repository(repo)("rev-parse", "HEAD^{tree}").strip()
     prefix = exported("root")
     prefix["messages"][1]["parts"] = [
         {
@@ -124,13 +127,69 @@ async def test_seed_restore_checks_the_recorded_diff_and_removes_its_staging(tmp
     sandbox = BoundSandbox(transport, user=None, workdir=str(repo), timeout_s=60)
     spec = RuntimeSpec(harness="opencode", task_backend="swe", continuation=continuation(prefix, "").model_dump())
     with pytest.raises(ValueError, match="disagrees with the recorded prefix"):
-        await restore_prefix_workspace(sandbox, spec)
+        await restore_prefix_workspace(sandbox, spec, base=base)
     prefix["messages"][1]["parts"][0]["state"]["metadata"]["nemo_gym_profile"]["workspace_diff"] = ""
     spec = RuntimeSpec(harness="opencode", task_backend="swe", continuation=continuation(prefix, "").model_dump())
-    receipt = await restore_prefix_workspace(sandbox, spec)
+    with pytest.raises(RuntimeError, match="Git repository"):
+        await restore_prefix_workspace(sandbox, spec, base=None)
+    receipt = await restore_prefix_workspace(sandbox, spec, base=base)
     assert receipt["workspace_matches_diff"] is True
     (staging,) = {command.split()[-1] for command, _ in transport.calls if command.startswith("umask 077; mkdir -p ")}
     assert staging.startswith("/tmp/nemo-gym-agentic-if-replay-") and not os.path.exists(staging)
+
+
+def bash_prefix(repo, command):
+    """A recorded prefix whose one completed bash call ran `command` in `repo` and printed nothing."""
+    prefix = exported("root")
+    prefix["info"]["directory"] = str(repo)
+    state = {"status": "completed", "input": {"command": command}, "output": "", "metadata": {}, "time": {"end": 3}}
+    prefix["messages"][1]["parts"] = [{"type": "tool", "tool": "bash", "callID": "bash", "state": state}]
+    return prefix
+
+
+@pytest.mark.asyncio
+async def test_restore_reproduces_the_recorded_files_when_the_replayed_commands_stage_and_commit(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git = repository(repo)
+    sandbox = BoundSandbox(LocalTransport(), user=None, workdir=str(repo), timeout_s=60)
+    base = await workspace_base(sandbox)
+    # The prefix committed an edit of `file` and then wrote a binary file, which no command replays.
+    command = "printf committed > file && git add file && git commit -qm prefix"
+    subprocess.run(["/bin/sh", "-c", command], cwd=repo, check=True)
+    (repo / "new.bin").write_bytes(bytes([0, 42, 255, 0]))
+    recorded = await _workspace_diff(sandbox, base=base)
+    git("reset", "-q", "--hard", "HEAD~1")
+    (repo / "new.bin").unlink()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    spec = RuntimeSpec(harness="opencode", task_backend="swe")
+    prefix = bash_prefix(repo, command)
+    receipt = await restore_workspace(sandbox, spec, continuation(prefix, recorded), base=base, staging=str(staging))
+    assert (repo / "file").read_text() == "committed"
+    assert (repo / "new.bin").read_bytes() == bytes([0, 42, 255, 0])
+    assert receipt["workspace_matches_diff"] is True and receipt["command_output_mismatch_indices"] == []
+    # What the replayed commands committed stays committed.
+    assert git("log", "-1", "--format=%s").strip() == "prefix"
+
+
+@pytest.mark.asyncio
+async def test_restore_supports_a_repository_without_commits(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    sandbox = BoundSandbox(LocalTransport(), user=None, workdir=str(repo), timeout_s=60)
+    base = await workspace_base(sandbox)
+    (repo / "recorded.txt").write_text("recorded")
+    recorded = await _workspace_diff(sandbox, base=base)
+    (repo / "recorded.txt").unlink()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    spec = RuntimeSpec(harness="opencode", task_backend="swe")
+    prefix = bash_prefix(repo, "printf replayed > replayed.txt")
+    receipt = await restore_workspace(sandbox, spec, continuation(prefix, recorded), base=base, staging=str(staging))
+    assert (repo / "recorded.txt").read_text() == "recorded" and not (repo / "replayed.txt").exists()
+    assert receipt["workspace_matches_diff"] is True
 
 
 def continued_root(prefix):

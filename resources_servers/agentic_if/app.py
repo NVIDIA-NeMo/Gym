@@ -76,6 +76,7 @@ from resources_servers.agentic_if.episode.workspace import (
     snapshot_workspace,
     stage_workspace_files,
     verify_materialized_cwd,
+    workspace_base,
 )
 from resources_servers.agentic_if.if_grading.contracts import IFResult, ResolvedCheck, SessionEvidence
 from resources_servers.agentic_if.if_grading.engine import grade
@@ -175,7 +176,7 @@ class _Episode:
     # The sealed task without its identity field and the actor's request; the task backend sees it minus agentic_if.
     content: dict[str, JsonValue] | None = None
     task: SandboxTaskSession | None = None
-    # What seed observed and staged: working directory, baseline diff, replay and bundle receipts.
+    # What seed observed and staged: working directory, base tree, baseline diff, replay and bundle receipts.
     seed: dict[str, JsonValue] = field(default_factory=dict)
     profile_sha256: str | None = None
     # Set by close before it waits for the lock, so a seed still in progress releases what it allocated.
@@ -347,18 +348,22 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
         await task.prepare()
         _closing(episode)
         sandbox = task.sandbox
-        # As the actor: the materialized prompt's working directory, its initial files, and the baseline diff.
+        # As the actor: the materialized prompt's working directory, its initial files, the base tree every workspace
+        # diff is taken against, and the baseline diff.
         await verify_materialized_cwd(sandbox, spec.provenance.get("materialized_cwd"))
         await stage_workspace_files(sandbox, spec.workspace_files)
-        episode.seed["workspace_initial_diff"] = await snapshot_workspace(sandbox)
+        base = episode.seed["workspace_base"] = await workspace_base(sandbox)
+        episode.seed["workspace_initial_diff"] = await snapshot_workspace(sandbox, base)
         _closing(episode)
         if spec.continuation is not None:
-            episode.seed["replay"] = await restore_prefix_workspace(sandbox, spec)
+            episode.seed["replay"] = await restore_prefix_workspace(sandbox, spec, base=base)
             _closing(episode)
         agent_user = None if is_root_agent_user(sandbox.user) else sandbox.user
         staged = await bundle.stage(sandbox.transport, spec=spec, agent_user=agent_user)
         episode.profile_sha256 = staged.profile_sha256
         episode.seed["bundle"] = asdict(staged)
+        # After staging, which creates the bundle directory: the profile plugin's diffs take the same base.
+        await bundle.stage_workspace_base(sandbox.transport, base)
         if self.config.opencode_runtime_files:
             # After staging, which creates the bundle directory.
             episode.seed["runtime_files"] = await bundle.stage_runtime_files(

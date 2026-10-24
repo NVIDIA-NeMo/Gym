@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 const root = process.env.IF_TEST_ROOT;
 const PLANTS = path.join(process.env.IF_BUNDLE, "plants.json");
 const FIRED = path.join(process.env.IF_BUNDLE, "receipts", "hook-events-fired.jsonl");
+const WORKSPACE = path.join(process.env.IF_BUNDLE, "workspace.json");
 const repo = path.join(root, "repo");
 fs.mkdirSync(repo);
 const git = (...args) => execFileSync("git", ["-C", repo, ...args], {encoding: "utf8"});
@@ -19,6 +20,8 @@ git("config", "user.name", "Test");
 fs.writeFileSync(path.join(repo, "base.txt"), "before\n");
 git("add", ".");
 git("commit", "-qm", "baseline");
+// The base tree seed records; every workspace diff is taken against it.
+fs.writeFileSync(WORKSPACE, JSON.stringify({base_tree: git("rev-parse", "HEAD^{tree}").trim()}));
 const {IfProfile} = await import(pathToFileURL(process.env.IF_PROFILE_PLUGIN).href);
 const plants = nths => nths.map((nth, index) => ({
   id: "event-" + index, match: {tool: "read"}, nth, action: "fail", text: "fail literal " + index
@@ -87,4 +90,33 @@ assert.equal(fs.existsSync(path.join(repo, "base.txt")), false);
 const fired = fs.readFileSync(FIRED, "utf8")
   .trim().split("\n").map(JSON.parse).filter(row => row.kind === "fired");
 assert.deepEqual(fired.map(row => row.event_id), ["event-0", "event-1", "event-0"]);
+// Staging and committing change neither what a receipt says about the files nor, by observing, the agent's index.
+async function receiptDiff(instance, callID) {
+  const result = {output: "ok", metadata: {}};
+  await instance["tool.execute.after"]({tool: "bash", callID, sessionID: "root"}, result);
+  return result.metadata.nemo_gym_profile.workspace_diff;
+}
+fs.writeFileSync(path.join(repo, "base.txt"), "after\n");
+const unstaged = await receiptDiff(hook, "unstaged");
+assert.match(unstaged, /\+after/);
+assert.match(unstaged, /GIT binary patch/);
+git("add", "base.txt", "new.bin");
+const index = fs.readFileSync(path.join(repo, ".git", "index"));
+const status = git("status", "--porcelain");
+assert.equal(await receiptDiff(hook, "staged"), unstaged);
+assert.deepEqual(fs.readFileSync(path.join(repo, ".git", "index")), index);
+assert.equal(git("status", "--porcelain"), status);
+git("commit", "-qm", "agent work");
+assert.equal(await receiptDiff(hook, "committed"), unstaged);
+// A repository without a commit is observed against the empty tree.
+const fresh = path.join(root, "fresh");
+fs.mkdirSync(fresh);
+execFileSync("git", ["-C", fresh, "init", "-q"]);
+fs.writeFileSync(path.join(fresh, "first.txt"), "first\n");
+const emptyTree = execFileSync("git", ["-C", fresh, "hash-object", "-t", "tree", "/dev/null"], {encoding: "utf8"});
+fs.writeFileSync(WORKSPACE, JSON.stringify({base_tree: emptyTree.trim()}));
+assert.match(await receiptDiff(await IfProfile({directory: fresh}), "fresh"), /new file mode[\s\S]*\+first/);
+// Without a base (no git worktree at seed) no diff is recorded.
+fs.writeFileSync(WORKSPACE, JSON.stringify({base_tree: null}));
+assert.equal(await receiptDiff(await IfProfile({directory: fresh}), "no-base"), undefined);
 console.log("combined hooks passed");

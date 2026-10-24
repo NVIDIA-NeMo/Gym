@@ -23,6 +23,10 @@ EXPORT_DIR = f"{BUNDLE_ROOT}/exports"
 SESSION_IMPORT_PATH = f"{BUNDLE_ROOT}/prefix-export.json"
 """The agent's ``session_import_path``; written by the Resources Server for continuation rows only."""
 
+WORKSPACE_BASE_PATH = f"{BUNDLE_ROOT}/workspace.json"
+"""``{"base_tree": ...}``: the tree the profile plugin's workspace diffs are taken against (null: no diffs);
+written by the Resources Server at seed."""
+
 RECEIPTS_DIR = f"{BUNDLE_ROOT}/receipts"
 """Written by the plugins as the identity OpenCode runs as."""
 

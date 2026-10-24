@@ -6,11 +6,13 @@
 //   - tool.execute.before: the model's (configured) arguments are mapped to the built-in tool's, in place;
 //   - tool.execute.after: the configured arguments and the profile hash are recorded in the tool part's metadata;
 //   - experimental.chat.messages.transform: every past call of a reshaped tool is shown in the configured form.
-// The plugin keeps no state between runs: everything it needs is in the profile and in the stored tool parts.
+// The plugin keeps no state between runs: everything it needs is in the bundle's files and in the stored tool parts.
 //
 // Bundle layout (the Resources Server stages this file in its bundle directory; every path is beside this module):
 //   - profile.json: the compiled profile, read when OpenCode creates the plugin;
 //   - plants.json: the planted tool failures, read at the same time;
+//   - workspace.json: the base tree of the workspace diffs, written by the Resources Server at seed and read at the
+//     same time;
 //   - receipts/hook-applied.jsonl: the load receipt, tool definitions, tool receipts and presentation receipts;
 //   - receipts/hook-events-fired.jsonl: one "loaded" (or "error") line for the plants, then one line per firing.
 // The records are evidence format (episode/opencode_hooks.py reads them): OpenCode's tool ID and error are in
@@ -39,6 +41,7 @@ const MODULE_PATH = fileURLToPath(import.meta.url);
 const BUNDLE_DIR = path.dirname(MODULE_PATH);
 const PROFILE_PATH = path.join(BUNDLE_DIR, "profile.json");
 const PLANTS_PATH = path.join(BUNDLE_DIR, "plants.json");
+const WORKSPACE_PATH = path.join(BUNDLE_DIR, "workspace.json");
 const APPLIED_PATH = path.join(BUNDLE_DIR, "receipts", "hook-applied.jsonl");
 const PLANTS_FIRED_PATH = path.join(BUNDLE_DIR, "receipts", "hook-events-fired.jsonl");
 // Shared with if-boundary.mjs: each plugin instance registers how it loaded.
@@ -134,8 +137,10 @@ function schemaErrors(schema, value, path = "") {
 }
 
 // The workspace diff after a file-changing call, recorded so that a later replay can cut the session after any completed
-// step and restore the files exactly. Computed against a temporary copy of the git index, so the agent's own
-// `git status` is unchanged; keep deletions unstaged so the diff records them too.
+// step and restore the files exactly. Taken against the episode's base tree (workspace.json: HEAD's tree when seed
+// first observed the repository, or the empty tree before its first commit), so staging and commits do not change
+// what it says about the files. Untracked files are added to a temporary copy of the git index, so the agent's own
+// index and `git status` are unchanged; keep deletions unstaged so the diff records them too.
 const FILE_TOOLS = new Set(["edit", "write", "bash"]);
 
 function git(dir, args, env) {
@@ -148,7 +153,17 @@ function git(dir, args, env) {
   return r.stdout;
 }
 
-function workspaceDiff(dir) {
+// The base tree seed recorded; null without a git worktree at seed (or a missing record): no diffs then.
+function workspaceBase() {
+  try {
+    const base = JSON.parse(fs.readFileSync(WORKSPACE_PATH, "utf8")).base_tree;
+    return typeof base === "string" && /^([0-9a-f]{40}|[0-9a-f]{64})$/.test(base) ? base : null;
+  } catch {
+    return null;
+  }
+}
+
+function workspaceDiff(dir, base) {
   const gitDir = git(dir, ["rev-parse", "--absolute-git-dir"]).trim();
   const index = path.join(os.tmpdir(), `nemo-gym-index-${process.pid}-${crypto.randomUUID()}`);
   try {
@@ -161,7 +176,7 @@ function workspaceDiff(dir) {
       fs.utimesSync(index, atime, mtime);
     }
     git(dir, ["add", "-N", "--ignore-removal", "."], { GIT_INDEX_FILE: index });
-    return git(dir, ["diff", "--binary", "--full-index"], { GIT_INDEX_FILE: index });
+    return git(dir, ["diff", "--binary", "--full-index", base, "--"], { GIT_INDEX_FILE: index });
   } finally {
     fs.rmSync(index, { force: true });
   }
@@ -326,6 +341,7 @@ export const IfProfile = async (input) => {
   record({kind: "loaded", profile_sha256: profile.profile_sha256});
   record({kind: "plugin", plugin: "if-profile", plugin_sha256: pluginSha256()});
   register({status: "loaded", profile_sha256: profile.profile_sha256});
+  const base = workspaceBase();
   const tools = profile.tools || {};
   const reshaped = (id) => tools[id] && tools[id].args_map;
   const key = value => JSON.stringify([value.sessionID, value.callID]);
@@ -420,11 +436,11 @@ export const IfProfile = async (input) => {
       const configured = pending.get(key(input));
       pending.delete(key(input));
       let diff = null;
-      if (FILE_TOOLS.has(input.tool)) {
+      if (FILE_TOOLS.has(input.tool) && base !== null) {
         try {
-          diff = workspaceDiff(directory);
+          diff = workspaceDiff(directory, base);
         } catch {
-          diff = null; // not a git repository: no replay record
+          diff = null; // not a git repository any more: no replay record
         }
       }
       if (configured && output && typeof output.output === "string") {

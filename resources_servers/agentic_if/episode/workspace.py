@@ -3,13 +3,29 @@
 """Stage literal initial actor state through the shared task identity boundary."""
 
 import json
+import re
+from collections.abc import Sequence
 from shlex import quote
 
 from resources_servers.agentic_if.episode.runtime import BoundSandbox, private_staging, upload_text
 
 
-# Match the profile plugin's per-tool snapshots without changing the actor's Git index. Keep
-# the index timestamp so Git still checks same-size, same-second edits.
+# The base every workspace diff of an episode is taken against: the tree of the commit HEAD names when seed first
+# observes the repository, or the empty tree on a branch with no commit yet. Staging and commits do not move it, so a
+# diff describes the files, whatever the actor staged or committed. HEAD naming a missing commit is Git's own fatal
+# repository state (78).
+_WORKSPACE_BASE = """
+if_base="$(git rev-parse -q --verify 'HEAD^{tree}')" || {
+    if_head="$(git symbolic-ref -q HEAD)" && ! git rev-parse -q --verify "$if_head" >/dev/null || exit 78
+    if_base="$(git hash-object -t tree /dev/null)" || exit 1
+}
+printf '%s\\n' "$if_base"
+"""
+
+
+# Match the profile plugin's per-tool snapshots: the files against the base tree (`if_base`), untracked files included
+# through a temporary copy of the actor's Git index, which itself stays unchanged. Keep the index timestamp so Git still
+# checks same-size, same-second edits. The positional parameters are the diff's pathspecs.
 WORKSPACE_DIFF = """
 if_git_dir="$(git rev-parse --absolute-git-dir)" || {
     if_status=$?
@@ -31,11 +47,17 @@ export GIT_INDEX_FILE="$if_index_dir/index"
 # Git also uses 128 for index.lock/disk failures: writes must remain failures,
 # not be mistaken for deliberately broken repository state in the task image.
 git add -N --ignore-removal . || exit "$?"
-git diff --binary --full-index
+git diff --binary --full-index "$if_base" -- "$@"
 if_status=$?
 [ "$if_status" -eq 128 ] && exit 78
 exit "$if_status"
 """
+
+
+def workspace_diff_command(base: str, *, exclude: Sequence[str] = ()) -> str:
+    """``WORKSPACE_DIFF`` against the base tree ``base``, leaving out the repository-relative paths in ``exclude``."""
+    pathspecs = (".", *(":(top,literal,exclude)" + path for path in exclude)) if exclude else ()
+    return f"if_base={quote(base)}\nset -- {' '.join(quote(spec) for spec in pathspecs)}\n" + WORKSPACE_DIFF
 
 
 _DISCOVER_WORKSPACE = """
@@ -55,16 +77,29 @@ esac
 """
 
 
-async def snapshot_workspace(sandbox: BoundSandbox) -> str | None:
-    """Observe initial state as the actor; unavailable Git is not a clean tree.
+async def workspace_base(sandbox: BoundSandbox) -> str | None:
+    """The episode's base tree (``_WORKSPACE_BASE``), observed as the actor; None without a usable Git worktree."""
+    result = await sandbox.exec(command=_DISCOVER_WORKSPACE + _WORKSPACE_BASE, timeout_s=60)
+    if result.return_code in {77, 78} and not result.error_type:
+        return None
+    base = (result.stdout or "").strip()
+    if result.return_code or result.error_type or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", base):
+        raise RuntimeError("could not resolve the workspace's base tree")
+    return base
+
+
+async def snapshot_workspace(sandbox: BoundSandbox, base: str | None) -> str | None:
+    """Observe initial state as the actor, against the episode's base tree; unavailable Git is not a clean tree.
 
     A task may deliberately contain broken Git metadata. That state is unknown,
     not clean, and is recorded explicitly for the scorer's argument fallback.
     Transport, timeout and temporary-index I/O failures still abort preparation.
     """
+    if base is None:
+        return None
     # 77 means no Git/worktree; 78 means Git's own fatal repository error (128).
     # Neither implies an empty diff. Never repair task state to obtain a baseline.
-    command = _DISCOVER_WORKSPACE + WORKSPACE_DIFF
+    command = _DISCOVER_WORKSPACE + workspace_diff_command(base)
     # Initial trees may contain substantial pre-existing untracked state. Use
     # the same bounded budget as replay's identical diff operation, not the
     # short metadata-command budget. BoundSandbox still caps the task lifetime.

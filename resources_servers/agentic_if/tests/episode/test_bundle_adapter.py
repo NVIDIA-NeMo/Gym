@@ -88,6 +88,19 @@ def test_a_row_without_a_system_message_needs_a_boundary_configured_without_one(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("base", ["a" * 40, None])
+async def test_the_workspace_base_is_staged_where_the_profile_plugin_reads_it(base):
+    transport = Transport()
+    await bundle.stage_workspace_base(transport, base)
+    path = "/tmp/nemo-gym-agentic-if/workspace.json"
+    assert json.loads(transport.uploads[path]) == {"base_tree": base}
+    assert transport.calls[-1] == {"command": f"chmod 0644 {path}", "user": "root", "timeout_s": 30}
+    transport.fail["chmod"] = SimpleNamespace(return_code=1, error_type=None, stdout="", stderr="denied")
+    with pytest.raises(RuntimeError, match="workspace base"):
+        await bundle.stage_workspace_base(transport, base)
+
+
+@pytest.mark.asyncio
 async def test_the_prefix_is_staged_where_the_harness_imports_it():
     transport = Transport()
     prefix = {"info": {"id": "ses_prefix"}, "messages": []}
