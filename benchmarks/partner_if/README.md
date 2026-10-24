@@ -88,8 +88,12 @@ task checks whether the model follows its instructions, graded against versioned
     with equal weight.
   - Also `if_partial`, the passed fraction of IF items.
   - `coverage/*` counts masked rollouts.
-- **Reference score:** not yet measured on dataset 2.1.4. Dataset 2.1.0 scored 61.33 on
-  `pass@1[avg-of-3]/all_if_pass`, tolerance ±8.5 points (95%).
+- **Dataset 2.1.4 regrade:** 50.67 on `pass@1[avg-of-3]/all_if_pass`, with 0 masked rows. This regraded
+  75 saved GLM 5.3 policy rollouts (25 tasks × 3 repeats) using GPT-6 Sol as the judge and the 2.1.4
+  rubrics and code checks. The saved run used dataset 2.1.0; its actor inputs match 2.1.4, so no policy or
+  sandbox steps were replayed. The different judge means this score is not comparable to the GLM reference.
+- **Full-run reference:** dataset 2.1.0 scored 61.33 on `pass@1[avg-of-3]/all_if_pass`, tolerance ±8.5 points
+  (95%).
   - Policy and judge: GLM 5.3 (`nvidia/zai-org/glm-5.3`).
   - Policy settings, all on the model server: temperature 1.0 and top_p 1.0 (the benchmark's pin), maximum
     reasoning effort, 262,144 output tokens, 16 rollouts in parallel.
