@@ -17,12 +17,21 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 import aiohttp
-from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, ToolCall, UnifiedLLM
+from nooa.unifiedllm import (
+    AssistantPart,
+    AssistantReasoning,
+    AssistantText,
+    CacheBoundary,
+    LLMResponse,
+    Tool,
+    ToolCall,
+    UnifiedLLM,
+)
 from nooa.unifiedllm.limits import REPLY_CAP_KEYS, ContextLimits
 from pydantic import BaseModel
 
@@ -32,6 +41,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseReasoningItem,
 )
 from nemo_gym.rollout_observability import ModelCallRef, ObservationGap
 from nemo_gym.server_utils import get_response_json, raise_for_status
@@ -102,20 +112,114 @@ def _dump(value: Any) -> Any:
     return value.model_dump(mode="json", exclude_none=True) if isinstance(value, BaseModel) else value
 
 
-def _portable_assistant_message(response: LLMResponse) -> dict[str, Any]:
-    """Project a foreign LLMResponse onto the portable chat-shaped dict."""
-    message: dict[str, Any] = {"role": "assistant", "content": response.content}
-    if response.tool_calls:
-        message["tool_calls"] = [
-            {"id": call.id, "function": {"name": call.name, "arguments": call.arguments}}
-            for call in response.tool_calls
-        ]
-    return message
+_GYM_REPLAY_SCOPE = "nemo-gym/responses/v1:"
+_UNSUPPORTED_CLIENT_CALLS = {"custom_tool_call", "local_shell_call", "shell_call", "apply_patch_call", "computer_call"}
+
+
+def _reject_unsupported_client_call(item_type: object) -> None:
+    if isinstance(item_type, str) and item_type in _UNSUPPORTED_CLIENT_CALLS:
+        raise InvalidPolicyOutputError(f"NOOA cannot execute the client tool output type {item_type!r}")
+
+
+def _record_gap(gaps: list[ObservationGap] | None, *, code: str, detail: str) -> None:
+    if gaps is not None:
+        gap = ObservationGap(code=code, detail=detail)
+        if gap not in gaps:
+            gaps.append(gap)
+
+
+def _native_matches_public(part: AssistantPart) -> bool:
+    """An archive rebuild can bypass NOOA's normal edit-time native invalidation."""
+    native = part.native
+    if native is None:
+        return False
+    kind = native.get("type")
+    _reject_unsupported_client_call(kind)
+    if isinstance(part, ToolCall):
+        return kind == "function_call" and all(
+            native.get(key) == value
+            for key, value in (("call_id", part.id), ("name", part.name), ("arguments", part.arguments))
+        )
+    if isinstance(part, AssistantReasoning):
+        if kind != "reasoning":
+            return False
+        groups = (native.get("content") or (), native.get("summary") or ())
+        separator = "\n"
+    elif kind == "message":
+        content = native.get("content")
+        if native.get("role") != "assistant" or isinstance(content, str):
+            # Gym can also return request-shaped messages in a trajectory. Capture
+            # keeps those opaque, with no public AssistantText to compare.
+            return part.text == ""
+        if isinstance(content, (list, tuple)) and content and isinstance(content[0], Mapping):
+            if content[0].get("type") not in {"output_text", "refusal"}:
+                return part.text == ""
+        groups = (content,)
+        separator = ""
+    else:
+        # Captured hosted items have no public text. They must remain opaque.
+        return isinstance(kind, str) and kind not in {"function_call", "reasoning"} and part.text == ""
+    for blocks in groups:
+        if not isinstance(blocks, (list, tuple)):
+            return False
+        texts = []
+        for block in blocks:
+            if not isinstance(block, Mapping):
+                return False
+            text = block.get("refusal" if block.get("type") == "refusal" else "text")
+            if not isinstance(text, str):
+                return False
+            texts.append(text)
+        text = separator.join(texts)
+        if text:
+            return part.text == text
+    return part.text == ""
+
+
+def _assistant_parts(response: NeMoGymResponse) -> tuple[AssistantPart, ...]:
+    """Keep readable NOOA history and the exact Gym wire items in the same order."""
+    parts: list[AssistantPart] = []
+    for item in response.output:
+        _reject_unsupported_client_call(item.type)
+        # NOOA freezes provider metadata JSON, persists it, and strips it on public edits.
+        # Keeping the complete item deliberately duplicates readable text so Gym
+        # can preserve block boundaries, opaque reasoning, and training metadata.
+        provider_metadata = item.model_dump(mode="json", exclude_none=True)
+        if isinstance(item, NeMoGymResponseFunctionToolCall):
+            parts.append(ToolCall(id=item.call_id, name=item.name, arguments=item.arguments, native=provider_metadata))
+        elif isinstance(item, NeMoGymResponseReasoningItem):
+            text = "\n".join(block.text for block in item.content or [])
+            if not text:
+                text = "\n".join(block.text for block in item.summary)
+            parts.append(AssistantReasoning(text=text, native=provider_metadata))
+        elif isinstance(item, NeMoGymResponseOutputMessage):
+            text = "".join(block.text if block.type == "output_text" else block.refusal for block in item.content)
+            parts.append(AssistantText(text=text, native=provider_metadata))
+        else:
+            # NOOA has no public part for hosted-tool/other opaque output items.
+            # Retain them for exact Gym replay without making them executable.
+            parts.append(AssistantText(text="", native=provider_metadata))
+    return tuple(parts)
+
+
+def _portable_assistant_items(response: LLMResponse) -> list[dict[str, Any]]:
+    """Replay ordered public parts without another client's opaque state."""
+    items: list[dict[str, Any]] = []
+    for part in response.parts:
+        if isinstance(part, ToolCall):
+            items.append({"type": "function_call", "call_id": part.id, "name": part.name, "arguments": part.arguments})
+        elif part.text:
+            # Like NOOA's portable projection, readable reasoning becomes text;
+            # provider reasoning IDs/signatures cannot be invented across routes.
+            items.append({"role": "assistant", "content": part.text})
+    return items
 
 
 def _responses_input(
     messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
     gaps: list[ObservationGap] | None = None,
+    *,
+    replay_scope: str,
 ) -> tuple[list[dict[str, Any]], str | None]:
     instructions: list[str] = []
     result: list[dict[str, Any]] = []
@@ -124,27 +228,27 @@ def _responses_input(
             # Stable-prefix marker, never a model input.
             continue
         if isinstance(message, LLMResponse):
-            # The rewritten unifiedllm passes prior turns back as the stored
-            # LLMResponse object. This adapter's responses carry the full Gym
-            # output (including training token metadata) on raw_response.
-            if isinstance(message.raw_response, NeMoGymResponse):
-                result.extend(_dump(item) for item in message.raw_response.output)
+            if (
+                message.replay_scope is not None
+                and message.replay_scope.startswith(_GYM_REPLAY_SCOPE)
+                and message.replay_scope == replay_scope
+                and all(_native_matches_public(part) for part in message.parts)
+            ):
+                result.extend(part.model_dump(mode="json", include={"native"})["native"] for part in message.parts)
                 continue
-            # Foreign or detached turns (per-method model aliases, edited turns,
-            # snapshot-restored sessions) carry no Gym raw output; replay only
-            # their portable public fields and record the gap instead of guessing
-            # at training metadata.
-            if gaps is not None:
-                gaps.append(
-                    ObservationGap(
-                        code="foreign_turn_projected_portable",
-                        detail=(
-                            "A stored LLMResponse without a Gym raw_response was projected from its portable "
-                            "public fields; training metadata was not guessed."
-                        ),
-                    )
-                )
-            message = _portable_assistant_message(message)
+            # Foreign/edited turns and old archives have only portable authority.
+            # A live raw_response may predate public edits and cannot authorize replay.
+            # Preserve readable parts, but do not guess opaque/training metadata.
+            _record_gap(
+                gaps,
+                code="foreign_turn_projected_portable",
+                detail=(
+                    "An LLMResponse without compatible Gym replay state was projected from its portable "
+                    "public fields; training metadata was not guessed."
+                ),
+            )
+            result.extend(_portable_assistant_items(message))
+            continue
         if message.get("role") == "system":
             if content := message.get("content"):
                 instructions.append(str(content))
@@ -161,10 +265,26 @@ def _responses_input(
                 }
             )
             continue
-        if message.get("role") == "assistant" and message.get("tool_calls"):
+        if message.get("role") == "assistant":
+            _record_gap(
+                gaps,
+                code="public_assistant_metadata_unavailable",
+                detail=(
+                    "A public assistant dictionary has no native replay metadata or provenance; it may be an "
+                    "edited policy turn or a caller-authored example. Training metadata was not guessed."
+                ),
+            )
+        if message.get("role") == "assistant" and (message.get("tool_calls") or message.get("reasoning_content")):
+            # NOOA renders edited turns as public dictionaries. Match its portable
+            # Responses projection without restoring stale provider/training state.
+            reasoning = message.get("reasoning_content")
+            if reasoning is not None and not isinstance(reasoning, str):
+                raise ValueError("Assistant reasoning_content must be a string.")
+            if reasoning:
+                result.append({"role": "assistant", "content": reasoning})
             if message.get("content"):
                 result.append({"role": "assistant", "content": message["content"]})
-            for call in message["tool_calls"]:
+            for call in message.get("tool_calls") or []:
                 function = call.get("function", {})
                 result.append(
                     {
@@ -208,14 +328,6 @@ def _schema_is_strict(value: Any, root: dict[str, Any] | None = None) -> bool:
     return all(_schema_is_strict(child, root) for child in value.values() if isinstance(child, dict))
 
 
-def _output_text(response: NeMoGymResponse) -> str:
-    parts: list[str] = []
-    for item in response.output:
-        if isinstance(item, NeMoGymResponseOutputMessage):
-            parts.extend(part.text for part in item.content if part.type == "output_text")
-    return "\n".join(parts)
-
-
 def _finish_reason(response: NeMoGymResponse) -> Literal["stop", "length", "error"]:
     if response.incomplete_details is None:
         return "stop"
@@ -249,6 +361,9 @@ class GymResponsesLLM(UnifiedLLM):
         self._on_call = on_call
         self._on_response = on_response
         self._sampling_overrides = dict(sampling_overrides or {})
+        # Rollout IDs in model_url_path change across restores; the configured
+        # model server and alias identify the compatible inference route.
+        self._gym_replay_scope = _GYM_REPLAY_SCOPE + json.dumps([model_server_name, model])
         self._cookies = cookies
         self._calls = 0
         self._lock = asyncio.Lock()
@@ -298,41 +413,48 @@ class GymResponsesLLM(UnifiedLLM):
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        limits = self.get_context_limits(kwargs)
+        try:
+            limits = self.get_context_limits(kwargs)
+            input_items, instructions = _responses_input(
+                messages, gaps=self._state.gaps, replay_scope=self._gym_replay_scope
+            )
+            request: dict[str, Any] = {
+                "input": input_items,
+                "instructions": instructions,
+                "model": None,
+                "parallel_tool_calls": False,
+                "tools": [_responses_tool_schema(tool) for tool in tools or []],
+            }
+            if output_model is not None:
+                output_schema = output_model.model_json_schema()
+                request["text"] = {
+                    "format": {
+                        "type": "json_schema",
+                        "name": output_model.__name__,
+                        "schema": output_schema,
+                        "strict": _schema_is_strict(output_schema),
+                    }
+                }
+
+            supported = set(NeMoGymResponseCreateParamsNonStreaming.model_fields) - {"model"}
+            for name, value in kwargs.items():
+                if name not in REPLY_CAP_KEYS and name in supported and value is not None:
+                    request[name] = value
+
+            # Explicit Gym rollout controls take precedence over NOOA's per-call settings.
+            request.update(self._sampling_overrides)
+            if limits.reserve_is_fallback:
+                request.pop("max_output_tokens", None)
+            else:
+                request["max_output_tokens"] = limits.reserved_output_tokens
+            body = NeMoGymResponseCreateParamsNonStreaming.model_validate(request)
+        except Exception as error:
+            self._state.fatal_error = error
+            raise
+
+        # Preparation failures are recorded but never consume a policy request.
         self._state.charge()
         self._calls += 1
-
-        input_items, instructions = _responses_input(messages, gaps=self._state.gaps)
-        request: dict[str, Any] = {
-            "input": input_items,
-            "instructions": instructions,
-            "model": None,
-            "parallel_tool_calls": False,
-            "tools": [_responses_tool_schema(tool) for tool in tools or []],
-        }
-        if output_model is not None:
-            output_schema = output_model.model_json_schema()
-            request["text"] = {
-                "format": {
-                    "type": "json_schema",
-                    "name": output_model.__name__,
-                    "schema": output_schema,
-                    "strict": _schema_is_strict(output_schema),
-                }
-            }
-
-        supported = set(NeMoGymResponseCreateParamsNonStreaming.model_fields) - {"model"}
-        for name, value in kwargs.items():
-            if name not in REPLY_CAP_KEYS and name in supported and value is not None:
-                request[name] = value
-
-        # Explicit Gym rollout controls take precedence over NOOA's per-call settings.
-        request.update(self._sampling_overrides)
-        if limits.reserve_is_fallback:
-            request.pop("max_output_tokens", None)
-        else:
-            request["max_output_tokens"] = limits.reserved_output_tokens
-        body = NeMoGymResponseCreateParamsNonStreaming.model_validate(request)
         call = GymModelCall(
             model_ref=ModelServerRef(name=self._model_server_name, type="responses_api_models"),
             request=body.model_copy(deep=True),
@@ -366,7 +488,7 @@ class GymResponsesLLM(UnifiedLLM):
             self._state.fatal_error = error
             raise
 
-        # A successful retry clears only the earlier transport failure.
+        # A successful retry clears an earlier preparation or transport failure.
         self._state.fatal_error = None
         if self._on_response is not None:
             self._on_response()
@@ -376,34 +498,30 @@ class GymResponsesLLM(UnifiedLLM):
         if response.incomplete_details is not None and response.incomplete_details.reason == "max_output_tokens":
             raise OutputTokenLimitExceeded("Gym model response exhausted max_output_tokens before completion")
 
+        parts = _assistant_parts(response)
         function_calls = [item for item in response.output if isinstance(item, NeMoGymResponseFunctionToolCall)]
         usage = response.usage.model_dump(mode="json") if response.usage is not None else None
-        if function_calls:
-            return LLMResponse(
-                raw_response=response,
-                content="",
-                tool_calls=[
-                    ToolCall(id=item.call_id, name=item.name, arguments=item.arguments) for item in function_calls
-                ],
-                finish_reason="tool_calls",
-                usage=usage,
-            )
-
-        content: str | BaseModel = _output_text(response)
-        if output_model is not None:
+        parsed: BaseModel | None = None
+        if output_model is not None and not function_calls:
+            if any(
+                block.type == "refusal"
+                for item in response.output
+                if isinstance(item, NeMoGymResponseOutputMessage)
+                for block in item.content
+            ):
+                raise InvalidPolicyOutputError(f"Gym model refused to produce {output_model.__name__}")
+            # NOOA excludes parsed from persistence; restored callers parse content.
+            text = "".join(part.text for part in parts if isinstance(part, AssistantText))
             try:
-                content = output_model.model_validate(json.loads(content))
+                parsed = output_model.model_validate(json.loads(text))
             except (json.JSONDecodeError, ValueError, TypeError) as error:
                 raise InvalidPolicyOutputError(f"Gym model returned invalid {output_model.__name__} JSON") from error
 
-        reasoning = [
-            item.model_dump(mode="json", exclude_none=True) for item in response.output if item.type == "reasoning"
-        ]
         return LLMResponse(
             raw_response=response,
-            content=content,
-            tool_calls=[],
-            finish_reason=_finish_reason(response),
-            reasoning=json.dumps(reasoning) if reasoning else None,
+            parts=parts,
+            replay_scope=self._gym_replay_scope,
+            parsed=parsed,
+            finish_reason="tool_calls" if function_calls else _finish_reason(response),
             usage=usage,
         )
