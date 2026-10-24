@@ -429,6 +429,7 @@ def test_relay_run_builds_response_from_atif(tmp_path: Path) -> None:
         return result
 
     fabric = MagicMock()
+    fabric.plan.return_value.to_mapping.return_value = {"adapter": {"telemetry": {"providers": {"relay": {}}}}}
     fabric.run = AsyncMock(side_effect=run)
     with patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric):
         response, fabric_result = asyncio.run(
@@ -449,6 +450,73 @@ def test_relay_run_builds_response_from_atif(tmp_path: Path) -> None:
     assert response.output[3].output == "README.txt"
     assert response.output[-1].content[0].text == "fabric answer"
     assert fabric_result["relay_atif"] == [trajectory]
+
+
+def test_relay_is_skipped_for_adapters_without_relay_support(tmp_path: Path) -> None:
+    agent = _agent(cwd=str(tmp_path), relay=True)
+    agent.server_client.global_config_dict = {
+        "policy_model": {"responses_api_models": {"policy_model": {"host": "127.0.0.1", "port": 9002}}}
+    }
+    agent.server_client._build_server_base_url.side_effect = lambda config: f"http://{config['host']}:{config['port']}"
+    fabric = MagicMock()
+    fabric.plan.return_value.to_mapping.return_value = {"adapter": {"telemetry": {"providers": {}}}}
+    fabric.run = AsyncMock(return_value=_FakeResult())
+    with patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric):
+        for _ in range(2):
+            _, fabric_result = asyncio.run(
+                agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="question"))
+            )
+
+    assert fabric.plan.call_count == 1
+    assert "relay" not in fabric.run.call_args.args[0].to_mapping()
+    assert "relay_atif" not in fabric_result
+
+
+def test_atif_inlines_subagent_trajectories_and_skips_wrapper_steps() -> None:
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "llm_call_count": 0,
+                "message": "wrapper",
+                "tool_calls": [{"tool_call_id": "wrap", "function_name": "DeepAgent", "arguments": {}}],
+                "observation": {
+                    "results": [{"source_call_id": "wrap", "subagent_trajectory_ref": [{"trajectory_id": "sub"}]}]
+                },
+            }
+        ],
+        "subagent_trajectories": [
+            {
+                "trajectory_id": "sub",
+                "steps": [
+                    {
+                        "source": "agent",
+                        "llm_call_count": 1,
+                        "tool_calls": [{"tool_call_id": "c1", "function_name": "task", "arguments": {"x": 1}}],
+                        "observation": {"results": [{"source_call_id": "c1", "content": "done"}]},
+                    }
+                ],
+            }
+        ],
+    }
+
+    items = _atif_output_items([trajectory], "answer")
+
+    assert [item.type for item in items] == ["function_call", "function_call_output", "message"]
+    assert items[0].name == "task"
+    assert items[1].output == "done"
+
+
+def test_send_model_base_url_false_leaves_base_url_out(tmp_path: Path) -> None:
+    config = (
+        _agent(send_model_base_url=False)
+        ._fabric_config(
+            model_base_url="http://model/v1", workspace=tmp_path, system_prompt=None, mcp_servers={}, skills=[]
+        )
+        .to_mapping()
+    )
+
+    assert "base_url" not in config["models"]["default"]
 
 
 def test_atif_without_agent_steps_falls_back_to_fabric_output() -> None:

@@ -262,13 +262,20 @@ def _atif_trajectories(output: dict[str, Any]) -> list[dict[str, Any]]:
     return trajectories
 
 
-def _atif_output_items(trajectories: list[dict[str, Any]], response_text: str) -> list[Any]:
-    """Response items from the agent steps of Relay ATIF trajectories, or [] when there are none."""
-    items: list[Any] = []
-    for trajectory in trajectories:
-        for step in trajectory.get("steps") or []:
-            if not isinstance(step, dict) or step.get("source") != "agent":
-                continue
+def _atif_trajectory_items(trajectory: dict[str, Any], response_text: str, items: list[Any]) -> None:
+    """Append the agent-step items of one ATIF trajectory, inlining embedded subagent trajectories at their call."""
+    subagents = {
+        str(sub.get("trajectory_id")): sub
+        for sub in trajectory.get("subagent_trajectories") or []
+        if isinstance(sub, dict)
+    }
+    for step in trajectory.get("steps") or []:
+        if not isinstance(step, dict) or step.get("source") != "agent":
+            continue
+        # A step without LLM calls only wraps a subagent (for example the Deep Agents orchestrator scope).
+        # The policy did not emit it, so only its subagent steps become items.
+        wrapper = step.get("llm_call_count") == 0
+        if not wrapper:
             reasoning = step.get("reasoning_content")
             if isinstance(reasoning, str) and reasoning:
                 items.append(
@@ -303,18 +310,31 @@ def _atif_output_items(trajectories: list[dict[str, Any]], response_text: str) -
                         status="completed",
                     )
                 )
-            for result in _mapping(step.get("observation")).get("results") or []:
-                if not isinstance(result, dict):
-                    continue
-                items.append(
-                    NeMoGymResponseFunctionCallOutput(
-                        id=f"fco_{uuid4().hex}",
-                        call_id=str(result.get("source_call_id") or ""),
-                        output=_content_text(result.get("content")),
-                        status="completed",
-                        type="function_call_output",
-                    )
+        for result in _mapping(step.get("observation")).get("results") or []:
+            if not isinstance(result, dict):
+                continue
+            for ref in result.get("subagent_trajectory_ref") or []:
+                subagent = subagents.get(str(_mapping(ref).get("trajectory_id")))
+                if subagent is not None:
+                    _atif_trajectory_items(subagent, response_text, items)
+            if wrapper:
+                continue
+            items.append(
+                NeMoGymResponseFunctionCallOutput(
+                    id=f"fco_{uuid4().hex}",
+                    call_id=str(result.get("source_call_id") or ""),
+                    output=_content_text(result.get("content")),
+                    status="completed",
+                    type="function_call_output",
                 )
+            )
+
+
+def _atif_output_items(trajectories: list[dict[str, Any]], response_text: str) -> list[Any]:
+    """Response items from the agent steps of Relay ATIF trajectories, or [] when there are none."""
+    items: list[Any] = []
+    for trajectory in trajectories:
+        _atif_trajectory_items(trajectory, response_text, items)
     if not items:
         return []
     items.append(
@@ -402,6 +422,9 @@ class NeMoFabricAgentConfig(BaseResponsesAPIAgentConfig):
     # Record each run with NeMo Relay. The response is then built from Relay's ATIF trajectory, the same shape for
     # every adapter that supports Relay, and fabric_result carries the trajectory as relay_atif.
     relay: bool = False
+    # Adapters whose model schema has no base_url (Factory Droid reads custom endpoints from its own settings)
+    # reject a config that sets it. False leaves models.default.base_url out.
+    send_model_base_url: bool = True
 
 
 class NeMoFabricAgentRunRequest(BaseRunRequest):
@@ -419,6 +442,16 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
     config: NeMoFabricAgentConfig
     sem: Semaphore | None = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    _relay_supported: Optional[bool] = None
+
+    def _adapter_supports_relay(self, fabric_config: FabricConfig, base_dir: str) -> bool:
+        """Whether the adapter descriptor declares the Relay telemetry provider. Planned once per agent."""
+        if self._relay_supported is None:
+            adapter = _mapping(Fabric().plan(fabric_config, base_dir=base_dir).to_mapping().get("adapter"))
+            self._relay_supported = "relay" in _mapping(_mapping(adapter.get("telemetry")).get("providers"))
+            if not self._relay_supported:
+                LOG.warning("%s does not support NeMo Relay, so it runs without Relay", self.config.adapter_id)
+        return self._relay_supported
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
@@ -494,6 +527,8 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                 "output_dir": atif_dir,
                 "observability": {"version": 4, "atif": {"enabled": True, "output_directory": atif_dir}},
             }
+        if not self.config.send_model_base_url:
+            del generated["models"]["default"]["base_url"]
         merged = _deep_merge(authored, generated)
 
         authored_instruction = ((authored.get("instructions") or {}).get("system") or {}).get("content")
@@ -546,14 +581,16 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             tempfile.TemporaryDirectory(prefix="nemo_gym_relay_") if self.config.relay else nullcontext(None)
         )
         with relay_context as relay_dir, workspace_context as workspace:
-            fabric_config = self._fabric_config(
+            config_kwargs = dict(
                 model_base_url=model_base_url,
                 workspace=Path(workspace),
                 system_prompt=system_prompt,
                 mcp_servers=mcp_servers or {},
                 skills=_skill_paths(skills_path),
-                relay_dir=Path(relay_dir) if relay_dir else None,
             )
+            if relay_dir and not self._adapter_supports_relay(self._fabric_config(**config_kwargs), workspace):
+                relay_dir = None
+            fabric_config = self._fabric_config(**config_kwargs, relay_dir=Path(relay_dir) if relay_dir else None)
             # Fabric otherwise starts Python adapters on VIRTUAL_ENV's interpreter, which in R2E-style task images is
             # the repo's venv and lacks the adapter. This agent's interpreter has the adapters installed.
             os.environ.setdefault("ADAPTER_PYTHON", sys.executable)

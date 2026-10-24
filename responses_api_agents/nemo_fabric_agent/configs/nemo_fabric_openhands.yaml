@@ -6,6 +6,8 @@ nemo_fabric_openhands:
   responses_api_agents:
     nemo_fabric_agent:
       adapter_id: nvidia.fabric.openhands
+      # Otherwise OpenHands sends the model as openai-compatible/<model>.
+      model_provider: openai
       harness_settings: {}
       fabric_config: {}
 

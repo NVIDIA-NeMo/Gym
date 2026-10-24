@@ -9,4 +9,6 @@ OpenHands. OpenClaw also needs the `openclaw` npm CLI on `PATH`.
 
 Set `relay: true` to record each run with [NeMo Relay](https://github.com/NVIDIA/NeMo-Relay). The response is then
 built from Relay's ATIF trajectory, so every adapter with Relay support returns the same item shape, and
-`fabric_result.relay_atif` holds the trajectories. Adapters without Relay output fall back to their native output.
+`fabric_result.relay_atif` holds the trajectories. Adapters without Relay support run without it. Relay is
+experimental: in NeMo Fabric 0.5.0 several adapters record tool calls without their outputs, and mini-SWE-agent runs
+fail more often with it.

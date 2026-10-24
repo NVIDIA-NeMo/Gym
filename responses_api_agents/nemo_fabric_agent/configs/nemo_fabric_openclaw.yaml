@@ -7,7 +7,9 @@ nemo_fabric_openclaw:
   responses_api_agents:
     nemo_fabric_agent:
       adapter_id: nvidia.fabric.openclaw
-      harness_settings: {}
+      harness_settings:
+        # The gateway can take longer than the 30 s default to start.
+        startup_timeout_seconds: 120
       fabric_config: {}
 
 nemo_fabric_openclaw_environment_server:
