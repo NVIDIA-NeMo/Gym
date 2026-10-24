@@ -200,6 +200,11 @@ class CodexSessions:
             raise EvidenceError("Request model differs from its proven Codex session")
         return selected
 
+    def own_trace(self, sid: str) -> list[dict[str, object]]:
+        """Return the actual owner and new records for ATIF, excluding copied history."""
+        selected = self.session(sid)
+        return [self._files[self._owners[sid]][0].event, *(row.event for row in selected.own)]
+
     def outputs(self, sid: str, *, skill_paths: dict[str, str]) -> list[ToolResult]:
         """Extract only this session's newly completed canonical tool outputs."""
         selected = self.session(sid)

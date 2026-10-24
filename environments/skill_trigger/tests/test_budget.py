@@ -175,3 +175,20 @@ async def test_unproven_session_model_substitution_and_stopped_trial_cannot_forw
     with pytest.raises(EvidenceError):
         trial.release()
     assert trial.requests == []
+
+
+async def test_binding_harness_root_does_not_reset_deadline_or_admission():
+    now = [10.0]
+    trial = budget(clock=lambda: now[0])
+    trial.release()
+    now[0] = 12.0
+    trial.bind_root_session("actual-root")
+    assert trial.elapsed() == 2 and trial.sessions == {"actual-root"}
+    async with forward(trial, session="actual-root"):
+        pass
+    with pytest.raises(EvidenceError):
+        trial.bind_root_session("replacement")
+    assert trial.requests[0].session_id == "actual-root"
+    with pytest.raises(EvidenceError):
+        async with forward(trial, session="root"):
+            pytest.fail("Old placeholder root must not forward")

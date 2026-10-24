@@ -19,6 +19,7 @@ inference gateway, and the private host evidence consumed by our verifier.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -36,8 +37,10 @@ from harbor.models.task.task import Task
 from pydantic import Field, model_validator
 
 from environments.skill_trigger.budget import TrialBudget
+from environments.skill_trigger.codex_runtime import CodexRuntime
 from environments.skill_trigger.container import TrialContainer, command
 from environments.skill_trigger.gateway import InferenceGateway
+from environments.skill_trigger.launch import codex_profile
 from environments.skill_trigger.scoring import Access, EvidenceError, Session, TrialEvidence, score_trial
 from environments.skill_trigger.tool_results import extract_tool_results
 from environments.skill_trigger.trajectory import convert_trace
@@ -52,7 +55,9 @@ class SkillOptions(AgentOptions):
     api_key_env: str
     gateway_host: str
     gateway_port: int = Field(default=0, ge=0, le=65535)
-    harness: Literal["pi", "hermes", "hermes_guidance"]
+    harness: Literal["pi", "codex", "codex_guidance", "hermes", "hermes_guidance"]
+    model_catalog_path: str | None = None
+    model_catalog_sha256: str | None = None
     node_binary: str = "node"
     provider: str | None = None
     api: Literal["openai-responses", "openai-completions"] | None = None
@@ -65,7 +70,13 @@ class SkillOptions(AgentOptions):
             if self.gateway_host != "127.0.0.1":
                 raise ValueError("The host-side Pi gateway must bind loopback")
         elif self.provider or self.api:
-            raise ValueError("Hermes uses its frozen codex_responses API profile")
+            raise ValueError("Codex and Hermes use their frozen Responses API profiles")
+        if bool(self.model_catalog_path) != bool(self.model_catalog_sha256):
+            raise ValueError("Codex model catalog requires both path and hash")
+        if self.harness == "codex_guidance" and not self.model_catalog_path:
+            raise ValueError("Codex guidance requires a pinned effective model catalog")
+        if self.model_catalog_path and not self.harness.startswith("codex"):
+            raise ValueError("Model catalogs apply only to Codex")
         return self
 
 
@@ -80,6 +91,8 @@ class SkillAgent(BaseAgent):
         return "skill-trigger"
 
     def version(self) -> str:
+        if self.options.harness.startswith("codex"):
+            return "0.156.1"
         return "1.3.0" if self.options.harness == "pi" else "0.22.2"
 
     async def setup(self, environment: BaseEnvironment) -> None:
@@ -102,6 +115,22 @@ class SkillAgent(BaseAgent):
             raise EvidenceError("Harbor task instruction differs from the frozen case")
         self.store = EvidenceStore(root=Path(options.evidence_root), trial_dir=environment.trial_paths.trial_dir)
         self.store.begin()
+        self.model_catalog = None
+        if options.model_catalog_path:
+            raw = Path(options.model_catalog_path).read_bytes()
+            if hashlib.sha256(raw).hexdigest() != options.model_catalog_sha256:
+                raise EvidenceError("Codex model catalog differs from its configured hash")
+            self.model_catalog = json.loads(raw)
+            codex_profile(
+                {
+                    "harness": options.harness,
+                    "model": self.model_name,
+                    "base_url": "http://placeholder/v1",
+                    "model_catalog": self.model_catalog,
+                },
+                root=Path("/unused"),
+            )
+            (self.store.path / "model-catalog.json").write_bytes(raw)
         result = await environment._run_docker_compose_command(["ps", "-q", "main"])
         self.container = TrialContainer(result.stdout.strip())
         info = json.loads(await command("docker", "inspect", self.container.id))[0]
@@ -130,8 +159,15 @@ class SkillAgent(BaseAgent):
             raise EvidenceError("Released prompt differs from the frozen task")
         options = self.options
         is_pi = options.harness == "pi"
-        harness = "pi" if is_pi else "hermes"
+        is_codex = options.harness.startswith("codex")
+        harness = "codex" if is_codex else "pi" if is_pi else "hermes"
         budget = TrialBudget(model=self.model_name, root_session_id=self.session_id, preserve_payload=is_pi)
+
+        codex = (
+            CodexRuntime(container=self.container, budget=budget, evidence_dir=self.store.path, model=self.model_name)
+            if is_codex
+            else None
+        )
 
         async def root_session(payload: dict[str, object]) -> str:
             # These pinned tool profiles do not expose delegated agents.
@@ -142,7 +178,7 @@ class SkillAgent(BaseAgent):
             upstream_url=options.upstream_url,
             api_key=os.environ[options.api_key_env],
             evidence_dir=self.store.path / "inference",
-            resolve_session=root_session,
+            resolve_session=codex.resolve_request if codex else root_session,
         )
         process = observer = None
         observer_pid = None
@@ -168,6 +204,8 @@ class SkillAgent(BaseAgent):
                 "expected_skills": sorted(self.case.sources),
                 "api_mode": "codex_responses",
             }
+            if self.model_catalog is not None:
+                config["model_catalog"] = self.model_catalog
             if is_pi:
                 config.update(
                     provider=options.provider,
@@ -221,7 +259,9 @@ with urllib.request.urlopen(request,timeout=5) as response:
                     return None
                 log.write(line)
                 log.flush()
-                return json.loads(line[11:]) if line.startswith(b"EVAL_EVENT ") else {}
+                if line.startswith(b"EVAL_EVENT "):
+                    return json.loads(line[11:])
+                return json.loads(line) if is_codex else {}
 
             async with asyncio.timeout(60):
                 while True:
@@ -235,6 +275,14 @@ with urllib.request.urlopen(request,timeout=5) as response:
                     raise EvidenceError("Pi profile version or catalog mismatch")
                 if not isinstance(profile.get("system_prompt"), str) or not profile.get("sdk_session_id"):
                     raise EvidenceError("Pi omitted its actual system prompt or SDK session identity")
+            elif is_codex:
+                if profile.get("version") != "codex-cli 0.156.1" or profile.get("guidance") is not (
+                    options.harness == "codex_guidance"
+                ):
+                    raise EvidenceError("Codex version or guidance profile mismatch")
+                if profile.get("skills") != sorted(self.case.sources):
+                    raise EvidenceError("Codex profile catalog mismatch")
+                await codex.start()
             elif profile.get("revision") != "d923a5eb487a17c0a68801bba9ef0f56c81040a8":
                 raise EvidenceError("Hermes profile revision mismatch")
             observer = await self.container.start_observer(
@@ -249,7 +297,13 @@ with urllib.request.urlopen(request,timeout=5) as response:
             async def collect_agent() -> None:
                 nonlocal messages, result_seen, agent_outcome
                 while (record := await event()) is not None:
-                    if record.get("kind") == "sdk_event" and is_pi:
+                    if is_codex:
+                        codex.accept_cli(record)
+                        if record.get("type") == "turn.completed":
+                            result_seen = True
+                        elif record.get("type") == "turn.failed":
+                            agent_outcome = "provider_error"
+                    elif record.get("kind") == "sdk_event" and is_pi:
                         sdk_event = record.get("event")
                         if not isinstance(sdk_event, dict):
                             raise EvidenceError("Malformed Pi SDK event")
@@ -289,6 +343,9 @@ with urllib.request.urlopen(request,timeout=5) as response:
             released_at = budget.release()
             released = True
             readers = [asyncio.create_task(collect_agent()), asyncio.create_task(collect_access())]
+            if codex:
+                codex.reader = asyncio.create_task(codex.collect())
+                readers.append(codex.reader)
             process.stdin.write(b"run\n")
             await process.stdin.drain()
             if not is_pi:
@@ -312,6 +369,8 @@ with urllib.request.urlopen(request,timeout=5) as response:
             stopped = True
             await asyncio.wait_for(process.wait(), 10)
             await readers[0]
+            if codex:
+                await codex.stop()
             finished = budget.elapsed()
             await gateway.close()
             outcome = gateway.outcome or (agent_outcome if outcome == "completed" else outcome)
@@ -324,17 +383,23 @@ with urllib.request.urlopen(request,timeout=5) as response:
             await asyncio.wait_for(observer.wait(), 10)
             if observer.returncode != 0:
                 raise EvidenceError("Independent observer failed")
-            outputs = extract_tool_results(
-                tool_starts + messages,
-                harness=harness,
-                session_id=self.session_id,
-                completed_at=completed,
-                skill_paths={name: f"/skills/{name}/SKILL.md" for name in self.case.sources},
-            )
+            skill_paths = {name: f"/skills/{name}/SKILL.md" for name in self.case.sources}
+            if codex:
+                root_id, sessions, spawns, outputs = codex.evidence(skill_paths=skill_paths)
+            else:
+                root_id, sessions, spawns = self.session_id, [Session(id=self.session_id, model=self.model_name)], []
+                outputs = extract_tool_results(
+                    tool_starts + messages,
+                    harness=harness,
+                    session_id=self.session_id,
+                    completed_at=completed,
+                    skill_paths=skill_paths,
+                )
             evidence = TrialEvidence(
                 identity=self.case.identity,
-                root_session_id=self.session_id,
-                sessions=[Session(id=self.session_id, model=self.model_name)],
+                root_session_id=root_id,
+                sessions=sessions,
+                spawns=spawns,
                 requests=budget.requests,
                 catalog_staged_at=self.catalog_staged_at - released_at,
                 observer_ready_at=observer_ready_at - released_at,
@@ -349,19 +414,22 @@ with urllib.request.urlopen(request,timeout=5) as response:
             score = score_trial(
                 evidence, expected=self.case.identity, sources=self.case.sources, target=self.case.target
             )
-            trace = self.store.path / "canonical.jsonl"
-            trace.write_text(
-                "".join(json.dumps(event) + "\n" for event in messages)
-                if is_pi
-                else json.dumps({"id": self.session_id, "messages": messages}) + "\n"
-            )
-            trajectory = convert_trace(
-                trace,
-                harness=harness,
-                session_id=self.session_id,
-                model=self.model_name,
-                system_prompt=profile["system_prompt"] if is_pi else None,
-            )
+            if codex:
+                trajectory = codex.trajectory()
+            else:
+                trace = self.store.path / "canonical.jsonl"
+                trace.write_text(
+                    "".join(json.dumps(event) + "\n" for event in messages)
+                    if is_pi
+                    else json.dumps({"id": self.session_id, "messages": messages}) + "\n"
+                )
+                trajectory = convert_trace(
+                    trace,
+                    harness=harness,
+                    session_id=self.session_id,
+                    model=self.model_name,
+                    system_prompt=profile["system_prompt"] if is_pi else None,
+                )
             self.logs_dir.mkdir(parents=True, exist_ok=True)
             (self.logs_dir / "trajectory.json").write_text(trajectory.model_dump_json(indent=2))
             context.metadata = {"outcome": outcome, "opened_intended_skill": bool(score.reward)}
@@ -389,6 +457,8 @@ with urllib.request.urlopen(request,timeout=5) as response:
                     except TimeoutError:
                         process.kill()
                         await process.wait()
+                if codex:
+                    await codex.stop()
                 if observer is not None and observer.returncode is None and observer_pid is not None:
                     await self.container.stop_observer(pid=observer_pid)
                 if observer is not None:

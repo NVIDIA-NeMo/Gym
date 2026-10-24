@@ -39,7 +39,7 @@ def test_pi_requires_explicit_api_identity_and_loopback(change):
 
 
 def test_hermes_cannot_inherit_a_pi_api_override():
-    with pytest.raises(ValidationError, match="frozen codex_responses"):
+    with pytest.raises(ValidationError, match="frozen Responses API profiles"):
         SkillOptions(
             release="release",
             manifest_sha256="hash",

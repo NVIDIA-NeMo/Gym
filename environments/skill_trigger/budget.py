@@ -33,7 +33,7 @@ from environments.skill_trigger.scoring import EvidenceError, Request
 class BudgetReached(Exception):
     """A valid model-behavior boundary, not a provider failure to retry."""
 
-    def __init__(self, outcome: Literal["timeout", "routing_horizon"]):
+    def __init__(self, outcome: Literal["timeout", "routing_horizon", "routing_boundary"]):
         self.outcome = outcome
         super().__init__(outcome)
 
@@ -55,6 +55,7 @@ class TrialBudget:
         self.model = model
         self.preserve_payload = preserve_payload
         self.sessions = {root_session_id}
+        self._root_rebound = False
         self.requests: list[Request] = []
         self._clock = clock
         self._released_at: float | None = None
@@ -70,6 +71,13 @@ class TrialBudget:
             raise EvidenceError("Prompt release must happen exactly once on an open trial")
         self._released_at = self._clock()
         return self._released_at
+
+    def bind_root_session(self, session_id: str) -> None:
+        """Bind a harness-created root once, before any request or child exists."""
+        if self._closed or self._root_rebound or self.requests or len(self.sessions) != 1 or not session_id:
+            raise EvidenceError("Cannot replace an already bound or active trial root")
+        self.sessions = {session_id}
+        self._root_rebound = True
 
     def add_session(self, *, session_id: str, parent_id: str) -> None:
         """Register an adapter-verified child with this same shared allowance."""

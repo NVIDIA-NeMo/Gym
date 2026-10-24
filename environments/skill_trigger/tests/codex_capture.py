@@ -22,6 +22,7 @@ exercise the host gateway. Run inside the benchmark image with /input and
 import json
 import shutil
 import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -32,6 +33,21 @@ LOCK = threading.Lock()
 CHILD = threading.Event()
 ROOT_THREAD = None
 COUNT = 0
+TICKETS = {}
+
+
+def emit(record):
+    with LOCK:
+        print(json.dumps(record), flush=True)
+
+
+def approvals():
+    for line in sys.stdin:
+        record = json.loads(line)
+        with LOCK:
+            event, reply = TICKETS[record["index"]]
+            reply.update(record)
+            event.set()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -50,8 +66,17 @@ class Handler(BaseHTTPRequestHandler):
                 ROOT_THREAD = sid
             child = sid != ROOT_THREAD
             (ROOT / f"request-{index}.json").write_bytes(raw)
+        config = json.loads(Path("/input/config.json").read_text())
+        if config.get("fixture_host_admission"):
+            ticket = threading.Event()
+            reply = {}
+            with LOCK:
+                TICKETS[index] = (ticket, reply)
+            emit({"kind": "request", "index": index, "payload": payload})
+            if not ticket.wait(30) or reply.get("allowed") is not True:
+                self.send_error(409, "Scripted request was not admitted")
+                return
         if index == 0:
-            config = json.loads(Path("/input/config.json").read_text())
             item = {
                 "type": "function_call",
                 "id": "fc-spawn",
@@ -100,9 +125,23 @@ def main() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 18999), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        result = subprocess.run(["python3", "/input/launch.py"], input=b"run\n", capture_output=True, timeout=60)
-        (ROOT / "process.jsonl").write_bytes(result.stdout)
-        (ROOT / "process.stderr").write_bytes(result.stderr)
+        if json.loads(Path("/input/config.json").read_text()).get("fixture_host_admission"):
+            threading.Thread(target=approvals, daemon=True).start()
+            with (ROOT / "process.jsonl").open("wb") as log, (ROOT / "process.stderr").open("wb") as errors:
+                result = subprocess.Popen(
+                    ["python3", "/input/launch.py"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors
+                )
+                result.stdin.write(b"run\n")
+                result.stdin.close()
+                for line in result.stdout:
+                    log.write(line)
+                    log.flush()
+                    emit({"kind": "cli", "line": line.decode()})
+                result.wait(timeout=10)
+        else:
+            result = subprocess.run(["python3", "/input/launch.py"], input=b"run\n", capture_output=True, timeout=60)
+            (ROOT / "process.jsonl").write_bytes(result.stdout)
+            (ROOT / "process.stderr").write_bytes(result.stderr)
         sessions = Path("/home/agent/native-codex/config/sessions")
         if sessions.exists():
             shutil.copytree(sessions, ROOT / "sessions")

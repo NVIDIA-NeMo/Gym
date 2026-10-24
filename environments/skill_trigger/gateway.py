@@ -32,7 +32,9 @@ from environments.skill_trigger.budget import BudgetReached, TrialBudget
 from environments.skill_trigger.scoring import EvidenceError
 
 
-Outcome = Literal["output_limit", "provider_error", "trace_error", "timeout", "routing_horizon", "cancelled"]
+Outcome = Literal[
+    "output_limit", "provider_error", "trace_error", "timeout", "routing_horizon", "routing_boundary", "cancelled"
+]
 
 
 def response_outcome(raw: bytes, *, streaming: bool) -> Outcome | None:
