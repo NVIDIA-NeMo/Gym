@@ -23,8 +23,6 @@ partner_if_swe:
         ready_timeout_s: 600
         env: {SHELL: /bin/bash, EXECD_API_GRACE_SHUTDOWN: 50ms}
         resources: {cpu: 4, memory_mib: 16384, disk_gib: 20}
-        # The agent gets a shell, so keep the cluster's S3 mount out of its sandbox.
-        metadata: {nemo.nvidia.com/s3-hostpath: "false"}
       judge_model_server:
         type: responses_api_models
         name: partner_if_judge

@@ -56,9 +56,7 @@ task checks whether the model follows its instructions, graded against versioned
     and 1 GiB. By default the sandbox can reach only the package index, to install the backend's pinned
     requirements. With a prebuilt image, set `network: none`.
   - Each SWE rollout gets a sandbox of the row's Scale-SWE image: limits of 4 CPUs and 16 GiB, requests of 1 CPU
-    and 4 GiB, and 20 GiB of disk. It needs egress to GitHub, to install OpenCode, and to the policy model
-    server. Its label `nemo.nvidia.com/s3-hostpath: "false"` keeps the cluster's S3 mount out of the agent's
-    shell.
+    and 4 GiB, and 20 GiB of disk. It needs egress to GitHub, to install OpenCode, and to the policy model server.
   - OpenCode calls the policy model server from inside the sandbox, so run with `++use_absolute_ip=true`, as other
     sandboxed-agent benchmarks do: the servers then listen on the host's address instead of loopback. Where the
     host's name does not resolve to an address the sandboxes can reach, also set `+default_host=<address>`.

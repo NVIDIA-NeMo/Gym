@@ -121,7 +121,8 @@ def test_the_swe_config_hands_its_sandbox_to_opencode_without_web_subagent_or_sk
     )
     assert (env.resources_server.name, env.agent_server.name) == ("partner_if_swe", "partner_if_swe_agent")
     assert env.resources_tool_transports == []
-    assert scorer.sandbox_config["metadata"] == {"nemo.nvidia.com/s3-hostpath": "false"}
+    # Sandbox labels are deployment-specific, so a deployment adds its own.
+    assert "nemo.nvidia.com/s3-hostpath" not in scorer.sandbox_config.get("metadata", {})
     permission = agent.opencode_config["permission"]
     assert [permission[tool] for tool in ("webfetch", "websearch", "task", "skill")] == ["deny"] * 4
     # The denials follow opencode_agent's allow-all, which they override, and keep its command deny-list.
