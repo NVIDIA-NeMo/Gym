@@ -1,0 +1,33 @@
+name: capx
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: CaP-Bench (CaP-X) robotic coding, text tiers S1-S4 and M1. The model writes Python that composes robot
+  perception and control APIs; the program runs in a Robosuite simulator and is rewarded 1 if the manipulation task is
+  completed.
+modality: text
+licensing: MIT
+authors:
+- lgulich
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: seeded
+resources_server: capx
+agent_server: gymnasium_agent
+datasets:
+- name: capx
+  type: benchmark
+  jsonl_fpath: benchmarks/capx/data/capbench_benchmark.jsonl
+  prepare_script: benchmarks/capx/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+session_model: episode
+state: per_session
+lifecycle: active
