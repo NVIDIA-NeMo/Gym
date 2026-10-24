@@ -5024,6 +5024,102 @@ def _make_completions_backend_model(
     )
 
 
+_WINDOW_32768 = json.dumps(
+    {
+        "message": "This model's maximum context length is 32768 tokens. However, you requested 40010 tokens "
+        "(10 in the messages, 40000 in the completion). Please reduce the length of the messages or completion."
+    }
+)
+
+
+@mark.parametrize("propagate", [False, True], ids=["finish-reason-length", "propagate-error"])
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+@mark.parametrize(
+    ("budget", "error_content", "categories"),
+    [
+        (
+            {"max_tokens": 256, "max_completion_tokens": 40000},
+            _WINDOW_32768,
+            ("invalid_output_token_parameter", "context_length_exceeded"),
+        ),
+        (
+            {"max_tokens": 40000, "max_completion_tokens": 256},
+            _WINDOW_32768,
+            ("context_length_exceeded", "invalid_output_token_parameter"),
+        ),
+        ({"max_completion_tokens": 40000}, _WINDOW_32768, ("invalid_output_token_parameter",) * 2),
+        (
+            {"max_completion_tokens": 40000},
+            '{"message": "max_completion_tokens=40000 cannot be greater than max_model_len=32768."}',
+            ("invalid_output_token_parameter",) * 2,
+        ),
+        (
+            {"max_tokens": 40000},
+            json.dumps(
+                {
+                    "message": "max_tokens=40000 cannot be greater than max_model_len=max_total_tokens=32768. "
+                    "Please request fewer output tokens. (parameter=max_tokens, value=40000)"
+                }
+            ),
+            ("invalid_output_token_parameter",) * 2,
+        ),
+        ({"max_tokens": 32768}, _WINDOW_32768, ("context_length_exceeded",) * 2),
+        ({}, _WINDOW_32768, ("context_length_exceeded",) * 2),
+        (
+            {"max_tokens": 40000},
+            '{"message": "max_tokens must be at least 1, got -6677."}',
+            ("context_length_exceeded",) * 2,
+        ),
+    ],
+    ids=[
+        "chat-budget-over-window",
+        "completions-budget-over-window",
+        "alias-only-over-window",
+        "max-model-len",
+        "vllm-0.27-max-total-tokens",
+        "budget-equal-to-window",
+        "no-budget",
+        "no-window-named",
+    ],
+)
+async def test_a_budget_larger_than_the_named_window_is_an_invalid_parameter(
+    monkeypatch: MonkeyPatch,
+    propagate: bool,
+    use_completions_api: bool,
+    budget: dict,
+    error_content: str,
+    categories: tuple[str, str],
+) -> None:
+    """No prompt fits a budget larger than the whole window the engine names, so the budget is at fault. The budget
+    is the one the engine received: chat reads max_completion_tokens first, and completions passes max_tokens."""
+    monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value={}))
+    model = _make_completions_backend_model() if use_completions_api else TestApp()._setup_server(monkeypatch)
+    model.config.propagate_context_overflow_errors = propagate
+    error = ClientResponseError(MagicMock(), (), status=400, message="backend request failed")
+    error.response_content = error_content.encode()
+    client = MagicMock(spec=NeMoGymAsyncOpenAI)
+    client.create_chat_completion = AsyncMock(side_effect=error)
+    client.create_completion = AsyncMock(side_effect=error)
+    model._clients = [client]
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "invalid-budget-test"}
+    request.headers = {}
+    body = NeMoGymChatCompletionCreateParamsNonStreaming(
+        messages=[NeMoGymChatCompletionUserMessageParam(role="user", content="hello")], **budget
+    )
+
+    if propagate:
+        with raises(ClientResponseError):
+            await model.chat_completions(request, body)
+    else:
+        assert (await model.chat_completions(request, body)).choices[0].finish_reason == "length"
+
+    category = categories[use_completions_api]
+    execution = request.state.nemo_gym_model_execution
+    assert execution["error_category"] == category
+    assert execution["local_response_reason"] == (None if propagate else category)
+
+
 @mark.parametrize("propagate", [False, True], ids=["finish-reason-length", "propagate-error"])
 @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
 @mark.parametrize(

@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from threading import Lock
@@ -132,6 +133,31 @@ def _is_context_length_error(error: ClientResponseError) -> bool:
         return False
     message = error.response_content.decode(errors="replace")
     return _names_context_window(message) or any(marker in message for marker in _MAX_TOKENS_PARAMETER_MARKERS)
+
+
+# How an engine names its context window: "maximum context length is 32768", "max_model_len=32768", and vLLM 0.27's
+# "max_model_len=max_total_tokens=32768".
+_CONTEXT_WINDOW_SIZE = re.compile(
+    r"(?:maximum context length|maximum model length|max_model_len|max_total_tokens)\D{0,5}(\d+)"
+)
+
+
+def _length_refusal_category(
+    error: ClientResponseError, outbound: Dict[str, Any], *, completions_api: bool = False
+) -> str:
+    """``invalid_output_token_parameter`` when the engine names its context window and the request's own output budget
+    exceeds all of it, so that no prompt fits; otherwise ``context_length_exceeded``.
+
+    The budget is the one the engine received: on chat, ``max_completion_tokens`` before ``max_tokens``. A message that
+    names no window does not prove the budget wrong, so that refusal stays an overflow.
+    """
+    keys = ("max_tokens",) if completions_api else ("max_completion_tokens", "max_tokens")
+    budget = next((outbound[key] for key in keys if outbound.get(key) is not None), None)
+    message, _, _ = context_overflow_error_fields(error)
+    window = _CONTEXT_WINDOW_SIZE.search(message)
+    if type(budget) is int and window is not None and budget > int(window.group(1)):
+        return "invalid_output_token_parameter"
+    return "context_length_exceeded"
 
 
 def _mark_propagated_overflow(error: ClientResponseError) -> None:
@@ -1255,13 +1281,14 @@ class VLLMModel(SimpleResponsesAPIModel):
             """
             result_content_str = e.response_content.decode(errors="replace")
             if _is_context_length_error(e):
-                execution["error_category"] = "context_length_exceeded"
+                category = _length_refusal_category(e, body_dict)
+                execution["error_category"] = category
                 if self.config.propagate_context_overflow_errors:
                     _mark_propagated_overflow(e)
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
-                execution.update(response_source="local", local_response_reason="context_length_exceeded")
+                execution.update(response_source="local", local_response_reason=category)
                 return res
             else:
                 _log_unhandled_engine_error(request, e.status, result_content_str, "chat completion")
@@ -1603,13 +1630,14 @@ class VLLMModel(SimpleResponsesAPIModel):
             execution.update(response_source="upstream", upstream_status_code=e.status)
             result_content_str = e.response_content.decode(errors="replace")
             if _is_context_length_error(e):
-                execution["error_category"] = "context_length_exceeded"
+                category = _length_refusal_category(e, completion_body, completions_api=True)
+                execution["error_category"] = category
                 if self.config.propagate_context_overflow_errors:
                     _mark_propagated_overflow(e)
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
-                execution.update(response_source="local", local_response_reason="context_length_exceeded")
+                execution.update(response_source="local", local_response_reason=category)
                 return res
             _log_unhandled_engine_error(request, e.status, result_content_str, "completion")
             raise
