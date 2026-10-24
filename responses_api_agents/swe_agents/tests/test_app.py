@@ -281,6 +281,7 @@ class TestSWEBenchWrapperConfig:
         assert config.command_exec_timeout == 5 * 60
         assert config.concurrency == 256
         assert config.dataset_path is None
+        assert config.mask_runtime_deaths is False
         assert config.agent_prompt_overrides is None
         assert config.agent_prompt_override_random is False
         assert config.openhands_should_log is False
@@ -3573,9 +3574,12 @@ class TestAgentErrorMasking:
         assert swe_app._classify_agent_error("some other failure") == "other"
 
     @staticmethod
-    async def _mask_sample_for(monkeypatch, tmp_path: Path, persisted_metrics: dict) -> bool:
+    async def _mask_sample_for(
+        monkeypatch, tmp_path: Path, persisted_metrics: dict, *, mask_runtime_deaths: bool = False
+    ) -> bool:
         """Run `_inner_responses` past the masking decision with the agent run stubbed out."""
         wrapper = _create_wrapper(monkeypatch)
+        wrapper.config.mask_runtime_deaths = mask_runtime_deaths
         params = _make_instance_config(str(tmp_path))
         params.metrics_fpath.write_text(json.dumps(persisted_metrics))
         monkeypatch.setattr(swe_app, "runner_ray_remote", MagicMock(remote=AsyncMock(return_value=None)))
@@ -3586,9 +3590,19 @@ class TestAgentErrorMasking:
         return json.loads(response.metadata["instance_config"])["mask_sample"]
 
     @pytest.mark.asyncio
-    async def test_runtime_death_is_masked(self, monkeypatch, tmp_path) -> None:
+    @pytest.mark.parametrize("mask_runtime_deaths", [False, True])
+    async def test_runtime_death_mask_requires_opt_in(self, monkeypatch, tmp_path, mask_runtime_deaths) -> None:
         agent_error_kind = swe_app._classify_agent_error(self.RUNTIME_DIED_ERROR)
-        assert await self._mask_sample_for(monkeypatch, tmp_path, {"agent_error_kind": agent_error_kind}) is True
+        assert agent_error_kind == "runtime_died"
+        assert (
+            await self._mask_sample_for(
+                monkeypatch,
+                tmp_path,
+                {"agent_error_kind": agent_error_kind},
+                mask_runtime_deaths=mask_runtime_deaths,
+            )
+            is mask_runtime_deaths
+        )
 
     @pytest.mark.asyncio
     async def test_genuine_agent_failure_is_not_masked(self, monkeypatch, tmp_path) -> None:
@@ -3597,8 +3611,9 @@ class TestAgentErrorMasking:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("run_time", [59.0, 60.0, 61.0])
+    @pytest.mark.parametrize("mask_runtime_deaths", [False, True])
     async def test_runtime_death_at_time_budget_is_not_an_infrastructure_error(
-        self, monkeypatch, tmp_path, run_time
+        self, monkeypatch, tmp_path, run_time, mask_runtime_deaths
     ) -> None:
         params = _make_instance_config(str(tmp_path), debug=False, swebench_agent_timeout=60)
         params.metrics_fpath.write_text("{}")
@@ -3631,12 +3646,25 @@ class TestAgentErrorMasking:
         metrics = SWEBenchMetrics.model_validate_json(params.metrics_fpath.read_text())
         assert metrics.openhands_run_time == run_time
         assert metrics.agent_error_kind == ("runtime_died" if run_time < 60 else "other")
-        assert await self._mask_sample_for(monkeypatch, tmp_path, metrics.model_dump()) is (run_time < 60)
+        assert await self._mask_sample_for(
+            monkeypatch, tmp_path, metrics.model_dump(), mask_runtime_deaths=mask_runtime_deaths
+        ) is (mask_runtime_deaths and run_time < 60)
 
     @pytest.mark.asyncio
-    async def test_existing_agent_timeout_mask_is_preserved(self, monkeypatch, tmp_path) -> None:
+    @pytest.mark.parametrize("mask_runtime_deaths", [False, True])
+    @pytest.mark.parametrize(
+        "failure", ["agent_timed_out", "eval_timed_out", "eval_launch_failed", "oom_killed", "eval_oom_killed"]
+    )
+    async def test_existing_failure_masks_are_preserved(
+        self, monkeypatch, tmp_path, mask_runtime_deaths, failure
+    ) -> None:
         assert (
-            await self._mask_sample_for(monkeypatch, tmp_path, {"agent_error_kind": "other", "agent_timed_out": True})
+            await self._mask_sample_for(
+                monkeypatch,
+                tmp_path,
+                {"agent_error_kind": "runtime_died", failure: True},
+                mask_runtime_deaths=mask_runtime_deaths,
+            )
             is True
         )
 

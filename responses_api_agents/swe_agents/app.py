@@ -183,6 +183,14 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         ),
     )
 
+    mask_runtime_deaths: bool = Field(
+        default=False,
+        description=(
+            "Mask OpenHands runtime-server deaths before the agent time budget. Disabled by default because "
+            "the error does not distinguish infrastructure failures from agent actions that kill the runtime."
+        ),
+    )
+
     agent_prompt_overrides: Optional[list[AgentPromptOverride]] = Field(
         default=None,
         description="List of (user_prompt_template, system_prompt_template, agent_cls) overrides. "
@@ -2434,7 +2442,7 @@ def _classify_agent_error(err: Optional[str]) -> Optional[str]:
         return "stuck_in_loop"
     if "server process died" in s.lower():
         # OpenHands' action-execution server (the runtime the agent's commands run in) exited under the agent.
-        # That is an infrastructure failure, not a policy outcome, so it is masked like OOM kills and timeouts.
+        # The error does not identify the cause: agent actions can also kill the server.
         return "runtime_died"
     return "other"
 
@@ -3954,7 +3962,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # 4) Memory watchdog killed the agent container (OOM).
         # 5) Memory watchdog killed the eval container.
         # 6) Evaluator failed before its startup marker; no reward was measured.
-        # 7) The OpenHands runtime server died under the agent (infrastructure failure).
+        # 7) The OpenHands runtime server died before the time budget and masking was explicitly enabled.
         persisted_metrics = SWEBenchMetrics.model_validate(update_and_read_metrics(params.metrics_fpath))
         agent_error_kind = persisted_metrics.agent_error_kind
         eval_timed_out = bool(persisted_metrics.eval_timed_out)
@@ -3962,7 +3970,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         oom_killed = bool(persisted_metrics.oom_killed)
         eval_oom_killed = bool(persisted_metrics.eval_oom_killed)
         if (
-            agent_error_kind in ("max_iteration", "context_window", "runtime_died")
+            agent_error_kind in ("max_iteration", "context_window")
+            or (self.config.mask_runtime_deaths and agent_error_kind == "runtime_died")
             or eval_timed_out
             or persisted_metrics.eval_launch_failed
             or agent_timed_out
