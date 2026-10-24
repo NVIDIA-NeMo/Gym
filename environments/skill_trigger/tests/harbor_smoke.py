@@ -22,6 +22,7 @@ import argparse
 import asyncio
 import json
 import os
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -194,6 +195,7 @@ async def smoke(
 
     set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
     os.environ["SYNTHETIC_PROVIDER_KEY"] = "dummy-not-a-real-key"
+    ray_started = False
     try:
         kwargs = dict(
             release=str(release), manifest_sha256=digest(raw), evidence_root=str(root / "private"), harness=harness
@@ -233,11 +235,13 @@ async def smoke(
         gym_response = None
         bridge_error = None
         result = None
-        if engine == "gym-job":
-            # Exercise Gym's real Job execution and response conversion without
-            # starting Ray or a webserver; this does not test those boundaries.
+        if engine in {"gym-job", "gym-ray"}:
+            # Both paths use the real bridge; gym-ray also crosses its worker boundary.
+            # Neither starts the HTTP agent server or rollout collector.
             from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-            from responses_api_agents.harbor_agent_general.app import HarborAgent, HarborAgentConfig, HarborRunRequest
+            from nemo_gym.skills import load_skill_directory
+            from responses_api_agents.harbor_agent_general.app import HarborAgentConfig, HarborRunRequest
+            from responses_api_agents.skill_trigger.app import SkillHarborAgent, check_catalog
 
             os.environ["NEMO_GYM_CONFIG_DICT"] = json.dumps({"num_samples_in_parallel": 1})
             bridge_config = HarborAgentConfig.model_validate(
@@ -247,6 +251,10 @@ async def smoke(
                     "port": 8080,
                     "entrypoint": "app.py",
                     "harbor_unique_job_names": True,
+                    "harbor_worker_env": {
+                        "SYNTHETIC_PROVIDER_KEY": "dummy-not-a-real-key",
+                        "NEMO_GYM_CONFIG_DICT": json.dumps({"num_samples_in_parallel": 1}),
+                    },
                     "job": {
                         "jobs_dir": str(root / "jobs"),
                         "datasets": [{"path": str(task.parent)}],
@@ -257,27 +265,51 @@ async def smoke(
                     },
                 }
             )
-            bridge = HarborAgent.model_construct(config=bridge_config)
+            bridge = SkillHarborAgent.model_construct(config=bridge_config)
             body = HarborRunRequest.model_validate(
                 {
                     "task_name": task.name,
                     TASK_INDEX_KEY_NAME: 0,
                     ROLLOUT_INDEX_KEY_NAME: 0,
                     "responses_create_params": {"input": []},
+                    "skills_ref": load_skill_directory(str(release / "catalogs/synthetic")).model_dump(),
                 }
             )
-            job = bridge_config.build_job_config(task_name=task.name, job_name="synthetic")
-            (root / "job.json").write_text(job.model_dump_json(indent=2))
-            try:
-                trial_dir = Path(await bridge.run_job(job.model_dump(mode="json"), task.name))
-            except RuntimeError as error:
-                if scenario != "provider-error":
-                    raise
-                bridge_error = str(error)
-                gym_response = bridge.failure_response(body, error)
+            if engine == "gym-ray":
+                import ray
+
+                ray_dir = tempfile.mkdtemp(prefix="skill-ray-")
+                (root / "ray-directory.txt").write_text(ray_dir)
+                ray.init(
+                    address="local",
+                    num_cpus=1,
+                    include_dashboard=False,
+                    log_to_driver=False,
+                    object_store_memory=80 * 1024**2,
+                    _temp_dir=ray_dir,
+                )
+                ray_started = True
+                gym_response = await bridge.run(body)
+                results = list((root / "jobs").glob("*/*/result.json"))
+                if gym_response.response.status == "failed":
+                    bridge_error = gym_response.model_dump().get("error")
+                else:
+                    assert len(results) == 1, "Expected one retained successful trial"
+                    result = TrialResult.model_validate_json(results[0].read_bytes())
             else:
-                result = TrialResult.model_validate_json((trial_dir / "result.json").read_bytes())
-                gym_response = bridge.success_response(body, trial_dir)
+                check_catalog(config=bridge_config, body=body)
+                job = bridge_config.build_job_config(task_name=task.name, job_name="synthetic")
+                (root / "job.json").write_text(job.model_dump_json(indent=2))
+                try:
+                    trial_dir = Path(await bridge.run_job(job.model_dump(mode="json"), task.name))
+                except RuntimeError as error:
+                    if scenario != "provider-error":
+                        raise
+                    bridge_error = str(error)
+                    gym_response = bridge.failure_response(body, error)
+                else:
+                    result = TrialResult.model_validate_json((trial_dir / "result.json").read_bytes())
+                    gym_response = bridge.success_response(body, trial_dir)
             (root / "gym-response.json").write_text(gym_response.model_dump_json(indent=2))
         else:
             trial = await Trial.create(config)
@@ -328,6 +360,10 @@ async def smoke(
                 if expected_reward:
                     assert skill_body in json.dumps(gym_response.response.model_dump(mode="json"))
     finally:
+        if ray_started:
+            import ray
+
+            ray.shutdown()
         await runner.cleanup()
         from nemo_gym.server_utils import get_global_aiohttp_client, is_global_aiohttp_client_setup
 
@@ -338,7 +374,7 @@ async def smoke(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--engine", choices=["harbor-trial", "gym-job"], default="harbor-trial")
+    parser.add_argument("--engine", choices=["harbor-trial", "gym-job", "gym-ray"], default="harbor-trial")
     parser.add_argument("--image", required=True)
     parser.add_argument("--gateway-host", required=True)
     parser.add_argument("--gateway-port", type=int, default=0)

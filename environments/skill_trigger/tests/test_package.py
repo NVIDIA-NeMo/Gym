@@ -22,7 +22,7 @@ from harbor.models.job.config import DatasetConfig
 from harbor.models.task.task import Task
 
 from benchmarks.skill_trigger.prepare import digest, encode, tree_digest
-from environments.skill_trigger.package import HARNESSES, package_tasks
+from environments.skill_trigger.package import HARNESSES, package_tasks, prepare
 from environments.skill_trigger.scoring import EvidenceError
 from environments.skill_trigger.tests.test_verifier import prepared as prepared
 
@@ -73,6 +73,11 @@ async def test_packaged_tasks_preserve_separate_catalogs_and_prompts(tmp_path, p
     assert rows == [
         {"task_name": row["task_name"], "responses_create_params": {"input": []}} for row in manifest["cases"]
     ]
+    grouped = [
+        [json.loads(line) for line in p.read_text().splitlines()]
+        for p in sorted((output / "catalogs").glob("*.jsonl"))
+    ]
+    assert grouped == [[rows[0]], [rows[1]]]
     # Harbor's own local-dataset discovery accepts the emitted layout.
     assert len(await DatasetConfig(path=output).get_task_configs()) == 2
     assert tasks[0].config.environment.network_mode == ("no-network" if harness == "pi" else "allowlist")
@@ -105,3 +110,17 @@ def test_does_not_replace_existing_package(tmp_path, prepared):
     with pytest.raises(FileExistsError):
         package(prepared, output)
     assert (output / "gym.jsonl").read_bytes() == before
+
+
+def test_gym_prepare_entrypoint_returns_selected_catalog_rows(tmp_path, prepared):
+    path = prepare(
+        release=str(prepared),
+        manifest_sha256=digest((prepared / "manifest.json").read_bytes()),
+        output=str(tmp_path / "tasks"),
+        image="skill-harnesses:test",
+        harness="pi",
+        gateway_host="127.0.0.1",
+        catalog="catalog",
+    )
+    assert path == tmp_path / "tasks/catalogs/catalog.jsonl"
+    assert json.loads(path.read_text())["task_name"] == "case-one"

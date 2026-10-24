@@ -1,6 +1,6 @@
 # Skill opening across agent harnesses
 
-**Implementation draft: this benchmark is not runnable yet.** Source preparation, task packaging, scoring, trace conversion, shared budgets, inference transport, and the host-side Harbor verifier have component tests. Codex/Hermes launch profiles are ported. The shared adapter has passed synthetic Pi integration through Harbor and Codex live session-attribution checks; complete Codex/Hermes integration and live migration checks remain pending. This draft does not register a benchmark or report new model results.
+**Implementation draft: this benchmark is not runnable yet.** Source preparation, task packaging, scoring, trace conversion, shared budgets, inference transport, and the host-side Harbor verifier have component tests. Codex/Hermes launch profiles are ported. The shared adapter has passed synthetic Pi integration through Harbor and Codex live session-attribution checks; complete Codex/Hermes integration and live migration checks remain pending. Five experimental profile declarations are present; their full dataset validation and live migration remain incomplete. No new model results are reported.
 
 The question is whether a model opens the relevant skill instructions when a task calls for them. Task-performance benchmarks measure whether work gets done; this benchmark measures an earlier step. Opening instructions is not evidence that the agent followed them or completed the task.
 
@@ -30,7 +30,7 @@ python -m pytest --confcutdir=benchmarks/skill_trigger/tests benchmarks/skill_tr
 
 Use a new output directory for each preparation. Normal preparation refuses unresolved blockers. Only a `prepared-release` artifact may eventually be packaged for execution; `source-audit` is metadata only. The manifest contains labels and original prompt provenance and must remain outside the agent sandbox. Copies of root and nested attribution notices accompany permitted prepared catalogs. No scientific software or model weights referenced by a skill are downloaded or executed during preparation.
 
-Once release terms are resolved, `python -m environments.skill_trigger.package --release RELEASE --manifest-sha256 SHA256 --output NEW_TASKS --image PINNED_IMAGE --harness pi --gateway-host 127.0.0.1` packages every case for Harbor. Select another of the five harness configurations to preserve its network profile. This validates the manifest and skill files, retains each original catalog, and keeps labels outside task images. The same packager is used by the synthetic integration checks; it refuses audit-only artifacts and existing output directories. Named Gym configurations and their execution commands remain unfinished.
+Once release terms are resolved, `python -m environments.skill_trigger.package --release RELEASE --manifest-sha256 SHA256 --output NEW_TASKS --image PINNED_IMAGE --harness pi --gateway-host 127.0.0.1` packages every case for Harbor. Select another of the five harness configurations to preserve its network profile. This validates the manifest and skill files, retains each original catalog, and keeps labels outside task images. The same packager is used by the synthetic integration checks; it refuses audit-only artifacts and existing output directories. Packaging also writes `catalogs/<catalog-id>.jsonl` for separate catalog runs.
 
 ## Scoring
 
@@ -112,6 +112,16 @@ Three compatibility gates precede live scoring:
 - The verifier must supply the selected binary reward explicitly. Missing or malformed reward data must fail validation rather than reaching the bridge's fallback-to-zero behavior.
 
 Use fresh sessions, isolated homes/workspaces, per-trial skill-file copies, and observer startup after catalog staging. Keep credentials, targets, and verifier evidence outside the agent's readable environment. Limit the agent's network to the configured inference route. This proposal is evaluation-only; it does not promise training-compatible token metadata or a recurring hosted evaluation service.
+
+## Gym profiles
+
+The five profiles are [Pi](configs/pi/config.yaml), [Codex](configs/codex/config.yaml), [Codex with guidance](configs/codex_guidance/config.yaml), [Hermes](configs/hermes/config.yaml), and [Hermes with guidance](configs/hermes_guidance/config.yaml). They share [common settings](common.yaml) and the existing Harbor bridge, with a small [catalog check](../../responses_api_agents/skill_trigger/README.md) before dispatch. Configuration and manifest composition checks pass; full `gym env validate` requires the currently blocked prepared release and has not passed.
+
+The declarations default to the BioNeMo catalog as a starting group, **not the complete 110-case benchmark**. For each catalog, select its packaged JSONL as the input and set `skill_trigger_settings.catalog` to its ID; `skills.path` then resolves to that catalog in the release. Keep all 43 groups in the final run and combine their trial records. A driver covering every group is still pending. The catalog guard rejects another group's tasks before inference.
+
+Set the release manifest hash, model name and endpoint, image, task paths, and Docker-reachable gateway explicitly. Pi additionally requires its original `provider` and `api`; Codex guidance requires the pinned effective model catalog and its hash. `SKILL_MODEL_API_KEY` stays in the host/worker environment and is not part of Harbor's task config. Set `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS=1`; Harbor retries are already disabled. The single-repetition defaults are for migration validation, not a replacement for the historical three repetitions.
+
+`--engine gym-ray` on the synthetic smoke exercises the catalog guard and actual Ray worker, using a disposable local runtime that is shut down afterward. The successful Pi check preserved catalog provenance, returned skill text, and reward. It does not exercise the HTTP server or collector persistence and uses no real model.
 
 ## Implementation and acceptance checklist
 

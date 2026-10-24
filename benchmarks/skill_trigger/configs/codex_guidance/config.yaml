@@ -1,0 +1,13 @@
+config_paths:
+- benchmarks/skill_trigger/common.yaml
+skill_trigger_settings:
+  harness: codex_guidance
+skill_trigger:
+  responses_api_agents:
+    skill_trigger:
+      datasets:
+      - name: skill_trigger
+        type: benchmark
+        jsonl_fpath: benchmarks/skill_trigger/data/codex_guidance/tasks/catalogs/bionemo-9984d9c3ec80.jsonl
+        prepare_script: environments/skill_trigger/package.py
+        num_repeats: 1

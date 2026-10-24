@@ -64,6 +64,7 @@ def package_tasks(
         staged = Path(temporary) / "dataset"
         staged.mkdir()
         rows = []
+        grouped_rows = {}
         for name in names:
             case = load_case(
                 release=release, manifest_sha256=manifest_sha256, task_name=name, model="preparation", harness=harness
@@ -104,8 +105,16 @@ memory_mb = 768
 network_mode = {json.dumps("no-network" if harness == "pi" else "allowlist")}
 allowed_hosts = {"[]" if harness == "pi" else json.dumps([gateway_host])}
 """)
-            rows.append({"task_name": name, "responses_create_params": {"input": []}})
+            row = {"task_name": name, "responses_create_params": {"input": []}}
+            rows.append(row)
+            catalog = next(item["catalog"] for item in cases if item["task_name"] == name)
+            if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]*", catalog):
+                raise EvidenceError("Prepared release contains an unsafe catalog name")
+            grouped_rows.setdefault(catalog, []).append(row)
         # Labels and source metadata are deliberately absent from task images.
+        (staged / "catalogs").mkdir()
+        for catalog, group in grouped_rows.items():
+            (staged / "catalogs" / f"{catalog}.jsonl").write_text("".join(json.dumps(row) + "\n" for row in group))
         (staged / "gym.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
         (staged / "package.json").write_text(
             json.dumps(
@@ -115,6 +124,24 @@ allowed_hosts = {"[]" if harness == "pi" else json.dumps([gateway_host])}
         )
         staged.rename(output)
     return output
+
+
+def prepare(
+    *, release: str, manifest_sha256: str, output: str, image: str, harness: str, gateway_host: str, catalog: str
+) -> Path:
+    """Gym preparation entrypoint; materialize all cases and return one catalog's input rows."""
+    manifest = json.loads(source_path(Path(release), "manifest.json").read_bytes())
+    if catalog not in manifest.get("catalogs", {}):
+        raise EvidenceError("Requested catalog is absent from the prepared release")
+    dataset = package_tasks(
+        release=Path(release),
+        manifest_sha256=manifest_sha256,
+        output=Path(output),
+        image=image,
+        harness=harness,
+        gateway_host=gateway_host,
+    )
+    return dataset / "catalogs" / f"{catalog}.jsonl"
 
 
 if __name__ == "__main__":
