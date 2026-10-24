@@ -840,6 +840,22 @@ def test_resolve_provider_metadata() -> None:
         resolve_provider_metadata({"opensandbox": {}, "default_metadata": "not-a-mapping"})
 
 
+def test_async_sandbox_start_uploads_spec_files_byte_for_byte() -> None:
+    class RecordingProvider(TransferOnlySandboxProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.uploaded: dict[str, bytes] = {}
+
+        async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
+            self.uploaded[target_path] = source_path.read_bytes()
+
+    png = b"\x89PNG\r\n\x1a\n\x00\xff\xfe"
+    provider = RecordingProvider()
+    files = {"/remote/image.png": png, "/remote/note.txt": "héllo"}
+    asyncio.run(AsyncSandbox(provider).start(SandboxSpec(image="image:tag", files=files)))
+    assert provider.uploaded == {"/remote/image.png": png, "/remote/note.txt": "héllo".encode()}
+
+
 def test_async_sandbox_transfer_fallback_and_unknown_status(tmp_path: Path) -> None:
     asyncio.run(_assert_async_sandbox_transfer_fallback_and_unknown_status(tmp_path))
 

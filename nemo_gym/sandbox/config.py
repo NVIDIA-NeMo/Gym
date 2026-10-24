@@ -200,7 +200,7 @@ class SandboxConfig(BaseModel):
         image: str | None,
         workdir: str | None,
         metadata: Mapping[str, str] | None = None,
-        files: Mapping[str, str] | None = None,
+        files: Mapping[str, str | bytes] | None = None,
         named_configs: Mapping[str, Any] | None = None,
     ) -> SandboxSpec:
         """Build the spec of one sandbox; ``metadata`` adds to the provider's and the config's metadata."""
