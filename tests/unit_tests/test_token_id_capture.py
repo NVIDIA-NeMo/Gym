@@ -1371,6 +1371,19 @@ def test_model_server_can_declare_successful_non_generating_route(tmp_path):
     assert TokenCaptureStore(tmp_path).freeze_now("declared-roll0").incomplete is False
 
 
+def test_embeddings_route_is_non_generating(tmp_path):
+    class _EmbeddingsModel(_CapturingModel):
+        async def embeddings(self, body: dict = Body()) -> dict:
+            return {"data": [{"embedding": [0.5], "index": 0}]}
+
+    client = TestClient(_server(_both_enabled(tmp_path), model_cls=_EmbeddingsModel).setup_webserver())
+
+    response = client.post("/ng-rollout/embed-roll0/training-token-capture/v1/embeddings", json={"input": "hi"})
+
+    assert response.status_code == 200
+    assert TokenCaptureStore(tmp_path).freeze_now("embed-roll0").incomplete is False
+
+
 def test_package_is_dependency_free_leaf():
     """Keep token capture independent of Gym's server stack.
 
