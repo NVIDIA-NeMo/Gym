@@ -239,6 +239,16 @@ class TestStartStop:
 
 class TestExec:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("user, expected", [(None, "verifier"), ("root", "root"), (1000, 1000)])
+    async def test_exec_forwards_explicit_and_default_users(self, tmp_path, user, expected):
+        env = _make_environment(tmp_path)
+        env.default_user = "verifier"
+        await env.start(force_build=False)
+        await env.exec("id", user=user)
+        assert _provider().exec_calls[-1]["user"] == expected
+        await env.stop(delete=True)
+
+    @pytest.mark.asyncio
     async def test_exec_passthrough_and_result_mapping(self, tmp_path):
         env = _make_environment(tmp_path)
         await env.start(force_build=False)

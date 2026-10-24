@@ -293,6 +293,7 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_sec: int | None = None,
+        user: str | int | None = None,
     ) -> ExecResult:
         timeout_s = timeout_sec if timeout_sec is not None else self._default_exec_timeout_s
         # Harbor's docker/daytona backends use an interactive bash, so
@@ -308,6 +309,7 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
             cwd=cwd,
             env=env,
             timeout_s=timeout_s,
+            user=user if user is not None else getattr(self, "default_user", None),
         )
         return ExecResult(
             stdout=result.stdout,

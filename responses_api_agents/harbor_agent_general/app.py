@@ -53,6 +53,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
+from nemo_gym.telemetry.setup import init_telemetry
 
 
 logger = logging.getLogger(__name__)
@@ -87,10 +88,26 @@ def harbor_job_worker(job_config_dict: dict, task_name: str, worker_env: dict[st
     global _RAY_WORKER_EVENT_LOOP
     logging.disable(logging.DEBUG)
     with temporary_worker_env(worker_env):
+        # Ray tasks do not run the server startup hooks. Initialise their own
+        # providers so sandbox lifecycle spans are emitted from this process.
+        handle = init_telemetry(server_name="harbor_job_worker", server_type="responses_api_agents")
         if _RAY_WORKER_EVENT_LOOP is None or _RAY_WORKER_EVENT_LOOP.is_closed():
             _RAY_WORKER_EVENT_LOOP = asyncio.new_event_loop()
             asyncio.set_event_loop(_RAY_WORKER_EVENT_LOOP)
-        return _RAY_WORKER_EVENT_LOOP.run_until_complete(HarborAgent.run_job(job_config_dict, task_name))
+        try:
+            return _RAY_WORKER_EVENT_LOOP.run_until_complete(HarborAgent.run_job(job_config_dict, task_name))
+        finally:
+            if handle is not None:
+                # The supervisor can stop Ray as soon as the final task returns.
+                # Flush its sandbox stop span first, keeping providers reusable.
+                from opentelemetry import trace
+
+                flush = getattr(trace.get_tracer_provider(), "force_flush", None)
+                if flush is not None:
+                    try:
+                        flush(timeout_millis=5000)
+                    except Exception:
+                        logger.warning("Could not flush Harbor worker telemetry", exc_info=True)
 
 
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
@@ -240,10 +257,16 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     job_name=f"t{body.task_index}-r{body.rollout_index}",
                 )
 
+                worker_env = {
+                    key: value
+                    for key, value in os.environ.items()
+                    if key.startswith(("OTEL_", "NEMO_GYM_OTEL_", "NEMO_LENS_"))
+                }
+                worker_env.update(self.config.harbor_worker_env)
                 job_ref = harbor_job_worker.options(num_cpus=self.config.harbor_ray_task_num_cpus).remote(
                     job_config.model_dump(mode="json"),
                     body.task_name,
-                    dict(self.config.harbor_worker_env),
+                    worker_env,
                 )
                 try:
                     trial_dir = Path(await job_ref)
