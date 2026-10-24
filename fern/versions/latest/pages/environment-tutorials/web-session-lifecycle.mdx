@@ -1,0 +1,55 @@
+---
+title: "Web Browser Session Lifecycle"
+description: "Own browser sessions across request cancellation and distinguish policy outcomes from infrastructure failures."
+---
+
+# Web Browser Session Lifecycle
+
+The web agent and web resources servers share a session lifecycle. Task preparation, browser actions, policy prompts, and benchmark evaluators remain separate from session ownership.
+
+## Seed, retry, and close
+
+Before sending `/seed_session`, the web agent generates `_ng_session_id` and `_ng_session_close_token`. It reuses this pair when retrying the same seed request and sends it to `/close` even if the seed response or its cookie never arrives.
+
+- Concurrent seed requests with the same identity and payload share one creation task. Reusing the identity with a different payload is rejected.
+- A close request requires the matching capability, or the existing session cookie for legacy clients. A conflicting bound cookie and explicit identity is rejected.
+- Close can arrive before seed finishes, or before seed arrives. The server owns the outstanding creation task, releases any resulting session, and retains a tombstone to reject late seed retries.
+- Cancelling an HTTP waiter does not cancel the server-owned creation or cleanup task. Closing an already closed identity succeeds without releasing the provider twice.
+- Failed releases retain their handles and occupy capacity until cleanup succeeds. `/close` returns HTTP 503 with `closed: false` and `failure_kind: session_release_failed`; retry with the same identity.
+
+The capability is a secret. Do not place it in model messages, rollout artifacts, or logs. The server retains a digest rather than the plaintext capability in its identity registry. This mechanism does not replace service authentication or make the existing cookie interface a multi-tenant security boundary.
+
+Deploy the updated web agent and resources server together. Cookie-only clients remain supported, but cannot close a session whose creation response and cookie were lost.
+
+## Expiry and process boundaries
+
+Sessions still use the configured idle timeout. Identity retention does not add a hard duration limit to an active rollout. Closed identities are retained for `session_ttl_seconds`; use a fresh identity for every new rollout rather than reusing one after that retention window.
+
+The registry is process-local. Seed, steps, and close must reach the same resources-server instance. Keep `num_workers: 1` and scale with separately addressed workers. The headed visual-control runtime also requires one active session per DISPLAY. Thread-affine execution keeps synchronous Playwright calls off the HTTP event loop; it is not a way to kill a permanently stuck browser operation.
+
+An abrupt process kill can lose in-memory handles. External providers need provider-side lease TTLs or an external reconciliation mechanism. The local cleanup guarantee is not evidence of crash-proof remote session reclamation or of an implemented remote visual-control driver.
+
+## Report failures without changing valid rewards
+
+Use these fields when consuming web rollout results:
+
+| Situation | Result |
+| --- | --- |
+| Browser creation failed or the session was lost | `mask_sample: true`, `failure_kind: session_lost`, and a diagnostic `failure_reason` |
+| Verifier infrastructure failed | `mask_sample: true` with a verifier failure category |
+| The task was validly evaluated and failed | A valid zero reward, not an infrastructure mask |
+| Cleanup failed after a valid verdict | Preserve the reward and mask; report `cleanup_failure_kind: session_release_failed` separately |
+
+A reward of zero on a masked row is only a placeholder. Training integrations must carry `mask_sample` through batching and exclude these rows from loss and group reward statistics. Validate that behavior in the selected trainer; Gym emitting the field alone is not end-to-end training qualification.
+
+The health endpoint exposes `creating`, `cleanup_pending`, `late_release_pending`, and browser-provider acquisition, release, and failure counters. Persistent pending cleanup or nonzero active leases after all rollouts end requires investigation.
+
+## Browser startup admission
+
+At resources-server startup, the visual browser checks the full Chromium executable selected by the installed Playwright driver. If it is missing, `browser_auto_install: true` installs it through `python -m playwright install chromium`. A cache lock serializes installers and both lock waiting and installation are bounded. Installation errors include the expected executable and captured stderr.
+
+For offline deployments, prepopulate the matching browser cache and set `browser_auto_install: false`. Preserve the resource server's pinned Playwright dependency. A cached older revision or a headless-shell executable is not sufficient for the headed Xvfb/PyAutoGUI runtime. System browser channels are provisioned externally; the bootstrap does not install them or operating-system libraries.
+
+## Validation boundaries
+
+The regression tests inject lost seed responses, caller cancellation, close-before-seed, repeated close, failed provider release, invalid capabilities, and a 64-caller cancellation burst. They also check that capacity can be reused and cleanup failures do not overwrite valid scores. These tests use simulated providers and browsers. Representative model rollouts and inspection of browser/verifier logs are still required before deploying a lifecycle change as a benchmark-validated recipe.
