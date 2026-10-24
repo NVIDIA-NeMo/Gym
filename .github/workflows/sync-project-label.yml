@@ -1,0 +1,157 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Sync Project status to release label
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sync-label:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check Project status
+        id: check
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.PAT }}
+          script: |
+            const projectOwner = "NVIDIA-NeMo";
+            const projectNumber = 96;
+            const expectedStatus = "Label Sync";
+            const issueNumber = context.issue.number;
+            const repositoryName =
+              `${context.repo.owner}/${context.repo.repo}`.toLowerCase();
+
+            const query = `
+              query(
+                $owner: String!
+                $projectNumber: Int!
+                $cursor: String
+              ) {
+                organization(login: $owner) {
+                  projectV2(number: $projectNumber) {
+                    items(first: 100, after: $cursor) {
+                      pageInfo {
+                        hasNextPage
+                        endCursor
+                      }
+                      nodes {
+                        content {
+                          __typename
+                          ... on Issue {
+                            number
+                            repository {
+                              nameWithOwner
+                            }
+                          }
+                        }
+                        status: fieldValueByName(name: "Status") {
+                          ... on ProjectV2ItemFieldSingleSelectValue {
+                            name
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+
+            const sleep = milliseconds =>
+              new Promise(resolve => setTimeout(resolve, milliseconds));
+
+            // The Project workflow may set the status shortly after the
+            // issue-opened event, so retry for approximately one minute.
+            for (let attempt = 1; attempt <= 12; attempt++) {
+              let cursor = null;
+              let observedStatus = null;
+
+              do {
+                const result = await github.graphql(query, {
+                  owner: projectOwner,
+                  projectNumber,
+                  cursor,
+                });
+
+                const project = result.organization?.projectV2;
+
+                if (!project) {
+                  throw new Error(
+                    `Unable to read Project ${projectOwner}/${projectNumber}. ` +
+                    "Check the PAT secret's Projects permission.",
+                  );
+                }
+
+                const connection = project.items;
+
+                for (const item of connection.nodes) {
+                  const issue = item.content;
+
+                  if (
+                    issue?.__typename === "Issue" &&
+                    issue.number === issueNumber &&
+                    issue.repository.nameWithOwner.toLowerCase() ===
+                      repositoryName
+                  ) {
+                    observedStatus = item.status?.name ?? null;
+                    break;
+                  }
+                }
+
+                cursor = connection.pageInfo.hasNextPage
+                  ? connection.pageInfo.endCursor
+                  : null;
+              } while (cursor && observedStatus !== expectedStatus);
+
+              core.info(
+                `Attempt ${attempt}: status = ` +
+                  `${observedStatus ?? "not found"}`,
+              );
+
+              if (observedStatus === expectedStatus) {
+                core.setOutput("matched", "true");
+                return;
+              }
+
+              if (attempt < 12) {
+                await sleep(5000);
+              }
+            }
+
+            core.setOutput("matched", "false");
+
+      - name: Add r0.5.0 label
+        if: steps.check.outputs.matched == 'true'
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ["r0.5.0"],
+            });
+
+            core.notice(
+              `Applied r0.5.0 to issue #${context.issue.number}`,
+            );
