@@ -608,7 +608,7 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
   "resolved": true,
   "patch_exists": true,
   "model_patch": "diff --git ...",
-  "agent_error_kind": null, // "max_iteration" | "context_window" | "stuck_in_loop" | "oom" | "other" | null
+  "agent_error_kind": null, // "max_iteration" | "context_window" | "stuck_in_loop" | "runtime_died" | "oom" | "other" | null
   "agent_timed_out": false,
   "eval_timed_out": false,
   "oom_killed": false,       // memory watchdog killed the agent container — see Memory watchdog
@@ -674,6 +674,24 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
 3. The agent hit `swebench_agent_timeout` (wall-clock) regardless of `resolved`.
 4. The memory watchdog killed the **agent** container (OOM).
 5. The memory watchdog killed the **eval** container (OOM).
+6. The evaluator failed before its startup marker (`eval_launch_failed`); no reward was measured.
+7. The host observer verifies an OpenHands runtime-server death before any execution-capable setup or
+   policy action. The supported OpenHands pin is `54d2a95edc666551b854a7e5d4205ec69e60ff23`.
+   A death at or after `swebench_agent_timeout` stays in `other`; the existing timeout policy is unchanged.
+
+`Server process died` alone does not establish a cause. A per-run host socket records the controller and
+runtime process identities, startup coverage, every runtime attempt, and execution-start acknowledgments.
+Python audit hooks record process creation in the controller and runtime before it executes, including
+shell and plugin setup; the controller also records policy actions before dispatch. Once execution starts, no retry can reset
+that decision. The host passes eligibility directly through Ray; agent-writable metrics are diagnostic only
+for this decision.
+
+Only a verified clean startup exit before execution has `runtime_death_cause: pre_execution` and qualifies
+for the new mask. Agent-induced deaths and all ambiguous cases remain eligible with cause `unknown`,
+unless an independent masking condition applies. Missing or disconnected observation, stale identities,
+unobserved retries, other OpenHands commits, SIGKILL/segfault, and deaths after setup stay unknown.
+Imports that launch helpers count as execution, so this deliberately identifies only a narrow subset of
+infrastructure failures. The `runtime_died` diagnostic remains available for either cause.
 
 Agent error strings are bucketed by `_classify_agent_error`:
 
@@ -682,6 +700,7 @@ Agent error strings are bucketed by `_classify_agent_error`:
 | `maximum iteration`                 | `max_iteration`  |
 | `ContextWindow` / `context window`  | `context_window` |
 | `stuck in a loop`                   | `stuck_in_loop`  |
+| `Server process died`               | `runtime_died`   |
 | anything else                       | `other`          |
 
 `oom` is set directly by `_apply_watchdog_stats` when the memory watchdog kills the agent container — it bypasses `_classify_agent_error` since there's no error string to classify (the container is killed, not erroring out on its own). See [Memory watchdog](#memory-watchdog-oom-handling).
