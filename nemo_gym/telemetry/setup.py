@@ -429,6 +429,16 @@ def _build_resource_attributes(server_name: Optional[str], server_type: Optional
     return attrs
 
 
+def _service_instance_id(run_id: str, server_name: Optional[str]) -> str:
+    """A name for this process, unique within the run.
+
+    The server name separates the servers; the PID separates one server's Uvicorn
+    workers. Both are omitted when absent rather than left as an empty segment, so a
+    standalone server with no run id still gets ``<name>-<pid>`` instead of ``--<pid>``.
+    """
+    return "-".join(part for part in (run_id, server_name, str(os.getpid())) if part)
+
+
 def _sdk_meter_provider_installed() -> bool:
     """Whether a real OpenTelemetry SDK meter provider, not a no-op or proxy, is registered."""
     try:
@@ -554,6 +564,10 @@ def init_telemetry(
         # reports no rank, since the collector could not filter it by rank.
         attrs[NV_DL_RANK] = 0
         attrs[NV_DL_WORLD_SIZE] = 1
+        # Named here because nemo-lens derives it as f"{run_id}-rank{rank}" otherwise.
+        # With the rank above pinned to 0 and run_id shared fleet-wide by design, that
+        # derivation hands every server in the job the same instance id.
+        attrs["service.instance.id"] = _service_instance_id(config.run_id, server_name)
         if resource_attributes:
             attrs.update(resource_attributes)
 

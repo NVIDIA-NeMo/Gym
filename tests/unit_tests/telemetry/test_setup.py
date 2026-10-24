@@ -298,6 +298,42 @@ def test_each_server_reports_itself_as_a_single_rank_world(enabled_console_env, 
     assert captured[NV_DL_WORLD_SIZE] == 1
 
 
+def test_each_server_names_its_own_instance(enabled_console_env, monkeypatch):
+    """The companion to the rank above: nemo-lens derives `service.instance.id` as
+    f"{run_id}-rank{rank}" when a rank is present and no identity was supplied. Rank is
+    pinned to 0 for every server and run_id is deliberately shared fleet-wide, so
+    leaving the derivation to lens gives the whole job one instance id.
+    """
+    monkeypatch.setenv("NEMO_GYM_OTEL_RUN_ID", "job-1416252")
+    captured = {}
+
+    def capture(config, **kwargs):
+        captured.update(kwargs.get("resource_attributes") or {})
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr("nemo.lens.setup_telemetry", capture)
+    init_telemetry(server_name="weather")
+
+    assert captured["service.instance.id"] == f"job-1416252-weather-{os.getpid()}"
+
+
+def test_an_instance_id_from_the_caller_wins(enabled_console_env, monkeypatch):
+    """A deployment that already names its processes keeps its own scheme."""
+    captured = {}
+
+    def capture(config, **kwargs):
+        captured.update(kwargs.get("resource_attributes") or {})
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr("nemo.lens.setup_telemetry", capture)
+    init_telemetry(
+        server_name="weather",
+        resource_attributes={"service.instance.id": "chosen-by-the-caller"},
+    )
+
+    assert captured["service.instance.id"] == "chosen-by-the-caller"
+
+
 # --------------------------------------------------------------------------- #
 # Another library already initialised nemo-lens in this process (NeMo-RL)
 # --------------------------------------------------------------------------- #
