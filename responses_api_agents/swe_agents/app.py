@@ -77,6 +77,12 @@ from responses_api_agents.swe_agents.opencode_replay import (
     parse_replay_subagent_manifest,
     parse_replay_subagent_payload,
 )
+from responses_api_agents.swe_agents.runtime_death_provenance import (
+    PROVENANCE_MOUNT,
+    SOCKET_MOUNT,
+    SUPPORTED_OPENHANDS_COMMIT,
+    RuntimeDeathMonitor,
+)
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
@@ -180,14 +186,6 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
             "still runs, so this verifies that the dataset sample actually "
             "resolves when its golden patch is applied. Currently supported "
             "for dataset_name == 'swe-bench-ext'."
-        ),
-    )
-
-    mask_runtime_deaths: bool = Field(
-        default=False,
-        description=(
-            "Mask OpenHands runtime-server deaths before the agent time budget. Disabled by default because "
-            "the error does not distinguish infrastructure failures from agent actions that kill the runtime."
         ),
     )
 
@@ -322,6 +320,7 @@ class SWEBenchMetrics(BaseModel):
 
     # Failure-mode signals used to decide mask_sample downstream.
     agent_error_kind: Optional[str] = None
+    runtime_death_cause: Optional[Literal["pre_execution", "unknown"]] = None
     agent_timed_out: Optional[bool] = None
     eval_timed_out: Optional[bool] = None
     eval_launch_failed: bool = False
@@ -1921,6 +1920,10 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
         baseline_fix = _extract_instance_dict(data_point).get("baseline_fix", "")
         baseline_fix_cmd = f"{{ {baseline_fix} >/tmp/baseline_fix.log 2>&1 || true; }} && " if baseline_fix else ""
 
+        provenance_cmd = ""
+        if self.config.agent_framework_commit == SUPPORTED_OPENHANDS_COMMIT:
+            provenance_cmd = f"export PYTHONPATH={PROVENANCE_MOUNT}:${{PYTHONPATH:-}} && "
+
         agent_main_cmd = (
             f"{workspace_check_cmd}"
             # Add miniforge bin to PATH (for tmux, node, poetry, etc.)
@@ -1938,6 +1941,7 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
             # Use pre-built OpenHands
             "cd /openhands_setup/OpenHands && "
             f"{capture_route_cmd}"
+            f"{provenance_cmd}"
             "export RUNTIME=local && "
             f'date +"%s.%N" > {self.config.generation_apptainer_spinup_timestamp_mounted_fpath} && '
             f"{log_cmd}"
@@ -2447,6 +2451,12 @@ def _classify_agent_error(err: Optional[str]) -> Optional[str]:
     return "other"
 
 
+class RunnerResult(NamedTuple):
+    report_file: Optional[Path]
+    # Host-only decision: never reconstruct this from mounted metrics.
+    runtime_death_cause: Literal["pre_execution", "unknown"] = "unknown"
+
+
 @ray.remote(
     scheduling_strategy="SPREAD",
     runtime_env={
@@ -2454,7 +2464,7 @@ def _classify_agent_error(err: Optional[str]) -> Optional[str]:
     },
     num_cpus=0.1,
 )
-def runner_ray_remote(params_dict: dict[str, Any]) -> Optional[Path]:
+def runner_ray_remote(params_dict: dict[str, Any]) -> RunnerResult:
     # For some reason Ray may not pick up the proper model fields if we don't rebuild the model here. Very strange.
     SWEBenchWrapperInstanceConfig.model_rebuild(force=True)
     RunOpenHandsAgent.model_rebuild(force=True)
@@ -2463,7 +2473,7 @@ def runner_ray_remote(params_dict: dict[str, Any]) -> Optional[Path]:
     run_oh = RunOpenHandsAgent(config=params)
     report_file = asyncio.run(run_oh.process_single_datapoint())
 
-    return report_file
+    return RunnerResult(report_file, run_oh.runtime_death_cause)
 
 
 def update_and_read_metrics(metrics_fpath: Path, update_dict: Dict[str, Any] | None = None) -> dict:
@@ -2606,10 +2616,13 @@ class ActiveContainerCommand(BaseModel):
     log_file_path: Path
     watchdog_task: Optional[Any] = None
     watchdog_stats: Dict[str, Any] = Field(default_factory=dict)
+    runtime_monitor: Optional[RuntimeDeathMonitor] = None
+    runtime_death_cause: str = "unknown"
 
 
 class RunOpenHandsAgent(BaseModel):
     config: SWEBenchWrapperInstanceConfig
+    runtime_death_cause: Literal["pre_execution", "unknown"] = "unknown"
 
     def _openhands_dir_copy_from_host(self, output_file_path: Optional[str]) -> Optional[str]:
         data_point = self.config.problem_info
@@ -2741,12 +2754,43 @@ class RunOpenHandsAgent(BaseModel):
         log_file_path = logs_dir / f"{self.config.instance_id}_{command.mode}.log"
         log_file = open(log_file_path, "w")
 
+        monitor = None
+        if (
+            command.mode == "agent"
+            and self.config.agent_framework == "openhands"
+            and self.config.agent_framework_commit == SUPPORTED_OPENHANDS_COMMIT
+        ):
+            try:
+                monitor = RuntimeDeathMonitor()
+                await monitor.start()
+            except OSError as exc:
+                print(f"Runtime provenance unavailable; deaths remain unknown: {exc}", flush=True)
+                if monitor is not None:
+                    await monitor.finish()
+                monitor = None
+            if monitor is not None:
+                observer_args = (
+                    f"--mount type=bind,src={monitor.path},dst={SOCKET_MOUNT},ro "
+                    f"--env NEMO_GYM_RUNTIME_SOCKET={SOCKET_MOUNT} "
+                    f"--env NEMO_GYM_RUNTIME_NONCE={monitor.nonce} "
+                )
+                apptainer_cmd = apptainer_cmd.replace("apptainer exec ", f"apptainer exec {observer_args}", 1)
         # start_new_session so watchdog/timeout kills can address the whole process tree
-        process = await asyncio.create_subprocess_shell(
-            apptainer_cmd, stdout=log_file, stderr=log_file, start_new_session=True
-        )
+        try:
+            process = await asyncio.create_subprocess_shell(
+                apptainer_cmd, stdout=log_file, stderr=log_file, start_new_session=True
+            )
+            if monitor is not None:
+                monitor.set_root(process.pid)
+        except BaseException:
+            log_file.close()
+            if monitor is not None:
+                await monitor.finish()
+            raise
 
-        active_command = ActiveContainerCommand(process=process, log_file=log_file, log_file_path=log_file_path)
+        active_command = ActiveContainerCommand(
+            process=process, log_file=log_file, log_file_path=log_file_path, runtime_monitor=monitor
+        )
         if self.config.memory_watchdog_enabled:
             active_command.watchdog_task = asyncio.create_task(
                 self._memory_watchdog(process.pid, active_command.watchdog_stats, command.mode)
@@ -2771,6 +2815,9 @@ class RunOpenHandsAgent(BaseModel):
                 await active_command.process.wait()
             raise ValueError("Command timed out")
         finally:
+            if active_command.runtime_monitor is not None:
+                active_command.runtime_death_cause = await active_command.runtime_monitor.finish()
+                active_command.runtime_monitor = None
             active_command.log_file.close()
             if active_command.watchdog_task is not None:
                 active_command.watchdog_task.cancel()
@@ -2814,6 +2861,9 @@ class RunOpenHandsAgent(BaseModel):
             except ProcessLookupError:
                 pass
             await active_command.process.wait()
+        if active_command.runtime_monitor is not None:
+            active_command.runtime_death_cause = await active_command.runtime_monitor.finish()
+            active_command.runtime_monitor = None
         active_command.log_file.close()
         if active_command.watchdog_task is not None:
             active_command.watchdog_task.cancel()
@@ -2865,6 +2915,10 @@ class RunOpenHandsAgent(BaseModel):
                 metrics.openhands_run_time is not None
                 and metrics.openhands_run_time >= self.config.swebench_agent_timeout
             )
+            if openhands_active_command.runtime_death_cause == "pre_execution" and not metrics.agent_timed_out:
+                metrics.agent_error_kind = "runtime_died"
+                metrics.runtime_death_cause = "pre_execution"
+                self.runtime_death_cause = "pre_execution"
             update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
             if self.config.debug:
                 profiler.stop()
@@ -2881,6 +2935,10 @@ class RunOpenHandsAgent(BaseModel):
 
         metrics.per_turn_metrics = out_dict.get("metrics")
         metrics.agent_error_kind = _classify_agent_error(out_dict.get("error"))
+        if metrics.agent_error_kind == "runtime_died":
+            metrics.runtime_death_cause = (
+                "pre_execution" if openhands_active_command.runtime_death_cause == "pre_execution" else "unknown"
+            )
         if (
             metrics.agent_error_kind == "runtime_died"
             and metrics.openhands_run_time >= self.config.swebench_agent_timeout
@@ -2889,6 +2947,10 @@ class RunOpenHandsAgent(BaseModel):
             # its final error. Reaching the time budget does not establish a
             # spontaneous runtime failure; retain the existing timeout policy.
             metrics.agent_error_kind = "other"
+            metrics.runtime_death_cause = "unknown"
+
+        if metrics.agent_error_kind == "runtime_died" and metrics.runtime_death_cause == "pre_execution":
+            self.runtime_death_cause = "pre_execution"
 
         patch = out_dict["test_result"]["git_patch"] or None
         patch = patch + "\n" if patch and not patch.endswith("\n") else patch
@@ -3502,6 +3564,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     for subdir in (".eval_sessions", "logs", "evaluation/oh")
                 ]
             mount_args.extend(real_openhands_mounts)
+            if command.mode == "agent" and params.agent_framework_commit == SUPPORTED_OPENHANDS_COMMIT:
+                provenance_dir = Path(__file__).parent / "runtime_provenance_overlay"
+                mount_args.append(f"--mount type=bind,src={provenance_dir},dst={PROVENANCE_MOUNT},ro")
             if params.install_openhands_capture_overlay and command.mode == "agent":
                 # Mount ``sitecustomize.py`` into capture-enabled agent containers.
                 # The module patches the OpenHands ``nemo-gym`` client at startup.
@@ -3939,8 +4004,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     async def _inner_responses(
         self, params: SWEBenchWrapperInstanceConfig, dataset_processor: BaseDatasetHarnessProcessor
     ) -> NeMoGymResponse:
-        maybe_report_file = await runner_ray_remote.remote(params.model_dump())
-        metrics_to_update = dict()
+        result = await runner_ray_remote.remote(params.model_dump())
+        maybe_report_file = result.report_file
+        metrics_to_update = {"runtime_death_cause": result.runtime_death_cause}
 
         if maybe_report_file:
             dataset_processor.postprocess_after_run(maybe_report_file)
@@ -3962,7 +4028,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # 4) Memory watchdog killed the agent container (OOM).
         # 5) Memory watchdog killed the eval container.
         # 6) Evaluator failed before its startup marker; no reward was measured.
-        # 7) The OpenHands runtime server died before the time budget and masking was explicitly enabled.
+        # 7) Host-observed OpenHands runtime death before any execution-capable initialization or action.
         persisted_metrics = SWEBenchMetrics.model_validate(update_and_read_metrics(params.metrics_fpath))
         agent_error_kind = persisted_metrics.agent_error_kind
         eval_timed_out = bool(persisted_metrics.eval_timed_out)
@@ -3971,7 +4037,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         eval_oom_killed = bool(persisted_metrics.eval_oom_killed)
         if (
             agent_error_kind in ("max_iteration", "context_window")
-            or (self.config.mask_runtime_deaths and agent_error_kind == "runtime_died")
+            or (result.runtime_death_cause == "pre_execution")
             or eval_timed_out
             or persisted_metrics.eval_launch_failed
             or agent_timed_out

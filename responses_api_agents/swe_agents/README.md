@@ -401,7 +401,6 @@ The full schema lives in `SWEBenchWrapperConfig` (and the per-override `AgentPro
 | `agent_framework_repo`             | OpenHands official                                | Fork to clone for the agent runtime.                                    |
 | `agent_framework_commit`           | `HEAD`                                            | Commit to pin.                                                          |
 | `agent_max_turns`                  | `100`                                             | Max agent iterations (OpenHands) / max turns the bench loop will spin (opencode). |
-| `mask_runtime_deaths`              | `false`                                           | Opt in to masking OpenHands runtime-server deaths before the agent time budget; the error cannot distinguish infrastructure failures from agent-induced deaths. |
 | `agent_config`                     | `null`                                            | Path to the per-harness model config (`configs/oh_config.toml` for OpenHands; opencode builds the config inline in `app.py`). |
 | `agent_tools_file`                 | `null`                                            | (SWE-agent only) JSON tool list in OpenAI format.                       |
 | `container_formatter`              | `docker://swebench/sweb.eval.x86_64.{instance_id}`| Path template (or list of templates) for SIFs. Supports the `_1776_` / `_s_` rewrites and fuzzy glob fallbacks. |
@@ -676,17 +675,23 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
 4. The memory watchdog killed the **agent** container (OOM).
 5. The memory watchdog killed the **eval** container (OOM).
 6. The evaluator failed before its startup marker (`eval_launch_failed`); no reward was measured.
-7. `mask_runtime_deaths: true` is configured and the OpenHands runtime server died before the agent's time
-   budget (`runtime_died`). A death at or after
-   `swebench_agent_timeout` stays in `other`, since the timeout wrapper itself can kill the runtime.
-   The existing `agent_timed_out` masking policy remains unchanged.
+7. The host observer verifies an OpenHands runtime-server death before any execution-capable setup or
+   policy action. The supported OpenHands pin is `54d2a95edc666551b854a7e5d4205ec69e60ff23`.
+   A death at or after `swebench_agent_timeout` stays in `other`; the existing timeout policy is unchanged.
 
-`mask_runtime_deaths` defaults to `false`: the `Server process died` error reports that the process exited,
-not why it exited. Agent commands can also kill or exhaust the runtime. By default these rollouts keep
-their measured reward and remain eligible unless another independent masking condition applies.
-The `runtime_died` diagnostic remains available in metrics. Enable the flag only when deliberately
-excluding all runtime deaths before the deadline, including deaths caused by the agent; it is not
-a test for infrastructure failure.
+`Server process died` alone does not establish a cause. A per-run host socket records the controller and
+runtime process identities, startup coverage, every runtime attempt, and execution-start acknowledgments.
+Python audit hooks record process creation in the controller and runtime before it executes, including
+shell and plugin setup; the controller also records policy actions before dispatch. Once execution starts, no retry can reset
+that decision. The host passes eligibility directly through Ray; agent-writable metrics are diagnostic only
+for this decision.
+
+Only a verified clean startup exit before execution has `runtime_death_cause: pre_execution` and qualifies
+for the new mask. Agent-induced deaths and all ambiguous cases remain eligible with cause `unknown`,
+unless an independent masking condition applies. Missing or disconnected observation, stale identities,
+unobserved retries, other OpenHands commits, SIGKILL/segfault, and deaths after setup stay unknown.
+Imports that launch helpers count as execution, so this deliberately identifies only a narrow subset of
+infrastructure failures. The `runtime_died` diagnostic remains available for either cause.
 
 Agent error strings are bucketed by `_classify_agent_error`:
 
