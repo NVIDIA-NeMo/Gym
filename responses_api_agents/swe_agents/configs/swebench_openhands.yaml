@@ -10,6 +10,9 @@ swe_agents:
       agent_max_turns: 100
       agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
       agent_framework_commit: 54d2a95edc666551b854a7e5d4205ec69e60ff23  # pragma: allowlist secret
+      # Optional: route policy calls through a token-capture Switchyard proxy and
+      # rebuild the rollout with exact token ids (see gym-switchyard-integration.md).
+      # switchyard_base_url: http://<switchyard-host>:<port>
       
       # Container configuration
       container_formatter: ???

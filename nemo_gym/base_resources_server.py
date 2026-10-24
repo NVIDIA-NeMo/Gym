@@ -156,7 +156,6 @@ class BaseVerifyRequest(BaseRunRequest):
 
 class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
-
     mask_sample: bool = Field(
         default=False,
         description=(
