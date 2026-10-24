@@ -1352,6 +1352,7 @@ def test_build_sbatch_script_driver_mounts(bench_dir):
                 "container": "python:3.12",
                 "benchmarks": {"gsm8k": {}},
                 "mounts": ["/lustre/checkpoints:/ckpts"],
+                "container_env": ["UV_CONSTRAINT"],
             },
             "job": {"output_path": "/remote/jobs"},
         }
@@ -1362,6 +1363,7 @@ def test_build_sbatch_script_driver_mounts(bench_dir):
     # mounts flag appears on the driver srun line
     driver_srun_line = next(line for line in script.splitlines() if "python:3.12" in line)
     assert "--container-mounts=/lustre/checkpoints:/ckpts" in driver_srun_line
+    assert "--container-env=UV_CONSTRAINT" in driver_srun_line
 
 
 def test_build_sbatch_script_no_service_mounts_by_default(submit_config, bench_dir):
