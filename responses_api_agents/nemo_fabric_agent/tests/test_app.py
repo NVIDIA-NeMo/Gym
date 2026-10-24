@@ -29,6 +29,7 @@ from responses_api_agents.nemo_fabric_agent.app import (
     _content_text,
     _extract_request_input,
     _fabric_output_items,
+    _loopback_proxy,
     _mapping,
     _normalized_usage,
     _skill_paths,
@@ -517,6 +518,76 @@ def test_send_model_base_url_false_leaves_base_url_out(tmp_path: Path) -> None:
     )
 
     assert "base_url" not in config["models"]["default"]
+
+
+def test_loopback_proxy_forwards_remote_http_and_leaves_other_urls() -> None:
+    async def scenario() -> None:
+        async def echo(reader, writer):
+            writer.write(b"pong:" + await reader.read(4))
+            await writer.drain()
+            writer.close()
+
+        upstream = await asyncio.start_server(echo, "127.0.0.1", 0)
+        remote = f"http://127.0.0.1:{upstream.sockets[0].getsockname()[1]}/v1"
+        assert await _loopback_proxy("http://127.0.0.1:9000/v1") == ("http://127.0.0.1:9000/v1", None)
+        assert await _loopback_proxy("https://models.example/v1") == ("https://models.example/v1", None)
+
+        with patch("responses_api_agents.nemo_fabric_agent.app.ipaddress.ip_address") as ip_address:
+            ip_address.return_value.is_loopback = False
+            url, proxy = await _loopback_proxy(remote)
+        try:
+            assert url.startswith("http://127.0.0.1:") and url.endswith("/v1")
+            reader, writer = await asyncio.open_connection("127.0.0.1", int(url.split(":")[2].split("/")[0]))
+            writer.write(b"ping")
+            await writer.drain()
+            assert await reader.read() == b"pong:ping"
+        finally:
+            proxy.close()
+            upstream.close()
+
+    asyncio.run(scenario())
+
+
+def test_relay_keeps_native_items_when_atif_lacks_tool_outputs(tmp_path: Path) -> None:
+    agent = _agent(cwd=str(tmp_path), relay=True)
+    agent.server_client.global_config_dict = {
+        "policy_model": {"responses_api_models": {"policy_model": {"host": "127.0.0.1", "port": 9002}}}
+    }
+    agent.server_client._build_server_base_url.side_effect = lambda config: f"http://{config['host']}:{config['port']}"
+    trajectory = {
+        "steps": [
+            {"source": "agent", "tool_calls": [{"tool_call_id": "c1", "function_name": "bash", "arguments": {}}]},
+        ]
+    }
+
+    async def run(config, **kwargs):
+        relay_dir = Path(config.to_mapping()["relay"]["output_dir"])
+        relay_dir.mkdir(parents=True)
+        (relay_dir / "t.json").write_text(json.dumps(trajectory))
+        result = _FakeResult()
+        result.output["relay_artifacts"] = [{"kind": "atif", "path": str(relay_dir / "t.json")}]
+        result.output["messages"] = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "c1", "name": "bash", "args": {"command": "ls"}}],
+            },
+            {"role": "tool", "content": "README.txt"},
+            {"role": "assistant", "content": "fabric answer"},
+        ]
+        return result
+
+    fabric = MagicMock()
+    fabric.plan.return_value.to_mapping.return_value = {"adapter": {"telemetry": {"providers": {"relay": {}}}}}
+    fabric.run = AsyncMock(side_effect=run)
+    with patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric):
+        response, fabric_result = asyncio.run(
+            agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="question"))
+        )
+
+    assert [item.type for item in response.output] == ["function_call", "function_call_output", "message"]
+    assert response.output[1].output == "README.txt"
+    assert fabric_result["relay_atif"] == [trajectory]
 
 
 def test_atif_without_agent_steps_falls_back_to_fabric_output() -> None:

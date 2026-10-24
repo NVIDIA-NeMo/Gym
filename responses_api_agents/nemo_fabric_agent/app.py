@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -12,6 +14,7 @@ from copy import deepcopy
 from pathlib import Path
 from time import time
 from typing import Any, Optional
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import Body, Request
@@ -349,6 +352,47 @@ def _atif_output_items(trajectories: list[dict[str, Any]], response_text: str) -
     return items
 
 
+def _tool_output_count(items: list[Any]) -> int:
+    return sum(1 for item in items if getattr(item, "type", None) == "function_call_output" and item.output)
+
+
+async def _loopback_proxy(base_url: str) -> tuple[str, Optional[asyncio.Server]]:
+    """Serve a remote plain-HTTP model URL on a loopback port, or return the URL unchanged.
+
+    The Claude and Codex Relay gateways accept a plain-HTTP upstream only on loopback.
+    """
+    parts = urlsplit(base_url)
+    host = parts.hostname or ""
+    try:
+        loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = False
+    if parts.scheme != "http" or loopback:
+        return base_url, None
+
+    async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            while data := await reader.read(65536):
+                writer.write(data)
+                await writer.drain()
+        except OSError:
+            pass
+        finally:
+            writer.close()
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            upstream_reader, upstream_writer = await asyncio.open_connection(host, parts.port or 80)
+        except OSError:
+            writer.close()
+            return
+        await asyncio.gather(pipe(reader, upstream_writer), pipe(upstream_reader, writer))
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    return parts._replace(netloc=f"127.0.0.1:{port}").geturl(), server
+
+
 def _skill_paths(skills_root: Optional[str]) -> list[str]:
     if not skills_root:
         return []
@@ -590,19 +634,26 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             )
             if relay_dir and not self._adapter_supports_relay(self._fabric_config(**config_kwargs), workspace):
                 relay_dir = None
+            model_proxy = None
+            if relay_dir:
+                config_kwargs["model_base_url"], model_proxy = await _loopback_proxy(model_base_url)
             fabric_config = self._fabric_config(**config_kwargs, relay_dir=Path(relay_dir) if relay_dir else None)
             # Fabric otherwise starts Python adapters on VIRTUAL_ENV's interpreter, which in R2E-style task images is
             # the repo's venv and lacks the adapter. This agent's interpreter has the adapters installed.
             os.environ.setdefault("ADAPTER_PYTHON", sys.executable)
-            result = await Fabric().run(
-                fabric_config,
-                base_dir=workspace,
-                request=RunRequest(
-                    input=request_input,
-                    request_id=rollout_id or f"request-{uuid4().hex}",
-                    context={"nemo_gym_rollout_id": rollout_id} if rollout_id else {},
-                ),
-            )
+            try:
+                result = await Fabric().run(
+                    fabric_config,
+                    base_dir=workspace,
+                    request=RunRequest(
+                        input=request_input,
+                        request_id=rollout_id or f"request-{uuid4().hex}",
+                        context={"nemo_gym_rollout_id": rollout_id} if rollout_id else {},
+                    ),
+                )
+            finally:
+                if model_proxy is not None:
+                    model_proxy.close()
             # The trajectory files live in relay_dir, so read them before it is removed.
             trajectories = _atif_trajectories(_mapping(result.output)) if relay_dir else []
 
@@ -630,12 +681,20 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             response_text = (
                 "" if response_text is None else json.dumps(response_text, ensure_ascii=False, sort_keys=True)
             )
+        atif_items = _atif_output_items(trajectories, response_text)
+        native_items = _fabric_output_items(output, response_text)
+        # Some adapters' trajectories drop tool outputs or collapse the run into one step. Keep the fuller record.
+        output_items = (
+            atif_items
+            if atif_items and _tool_output_count(atif_items) >= _tool_output_count(native_items)
+            else native_items
+        )
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=str(output.get("model") or self.config.model),
             object="response",
-            output=_atif_output_items(trajectories, response_text) or _fabric_output_items(output, response_text),
+            output=output_items,
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
