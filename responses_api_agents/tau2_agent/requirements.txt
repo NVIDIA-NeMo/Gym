@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+tau2 @ git+https://github.com/sierra-research/tau2-bench
