@@ -1,6 +1,6 @@
 # Skill opening across agent harnesses
 
-**Implementation draft: this benchmark is not runnable yet.** Source preparation, scoring, trace conversion, shared budgets, inference transport, and the host-side Harbor verifier have component tests. Codex/Hermes launch profiles are ported; runtime collection, complete harness adapters, and live migration checks remain pending. This draft does not register a benchmark or report new model results.
+**Implementation draft: this benchmark is not runnable yet.** Source preparation, scoring, trace conversion, shared budgets, inference transport, and the host-side Harbor verifier have component tests. Codex/Hermes launch profiles are ported, and a Hermes Harbor adapter is in development. Successful end-to-end execution, Pi/Codex adapters, and live migration checks remain pending. This draft does not register a benchmark or report new model results.
 
 The question is whether a model opens the relevant skill instructions when a task calls for them. Task-performance benchmarks measure whether work gets done; this benchmark measures an earlier step. Opening instructions is not evidence that the agent followed them or completed the task.
 
@@ -42,9 +42,9 @@ The initial comparison uses three forwarded model requests including retries, 12
 
 The shared implementation is under [`environments/skill_trigger`](../../environments/skill_trigger). It extracts successful model-visible tool results, checks session lineage and observation coverage, and preserves the original excerpt-matching rules, including Pi's UTF-16 character counting. Exact-file reads can disambiguate shared text; shell output must identify a skill by its content. Invalid evidence raises an error rather than producing a zero.
 
-Trajectory conversion reuses Harbor 0.24.0's Pi, Codex, and Hermes converters. The wrapper checks call/result IDs and rejects dropped or invented records. Converted trajectories support Gym interoperability; canonical traces remain the scoring source. The shared request allowance counts retries and child requests together, anchors time to prompt release, and cancels streams at the absolute deadline. These components are not yet connected to live adapters; their tests do not prove sandbox isolation or end-to-end correctness.
+Trajectory conversion reuses Harbor 0.24.0's Pi, Codex, and Hermes converters. The wrapper checks call/result IDs and rejects dropped or invented records. Converted trajectories support Gym interoperability; canonical traces remain the scoring source. The shared request allowance counts retries and child requests together, anchors time to prompt release, and cancels streams at the absolute deadline. Component tests do not establish end-to-end correctness; the developing Hermes adapter still needs a successful integrated run.
 
-The trial-scoped gateway uses Gym's shared HTTP client with transport retries and redirects disabled. It records original and forwarded requests, response bytes, and provider status outside the agent-visible logs. Tests use local HTTP endpoints to check stream preservation, errors, deadlines, and blocked requests. The Codex/Hermes launcher waits for host authorization after profile setup; Codex guidance requires effective model metadata, while Hermes guidance changes only `tool_use_enforcement`. Session attribution, Pi execution, and complete lifecycle wiring remain to be implemented.
+The trial-scoped gateway uses Gym's shared HTTP client with transport retries and redirects disabled. It records original and forwarded requests, response bytes, and provider status outside the agent-visible logs. Tests use local HTTP endpoints to check stream preservation, errors, deadlines, and blocked requests. The Codex/Hermes launcher waits for host authorization after profile setup; Codex guidance requires effective model metadata, while Hermes guidance changes only `tool_use_enforcement`. The Hermes adapter connects these components for its terminal/file/skills profile. Pi execution, Codex session attribution, and a successful integrated run remain outstanding.
 
 The custom Harbor verifier reads a pinned prepared release and private host evidence outside Harbor's mounted trial logs. It checks the prompt and complete catalog files, rejects audit-only or blocked releases, and returns an explicit binary `reward`. Missing evidence and provider errors raise; an agent-written `reward.json` cannot substitute for the host record. Each attempt is recorded once and retained independently of Harbor trial cleanup. The adapter must still establish that these directories are not mounted into the sandbox.
 
@@ -63,6 +63,28 @@ For the offline tests, install Gym's development dependencies and `harbor==0.24.
 LITELLM_LOCAL_MODEL_COST_MAP=True python -m pytest \
     --confcutdir=environments/skill_trigger/tests environments/skill_trigger/tests
 ```
+
+## Runtime development
+
+Build the pinned Codex/Hermes container from public sources:
+
+```bash
+docker build -t gym-skill-harnesses:local environments/skill_trigger
+```
+
+The Dockerfile checks the Codex release checksum and retains the exact Hermes Git revision. Codex, Hermes, and Hermes-guidance startup were exercised in this image with networking disabled and stopped before prompt release. This is profile validation, not a scored rollout; Codex-guidance startup still needs its effective model catalog.
+
+The developing Hermes adapter uses Harbor's Docker lifecycle, independent observation, the shared inference gateway, canonical messages, ATIF conversion, and the host verifier. A synthetic integration command is available:
+
+```bash
+LITELLM_LOCAL_MODEL_COST_MAP=True python -m environments.skill_trigger.tests.harbor_smoke \
+    --image gym-skill-harnesses:local --gateway-host YOUR_DOCKER_REACHABLE_HOST_IP \
+    --output /tmp/new-skill-harbor-smoke
+```
+
+This uses a local scripted provider and synthetic instructions, not a model API or benchmark case. **It has not passed end to end yet.** The first integrated attempt was blocked by the test host's firewall and remained unscored with zero forwarded requests. The gateway now has an authenticated readiness check before prompt release. An optional `--gateway-port` permits an operator-approved fixed port; the test does not alter firewall rules.
+
+Harbor's task CPU field accepts whole numbers. The frozen half-CPU limit is enforced by Docker Compose with Harbor's CPU override disabled (`cpu_enforcement_policy: ignore`); the adapter checks the actual running container still has 0.5 CPU and 768 MiB. The networking path also needs the migration comparison: the prior experiment documented an earlier header timeout in Harbor's sidecar, separate from the 120-second trial limit. Do not silently change that behavior and label the result a historical reproduction.
 
 ## Gym integration
 

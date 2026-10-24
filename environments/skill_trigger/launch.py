@@ -133,7 +133,9 @@ def hermes_profile(*, guidance: bool) -> dict[str, object]:
 
 def launch_hermes(config: dict[str, object], *, prompt: str) -> None:
     """Run the pinned programmatic agent with its original native tool profile."""
-    revision = subprocess.check_output(["git", "-C", "/opt/hermes", "rev-parse", "HEAD"], text=True).strip()
+    revision = subprocess.check_output(
+        ["git", "-c", "safe.directory=/opt/hermes", "-C", "/opt/hermes", "rev-parse", "HEAD"], text=True
+    ).strip()
     if revision != HERMES_REVISION:
         raise RuntimeError("Hermes checkout differs from the pinned revision")
     os.environ.pop("HERMES_SINGLE_QUERY_SESSION", None)
@@ -208,7 +210,9 @@ def launch_hermes(config: dict[str, object], *, prompt: str) -> None:
         api_mode=agent.api_mode,
     )
     authorize_prompt()
-    emit("result", result=agent.run_conversation(prompt))
+    result = agent.run_conversation(prompt)
+    emit("messages", id=config["session_id"], messages=database.get_messages_as_conversation(config["session_id"]))
+    emit("result", result=result)
 
 
 def main() -> None:

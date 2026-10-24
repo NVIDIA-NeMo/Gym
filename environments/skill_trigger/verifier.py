@@ -42,6 +42,7 @@ class PreparedCase:
     prompt: str
     target: str
     sources: dict[str, str]
+    mounted_hashes: dict[str, str]
 
 
 def load_case(*, release: Path, manifest_sha256: str, task_name: str, model: str, harness: str) -> PreparedCase:
@@ -92,6 +93,7 @@ def load_case(*, release: Path, manifest_sha256: str, task_name: str, model: str
         prompt=case["prompt"],
         target=case["skill"],
         sources=sources,
+        mounted_hashes={member["name"]: member["mounted_sha256"] for member in catalog["members"]},
     )
 
 

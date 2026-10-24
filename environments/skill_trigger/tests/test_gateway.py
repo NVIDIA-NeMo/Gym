@@ -36,7 +36,7 @@ async def network(tmp_path, monkeypatch):
     stack = AsyncExitStack()
     providers = []
 
-    async def start(handler, *, clock=None, resolver=None):
+    async def start(handler, *, clock=None, resolver=None, release=True):
         provider = web.Application()
         provider.router.add_post("/v1/{endpoint:.*}", handler)
         runner = web.AppRunner(provider, access_log=None, shutdown_timeout=0.1)
@@ -60,7 +60,8 @@ async def network(tmp_path, monkeypatch):
         )
         await gateway.start(bind_host="127.0.0.1")
         stack.push_async_callback(gateway.close)
-        budget.release()
+        if release:
+            budget.release()
         return gateway
 
     async def send(gateway, *, endpoint="responses", token=None, payload=None):
@@ -232,3 +233,31 @@ async def test_invalid_payload_cannot_become_a_scored_miss(network, payload):
 )
 def test_provider_terminal_outcomes(body, outcome):
     assert response_outcome(json.dumps(body).encode(), streaming=False) == outcome
+
+
+async def test_authenticated_readiness_before_prompt_release_does_not_call_provider(network):
+    from nemo_gym import server_utils
+
+    received = []
+
+    async def provider(request):
+        received.append(await request.json())
+        return web.json_response({"status": "completed"})
+
+    start, _ = network
+    gateway = await start(provider, release=False)
+    for token, status in [("wrong", 403), (gateway.token, 200)]:
+        response = await server_utils.request(
+            "GET",
+            f"http://127.0.0.1:{gateway.port}/health",
+            headers={"Authorization": "Bearer " + token},
+            _max_num_tries=1,
+            _max_connection_retries=0,
+            _resend_after_disconnect=False,
+        )
+        async with response:
+            assert response.status == status
+            if status == 200:
+                assert await response.text() == "ready"
+    assert received == gateway.budget.requests == []
+    assert list(gateway.evidence_dir.iterdir()) == []

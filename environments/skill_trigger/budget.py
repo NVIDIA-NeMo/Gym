@@ -64,11 +64,12 @@ class TrialBudget:
         self._settled = asyncio.Event()
         self._settled.set()
 
-    def release(self) -> None:
+    def release(self) -> float:
         """Anchor the deadline to prompt release, never to the first request."""
         if self._released_at is not None or self._closed:
             raise EvidenceError("Prompt release must happen exactly once on an open trial")
         self._released_at = self._clock()
+        return self._released_at
 
     def add_session(self, *, session_id: str, parent_id: str) -> None:
         """Register an adapter-verified child with this same shared allowance."""

@@ -111,15 +111,16 @@ class InferenceGateway:
         self._runner: web.AppRunner | None = None
         self.port: int | None = None
 
-    async def start(self, *, bind_host: str) -> int:
+    async def start(self, *, bind_host: str, port: int = 0) -> int:
         """Listen on an explicitly chosen host; return the allocated port."""
         if self._runner is not None:
             raise EvidenceError("Gateway already started")
         app = web.Application(client_max_size=30_000_000)
+        app.router.add_get("/health", self._health)
         app.router.add_post("/v1/{endpoint:.*}", self._handle)
         self._runner = web.AppRunner(app, access_log=None, shutdown_timeout=2)
         await self._runner.setup()
-        site = web.TCPSite(self._runner, bind_host, 0)
+        site = web.TCPSite(self._runner, bind_host, port)
         try:
             await site.start()
             addresses = self._runner.addresses
@@ -131,6 +132,12 @@ class InferenceGateway:
             await self._runner.cleanup()
             self._runner = None
             raise
+
+    async def _health(self, incoming: web.Request) -> web.Response:
+        """Check container connectivity before release without consuming a model request."""
+        if not secrets.compare_digest(incoming.headers.get("Authorization", ""), "Bearer " + self.token):
+            raise web.HTTPForbidden()
+        return web.Response(text="ready")
 
     async def close(self) -> None:
         """Stop admission, close connections, and wait for evidence writes."""
