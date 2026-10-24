@@ -762,7 +762,7 @@ async def _check_reverify_mode(server_client: "ServerClient", agent_to_rs: Dict[
 
 
 async def _guard_reverify_mode(config: RolloutReverificationConfig) -> Optional[str]:
-    """Check reverify_mode for every RS in the config before reverification starts.
+    """Check configured agent destinations and actual row routes before reverification starts.
 
     Returns a warning string when the user runs full re-verification (not judge-failed-only) and force=True and at least one RS is UNSUPPORTED or UNKNOWN (caller must
     print it and apply the unsafe_ output prefix).
@@ -773,7 +773,17 @@ async def _guard_reverify_mode(config: RolloutReverificationConfig) -> Optional[
         return None
     server_client = setup_server_client()
     agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
-    non_stateless_rs = await _check_reverify_mode(server_client, agent_to_rs)
+    rs_names = set(_get_rs_names(agent_to_rs))
+    # Resolve payloads before output cleanup or cache lookup: a remapped destination can
+    # require refusal or the unsafe_ prefix even when every agent destination is stateless.
+    assert config.rollouts_jsonl_fpath is not None
+    for pair in _yield_inputs_and_rollouts_paired(
+        _resolve_under_cwd_or_install(config.materialized_inputs_jsonl_fpath),
+        _resolve_under_cwd_or_install(config.rollouts_jsonl_fpath),
+        limit=config.limit,
+    ):
+        rs_names.add(_rs_for_row(_build_verify_payload(pair), agent_to_rs, server_client.global_config_dict))
+    non_stateless_rs = await _check_reverify_mode(server_client, {name: name for name in rs_names})
     if not non_stateless_rs:
         return None
     if not config.force:
