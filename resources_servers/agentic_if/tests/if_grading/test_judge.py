@@ -59,7 +59,7 @@ def test_judge_sends_the_calibrated_prompt_and_model_settings():
 
 def test_the_shipped_judge_configuration_keeps_its_identity():
     # Results record this hash; prompts, model settings and votes are all part of it.
-    assert config_hash(load_config()) == "5bf772a4a461"
+    assert config_hash(load_config()) == "5bf772a4a461"  # pragma: allowlist secret
     assert Judge(lambda body: reply(YES)).hash == "5bf772a4a461"
 
 

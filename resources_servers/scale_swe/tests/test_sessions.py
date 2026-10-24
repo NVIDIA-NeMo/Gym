@@ -37,7 +37,7 @@ from resources_servers.swebench.patch_capture import CaptureCommandError, PatchC
 ROW = {"instance_id": "task", "workdir": "/repo", "image_url": "image", "FAIL_TO_PASS": '["tests/test_x.py::test_a"]'}
 EPISODE = EpisodeId(rollout_id="rollout")
 # What `git rev-parse HEAD` prints in the task sandbox.
-BASE_COMMIT = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+BASE_COMMIT = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # pragma: allowlist secret
 RESPONSE = {
     "output": [],
     "id": "response",
