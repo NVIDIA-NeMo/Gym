@@ -210,6 +210,9 @@ def _validate_row(row: Mapping[str, object], spec: RuntimeSpec) -> list[dict]:
     systems = [message for message in messages if message["role"] == "system"]
     if len(systems) > 1:
         raise ValueError("input accepts at most one resolved system message")
+    if any(content_text(message.get("content")) == "" for message in systems):
+        # opencode_agent stages no instructions for an empty one, so OpenCode would keep its own system prompt.
+        raise ValueError("a system message needs text; omit it to keep OpenCode's own system prompt")
     _validate_sources(row, spec)
     return messages
 

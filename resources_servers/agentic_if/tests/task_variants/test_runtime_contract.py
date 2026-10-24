@@ -257,16 +257,14 @@ def test_unsupported_actor_input_is_not_silently_dropped(input):
         runtime.seal_runtime_row(row, spec())
 
 
-def test_omitted_and_empty_system_prompts_are_distinct_valid_inputs():
+def test_an_omitted_system_prompt_is_valid_and_an_empty_one_is_refused():
     row = base_row()
     row["responses_create_params"]["input"].pop(0)
     omitted = runtime.seal_runtime_row(row, runtime.RuntimeSpec(harness="opencode", task_backend="swe"))
     runtime.validate_runtime(omitted)
     row["responses_create_params"]["input"].insert(0, {"role": "system", "content": ""})
-    empty = runtime.seal_runtime_row(row, runtime.RuntimeSpec(harness="opencode", task_backend="swe"))
-    runtime.validate_runtime(empty)
-    assert omitted != empty
-    assert empty["responses_create_params"]["input"][0] == {"role": "system", "content": ""}
+    with pytest.raises(ValueError, match="system message needs text"):
+        runtime.seal_runtime_row(row, runtime.RuntimeSpec(harness="opencode", task_backend="swe"))
 
 
 def planted_continuation():
