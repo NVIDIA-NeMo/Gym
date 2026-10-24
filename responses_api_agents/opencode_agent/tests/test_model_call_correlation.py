@@ -5,12 +5,9 @@ from copy import deepcopy
 
 import pytest
 
-from nemo_gym.base_responses_api_model import (
-    CaptureStore,
-    merge_model_call_capture_into_record,
-    read_model_call_records,
-)
+from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.observability.model_calls import merge_model_call_capture_into_record, read_model_call_records
 from nemo_gym.rollout_collection import _build_trajectory_record
 from nemo_gym.rollout_observability import (
     AgentObservationBundle,
@@ -306,7 +303,7 @@ def test_message_join_failure_preserves_invocation_ownership(tmp_path, parse, mo
         def fail_association(*_args, **_kwargs):
             raise RuntimeError("message association failed")
 
-        monkeypatch.setattr("nemo_gym.base_responses_api_model.join_assistant_message_calls", fail_association)
+        monkeypatch.setattr("nemo_gym.observability.model_calls.join_assistant_message_calls", fail_association)
 
     merge_model_call_capture_into_record(record, [store.root], include_payloads=True)
 

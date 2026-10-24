@@ -47,6 +47,12 @@ class AdmissionClosedError(ControlError):
     code = "admission_closed"
 
 
+class RetireIncompleteError(ControlError):
+    """A forget for a rollout whose retire has not finished freeing it: forgetting it would make it live again."""
+
+    code = "retire_incomplete"
+
+
 class ExportFailedError(ControlError):
     """A participant's export for this checkpoint failed, so the checkpoint can never be committed.
 
@@ -68,6 +74,13 @@ class RolloutIdRequiredError(ControlError):
 
     status_code = 400
     code = "rollout_id_required"
+
+
+class InvalidRolloutIdError(ControlError):
+    """A request whose rollout path prefix is not a valid rollout id and attempt."""
+
+    status_code = 400
+    code = "invalid_rollout_id"
 
 
 class UnauthorizedError(ControlError):

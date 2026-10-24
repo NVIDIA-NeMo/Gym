@@ -69,12 +69,14 @@ litmus_agent_agent:
       datasets:
         - name: train
           type: train
-          jsonl_fpath: resources_servers/litmus_agent/data/train.jsonl
+          jsonl_fpath: resources_servers/litmus_agent/data/litmus-bench/train.jsonl
           source:
             type: huggingface
-            repo_id: nvidia/Nemotron-RL-litmus-bench-v0.1
+            repo_id: nvidia/Nemotron-RL-litmus-bench-v0.2
+            # Public dataset commit, pinned for reproducible downloads.
+            revision: c180425444ebcc6db8dafdb897e51a94927df62a  # pragma: allowlist secret
             artifact_fpath: train.jsonl
-          license: Creative Commons Attribution 4.0 International
+          license: CC-BY-SA-4.0 AND LicenseRef-OpenMDW-1.1
         - name: example
           type: example
           jsonl_fpath: resources_servers/litmus_agent/data/example.jsonl

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 import pytest
 import usersim.engine.external as usersim_external
-from aiohttp import ClientConnectionError, ClientResponseError
+from aiohttp import ClientConnectionError, ClientResponseError, InvalidURL, InvalidUrlRedirectClientError
 from omegaconf import OmegaConf
 from pydantic import ConfigDict
 
@@ -29,14 +29,14 @@ from environment_servers.nemo_user_sim.app import (
     _ParticipantActivationError,
     _to_responses_input_items,
 )
+from environment_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest, UserSimEpisodeResult
 from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.rollout_collection import _episode_record
 from nemo_gym.server_utils import SESSION_ID_KEY, BaseServerConfig, ServerClient
+from nemo_gym.task_materialization import materialize_task
 from resources_servers.nemo_user_sim.app import UserSimResourcesServer, UserSimResourcesServerConfig
 from resources_servers.nemo_user_sim.episode_contracts import (
-    UserSimEpisodeRequest,
-    UserSimEpisodeResult,
     UserSimSimulationResult,
     UserSimTaskInput,
     UserSimVerification,
@@ -115,6 +115,20 @@ def test_episode_result_projects_verification_into_gym_scoring_contract() -> Non
     assert record["verification"]["verifier_data"]["assistant_eval"] == {"axes": {}}
     assert record["verification"]["usersim_result"] is None
     assert record["usersim_result"]["conversation_status"] is True
+
+
+def test_example_rows_materialize_as_episode_requests() -> None:
+    examples_path = Path(__file__).parents[3] / "resources_servers/nemo_user_sim/data/example.jsonl"
+    rows = [orjson.loads(line) for line in examples_path.read_bytes().splitlines() if line]
+
+    assert len(rows) == 5
+    for index, row in enumerate(rows):
+        task = materialize_task(row, taskset="nemo_user_sim:example", task_index=index)
+        request = UserSimEpisodeRequest.model_validate(
+            {"episode_id": {"rollout_id": f"{index}-0", "attempt": 0}, "task": task}
+        )
+        assert request.task.task_id == TaskId(taskset="nemo_user_sim:example", task_id=row["task_id"])
+        assert request.task.task_input.resolved_row == row["resolved_row"]
 
 
 def test_assistant_tool_calls_and_results_convert_to_responses_items() -> None:
@@ -790,6 +804,8 @@ async def test_committed_activation_fixtures_round_trip_through_real_bridge(
     assert result.response["reasoning_content"]
     assert len(bridge.invocations) == 1
     assert bridge.invocations[0].role == "assistant"
+    # With checkpointing on, the agent refuses a session activation whose path does not name its attempt.
+    assert client.calls[0][1] == f"/ng-rollout/{request.episode_id.capture_key}/v1/responses"
     sent_tools = client.calls[0][2]["json"].tools
     if probe_type == "tool_calling":
         assert [tool["name"] for tool in sent_tools] == ["get_weather"]
@@ -959,19 +975,36 @@ async def test_non_retryable_assistant_response_failure_is_verified_as_reward_ze
 
 
 @pytest.mark.asyncio
-async def test_retryable_assistant_transport_failure_skips_verification(
+@pytest.mark.parametrize(
+    ("error", "terminal"),
+    [
+        (ClientConnectionError("assistant disconnected"), False),
+        (InvalidURL("http://"), True),
+        (InvalidUrlRedirectClientError("http://"), True),
+    ],
+)
+async def test_assistant_transport_failure_skips_verification(
     monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    terminal: bool,
 ) -> None:
     server, client = _lifecycle_server()
     client.responses = [
         *_seeded_participant_responses(),
         _Response({}),
         _Response({}),
+        _Response(
+            {
+                "reward": 0.0,
+                "mask_sample": False,
+                "reward_components": {"assistant_quality": 0.0},
+                "scenario_completed": False,
+            }
+        ),
         _Response({}),
     ]
 
     async def fail_assistant(*_args: Any) -> dict[str, Any]:
-        error = ClientConnectionError("assistant disconnected")
         raise _ParticipantActivationError("assistant_model", error) from error
 
     monkeypatch.setattr(server, "_run_usersim", fail_assistant)
@@ -980,7 +1013,8 @@ async def test_retryable_assistant_transport_failure_skips_verification(
 
     assert response.failure is not None
     assert response.failure.stage == "agent"
-    assert response.failure.terminal is False
+    assert response.failure.terminal is terminal
+    assert response.result is None
     assert "/verify" not in [path for _, path, _ in client.calls]
 
 
@@ -995,6 +1029,26 @@ def test_wrapped_participant_http_infrastructure_failures_are_retryable(status: 
 @pytest.mark.parametrize("status", [404, 409])
 def test_non_participant_http_contract_failures_are_not_retryable(status: int) -> None:
     assert _is_retryable_dependency_error(ClientResponseError(MagicMock(), (), status=status)) is False
+
+
+def test_an_agent_seed_refusal_fails_with_the_agents_reason() -> None:
+    refusal = ClientResponseError(MagicMock(), (), status=422, message="Unprocessable Content")
+    refusal.response_content = b'{"detail":"Simple Agent does not support sandbox access"}'
+
+    failure = UserSimEnvironmentServer._failure("agent", refusal).failure
+
+    assert failure.terminal is True
+    assert "Simple Agent does not support sandbox access" in failure.failure_reason
+
+
+def test_a_participant_turn_refusal_fails_with_the_agents_reason() -> None:
+    refusal = ClientResponseError(MagicMock(), (), status=422, message="Unprocessable Content")
+    refusal.response_content = b'{"detail":"user_model agent cannot serve this tool_choice"}'
+
+    failure = UserSimEnvironmentServer._failure("agent", _ParticipantActivationError("user_model", refusal)).failure
+
+    assert failure.terminal is True
+    assert "user_model agent cannot serve this tool_choice" in failure.failure_reason
 
 
 def test_wrapped_assistant_invalid_response_is_not_retryable() -> None:
@@ -1024,3 +1078,11 @@ def test_wrapped_assistant_invalid_response_is_not_retryable() -> None:
         _is_retryable_dependency_error(_ParticipantActivationError("assistant_model", TimeoutError("timed out")))
         is True
     )
+
+
+@pytest.mark.parametrize("error_type", [InvalidURL, InvalidUrlRedirectClientError])
+def test_invalid_assistant_url_is_terminal_and_not_scorable(error_type: type[InvalidURL]) -> None:
+    error = _ParticipantActivationError("assistant_model", error_type("http://"))
+
+    assert _is_retryable_dependency_error(error) is False
+    assert _is_scorable_assistant_activation_error(error) is False

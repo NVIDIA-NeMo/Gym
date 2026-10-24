@@ -42,14 +42,36 @@ _CLEANUP_RECEIPT = TypeAdapter(CleanupReceipt)
 LOG = logging.getLogger(__name__)
 
 
+class HarnessTerminationError(RuntimeError):
+    """A final supervisor receipt could not confirm the harness stopped.
+
+    The sandbox owner must tear down the sandbox. Re-reading this terminal
+    receipt cannot recover execution, but a borrowed client can release it.
+    """
+
+    def __init__(self, *, harness: str, receipt: CleanupReceipt) -> None:
+        self.receipt: CleanupReceipt = receipt
+        super().__init__(f"{harness} harness termination was not confirmed: {receipt['error']}")
+
+
+def _raise_terminal_failure(payload: object, *, harness: str) -> None:
+    if not isinstance(payload, dict) or payload.get("cleanup_confirmed") is not False:
+        return
+    try:
+        receipt = _CLEANUP_RECEIPT.validate_python(payload, strict=True, extra="forbid")
+    except ValidationError:
+        return  # Malformed evidence remains unknown and retryable.
+    raise HarnessTerminationError(harness=harness, receipt=receipt)
+
+
 def parse_cleanup_receipt(payload: object) -> CleanupReceipt:
     """Require positive cleanup evidence, tolerating malformed optional diagnostics."""
     if not isinstance(payload, dict) or payload.get("cleanup_confirmed") is not True:
-        raise ValueError("Sandbox cleanup was not confirmed")
+        raise ValueError("Harness termination was not confirmed")
     try:
         return _CLEANUP_RECEIPT.validate_python(payload, strict=True, extra="forbid")
     except ValidationError:
-        LOG.warning("Cleanup was confirmed, but its diagnostic fields did not match the receipt schema")
+        LOG.warning("Harness termination was confirmed, but its diagnostic fields did not match the receipt schema")
     return {
         "cleanup_confirmed": True,
         "return_code": payload.get("return_code") if type(payload.get("return_code")) is int else None,
@@ -61,8 +83,8 @@ def parse_cleanup_receipt(payload: object) -> CleanupReceipt:
 def supervision_timeouts(*, timeout: float, close_timeout: float) -> tuple[float, float]:
     """Return the per-cleanup-phase and provider execution deadlines.
 
-    Divide the close budget across TERM grace, harness process reaping, and
-    descendant draining. The provider deadline reserves all three phases after
+    Divide the close budget across TERM grace, direct-process and group reaping.
+    The provider deadline reserves all phases after
     the harness timeout, plus 30 seconds for startup, polling, and receipt I/O.
     """
     cleanup_timeout = close_timeout / CLEANUP_PHASE_COUNT
@@ -82,6 +104,7 @@ def supervised_launch_command(
     The adapter must install or select the interpreter explicitly. Check that it
     can load the supervisor before claiming a launch: a failed bootstrap cannot
     write a cleanup receipt. Supervisor and harness diagnostics share output.log.
+    The supervisor stops the harness group; the sandbox owner stops escaped services.
     """
     supervisor = quote(f"{session_dir}/{SUPERVISOR_FILE}")
     claim_path = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
@@ -111,6 +134,7 @@ async def stop_and_confirm_cleanup(
         receipt = json.loads(await read_text(sandbox, path=receipt_path))
     except Exception:
         receipt = {}
+    _raise_terminal_failure(receipt, harness=harness)
     if not isinstance(receipt, dict) or receipt.get("cleanup_confirmed") is not True:
         pid_path = quote(f"{session_dir}/{SUPERVISOR_PID_FILE}")
         stop_path = quote(f"{session_dir}/{STOP_REQUEST_FILE}")
@@ -136,7 +160,8 @@ async def stop_and_confirm_cleanup(
             raise RuntimeError(f"{harness} launch outcome is unknown; cannot confirm termination") from error
         if not isinstance(receipt, dict) or receipt.get("cleanup_confirmed") is not True:
             detail = receipt.get("error") if isinstance(receipt, dict) else "cleanup receipt is not a JSON object"
-            raise RuntimeError(f"{harness} sandbox cleanup was not confirmed: {detail}")
+            _raise_terminal_failure(receipt, harness=harness)
+            raise RuntimeError(f"{harness} harness termination was not confirmed: {detail}")
     return parse_cleanup_receipt(receipt)
 
 
