@@ -33,6 +33,14 @@ Set `SWE_ATLAS_HARNESS_PYTHON` to the Python command inside the sandbox if it di
 The bundle must run in the upstream task image, including Alpine/musl images. Keep task assets and credentials
 out of this archive. Runtime installation belongs to the harness, not this resource server.
 
+The upstream images are x86_64. Eight use glibc 2.31 or newer, and three (k6, MinIO, and SFTPGo) use Alpine/musl.
+A Python 3.13 runtime that ships its own glibc loader and libraries, with ELF interpreters and rpaths pointed at them,
+ran unchanged on all 11 images. Keep `SWE_ATLAS_HARNESS_PYTHON` to a command that only extends `PATH`, for example
+`env PATH=/work/gym_mount/bin:$PATH /work/gym_mount/runtime/python/bin/python3.13`. Setting `PYTHONPATH`,
+`PYTHONHOME`, or `LD_LIBRARY_PATH` there leaks into the agent's shell commands. `SWE_ATLAS_HARNESS_BUNDLE` may also
+be an `http://` or `https://` URL that the sandbox fetches with `curl`. Task sandboxes reach only the policy-model host,
+so serve the bundle from that host.
+
 Configure an OpenAI-compatible policy endpoint with the usual Gym values
 `policy_base_url`, `policy_model_name`, and `policy_api_key` (an unused placeholder for an unauthenticated server).
 Set `SWE_ATLAS_JUDGE_BASE_URL` and `SWE_ATLAS_JUDGE_MODEL` for the rubric judge. Set
@@ -50,6 +58,14 @@ set `+policy_model.responses_api_models.vllm_model.port=9000`; the sandbox URL f
 The default configuration routes the harness through the Gym model server,
 which proxies the configured policy endpoint. The judge endpoint must be reachable from the verifier sandbox.
 
+The task sandbox must reach `SWE_ATLAS_GYM_MODEL_HOST`. A workstation behind a VPN usually is not reachable. Run Gym
+on a reachable host, or forward a reachable port to the model server and set
+`++policy_model.responses_api_models.vllm_model.host=127.0.0.1` so it binds locally.
+
+For a full run, raise `swe_atlas_qa_agent.responses_api_agents.harness_agent.concurrency` (the config default is 1) and
+set `++route_failures_to_sidecar=true`. Otherwise one failed `/run` ends the whole collection. Failed rollouts are then
+written to `rollouts_failures.jsonl`. Count them as zero and report the score over all dispatched rollouts.
+
 The default harness is OpenCode. Select another built-in harness and its corresponding `agent_kwargs`, for example:
 
 ```yaml
@@ -66,6 +82,26 @@ swe_atlas_qa_agent:
 Use the same tasks and grader when comparing harnesses. Their CLI commands, model configuration, dependencies,
 and libc compatibility remain harness-specific.
 
+These settings beyond `agent` were used to run each harness on three tasks, including Alpine k6, with GLM-5.2:
+
+| Harness | Settings |
+|---|---|
+| `claude_code` | `max_turns: null`, `disallowed_tools: WebSearch,WebFetch` |
+| `cline` | `command: cline`, `workspace_root` outside `/app`, `cline_version` matching the bundled CLI |
+| `codex` | `codex_version` (required) |
+| `kilocode` | `command: kilo`, `context_window: 200000` (the 32768 default overflowed), and `responses_api_agents/opencode_agent/` in the bundle |
+| `mini_swe` | a provider-prefixed `model` such as `openai/<name>`, `fabric_config: {runtime: {max_turns: 500}}`, `LITELLM_LOCAL_MODEL_COST_MAP=True` and `MSWEA_COST_TRACKING=ignore_errors` in the runner environment, a LiteLLM release compatible with Gym's `mcp<2` pin, and NeMo Fabric's data files under the interpreter prefix |
+| `openclaw` | `command: openclaw`, `openclaw_version` (required), `node_bin_dir` |
+| `opencode` | `workspace_root` outside `/app`, `opencode_config.permission.external_directory` allowing `/logs/*` |
+| `pi` | `command: pi` |
+| `prime` | `thinking: high` for models that reject the default effort |
+| `simple_strands` | `workspace_root` outside `/app` |
+| `terminus_2` | `tmux` and `script` in the bundle, linked onto the login-shell `PATH` with `setup_commands` |
+
+`hermes` currently rejects the request `metadata` that every row carries. `deepagents` writes `/logs/agent/answer.txt`
+inside its virtual filesystem rooted at `/app`, so the answer is not collected. Both need adapter fixes before they can
+score this benchmark.
+
 ## Scoring and validation
 
 `reward` is the upstream binary strict-pass result. `agg_score` is the fraction of scored rubrics passed.
@@ -73,6 +109,12 @@ The upstream evaluator excludes unscored rubrics when computing strict pass. Gym
 `num_scored`, `num_unscored`, and `all_rubrics_scored` so incomplete judging is visible.
 Missing or empty agent answers receive zero. Infrastructure and malformed-verifier failures set
 `mask_sample=true` and `evaluation_completed=false`.
+
+With `mini_swe` (NeMo Fabric's mini-SWE-agent adapter), GLM-5.2 as the policy, and Claude Opus 4.5 as the judge,
+all 124 tasks x 3 rollouts scored 189/372 = 50.8%, counting the 8 failed rollouts as zero. The
+[public leaderboard](https://labs.scale.com/leaderboard/sweatlas-qna) reports 48.12 +/- 5.07 for GLM 5.2 with
+mini-SWE-agent. Five failures were mini-SWE-agent exits before submission. The Fabric adapter does not truncate long
+command output, and some contexts exceeded 1M tokens. Two were sandbox OOM kills and one was another adapter error.
 The collected answer is retained in the rollout so the grader's exact input can be inspected.
 
 ```bash
