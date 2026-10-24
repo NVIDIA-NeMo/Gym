@@ -606,6 +606,30 @@ async def test_histogram_only_scrapes_publish_replica_and_aggregate_samples(monk
     assert not any("_created" in key for key in published)
 
 
+def test_dbo_metrics_preserve_engine_outcome_and_microbatch_labels():
+    collector = InferenceMetricsCollector(config())
+    registry = CollectorRegistry()
+    steps = Counter("vllm:dbo_steps_total", "Steps", ["model_name", "engine", "outcome"], registry=registry)
+    sizes = Histogram(
+        "vllm:dbo_microbatch_tokens", "Tokens", ["model_name", "engine", "microbatch"], registry=registry
+    )
+    steps.labels("model", "0", "executed").inc(2)
+    steps.labels("model", "1", "below_threshold").inc(3)
+    sizes.labels("model", "0", "0").observe(100)
+    sizes.labels("model", "1", "0").observe(200)
+    first = collector.parse("prefill0", generate_latest(registry).decode(), 10)
+    prefix = "vllm/prefill0/dbo_"
+    assert first[prefix + "steps_total/engine/0/outcome/executed"] == 2
+    assert first[prefix + "steps_total/engine/1/outcome/below_threshold"] == 3
+    assert first[prefix + "microbatch_tokens_sum/engine/0/microbatch/0"] == 100
+    assert first[prefix + "microbatch_tokens_sum/engine/1/microbatch/0"] == 200
+    assert first[prefix + "microbatch_tokens_bucket/engine/0/le/+Inf/microbatch/0"] == 1
+    steps.labels("model", "0", "executed").inc(4)
+    second = collector.parse("prefill0", generate_latest(registry).decode(), 12)
+    assert second[prefix + "steps_per_second/engine/0/outcome/executed"] == 2
+    assert second[prefix + "steps_per_second/engine/1/outcome/below_threshold"] == 0
+
+
 def test_derived_cache_and_source_prompt_metrics():
     collector = InferenceMetricsCollector(config())
 

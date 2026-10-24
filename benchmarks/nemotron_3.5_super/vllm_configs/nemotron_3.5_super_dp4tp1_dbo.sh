@@ -3,6 +3,9 @@
 NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-5}"
 # Use 0 for a matching eager control run before comparing throughput.
 ENABLE_PREFILL_DBO="${ENABLE_PREFILL_DBO:-1}"
+# Collect per-engine DBO execution/fallback and microbatch metrics on prefill.
+# Enable for both the DBO run and its control; requires the updated Rust frontend.
+ENABLE_DBO_METRICS="${ENABLE_DBO_METRICS:-0}"
 
 # Optional detailed Nsight Systems capture on PD prefill nodes only.
 # PROFILE_PREFILL=1 auto-installs nsys if needed in root Ubuntu containers.
@@ -97,6 +100,9 @@ VLLM_PREFILL_ARGS=(
 )
 if [[ "${ENABLE_PREFILL_DBO}" == "1" ]]; then
     VLLM_PREFILL_ARGS+=(--enable-dbo)
+fi
+if [[ "${ENABLE_DBO_METRICS}" == "1" ]]; then
+    VLLM_PREFILL_ARGS+=(--enable-dbo-metrics)
 fi
 # @bxyu-nvidia: We set "enable_lookup": false for the Mooncake store connector because the prefill worker handles the prefix cache lookup and decode just needs to receive the transferred kv cache.
 VLLM_DECODE_ARGS=(

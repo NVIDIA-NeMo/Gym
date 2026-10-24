@@ -216,6 +216,7 @@ class InferenceMetricsCollector:
                     and (
                         label != "engine"
                         or name == "cache_inventory"
+                        or name.startswith("dbo_")
                         or name.removesuffix("_total") in PREFILL_ENGINE_COUNTERS
                     )
                     # Role is already captured by replica names (prefill0/decode0).
