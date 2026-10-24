@@ -105,6 +105,10 @@ async def test_real_runner_preserves_model_history_and_tool_observations(
         assert [r["status"] for r in records[1:]] == ["completed", "timeout", "incomplete"]
         assert all(r["duration_ms"] is None for r in records[1:])
         assert [t["step_count"] for t in extra["ng_trajectory"]["turns"]] == [1, 2, 2]
-        assert len(extra["ng_trajectory"]["gaps"]) == (3 if response_id else 6)
+        assert records[1]["execution_timing"]["duration_ms"] >= 0
+        assert records[2]["execution_timing"]["duration_ms"] >= 1000
+        assert records[1]["execution_timing"]["execution_id"] == "call_0"
+        assert records[3]["execution_timing"] is None  # Native submit has no saved result.
+        assert len(extra["ng_trajectory"]["gaps"]) == (1 if response_id else 4)
     else:
         assert "ng_agent_observations" not in extra and "ng_trajectory" not in extra

@@ -24,11 +24,12 @@ import shlex
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable, Literal, NoReturn
 from urllib.parse import urlsplit
 
+from nemo_gym.execution_timing import ExecutionTiming
 from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_attribution, resolve_run_id
 from nemo_gym.sandbox.providers.base import (
     ORPHAN_REAP_TIMEOUT_S,
@@ -50,6 +51,51 @@ from nemo_gym.sandbox.utils import rewrite_image
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.gym_metrics import record_sandbox_create_retry
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+
+
+def _execution_timing(
+    handle: SandboxHandle, execution_id: str | None, status: Any, complete: Any = None
+) -> ExecutionTiming:
+    """Read execd clocks without substituting dispatch, poll, or log-read time."""
+
+    def timestamp(value: Any) -> float | None:
+        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+            return None
+        try:
+            epoch = value.timestamp()
+            return epoch if math.isfinite(epoch) else None
+        except (ValueError, OverflowError, OSError):
+            return None
+
+    start = timestamp(getattr(status, "started_at", None))
+    end = timestamp(getattr(status, "finished_at", None))
+    if start is not None and end is not None and end < start:
+        # A backwards wall clock invalidates the interval, not a separately
+        # measured duration or the command's outcome.
+        start = end = None
+    measured = getattr(complete, "execution_time_in_millis", None)
+    duration = None
+    duration_source = None
+    if (
+        isinstance(measured, (int, float))
+        and not isinstance(measured, bool)
+        and math.isfinite(measured)
+        and measured >= 0
+    ):
+        duration = float(measured)
+        duration_source = "opensandbox.execd.execution_complete"
+    elif start is not None and end is not None:
+        duration = (end - start) * 1000
+        duration_source = "opensandbox.execd.command_status.wall_clock_delta"
+    return ExecutionTiming(
+        started_at=start,
+        completed_at=end,
+        duration_ms=duration,
+        clock_domain=f"opensandbox:{handle.sandbox_id}:unix",
+        timing_source="opensandbox.execd.command_status",
+        duration_source=duration_source,
+        execution_id=execution_id,
+    )
 
 
 LOGGER = logging.getLogger(__name__)
@@ -2072,7 +2118,26 @@ class OpenSandboxProvider:
                 stderr_parts.append(note)
             stderr = "\n".join(stderr_parts) or None
 
-            return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
+            execution_id = getattr(execution, "id", None)
+            status = None
+            if execution_id and callable(getattr(handle.raw.commands, "get_command_status", None)):
+                try:
+                    status = await self._await_sdk_call(
+                        handle.raw.commands.get_command_status(execution_id),
+                        operation="command timing status",
+                        sandbox_id=handle.sandbox_id,
+                        timeout_s=min(sdk_timeout_s or 10.0, 10.0),
+                    )
+                except Exception:
+                    # Optional telemetry cannot change the completed command's outcome.
+                    LOGGER.debug("Command timing status unavailable", exc_info=True)
+            return SandboxExecResult(
+                stdout=stdout,
+                stderr=stderr,
+                return_code=return_code,
+                error_type=error_type,
+                execution_timing=_execution_timing(handle, execution_id, status, getattr(execution, "complete", None)),
+            )
 
         # Backstop for wedges the inner deadlines miss. Background exec polls, so
         # sdk_timeout_s bounds a single request rather than the command: without
@@ -2265,7 +2330,13 @@ class OpenSandboxProvider:
         else:
             return_code = 0
 
-        return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
+        return SandboxExecResult(
+            stdout=stdout,
+            stderr=stderr,
+            return_code=return_code,
+            error_type=error_type,
+            execution_timing=_execution_timing(handle, execution_id, status),
+        )
 
     async def exec(
         self,

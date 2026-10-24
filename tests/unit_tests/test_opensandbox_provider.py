@@ -1149,7 +1149,9 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
         timeout_s=2,
         user=1000,
     )
-    assert result == opensandbox_provider.SandboxExecResult(stdout="stdout", stderr=None, return_code=0)
+    assert (result.stdout, result.stderr, result.return_code, result.error_type) == ("stdout", None, 0, None)
+    assert result.duration_ms == 1
+    assert result.execution_timing.started_at is None
     command, opts = raw.commands.calls[0]
     assert command == "echo hello"
     assert opts.kwargs == {
@@ -1280,9 +1282,9 @@ async def test_exec_background_polls_status_and_logs(monkeypatch: pytest.MonkeyP
 
     result = await provider.exec(handle, "make build", cwd="/repo", timeout_s=30)
 
-    assert result == opensandbox_provider.SandboxExecResult(
-        stdout="combined output", stderr=None, return_code=7, error_type=None
-    )
+    assert (result.stdout, result.stderr, result.return_code, result.error_type) == ("combined output", None, 7, None)
+    assert result.duration_ms is None
+    assert result.execution_timing.execution_id == "exec-42"
     # Submitted once with background=True; polled twice (running -> finished); read logs once.
     assert len(raw.commands.run_calls) == 1
     assert raw.commands.run_calls[0][1].kwargs["background"] is True
@@ -1349,12 +1351,13 @@ async def test_exec_background_keeps_exit_status_when_the_command_deleted_its_ou
         result = await provider.exec(handle, "/tests/test.sh", timeout_s=30)
         # The exit status stands, and the empty output says why instead of looking like silence.
         note = opensandbox_provider.DELETED_OUTPUT_NOTE
-        assert result == opensandbox_provider.SandboxExecResult(
-            stdout=None,
-            stderr=f"{status_error}\n{note}" if status_error else note,
-            return_code=3,
-            error_type=None,
+        assert (result.stdout, result.stderr, result.return_code, result.error_type) == (
+            None,
+            f"{status_error}\n{note}" if status_error else note,
+            3,
+            None,
         )
+        assert result.execution_timing.execution_id == "exec-42"
     else:
         with pytest.raises(SandboxApiException, match="combined output file|HTTP 500"):
             await provider.exec(handle, "/tests/test.sh", timeout_s=30)
@@ -1617,7 +1620,9 @@ async def test_exec_background_without_timeout_skips_hard_cap(
 
     result = await provider.exec(handle, "echo hi")
 
-    assert result == opensandbox_provider.SandboxExecResult(stdout="ok", stderr=None, return_code=0, error_type=None)
+    assert (result.stdout, result.stderr, result.return_code, result.error_type) == ("ok", None, 0, None)
+    assert result.duration_ms is None
+    assert result.execution_timing.execution_id == "exec-uncapped"
     if request_timeout_s is not None:
         # The per-poll timeout must not become the whole command's hard cap.
         assert 2.0 * request_timeout_s + 30.0 not in wait_for_timeouts
