@@ -105,7 +105,7 @@ An agent can use both simultaneously — its own tools and the environment's too
 
 Gym servers communicate over async HTTP (aiohttp) with:
 - **Session cookies** propagated through the call stack for stateful environments
-- **Retry logic** with exponential backoff (3 attempts)
+- **Retries** with a fixed 0.5-second wait when a request fails with an error (an HTTP error status is returned, not retried). Calls between Gym servers retry until they succeed. Calls to other endpoints, such as a model provider, stop after 3 attempts, except on connection errors, which retry until they succeed.
 - **Connection pooling** via a singleton aiohttp client for high-concurrency workloads
 
 Sandbox execution and file transfer are not Gym HTTP calls. They use the configured sandbox provider's transport, such as HTTP, gRPC, a Docker CLI, or a local subprocess.
