@@ -14,10 +14,12 @@
 # limitations under the License.
 
 import asyncio
+import importlib.util
 import json
 import os
 import shlex
 import sys
+from functools import cache
 from glob import glob
 from pathlib import Path
 from shutil import rmtree
@@ -33,7 +35,8 @@ import rich
 import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, ListConfig, OmegaConf
-from pydantic import Field
+from pydantic import BaseModel, Field, ValidationError
+from rich.markup import escape
 from rich.table import Table
 from tqdm.auto import tqdm
 
@@ -47,7 +50,7 @@ from nemo_gym.cli.utils import (
     print_rich_table,
     render_component_inspection,
 )
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError, EnvironmentServerConfigError
 from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
 from nemo_gym.environment.onboarding import (
     EnvironmentOnboardingError,
@@ -60,6 +63,7 @@ from nemo_gym.environment.validation import EnvironmentValidationReport, validat
 from nemo_gym.global_config import (
     COMPONENT_NAME_KEY_NAME,
     DRY_RUN_KEY_NAME,
+    ENVIRONMENT_SERVER_TYPE_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
@@ -88,6 +92,7 @@ from nemo_gym.server_utils import (
     ServerInstanceDisplayConfig,
     ServerStatus,
     entrypoint_ray_enabled,
+    entrypoint_server_class_names,
     initialize_ray,
     ray_is_installed,
 )
@@ -1512,6 +1517,75 @@ def init_resources_server():  # pragma: no cover
     scaffold_resources_server(directory=dirpath, checkout_root=checkout_root)
 
 
+@cache
+def _entrypoint_config_class(entrypoint_fpath: Path, module_name: str) -> type[BaseModel]:
+    """The config class of the server an entrypoint runs, the one its launch validates its block against."""
+    spec = importlib.util.spec_from_file_location(module_name, entrypoint_fpath)
+    if spec is None or spec.loader is None:  # pragma: no cover - importlib internals
+        raise ImportError(f"no import spec for {entrypoint_fpath}")
+    module = importlib.util.module_from_spec(spec)
+    # Registered before exec, so annotations that pydantic resolves through sys.modules are found.
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
+    config_classes = {
+        server_class.model_fields["config"].annotation
+        for class_name in entrypoint_server_class_names(entrypoint_fpath)
+        if isinstance(server_class := getattr(module, class_name, None), type)
+        and issubclass(server_class, BaseModel)
+        and "config" in server_class.model_fields
+    }
+    if len(config_classes) != 1:
+        raise LookupError("it does not call run_webserver() on exactly one server class with a config")
+    return config_classes.pop()
+
+
+def _check_environment_server_configs(global_config_dict: DictConfig) -> List[str]:
+    """Validate each Environment Server block against its server's config class without starting it.
+
+    `gym env start` applies that class only when the server launches, after the other servers are up. Environment
+    Servers ship with Gym and need few packages of their own, so this process imports their entrypoints. A server
+    whose entrypoint does not import here is left to its launch: the returned warnings name each one.
+
+    Raises EnvironmentServerConfigError listing every invalid field, by its path in the merged config.
+    """
+    errors: List[str] = []
+    unchecked: List[str] = []
+    for server in _configured_servers(global_config_dict):
+        if server.server_type != ENVIRONMENT_SERVER_TYPE_KEY_NAME:
+            continue
+        source = f"{server.server_type}/{server.name}/{server.entrypoint_fpath}"
+        module_name = ".".join(
+            ["nemo_gym_environment_server_entrypoint", server.name, *server.entrypoint_fpath.with_suffix("").parts]
+        )
+        try:
+            config_class = _entrypoint_config_class(server.dir_path / server.entrypoint_fpath, module_name)
+        except Exception as error:  # Its own venv may have what this one lacks.
+            unchecked.append(
+                f"Could not check Environment Server '{server.top_level_path}' before launch, so `gym env start` "
+                f"checks its config when it launches. Loading {source} here failed: {type(error).__name__}: {error}"
+            )
+            continue
+        server_config = OmegaConf.to_container(server.config, resolve=True) | {"name": server.top_level_path}
+        try:
+            config_class.model_validate(server_config)
+        except ValidationError as error:
+            block_path = f"{server.top_level_path}.{server.server_type}.{server.name}"
+            errors.append(f"'{server.top_level_path}' ({source}) does not match {config_class.__name__}:")
+            errors.extend(
+                f"  {'.'.join([block_path, *map(str, detail['loc'])])}: {detail['msg']}" for detail in error.errors()
+            )
+    if errors:
+        raise EnvironmentServerConfigError(
+            "Environment Server config is invalid, so `gym env start` would fail when the server launches.\n"
+            + "\n".join(errors)
+        )
+    return unchecked
+
+
 @exit_cleanly_on_config_error
 def dump_config():  # pragma: no cover
     """
@@ -1533,6 +1607,14 @@ def dump_config():  # pragma: no cover
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
     print(OmegaConf.to_yaml(global_config_dict, resolve=True))
+
+    # The config prints either way, since it is what you debug a failing config with.
+    try:
+        unchecked = _check_environment_server_configs(global_config_dict)
+    except EnvironmentServerConfigError as error:
+        unchecked = [str(error)]
+    for warning in unchecked:
+        rich.print(f"[yellow]Warning:[/yellow] {escape(warning)}", file=sys.stderr)
 
 
 class ManifestCommandConfig(BaseNeMoGymCLIConfig):
@@ -1627,6 +1709,8 @@ def validate() -> None:
         )
 
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+    for warning in _check_environment_server_configs(global_config_dict):
+        rich.print(f"[yellow]Warning:[/yellow] {escape(warning)}", file=sys.stderr)
     if incomplete_config_error is not None:
         rich.print(
             "[yellow]Warning:[/yellow] this config does not define model server configuration "

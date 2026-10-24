@@ -549,6 +549,8 @@ Resolve the configs, flags, and overrides into a final merged config and print i
 
 Unlike `gym env validate`, `resolve` substitutes no dummy model, so a model config's `policy_*` values must be supplied for its interpolations to resolve.
 
+When an environment server block doesn't match its server's config class, `resolve` still prints the config and lists the fields to fix as a warning on stderr.
+
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
@@ -567,7 +569,7 @@ gym env resolve \
 
 ### `gym env validate`
 
-Validate a manifest-backed workload or legacy config without starting Ray or server subprocesses. Manifest validation resolves the Gym config offline, checks composition mirrors and datasets, and reports the resolved components. Legacy validation retains the existing config pre-flight behavior. Exits `0` when valid, or `1` with a clean message when not.
+Validate a manifest-backed workload or legacy config without starting Ray or server subprocesses. Manifest validation resolves the Gym config offline, checks composition mirrors and datasets, and reports the resolved components. Legacy validation retains the existing config pre-flight behavior, and also checks each environment server block against the config class of the server it runs, which `gym env start` otherwise applies only when that server launches. Exits `0` when valid, or `1` with a clean message when not.
 
 By default, values a run needs but the config leaves undefined (such as `policy_base_url` from `env.yaml`) are filled with placeholders so the rest can still be checked, and reported as a warning. Pass `--strict` to fail on them instead.
 
