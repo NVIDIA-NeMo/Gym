@@ -1,0 +1,101 @@
+---
+title: "TALES Expert Review Package"
+description: "Rubric, trajectory sampling plan, and anomaly triggers for expert review of the TALES environment"
+position: 4
+---
+
+# TALES Expert Review Package
+
+Manual review by a domain expert is required before TALES is trusted
+(`verified: true`). This package makes that review targeted and cheap instead
+of exhaustive: a short rubric, a ~10-trajectory stratified sample, and a set
+of anomaly triggers that always get eyes. Trajectory placeholders fill in
+after the deferred baseline sweep (see the
+[onboarding report](/main/environment-reports/tales-onboarding-report)).
+
+## Review rubric (per trajectory, yes/no + note)
+
+**A. Does the reward reflect genuine game progress?** Read the *right* field
+per family — until the metric server fix lands: `info["score"]` for
+textworld/jericho/alfworld, `info["total_score"]` for scienceworld and
+textworld_express (twx is on a native 0–1 scale). Never judge from the
+summed rollout `reward` — for jericho it is inflated by construction.
+Cross-family raw comparisons are a trap: always compare `score/max_score`
+fractions.
+
+**B. Is failure attributable to the model, not the harness?** The whole model
+message is passed verbatim as the game command (`app.py:113`) — prose, JSON,
+or multi-line output getting rejected is harness-attributable. Episodes ending
+with `truncated=True` at the step cap ran out of turns rather than failing.
+HTTP 400s, Java py4j gateway failures (twx/scienceworld), or empty
+observations are harness failures — exclude, don't count against the model.
+
+**C. Is the observation text intact and readable?** Coherent game text, not a
+stack trace, raw dict, or truncated blob.
+
+**D. Does the environment state actually change in response to actions?**
+Successive observations differ; `info["moves"]` increments.
+
+**E. Is the task winnable under the configured step cap?** At the old
+25-step default most families are unwinnable by construction — a "fail" there
+is a cap artifact, not a capability signal. Protocol runs use 100.
+
+**F. Any oracle leakage visible to the model?** The stock agent feeds the
+model only the observation, so `walkthrough`/`expert_plan` fields in `info`
+contaminate artifacts and custom harnesses, not the stock run. Confirm which
+harness produced the trajectory before calling a high score leak-tainted.
+
+## Sampling plan (~10 trajectories)
+
+Two per family, mixing pass/fail, with mandatory extremes:
+
+| Family | Mandatory extreme |
+|---|---|
+| textworld | a difficulty-10 episode |
+| textworld_express | a (presumed-saturated) SimonSays variant |
+| alfworld | a `moves=0` or binary-0 episode |
+| scienceworld | a negative-score (`lost=True`) episode |
+| jericho | a hard-tail classic (e.g. zork1, anchor) — expected-hard, see triggers |
+
+**Viewing trajectories**: `tools/rollout_viewer` does not exist on `main`
+(it lives on the unmerged branch `ffrujeri/rollout-viewer`). The primary path
+needs no viewer — read straight from the rollouts JSONL: top-level `reward`,
+`terminated`, `truncated`, `info`, `_ng_task_index`, `_ng_rollout_index`;
+model turns in `response.output[]`; terminal state in
+`info.{score,total_score,max_score,won,lost,moves,step_count}`. Slicing keys
+(family, tier, contamination) ride in `responses_create_params.metadata` on
+every row.
+
+## Anomaly triggers (100% expert review, never sampled)
+
+1. **Large negative rewards** (≤−50) and scienceworld `lost=True` with
+   negative score — real terminal penalty or spurious env/parse crash?
+   (Known fixture: a `reward=-100` scienceworld episode in the example
+   rollouts.)
+2. **Strongest-reference-model floors** — broken-vs-hard adjudication. A
+   jericho floor is *expected-hard* (best published models score ≤13.4/100
+   there); call it broken only on a rubric B/C/D defect (stack trace, empty
+   obs, state never changes, `moves=0`), not on a mere zero.
+3. **High invalid-action rate** (>50% rejected steps). Per-family reject
+   signatures: scienceworld "No known action", textworld "not a verb",
+   textworld_express "not sure what", alfworld "Nothing happens", jericho
+   "That's not a verb I recognise".
+4. **`moves=0` across a whole episode** (dead env or parser mismatch — known
+   fixture: an alfworld episode with `moves=0` over 25 steps).
+5. **Zero-variance-at-zero task groups** across repeats where `moves` never
+   advances — likely broken, not hard.
+6. **Jericho paper-beating guard**: any jericho score that looks better than
+   the published ≤13.4/100 ceiling must be recomputed from the *last-step*
+   `info["score"]` (never the reward sum) before being believed.
+7. **Reproduction cells outside tolerance** (±max(5, 2σ_paper) vs the
+   Llama-3.1-8B row) — review that family's harness path first (Java gateway
+   for twx/scienceworld; jericho metric extraction).
+8. **Score/win disagreement** — `total_score` exceeding `max_score`
+   (sum-inflation) or `won=True` below max score.
+
+## Sign-off
+
+The reviewing expert should record: rubric pass rates per family, each anomaly
+adjudicated (with the broken-vs-hard call), and an explicit recommendation on
+flipping `verified`. The onboarding report's verified-flag recommendation
+stays **false** until this sign-off exists.
