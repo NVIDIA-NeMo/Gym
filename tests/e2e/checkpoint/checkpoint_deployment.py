@@ -150,9 +150,9 @@ class Deployment:
 
     Topologies:
 
-    - ``native``: ``single_agent_turn`` over Simple Agent and the weather resources server.
-    - ``legacy``: the legacy ``/run`` relay over Simple Agent and the weather resources server.
-    - ``counter``: the legacy relay over Simple Agent and the stateful counter resources server.
+    - ``sessions``: ``single_agent_turn`` over Simple Agent and the weather resources server.
+    - ``relay``: the ``legacy_agent`` ``/run`` relay over Simple Agent and the weather resources server.
+    - ``counter``: the ``legacy_agent`` relay over Simple Agent and the stateful counter resources server.
     - ``slow``: ``single_agent_turn`` over Simple Agent and a resources server whose verify blocks.
 
     With ``inference_url``,
@@ -272,7 +272,7 @@ class Deployment:
         )
         add("agent", "responses_api_agents/simple_agent", agent)
 
-        if self.topology in ("native", "slow", "mixed"):
+        if self.topology in ("sessions", "slow", "mixed"):
             environment = _server(
                 "environment_servers",
                 "single_agent_turn",
@@ -310,7 +310,7 @@ class Deployment:
                     cleanup_timeout_seconds=30,
                 ),
             )
-        if self.topology in ("legacy", "counter"):
+        if self.topology in ("relay", "counter"):
             environment = _server(
                 "environment_servers", "legacy_agent", agent_server=_ref("responses_api_agents", "agent")
             )
@@ -429,7 +429,7 @@ class Deployment:
 
 
 def weather_episode(rollout_id: str, attempt: int = 0) -> dict:
-    """A native ``single_agent_turn`` request."""
+    """An episode request for ``single_agent_turn``."""
     return {
         "episode_id": {"rollout_id": rollout_id, "attempt": attempt},
         "task": {
