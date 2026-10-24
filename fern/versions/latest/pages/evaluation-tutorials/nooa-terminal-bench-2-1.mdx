@@ -1,0 +1,49 @@
+---
+title: "Terminal-Bench 2.1 with NOOA"
+description: "Run NOOA with the canonical Terminal-Bench 2.1 preparation and verifier."
+---
+
+# Terminal-Bench 2.1 with NOOA
+
+The [NOOA recipe](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_2_1/nooa.yaml)
+runs NOOA inside the task sandbox and reuses Terminal-Bench 2.1's existing preparation and resources server.
+Configure a sandbox provider and your policy endpoint in a private `private-policy-provider.yaml` overlay;
+the provider must support the task images and allow the sandbox to reach Gym's model server. Keep credentials
+in your local configuration. Set `use_absolute_ip: true` in that overlay and configure `default_host` when
+necessary so the advertised model URL is reachable from the sandbox, rather than loopback. Runtime installation
+also needs outbound package access unless the agent’s `runtime_wheelhouse` points to a prepared offline wheelhouse
+on the controller. The resources server owns sandbox creation, verification, and cleanup.
+
+From the repository root:
+
+```bash
+gym eval prepare --benchmark terminal_bench_2_1/nooa
+
+gym env resolve \
+    --config benchmarks/terminal_bench_2_1/nooa.yaml \
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --config private-policy-provider.yaml
+
+gym eval run \
+    --config benchmarks/terminal_bench_2_1/nooa.yaml \
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --config private-policy-provider.yaml \
+    --split benchmark --limit 1 --concurrency 1 --num-repeats 1 \
+    --output results/terminal-bench-2-1-nooa.jsonl
+```
+
+The recipe uses one worker with a **21,600-second (six-hour)** sandbox runner ceiling. The **30,000-second**
+episode deadline covers seed, agent, verification, and close together; it is not the agent's time budget.
+The sandbox TTL is **30,600 seconds**, leaving room for bounded cleanup after that deadline.
+
+The canonical **1,800-second** verification timeout applies **per verifier command**, including setup and the
+test command. It is not a total verification budget. The episode deadline bounds verification overall;
+if it expires during verification, the result is a non-terminal `Episode timed out` failure with no reward.
+The canonical preparer omits per-task agent and verifier timeout values from `task.toml`; this recipe does not
+restore those budgets.
+
+<Note>
+Docker startup overrides the image command, so `install-windows-3.11` does not run its `CMD` that starts
+`supervisord`. This recipe adds no startup shim. A successful smoke run does not establish parity across
+all 89 tasks; account for this startup limitation when interpreting results.
+</Note>
