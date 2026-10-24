@@ -62,6 +62,7 @@ from nemo_gym.server_utils import (
     _make_keepalive_socket_factory,
     _set_tcp_keepalive,
     _validation_exception_handler,
+    format_exception_with_response_body,
     initialize_ray,
     raise_for_status,
 )
@@ -1444,6 +1445,26 @@ class TestServerUtils:
         assert "api_key=secret" not in message
         assert message.endswith("…")
         assert len(message) < 2200
+
+    def test_format_exception_with_response_body_carries_the_upstream_reason(self) -> None:
+        request_info = RequestInfo(
+            url=URL("http://agent.test/v1/agent_sessions"),
+            method="POST",
+            headers=CIMultiDictProxy(CIMultiDict()),
+            real_url=URL("http://agent.test/v1/agent_sessions"),
+        )
+        refusal = ClientResponseError(
+            request_info=request_info, history=(), status=422, message="Unprocessable Content"
+        )
+        refusal.response_content = b'{"detail":"Simple Agent does not support sandbox access"}'
+        bodiless = ClientResponseError(request_info=request_info, history=(), status=503, message="Unavailable")
+
+        # str() alone names only the status, reason phrase, and URL.
+        assert format_exception_with_response_body(refusal) == (
+            f'{refusal}: {{"detail":"Simple Agent does not support sandbox access"}}'
+        )
+        assert format_exception_with_response_body(bodiless) == str(bodiless)
+        assert format_exception_with_response_body(ValueError("invalid payload")) == "invalid payload"
 
     @mark.parametrize(
         ("body", "expected_truncated"),

@@ -52,21 +52,19 @@ Run this command from the **Slurm login/head node**, not from inside the interac
 ```bash
 cd /path/to/nemo/rl
 
+# Set your credentials and Slurm allocation first
+export WANDB_API_KEY=your_wandb_api_key  # your Weights & Biases API key
+export SLURM_ACCOUNT=your_slurm_account
+export SLURM_PARTITION=your_slurm_partition
+
 # Submit multi-node job
-# Set these environment variables before running:
-#   WANDB_API_KEY: Your Weights & Biases API key for logging
 #   EXP_NAME: Experiment name
 #   NUM_ACTOR_NODES: Number of GPU nodes to use (2, 4, 8, etc.)
 #   CONTAINER_IMAGE_PATH: Nano recipe container (see RL Framework Compatibility table)
-#   SLURM_ACCOUNT: Slurm account
-#   SLURM_PARTITION: Slurm partition
-WANDB_API_KEY={your W&B API key} \
 EXP_NAME=nemo_gym_grpo/nemotron_nano_v2_9b/2nodes/workplace_assistant_001 \
 NUM_ACTOR_NODES=2 \
 REPO_LOCATION=$PWD \
 CONTAINER_IMAGE_PATH=nvcr.io/nvidia/nemo-rl:v0.4.0.nemotron_3_nano \
-SLURM_ACCOUNT={your Slurm account} \
-SLURM_PARTITION={your Slurm partition} \
     examples/nemo_gym/launch_nemo_gym_multinode_training.sh \
     --config=examples/nemo_gym/grpo_workplace_assistant_nemotron_nano_v2_9b.yaml \
     ++policy.generation.vllm_cfg.tool_parser_plugin=$(find $PWD/.cache -name nemotron_toolcall_parser_no_streaming.py) \

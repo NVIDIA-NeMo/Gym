@@ -236,6 +236,7 @@ class GymResponsesLLM(UnifiedLLM):
         cookies: dict[str, str],
         model: str = "gym-policy",
         on_call: Callable[[GymModelCall], None] | None = None,
+        on_response: Callable[[], None] | None = None,
         sampling_overrides: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(model=model)
@@ -244,6 +245,7 @@ class GymResponsesLLM(UnifiedLLM):
         self._model_url_path = model_url_path
         self._state = state
         self._on_call = on_call
+        self._on_response = on_response
         self._sampling_overrides = dict(sampling_overrides or {})
         self._cookies = cookies
         self._calls = 0
@@ -346,6 +348,8 @@ class GymResponsesLLM(UnifiedLLM):
 
         # A successful retry clears only the earlier transport failure.
         self._state.fatal_error = None
+        if self._on_response is not None:
+            self._on_response()
 
         # Capture the upstream response first, but never hand a truncated tool
         # call to NOOA for execution. Its retry loop may recover with a later call.
