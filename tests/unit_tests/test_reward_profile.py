@@ -1006,3 +1006,172 @@ class TestCoverageBelongsToTheAgentThatEarnedIt:
         results = [self._result(0, 0)]
 
         assert coverage_by_agent(rows, results) == {}
+
+
+class TestBayesAtN:
+    """`--bayes-at-n` posterior moments: per-question posteriors, not one pooled posterior."""
+
+    def _row(self, task: int, rollout: int, agent: str = "agent", seed: int | None = None) -> dict:
+        row = {
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: rollout,
+            "responses_create_params": {"input": [{"role": "user", "content": f"question {task}"}]},
+            "agent_ref": {"name": agent},
+        }
+        if seed is not None:
+            row["responses_create_params"]["metadata"] = {"extra_body": f'{{"seed": {seed}}}'}
+        return row
+
+    def _result(self, task: int, rollout: int, reward: float | None = 1.0, masked: bool = False) -> dict:
+        return {
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: rollout,
+            "reward": reward,
+            "mask_sample": masked,
+            "response": {},
+        }
+
+    def _rows(self, outcomes: dict, agent: str = "agent") -> list[dict]:
+        """One row per trial, with the repeat seed `rollout_collection` would have written."""
+        return [
+            self._row(task, rollout, agent, seed=rollout)
+            for task, rewards in outcomes.items()
+            for rollout in range(len(rewards))
+        ]
+
+    def _results(self, outcomes: dict) -> list[dict]:
+        return [
+            self._result(task, rollout, reward=float(reward))
+            for task, rewards in outcomes.items()
+            for rollout, reward in enumerate(rewards)
+        ]
+
+    def test_per_question_posteriors_differ_from_one_pooled_posterior(self) -> None:
+        """Two questions of two trials each: one all-success, one half.
+
+        Per question: Beta(3, 1) has mean 0.75, Beta(2, 2) has mean 0.5, so the benchmark mean is
+        0.625. Pooling the four trials into Beta(4, 2) would instead report 0.6667. The spread is
+        likewise the posterior of the average, sqrt(var_a + var_b) / 2, not the pooled Beta(4, 2)
+        spread and not the average of the two per-question standard deviations.
+        """
+        outcomes = {0: [1, 1], 1: [1, 0]}
+
+        metrics = RewardProfiler().compute_bayes_at_n_metrics(self._rows(outcomes), self._results(outcomes))
+
+        var_question_0 = 3 * 1 / (4**2 * 5)
+        var_question_1 = 2 * 2 / (4**2 * 5)
+        assert metrics["agent"] == {
+            "bayes@2/reward": 0.625,
+            "std/bayes@2/reward": (var_question_0 + var_question_1) ** 0.5 / 2,
+        }
+        assert metrics["agent"]["bayes@2/reward"] != 4 / 6
+
+    def test_a_single_question_reports_its_own_posterior(self) -> None:
+        metrics = RewardProfiler().compute_bayes_at_n_metrics(
+            self._rows({0: [1, 1, 0]}), self._results({0: [1, 1, 0]})
+        )
+
+        # Beta(3, 2): mean 0.6, variance 3 * 2 / (5^2 * 6).
+        assert metrics["agent"]["bayes@3/reward"] == 0.6
+        assert metrics["agent"]["std/bayes@3/reward"] == pytest.approx((6 / 150) ** 0.5)
+
+    def test_fan_out_runs_keep_separate_posteriors(self) -> None:
+        """Two environment servers on one task index are two runs with their own N and outcomes."""
+        rows = [
+            {**self._row(0, 0, "agent_a", seed=0), "_ng_environment_server": "server_a"},
+            {**self._row(0, 0, "agent_b", seed=0), "_ng_environment_server": "server_b"},
+            {**self._row(0, 1, "agent_b", seed=1), "_ng_environment_server": "server_b"},
+        ]
+        results = [
+            {**self._result(0, 0, reward=1.0), "_ng_environment_server": "server_a"},
+            {**self._result(0, 0, reward=0.0), "_ng_environment_server": "server_b"},
+            {**self._result(0, 1, reward=0.0), "_ng_environment_server": "server_b"},
+        ]
+
+        metrics = RewardProfiler().compute_bayes_at_n_metrics(rows, results)
+
+        assert metrics["server_a"] == {
+            "bayes@1/reward": 2 / 3,
+            "std/bayes@1/reward": pytest.approx((2 * 1 / (3**2 * 4)) ** 0.5),
+        }
+        assert metrics["server_b"] == {
+            "bayes@2/reward": 0.25,
+            "std/bayes@2/reward": pytest.approx((1 * 3 / (4**2 * 5)) ** 0.5),
+        }
+
+    def test_repeated_inputs_may_differ_only_by_seed(self) -> None:
+        rows = [
+            self._row(0, 0, seed=0),
+            {**self._row(0, 1, seed=1), "responses_create_params": {"input": [{"role": "user", "content": "q0"}]}},
+        ]
+        rows[0]["responses_create_params"]["input"] = [{"role": "user", "content": "q0"}]
+
+        assert RewardProfiler().compute_bayes_at_n_metrics(rows, self._results({0: [1, 0]})) == {
+            "agent": {"bayes@2/reward": 0.5, "std/bayes@2/reward": (2 * 2 / (4**2 * 5)) ** 0.5}
+        }
+
+    def test_a_repeated_input_that_differs_is_rejected(self) -> None:
+        rows = self._rows({0: [1, 0]})
+        rows[1]["responses_create_params"]["temperature"] = 0.9
+
+        with pytest.raises(ValueError, match="differ beyond the per-rollout seed"):
+            RewardProfiler().compute_bayes_at_n_metrics(rows, self._results({0: [1, 0]}))
+
+    def test_a_missing_rollout_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="partial collection"):
+            RewardProfiler().compute_bayes_at_n_metrics(self._rows({0: [1, 0]}), self._results({0: [1]}))
+
+    def test_an_entirely_missing_task_is_rejected(self) -> None:
+        """Only the manifest knows the task was scheduled; grouped results alone could not tell."""
+        rows = self._rows({0: [1, 0], 1: [1, 1]})
+        results = self._results({0: [1, 0]})
+
+        with pytest.raises(ValueError, match="Missing rollout results"):
+            RewardProfiler().compute_bayes_at_n_metrics(rows, results)
+
+    def test_duplicate_rollout_keys_are_rejected(self) -> None:
+        rows = self._rows({0: [1, 0]})
+        results = self._results({0: [1, 0]})
+
+        with pytest.raises(ValueError, match="Duplicate result row"):
+            RewardProfiler().compute_bayes_at_n_metrics(rows, [*results, results[0]])
+
+    def test_a_masked_trial_is_rejected(self) -> None:
+        results = self._results({0: [1, 0]})
+        results[1]["mask_sample"] = True
+
+        with pytest.raises(ValueError, match="masked rollouts"):
+            RewardProfiler().compute_bayes_at_n_metrics(self._rows({0: [1, 0]}), results)
+
+    @pytest.mark.parametrize("reward", [0.5, 2.0, float("nan"), float("inf"), None, True])
+    def test_a_nonbinary_reward_is_rejected(self, reward) -> None:
+        results = self._results({0: [1, 0]})
+        results[1]["reward"] = reward
+
+        with pytest.raises(ValueError, match="binary outcomes only"):
+            RewardProfiler().compute_bayes_at_n_metrics(self._rows({0: [1, 0]}), results)
+
+    def test_ragged_trial_counts_are_rejected(self) -> None:
+        rows = self._rows({0: [1, 0], 1: [1, 1]})
+        results = self._results({0: [1, 0], 1: [1]})
+
+        with pytest.raises(ValueError, match="same number of trials"):
+            RewardProfiler().compute_bayes_at_n_metrics(rows, results)
+
+    def test_agent_metrics_export_the_posterior_to_json(self, tmp_path: Path) -> None:
+        outcomes = {0: [1, 1], 1: [1, 0]}
+        profiler = RewardProfiler()
+        _, agent_level_metrics, _ = profiler.profile_from_data(self._rows(outcomes), self._results(outcomes))
+        agent_level_metrics[0].update(
+            profiler.compute_bayes_at_n_metrics(self._rows(outcomes), self._results(outcomes))["agent"]
+        )
+
+        _, agent_level_metrics_fpath, _ = profiler.write_to_disk(
+            [], agent_level_metrics, [], tmp_path / "rollouts.jsonl"
+        )
+
+        written = orjson.loads(agent_level_metrics_fpath.read_bytes())
+        assert written[0]["bayes@2/reward"] == 0.625
+        assert written[0]["std/bayes@2/reward"] == pytest.approx((3 / 80 + 4 / 80) ** 0.5 / 2)
+        # The empirical spread is untouched and still answers its own question.
+        assert "std/reward" in written[0]
