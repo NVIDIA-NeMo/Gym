@@ -87,7 +87,8 @@ class IsolatedExporter(Exporter):
     process list. The worker file defines `run(payload) -> dict` and must not import `nemo_gym`.
     """
 
-    # pip requirement specifiers installed into the exporter's environment.
+    # pip requirement specifiers installed into the exporter's environment; override `required_packages` to
+    # take them from the config instead.
     requirements: ClassVar[tuple[str, ...]] = ()
     # The worker file; see `_isolated_worker.py` for its contract.
     worker_fpath: ClassVar[Path]
@@ -101,6 +102,9 @@ class IsolatedExporter(Exporter):
         config = cls.config_model.model_validate(global_config_dict)
         return cls(config, venv_root=Path(global_config_dict.get(UV_VENV_DIR_KEY_NAME) or WORKING_DIR))
 
+    def required_packages(self) -> tuple[str, ...]:
+        return self.requirements
+
     @abstractmethod
     def build_payload(self, artifacts: RunArtifacts, workdir: Path) -> dict[str, Any]:
         """The JSON-serializable input for the worker. Files it stages go under `workdir`, removed afterwards.
@@ -113,7 +117,7 @@ class IsolatedExporter(Exporter):
             workdir = Path(workdir_name)
             try:
                 payload = self.build_payload(artifacts, workdir)
-                python = ensure_exporter_environment(self.venv_root, self.name, self.requirements)
+                python = ensure_exporter_environment(self.venv_root, self.name, self.required_packages())
             except (ExportPreparationError, ExporterEnvironmentError) as exc:
                 return ExportResult.failed(str(exc))
             return self._run_worker(python, payload, workdir)
@@ -138,7 +142,12 @@ class IsolatedExporter(Exporter):
             return ExportResult.failed(f"The {self.name} exporter worker wrote an unreadable result: {exc}")
         detail = outcome.get("detail") or {}
         if state is ExportState.FAILED:
-            return ExportResult(state, exit_code=1, error=outcome.get("error") or "unknown error", detail=detail)
+            return ExportResult(
+                state,
+                exit_code=outcome.get("exit_code") or 1,
+                error=outcome.get("error") or "unknown error",
+                detail=detail,
+            )
         return ExportResult(state, detail=detail)
 
 
