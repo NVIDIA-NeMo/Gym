@@ -27,26 +27,25 @@
 #   ++multistage.stages='[{num_tasks: 5}, {num_tasks: 88, num_models: 4}]'
 # See benchmarks/gdpval/README.md for the full recipe.
 
+config_paths:
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
 # Rollout-collection driver: routes `gym eval run` through the GDPVal
 # orchestrator, which runs multi-stage ELO when ++multistage.enabled=true and
 # otherwise behaves exactly like the standard single-pass collection.
 rollout_collection_driver: resources_servers.gdpval.multistage_orchestrator:run_rollout_collection
 
-# GDPVal's failure contract, off by default in shared rollout collection and
-# reverification: on resume, retry timeouts that older Stirrup builds stamped
-# terminal, and retry rows whose judge response was invalid instead of scoring
-# them as zero. The driver above applies it when these keys are unset, and a
-# multistage run refuses an explicit false. These keys also apply it where the
-# driver does not run (`gym eval run --no-serve`, `gym eval reverify`).
-retry_terminal_timeouts: true
-retry_invalid_judge_responses: true
-
 # Judge endpoints throttle in bursts (429/502/503). Retries and timeouts stack:
 # - Each judge proxy below retries upstream 404/408/429/500/502/503/504/520
-#   responses 0.5 s apart, up to max_http_attempts (Gym's default is 3). 1800
-#   rides out roughly 15 minutes of throttling per request. A persistent error in
-#   that set (e.g. a 404 for an unknown model route) also retries for the whole
-#   window; a spent quota or invalid key (by error code) stops immediately.
+#   responses up to max_http_attempts times (Gym's default is 3);
+#   max_rate_limit_wait_seconds: 0 keeps 429 and 503 on that count instead of
+#   Gym's default 3600 s wait budget. Each wait is
+#   random up to 1 s, doubling per try and capped at 60 s, or the answer's
+#   Retry-After within that cap. 36 rides out about 15 minutes of throttling per
+#   request on average (at most about 30). A persistent error in that set (e.g. a
+#   404 for an unknown model route) also retries for the whole window; a spent
+#   quota or invalid key (by error code) stops immediately.
 # - The GDPVal server waits GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS per judge call:
 #   300 s in comparison mode and 1800 s in rubric mode. A comparison call that
 #   times out is not retried (its reference matchup is dropped), and time spent
@@ -57,8 +56,8 @@ retry_invalid_judge_responses: true
 #   rubric_structured_formatting_retries (3) attempts per trial, shared with
 #   unparseable replies, with backoff doubling from 5 s, and also retries an
 #   error whose message contains "timeout".
-# Lower the window per proxy with, e.g.,
-# ++gdpval_gpt55_judge_model.responses_api_models.openai_model.max_http_attempts=60
+# Lower the window per proxy, e.g. to about 30 s on average:
+# ++gdpval_gpt55_judge_model.responses_api_models.openai_model.max_http_attempts=7
 
 # Preserve the configurable single-judge endpoint for existing overlays.
 gdpval_judge_model:
@@ -68,7 +67,8 @@ gdpval_judge_model:
       openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
       openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
       openai_model: ${oc.env:JUDGE_MODEL_NAME,gcp/google/gemini-3.1-pro-preview}
-      max_http_attempts: 1800
+      max_http_attempts: 36
+      max_rate_limit_wait_seconds: 0
 
 # Each OpenAI proxy fixes the upstream model ID, so panel members use separate
 # proxies even when they share one OpenAI-compatible endpoint (JUDGE_BASE_URL).
@@ -79,7 +79,8 @@ gdpval_gpt55_judge_model:
       openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
       openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
       openai_model: ${oc.env:JUDGE_GPT_MODEL,openai/openai/gpt-5.5}
-      max_http_attempts: 1800
+      max_http_attempts: 36
+      max_rate_limit_wait_seconds: 0
 
 gdpval_gemini31_judge_model:
   responses_api_models:
@@ -88,7 +89,8 @@ gdpval_gemini31_judge_model:
       openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
       openai_api_key: ${oc.env:JUDGE_GEMINI_API_KEY,${oc.env:JUDGE_API_KEY,dummy}}
       openai_model: ${oc.env:JUDGE_GEMINI_MODEL,gcp/google/gemini-3.1-pro-preview}
-      max_http_attempts: 1800
+      max_http_attempts: 36
+      max_rate_limit_wait_seconds: 0
       extra_body: {reasoning_effort: high}
       max_concurrent_requests: ${oc.env:GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS,2}
 
@@ -99,7 +101,8 @@ gdpval_claude48_judge_model:
       openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
       openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
       openai_model: ${oc.env:JUDGE_CLAUDE_MODEL,aws/anthropic/bedrock-claude-opus-4-8}
-      max_http_attempts: 1800
+      max_http_attempts: 36
+      max_rate_limit_wait_seconds: 0
       # `timeout` / `request_timeout` are gateway-side keys (LiteLLM-style) that
       # let one adaptive-thinking Claude call run up to 900 s at the default
       # JUDGE_BASE_URL gateway. They are sent in every request body; remove them
@@ -186,13 +189,25 @@ gdpval_resources_server:
       # Seed for reproducible per-call judge sampling (null = seed only on task
       # identity, still stable per task).
       judge_sampling_seed: ${oc.env:JUDGE_SAMPLING_SEED,null}
+      tavily_api_key: ${oc.env:TAVILY_API_KEY}
+      persist_deliverables_dir: ${oc.env:PERSIST_DELIVERABLES_DIR}
+      # Names a top-level provider block such as nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml.
+      sandbox_provider: sandbox
+      sandbox_config:
+        # An OCI image built from containers/Dockerfile; see resources_servers/gdpval/README.md.
+        image: ${oc.env:GDPVAL_SANDBOX_IMAGE,null}
+        # Without a TTL the OpenSandbox SDK expires a sandbox 10 minutes after creation.
+        ttl_s: 21600
+        env:
+          # execd otherwise waits 1 s after every command.
+          EXECD_API_GRACE_SHUTDOWN: 50ms
+        resources: {cpu: 16, memory_mib: 65536}
 
 # Stirrup agent paired with the resources server above.
 gdpval_stirrup_agent:
   responses_api_agents:
     stirrup_agent:
       entrypoint: app.py
-      task: gdpval
       agent_max_turns: 250
       concurrency: 32
       temperature: 1.0
@@ -210,33 +225,7 @@ gdpval_stirrup_agent:
       # instruction that is not recorded in the trajectory. Generic Stirrup
       # agents leave this off so their rollouts stay unsteered.
       truncation_recovery: true
-      system_prompt_template: ${oc.env:SYSTEM_PROMPT_TEMPLATE,null}
-      user_prompt_template: ${oc.env:USER_PROMPT_TEMPLATE,null}
-      gdpval_container_path: ${oc.env:GDPVAL_CONTAINER_PATH,null}
-      persist_deliverables_dir: ${oc.env:PERSIST_DELIVERABLES_DIR,output/gdpval/deliverables}
-      # Task-only execution mode. When true, runs each task and caches deliverables
-      # to persist_deliverables_dir but skips the judge /verify call (no reward).
-      # Requires persist_deliverables_dir to be an absolute path.
-      execute_only: ${oc.env:EXECUTE_ONLY,false}
-      # Judge-only mode. When true, skips agent execution and scores the
-      # deliverables already cached in persist_deliverables_dir via /verify.
-      # Mutually exclusive with execute_only.
-      judge_only: ${oc.env:JUDGE_ONLY,false}
-      # Task re-run mode. When true, tasks that already FINISHED (a
-      # finish_params.json marker is cached under persist_deliverables_dir) skip
-      # the rollout (already-judged tasks return their cached /verify result,
-      # un-judged finished tasks are scored once; in execute_only the cached
-      # payload is returned as-is); tasks that never finished are rolled out
-      # again. Combine with `--resume` to re-run only the tasks that did not
-      # finish. Under multi-stage ELO (multistage.enabled=true) it additionally
-      # reuses cached judgements, keyed by each stage's reference subset, so a
-      # resumed run skips re-judging (task, references) pairs it already scored.
-      # Requires persist_deliverables_dir; composes with execute_only, judge_only,
-      # and multistage.
-      rerun_incomplete: ${oc.env:RERUN_INCOMPLETE,false}
-      resources_server:
-        type: resources_servers
-        name: gdpval_resources_server
+      finish_tool_names: [finish, abandon_task_finish]
       model_server:
         type: responses_api_models
         name: policy_model
@@ -244,14 +233,21 @@ gdpval_stirrup_agent:
         - name: gdpval
           type: benchmark
           jsonl_fpath: benchmarks/gdpval/data/gdpval_benchmark.jsonl
-          prompt_config: null
+          prompt_config: benchmarks/gdpval/prompts/default-stirrup.yaml
           prepare_script: benchmarks/gdpval/prepare.py
           num_repeats: 1
 
 gdpval_environment_server:
+  _inherit_from: single_agent_turn_legacy
   environment_servers:
-    legacy_agent:
-      entrypoint: app.py
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: gdpval_resources_server
       agent_server:
         type: responses_api_agents
         name: gdpval_stirrup_agent
+      resources_tool_transports: [direct_http]
+      default_episode_timeout_seconds: 18000
+      max_concurrent_episodes: 32
+      queue_timeout_seconds: 86400

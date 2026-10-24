@@ -62,7 +62,6 @@ class InferenceProviderConfig(BaseResponsesAPIModelConfig):
 
 
 class InferenceProvider(SimpleResponsesAPIModel):
-    ray_enabled = False
     config: InferenceProviderConfig
 
     def model_post_init(self, context):
@@ -73,6 +72,7 @@ class InferenceProvider(SimpleResponsesAPIModel):
         self._converter = ResponsesConverter(
             return_token_id_information=False,
             uses_reasoning_parser=self.config.uses_reasoning_parser,
+            custom_tool_strategy=self.config.custom_tool_strategy,
         )
         self._semaphore = Semaphore(self.config.num_concurrent_requests)
         return super().model_post_init(context)

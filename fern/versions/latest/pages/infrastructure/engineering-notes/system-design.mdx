@@ -64,7 +64,7 @@ When mixing named selectors and `--config`, the CLI uses a fixed flag-category o
 
 ### Phase 3: Initialize Ray
 
-If any configured server needs Ray, the system initializes a Ray cluster for distributed coordination. A server needs Ray when it declares `ray_enabled = True`; the default is `False`. If `ray_head_node_address` is specified, Ray-enabled servers connect to that cluster; otherwise, Gym starts a cluster. When no configured server needs Ray, this phase is skipped. Server implementations declaring `ray_enabled = False` do not import or connect to Ray. For how this fits a training cluster, see [Deployment Topology](/infrastructure/deployment-topology).
+If any configured server needs Ray, the system initializes a Ray cluster for distributed coordination. A server needs Ray when it declares `ray_enabled = True`; the default is `False`. If `ray_head_node_address` is specified, Ray-enabled servers connect to that cluster; otherwise, Gym starts a cluster. When no configured server needs Ray, this phase is skipped. Servers that don't declare `ray_enabled = True` do not import or connect to Ray. For how this fits a training cluster, see [Deployment Topology](/infrastructure/deployment-topology).
 
 ### Phase 4: Start Servers
 
@@ -167,7 +167,7 @@ sequenceDiagram
     Env-->>Client: Result with reward
 ```
 
-A native Environment Server takes over more of the episode. For example, [`single_agent_turn`](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/single_agent_turn) seeds the Resources and agent sessions itself, asks the agent for one response, calls `/verify`, and closes both sessions. The agent only generates the response and calls tools.
+An Environment Server that drives agent sessions takes over more of the episode. For example, [`single_agent_turn`](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/single_agent_turn) seeds the Resources and agent sessions itself, asks the agent for one response, calls `/verify`, and closes both sessions. The agent only generates the response and calls tools.
 
 **Key Design Points:**
 

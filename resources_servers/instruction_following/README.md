@@ -4,6 +4,13 @@
 
 Evaluates language model responses against instruction-following criteria using Open-Instruct and IFEval constraints.
 
+Set `instruction_backend: indicifeval_trans` in this server's YAML configuration
+to use the pinned AI4Bharat Trans checkers. This requires `language` in
+`verifier_metadata` and returns strict/loose prompt and instruction metrics.
+See [IndicIFEval-Trans](../../benchmarks/indic/ifeval/README.md) for the supported
+12 languages, data preparation, generation defaults, and scoring details.
+The default `instruction_backend: english` preserves the original evaluator.
+
 ### Input schema
 - `responses_create_params`: OpenAI Responses create params.
 - `verifier_metadata` (required): Scoring fields read by the verifier:
@@ -15,6 +22,8 @@ Evaluates language model responses against instruction-following criteria using 
 > **Backward compatibility** — older rows that store `instruction_id_list`, `prompt`, `kwargs`, and `grading_mode` at the top level (outside `verifier_metadata`) are still accepted and are automatically migrated at parse time.
 
 The dataset can be found at https://huggingface.co/datasets/nvidia/Nemotron-RL-instruction_following 
+
+The instruction checkers come from [verifiable-instructions](https://github.com/abukharin-nv/verifiable-instructions), except `count:counting_composition`, which is scored by the local checker in `counting_composition.py`. The upstream checker splits paragraphs on `***` although the instruction asks for `* * *`, and counts the period that ends each sentence as a word, so it rejected every response that followed the instruction.
 
 ### Example dataset row (dataset format)
 ```json

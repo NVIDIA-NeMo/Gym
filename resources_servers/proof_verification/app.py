@@ -178,7 +178,6 @@ class ProofVerificationVerifyResponse(BaseVerifyResponse):
 
 
 class ProofVerificationResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: ProofVerificationResourcesServerConfig
 
     _ext_clients: Optional[list] = PrivateAttr(default=None)

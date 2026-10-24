@@ -6,7 +6,6 @@ import asyncio
 import importlib.metadata
 import json
 import logging
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from shlex import quote
@@ -14,6 +13,7 @@ from shlex import quote
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
 from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.uv_bootstrap import DEFAULT_UV_CACHE_DIR, uv_for_sandbox
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
@@ -78,7 +78,7 @@ class HermesSandboxSession(AgentSessionState):
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
 
-    async def install_runtime(self, *, install_timeout: float) -> None:
+    async def install_runtime(self, *, install_timeout: float, uv_cache_dir: str = DEFAULT_UV_CACHE_DIR) -> None:
         """Reuse or install the pinned runtime and stage the Hermes harness files."""
         prepared = await self.session.sandbox.exec(
             f"mkdir -p {quote(_SANDBOX_RUNTIME_DIR)} {quote(self.session.session_dir)}",
@@ -88,7 +88,7 @@ class HermesSandboxSession(AgentSessionState):
         if prepared.return_code != 0:
             raise RuntimeError(prepared.stderr or prepared.stdout or "Failed to prepare Hermes sandbox paths")
         if not await self._runtime_installed():
-            await self._install_runtime(install_timeout)
+            await self._install_runtime(install_timeout, uv_cache_dir)
         await self.session.sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), _SANDBOX_RUNNER)
         await self.session.sandbox.upload(Path(__file__).with_name("sandbox_observer.py"), _SANDBOX_OBSERVER)
         await self.session.sandbox.upload(Path(__file__).with_name("model_kwargs.py"), _SANDBOX_MODEL_KWARGS)
@@ -106,10 +106,8 @@ class HermesSandboxSession(AgentSessionState):
         )
         return check.return_code == 0
 
-    async def _install_runtime(self, timeout: float) -> None:
-        uv_path = shutil.which("uv")
-        if uv_path is None:
-            raise RuntimeError("Hermes agent server requires uv to install the sandbox runtime")
+    async def _install_runtime(self, timeout: float, uv_cache_dir: str) -> None:
+        uv_path = await uv_for_sandbox(self.session.sandbox, self.session.workdir, uv_cache_dir)
         await self.session.sandbox.upload(uv_path, _SANDBOX_UV)
         venv = quote(_SANDBOX_RUNTIME_DIR + "/venv")
         # A runtime that failed the import check is incomplete, so rebuild it rather than reuse it.

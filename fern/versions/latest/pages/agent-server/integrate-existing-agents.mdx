@@ -1,36 +1,256 @@
 ---
 title: "Integrate Existing Agents"
-description: "Use built-in NeMo Gym agents or wrap external agent harnesses."
+description: "Choose an agent that Gym already integrates, pair it with a benchmark, and see what each one supports."
 position: 2
 ---
 
 You can use an existing agent in NeMo Gym, integrate an external one, or build your own from scratch.
 
+To use an agent that Gym does not integrate yet, see [Add an agent that is not listed](#add-an-agent-that-is-not-listed).
+
+## Built-in agents
+
 [`SimpleAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) is a native NeMo Gym agent that handles general-purpose multi-step tool calling with configurable max steps, and works with any Resources server out of the box. NeMo Gym also includes agents that integrate external tools: for example, [`MiniSWEAgent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/mini_swe_agent) wraps an external coding harness running in Docker containers and converts its output back into the NeMo Gym format, and [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) runs the Claude Code CLI. Because every Gym model server speaks Anthropic Messages, you can point Claude Code at any backend — see [Anthropic Messages](/model-server/anthropic-messages).
 
-## Agent session hooks
+## Sandboxed harnesses
 
-For Environment Server execution, implement these `SimpleResponsesAPIAgent` hooks:
+These adapters run a coding harness inside a task sandbox that a Resources server provides, and are driven by the `single_agent_turn` Environment Server. Each row summarizes the adapter's README; the README is the reference for supported features, runtime requirements, and limits.
 
-- `_seed_agent_session_state(body)`: validate grants, initialize the harness, and return
-  an `AgentSessionState`. If setup fails and cleanup cannot finish, raise
-  `AgentSessionSetupError(state, error=original_error)` so close can retry cleanup.
-- `_close_agent_session_state(state)`: stop the harness and its tools, then return an
-  `AgentCloseSessionResponse` with observations. Raise if cleanup is not confirmed.
+| Harness | Model API | Resources tool grants | Token IDs and logprobs | SWE-bench Pro | Terminal Bench 2.1 |
+| --- | --- | --- | --- | --- | --- |
+| Hermes (`hermes_agent`) | Chat Completions | MCP only | Returned in a result file that the model can also write; evaluation only | Declared | Not declared |
+| Pi (`pi_agent`) | Chat Completions | None | Not wired up; evaluation only | Declared | Declared |
+| Codex (`codex_agent`) | Responses (streaming) | MCP only | Not wired up; evaluation only | Declared | Declared |
+| OpenCode (`opencode_agent`) | Chat Completions | None | Off by default; the session path is evaluation only | Not declared | Declared |
+| OpenClaw (`openclaw_agent`) | Chat Completions | None | Not wired up; evaluation only | Not declared | Declared |
 
-The base handles seed retries and close receipts. In `responses()`, use
-`_require_agent_session()` to reject incomplete or closing sessions before execution.
-A borrowed task sandbox remains owned by the Resources Server: disconnect from it after
-stopping the harness; do not destroy it. Verification starts only after agent close succeeds.
+*Declared* means the benchmark's Resources server lists the agent in `allowed_agents`. Gym rejects any other pairing unless you pass `--allow-unsupported-pairing`. Declared support is not a validation: it says nothing about accuracy or training readiness. Check that a pairing works with a real model and the benchmark's verifier before you rely on it.
 
-When using the shared process supervisor, confirm its cleanup receipt before cancelling the
-provider's exec request. Cancellation can kill the provider's entire process group, including
-the supervisor when it is already the group leader (as with the local provider).
-`setsid()` alone does not guarantee cleanup; the close ordering does.
+The `allowed_agents` lists also name older adapters, such as `opencode_sandboxed_agent` and `terminus_2_sandboxed_agent`. They run the whole episode themselves behind a `legacy_agent` Environment Server, and shipped recipes such as `terminal_bench_2_1/opencode` use them. To run them or swap one for another, see [Compare Harnesses](/main/evaluation/harness).
+
+## Run an integrated agent on a benchmark
+
+An experiment is a few composable YAML files: the model and provider, the benchmark, the agent, and the Environment Server that binds them. To change the agent or the benchmark, replace one file; the others stay as they are.
+
+### Configure an experiment
+
+The following evaluation example pairs SWE-bench Pro with Hermes. Before you start, install a current Gym checkout with the agent session adapters, Gym's development environment, and the benchmark's preparation dependencies. Save the four files below under `experiments/onboarding/`, and run all commands from the repository root. Entries in `config_paths` are relative to the root.
+
+You also need a running vLLM-compatible model endpoint and an OpenSandbox deployment. Export the following variables in your shell:
+
+- `POLICY_BASE_URL`, `POLICY_API_KEY`, and `POLICY_MODEL_NAME` for the model endpoint.
+- `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` for the sandbox provider.
+- `GYM_HOST`, a bindable address of the Gym host that task sandboxes can reach. Do not use a loopback address or `0.0.0.0`, because sandboxes cannot call back to them.
+
+On Linux, you can find a candidate IPv4 address by running this command on the Gym node:
+
+```bash
+export GYM_HOST="$(getent ahostsv4 "$(hostname -f)" | awk 'NR==1 {print $1}')"
+```
+
+Use the result only if it is a local interface address that the task sandboxes can reach. If the command returns no address, or the host has several interfaces with different routes to the sandboxes, set `GYM_HOST` explicitly to the right address. Hostname resolution alone does not prove connectivity.
+
+The sandbox must reach the Gym Model Server's allocated port, and the Gym Model Server must reach the upstream endpoint. Keep credentials out of committed YAML files.
+
+```yaml
+# experiments/onboarding/model-provider.yaml
+config_paths:
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+default_host: ${oc.env:GYM_HOST}
+policy_base_url: ${oc.env:POLICY_BASE_URL}
+policy_api_key: ${oc.env:POLICY_API_KEY}
+policy_model_name: ${oc.env:POLICY_MODEL_NAME}
+```
+
+Give the benchmark and the harness stable instance names. The outer keys, `benchmark` and `agent`, are instance names that references and the CLI use. The inner keys, such as `swebench_pro` and `hermes_agent`, select implementation directories. `_inherit_from` reuses the imported template and applies your overrides; it does not start an extra copy of the server.
+
+```yaml
+# experiments/onboarding/benchmark.yaml
+config_paths:
+  - resources_servers/swebench_pro/configs/swebench_pro.yaml
+
+benchmark:
+  _inherit_from: swebench_pro_resources_server
+  resources_servers:
+    swebench_pro:
+      datasets:
+        - name: swebench_pro
+          type: benchmark
+          taskset: onboarding
+          jsonl_fpath: benchmarks/swebench/data/swebench_pro_benchmark.jsonl
+          prepare_script: benchmarks/swebench/pro/prepare.py
+          num_repeats: 1
+```
+
+```yaml
+# experiments/onboarding/agent.yaml
+config_paths:
+  - responses_api_agents/hermes_agent/configs/hermes_agent.yaml
+
+agent:
+  _inherit_from: hermes_agent
+  responses_api_agents:
+    hermes_agent:
+      resources_server: null
+      num_workers: 1
+      enabled_toolsets: [terminal]
+```
+
+The benchmark supplies the task sandbox. Its imported configuration sets `sandbox_provider: sandbox`, image selection, resources, and verification settings. The agent imports its runtime settings and the `model_server: {type: responses_api_models, name: policy_model}` binding. `resources_server: null` leaves benchmark selection to the Environment Server.
+
+```yaml
+# experiments/onboarding/run.yaml
+config_paths:
+  - experiments/onboarding/model-provider.yaml
+  - experiments/onboarding/benchmark.yaml
+  - experiments/onboarding/agent.yaml
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+
+environment_routing_mode: taskset
+environment_server_routes:
+  onboarding: experiment
+
+experiment:
+  _inherit_from: single_agent_turn
+  environment_servers:
+    single_agent_turn:
+      resources_server: {type: resources_servers, name: benchmark}
+      agent_server: {type: responses_api_agents, name: agent}
+      resources_tool_transports: []
+      max_concurrent_episodes: 1
+      queue_timeout_seconds: 60
+      # Above Hermes installation (900) + runner (21600) + SWE-bench Pro verification (2700), plus seed and agent close.
+      default_episode_timeout_seconds: 28800
+      # Each cleanup callback, such as agent close: Pi needs up to 5 x 60 + 60 = 360 seconds, Hermes 5 x 30 + 30.
+      cleanup_timeout_seconds: 360
+```
+
+With `taskset: onboarding`, collation wraps each prepared row in `task_id` and `task_input` and keeps the benchmark's task fields. `environment_server_routes` maps that taskset to the `experiment` instance, whose implementation is `single_agent_turn`. The collector assigns the episode identity and calls the instance's `/run` endpoint. `environment_routing_mode: taskset` rejects flat rows submitted by mistake. For the row contract, see [taskset data declarations](/main/environment-tutorials/resources-server-apis).
+
+Prepare the dataset and inspect the resolved configuration:
+
+```bash
+gym eval prepare --config experiments/onboarding/run.yaml
+gym env resolve --config experiments/onboarding/run.yaml
+```
+
+Then run one task. This command collates the declared benchmark data into materialized task rows, starts the servers, collects rollouts, and shuts the servers down:
+
+```bash
+gym eval run \
+  --config experiments/onboarding/run.yaml \
+  --output results/onboarding/swe-pro-hermes/rollouts.jsonl \
+  --split benchmark \
+  --limit 1 --concurrency 1
+```
+
+The taskset route selects the Environment Server, and its `agent_server` reference selects the harness, so you do not need an `--agent` option. The source JSONL is not modified. The collated input for this run is written to `results/onboarding/swe-pro-hermes/rollouts/preprocessed_datasets/benchmark.jsonl`.
+
+Before you increase concurrency, inspect the response, reward, failure sidecar, and cleanup evidence. When you raise `--concurrency`, raise `max_concurrent_episodes` to match and set `queue_timeout_seconds` above the expected episode duration; otherwise queued episodes fail admission after 60 seconds. A configuration that resolves has not yet been validated: resolution does not check task-image installation, model and tool behavior, or verification.
+
+For callers that still submit flat rows, `single_agent_turn_legacy` wraps the same session lifecycle as a migration adapter. The separate `legacy_agent` implementation delegates to the agent's old `/run` endpoint. New experiments should use the taskset configuration above.
+
+### Swap the agent or the benchmark
+
+Wait for the experiment to finish and its servers to shut down before you change the configuration. Then resolve and run it again. Use a new output directory for each variant, so that resume does not pick up another experiment's results.
+
+**Replace Hermes with Pi.** Replace the whole `agent.yaml` with the following file. Remove Hermes-only settings such as `enabled_toolsets`. The `agent` instance name does not change, so `run.yaml`, the taskset route, and the SWE-bench Pro preparation and input stay the same.
+
+```yaml
+# experiments/onboarding/agent.yaml (Pi replacement)
+config_paths:
+  - responses_api_agents/pi_agent/configs/pi_agent.yaml
+
+agent:
+  _inherit_from: pi_agent
+  responses_api_agents:
+    pi_agent:
+      resources_server: null
+      num_workers: 1
+```
+
+Before you run, check [Pi's runtime and request requirements](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/pi_agent/README.md): the same model and input must satisfy the new adapter's contract. Repeat the resolve and run commands with the output path `results/onboarding/swe-pro-pi/rollouts.jsonl`. Pi uses its own sandbox tools, so `resources_tool_transports: []` still applies.
+
+**Replace SWE-bench Pro with Terminal Bench 2.1.** Replace the whole `benchmark.yaml` with the following file, and keep whichever `agent.yaml` you selected. The dataset declaration selects the new preparation script and input, and `taskset: onboarding` keeps the route to `experiment`. The prepared rows supply each task's image (`docker_image`), the new Resources Server configuration supplies its resource requirements and verifier, and `run.yaml` still references `benchmark`. Repeat the prepare, resolve, and run commands with a new output directory.
+
+```yaml
+# experiments/onboarding/benchmark.yaml (Terminal Bench 2.1 replacement)
+config_paths:
+  - resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1.yaml
+
+benchmark:
+  _inherit_from: terminal_bench_2_1_resources_server
+  resources_servers:
+    terminal_bench_2_1:
+      datasets:
+        - name: terminal_bench_2_1
+          type: benchmark
+          taskset: onboarding
+          jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark.jsonl
+          prepare_script: benchmarks/terminal_bench_2_1/prepare.py
+          num_repeats: 1
+```
+
+<Warning>
+The Terminal Bench 2.1 pairing with Hermes is experimental. The benchmark's `allowed_agents` list includes `pi_agent`, but does not include `hermes_agent`.
+
+Before you try a pairing, review the benchmark's session and tool contract and the selected agent's task-image and runtime support. To run with Hermes, add `--allow-unsupported-pairing` to the `gym eval run` command; Pi does not need it. `gym eval prepare` and `gym env resolve` neither check the pairing nor accept the flag, and `gym eval run` checks it only when it dispatches rollouts, after the servers start. The flag waives every `allowed_agents` and `allowed_model_types` check in the run, not only this one. Validate a representative rollout with a real model and verifier before you claim support. Do not remove the benchmark's guard, and do not add the agent to the benchmark's `allowed_agents` only because its configuration resolves.
+</Warning>
+
+To swap a component, change the imported configuration and its matching implementation block together. Keep task data and preparation in the benchmark declaration, and keep harness selection in the Environment Server's `agent_server` reference. The `--agent-type` shortcut for legacy agent-to-Resources bindings does not replace these edits. To compare agents on the same endpoint, keep the model and provider file unchanged. To compare models or providers, change that file in a separate experiment.
+
+For where the harness runs and who cleans up, including borrowed and agent-owned sandboxes and host execution, see [Select an execution mode](/main/agent-server/add-or-update-a-harness#select-an-execution-mode).
+
+## Resuming harness sessions
+
+OpenCode can resume its saved session across multiple activations in either
+an owned or borrowed sandbox. Opt in during `/v1/agent_sessions` seed with
+`continuation: {mode: resume_harness_session}`. Existing adapters reject continuation
+requirements they cannot satisfy before preparing the sandbox.
+
+Use the existing `/v1/responses` request body and session cookie. Send
+`x-ng-agent-activation: 1` for the first input delta, `2` for the next, and so on.
+Identical requests at the same index replay the original response. Conflicting
+retries, skipped indices, and overlapping new activations fail. The existing
+`metadata.agent_timeout_sec` sets the per-activation budget, including preparation,
+queueing and staging. Setup and cleanup retain their separate bounds.
+
+Adapters that support continuation override `_agent_continuation_capabilities()` to return
+the supported mode and observations, implement `_validate_agent_activation()` before
+binding an index, `_activate_agent_session_state()` for execution, and
+`_continuation_close_timeout()` for their cleanup bound. The ordinary `responses()`
+handler delegates to `activate_agent_session()` only for opted-in sessions; its
+existing HTTP signature remains unchanged. The shared ledger protects active work
+from a disconnected waiter and fences it during close. These guarantees are
+process-local, separate from checkpoint recovery.
+
+`SandboxSession` still launches once by default. An adapter that supports continuation may call
+`begin_activation()` with a fresh supervisor directory after the previous process
+has confirmed cleanup. Saved harness session storage remains outside these launch
+directories. Finalization stays private to the lifecycle; close removes the retained
+session directory tree before releasing the connection.
+
+Emit one invocation per activation, recording `harness_session_id` as context, and tag
+each trajectory turn with its activation. OpenCode's header plugin uses that
+activation-scoped invocation identity to attribute captured model calls. Responses
+carry only new output, usage and evidence; close supplies the cumulative record.
+`cleanup_confirmed` is omitted when an adapter does not report it. A final negative
+termination receipt fails the activation and skips verification; close releases
+the borrowed connection and returns `cleanup_confirmed: false`. Failures to release
+the connection remain retryable.
 
 ## Tools in Agent vs. Resources Server
 
 Existing agents may come with predefined tools, allowing you to leverage them directly and use the Resources server to supplement with any additional external tools. When building a new environment, prefer defining tools in the Resources server rather than the Agent server. This separation of concerns allows different agents to share the same Resources server without duplicating tool logic.
+
+## Add an agent that is not listed
+
+- To score an agent you already run, without rewriting it, drive it through a [Remote Agent](/main/agent-server/remote-agent).
+- To get Gym's models, tools, sandboxes, and observability, write an adapter with [Add or Update a Harness](/main/agent-server/add-or-update-a-harness). It also describes the [session contract](/main/agent-server/add-or-update-a-harness#agent-server-and-environment-server) that an adapter implements.
+
+See [Choose a Path](/main/agent-server#choose-a-path) to compare the options.
 
 <Cards>
 

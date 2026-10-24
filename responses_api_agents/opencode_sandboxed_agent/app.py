@@ -24,7 +24,7 @@ from pathlib import Path
 from shlex import quote
 from time import time
 from traceback import format_exc
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 from uuid import uuid4
 
 from anyio import CancelScope
@@ -269,6 +269,20 @@ def parse_opencode_observations(
                 "running": "incomplete",
                 "pending": "incomplete",
             }.get(native_status, "unknown")
+            if native_status == "completed" and part.get("tool") == "bash":
+                # Completion describes the tool lifecycle, not shell success. Timeout/abort
+                # can complete that lifecycle with a null exit code in the native artifact.
+                metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+                exit_code = metadata.get("exit")
+                if type(exit_code) is int:
+                    status = "completed" if exit_code == 0 else "failed"
+                else:
+                    status = "unknown"
+                    gaps.append(
+                        ObservationGap(
+                            code="tool_outcome_unavailable", invocation_id=session_id, detail=observed_call_id
+                        )
+                    )
             if observed_call_id is not None:
                 tools.append(
                     ToolCallObservation(
@@ -280,7 +294,7 @@ def parse_opencode_observations(
                         duration_ms=duration_ms,
                         timing_source="artifact" if started_at is not None else None,
                         status=status,
-                        error_type="tool_error" if native_status == "error" else None,
+                        error_type="tool_error" if status == "failed" else None,
                     )
                 )
             else:
@@ -519,8 +533,9 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
 
 
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: OpenCodeSandboxedAgentConfig
+    # The harness runs inside the task sandbox and calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)

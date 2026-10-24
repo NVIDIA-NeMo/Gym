@@ -88,7 +88,8 @@ Claude Code talks to the model via the Anthropic Messages API (`/v1/messages`). 
 
 By default the agent runs with `--bare`, which skips auto-discovery of hooks, skills, plugins, MCP servers, memory, and CLAUDE.md so each scripted call starts clean and fast; Claude still has access to Bash, file read, and file edit tools. This isolation is the default because it keeps evals reproducible — a rollout depends only on the model, the task input, and the explicit config, not on ambient state of the host. This is the recommended mode for scripted and SDK calls per [Claude docs](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode). The runtime is configurable via `bare`, `mcp_config`, and `settings` (see [Runtime capabilities](#runtime-capabilities)).
 
-Claude Code is auto-installed on first startup via npm or a local Node.js binary if not already on PATH.
+For local execution, Claude Code is auto-installed on the first local invocation
+via npm or a local Node.js binary if not already on PATH.
 
 ## Configuration
 
@@ -122,7 +123,7 @@ claude_code_agent:
 - `anthropic_api_key`: Anthropic API key, or any non-empty string for local endpoints
 - `anthropic_base_url`: if set, used as `ANTHROPIC_BASE_URL`. Leave null for the real Anthropic API
 - `max_turns`: passed to `--max-turns`. Set to `null` to omit the flag entirely (unlimited turns)
-- `timeout`: per-request wall-clock seconds
+- `timeout`: per-request wall-clock seconds. On timeout the CLI is killed and the transcript streamed so far is returned
 - `system_prompt`: appended to Claude Code's built-in system prompt via `--append-system-prompt`. The data's system message (if any) is also appended after this.
 - `allowed_tools`: passed to `--allowedTools` (e.g. `"Bash,Read"`)
 - `disallowed_tools`: passed to `--disallowedTools`
@@ -197,7 +198,111 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
 
 ## Limitations
 
-- Eval only for now. Token IDs and logprobs are not wired up yet.
 - With `model_server`, model calls go through Gym and can be captured. Direct Anthropic or
   `anthropic_base_url` runs bypass Gym capture.
+- Enable training-token capture with run-level `token_id_capture.enabled: true` and either the
+  agent's `token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
+- With training-token capture on, thinking is returned as separate `reasoning` items instead of
+  `<think>` text. The response `id` is the last non-empty served model response id from the main
+  conversation; subagent frames are excluded from this transcript. Pending tool calls remain as
+  `function_call` items with `status="incomplete"` when the CLI times out. These witnesses let Gym
+  attribute the parent transcript without assigning its reward to a subagent's captured chain.
+  The served id is not a declared terminal id on `/run`; capture still corroborates it against the
+  transcript. Without capture, thinking stays folded and unmatched tool calls remain omitted.
 - `turns_used` counts assistant messages, not tool calls.
+
+## Sandbox execution
+
+The same `claude_code_agent` supports standard agent sessions. An EnvironmentServer
+seeds `/v1/agent_sessions`, sends one text activation to the rollout-scoped
+`/v1/responses`, and closes `/v1/agent_sessions/close` to collect observations.
+Retries of the same activation reuse its result; a different activation requires a
+new session. Unseeded requests retain the existing local behavior.
+
+For an agent-owned sandbox, add these fields to the agent config:
+
+```yaml
+claude_code_version: "2.1.108"
+sandbox_provider: sandbox  # top-level provider config, shared with other harnesses
+sandbox_config:
+  image: ubuntu:24.04
+  workdir: /app
+sandbox_install_timeout_seconds: 600
+session_close_timeout_seconds: 60
+```
+
+The image must include Linux Python **3.8+**, `tar`, and libraries required by the
+native Claude binary. Seed probes the sandbox's architecture and libc, downloads
+and caches the matching Linux x64/arm64 release on the **Gym host**, then compresses
+and uploads it in bounded pieces through the sandbox provider's file transfer API.
+The sandbox needs no internet access for runtime setup. The Gym host needs HTTPS
+access to the release service, or a supplied local binary as described below.
+
+The sandbox installer decompresses the transfer, verifies the native bytes, and
+atomically installs them in `/tmp/nemo-gym-claude-runtime-<version>`, separate from
+session state. A file lock serializes installation. Later seeds in the **same
+sandbox** verify the cached checksum and version before skipping the binary
+upload; a fresh sandbox still needs the transfer. Closing a borrowed session
+removes its private state and retains the shared runtime for subsequent sessions.
+
+Host downloads use the current user's owned, mode-0700
+`~/.cache/nemo_gym/claude` directory and are checked against the release manifest's
+SHA-256. Verified file identities are memoized in each worker; edits or replacements
+trigger verification again. Transfers stream from the compressed cache with at
+most four 1 MiB pieces staged or uploading per worker, shared across sessions.
+For an independently trusted checksum, set
+`sandbox_executable_sha256`. An offline Gym host can supply
+`sandbox_local_executable_path` pointing to a matching Linux binary on the host;
+alternatively, `sandbox_executable_path` names a binary already **inside the
+sandbox**. These two options are mutually exclusive and require
+`sandbox_executable_sha256`.
+
+Configure `model_server` as above, or `anthropic_base_url` and `anthropic_api_key`;
+the endpoint must be reachable from the sandbox. With `model_server`, only
+placeholder Anthropic credentials enter the sandbox; the configured direct
+Anthropic credential stays on the host. `resources_server` is needed only
+for the legacy agent `/run` path. Sandbox-only servers install no host CLI. For
+local execution, installation happens on the first local invocation; concurrent
+calls share setup, failures propagate, and a later call can retry.
+
+The default YAML selects composition with an Environment Server rather than acting as an unbound
+legacy swap source. To use `--resources-server X --agent-type claude_code_agent`
+with legacy swap configurations, explicitly restore
+`resources_server: {type: resources_servers, name: "???"}` on the agent. Existing
+resource-bound recipes retain their bindings.
+
+For borrowed execution, the seed request supplies `sandbox_access` with a direct
+provider connection descriptor and an absolute task `workdir`. Resources prepares
+the task directory; Claude Code only stages its own runtime and settings outside
+it. Required remote tool accesses are rejected: this adapter runs Claude Code's
+native tools. Optional static `mcp_config` and `settings` JSON files are staged
+from the agent server, with the same command options as local execution. A
+`skills.path` in the merged server config is copied into the session's
+`CLAUDE_CONFIG_DIR/skills`, including supporting files; skills disable `--bare`
+through the same command builder used locally. This fallback is sandbox-only:
+local `/run` uses only its explicit `skills_ref`, and unseeded `/v1/responses` does
+not pick up configured skills. The collector's
+run-level skills option remains unsupported for materialized task rows.
+
+Sandbox requests accept one user text prompt (a string or a single user message),
+optionally preceded by one system message. Assistant/developer messages, multiple
+user turns, and request `instructions` are rejected with HTTP 422 so history or
+instructions cannot be silently dropped. Use the leading system message or
+`system_prompt` for instructions. One session runs one activation and does not
+resume a previous Claude conversation. Local prompt conversion is unchanged.
+
+Sandbox requests may set `metadata.agent_timeout_sec` to a positive number of
+seconds, encoded as a string. This bounds the activation's model and tool work,
+capped by the configured `timeout`; missing or invalid values use that ceiling.
+Other metadata keys are rejected with HTTP 422. Setup and cleanup keep their
+separate limits.
+
+The shared `SandboxSession` supervisor stops the harness before reading its
+dedicated stdout stream and native transcripts. The runner keeps `events.jsonl`,
+`stderr.log`, and `runtime.json` separate from supervisor diagnostics. Close returns the observation bundle, disconnects
+borrowed sandboxes, and stops agent-owned sandboxes. The task directory remains
+available to the borrowed sandbox's owner for verification. `timeout` bounds
+harness execution; setup and close use the limits above. The close response's
+`cleanup_confirmed` reports whether harness termination was witnessed or an owned
+sandbox was stopped. A false value can accompany successful borrowed-connection
+release; the owner must destroy that sandbox and leave the activation ungraded.
