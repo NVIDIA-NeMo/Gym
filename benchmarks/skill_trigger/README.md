@@ -117,7 +117,19 @@ Use fresh sessions, isolated homes/workspaces, per-trial skill-file copies, and 
 
 The five profiles are [Pi](configs/pi/config.yaml), [Codex](configs/codex/config.yaml), [Codex with guidance](configs/codex_guidance/config.yaml), [Hermes](configs/hermes/config.yaml), and [Hermes with guidance](configs/hermes_guidance/config.yaml). They share [common settings](common.yaml) and the existing Harbor bridge, with a small [catalog check](../../responses_api_agents/skill_trigger/README.md) before dispatch. Configuration and manifest composition checks pass; full `gym env validate` requires the currently blocked prepared release and has not passed.
 
-The declarations default to the BioNeMo catalog as a starting group, **not the complete 110-case benchmark**. For each catalog, select its packaged JSONL as the input and set `skill_trigger_settings.catalog` to its ID; `skills.path` then resolves to that catalog in the release. Keep all 43 groups in the final run and combine their trial records. A driver covering every group is still pending. The catalog guard rejects another group's tasks before inference.
+The declarations default to the BioNeMo catalog as a starting group, **not the complete 110-case benchmark**. Use the [catalog runner](../../environments/skill_trigger/run.py) to prepare one model/profile across all 43 groups (110 cases, three repetitions). `--pilot` selects the frozen nine cases, five catalogs, and one repetition. Each group gets matching input rows and `skills.path`; the catalog guard rejects another group's tasks before inference.
+
+After source terms are resolved, create a runtime YAML containing `provider: openai` and `api: openai-responses` for Pi, or the appropriate gateway and pinned model catalog settings for another profile. Then:
+
+```bash
+python -m environments.skill_trigger.run plan \
+    --release RELEASE --manifest-sha256 SHA256 --output NEW_RUN \
+    --image PINNED_IMAGE --harness pi --model MODEL --endpoint BASE_URL \
+    --runtime-settings RUNTIME.yaml --pilot
+python -m environments.skill_trigger.run execute --output NEW_RUN
+```
+
+The plan checks the complete frozen selection and packages all tasks before selecting input rows. No API key belongs in the runtime YAML. Execute from a clean checkout without `env.yaml`, `NEMO_GYM_CONFIG_DICT`, or `NEMO_GYM_EXTRA_ROOTS`, which could override the plan. Execution calls `gym eval run` sequentially per catalog, with two concurrent trials inside a group and a one-attempt limit. It preserves each command, console log, exit code, and Gym's result/failure files. Reinvoking execution only starts never-attempted groups; failures and interrupted attempts remain visible and require inspection. Config or input changes require a new plan. A successful process exit is not proof of complete scored coverage: inspect Gym's result and failure counts before reporting a score. HTTP/collector integration and complete real-model execution remain unverified.
 
 Set the release manifest hash, model name and endpoint, image, task paths, and Docker-reachable gateway explicitly. Pi additionally requires its original `provider` and `api`; Codex guidance requires the pinned effective model catalog and its hash. `SKILL_MODEL_API_KEY` stays in the host/worker environment and is not part of Harbor's task config. Set `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS=1`; Harbor retries are already disabled. The single-repetition defaults are for migration validation, not a replacement for the historical three repetitions.
 
