@@ -13,7 +13,8 @@ python -m resources_servers.swe_atlas_qa.prepare
 `prepare.py` fetches upstream revision `c6673fe259c3493a2f834266abf63247a5d1507c`, checks the revision,
 rejects modifications to the task assets, and generates the gitignored `data/benchmark.jsonl`.
 The five checked-in smoke examples are separate and are never overwritten by preparation. Rows contain the upstream
-instruction, task ID, image, and working directory. Rubrics, evaluator prompts, and reference answers remain in the server's private source cache.
+instruction and task ID. The resource server starts each task sandbox from the task's pinned image with `/app` as its
+working directory, so rows carry no routing metadata. Rubrics, evaluator prompts, and reference answers remain in the server's private source cache.
 The digest-pinned v1.1 task images come from the upstream task definitions on GHCR.
 
 These tasks, answers, rubrics, and resulting trajectories are **evaluation-only**. Follow the upstream canary's

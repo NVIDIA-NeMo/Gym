@@ -103,7 +103,6 @@ def test_prepare_rows_preserve_instruction_and_exclude_private_assets(source: Pa
             "task_id": task_id,
             "responses_create_params": {
                 "input": [{"role": "user", "content": f"  Synthetic question {index}: café\n\n"}],
-                "metadata": {"docker_image": f"synthetic-image-{index}", "workdir": "/app"},
             },
             "verifier_metadata": {"task_id": task_id},
         }

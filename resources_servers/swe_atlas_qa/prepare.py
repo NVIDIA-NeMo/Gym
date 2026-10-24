@@ -56,13 +56,12 @@ def prepare(*, source_dir: Path = PACKAGE_DIR / "data/source", output_path: Path
         raise ValueError(f"Expected {EXPECTED_TASK_COUNT} SWE-Atlas QA tasks, found {len(task_dirs)}")
     rows = []
     for task_dir in task_dirs:
-        config = load_task(tasks_dir, task_dir.name)
+        load_task(tasks_dir, task_dir.name)
         rows.append(
             {
                 "task_id": task_dir.name,
                 "responses_create_params": {
                     "input": [{"role": "user", "content": (task_dir / "instruction.md").read_text(encoding="utf-8")}],
-                    "metadata": {"docker_image": config["environment"]["docker_image"], "workdir": "/app"},
                 },
                 "verifier_metadata": {"task_id": task_dir.name},
             }
