@@ -77,9 +77,11 @@ used `gpt-4.1-mini`, so absolute numbers are not directly comparable to the pape
 Every benchmark config sets `num_repeats: 4`, so each question is answered 4
 times when the dataset is collated (`gym eval run --benchmark ...` /
 `++split=benchmark`); keep `--num-repeats` at 1 there, or it multiplies on top.
-`--input` skips collation, so pass `--num-repeats 4` yourself (as above). Headline: `pass@1[avg-of-4]/overall` (each question scores the mean of
-its 4 rollouts, then the ten abilities are macro-averaged; equal to `overall`
-at 4 rollouts), with `pass@1[avg-of-4]/all_pass/overall` and
+`--input` skips collation, so pass `--num-repeats 4` yourself (as above).
+
+Headline: `pass@1[avg-of-4]/overall` (each question scores the mean of its 4
+rollouts, then the ten abilities are macro-averaged; equal to `overall` at 4
+rollouts), with `pass@1[avg-of-4]/all_pass/overall` and
 `pass@1[avg-of-4]/overall/std_dev_across_runs`, plus `pass@4/overall` (best of
 the 4 rollouts). Also reported: `mean/overall`, `all_pass/overall` and
 `chat_size/<size>/overall`.
