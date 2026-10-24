@@ -42,6 +42,13 @@ gym eval prepare --benchmark mrcr/config_n3_128k
 gym eval prepare --benchmark mrcr/config_n3_1m
 ```
 
+For parallel token counting with the default preparation script, pass
+`+prepare_script_args.num_workers=64` to `gym eval prepare --benchmark mrcr`,
+or `--num_workers 64` when running `benchmarks/mrcr/prepare.py` directly.
+Each worker loads its own tokenizer. Select a count that fits the allocated CPU
+and memory budget; the default is one worker. Rows retain source order, token
+counts and length filtering regardless of the worker count.
+
 ## Start environment
 
 ```bash
