@@ -42,7 +42,7 @@ partner_if_judge:
 # Supply the judge endpoint and key, for example in env.yaml.
 judge_base_url: null
 judge_api_key: null
-judge_model_name: nvidia/zai-org/glm-5.3
+judge_model_name: azure/openai/gpt-6-sol
 
 # Text tasks: one reply, no tools run.
 partner_if_simple_agent:

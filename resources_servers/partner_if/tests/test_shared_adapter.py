@@ -65,7 +65,7 @@ async def test_normal_text_resource_dispatches_deterministic_and_llm_items_toget
     assert result.grading_result.dimensions["if"].partial_score == 1
     assert result.grading_result.dimensions["if"].binary_score == 1
     assert result.reward == 1 and not result.mask_sample
-    assert result.judge_protocol == "partner-if-evidence-v5.2"
+    assert result.judge_protocol == "partner-if-evidence-v5.3"
     assert result.grading_result.items[1].quotes[0].quote == "HELLO"
 
 

@@ -14,7 +14,7 @@ from resources_servers.partner_if.grading_contract import EvidenceQuote, Grading
 from resources_servers.partner_if.schema import JudgeItem
 
 
-PROTOCOL = "partner-if-evidence-v5.2"
+PROTOCOL = "partner-if-evidence-v5.3"
 # The default limit on the judge's input: characters of its user message, the serialized rubrics and evidence.
 MAX_JUDGE_INPUT_CHARS = 1_000_000
 PROMPT = """You are an independent instruction-following and task-completion evaluator.
