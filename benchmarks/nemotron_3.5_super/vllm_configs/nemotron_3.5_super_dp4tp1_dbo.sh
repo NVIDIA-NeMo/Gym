@@ -92,7 +92,7 @@ VLLM_PREFILL_ARGS=(
     --max-cudagraph-capture-size 1200
     --max-num-batched-tokens 16960
     --max-num-seqs 256
-    --all2all-backend deepep_high_throughput
+    --all2all-backend allgather_reducescatter
     --moe-backend flashinfer_trtllm
     --enable-dbo
 )
