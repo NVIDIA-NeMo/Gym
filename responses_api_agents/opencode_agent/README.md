@@ -149,6 +149,13 @@ stricter, single-activation contract described above. The intentional difference
 | Provider name | `nemo` | `nemo_gym` (internal alias for the same Gym model server) |
 | `env`, `extra_args`, custom `command` | Applied | Rejected at seed, not silently ignored |
 | Request controls | Existing local compatibility behavior | Unsupported controls rejected explicitly |
+| Prompt delivery | Last `opencode run` argument; on stdin with `verbatim_prompt: true` | Always on stdin |
+
+By default the local CLI passes the prompt as an argument, which `opencode run` wraps in
+double quotes, escaping every inner `"` as `\"`
+([anomalyco/opencode#43923](https://github.com/anomalyco/opencode/issues/43923)).
+`verbatim_prompt: true` (default false) sends it on stdin, which OpenCode uses unchanged.
+Enabling it changes the model's input, so results are not comparable with runs made without it.
 
 Both paths honor configured `thinking` and declare interleaved `reasoning_content`.
 Different prompt placement can affect results; this integration does not establish
