@@ -1,8 +1,8 @@
 # RNA Design agent
 
-The campaign loop of the [RNA design environment](../../environments/rna_design/README.md). Each rollout runs a
-whole design campaign in its own worker process, and the reward comes from re-scoring the designs it produced.
-`arm` picks who chooses the tool calls: the model (`agent`) or a model-free baseline (`fixed`, `fixed_deep`,
+The fixed workflow, agent loop and tools of the [RNA design environment](../../environments/rna_design/README.md).
+Each rollout runs a whole design campaign in its own worker process, and the reward comes from re-scoring the designs
+it produced. `arm` picks who chooses the tool calls: the model (`agent`) or a fixed workflow (`fixed`, `fixed_deep`,
 `generator`). `rds/` holds the campaign runner and the tools, and `prepare.py` builds the suites and dataset rows and
 sets up gRNAde.
 

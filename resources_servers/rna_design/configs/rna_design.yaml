@@ -1,6 +1,6 @@
-# Claude Code in its own OpenSandbox box per rollout, with the rna_design tools served to it over MCP. The tools
-# and the scoring stay on the Gym node, so the box needs only Claude Code and a route back to that node: launch
-# with use_absolute_ip=true and point sandbox_model_base_url at the Gym policy server (see the README).
+# Claude Code harness in a sandbox per rollout, calling the rna_design tools over MCP. The tools and the scoring stay on
+# the Gym node, so the sandbox calls back to it: Gym listens on the node's address rather than localhost.
+use_absolute_ip: true
 config_paths:
 - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
@@ -12,7 +12,7 @@ rna_design:
       verified: false
       expose_tools_over_mcp: true
       worker_python: ${oc.env:RNA_WORKER_PYTHON,null}
-      description: "RNA inverse folding with Claude Code: the design tools served over MCP to a sandboxed harness."
+      description: "RNA inverse folding: the design tools served over MCP to a harness such as Claude Code."
 
 rna_design_claude_code_agent:
   responses_api_agents:

@@ -4,9 +4,8 @@ experimental: true
 kind: environment
 integration_profile: custom-gym-agent-loop
 domain: agent
-description: RNA inverse folding, as a benchmark and a training environment. Each
-  rollout is a design campaign with a fixed tool-call budget, rewarded 1.0 when it
-  solves the target structure.
+description: RNA inverse folding benchmark and training environment. Each rollout is a design campaign with a
+  fixed tool-call budget, rewarded 1.0 when it solves the target structure.
 modality: text
 licensing: MIT
 authors:
