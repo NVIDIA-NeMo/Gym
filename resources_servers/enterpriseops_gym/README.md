@@ -26,6 +26,10 @@ server with the Stirrup agent; see its README for the benchmark and its results.
    retried rather than scored. Verification stops the sandboxes, and a repeated `/verify` returns the same results.
 4. **`/close_session`** stops any sandbox still running. Every sandbox also has a TTL (`sandbox_config.ttl_s`).
 
+A seed or close that conflicts with the session's episode, or a seed after its session closed, is a final 409; a task
+the server cannot run is a final 422. For a session the server no longer holds, a tool call is a 404
+(`session_lost`) and `/verify` returns a masked sample, since no database is left to score.
+
 Aggregate metrics report `success` and `verifier_pass_rate` overall and per domain (`<domain>/pass@1[avg-of-k]/...`).
 
 ## Task fields

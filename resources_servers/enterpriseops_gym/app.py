@@ -35,9 +35,14 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
+    ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    ResourcesSessionFence,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import VERIFIER_ERROR
@@ -177,8 +182,7 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
     ray_enabled: ClassVar[bool] = False
 
     _sessions: Dict[str, _TaskSession] = PrivateAttr(default_factory=dict)
-    _closed_sessions: Dict[str, EpisodeId] = PrivateAttr(default_factory=dict)
-    _session_locks: Dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
+    _fence: ResourcesSessionFence = PrivateAttr()
     _seed_archive: Optional[SeedArchive] = PrivateAttr(default=None)
     _seed_archive_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 
@@ -186,6 +190,7 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
         super().model_post_init(context)
         if self.config.num_workers not in (None, 1):
             raise ValueError("EnterpriseOps-Gym sessions are process-local and require num_workers=1")
+        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -219,33 +224,36 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
 
     async def seed_session(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
         session_id = body.resources_session_id
-        request.session[SESSION_ID_KEY] = session_id
-        async with self._session_locks.setdefault(session_id, asyncio.Lock()):
-            if session_id in self._closed_sessions:
-                raise HTTPException(409, f"Resources session is already closed: {session_id}")
+        async with self._fence.locked(session_id):
+            self._fence.raise_if_closed(session_id)
             session = self._sessions.get(session_id)
             if session is not None:
                 if (session.episode_id, session.task_id) != (body.episode_id, body.task_id):
-                    raise HTTPException(409, "resources_session_id is already bound to another episode or task")
-                return await self._seed_response(session_id, session)
-            # A task this server cannot run is a terminal 422; a failure to start its gyms is a retryable 5xx.
-            try:
-                task = TaskData.model_validate(body.task_data)
-            except ValidationError as error:
-                raise HTTPException(422, f"Invalid EnterpriseOps-Gym task: {error}") from error
-            if body.task_id.task_id != task.task_id:
-                raise HTTPException(422, "TaskId does not match the EnterpriseOps-Gym task_id")
-            missing = [gym.name for gym in task.gym_servers if gym.name not in self.config.gym_images]
-            if missing:
-                raise HTTPException(422, f"No gym_images entry for gym servers {missing}")
-            session = _TaskSession(body.episode_id, body.task_id, task, gyms={})
-            try:
-                await self._start_gyms(session)
+                    raise ResourcesSessionConflictError(
+                        "resources_session_id is already bound to another episode or task"
+                    )
                 response = await self._seed_response(session_id, session)
-            except BaseException:
-                await self._release(session)
-                raise
-            self._sessions[session_id] = session
+            else:
+                # A task this server cannot run is a terminal 422; a failure to start its gyms is a retryable 5xx.
+                try:
+                    task = TaskData.model_validate(body.task_data)
+                except ValidationError as error:
+                    raise ResourcesSeedRejectedError(f"Invalid EnterpriseOps-Gym task: {error}") from error
+                if body.task_id.task_id != task.task_id:
+                    raise ResourcesSeedRejectedError("TaskId does not match the EnterpriseOps-Gym task_id")
+                missing = [gym.name for gym in task.gym_servers if gym.name not in self.config.gym_images]
+                if missing:
+                    raise ResourcesSeedRejectedError(f"No gym_images entry for gym servers {missing}")
+                session = _TaskSession(body.episode_id, body.task_id, task, gyms={})
+                try:
+                    await self._start_gyms(session)
+                    response = await self._seed_response(session_id, session)
+                except BaseException:
+                    await self._release(session)
+                    raise
+                self._sessions[session_id] = session
+            # Only on success: a refusal must not hand the caller a cookie for a session another episode holds.
+            request.session[SESSION_ID_KEY] = session_id
             return response
 
     async def _start_gyms(self, session: _TaskSession) -> None:
@@ -264,7 +272,7 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
             try:
                 sql = await asyncio.to_thread(archive.read, gym_task.seed_database_file)
             except ValueError as error:
-                raise HTTPException(422, str(error)) from error
+                raise ResourcesSeedRejectedError(str(error)) from error
             spec = self.config.sandbox_config.spec(
                 self.config.sandbox_provider,
                 image=image.image,
@@ -285,7 +293,9 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
             except GymUnavailableError as error:
                 raise HTTPException(503, f"Gym server {gym_task.name} is unavailable: {error}") from error
             except GymRequestError as error:
-                raise HTTPException(422, f"Gym server {gym_task.name} refused the task database: {error}") from error
+                raise ResourcesSeedRejectedError(
+                    f"Gym server {gym_task.name} refused the task database: {error}"
+                ) from error
             gym.headers = {**gym_task.headers, DATABASE_ID_HEADER: database_id}
 
         try:
@@ -314,18 +324,18 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
         self, request: Request, body: ResourcesCloseSessionRequest
     ) -> ResourcesCloseSessionResponse:
         session_id = body.resources_session_id
-        async with self._session_locks.setdefault(session_id, asyncio.Lock()):
-            closed_episode_id = self._closed_sessions.get(session_id)
+        async with self._fence.locked(session_id):
+            closed_episode_id = self._fence.closed_episode(session_id)
             if closed_episode_id is None:
                 session = self._sessions.get(session_id)
                 if session is not None:
                     if session.episode_id != body.episode_id:
-                        raise ValueError("episode_id does not match the seeded resources session")
+                        raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
                     await self._release(session)
                     del self._sessions[session_id]
-                self._closed_sessions[session_id] = body.episode_id
+                self._fence.mark_closed(session_id, body.episode_id)
             elif closed_episode_id != body.episode_id:
-                raise ValueError("episode_id does not match the closed resources session")
+                raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
         request.session.pop(SESSION_ID_KEY, None)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
@@ -350,11 +360,8 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
                 LOG.exception("Failed to stop the sandboxes of EnterpriseOps-Gym session %s", session_id)
         self._sessions.clear()
 
-    def _session(self, request: Request) -> _TaskSession:
-        session = self._sessions.get(request.session.get(SESSION_ID_KEY))
-        if session is None:
-            raise HTTPException(409, "No seeded EnterpriseOps-Gym session for this request")
-        return session
+    def _session(self, request: Request) -> Optional[_TaskSession]:
+        return self._sessions.get(request.session.get(SESSION_ID_KEY))
 
     async def call_tool(
         self, request: Request, tool_name: str, arguments: Dict[str, Any] = Body(default_factory=dict)
@@ -365,6 +372,8 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
         episode as an infrastructure error.
         """
         session = self._session(request)
+        if session is None:
+            raise ResourcesSessionLostError("No seeded EnterpriseOps-Gym session for this tool call")
         gym_name = session.task.tool_servers.get(tool_name)
         if gym_name is None:
             raise HTTPException(400, f"Tool {tool_name!r} is not available in this task")
@@ -381,6 +390,18 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: EnterpriseOpsGymVerifyRequest) -> EnterpriseOpsGymVerifyResponse:
         session = self._session(request)
+        if session is None:
+            # Closed, never seeded here, or gone with a restart: the task databases went with it, so there is nothing
+            # to score, and a reward of 0 would read as a model that solved nothing.
+            lost = lost_session_verification("No seeded EnterpriseOps-Gym session for this verify")
+            return EnterpriseOpsGymVerifyResponse(
+                **(body.model_dump() | lost),
+                evaluation_completed=False,
+                verifier_pass_rate=0.0,
+                num_verifiers=0,
+                num_verifiers_passed=0,
+                verifier_results=[],
+            )
         if body.task_id != session.task.task_id:
             raise HTTPException(409, "The verify request names another task than the session")
         if session.verifier_results is None:

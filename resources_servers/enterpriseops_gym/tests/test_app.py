@@ -203,8 +203,8 @@ def _post_seed(client: TestClient, seed: ResourcesSeedSessionRequest):
     return client.post("/seed_session", json=seed.model_dump(mode="json"))
 
 
-def _verify(client: TestClient, task_id: str = "task-1"):
-    body = {
+def _verify_body(task_id: str = "task-1") -> dict[str, Any]:
+    return {
         "task_id": task_id,
         "domain": "hybrid",
         "responses_create_params": NeMoGymResponseCreateParamsNonStreaming(input=[]).model_dump(mode="json"),
@@ -219,7 +219,10 @@ def _verify(client: TestClient, task_id: str = "task-1"):
             tools=[],
         ).model_dump(mode="json"),
     }
-    return client.post("/verify", json=body)
+
+
+def _verify(client: TestClient, task_id: str = "task-1"):
+    return client.post("/verify", json=_verify_body(task_id))
 
 
 def test_seed_starts_a_sandbox_per_gym_seeds_its_database_and_lends_the_first(client, gyms, sandboxes):
@@ -277,8 +280,14 @@ def test_an_unreachable_gym_fails_the_tool_call_as_infrastructure(client, gyms):
     assert client.post("/insert_notes", json={"text": "hello"}).status_code == 502
 
 
-def test_a_tool_call_without_a_seeded_session_is_refused(client):
-    assert client.post("/insert_notes", json={"text": "hello"}).status_code == 409
+def test_a_tool_call_or_verify_without_a_seeded_session_is_a_lost_session(client):
+    response = client.post("/insert_notes", json={"text": "hello"})
+
+    assert (response.status_code, response.json()["detail"]["failure_kind"]) == (404, "session_lost")
+    # No database is left to score, so the sample is masked rather than scored 0.
+    result = _verify(client).json()
+    assert (result["mask_sample"], result["failure_kind"], result["reward"]) == (True, "session_lost", 0.0)
+    assert (result["evaluation_completed"], result["num_verifiers"]) == (False, 0)
 
 
 def test_verify_scores_every_verifier_and_releases_the_sandboxes(client, sandboxes):
@@ -434,7 +443,8 @@ def test_a_sandbox_that_cannot_start_fails_the_seed_and_stops_the_others(archive
 
 
 def test_close_stops_the_sandboxes_and_the_session_follows_the_contract(archive, gyms, sandboxes):
-    app = _server(archive).setup_webserver()
+    server = _server(archive)
+    app = server.setup_webserver()
     with TestClient(app) as client:
         seed = _seed()
         _post_seed(client, seed)
@@ -442,10 +452,16 @@ def test_close_stops_the_sandboxes_and_the_session_follows_the_contract(archive,
 
         assert client.post("/close_session", json=close.model_dump(mode="json")).status_code == 200
         assert sorted(sandboxes["stopped"]) == ["gym-a", "gym-b"]
-        assert client.post("/insert_notes", json={"text": "hello"}).status_code == 409
+        assert client.post("/insert_notes", json={"text": "hello"}).status_code == 404
         assert _post_seed(client, seed).status_code == 409
 
-    check_resources_session_contract(app, _seed("contract"), keeps_state=True)
+    check_resources_session_contract(
+        app,
+        _seed("contract"),
+        keeps_state=True,
+        holds_state=lambda session_id: session_id in server._sessions,
+        verify_body=_verify_body(),
+    )
 
 
 def test_shutdown_stops_the_sandboxes_of_open_sessions(archive, gyms, sandboxes):
@@ -505,14 +521,14 @@ def test_a_seed_or_close_for_another_episode_or_task_is_refused(archive, gyms, s
 
         assert _post_seed(client, other_episode).status_code == 409
         assert _post_seed(client, other_task.model_copy(update={"resources_session_id": "s2"})).status_code == 422
-        assert client.post("/close_session", json=close.model_dump(mode="json")).status_code == 500
+        assert client.post("/close_session", json=close.model_dump(mode="json")).status_code == 409
         assert (
             client.post(
                 "/close_session", json=close.model_copy(update={"episode_id": seed.episode_id}).model_dump(mode="json")
             ).status_code
             == 200
         )
-        assert client.post("/close_session", json=close.model_dump(mode="json")).status_code == 500
+        assert client.post("/close_session", json=close.model_dump(mode="json")).status_code == 409
 
 
 def test_a_task_naming_a_gym_server_twice_is_refused(client):
