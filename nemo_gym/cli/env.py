@@ -58,6 +58,7 @@ from nemo_gym.environment.publication import finalize_publication
 from nemo_gym.environment.scaffold import scaffold_environment, scaffold_resources_server
 from nemo_gym.environment.validation import EnvironmentValidationReport, validate_environment
 from nemo_gym.global_config import (
+    AGENT_SERVER_TYPE_KEY_NAME,
     COMPONENT_NAME_KEY_NAME,
     DRY_RUN_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
@@ -65,6 +66,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
+    POLICY_MODEL_KEY_NAME,
     QUERY_KEY_NAME,
     SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
     SERVER_TYPE_KEYS,
@@ -133,6 +135,10 @@ _ENDPOINT_UNRESOLVABLE = "unresolvable"
 # A proxy or load balancer answers these while nothing healthy is behind it yet, for example in
 # front of vLLM replicas that are still loading weights, so they mean "not yet" rather than "here".
 _ENDPOINT_STARTING_STATUS_CODES = frozenset({502, 503, 504})
+_TOOL_CALL_READINESS_PROBE_NAME = "nemo_gym_readiness_probe"
+_TOOL_CALL_READINESS_MODEL_TYPES = frozenset(
+    {"vllm_model", "vllm_model_with_compaction", "local_vllm_model", "local_vllm_model_proxy"}
+)
 
 
 def _collect_model_endpoints(global_config_dict: DictConfig) -> List[Tuple[str, str]]:
@@ -320,6 +326,130 @@ def _model_endpoint_timeout_seconds(global_config_dict: DictConfig) -> float:
             f"`{MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME}` must be a number of seconds, got {value!r}. "
             "Set it to 0 to skip waiting for model endpoints."
         ) from None
+
+
+def _collect_policy_model_tool_call_probe_targets(
+    global_config_dict: DictConfig, server_instances: List[ServerInstanceDisplayConfig]
+) -> List[Tuple[str, bool]]:
+    """Return local policy-model URLs and reasoning-parser expectations for configured tool agents."""
+    if not any(instance.server_type == AGENT_SERVER_TYPE_KEY_NAME for instance in server_instances):
+        return []
+
+    policy_model = global_config_dict.get(POLICY_MODEL_KEY_NAME)
+    if not isinstance(policy_model, DictConfig):
+        return []
+    model_servers = policy_model.get(_MODEL_SERVER_TYPE)
+    if not isinstance(model_servers, DictConfig):
+        return []
+
+    server_instances_by_name = {
+        instance.name: instance
+        for instance in server_instances
+        if instance.config_path == POLICY_MODEL_KEY_NAME and instance.server_type == _MODEL_SERVER_TYPE
+    }
+    targets: List[Tuple[str, bool]] = []
+    for model_type, model_config in model_servers.items():
+        model_type = str(model_type)
+        if model_type not in _TOOL_CALL_READINESS_MODEL_TYPES or not isinstance(model_config, DictConfig):
+            continue
+        if model_config.get("use_completions_api", False):
+            continue
+        server = server_instances_by_name.get(model_type)
+        if server is None or server.url is None:
+            raise ConfigError(f"Cannot locate the policy model API for the `{model_type}` tool-call readiness check.")
+        uses_reasoning_parser = bool(model_config.get("uses_reasoning_parser", False)) and not bool(
+            model_config.get("is_responses_native", False)
+        )
+        targets.append((server.url, uses_reasoning_parser))
+    return targets
+
+
+def _probe_policy_model_tool_call(base_url: str, timeout_seconds: float, uses_reasoning_parser: bool) -> None:
+    """Require the policy model API to return a parsed function call before the first rollout."""
+    payload = {
+        "model": "readiness-probe",
+        "input": [
+            {
+                "role": "system",
+                "content": "Briefly reason about 1 + 1, then call the supplied function. Do not answer in prose.",
+            },
+            {"role": "user", "content": "Call readiness_probe."},
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "name": _TOOL_CALL_READINESS_PROBE_NAME,
+                "description": "Return the result of the readiness check.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"value": {"type": "integer"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            }
+        ],
+        "tool_choice": {"type": "function", "name": _TOOL_CALL_READINESS_PROBE_NAME},
+        "parallel_tool_calls": False,
+        "temperature": 0,
+        "max_output_tokens": 64,
+    }
+    try:
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.post(f"{base_url.rstrip('/')}/v1/responses", json=payload, timeout=timeout_seconds)
+        if response.status_code != requests.codes.ok:
+            if response.status_code == requests.codes.bad_request:
+                raise ConfigError(
+                    "Policy model rejected the required tool-call readiness probe with HTTP 400. "
+                    "Check the tool-call parser (vLLM: `--enable-auto-tool-choice` and `--tool-call-parser`; "
+                    "Dynamo: `--dyn-tool-call-parser` on every worker) and the model API configuration."
+                )
+            raise ConfigError(
+                f"Policy model tool-call readiness probe failed with HTTP {response.status_code}. "
+                "Check the model server API and its authentication."
+            )
+        response_body = response.json()
+    except ValueError:
+        raise ConfigError("Policy model tool-call readiness probe returned invalid JSON.") from None
+    except requests.exceptions.RequestException:
+        raise ConfigError("Policy model tool-call readiness probe could not reach a valid model response.") from None
+
+    output = response_body.get("output") if isinstance(response_body, dict) else None
+    has_parsed_tool_call = False
+    has_parsed_reasoning = False
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "function_call" and item.get("name") == _TOOL_CALL_READINESS_PROBE_NAME:
+                try:
+                    arguments = json.loads(item.get("arguments", ""))
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(arguments, dict):
+                    has_parsed_tool_call = True
+            elif item.get("type") == "reasoning":
+                summary = item.get("summary")
+                if isinstance(summary, list) and any(
+                    isinstance(part, dict) and isinstance(part.get("text"), str) and part["text"].strip()
+                    for part in summary
+                ):
+                    has_parsed_reasoning = True
+    failures = []
+    if not has_parsed_tool_call:
+        failures.append(
+            "The required function call was not parsed and may have been returned as plain text. "
+            "Configure the serving engine's tool-call parser (vLLM: `--enable-auto-tool-choice` and "
+            "`--tool-call-parser`; Dynamo: `--dyn-tool-call-parser` on every worker)."
+        )
+    if uses_reasoning_parser and not has_parsed_reasoning:
+        failures.append(
+            "No parsed reasoning output was returned although `uses_reasoning_parser` is enabled. "
+            "Configure the serving engine's reasoning parser (vLLM: `--reasoning-parser`; "
+            "Dynamo: `--dyn-reasoning-parser` on every worker)."
+        )
+    if failures:
+        raise ConfigError("Policy model failed the tool-call readiness check:\n- " + "\n- ".join(failures))
 
 
 _DEFAULT_SERVER_SPINUP_TIMEOUT_SEC: float = 600.0
@@ -933,8 +1063,20 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
         `start()` shuts down the servers it already spawned before the error reaches the caller.
         """
         timeout_seconds = _model_endpoint_timeout_seconds(global_config_dict)
+        readiness_started_at = monotonic()
         unreachable = _wait_for_model_endpoints(_collect_model_endpoints(global_config_dict), timeout_seconds)
         if not unreachable:
+            if timeout_seconds > 0:
+                for base_url, uses_reasoning_parser in _collect_policy_model_tool_call_probe_targets(
+                    global_config_dict, getattr(self, "_server_instance_display_configs", [])
+                ):
+                    remaining_seconds = timeout_seconds - (monotonic() - readiness_started_at)
+                    if remaining_seconds <= 0:
+                        raise ConfigError(
+                            "Policy model tool-call readiness check exhausted "
+                            f"`{MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME}`={timeout_seconds:.0f}s before completing."
+                        )
+                    _probe_policy_model_tool_call(base_url, remaining_seconds, uses_reasoning_parser)
             return
 
         listed = "\n".join(f"  - {url} (from `{key}`)" for key, url in unreachable)
