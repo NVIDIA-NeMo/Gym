@@ -27,9 +27,20 @@ validator dependency with
 `uv pip install -r resources_servers/agentic_if_realworld/benchmark/policy/requirements.txt`.
 Set `AGENTIC_IF_DATA_DIR` to an existing private release/cache, or use the default
 `~/.cache/nemo-gym/agentic_if_realworld/1.0.0`. Preparation checks every original
-artifact hash, writes outside Git, and creates an ignored symlink at
-`data/prepared.jsonl`. Set `AGENTIC_IF_PREPARED_PATH` for another private output.
-An existing link to a different destination is rejected before writing it.
+artifact hash and makes the entire ignored `data/` directory a symlink to the
+private prepared-file directory. Gym's adjacent collation and metrics files
+therefore stay outside the checkout as well. Set `AGENTIC_IF_PREPARED_PATH` for
+another private output, including a custom basename; an external `prepared.jsonl`
+alias preserves the configured dataset path. Collation sidecar names are reserved.
+Existing real directories, different directory targets and conflicting private
+`prepared.jsonl` files are rejected before writing prepared data.
+
+For an older file-only symlink layout, stop writers and inspect the ignored
+`benchmarks/agentic_if_realworld/data/` directory. Preserve its generated files
+outside Git, unlink only its old `prepared.jsonl` symlink, and remove the empty
+directory with `rmdir` before preparing again. To switch a current directory
+symlink, inspect and unlink that directory symlink itself; do not remove files
+through it. Preparation never deletes or migrates existing artifacts.
 
 Registry credentials, prepared inputs, model-call captures, rollouts, judge
 receipts and analysis all remain private. Keep capture/output directories outside
@@ -84,6 +95,13 @@ preserves that original snapshot, including when changed settings are rejected.
 Keep it with `.run.json`: Gym's generic redactor also masks token-named budget
 fields, whose fixed schedule remains in the run fingerprint and this contract.
 
+Before dispatch, the driver atomically saves the selected logical task inventory
+as `rollouts_materialized_inputs.jsonl` beside the output, with private
+permissions. Adaptive delivery attempts do not add inventory rows. Health reports
+use this inventory for expected and missing counts; the benchmark summary still
+uses the full declared dataset denominator. Resume requires the identical saved
+inventory and never replaces it. Older runs without one require a new run directory.
+
 `rollouts.summary.json` reports both views, subtype overlap, expected tasks,
 pass/fail/unscored counts and coverage. `rollouts_aggregate_metrics.json` exposes
 `composite/complete_accuracy`, which stays null until every declared task has a
@@ -132,7 +150,10 @@ and job record. Keep all native outputs, captures and judge receipts outside Git
 ## Architecture review
 
 The [Gym benchmark guide](https://docs.nvidia.com/nemo/gym/latest/contribute/environments/adding-a-benchmark)
-supports external rollout drivers. This contribution needs an explicit
+supports external rollout drivers. The documented `gym eval run` command already
+uses this supported hook and the standard SimpleAgent for generation. The hook
+handles adaptive delivery selection, independent judging and saved-run accounting;
+it does not replace the CLI entrypoint. This contribution needs an explicit
 Gym maintainer decision on its recorded streaming model adapter and thin adaptive
 driver: stock repeat/resume does not preserve the frozen first-complete schedule
 and delivery receipts. The stock native profile is a separate protocol.
@@ -143,8 +164,8 @@ applicable conformance registry/probes before platform acceptance.
 
 ## Synthetic smoke without registry credentials or paid inference
 
-Use a new private directory outside Git. If `data/prepared.jsonl` already points
-to another run, inspect and deliberately remove that ignored symlink first.
+Use a new private directory outside Git. If the ignored `data/` directory symlink
+already points to another run, inspect and deliberately unlink that symlink first.
 
 ```bash
 export AGENTIC_IF_DATA_DIR=/private/agentic-if/smoke/data

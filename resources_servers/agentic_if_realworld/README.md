@@ -33,7 +33,9 @@ To regenerate, use the synthetic environment exports and local mock server in th
 benchmark runbook with a fresh private directory at `/private/agentic-if/ci`.
 Set `AGENTIC_IF_DATA_DIR`, `AGENTIC_IF_PREPARED_PATH` and
 `AGENTIC_IF_RECEIPT_DIR` to its `data`, `prepared.jsonl` and `receipts` paths.
-Deliberately remove an existing ignored prepared-data symlink that points elsewhere.
+Inspect and unlink an existing ignored benchmark `data/` directory symlink that
+points elsewhere. Preserve older file-only layouts as described in the benchmark
+runbook before removing their empty directory.
 Then run from the Gym root:
 
 ```bash
@@ -64,5 +66,4 @@ gym env test +entrypoint=responses_api_models/agentic_if_text +should_validate_d
 ```
 
 The benchmark runbook's local mock smoke additionally checks generation,
-verification, health and P0 evidence. Platform CI still requires the standard
-GitHub PR route and qualified maintainer approval.
+verification, health and P0 evidence.

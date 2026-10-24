@@ -6,6 +6,8 @@ import asyncio
 import copy
 import fcntl
 import json
+import os
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -35,6 +37,7 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
         merge_model_call_capture_into_record,
         model_call_capture_dirs_from_config,
     )
+    from nemo_gym.path_utils import materialized_path_for
     from nemo_gym.rollout_collection import RolloutCollectionHelper, _attach_trajectory_record
     from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
     from nemo_gym.secret_utils import recursively_hide_secrets
@@ -101,7 +104,24 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
         if snapshot_path.exists():
             if not config.resume_from_cache:
                 raise ValueError("Existing resolved config requires resume or a new run directory")
+        inventory = private_path(materialized_path_for(output))
+        inventory_text = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows)
+        if inventory.exists():
+            if not config.resume_from_cache or inventory.read_text(encoding="utf-8") != inventory_text:
+                raise ValueError("Materialized rollout inventory mismatch")
         else:
+            if config.resume_from_cache and (output.exists() or (directory / "cells").exists()):
+                raise ValueError("Missing materialized rollout inventory; preserve this run and start a new directory")
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=inventory.parent, delete=False) as stream:
+                temporary = Path(stream.name)
+                try:
+                    stream.write(inventory_text)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                    temporary.replace(inventory)
+                finally:
+                    temporary.unlink(missing_ok=True)
+        if not snapshot_path.exists():
             # JSON is valid YAML; reuse the atomic private receipt writer.
             write(snapshot_path, OmegaConf.to_container(snapshot, resolve=True))
         results, rollouts = [], []

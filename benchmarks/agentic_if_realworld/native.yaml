@@ -1,5 +1,5 @@
 # Standard Gym execution, independent of the adaptive evaluation driver.
-# Select a stock policy server with --model-type, as in the NVBug text recipe.
+# Select a stock policy server with --model-type.
 config_paths:
   - resources_servers/agentic_if_realworld/configs/agentic_if_realworld.yaml
 policy_api_key: ${oc.env:AGENTIC_IF_POLICY_API_KEY,""}
