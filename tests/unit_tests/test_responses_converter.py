@@ -1053,11 +1053,47 @@ def test_drop_unrepresentable_request_fields_drops_hosted_tools(converter: Respo
                 },
                 {"type": "web_search_preview"},
             ],
+            tool_choice="required",
         ),
         drop_unrepresentable_request_fields=True,
     )
 
     assert [tool["function"]["name"] for tool in params.tools] == ["get_weather"]
+    assert params.tool_choice == "required"
+
+
+@pytest.mark.parametrize(
+    "tool_choice_kwargs", [{}, {"tool_choice": "auto"}, {"tool_choice": "none"}], ids=["omitted", "auto", "none"]
+)
+def test_drop_unrepresentable_request_fields_hosted_only_tools_is_a_no_tools_request(
+    converter: ResponsesConverter, tool_choice_kwargs: dict
+):
+    # vLLM rejects tool_choice / parallel_tool_calls without tools, also when every declared tool was dropped.
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input="hi",
+            tools=[{"type": "web_search_preview"}],
+            parallel_tool_calls=True,
+            **tool_choice_kwargs,
+        ),
+        drop_unrepresentable_request_fields=True,
+    )
+    dumped = params.model_dump(exclude_unset=True)
+    assert "tools" not in dumped
+    assert "tool_choice" not in dumped
+    assert "parallel_tool_calls" not in dumped
+
+
+def test_drop_unrepresentable_request_fields_hosted_only_tools_rejects_required_tool_choice(
+    converter: ResponsesConverter,
+):
+    with pytest.raises(ValueError, match="requires at least one tool"):
+        converter.responses_to_chat_completion_create_params(
+            NeMoGymResponseCreateParamsNonStreaming(
+                input="hi", tools=[{"type": "web_search_preview"}], tool_choice="required"
+            ),
+            drop_unrepresentable_request_fields=True,
+        )
 
 
 def test_output_text_accepts_null_annotations():

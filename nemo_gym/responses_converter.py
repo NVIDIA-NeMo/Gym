@@ -538,9 +538,12 @@ class ResponsesConverter(BaseModel):
                         "custom": self._responses_custom_tool_to_chat(tool_dict),
                     }
                 responses_create_params["tools"].append(converted_tool)
+        # Decide on the converted tools: a request whose only tools were dropped is a no-tools request.
+        if responses_create_params.get("tools"):
             if tool_choice is not None:
                 responses_create_params["tool_choice"] = tool_choice
         else:
+            responses_create_params.pop("tools", None)
             if tool_choice not in (None, "auto", "none"):
                 raise ValueError(f"tool_choice={tool_choice!r} requires at least one tool")
 
