@@ -34,7 +34,7 @@ Additional fields like `expected_answer` vary by resources server—the componen
 | Field | Added By | Description |
 |-------|----------|-------------|
 | `responses_create_params` | User | Input to the model during training. Contains `input` (messages) and optional `tools`, `temperature`, etc. |
-| `agent_ref` | `gym dataset collate` | Routes each row to its agent server. Auto-generated during data preparation. |
+| `task_source` | `gym dataset collate` | Names the config instance that declared the row's dataset. NeMo Gym resolves it to an agent server at run time. Auto-generated during data preparation. |
 
 ### Optional Fields
 
@@ -49,18 +49,22 @@ Check `resources_servers/<name>/README.md` for fields required by each resources
 
 </Tip>
 
-### The `agent_ref` Field
+### The `task_source` Field
 
-The `agent_ref` field maps each row to a specific agent server, which in turn knows its resources server from the YAML config. A training dataset can blend multiple agent servers in a single file—`agent_ref` tells NeMo Gym which server handles each row.
+The `task_source` field names the config instance that declared the row's dataset: the agent, or the resources server when the dataset is declared there. A training dataset can blend multiple environments in a single file. When rollouts are dispatched, NeMo Gym resolves each row's `task_source` to the agent server that handles it, and that agent knows its resources server from the YAML config.
 
 ```json
 {
   "responses_create_params": {"input": [{"role": "user", "content": "..."}]},
-  "agent_ref": {"type": "responses_api_agents", "name": "math_with_judge_simple_agent"}
+  "task_source": "math_with_judge_simple_agent"
 }
 ```
 
-**You don't create `agent_ref` manually.** The `gym dataset collate` tool adds it automatically based on your config file. The tool matches the agent type (`responses_api_agents`) with the agent name from the config.
+**You don't create `task_source` manually.** The `gym dataset collate` tool adds it based on your config file. The agent is chosen at run time, so collated rows carry no `agent_ref`, and collation strips any `agent_ref` already in the source data. To send selected rows to a different agent, pass `+agent_map`, keyed by the `task_source` value (for example `'+agent_map={math_with_judge_simple_agent: my_agent}'`).
+
+<Note>
+Datasets collated before NeMo Gym v0.6.0 carry `agent_ref` without `task_source`. They still run, but this routing format is deprecated. Collate them again with current NeMo Gym.
+</Note>
 
 ### Example Data
 
