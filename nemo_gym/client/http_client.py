@@ -16,6 +16,7 @@
 
 import asyncio
 import atexit
+import json
 import socket
 import time
 from collections.abc import Callable
@@ -439,7 +440,12 @@ async def request(
 
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
-        kwargs["data"] = orjson.dumps(kwargs.pop("json"))
+        body = kwargs.pop("json")
+        try:
+            kwargs["data"] = orjson.dumps(body)
+        except TypeError:
+            # orjson rejects integers wider than 64 bits, which a model can write into a tool argument.
+            kwargs["data"] = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         kwargs.setdefault("headers", dict())
         kwargs["headers"]["Content-Type"] = "application/json"
 
