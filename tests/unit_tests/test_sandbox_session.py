@@ -56,7 +56,7 @@ async def test_completed_execution_captures_once_before_release(session, owned):
     if owned:
         session.sandbox.stop.assert_awaited_once()
         session.sandbox.disconnect.assert_not_awaited()
-        assert session.sandbox.exec.await_count == 1
+        assert "mv /session /session.closed" in session.sandbox.exec.await_args.args[0]
     else:
         session.sandbox.stop.assert_not_awaited()
         session.sandbox.disconnect.assert_awaited_once()
@@ -113,7 +113,7 @@ async def test_interruption_captures_before_transport_cancellation_and_release(s
         await running
     assert session.artifacts == "partial transcript"
     collector.assert_awaited_once()
-    assert events == ["collect", "cancel_exec", *(["stop_sandbox"] if owned else ["remove_files", "disconnect"])]
+    assert events == ["collect", "cancel_exec", "remove_files", "stop_sandbox" if owned else "disconnect"]
 
 
 async def test_close_joins_collection_started_by_normal_completion(session):
@@ -580,3 +580,33 @@ async def test_missing_failure_log_does_not_mask_capture_failure(session, monkey
     assert session.cleanup == RECEIPT
     await session.close(timeout=1)
     assert session.closed
+
+
+async def test_owned_local_session_reclaims_runtime_without_deleting_task(tmp_path):
+    from nemo_gym.sandbox import SandboxSpec
+    from nemo_gym.sandbox.providers.local.provider import LocalProvider
+
+    workdir, runtime = tmp_path / "task", tmp_path / "private-session"
+    workdir.mkdir()
+    runtime.mkdir()
+    (workdir / "result.txt").write_text("task output")
+    (runtime / "node-runtime").write_text("private runtime")
+    sandbox = AsyncSandbox(LocalProvider())
+    await sandbox.start(SandboxSpec(workdir=str(workdir)))
+    session = SandboxSession(
+        sandbox=sandbox, session_dir=str(runtime), workdir=str(workdir), harness="test", owns_sandbox=True
+    )
+    session.cleanup = RECEIPT
+    await session.close(timeout=5)
+    assert not runtime.exists()
+    assert not runtime.with_name(runtime.name + ".closed").exists()
+    assert (workdir / "result.txt").read_text() == "task output"
+
+
+async def test_owned_session_stops_even_when_runtime_removal_fails(session):
+    session.owns_sandbox = True
+    await execute(session)
+    session.sandbox.exec.return_value = SandboxExecResult("", "disk error", 1)
+    with pytest.raises(RuntimeError, match="Could not remove"):
+        await session.close(timeout=1)
+    session.sandbox.stop.assert_awaited_once()
