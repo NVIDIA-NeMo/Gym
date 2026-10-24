@@ -729,6 +729,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
     def _opencode_export_to_output_items(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
         messages = []
+        # OpenCode already distinguishes text from reasoning. Re-parsing literal
+        # think tags would change the served text and break capture attribution.
+        text_converter = ResponsesConverter(return_token_id_information=True, uses_reasoning_parser=False)
         for message in opencode_export["messages"]:
             if message["info"]["role"] == "user":
                 message_parts = []
@@ -743,7 +746,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 converter = ResponsesConverter(return_token_id_information=True)
                 for part in message["parts"]:
                     if part["type"] == "text":
-                        output_items = converter.postprocess_assistant_message_dict(
+                        output_items = text_converter.postprocess_assistant_message_dict(
                             message_dict={
                                 "content": part["text"],
                                 "role": "assistant",
