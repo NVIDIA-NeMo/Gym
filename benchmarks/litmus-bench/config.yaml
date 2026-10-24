@@ -26,7 +26,7 @@ litmus_bench_benchmark_agent:
           prompt_config: null
           prepare_script: benchmarks/litmus-bench/prepare.py
           num_repeats: 5
-          license: CC-BY-4.0
+          license: CC-BY-SA-4.0 AND LicenseRef-OpenMDW-1.1
 
 litmus_bench_benchmark_environment_server:
   _inherit_from: litmus_agent_environment_server

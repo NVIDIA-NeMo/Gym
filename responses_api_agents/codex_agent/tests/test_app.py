@@ -557,7 +557,7 @@ class TestRolloutMCPServers:
         assert agent._rollout_mcp_servers({}) is None
 
     def test_builds_streamable_http_entry_with_session_header(self) -> None:
-        agent = self._agent_with_resources_server()
+        agent = self._agent_with_resources_server(mcp_tool_timeout_seconds=30)
         servers = agent._rollout_mcp_servers(
             {
                 "mcp": {
@@ -571,6 +571,7 @@ class TestRolloutMCPServers:
             "example_mcp_weather": {
                 "url": "http://127.0.0.1:8123/mcp",
                 "http_headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
+                "tool_timeout_sec": 30.0,
             }
         }
 
@@ -968,3 +969,24 @@ class TestConfigYaml:
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 32
         assert inner["sandbox_mode"] == "danger-full-access"
+
+
+@pytest.mark.parametrize("budget,expected", [(None, 1800), ("12.5", 12.5), ("3600", 1800), ("invalid", 1800)])
+async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget: str | None, expected: float) -> None:
+    agent = _make_agent(timeout=1800, cwd=str(tmp_path))
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input="task", metadata=None if budget is None else {"agent_timeout_sec": budget}
+    )
+    process = MagicMock(returncode=0)
+    process.communicate = AsyncMock(return_value=(b"", b""))
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)),
+        patch(f"{module}.asyncio.wait_for", wraps=asyncio.wait_for) as wait,
+        patch(f"{module}.Path.home", return_value=tmp_path),
+    ):
+        response = await agent._create_response(body)
+    wait.assert_awaited_once()
+    assert wait.await_args.kwargs["timeout"] == expected
+    assert response.metadata == {"agent_timeout_sec": str(float(expected))}
+    assert agent.config.timeout == 1800

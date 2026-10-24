@@ -60,6 +60,12 @@ requirements. The selected GPU deployment must supply H100s; its unsupported
 `gpu_type` filter is disabled explicitly. Each task retains its CPU, memory,
 storage, GPU count, build budget, agent budget, and verifier deadline.
 
+New agent, verifier, and Compose sandboxes request process-level OOM handling
+with `nemo.nvidia.com/oom-kill: process`. A memory-limit breach can kill a task
+process while leaving the sandbox available for subsequent commands. The agent
+itself can still be selected as the OOM victim. Set this metadata value to `pod`
+to restore whole-sandbox OOM handling.
+
 Compose uses the existing digest-verified `compose-images.json`. It preserves
 startup commands, users, dependency health checks, shared-memory requirements,
 and sidecar artifact collection. Declared-port TCP forwarding for shared-network

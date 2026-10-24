@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +30,14 @@ from nemo_gym.cli.eval import list_benchmarks, prepare_benchmark
 def _mock_global_config(config: dict = None):
     """Return an OmegaConf config without CLI/file parsing."""
     return OmegaConf.create(config or {})
+
+
+def test_ioi26_prepare_imports_as_a_package_module() -> None:
+    # `gym eval prepare --benchmark ioi26` imports benchmarks.ioi26.prepare, where a bare
+    # `from subtask_split import ...` fails because the benchmark directory is not on sys.path.
+    prepare = importlib.import_module("benchmarks.ioi26.prepare")
+
+    assert prepare.split_subtasks is importlib.import_module("benchmarks.ioi26.subtask_split").split
 
 
 def test_pinchbench_tavily_key_is_derived_from_environment() -> None:
@@ -1024,7 +1033,7 @@ class TestBenchmarkAgentResolution:
             )
 
 
-class TestNativeTasksetBenchmark:
+class TestMaterializedTasksetBenchmark:
     @pytest.fixture
     def config(self, tmp_path):
         prepare = tmp_path / "prepare.py"
@@ -1039,7 +1048,7 @@ class TestNativeTasksetBenchmark:
                             "domain": "coding",
                             "datasets": [
                                 {
-                                    "name": "native",
+                                    "name": "materialized",
                                     "type": "benchmark",
                                     "taskset": "swe:test",
                                     "jsonl_fpath": str(tmp_path / "source.jsonl"),
@@ -1136,13 +1145,13 @@ class TestNativeTasksetBenchmark:
         assert not (tmp_path / "source_prepare.jsonl").exists()
         assert not (tmp_path / "source_metrics.json").exists()
 
-    def test_native_route_resolves_the_servers_agent(self, config):
+    def test_taskset_route_resolves_the_servers_agent(self, config):
         from nemo_gym.global_config import resolve_dataset_agent
 
         assert resolve_dataset_agent(config, "resources", taskset="swe:test") == "agent"
 
     @pytest.mark.parametrize("pin", ["agent", "other"])
-    def test_native_route_rejects_any_pin(self, config, pin):
+    def test_taskset_route_rejects_any_pin(self, config, pin):
         from nemo_gym.config_types import ConfigError
         from nemo_gym.global_config import resolve_dataset_agent
 
@@ -1161,7 +1170,7 @@ class TestNativeTasksetBenchmark:
             ),
         ],
     )
-    def test_invalid_native_route_never_falls_back(self, config, change, message):
+    def test_invalid_taskset_route_never_falls_back(self, config, change, message):
         from nemo_gym.config_types import ConfigError
         from nemo_gym.global_config import resolve_dataset_agent
 
