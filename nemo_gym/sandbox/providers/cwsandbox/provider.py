@@ -277,7 +277,7 @@ class CWSandboxProvider:
         _positive("timeout_s", timeout)
         if env:
             command = (
-                f"env {shlex.join([f'{key}={value}' for key, value in env.items()])} bash -c {shlex.quote(command)}"
+                f'env {shlex.join([f"{key}={value}" for key, value in env.items()])} "$BASH" -c {shlex.quote(command)}'
             )
         if user is not None and str(user) not in {"root", "0"}:
             username = str(user)
