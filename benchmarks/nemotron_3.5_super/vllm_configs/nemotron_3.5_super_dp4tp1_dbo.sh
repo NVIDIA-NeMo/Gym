@@ -30,7 +30,7 @@ export VLLM_USE_RUST_FRONTEND=1
 VLLM_COMMON_ARGS=(
     --trust-remote-code
     --disable-uvicorn-access-log
-    --gpu-memory-utilization 0.8
+    --gpu-memory-utilization 0.85
     --distributed-executor-backend mp
     --data-parallel-backend mp
     --enable-auto-tool-choice
