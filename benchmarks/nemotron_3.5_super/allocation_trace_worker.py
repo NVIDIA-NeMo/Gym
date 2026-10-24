@@ -26,7 +26,8 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 
-logger = init_logger(__name__)
+# vLLM configures handlers on its own namespace, not the Python root logger.
+logger = init_logger("vllm.allocation_trace_worker")
 
 
 class AllocationTraceWorker(Worker):
@@ -47,6 +48,12 @@ class AllocationTraceWorker(Worker):
         self._allocation_trace_identity = (
             f"{socket.gethostname()}-pid{os.getpid()}-{role}"
             f"-dp{self.parallel_config.data_parallel_index}-rank{self.rank}"
+        )
+        logger.info(
+            "ALLOC_TRACE ready worker=%s directory=%s steps=%d",
+            self._allocation_trace_identity,
+            self._allocation_trace_dir,
+            self._allocation_trace_limit,
         )
 
     def _allocation_snapshot(self, label: str) -> None:
