@@ -1,9 +1,23 @@
-# partner_if: internal instruction-following tasks on the policy model, as text, search-tool and build-tool
+# partner_if: internal instruction-following tasks on the policy model, as text, search-tool, build-tool and SWE
 # episodes; see README.md for the measurement contract. prepare.py downloads the rows from Gym's GitLab dataset
-# registry (mlflow_tracking_uri and mlflow_tracking_token). The tool tasks run their backends in sandboxes, so add a
-# sandbox provider config, such as nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml.
+# registry (mlflow_tracking_uri and mlflow_tracking_token). The tool tasks run their backends in sandboxes and the
+# SWE tasks run OpenCode in one, so add a sandbox provider config, such as
+# nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml.
 config_paths:
   - resources_servers/partner_if/configs/verifier_base.yaml
+  # opencode_agent's command deny-list, which partner_if_swe_agent inherits.
+  - responses_api_agents/opencode_agent/configs/permissions/default.yaml
+
+# The benchmark fixes the policy's sampling for every task: temperature 1.0, top_p 1.0 and no output cap. The null
+# caps, which also replace the per-call cap OpenCode sends, leave each reply the rest of a vLLM endpoint's context
+# window; an endpoint with a smaller default needs an explicit cap here (see README.md). It pins them on this copy
+# of the run's policy model, which every agent here calls. Runs set no sampling of their own: opencode_agent refuses
+# request-level sampling, so a run that sets it fails the SWE tasks.
+partner_if_policy_model:
+  _copy: policy_model
+  responses_api_models:
+    vllm_model:
+      sampling_overrides: {temperature: 1.0, top_p: 1.0, max_tokens: null, max_completion_tokens: null}
 
 # The judge settings are part of the measurement contract.
 partner_if:
@@ -28,7 +42,7 @@ partner_if_judge:
 # Supply the judge endpoint and key, for example in env.yaml.
 judge_base_url: null
 judge_api_key: null
-judge_model_name: nvidia/zai-org/glm-5.3
+judge_model_name: azure/openai/gpt-6-sol
 
 # Text tasks: one reply, no tools run.
 partner_if_simple_agent:
@@ -38,7 +52,7 @@ partner_if_simple_agent:
       max_steps: 1
       execute_tools: false
       resources_server: {type: resources_servers, name: partner_if}
-      model_server: {type: responses_api_models, name: policy_model}
+      model_server: {type: responses_api_models, name: partner_if_policy_model}
 
 partner_if_environment_server:
   environment_servers:
@@ -79,7 +93,7 @@ partner_if_search_tools_agent:
       max_steps: 30
       execute_tools: true
       resources_server: {type: resources_servers, name: partner_if_tools}
-      model_server: {type: responses_api_models, name: policy_model}
+      model_server: {type: responses_api_models, name: partner_if_policy_model}
 
 partner_if_search_tools:
   environment_servers:
@@ -98,7 +112,7 @@ partner_if_build_tools_agent:
       max_steps: 15
       execute_tools: true
       resources_server: {type: resources_servers, name: partner_if_tools}
-      model_server: {type: responses_api_models, name: policy_model}
+      model_server: {type: responses_api_models, name: partner_if_policy_model}
 
 partner_if_build_tools:
   environment_servers:
@@ -110,7 +124,67 @@ partner_if_build_tools:
         - direct_http
       agent_server: {type: responses_api_agents, name: partner_if_build_tools_agent}
 
-# The dispatcher routes each task to its environment, so all three share one dataset and one score.
+# SWE tasks: OpenCode works in the row's Scale-SWE sandbox, which this server starts and hands to the agent. Each
+# row's pre_commands set up the agent's harness, and its contract carries the judge's copies of that setup.
+partner_if_swe:
+  resources_servers:
+    partner_if:
+      entrypoint: swe_app.py
+      domain: instruction_following
+      verified: false
+      num_workers: 1
+      sandbox_provider: sandbox
+      sandbox_config:
+        # Outlives the agent's 10800 s deadline and the seed before it.
+        ttl_s: 14400
+        ready_timeout_s: 600
+        env: {SHELL: /bin/bash, EXECD_API_GRACE_SHUTDOWN: 50ms}
+        resources: {cpu: 4, memory_mib: 16384, disk_gib: 20}
+        provider_options:
+          resource_requests: {cpu: 1, memory_mib: 4096, disk_gib: 20}
+        # Labels are deployment-specific: the agent gets a shell, so a deployment whose sandboxes mount shared
+        # storage adds its own label to keep that storage out.
+        metadata: {environment: partner-if-swe}
+      judge_model_server: {type: responses_api_models, name: partner_if_judge}
+      allow_provisional_rubrics: true
+      judge_responses_create_params: {input: [], max_output_tokens: 32768, temperature: 0.0}
+      judge_max_concurrency: 2
+
+# OpenCode with opencode_agent's command deny-list and without the web, subagent and skill tools; it keeps its default
+# step limit and compaction. The agent inherits only the deny-list (permissions/default.yaml), not opencode_agent.yaml:
+# OpenCode 1.17.11 places the keys of a `tools` map, such as the one opencode_agent.yaml sets, before the permission
+# map's "*" rule, and the last matching rule wins, so with that map none of the denials apply.
+partner_if_swe_agent:
+  _inherit_from: opencode_agent
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      num_workers: 1
+      model: ${policy_model_name}
+      model_server: {type: responses_api_models, name: partner_if_policy_model}
+      # Set it to the policy model's context window: OpenCode compacts the conversation as it nears it.
+      context_window: 262144
+      timeout: 10800
+      sandbox_install_timeout_seconds: 600
+      session_close_timeout_seconds: 60
+      session_close_retry_window_seconds: 300
+      opencode_config:
+        permission:
+          webfetch: deny
+          websearch: deny
+          task: deny
+          skill: deny
+
+partner_if_swe_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      cleanup_timeout_seconds: 180
+      resources_server: {type: resources_servers, name: partner_if_swe}
+      resources_tool_transports: []
+      agent_server: {type: responses_api_agents, name: partner_if_swe_agent}
+
+# The dispatcher routes each task to its environment, so all four share one dataset and one score.
 partner_if_dispatcher:
   responses_api_agents:
     partner_if_dispatcher:
@@ -139,6 +213,9 @@ partner_if_dispatcher:
         pif_020: {type: environment_servers, name: partner_if_build_tools}
         pif_021: {type: environment_servers, name: partner_if_build_tools}
         pif_022: {type: environment_servers, name: partner_if_build_tools}
+        pif_024: {type: environment_servers, name: partner_if_swe_environment_server}
+        pif_025: {type: environment_servers, name: partner_if_swe_environment_server}
+        pif_026: {type: environment_servers, name: partner_if_swe_environment_server}
       datasets:
         - name: partner_if
           type: benchmark
