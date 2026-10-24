@@ -2086,7 +2086,7 @@ def _git_history_sanitize_cmd(repo_path: str, base_commit: str, log_path: str) -
     """
     script = f"""set -u
 g() {{ git -c safe.directory='*' "$@"; }}
-cd {shlex.quote(repo_path)} 2>/dev/null && [ -e .git ] || {{ echo "no git repository at {shlex.quote(repo_path)}"; exit 0; }}
+cd {shlex.quote(repo_path)} 2>/dev/null && [ -e .git ] || {{ printf 'no git repository at %s\\n' {shlex.quote(repo_path)}; exit 0; }}
 before=$(g rev-list --all --count)
 base={shlex.quote(base_commit)}
 # Resolve symbolic/remote names before deleting the refs that give them meaning.
@@ -2105,7 +2105,7 @@ git_dir=$(g rev-parse --git-dir)
 for f in FETCH_HEAD ORIG_HEAD MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_HEAD AUTO_MERGE; do rm -f "$git_dir/$f"; done
 g reflog expire --expire=now --expire-unreachable=now --all
 g gc --prune=now --quiet
-echo "git history sanitized in {shlex.quote(repo_path)}: $before -> $(g rev-list --all --count) commits reachable"
+printf 'git history sanitized in %s: %s -> %s commits reachable\\n' {shlex.quote(repo_path)} "$before" "$(g rev-list --all --count)"
 """
     return f"{{ bash -c {shlex.quote(script)} >{shlex.quote(log_path)} 2>&1 || true; }} && "
 

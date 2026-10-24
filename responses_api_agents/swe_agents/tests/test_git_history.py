@@ -231,6 +231,22 @@ class TestGitHistorySanitizer:
         assert not _object_exists(repo, future)
         assert not (tmp_path / "injected").exists()
 
+    @pytest.mark.parametrize("repository_exists", [False, True])
+    def test_repository_path_is_literal_in_log_messages(self, tmp_path: Path, repository_exists: bool) -> None:
+        repo = tmp_path / "repo $(touch unexpected-file)"
+        if repository_exists:
+            repo.mkdir()
+            _git(repo, "init", "-q", "-b", "main")
+            _commit(repo, "bug\n", "base")
+        log_path = tmp_path / "git_sanitize.log"
+        command = _git_history_sanitize_cmd(str(repo), "HEAD", str(log_path))
+
+        subprocess.run(["bash", "-c", command + "true"], cwd=tmp_path, check=True)
+
+        assert str(repo) in log_path.read_text()
+        assert not (tmp_path / "unexpected-file").exists()
+        assert not (repo / "unexpected-file").exists()
+
 
 class TestSanitizeGitHistoryWiring:
     def test_default_off(self) -> None:
