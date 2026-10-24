@@ -10,10 +10,11 @@ swe_atlas_qa_resources_server:
       model_server:
         type: responses_api_models
         name: policy_model
-      sandbox_model_base_url: http://${oc.env:SWE_ATLAS_GYM_MODEL_HOST}:${policy_model.responses_api_models.vllm_model.port}
-      judge_base_url: ${oc.env:SWE_ATLAS_JUDGE_BASE_URL}
-      judge_model: ${oc.env:SWE_ATLAS_JUDGE_MODEL}
-      judge_api_key: ${oc.env:SWE_ATLAS_JUDGE_API_KEY,unused}
+      # null: task sandboxes call the Gym model server directly. Set a relay URL when they cannot reach it.
+      sandbox_model_base_url: null
+      judge_base_url: ${judge_base_url}
+      judge_model: ${judge_model_name}
+      judge_api_key: ${oc.select:judge_api_key,unused}
 
 swe_atlas_qa_agent:
   responses_api_agents:
@@ -32,8 +33,8 @@ swe_atlas_qa_agent:
         model: ${policy_model_name}
         command: opencode
         timeout: 10800
-      gym_source: ${oc.env:SWE_ATLAS_HARNESS_BUNDLE}
-      sandbox_python: ${oc.env:SWE_ATLAS_HARNESS_PYTHON,python3}
+      gym_source: ${harness_bundle}
+      sandbox_python: ${oc.select:harness_python,python3}
       concurrency: 1
       rollout_timeout: 11100
       datasets:
@@ -53,8 +54,9 @@ swe_atlas_qa_environment_server:
         type: responses_api_agents
         name: swe_atlas_qa_agent
 
+# A fixed port keeps a relay or tunnel to the model server stable. Run with +use_absolute_ip=true so the server
+# listens on an address task sandboxes can reach.
 policy_model:
   responses_api_models:
     vllm_model:
-      host: ${oc.env:SWE_ATLAS_GYM_MODEL_HOST}
       port: 8000

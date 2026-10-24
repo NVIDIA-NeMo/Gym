@@ -87,7 +87,11 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> module.SWEAtlasQA
         global_config_dict=OmegaConf.create(
             {
                 "sandbox": {"test": {}},
-                "policy": {"responses_api_models": {"test": {"base_url": "http://model.internal:8000/v1"}}},
+                "policy": {
+                    "responses_api_models": {
+                        "test": {"host": "model.internal", "port": 8000, "base_url": "https://policy.invalid/v1"}
+                    }
+                },
             }
         ),
     )

@@ -153,7 +153,8 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                 model_config = get_first_server_config_dict(
                     self.server_client.global_config_dict, self.config.model_server.name
                 )
-                model_url = model_config.get("base_url") or self.server_client._build_server_base_url(model_config)
+                # harness_agent calls the Gym model server, not the policy endpoint behind it (`base_url`).
+                model_url = self.server_client._build_server_base_url(model_config)
             if isinstance(model_url, (list, ListConfig)):
                 model_url = model_url[0]
             model_host = urlsplit(str(model_url)).hostname

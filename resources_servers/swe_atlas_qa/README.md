@@ -14,19 +14,11 @@ sandbox, and agent network access is limited to the policy-model host.
 rubrics are excluded from strict pass. They are reported in `num_unscored` and `all_rubrics_scored`. Missing answers
 score zero. Infrastructure and verifier failures set `mask_sample=true` and `evaluation_completed=false`.
 
-## Tests and examples
+## Tests
 
 ```bash
 pytest resources_servers/swe_atlas_qa/tests
 gym env test +entrypoint=resources_servers/swe_atlas_qa +should_validate_data=true
-```
-
-`data/example.jsonl`, `data/example_metrics.json`, and `data/example_rollouts.jsonl` hold five Claude Code with
-Opus 4.6 baseline rollouts for Gym's example-data check. They are not a benchmark score. Regenerate the metrics with:
-
-```bash
-gym dataset collate "+config_paths=[resources_servers/swe_atlas_qa/configs/swe_atlas_qa.yaml]" \
-  +mode=example_validation +output_dirpath=/tmp/swe-atlas-examples
 ```
 
 ## Attribution
