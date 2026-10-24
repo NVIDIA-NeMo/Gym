@@ -19,6 +19,7 @@ import shlex
 import socket
 import subprocess
 import tempfile
+import time
 from asyncio import Semaphore
 from contextvars import ContextVar
 from pathlib import Path
@@ -88,6 +89,19 @@ _WORKDIR_KEYS = {
 }
 
 
+def _empty_response() -> dict[str, Any]:
+    return NeMoGymResponse(
+        id=f"resp_{uuid4().hex}",
+        created_at=int(time.time()),
+        model="",
+        object="response",
+        output=[],
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
+    ).model_dump(mode="json")
+
+
 def resolve_agent(name: str) -> tuple[str, str, str]:
     try:
         return _AGENTS[name]
@@ -147,6 +161,9 @@ class HarnessAgentConfig(BaseResponsesAPIAgentConfig):
 
     eval_timeout: int = 1800
     rollout_timeout: int = 2400
+    # Score a crashed harness run (sandbox OOM, runner error, context overflow) as an empty
+    # response instead of failing /run, so one pathological prompt cannot end a training run.
+    score_failed_runs: bool = False
 
 
 class HarnessAgentRunRequest(BaseRunRequest):
@@ -280,8 +297,15 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             }
             token = _RUN_CONTEXT.set(run_context)
             try:
-                agent_resp = await self.responses(request, body.responses_create_params)
-                agent_resp_json = agent_resp.model_dump(mode="json")
+                try:
+                    agent_resp = await self.responses(request, body.responses_create_params)
+                    agent_resp_json = agent_resp.model_dump(mode="json")
+                except Exception:
+                    if not self.config.score_failed_runs:
+                        raise
+                    LOG.warning("harness run failed, scoring it as an empty response", exc_info=True)
+                    await self._close_run_sandbox(run_context)
+                    agent_resp_json = _empty_response()
                 verify_resp = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path="/verify",
