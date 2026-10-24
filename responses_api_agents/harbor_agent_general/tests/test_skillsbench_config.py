@@ -24,7 +24,9 @@ def _config(opensandbox: bool, max_input_tokens: int = 131072) -> SkillsBenchHar
     configs = [OmegaConf.load(ROOT / "benchmarks/skillsbench/harbor.yaml")]
     if opensandbox:
         configs.append(OmegaConf.load(ROOT / "benchmarks/skillsbench/harbor_opensandbox.yaml"))
-    merged = OmegaConf.merge(*configs, {"policy_model_name": "test-policy", "skillsbench_max_input_tokens": max_input_tokens})
+    merged = OmegaConf.merge(
+        *configs, {"policy_model_name": "test-policy", "skillsbench_max_input_tokens": max_input_tokens}
+    )
     raw = OmegaConf.to_container(
         merged.skillsbench_harbor_agent.responses_api_agents.harbor_agent_general, resolve=True
     )
