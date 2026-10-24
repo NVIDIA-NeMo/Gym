@@ -12,6 +12,13 @@ osworld_nano_omni_agent:
       setup_cache_dir: ${oc.env:OSWORLD_CACHE_ROOT}/osworld-assets
       asset_input_jsonl: ${oc.env:OSWORLD_GRPO_TRAIN_DATA}
       sandbox_provider: osworld_opensandbox
+      # The base OSWorld profile caps create at 180s, but this pool spec allows
+      # 1200s for SDK readiness after the 180s request phase.
+      sandbox_provider_overrides:
+        opensandbox:
+          create:
+            request_timeout_s: 180
+            timeout_s: 1380
       vm_path: /opensandbox/Ubuntu.qcow2
       sandbox_require_kvm: false
       sandbox_ready_timeout_s: 600.0
