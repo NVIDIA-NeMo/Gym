@@ -3,6 +3,7 @@
 """OpenCode artifacts and request state over the shared sandbox lifecycle."""
 
 import asyncio
+import functools
 import json
 import logging
 import tempfile
@@ -10,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
 from time import monotonic
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
@@ -22,7 +24,12 @@ from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.sandbox.utils import read_text, upload_text
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
 from responses_api_agents.opencode_agent.observability import scope_opencode_activation
-from responses_api_agents.opencode_agent.sandbox_runner import ExportStatus, export_failures
+
+
+# The runner is a script the adapter uploads into the sandbox. Its export-status helpers are imported only where an
+# export result is read, so importing the adapter does not import the runner.
+if TYPE_CHECKING:
+    from responses_api_agents.opencode_agent.sandbox_runner import ExportStatus
 
 
 LOG = logging.getLogger(__name__)
@@ -60,16 +67,20 @@ def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
         return None
 
 
-_EXPORT_STATUS = TypeAdapter(ExportStatus)
+@functools.cache
+def _export_status_adapter() -> TypeAdapter:
+    from responses_api_agents.opencode_agent.sandbox_runner import ExportStatus
+
+    return TypeAdapter(ExportStatus)
 
 
-def _export_status(result: SandboxExecResult) -> ExportStatus | None:
+def _export_status(result: SandboxExecResult) -> "ExportStatus | None":
     """The runner's one-line export status, from stdout or wherever the provider put the command's output."""
     for stream in (result.stdout, result.stderr):
         for line in reversed((stream or "").splitlines()):
             if line.startswith("{"):
                 try:
-                    return _EXPORT_STATUS.validate_json(line)
+                    return _export_status_adapter().validate_json(line)
                 except ValidationError:
                     continue
     return None
@@ -80,6 +91,8 @@ def _export_failure(result: SandboxExecResult, *, budget: float) -> str:
 
     OpenSandbox's background exec, for one, returns stderr merged into stdout and only the exit status as stderr.
     """
+    from responses_api_agents.opencode_agent.sandbox_runner import export_failures
+
     parts = [f"exit={result.return_code}, error={result.error_type}, exec budget {budget:.1f} s"]
     status = _export_status(result)
     if status is None:
