@@ -38,8 +38,19 @@ in the rollout and trial result; `verifier_result.source` is
 `sandbox_resource_limit`, and test counts remain null. The original agent
 termination and diagnostics are preserved, but the result carries no
 infrastructure-failure marker. Recognition requires an explicit provider death
-report. Setup failures, node-pressure evictions, unrelated sandbox losses, and
-verifier failures retain their existing infrastructure-error handling.
+report. Setup failures, node-pressure evictions, unrelated sandbox losses, and a
+verifier that fails to start retain their existing infrastructure-error handling.
+
+A verifier that runs but times out, or that leaves no reward file, an empty one
+or one that cannot be parsed, scores `reward: 0.0` and counts in the pass-rate
+denominator. This is how Terminal-Bench scores it: Harbor never retries these
+outcomes and counts a trial without a reward as 0. The response keeps
+`evaluation_completed: false`, names the exception in `failure_reason`, and sets
+`failure_kind: verifier_error`. Only the verifier's own budget makes a timeout: a
+provider call that times out within it, or a sandbox that reports no command
+outcome, keeps the infrastructure-error handling. So does a trial whose agent
+ended on an infrastructure failure, whatever its verifier did next, because
+Harbor decides a retry from the trial's first exception.
 
 The wire models in `models.py` are resources-owned. Agent implementations use
 their own HTTP models and need not import this server. `termination.reason` accepts
