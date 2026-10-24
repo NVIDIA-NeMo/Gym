@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import uvicorn
-from aiohttp import ClientOSError, ClientResponseError, RequestInfo, TCPConnector
+from aiohttp import ClientOSError, ClientResponseError, RequestInfo, TCPConnector, web
 from fastapi import Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
@@ -1066,6 +1066,35 @@ class TestServerUtils:
             report.assert_not_called()
         finally:
             await client.close()
+            monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+
+    async def test_global_aiohttp_client_reads_long_response_headers(self, monkeypatch: MonkeyPatch) -> None:
+        # github.com release downloads answer with a header longer than aiohttp's 8190-byte default.
+        long_value = "a" * 16384
+
+        async def handler(_request: web.Request) -> web.Response:
+            return web.Response(text="ok", headers={"Content-Security-Policy": long_value})
+
+        app = web.Application()
+        app.router.add_get("/", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+        monkeypatch.setattr(nemo_gym.server_utils, "get_nemo_gym_fastapi_num_workers", lambda: 1)
+        monkeypatch.setattr(connection_pool, "is_metrics_exporter_active", lambda: False)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
+
+        client = nemo_gym.server_utils.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+        try:
+            async with client.get(f"http://127.0.0.1:{port}/") as response:
+                assert response.headers["Content-Security-Policy"] == long_value
+                assert await response.text() == "ok"
+        finally:
+            await client.close()
+            await runner.cleanup()
             monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
 
     async def test_connection_pool_telemetry_is_installed_when_enabled(self, monkeypatch: MonkeyPatch) -> None:
