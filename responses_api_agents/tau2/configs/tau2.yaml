@@ -15,6 +15,7 @@ tau2_agent:
       user_llm_args: {}
       max_steps: 200
       malformed_tool_call_max_retries: 0
+      replay_policy_reasoning: false
       debug: false
       print_step_counts: false
       datasets:
