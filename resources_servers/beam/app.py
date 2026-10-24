@@ -41,7 +41,7 @@ Defaults differ from upstream in one place: the judge is binary.
   ``partial`` restores upstream's 0 / 0.5 / 1 scale.
 * ``question_scoring: mean`` (default, as upstream) averages rubric items;
   ``all_pass`` makes a question score 1.0 only when every rubric item scores
-  1.0 (event ordering included, instead of tau_norm).
+  1.0; for event ordering the matched events must also appear in reference order.
 
 Upstream reproduction is ``judge_scale: partial`` + ``question_scoring: mean``.
 
@@ -57,16 +57,19 @@ Deliberate, minimal deviations from upstream:
 * Blank answer lines in event ordering are treated as unmatched without a judge
   call (an empty snippet cannot describe the same event as a reference item).
   The line still takes part in the tau computation, as upstream.
-* Within one answer line, equivalence calls against the unused reference items
-  run concurrently; the first YES in reference order wins, which is identical to
-  upstream's sequential scan for a deterministic judge.
+* Within one answer line, the unused reference items are checked in reference
+  order in small concurrent batches, stopping at the batch that holds the first
+  YES; the first YES in reference order wins, which is identical to upstream's
+  sequential scan for a deterministic judge.
 * A NaN tau-b (degenerate ranking, e.g. an empty alignment) is mapped to 0.0;
   upstream propagates NaN into its averages.
-* A judge reply without a parseable ``score`` counts as 0.0 for that rubric item
-  (``n_judge_parse_failed``); upstream raises and loses the whole conversation.
-* Judge calls retry with bounded exponential backoff on 429 / 5xx. A row whose
-  judge calls still fail is marked ``judge_call_failed`` and excluded from the
-  headline metrics (reported through ``n_judge_call_failed``).
+* A judge reply without a valid ``score`` (unparseable, non-finite, or outside
+  the scale) counts as 0.0 for that rubric item (``n_judge_parse_failed``);
+  upstream raises and loses the whole conversation.
+* A judge call that fails (the judge model server has already retried) raises
+  ``nemo_gym.judge.JudgeError``: ``judge_failsafe`` masks the row and routes it to
+  the failures sidecar, so it is neither scored as a policy zero nor counted in
+  the metrics, and ``gym eval reverify --judge-failed-only`` can retry it.
 """
 
 from __future__ import annotations
@@ -79,7 +82,7 @@ import re
 import statistics
 from collections import defaultdict
 from contextlib import nullcontext
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Awaitable, ClassVar, Dict, List, Literal, Optional, Tuple, get_args
 
 from pydantic import ConfigDict, PrivateAttr
 
@@ -88,49 +91,36 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.beam.prompts import (
     BINARY_LLM_JUDGE_BASE_PROMPT,
     EQUIVALENCE_SYSTEM_PROMPT,
     EQUIVALENCE_USER_TEMPLATE,
     UNIFIED_LLM_JUDGE_BASE_PROMPT,
 )
+from resources_servers.beam.task_data import TaskData
 
 
 LOG = logging.getLogger(__name__)
 
-ABILITIES = (
-    "abstention",
-    "contradiction_resolution",
-    "event_ordering",
-    "information_extraction",
-    "instruction_following",
-    "knowledge_update",
-    "multi_session_reasoning",
-    "preference_following",
-    "summarization",
-    "temporal_reasoning",
-)
+# The ten BEAM memory abilities; TaskData's ``ability`` Literal is the single source of truth.
+ABILITIES: Tuple[str, ...] = get_args(TaskData.model_fields["ability"].annotation)
 EVENT_ORDERING = "event_ordering"
 
-ERROR_JUDGE_CALL_FAILED = "judge_call_failed"
-ERROR_BAD_METADATA = "bad_metadata"
+# Valid judge scores per scale; anything else is a parse failure.
+_ALLOWED_SCORES = {"binary": frozenset({0.0, 1.0}), "partial": frozenset({0.0, 0.5, 1.0})}
+# Reference events checked concurrently per batch when aligning one answer line.
+_EQUIVALENCE_BATCH_SIZE = 4
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _SCORE_RE = re.compile(r'"score"\s*:\s*\[?\s*"?([0-9]*\.?[0-9]+)')
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\[.*\]|\{.*\})\s*```", re.DOTALL)
 _JSON_OBJ_RE = re.compile(r"(\{.*?\}|\[.*?\])", re.DOTALL)
-
-# Upper bound on a single backoff sleep, so a long-lived 429 storm still makes progress.
-_RETRY_MAX_DELAY_S = 30.0
-
-
-class JudgeCallError(RuntimeError):
-    """The judge endpoint failed after all retries."""
 
 
 def strip_think(text: str) -> str:
@@ -162,11 +152,16 @@ def response_text(response: Optional[NeMoGymResponse]) -> str:
     return "".join(parts)
 
 
-def parse_judge_score(raw: str) -> Optional[float]:
+def parse_judge_score(raw: str, allowed: frozenset[float] = _ALLOWED_SCORES["partial"]) -> Optional[float]:
     """Extract ``score`` from a judge reply, mirroring upstream ``parse_json_response``.
 
-    Returns None when no score can be recovered.
+    Returns None when no score can be recovered or the score is not one of ``allowed``
+    (so an out-of-range or NaN score cannot leave the [0, 1] reward range).
     """
+
+    def valid(value: float) -> Optional[float]:
+        return value if math.isfinite(value) and value in allowed else None
+
     text = (raw or "").strip()
     fenced = _JSON_FENCE_RE.search(text) if text.startswith("```") else None
     candidates = [fenced.group(1).strip()] if fenced else []
@@ -181,11 +176,11 @@ def parse_judge_score(raw: str) -> Optional[float]:
             continue
         if isinstance(parsed, dict) and "score" in parsed:
             try:
-                return float(parsed["score"])
+                return valid(float(parsed["score"]))
             except (TypeError, ValueError):
                 continue
     score_match = _SCORE_RE.search(text)
-    return float(score_match.group(1)) if score_match else None
+    return valid(float(score_match.group(1))) if score_match else None
 
 
 def build_rubric_prompt(rubric_item: str, llm_response: str, *, binary: bool = False) -> str:
@@ -243,27 +238,43 @@ def _is_reward(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def events_in_reference_order(reference: List[str], system_canon: List[str]) -> bool:
+    """True when every reference event was aligned and the aligned events keep the reference order."""
+    return [x for x in system_canon if x in reference] == reference
+
+
+async def _gather_or_cancel(coros: List[Awaitable[Any]]) -> List[Any]:
+    """Run ``coros`` concurrently; the first ``JudgeError`` cancels the rest and is re-raised as is."""
+    try:
+        async with asyncio.TaskGroup() as tg:
+            tasks = [tg.create_task(c) for c in coros]
+    except* JudgeError as group:
+        raise group.exceptions[0] from None
+    return [t.result() for t in tasks]
+
+
 class BEAMResourcesServerConfig(BaseResourcesServerConfig):
     """Config for the BEAM resources server (LLM-as-judge scoring)."""
+
+    # verify() depends only on the request, this config and the judge.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     name: str = "beam"
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     judge_endpoint_max_concurrency: Optional[int] = 64
-    judge_max_retries: int = 5
-    judge_retry_base_delay: float = 1.0
     # "binary" (default): pass (1) / fail (0) per rubric item. "partial": upstream 0 / 0.5 / 1.
     judge_scale: Literal["partial", "binary"] = "binary"
     # Which per-question score becomes the reward. Both are always reported.
     # "mean": average over rubric items (event ordering: tau_norm), as upstream.
-    # "all_pass": 1.0 only if every rubric item scores 1.0 (event ordering included).
+    # "all_pass": 1.0 only if every rubric item scores 1.0 (event ordering: and in reference order).
     question_scoring: Literal["mean", "all_pass"] = "mean"
 
 
 class BEAMRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
-    verifier_metadata: Optional[Dict[str, Any]] = None
+    verifier_metadata: TaskData
 
 
 class BEAMVerifyRequest(BEAMRunRequest, BaseVerifyRequest):
@@ -282,8 +293,6 @@ class BEAMVerifyResponse(BaseVerifyResponse):
     rubric_scores: List[Optional[float]] = []
     judge_raw: List[str] = []
     event_ordering: Optional[Dict[str, float]] = None
-    judge_error: Optional[str] = None
-    judge_error_detail: str = ""
     n_judge_parse_failed: int = 0
     empty_response: bool = False
     generation: str = ""
@@ -300,42 +309,30 @@ class BEAMResourcesServer(SimpleResourcesServer):
         self._semaphore = asyncio.Semaphore(mc) if mc is not None else nullcontext()
 
     async def _call_judge(self, messages: List[Dict[str, str]]) -> str:
-        """Call the judge, retrying 429 / 5xx with bounded exponential backoff."""
+        """One judge call; failures (after the judge model server's own retries) raise ``JudgeError``."""
         params = self.config.judge_responses_create_params.model_dump()
         params["input"] = messages
-        max_retries = max(0, self.config.judge_max_retries)
-        attempt = 0
-        while True:
-            async with self._semaphore:
-                resp = await self.server_client.post(
-                    server_name=self.config.judge_model_server.name,
-                    url_path="/v1/responses",
-                    json=params,
-                )
-                status = getattr(resp, "status", None)
-                retryable = isinstance(status, int) and (status == 429 or 500 <= status < 600)
-                if attempt >= max_retries or not retryable:
-                    try:
-                        await raise_for_status(resp)
-                        result = await get_response_json(resp)
-                    except Exception as exc:  # noqa: BLE001
-                        raise JudgeCallError(f"{type(exc).__name__}: {exc}") from exc
-                    return strip_think(response_text(NeMoGymResponse(**result))).strip()
-            delay = min(self.config.judge_retry_base_delay * (2**attempt), _RETRY_MAX_DELAY_S)
-            LOG.warning("beam: judge returned %s, retrying in %.1fs (%d/%d)", status, delay, attempt + 1, max_retries)
-            await asyncio.sleep(delay)
-            attempt += 1
+        async with self._semaphore:
+            response = await call_judge(
+                self.server_client,
+                server_name=self.config.judge_model_server.name,
+                url_path="/v1/responses",
+                json=params,
+                response_model=NeMoGymResponse,
+            )
+        return strip_think(response_text(response)).strip()
 
     async def _judge_rubric(self, rubric: List[str], llm_response: str) -> Tuple[List[Optional[float]], List[str]]:
-        """Score every rubric item; an unparseable reply yields None for that item."""
+        """Score every rubric item; an invalid reply yields None for that item."""
         binary = self.config.judge_scale == "binary"
-        raws = await asyncio.gather(
-            *(
+        raws = await _gather_or_cancel(
+            [
                 self._call_judge([{"role": "user", "content": build_rubric_prompt(item, llm_response, binary=binary)}])
                 for item in rubric
-            )
+            ]
         )
-        return [parse_judge_score(r) for r in raws], list(raws)
+        allowed = _ALLOWED_SCORES[self.config.judge_scale]
+        return [parse_judge_score(r, allowed) for r in raws], list(raws)
 
     async def _equivalent(self, first: str, second: str) -> bool:
         """Upstream ``llm_equivalence``: True when the judge reply contains "yes"."""
@@ -347,16 +344,23 @@ class BEAMResourcesServer(SimpleResourcesServer):
         )
         return "yes" in reply.lower()
 
+    async def _first_equivalent(self, reference: List[str], candidates: List[int], line: str) -> Optional[int]:
+        """First candidate (in reference order) the judge calls equivalent to ``line``; batches stop early."""
+        for start in range(0, len(candidates), _EQUIVALENCE_BATCH_SIZE):
+            batch = candidates[start : start + _EQUIVALENCE_BATCH_SIZE]
+            verdicts = await _gather_or_cancel([self._equivalent(reference[i], line) for i in batch])
+            matched = next((i for i, ok in zip(batch, verdicts) if ok), None)
+            if matched is not None:
+                return matched
+        return None
+
     async def _align_with_llm(self, reference: List[str], system: List[str]) -> List[str]:
         """Upstream ``align_with_llm``: map each system line to its first unused equivalent reference."""
         used: set[int] = set()
         system_out: List[str] = []
         for line in system:
             candidates = [i for i in range(len(reference)) if i not in used]
-            matched: Optional[int] = None
-            if line.strip() and candidates:
-                verdicts = await asyncio.gather(*(self._equivalent(reference[i], line) for i in candidates))
-                matched = next((i for i, ok in zip(candidates, verdicts) if ok), None)
+            matched = await self._first_equivalent(reference, candidates, line) if line.strip() else None
             if matched is None:
                 system_out.append(line)
             else:
@@ -365,41 +369,34 @@ class BEAMResourcesServer(SimpleResourcesServer):
         return system_out
 
     async def verify(self, body: BEAMVerifyRequest) -> BEAMVerifyResponse:
-        meta = body.verifier_metadata if isinstance(body.verifier_metadata, dict) else {}
-        ability = str(meta.get("ability") or "")
-        rubric = [str(r) for r in (meta.get("rubric") or []) if str(r).strip()]
+        meta = body.verifier_metadata
+        rubric = [r for r in meta.rubric if r.strip()]
         answer = strip_think(response_text(body.response)).strip()
 
         result: Dict[str, Any] = dict(
-            ability=ability,
-            chat_size=str(meta.get("chat_size") or ""),
-            conversation_id=str(meta.get("conversation_id") or ""),
+            ability=meta.ability,
+            chat_size=meta.chat_size or "",
+            conversation_id=meta.conversation_id or "",
             empty_response=not answer,
             generation=answer[:2000],
         )
         reward = 0.0
-        if ability not in ABILITIES or not rubric:
-            LOG.warning("beam: unusable verifier_metadata (ability=%r, %d rubric items)", ability, len(rubric))
-            result["judge_error"] = ERROR_BAD_METADATA
-        elif answer:
-            try:
-                scores, raws = await self._judge_rubric(rubric, answer)
-                result["rubric_scores"] = scores
-                result["judge_raw"] = raws
-                result["n_judge_parse_failed"] = sum(s is None for s in scores)
-                result["llm_judge_score"] = sum(s or 0.0 for s in scores) / len(scores)
-                result["score_mean"] = result["llm_judge_score"]
-                result["score_all_pass"] = float(all(s == 1.0 for s in scores))
-                if ability == EVENT_ORDERING:
-                    system_canon = await self._align_with_llm(rubric, answer.split("\n"))
-                    result["event_ordering"] = event_ordering_score(rubric, system_canon)
-                    result["score_mean"] = result["event_ordering"]["tau_norm"]
-                reward = result["score_" + self.config.question_scoring]
-            except JudgeCallError as exc:
-                LOG.warning("beam: judge call failed: %s", exc)
-                result["judge_error"] = ERROR_JUDGE_CALL_FAILED
-                result["judge_error_detail"] = str(exc)
-                reward = 0.0
+        if answer and rubric:
+            # A failing judge call raises JudgeError out of verify(); judge_failsafe handles the row.
+            scores, raws = await self._judge_rubric(rubric, answer)
+            result["rubric_scores"] = scores
+            result["judge_raw"] = raws
+            result["n_judge_parse_failed"] = sum(s is None for s in scores)
+            result["llm_judge_score"] = sum(s or 0.0 for s in scores) / len(scores)
+            result["score_mean"] = result["llm_judge_score"]
+            result["score_all_pass"] = float(all(s == 1.0 for s in scores))
+            if meta.ability == EVENT_ORDERING:
+                system_canon = await self._align_with_llm(rubric, answer.split("\n"))
+                result["event_ordering"] = event_ordering_score(rubric, system_canon)
+                result["score_mean"] = result["event_ordering"]["tau_norm"]
+                if not events_in_reference_order(rubric, system_canon):
+                    result["score_all_pass"] = 0.0
+            reward = result["score_" + self.config.question_scoring]
 
         data = body.model_dump()
         for key in list(result) + ["reward"]:
@@ -407,20 +404,19 @@ class BEAMResourcesServer(SimpleResourcesServer):
         return BEAMVerifyResponse(**data, **result, reward=reward)
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Per-ability and per-chat-size means, plus the 10-ability macro average (upstream headline)."""
-        rows = [r for task_rollouts in tasks for r in task_rollouts if _is_reward(r.get("reward"))]
-        metrics: Dict[str, Any] = {}
-        if not rows:
-            return metrics
+        """Per-ability and per-chat-size means, plus the 10-ability macro average (upstream headline).
 
-        metrics["n_judge_call_failed"] = sum(r.get("judge_error") == ERROR_JUDGE_CALL_FAILED for r in rows)
-        metrics["n_bad_metadata"] = sum(r.get("judge_error") == ERROR_BAD_METADATA for r in rows)
-        metrics["n_judge_parse_failed"] = sum(int(r.get("n_judge_parse_failed") or 0) for r in rows)
-        scored = [r for r in rows if r.get("judge_error") != ERROR_JUDGE_CALL_FAILED]
-        metrics["n_empty_response"] = sum(bool(r.get("empty_response")) for r in scored)
-        metrics["count"] = len(scored)
+        Rows whose judge failed are masked by ``judge_failsafe`` and removed by the framework
+        before this runs, so every row here was scored.
+        """
+        scored = [r for task_rollouts in tasks for r in task_rollouts if _is_reward(r.get("reward"))]
+        metrics: Dict[str, Any] = {}
         if not scored:
             return metrics
+
+        metrics["n_judge_parse_failed"] = sum(int(r.get("n_judge_parse_failed") or 0) for r in scored)
+        metrics["n_empty_response"] = sum(bool(r.get("empty_response")) for r in scored)
+        metrics["count"] = len(scored)
 
         def add_group(prefix: str, group: List[Dict[str, Any]], field: str, *, per_ability: bool) -> None:
             by_ability: Dict[str, List[float]] = defaultdict(list)
@@ -451,9 +447,11 @@ class BEAMResourcesServer(SimpleResourcesServer):
 
     @staticmethod
     def _pass_at_1_avg_of_k(tasks: List[List[Dict[str, Any]]]) -> Dict[str, float]:
-        """``pass@1[avg-of-k]``: each question scores the mean of its first k rollouts; ``pass@k``:
-        the best of them. The ten abilities are then macro-averaged (as ``overall``). Run ``i``
-        (rollout index ``i`` of every question) gives the spread across runs at the largest k."""
+        """``pass@1[avg-of-k]``: each question scores the mean of its rollouts with index < k;
+        ``pass@k``: the best of them. The ten abilities are then macro-averaged (as ``overall``).
+        Run ``i`` is rollout index ``i`` of every question that has it, which gives the spread
+        across runs at the largest k. Keying by ``_ng_rollout_index`` keeps runs aligned when a
+        rollout is missing (e.g. a masked judge failure or a policy timeout)."""
 
         def macro(per_task: List[Tuple[str, float]]) -> Optional[float]:
             by_ability: Dict[str, List[float]] = defaultdict(list)
@@ -462,35 +460,31 @@ class BEAMResourcesServer(SimpleResourcesServer):
             known = [sum(v) / len(v) for a, v in by_ability.items() if a in ABILITIES]
             return sum(known) / len(known) if known else None
 
-        groups = []
+        groups: List[Tuple[str, Dict[int, Dict[str, Any]]]] = []
         for rollouts in tasks:
-            kept = [
-                r for r in rollouts if _is_reward(r.get("reward")) and r.get("judge_error") != ERROR_JUDGE_CALL_FAILED
-            ]
-            if kept:
-                groups.append(sorted(kept, key=lambda r: int(r.get("_ng_rollout_index") or 0)))
+            by_index = {int(r.get("_ng_rollout_index") or 0): r for r in rollouts if _is_reward(r.get("reward"))}
+            if by_index:
+                groups.append((str(next(iter(by_index.values())).get("ability")), by_index))
         metrics: Dict[str, float] = {}
         if not groups:
             return metrics
-        max_k = max(len(g) for g in groups)
+        max_k = max(max(by_index) for _, by_index in groups) + 1
         for k in range(1, max_k + 1):
             for prefix, field in (("", "reward"), ("all_pass/", "score_all_pass")):
-                value = macro(
-                    [
-                        (str(g[0].get("ability")), sum(float(r.get(field) or 0.0) for r in g[:k]) / len(g[:k]))
-                        for g in groups
-                    ]
-                )
+                firsts = [
+                    (ability, [float(r.get(field) or 0.0) for i, r in by_index.items() if i < k])
+                    for ability, by_index in groups
+                ]
+                firsts = [(ability, vals) for ability, vals in firsts if vals]
+                value = macro([(ability, sum(vals) / len(vals)) for ability, vals in firsts])
                 if value is not None:
                     metrics[f"pass@1[avg-of-{k}]/{prefix}overall"] = value
                 # pass@k: best of the first k rollouts (max-of-k for continuous scores).
-                best = macro(
-                    [(str(g[0].get("ability")), max(float(r.get(field) or 0.0) for r in g[:k])) for g in groups]
-                )
+                best = macro([(ability, max(vals)) for ability, vals in firsts])
                 if best is not None:
                     metrics[f"pass@{k}/{prefix}overall"] = best
         runs = [
-            macro([(str(g[i].get("ability")), float(g[i]["reward"])) for g in groups if len(g) > i])
+            macro([(ability, float(by_index[i]["reward"])) for ability, by_index in groups if i in by_index])
             for i in range(max_k)
         ]
         runs = [r for r in runs if r is not None]
@@ -506,7 +500,7 @@ class BEAMResourcesServer(SimpleResourcesServer):
         return {
             k: v
             for k, v in agent_metrics.items()
-            if k in ("overall", "mean/overall", "all_pass/overall", "n_judge_call_failed", "n_empty_response")
+            if k in ("overall", "mean/overall", "all_pass/overall", "n_empty_response")
             or (k.startswith("chat_size/") and k.endswith("/overall"))
             or (top is not None and k.startswith(top))
         }

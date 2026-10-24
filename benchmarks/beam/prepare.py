@@ -106,6 +106,11 @@ _REFERENCE_FIELDS = ("answer", "ideal_answer", "ideal_response", "ideal_summary"
 Message = Dict[str, str]
 
 
+def is_tiktoken_encoding_name(tokenizer_name: str) -> bool:
+    """tiktoken encodings (``cl100k_base``...) are bare names; HF ids have a ``/`` or are local paths."""
+    return "/" not in tokenizer_name and not Path(tokenizer_name).exists()
+
+
 class PromptCounter:
     """Counts prompt tokens for a message list the way the policy server will see it.
 
@@ -118,7 +123,7 @@ class PromptCounter:
     def __init__(self, tokenizer_name: str) -> None:
         self.tokenizer_name = tokenizer_name
         self._hf = None
-        try:
+        if is_tiktoken_encoding_name(tokenizer_name):
             import tiktoken
 
             enc = tiktoken.get_encoding(tokenizer_name)
@@ -127,8 +132,6 @@ class PromptCounter:
             self.role_overhead = {"user": 4, "assistant": 4}
             self.fixed_overhead = 2
             return
-        except (ImportError, ValueError):
-            pass
 
         from transformers import AutoTokenizer
 

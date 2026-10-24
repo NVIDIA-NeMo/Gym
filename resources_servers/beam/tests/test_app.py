@@ -14,14 +14,20 @@
 # limitations under the License.
 import asyncio
 import json
+import math
+import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, get_args
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 from pytest import approx
 
+from nemo_gym import judge as judge_module
+from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError, judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -29,7 +35,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import ServerClient
-from resources_servers.beam import app as beam_app
 from resources_servers.beam.app import (
     ABILITIES,
     BEAMResourcesServer,
@@ -42,6 +47,7 @@ from resources_servers.beam.app import (
     strip_think,
 )
 from resources_servers.beam.prompts import EQUIVALENCE_SYSTEM_PROMPT
+from resources_servers.beam.task_data import TaskData
 
 
 _EXAMPLE_JSONL = Path(__file__).resolve().parents[1] / "data" / "example.jsonl"
@@ -68,7 +74,7 @@ def _make_response(text: str) -> NeMoGymResponse:
     )
 
 
-def _server(max_retries: int = 2, **config_overrides: Any) -> BEAMResourcesServer:
+def _server(**config_overrides: Any) -> BEAMResourcesServer:
     config = BEAMResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
@@ -79,8 +85,6 @@ def _server(max_retries: int = 2, **config_overrides: Any) -> BEAMResourcesServe
             input=[], max_output_tokens=256, temperature=0.0
         ),
         judge_endpoint_max_concurrency=8,
-        judge_max_retries=max_retries,
-        judge_retry_base_delay=0.0,
         **config_overrides,
     )
     return BEAMResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
@@ -105,7 +109,10 @@ def _request(
 def _mock_judge(
     server: BEAMResourcesServer, judge: Callable[[List[Dict[str, str]]], str], monkeypatch, statuses=()
 ) -> List[Dict[str, Any]]:
-    """Route /v1/responses to ``judge(messages)``; the first calls get ``statuses`` (e.g. 429) instead."""
+    """Route /v1/responses to ``judge(messages)``; the first calls get ``statuses`` (e.g. 500) instead.
+
+    Patches the HTTP helpers ``nemo_gym.judge.call_judge`` uses, so failures surface as ``JudgeError``.
+    """
     calls: List[Dict[str, Any]] = []
     pending = list(statuses)
 
@@ -124,8 +131,8 @@ def _mock_judge(
         return _make_response(resp.reply).model_dump()
 
     server.server_client.post = AsyncMock(side_effect=fake_post)
-    monkeypatch.setattr(beam_app, "raise_for_status", fake_raise_for_status)
-    monkeypatch.setattr(beam_app, "get_response_json", fake_get_response_json)
+    monkeypatch.setattr(judge_module, "raise_for_status", fake_raise_for_status)
+    monkeypatch.setattr(judge_module, "get_response_json", fake_get_response_json)
     return calls
 
 
@@ -167,10 +174,24 @@ def test_response_text_skips_non_message_items() -> None:
         ('{"score": [1.0], "reason": "unescaped "quote" breaks json"}', 1.0),
         ("no json here", None),
         ('{"score": "high"}', None),
+        # Out of range or non-finite scores are invalid, not clamped.
+        ('{"score": 5}', None),
+        ('{"score": -1}', None),
+        ('{"score": NaN}', None),
+        ('{"score": Infinity}', None),
+        ('{"score": 0.7}', None),
+        ('"score": 2', None),
     ],
 )
 def test_parse_judge_score(raw: str, expected: Optional[float]) -> None:
     assert parse_judge_score(raw) == expected
+
+
+def test_parse_judge_score_binary_rejects_partial_credit() -> None:
+    binary = frozenset({0.0, 1.0})
+    assert parse_judge_score('{"score": 0.5}', binary) is None
+    assert parse_judge_score('{"score": 1}', binary) == 1.0
+    assert math.isnan(float("nan")) and parse_judge_score('{"score": NaN}', binary) is None
 
 
 def test_build_rubric_prompt_fills_both_slots() -> None:
@@ -190,17 +211,32 @@ def test_event_ordering_score_perfect_reversed_and_empty() -> None:
     assert event_ordering_score(ref, [])["tau_norm"] == 0.0
 
 
-def test_event_ordering_score_partial_with_extra_line() -> None:
-    out = event_ordering_score(["a", "b", "c"], ["a", "x", "c"])
-    assert out["precision"] == approx(2 / 3) and out["recall"] == approx(2 / 3)
-    assert 0.0 < out["tau_norm"] < 1.0
+@pytest.mark.parametrize(
+    ("system", "tau_norm", "f1"),
+    [
+        # Literals checked against scipy.stats.kendalltau(variant="b").
+        (["a"], 0.9082482904638631, 0.5),
+        (["a", "x", "c"], 0.5, 2 / 3),
+        (["c", "", "a", "b"], 0.33333333333333337, 6 / 7),
+    ],
+)
+def test_event_ordering_score_pinned(system: List[str], tau_norm: float, f1: float) -> None:
+    out = event_ordering_score(["a", "b", "c"], system)
+    assert out["tau_norm"] == approx(tau_norm, abs=1e-12)
+    assert out["f1"] == approx(f1)
+    assert out["final_score"] == approx(tau_norm * f1)
+
+
+def test_abilities_match_task_data_literal() -> None:
+    assert set(get_args(TaskData.model_fields["ability"].annotation)) == set(ABILITIES)
+    assert len(ABILITIES) == 10
 
 
 # ── verify ────────────────────────────────────────────────────────────────
 
 
 def test_verify_averages_rubric_scores(monkeypatch) -> None:
-    server = _server()
+    server = _server(judge_scale="partial")
     scores = iter([1.0, 0.5])
     calls = _mock_judge(server, lambda _m: json.dumps({"score": next(scores)}), monkeypatch)
     resp = asyncio.run(server.verify(_request("Two columns", ability="multi_session_reasoning", rubric=["a", "b"])))
@@ -239,38 +275,75 @@ def test_verify_empty_response_skips_judge(monkeypatch, text: str) -> None:
     server.server_client.post.assert_not_called()
 
 
-@pytest.mark.parametrize(("ability", "rubric"), [("unknown_ability", ["a"]), ("summarization", [])])
-def test_verify_bad_metadata(monkeypatch, ability: str, rubric: List[str]) -> None:
+@pytest.mark.parametrize(
+    ("ability", "rubric"),
+    [("unknown_ability", ["a"]), ("summarization", []), ("summarization", "a string, not a list")],
+)
+def test_request_rejects_bad_metadata(ability: str, rubric: Any) -> None:
+    with pytest.raises(ValidationError):
+        _request("x", ability=ability, rubric=rubric)
+
+
+def test_verify_judge_failure_raises_judge_error(monkeypatch) -> None:
     server = _server()
-    _mock_judge(server, _score_reply(1.0), monkeypatch)
-    resp = asyncio.run(server.verify(_request("x", ability=ability, rubric=rubric)))
-    assert resp.reward == 0.0 and resp.judge_error == "bad_metadata"
-    server.server_client.post.assert_not_called()
+    _mock_judge(server, _score_reply(1.0), monkeypatch, statuses=[500])
+    with pytest.raises(JudgeError, match="HTTP 500"):
+        asyncio.run(server.verify(_request("March 29")))
 
 
-def test_verify_retries_rate_limit_then_succeeds(monkeypatch) -> None:
-    server = _server(max_retries=2)
-    calls = _mock_judge(server, _score_reply(1.0), monkeypatch, statuses=[429, 503])
-    resp = asyncio.run(server.verify(_request("March 29")))
-    assert resp.reward == approx(1.0) and resp.judge_error is None
-    assert len(calls) == 3
+def test_judge_failure_is_masked_by_judge_failsafe(monkeypatch) -> None:
+    server = _server()
+    _mock_judge(server, _score_reply(1.0), monkeypatch, statuses=[500])
+    resp = asyncio.run(judge_failsafe(server.verify)(body=_request("March 29")))
+    data = json.loads(resp.body)
+    assert data["reward"] == 0.0 and data["mask_sample"] is True
+    assert data["failure_kind"] == "judge_failed" and "HTTP 500" in data["failure_reason"]
 
 
-def test_verify_judge_failure_after_retries(monkeypatch) -> None:
-    server = _server(max_retries=1)
-    _mock_judge(server, _score_reply(1.0), monkeypatch, statuses=[429, 429])
-    resp = asyncio.run(server.verify(_request("March 29")))
-    assert resp.reward == 0.0
-    assert resp.judge_error == "judge_call_failed"
-    assert "HTTP 429" in resp.judge_error_detail
+def test_judge_failure_cancels_sibling_calls(monkeypatch) -> None:
+    server = _server()
+    finished: List[str] = []
+
+    async def fake_post(**kwargs: Any) -> Any:
+        content = kwargs["json"]["input"][0]["content"]
+        resp = MagicMock()
+        if "CRITERION (what to check): fail" in content:
+            resp.status = 500
+        else:
+            await asyncio.sleep(2.0)
+            finished.append(content)
+            resp.status = 200
+        resp.reply = '{"score": 1.0}'
+        return resp
+
+    async def fake_raise_for_status(resp: Any) -> None:
+        if resp.status != 200:
+            raise RuntimeError(f"HTTP {resp.status}")
+
+    async def fake_get_response_json(resp: Any) -> Dict[str, Any]:
+        return _make_response(resp.reply).model_dump()
+
+    server.server_client.post = AsyncMock(side_effect=fake_post)
+    monkeypatch.setattr(judge_module, "raise_for_status", fake_raise_for_status)
+    monkeypatch.setattr(judge_module, "get_response_json", fake_get_response_json)
+    start = time.monotonic()
+    with pytest.raises(JudgeError):
+        asyncio.run(server.verify(_request("x", ability="summarization", rubric=["slow 1", "fail", "slow 2"])))
+    assert time.monotonic() - start < 1.0
+    assert finished == []
 
 
-def test_verify_non_retryable_status_fails_fast(monkeypatch) -> None:
-    server = _server(max_retries=5)
-    calls = _mock_judge(server, _score_reply(1.0), monkeypatch, statuses=[400])
-    resp = asyncio.run(server.verify(_request("March 29")))
-    assert resp.judge_error == "judge_call_failed"
-    assert len(calls) == 1
+def test_verify_invalid_judge_score_counts_zero(monkeypatch) -> None:
+    server = _server()
+    replies = iter(['{"score": 1.0}', '{"score": 5}'])
+    _mock_judge(server, lambda _m: next(replies), monkeypatch)
+    resp = asyncio.run(server.verify(_request("x", rubric=["a", "b"])))
+    assert resp.rubric_scores == [1.0, None]
+    assert resp.n_judge_parse_failed == 1 and resp.reward == approx(0.5)
+
+
+def test_config_declares_stateless_reverify() -> None:
+    assert BEAMResourcesServerConfig.REVERIFY_MODE == ReverifyMode.STATELESS
 
 
 def _equivalence_judge(pairs: Dict[str, str]) -> Callable[[List[Dict[str, str]]], str]:
@@ -299,10 +372,10 @@ def test_verify_event_ordering_uses_tau_norm(monkeypatch) -> None:
     # All three events found; the blank line is an unmatched system item (precision 3/4), as upstream.
     assert resp.event_ordering["recall"] == approx(1.0)
     assert resp.event_ordering["f1"] == approx(6 / 7)
-    # System order (c, a, b) vs reference (a, b, c) plus one unmatched blank line.
-    expected = event_ordering_score(rubric, [rubric[2], "", rubric[0], rubric[1]])
-    assert resp.reward == approx(expected["tau_norm"])
-    assert 0.0 < resp.reward < 1.0
+    # System order (c, a, b) vs reference (a, b, c) plus one unmatched blank line (scipy-checked).
+    assert resp.reward == approx(0.33333333333333337, abs=1e-12)
+    # Out of order, so all_pass fails even though every rubric item passed.
+    assert resp.score_all_pass == 0.0
     # The blank line never reaches the judge.
     eq_prompts = [c["input"][1]["content"] for c in calls if c["input"][0]["content"] == EQUIVALENCE_SYSTEM_PROMPT]
     assert all("Second snippet: \n" not in p for p in eq_prompts)
@@ -314,6 +387,32 @@ def test_verify_event_ordering_perfect(monkeypatch) -> None:
     _mock_judge(server, _equivalence_judge({"first a": "a event", "then b": "b event"}), monkeypatch)
     resp = asyncio.run(server.verify(_request("first a\nthen b", ability="event_ordering", rubric=rubric)))
     assert resp.reward == approx(1.0)
+    assert resp.score_all_pass == 1.0
+
+
+def test_alignment_takes_first_yes_in_reference_order_and_stops_early(monkeypatch) -> None:
+    server = _server()
+    reference = [f"event {i}" for i in range(8)]
+    eq_calls: List[str] = []
+
+    def judge(messages: List[Dict[str, str]]) -> str:
+        user = messages[1]["content"]
+        first = user.split("First snippet: ", 1)[1].split(" \n", 1)[0]
+        eq_calls.append(first)
+        # The line matches events 1 and 2; event 1 comes first in reference order.
+        return "YES" if first in ("event 1", "event 2") else "NO"
+
+    _mock_judge(server, judge, monkeypatch)
+    out = asyncio.run(server._align_with_llm(reference, ["the line"]))
+    assert out == ["event 1"]
+    # Only the first batch of 4 candidates is judged, not all 8.
+    assert sorted(eq_calls) == [f"event {i}" for i in range(4)]
+
+    # A line that matches nothing is checked against every candidate (two batches) and kept as is.
+    eq_calls.clear()
+    out = asyncio.run(server._align_with_llm(reference[3:], ["the line"]))
+    assert out == ["the line"]
+    assert sorted(eq_calls) == reference[3:]
 
 
 # ── metrics ───────────────────────────────────────────────────────────────
@@ -333,10 +432,9 @@ def test_compute_metrics_macro_average_and_buckets() -> None:
             "chat_size": "100K",
             "empty_response": True,
         },
-        {"reward": 0.0, "ability": "summarization", "chat_size": "1M", "judge_error": "judge_call_failed"},
     ]
     m = server.compute_metrics([[r] for r in rows])
-    assert m["count"] == 4 and m["n_judge_call_failed"] == 1 and m["n_empty_response"] == 1
+    assert m["count"] == 4 and m["n_empty_response"] == 1
     assert m["abstention/score"] == approx(0.5)
     assert m["summarization/score"] == approx(0.5)
     assert m["overall"] == approx(0.5)
@@ -355,18 +453,16 @@ def test_compute_metrics_macro_average_and_buckets() -> None:
         "overall",
         "mean/overall",
         "all_pass/overall",
-        "n_judge_call_failed",
         "n_empty_response",
         "chat_size/100K/overall",
         "chat_size/1M/overall",
     }
 
 
-def test_compute_metrics_empty_and_all_failed() -> None:
+def test_compute_metrics_empty() -> None:
     server = _server()
     assert server.compute_metrics([]) == {}
-    m = server.compute_metrics([[{"reward": 0.0, "ability": "abstention", "judge_error": "judge_call_failed"}]])
-    assert m["count"] == 0 and "overall" not in m
+    assert server.compute_metrics([[{"ability": "abstention"}]]) == {}
 
 
 # ── data ──────────────────────────────────────────────────────────────────
@@ -410,7 +506,7 @@ def test_verify_judge_scale_selects_prompt(monkeypatch, overrides: Dict[str, Any
 
 @pytest.mark.parametrize(("question_scoring", "expected"), [("mean", 0.75), ("all_pass", 0.0)])
 def test_verify_question_scoring_selects_reward(monkeypatch, question_scoring: str, expected: float) -> None:
-    server = _server(question_scoring=question_scoring)
+    server = _server(question_scoring=question_scoring, judge_scale="partial")
     scores = iter([1.0, 0.5])
     _mock_judge(server, lambda _m: json.dumps({"score": next(scores)}), monkeypatch)
     resp = asyncio.run(server.verify(_request("x", ability="summarization", rubric=["a", "b"])))
@@ -418,14 +514,15 @@ def test_verify_question_scoring_selects_reward(monkeypatch, question_scoring: s
     assert resp.reward == approx(expected)
 
 
-def test_verify_all_pass_event_ordering_uses_rubric_not_tau(monkeypatch) -> None:
+@pytest.mark.parametrize(("answer", "all_pass"), [("first a\nthen b", 1.0), ("then b\nfirst a", 0.0)])
+def test_verify_all_pass_event_ordering_requires_reference_order(monkeypatch, answer: str, all_pass: float) -> None:
     server = _server(question_scoring="all_pass")
     rubric = ["a event", "b event"]
-    # Events found but in reverse order: tau_norm is 0, while every rubric item passes.
+    # Every rubric item passes either way; only the order differs.
     _mock_judge(server, _equivalence_judge({"then b": "b event", "first a": "a event"}), monkeypatch)
-    resp = asyncio.run(server.verify(_request("then b\nfirst a", ability="event_ordering", rubric=rubric)))
-    assert resp.score_mean == approx(0.0)
-    assert resp.score_all_pass == 1.0 and resp.reward == 1.0
+    resp = asyncio.run(server.verify(_request(answer, ability="event_ordering", rubric=rubric)))
+    assert resp.llm_judge_score == approx(1.0)
+    assert resp.score_all_pass == all_pass and resp.reward == all_pass
 
 
 def test_compute_metrics_pass_at_1_avg_of_k() -> None:
@@ -458,3 +555,25 @@ def test_compute_metrics_pass_at_1_avg_of_k() -> None:
     key = server.get_key_metrics(m)
     assert "pass@1[avg-of-2]/overall" in key and "pass@2/overall" in key
     assert "pass@1[avg-of-1]/overall" not in key
+
+
+def test_compute_metrics_runs_keyed_by_rollout_index() -> None:
+    server = _server()
+
+    def row(reward: float, idx: int) -> Dict[str, Any]:
+        return {
+            "reward": reward,
+            "score_mean": reward,
+            "score_all_pass": reward,
+            "ability": "abstention",
+            "chat_size": "100K",
+            "_ng_rollout_index": idx,
+        }
+
+    # Task B lost rollout 0 (e.g. a masked judge failure): run 0 = [A=1.0], run 1 = [A=0.0, B=1.0].
+    tasks = [[row(1.0, 0), row(0.0, 1)], [row(1.0, 1)]]
+    m = server.compute_metrics(tasks)
+    assert m["pass@1[avg-of-1]/overall"] == approx(1.0)
+    assert m["pass@1[avg-of-2]/overall"] == approx((0.5 + 1.0) / 2)
+    assert m["pass@2/overall"] == approx(1.0)
+    assert m["pass@1[avg-of-2]/overall/std_dev_across_runs"] == approx(0.35355339, abs=1e-6)

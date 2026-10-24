@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schema for the beam server.
 
-Task fields live inside ``verifier_metadata`` (``BEAMVerifyRequest`` in app.py declares it as a
-loosely-typed dict), so they are annotated ``legacy_location: verifier_metadata``. Rows are built by
-``benchmarks/beam/prepare.py``: one row per BEAM probing question. ``verify()`` needs ``ability`` and
-a non-empty ``rubric``; without them it returns reward 0 with ``judge_error=bad_metadata``.
+Task fields live inside ``verifier_metadata`` (``BEAMVerifyRequest`` in app.py types it as this
+model), so they are annotated ``legacy_location: verifier_metadata``. Rows are built by
+``benchmarks/beam/prepare.py``: one row per BEAM probing question. A row without a valid ``ability``
+or a non-empty ``rubric`` fails request validation instead of scoring 0.
 """
 
 from typing import List, Literal, Optional
@@ -28,7 +28,7 @@ class TaskData(BaseModel):
         "summarization",
         "temporal_reasoning",
     ] = Field(
-        description="BEAM memory ability probed; event_ordering adds Kendall-tau scoring. Mirrors ABILITIES in app.py.",
+        description="BEAM memory ability probed; event_ordering adds Kendall-tau scoring. app.py derives ABILITIES from it.",
         json_schema_extra={"consumed_by": ["verify", "metrics"], "legacy_location": "verifier_metadata"},
     )
     rubric: List[str] = Field(

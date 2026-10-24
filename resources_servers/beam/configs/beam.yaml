@@ -17,10 +17,9 @@ beam:
         max_output_tokens: 2048
         temperature: 0.0
       judge_endpoint_max_concurrency: 64
-      # Bounded exponential backoff on judge 429/5xx. Rows whose judge calls
-      # still fail are excluded and counted in n_judge_call_failed.
-      judge_max_retries: 6
-      judge_retry_base_delay: 2.0
+      # Retries on 429/5xx happen in the judge_model server (openai_model). A judge call
+      # that still fails masks the row and sends it to the failures sidecar
+      # (rerun with `gym eval reverify --judge-failed-only`).
       # binary: pass / fail per rubric item (default); partial: upstream 0 / 0.5 / 1.
       judge_scale: binary
       # Reward per question: mean over rubric items (upstream; event ordering

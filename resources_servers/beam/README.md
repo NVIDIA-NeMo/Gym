@@ -17,13 +17,13 @@ This server ports the upstream evaluation
 
 Config switches (defaults first): `judge_scale: binary | partial` (`partial` is
 upstream's 0 / 0.5 / 1 judge) and `question_scoring: mean | all_pass` (`all_pass`
-scores a question 1 only when every rubric item passes; event ordering then uses
-its rubric items instead of tau). Every row carries `score_mean` and
+scores a question 1 only when every rubric item passes; for event ordering the
+aligned events must also be in reference order). Every row carries `score_mean` and
 `score_all_pass`.
 
 Rewards are continuous in [0, 1], as upstream reports them. Deviations from upstream
 (think-block stripping, empty answers short-circuiting to 0, NaN tau mapped to 0,
-bounded judge retries) are listed in the `app.py` docstring.
+invalid judge scores counted as 0) are listed in the `app.py` docstring.
 
 ## Metrics
 
@@ -35,15 +35,18 @@ With repeated rollouts it also reports `pass@1[avg-of-k]/overall` and
 its first k rollouts, then abilities are macro-averaged), plus
 `pass@1[avg-of-k]/overall/std_dev_across_runs` / `std_err_across_runs` at the
 largest k. The BEAM benchmark configs run 4 rollouts (`pass@1[avg-of-4]`).
-Rows whose judge calls fail after retries are excluded and counted in
-`n_judge_call_failed`; check that it is 0 before trusting a score.
+A judge call that still fails after the judge model server's retries raises
+`JudgeError`: the row is masked, written to `<output>_failures.jsonl`, and left
+out of every metric; `gym eval reverify --judge-failed-only` re-judges it.
 
 ## Data
 
 Rows are built by [`benchmarks/beam/prepare.py`](../../benchmarks/beam/prepare.py):
-one row per probing question, the whole chat replayed as user/assistant messages,
-and questions whose full prompt exceeds the token limit (counted with the
-policy's tokenizer) dropped. `data/example.jsonl` holds 5 smoke-test rows whose
+one row per probing question. By default the whole chat is rendered as one `User: ... /
+Assistant: ...` transcript followed by the question, with no length filter; `--prompt_format
+multi_turn` replays it as user/assistant messages, and the benchmark variants drop questions whose
+full prompt exceeds a token limit (see [`benchmarks/beam/README.md`](../../benchmarks/beam/README.md)).
+`data/example.jsonl` holds 5 smoke-test rows whose
 history was cut to the last ~4k tokens to keep the file small; it is not a
 benchmark split.
 
