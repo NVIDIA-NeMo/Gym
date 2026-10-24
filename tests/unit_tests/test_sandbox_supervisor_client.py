@@ -19,6 +19,7 @@ from nemo_gym.agent_utils.supervisor_client import (
     STOP_REQUEST_FILE,
     SUPERVISOR_FILE,
     SUPERVISOR_PID_FILE,
+    HarnessTerminationError,
     parse_cleanup_receipt,
     stop_and_confirm_cleanup,
     supervised_launch_command,
@@ -179,7 +180,7 @@ async def test_unconfirmed_cleanup_preserves_receipt_for_retry(session, confirme
     receipt_path = session_dir / CLEANUP_RECEIPT_FILE
     receipt = {"cleanup_confirmed": confirmed, "error": "descendants remain"}
     receipt_path.write_text(json.dumps(receipt))
-    with pytest.raises(RuntimeError, match="test sandbox cleanup was not confirmed: descendants remain"):
+    with pytest.raises(RuntimeError, match="test harness termination was not confirmed: descendants remain"):
         await stop_and_confirm_cleanup(
             sandbox, session_dir=str(session_dir), workdir=str(session_dir.parent), timeout=1, harness="test"
         )
@@ -189,6 +190,41 @@ async def test_unconfirmed_cleanup_preserves_receipt_for_retry(session, confirme
     assert await stop_and_confirm_cleanup(
         sandbox, session_dir=str(session_dir), workdir=str(session_dir.parent), timeout=1, harness="test"
     ) == parse_cleanup_receipt(receipt)
+
+
+async def test_terminal_negative_receipt_preserves_failure_without_signalling_a_stale_pid(session):
+    sandbox, session_dir = session
+    receipt = {"cleanup_confirmed": False, "return_code": None, "timed_out": False, "error": "launch failed"}
+    (session_dir / CLEANUP_RECEIPT_FILE).write_text(json.dumps(receipt))
+    sandbox.exec = AsyncMock(side_effect=AssertionError("must not signal a possibly reused PID"))
+    with pytest.raises(HarnessTerminationError, match="launch failed") as failure:
+        await stop_and_confirm_cleanup(
+            sandbox, session_dir=str(session_dir), workdir=str(session_dir.parent), timeout=1, harness="test"
+        )
+    assert failure.value.receipt == receipt
+    sandbox.exec.assert_not_awaited()
+
+
+async def test_stop_surfaces_terminal_negative_receipt_created_after_initial_check(session):
+    sandbox, session_dir = session
+    receipt_path = session_dir / CLEANUP_RECEIPT_FILE
+    receipt = {"cleanup_confirmed": False, "return_code": -9, "timed_out": True, "error": "descendants remain"}
+    assert not receipt_path.exists()
+
+    async def stop(*args, **kwargs):
+        # The first read sees no receipt; stopping the supervisor publishes its
+        # final failure. This must take the same typed failure path as an early receipt.
+        receipt_path.write_text(json.dumps(receipt))
+        return SandboxExecResult("", "", 0)
+
+    sandbox.exec = AsyncMock(side_effect=stop)
+    with pytest.raises(HarnessTerminationError, match="descendants remain") as failure:
+        await stop_and_confirm_cleanup(
+            sandbox, session_dir=str(session_dir), workdir=str(session_dir.parent), timeout=1, harness="test"
+        )
+    assert failure.value.receipt == receipt
+    sandbox.exec.assert_awaited_once()
+    assert json.loads(receipt_path.read_text()) == receipt
 
 
 @pytest.mark.parametrize("timeout,close_timeout", [(1, 0.3), (2700, 30), (21600, 300)])
@@ -219,7 +255,7 @@ def test_confirmed_cleanup_keeps_valid_diagnostics_and_ignores_malformed_fields(
     [None, [], "true", {}, {"cleanup_confirmed": False}, {"cleanup_confirmed": "true"}, {"cleanup_confirmed": 1}],
 )
 def test_cleanup_receipt_requires_positive_boolean_evidence(payload):
-    with pytest.raises(ValueError, match="cleanup was not confirmed"):
+    with pytest.raises(ValueError, match="termination was not confirmed"):
         parse_cleanup_receipt(payload)
 
 
@@ -230,5 +266,5 @@ def test_absent_exit_code_is_not_success(caplog):
     assert parse_cleanup_receipt({"cleanup_confirmed": True, "error": None}) == full
     assert "diagnostic fields" in caplog.text
     assert parse_cleanup_receipt({"cleanup_confirmed": True}) == full
-    with pytest.raises(ValueError, match="cleanup was not confirmed"):
+    with pytest.raises(ValueError, match="termination was not confirmed"):
         parse_cleanup_receipt({"return_code": 0, "error": None})

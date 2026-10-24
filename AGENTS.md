@@ -30,6 +30,11 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - The PR body must explain what changed and why, link the relevant issue or state why one is unnecessary, list the
   exact validation performed, and include rollout evidence or an explicit `N/A` with justification. Call out user-facing
   compatibility, migration, or benchmark-result impact when applicable.
+- **CI does not start on its own for unverified commits or external contributors.** A qualified NVIDIA-NeMo member
+  must comment `/ok to test <full 40-character commit SHA>` on the PR (get it with `git rev-parse HEAD`; a short SHA
+  is not enough). After the head changes, the new full SHA needs a new comment. If CI checks are missing, check this
+  first. That comment authorizes CI to run contributor code, so never post it yourself unless the user explicitly asks.
+  Details: [CONTRIBUTING.md](CONTRIBUTING.md#continuous-integration-ci).
 - Keep incomplete work as a draft. Mark it ready for review only after reviewing the final diff and recording the
   applicable local checks. Use the `nemo-gym-pr-checks-and-labels` skill for CI routing and label selection.
 
@@ -65,7 +70,7 @@ For full architecture and concepts (environments, training approaches, verificat
 
 The typical workflow is to create your own environments tailored to your evaluation or training task. An environment consists of:
 
-1. **Dataset** — JSONL with one task per row. NeMo Gym uses the OpenAI Responses API as its native format because it natively represents multi-turn, tool-calling agentic trajectories without custom serialization. Each row has `responses_create_params.input` (the input messages in Responses API format) and `verifier_metadata` (task-specific data passed to the verifier)
+1. **Dataset** — JSONL with one task per row. NeMo Gym uses the OpenAI Responses API as its data format because it represents multi-turn, tool-calling agentic trajectories without custom serialization. Each row has `responses_create_params.input` (the input messages in Responses API format) and `verifier_metadata` (task-specific data passed to the verifier)
 2. **Resources Server** — implements verification logic, environment-specific tools, and per-task state isolation
 3. **Agent Harness** — reuse a built-in agent harness (e.g. OpenHands) or bring your own
 4. **Model** — use any LLM endpoint via the Model Server (supports inference providers like OpenAI, and vLLM for local/open models), or manage inference in your own agent harness
@@ -109,6 +114,29 @@ For sandboxed harnesses, install the harness runtime inside the sandbox during a
 do not install an unused copy on the agent-server host. An optional local execution path may install its host runtime
 on first use instead of startup. Document that first-call setup, share concurrent installation attempts, surface
 installation failures, and allow a later call to retry. Required host tools still follow the startup rule above.
+
+## Sandbox
+
+Servers and agent harnesses run tasks in remote sandboxes through `nemo_gym.sandbox`, which hides provider differences.
+
+- **Keep the `nemo_gym.sandbox` public API minimal and lifecycle-only**: create/start, exec, upload/download, stop
+  (and provider capabilities such as pause/resume or endpoints). Put utilities and helpers built on top of it outside
+  `nemo_gym.sandbox`, for example in `nemo_gym/agent_utils/` or the server that uses them.
+- **Resolve providers from config** with `resolve_provider_config(sandbox_provider, global_config_dict)` and merge
+  `resolve_provider_metadata(...)` into `SandboxSpec.metadata`. Do not hard-code a provider or parse provider blocks by
+  hand. Merge metadata as provider defaults, then `sandbox_config.metadata`, then per-task labels, and keep label
+  values short (truncate IDs to 63 characters).
+- **Deliver files through `SandboxSpec.files` or `start_with_setup()`**, not ad hoc writes after `start()`. Both stop
+  the sandbox if file delivery or setup fails. Send text with `upload`, not by interpolating it into an `exec` shell
+  command, and `shlex.quote` every value that does go into a command.
+- **Stop every sandbox you start, on every path.** Wrap use in `try/finally` and call `stop()`. For sandboxes kept per
+  session, key them by session ID, pop the entry only after `stop()` succeeds (so a later close can retry), and stop
+  any remaining sandboxes in the server's lifespan shutdown. Set `ttl_s` so the provider reclaims leaked sandboxes.
+- **Check `return_code` and `error_type` on every `exec` result.** A non-`None` `error_type` (for example a timeout)
+  means the sandbox did not report a process exit code. Treat `stdout`/`stderr` as optional (`result.stdout or ""`).
+- **Separate infrastructure failures from task failures.** When verification is inconclusive (sandbox start, exec,
+  or provider error), retry on a fresh sandbox a bounded, configurable number of times
+  (`inconclusive_verification_retries`), and report `evaluation_completed=False` instead of a silent reward of 0.
 
 ## Common Commands for Building & Testing Environments
 
@@ -171,6 +199,9 @@ gym env resolve --config ...
   when that area is already type-checkable; do not claim repo-wide `mypy --strict` compliance.
 - Public APIs and objects included in generated reference docs need useful docstrings. Comments should explain intent,
   invariants, or tradeoffs rather than narrating the code.
+- Name things by what they are. Avoid qualifiers that carry no information, such as "native", "legacy", "new", or
+  "old"; name the specific mechanism, owner, or format instead (for example, "agent session" rather than "native
+  session"). This applies to identifiers, comments, docs, error messages, and test names.
 - Use keyword-only arguments for new public parameters that are easy to swap or misread, especially repeated same-type
   values and boolean controls.
 - Use module loggers for library and server diagnostics. Direct console output is acceptable in CLI/user-facing paths;
