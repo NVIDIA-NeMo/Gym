@@ -60,17 +60,14 @@ def _field_schema(annotation: Any) -> dict[str, Any]:
     raise TypeError(f"unsupported tool-input annotation: {annotation!r}")
 
 
-def json_schema(model: type, for_model: bool = False) -> dict[str, Any]:
-    """JSON Schema for a tool-input dataclass. Fields without a default are required.
-
-    `for_model` drops the operator fields, which is what a controller is shown.
-    """
+def json_schema(model: type) -> dict[str, Any]:
+    """JSON Schema for a tool-input dataclass, as a model sees it. Fields without a default are required."""
     # field.type is a string under `from __future__ import annotations`, so resolve it.
     hints = typing.get_type_hints(model)
     properties: dict[str, Any] = {}
     required: list[str] = []
     for field in dataclasses.fields(model):
-        if for_model and field.metadata.get("operator"):
+        if field.metadata.get("operator"):
             continue
         schema = _field_schema(hints[field.name])
         if field.metadata.get("help"):
@@ -132,17 +129,6 @@ class ToolSpec:
     steps: tuple[str, ...] = ()
 
     @property
-    def group(self) -> str:
-        return self.name.split(".", 1)[0]
-
-    @property
-    def verb(self) -> str:
-        return self.name.split(".", 1)[1]
-
-    def input_schema(self) -> dict[str, Any]:
-        return json_schema(self.model)
-
-    @property
     def llm_name(self) -> str:
         """The tool name as a model sees it. Providers forbid dots in function names."""
         return self.name.replace(".", "_")
@@ -157,7 +143,7 @@ class ToolSpec:
         return {
             "name": self.llm_name,
             "description": f"{self.summary} [{charged.get(self.cost.name, self.cost.name)}]",
-            "input_schema": json_schema(self.model, for_model=True),
+            "input_schema": json_schema(self.model),
         }
 
     def call(self, **kwargs: Any) -> Any:

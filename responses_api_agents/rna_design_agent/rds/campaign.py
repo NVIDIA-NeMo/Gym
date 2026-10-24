@@ -106,16 +106,6 @@ class Campaign:
         scoring = Scoring(**data.pop("scoring"))
         return Campaign(scoring=scoring, **data)
 
-    def dump(self, path: str | Path) -> Path:
-        from dataclasses import asdict
-
-        import yaml
-
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.safe_dump(asdict(self), sort_keys=False))
-        return path
-
 
 #: The axis the ground truth judges, keyed by the primary metric's family. A pseudoknotted target has
 #: several readings of "a good design", so the axis is named while the engine and threshold stay hidden.

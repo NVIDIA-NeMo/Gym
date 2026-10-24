@@ -43,6 +43,8 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.verifier_fixture import VerifierFixture
+from resources_servers.rna_design.verifier_fixture import create_server, invoke
 
 
 LOG = logging.getLogger(__name__)
@@ -127,14 +129,6 @@ class ToolWorker:
             shutil.rmtree(self.scratch, ignore_errors=True)
 
 
-def _tool_specs() -> list[tuple[str, str, dict]]:
-    """(model-facing name, description, input schema) for every rds tool, the same the agent's model sees."""
-    sys.path.insert(0, str(AGENT_DIR))
-    from rds import registry
-
-    return [(spec.llm_name, spec.summary, spec.llm_tool()["input_schema"]) for spec in registry.all_tools()]
-
-
 class RnaDesignResourcesServer(SimpleResourcesServer):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -160,8 +154,11 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
         return app
 
     def mcp_tools(self, harvested, catchall):
-        # One tool per rds tool, each with its own schema, all dispatched through POST /{path}.
-        return harvested + [catchall.tool(name, schema, summary) for name, summary, schema in _tool_specs()]
+        # One tool per rds tool, with the schema the agent's model sees, all dispatched through POST /{path}.
+        from rds import registry
+
+        tools = [(spec.llm_name, spec.llm_tool()["input_schema"], spec.summary) for spec in registry.all_tools()]
+        return harvested + [catchall.tool(name, schema, summary) for name, schema, summary in tools]
 
     def mcp_allowed_tools_for_session(self, seed_body: dict[str, Any]) -> Optional[list[str]]:
         """The tools this rollout's task offers, the same the agent's model sees, plus the free campaign_state."""
@@ -299,6 +296,14 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
             failure_kind=failure_kinds.AGENT_RUN_ERROR if failure else None,
             failure_reason=failure,
         )
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=create_server,
+    request_model=RnaDesignVerifyRequest,
+    cases_path=HERE / "tests" / "verifier_cases.jsonl",
+    invoke=invoke,
+)
 
 
 if __name__ == "__main__":

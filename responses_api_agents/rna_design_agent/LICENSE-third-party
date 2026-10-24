@@ -17,11 +17,10 @@ components below rather than vendoring them. No model weights are in this direct
 
 ## Data
 
-No dataset is redistributed here. `prepare.ensure_suites()` reads two published files from
-[RNAInvBench](https://github.com/COLA-Laboratory/RNAInvBench) (MIT) at a pinned commit, checks each
-against its SHA-256, and writes the suites locally. RNAInvBench collates sets that were published
-separately, and their own terms govern use. Only structures and pinned bases are read from them; no
-designed sequence from any of these sets is used.
+The suites are not in this repository. `prepare.py` builds them on first start from two
+[RNAInvBench](https://github.com/COLA-Laboratory/RNAInvBench) files (MIT) at a pinned commit, each checked
+against its SHA-256. RNAInvBench collates sets published separately, under their own terms. Only structures
+and pinned bases are read from them.
 
 | Set | Origin | Terms |
 |---|---|---|
@@ -30,7 +29,6 @@ designed sequence from any of these sets is used.
 | rfam_learn-test | Runge et al. 2019 (LEARNA), built on [Rfam](https://rfam.org) | Rfam is CC0 |
 | rfam_taneda-test | Taneda 2011 (MODENA), built on Rfam | Rfam is CC0 |
 | anta_rfam / anta_strand / anta_pseudo | Kleinkauf et al. 2015 (antaRNA) | stated by the authors |
-| ArchiveII-test | Mathews lab, [rna.urmc.rochester.edu](https://rna.urmc.rochester.edu/) | **no licence is stated by the authors.** Not redistributed here; refer to that site before using it |
+| ArchiveII-test | Mathews lab, [rna.urmc.rochester.edu](https://rna.urmc.rochester.edu/) | No licence stated by the authors. Check that site before using it. |
 
-`data/example.jsonl` and `resources_servers/rna_design/data/` hold five Eterna100 v1 targets, read
-from the same files (MIT).
+`resources_servers/rna_design/data/example.jsonl` holds five Eterna100 v1 targets from the same files (MIT).

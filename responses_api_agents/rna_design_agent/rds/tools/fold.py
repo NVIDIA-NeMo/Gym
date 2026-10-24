@@ -22,11 +22,6 @@ from ..registry import tool
 from ..spec import Cost, field
 
 
-@dataclass
-class FoldIn:
-    sequences: list[str] = field("RNA sequences (A/C/G/U), or a selector: @all, @unscored, @top:N.")
-
-
 def _validate(sequences: list[str]) -> None:
     if not sequences:
         raise ValueError("no sequences given")

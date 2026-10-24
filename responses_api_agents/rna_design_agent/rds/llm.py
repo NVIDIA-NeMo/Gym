@@ -163,9 +163,8 @@ class GatewayProvider:
                     return json.loads(response.read())
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode(errors="replace")[:400]
-                # 4xx other than rate-limiting will not get better by waiting, with one exception: a
-                # gateway that answers its own database trouble with 401. A wrong key reads differently,
-                # and treating the transient one as fatal ends a session that was only unlucky in time.
+                # Other 4xx will not improve by waiting, except a 401 for the gateway's own trouble
+                # (TRANSIENT_AUTH). A wrong key reads differently.
                 lowered = detail.lower()
                 transient = exc.code in (401, 429) and (
                     exc.code == 429 or any(mark in lowered for mark in TRANSIENT_AUTH)
@@ -236,19 +235,3 @@ def _tool_calls_in_text(text: str) -> list[ToolCall]:
                 continue
         calls.append(ToolCall(id=f"text-{index}", name=name, arguments=dict(arguments)))
     return calls
-
-
-class ScriptedProvider:
-    """Replays prepared replies, to test the loop with no key, network or GPU."""
-
-    name = "scripted"
-
-    def __init__(self, replies: list[Reply]) -> None:
-        self._replies = list(replies)
-        self.calls: list[dict] = []
-
-    def chat(self, messages: list[dict], tools: list[dict] | None = None, max_tokens: int = 4096) -> Reply:
-        self.calls.append({"messages": messages, "tools": tools})
-        if not self._replies:
-            raise AssertionError("ScriptedProvider ran out of replies")
-        return self._replies.pop(0)

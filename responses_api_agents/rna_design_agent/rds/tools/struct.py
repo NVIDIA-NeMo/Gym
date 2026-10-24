@@ -73,9 +73,8 @@ def struct_rnet_ss(inp: RNetSSIn) -> dict:
     from network import RibonanzaNetSS
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # RibonanzaNetSS.__init__ writes an arnie_file.txt in the working directory
-    # and points $ARNIEFILE at it. That would silently disconnect EternaFold for
-    # the rest of the process, so the original is restored afterwards.
+    # RibonanzaNetSS points $ARNIEFILE at its own arnie_file.txt, which would cut EternaFold off for the rest
+    # of the process, so the original is restored afterwards.
     saved_arniefile = os.environ.get("ARNIEFILE")
     try:
         # RibonanzaNetSS prints a load banner to stdout, where the worker writes its JSON replies.

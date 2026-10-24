@@ -201,11 +201,6 @@ class CampaignState:
         with self.trace_path.open("a") as handle:
             handle.write(json.dumps(event, default=str) + "\n")
 
-    def events(self) -> list[dict]:
-        if not self.trace_path.exists():
-            return []
-        return [json.loads(line) for line in self.trace_path.read_text().splitlines() if line]
-
     # --- the controller's view -----------------------------------------
     def view(
         self,

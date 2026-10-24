@@ -113,8 +113,3 @@ class Suite:
                 )
             )
         return out
-
-
-def load_suites(root: str | Path) -> list[Suite]:
-    """Every suite under a directory, name-sorted."""
-    return sorted((Suite.load(p) for p in Path(root).glob("*.yaml")), key=lambda s: s.name)

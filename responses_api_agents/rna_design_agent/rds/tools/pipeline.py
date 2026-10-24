@@ -75,8 +75,3 @@ def pipeline_design_and_rank(inp: DesignAndRankIn) -> dict:
         "best_f1": scored.get("best_f1"),
         "results": scored["results"],
     }
-
-
-def _present(arguments: dict) -> dict:
-    """Drop the empty optionals, which a tool reads as a value rather than a gap."""
-    return {k: v for k, v in arguments.items() if v not in ("", None)}

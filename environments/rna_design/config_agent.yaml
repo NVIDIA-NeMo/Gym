@@ -17,7 +17,7 @@ rna_design_agent:
       datasets:
       - name: example
         type: example
-        jsonl_fpath: responses_api_agents/rna_design_agent/data/example.jsonl
+        jsonl_fpath: resources_servers/rna_design/data/example.jsonl
 
 rna_design_agent_environment_server:
   environment_servers:

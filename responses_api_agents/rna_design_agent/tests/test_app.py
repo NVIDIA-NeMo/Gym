@@ -171,8 +171,43 @@ class TestWorkerPython:
         assert "RNA_WORKER_PYTHON" not in caplog.text
 
     def test_the_shipped_config_leaves_it_to_the_environment(self) -> None:
-        text = (AGENT_DIR / "configs" / "rna_design_agent.yaml").read_text()
+        text = (AGENT_DIR.parents[1] / "environments" / "rna_design" / "config_agent.yaml").read_text()
         assert "worker_python: ${oc.env:RNA_WORKER_PYTHON,null}" in text
+
+
+def test_servers_starting_together_build_eternafold_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two servers starting from one fresh checkout must not run make in the same tree at the same time."""
+    import threading
+    import time
+
+    from responses_api_agents.rna_design_agent import setup_eternafold
+
+    monkeypatch.delenv("ARNIEFILE", raising=False)
+    builds = []
+
+    def fake_run(command: list[str], check: bool) -> None:
+        if command[0] == "git":
+            (tmp_path / "EternaFold" / "src").mkdir(parents=True)
+        else:
+            builds.append(command)
+            time.sleep(0.2)
+            (tmp_path / "EternaFold" / "src" / "contrafold").write_text("")
+
+    errors = []
+
+    def start_server() -> None:
+        try:
+            setup_eternafold.ensure_eternafold(tmp_path)
+        except Exception as error:
+            errors.append(error)
+
+    monkeypatch.setattr(setup_eternafold.subprocess, "run", fake_run)
+    threads = [threading.Thread(target=start_server) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == [] and len(builds) == 1
 
 
 class TestPrepare:

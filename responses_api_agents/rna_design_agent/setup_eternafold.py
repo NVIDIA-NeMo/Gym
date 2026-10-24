@@ -14,6 +14,7 @@
 # limitations under the License.
 """Build EternaFold, the folding engine every rna_design scorer calls, and point arnie at it."""
 
+import fcntl
 import logging
 import os
 import shutil
@@ -39,20 +40,23 @@ def ensure_eternafold(base_dir: Path | str | None = None) -> Path:
         return Path(os.environ["ARNIEFILE"])
 
     base_dir = Path(base_dir) if base_dir else _DEFAULT_DIR
+    base_dir.mkdir(parents=True, exist_ok=True)
     src = base_dir / "EternaFold" / "src"
     binary = src / "contrafold"
-    if not binary.is_file():
-        for tool in ("git", "make"):
-            if shutil.which(tool) is None:
-                raise RuntimeError(f"building EternaFold needs `{tool}` on PATH")
-        base_dir.mkdir(parents=True, exist_ok=True)
-        if not src.is_dir():
-            logger.info("Cloning EternaFold into %s", base_dir)
-            subprocess.run(["git", "clone", "--depth=1", _REPO, str(base_dir / "EternaFold")], check=True)
-        logger.info("Building EternaFold")
-        subprocess.run(["make", "-C", str(src), f"-j{os.cpu_count() or 2}", f"CXXFLAGS={_CXXFLAGS}"], check=True)
+    # Servers starting together from one checkout share a single build: the second waits for the first.
+    with open(base_dir / ".build.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
         if not binary.is_file():
-            raise RuntimeError(f"EternaFold build finished but {binary} is missing")
+            for tool in ("git", "make"):
+                if shutil.which(tool) is None:
+                    raise RuntimeError(f"building EternaFold needs `{tool}` on PATH")
+            if not src.is_dir():
+                logger.info("Cloning EternaFold into %s", base_dir)
+                subprocess.run(["git", "clone", "--depth=1", _REPO, str(base_dir / "EternaFold")], check=True)
+            logger.info("Building EternaFold")
+            subprocess.run(["make", "-C", str(src), f"-j{os.cpu_count() or 2}", f"CXXFLAGS={_CXXFLAGS}"], check=True)
+            if not binary.is_file():
+                raise RuntimeError(f"EternaFold build finished but {binary} is missing")
 
     params = base_dir / "EternaFold" / "parameters" / "EternaFoldParams.v1"
     tmp = base_dir / "tmp"
