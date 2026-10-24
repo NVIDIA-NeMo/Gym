@@ -808,9 +808,10 @@ def _validate_rollout_id(rollout_id: str) -> str:
 class CaptureStore:
     """Append-only, rollout-keyed JSONL sink for model exchanges."""
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(self, root: str | Path, *, create: bool = True) -> None:
         self._root = Path(root)
-        self._root.mkdir(parents=True, exist_ok=True)
+        if create:
+            self._root.mkdir(parents=True, exist_ok=True)
 
     @property
     def root(self) -> Path:

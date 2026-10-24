@@ -804,6 +804,7 @@ def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
             ignored_checks=args.ignore_checks or (),
             limits=RunHealthLimits(**given_limits),
             json_output=args.json,
+            model_call_capture_dir=args.model_call_capture_dir,
         )
     except (FileNotFoundError, ValueError) as exc:
         args._parser.error(str(exc))
@@ -1368,6 +1369,17 @@ COMMANDS = {
                 )
             ),
             Flag(register=lambda p: p.add_argument("--workers", type=int, help="Number of worker processes.")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--model-call-capture-dir",
+                    type=Path,
+                    metavar="DIR",
+                    help=(
+                        "The run's model_call_capture_dir. With it, the captured calls of rollouts that failed "
+                        "without a row (an episode deadline, say) count in run.stats.timeouts' time split."
+                    ),
+                )
+            ),
             Flag(
                 register=lambda p: p.add_argument(
                     "--ignore-checks",

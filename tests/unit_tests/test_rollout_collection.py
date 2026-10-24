@@ -4868,6 +4868,7 @@ class TestRolloutCollection:
             workers=None,
             ignored_checks=[],
             limits=RunHealthLimits(),
+            model_call_capture_dirs=[],
         )
         format_health_report.assert_called_once_with(health_result)
 

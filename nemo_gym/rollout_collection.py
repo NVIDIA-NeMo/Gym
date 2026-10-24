@@ -59,7 +59,7 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.failure_kinds import AGENT_TIMEOUT, CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
+from nemo_gym.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
@@ -132,6 +132,7 @@ if TYPE_CHECKING:
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
+from nemo_gym.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
 from nemo_gym.server_utils import (
     ServerClient,
     get_response_json,
@@ -463,6 +464,8 @@ class _CompletedRollout:
     rollout_latency_ms: Optional[float]
     environment_server: Optional[str] = None
     environment_server_type: Optional[str] = None
+    # The `/run` wall clock in seconds, success or failure; None for a row that never started.
+    elapsed_s: Optional[float] = None
 
 
 def _round_robin_by_agent(examples: List[Dict]) -> List[Dict]:
@@ -654,6 +657,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         except Exception as exc:
             gaps.append(ObservationGap(code="producer_trajectory_invalid", detail=type(exc).__name__))
 
+    observations_read = False
     raw_observations = result.get(NG_AGENT_OBSERVATIONS_KEY)
     if raw_observations is not None:
         try:
@@ -690,8 +694,14 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                         tools.append(projected)
                     else:
                         tools[position] = projected
+            observations_read = True
         except Exception as exc:
             gaps.append(ObservationGap(code="agent_observations_invalid", detail=type(exc).__name__))
+
+    # Without a valid producer trajectory or valid observations, the empty tool list below is the collector's
+    # default, not a report that no tool ran.
+    if not producer_turns_observed and not observations_read:
+        gaps.append(ObservationGap(code="tool_timing_unavailable"))
 
     turns.sort(key=lambda turn: (turn.timestamp, turn.invocation_id, turn.turn_no))
 
@@ -1358,7 +1368,7 @@ class RunTimingReport:
 
     def record_result(self, result: Mapping[str, Any], seconds: float) -> None:
         self._durations.append(seconds)
-        if result.get("timed_out") or result.get(NG_FAILURE_CLASS_KEY) in ("timeout_exceeded", AGENT_TIMEOUT):
+        if classify_timeout(result):
             self._timed_out += 1
 
     def table(self) -> str:
@@ -3488,6 +3498,10 @@ class RolloutCollectionHelper(BaseModel):
                 if _materialized_taskset(row) is not None and _is_episode_response(result):
                     # The row went out as an episode request, so the reply is a BaseEpisodeResponse.
                     result = _episode_record(result)
+                if completed.elapsed_s is not None:
+                    # Read by the timeouts section of the run health summary. Not `elapsed_seconds`,
+                    # which resume reads to order dispatch.
+                    result[ELAPSED_S_KEY] = completed.elapsed_s
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -3916,6 +3930,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
                     limits=config.run_health_limits,
+                    model_call_capture_dirs=capture_dirs,
                 )
             except Exception:
                 logger.exception(
@@ -3923,6 +3938,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 )
             else:
                 print(format_health_report(health_result))
+                export_run_health_timeouts(health_result)
 
         config.check_completion(expected=expected_rollouts, results=persisted_results)
         return results
@@ -4473,6 +4489,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         rollout_latency_ms=rollout_latency_ms,
                         environment_server=server_name,
                         environment_server_type=server_type,
+                        elapsed_s=time.monotonic() - started,
                     )
                 except Exception as e:
                     print(
@@ -4494,6 +4511,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         rollout_latency_ms=None,
                         environment_server=server_name,
                         environment_server_type=server_type,
+                        elapsed_s=time.monotonic() - started,
                     )
                 finally:
                     # Failed and timed-out tasks inform the adaptive margin too, but only by
@@ -4913,6 +4931,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 )
             else:
                 print(format_health_report(health_result))
+                export_run_health_timeouts(health_result)
 
         return aggregate_metrics_fpath
 

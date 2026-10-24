@@ -645,9 +645,14 @@ def e2e_rollout_collection():  # pragma: no cover
         # A failed or interrupted run reports health too, so its failed and missing rollouts are counted.
         try:
             if health_check_enabled:
+                from nemo_gym.rollout_health import capture_dirs_for_health
+
                 # A custom driver keeps no landed keys, so its stopped run gets the full check.
                 _health_check_collected_rollouts(
-                    output_fpath, rollout_collection_config, None if driver_path else rch._landed_keys
+                    output_fpath,
+                    rollout_collection_config,
+                    None if driver_path else rch._landed_keys,
+                    model_call_capture_dirs=capture_dirs_for_health(global_config_dict),
                 )
         finally:
             rh.shutdown()
@@ -683,7 +688,9 @@ def _remove_health_reports(output_fpath: Path) -> None:
         (output_fpath.parent / report).unlink(missing_ok=True)
 
 
-def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_keys: set | None = None) -> None:
+def _health_check_collected_rollouts(
+    output_fpath: Path, config: Any, landed_keys: set | None = None, *, model_call_capture_dirs: Sequence[Path] = ()
+) -> None:
     """Write the quality summary for whatever a run collected; a run that never started collection has none.
 
     After SIGTERM, Slurm kills the job once KillWait (120 s on some clusters) is over, and the full check can take
@@ -692,6 +699,7 @@ def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_key
     """
     if not output_fpath.exists():
         return
+    from nemo_gym.health.timeouts import export_run_health_timeouts
     from nemo_gym.rollout_health import format_health_report, run_health_checks, write_provisional_summary
 
     if _terminated and landed_keys is not None:
@@ -713,11 +721,13 @@ def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_key
             workers=config.health_check_workers,
             ignored_checks=config.health_check_ignored_checks,
             limits=config.run_health_limits,
+            model_call_capture_dirs=model_call_capture_dirs,
         )
     except Exception:
         logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
     else:
         print(format_health_report(health_result))
+        export_run_health_timeouts(health_result)
 
 
 @exit_cleanly_on_config_error
@@ -751,7 +761,14 @@ def collect_rollouts():  # pragma: no cover
             shutdown_telemetry()
         finally:
             if health_check_enabled:
-                _health_check_collected_rollouts(Path(config.output_jsonl_fpath), config, rch._landed_keys)
+                from nemo_gym.rollout_health import capture_dirs_for_health
+
+                _health_check_collected_rollouts(
+                    Path(config.output_jsonl_fpath),
+                    config,
+                    rch._landed_keys,
+                    model_call_capture_dirs=capture_dirs_for_health(global_config_dict),
+                )
     _exit_if_terminated()
 
 
@@ -774,6 +791,7 @@ def health_check_rollouts(
     ignored_checks: Sequence[str] = (),
     limits: Any = None,
     json_output: bool = False,
+    model_call_capture_dir: str | Path | None = None,
 ):
     """Run rollout quality verification for an existing run directory.
 
@@ -790,6 +808,7 @@ def health_check_rollouts(
         ignored_checks=ignored_checks,
         limits=limits,
         json_output=json_output,
+        model_call_capture_dir=model_call_capture_dir,
     )
 
 
