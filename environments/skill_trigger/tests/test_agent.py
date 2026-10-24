@@ -17,7 +17,31 @@
 import pytest
 from pydantic import ValidationError
 
-from environments.skill_trigger.agent import SkillOptions
+from environments.skill_trigger.agent import SkillOptions, check_private_mounts
+from environments.skill_trigger.scoring import EvidenceError
+
+
+@pytest.mark.parametrize("source", [".", "release", "release/manifest.json", "private/other-trial/evidence.json"])
+def test_mount_cannot_expose_private_directories_or_individual_files(tmp_path, source):
+    with pytest.raises(EvidenceError, match="private evidence"):
+        check_private_mounts(sources=[tmp_path / source], hidden=[tmp_path / "release", tmp_path / "private"])
+
+
+def test_mount_alias_cannot_expose_private_file(tmp_path):
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / "manifest.json").write_text("hidden labels")
+    alias = tmp_path / "alias"
+    alias.symlink_to(release / "manifest.json")
+    with pytest.raises(EvidenceError, match="private evidence"):
+        check_private_mounts(sources=[alias], hidden=[release])
+
+
+def test_trial_logs_and_similarly_named_sibling_paths_remain_allowed(tmp_path):
+    check_private_mounts(
+        sources=[tmp_path / "trial/agent", tmp_path / "release-copy", tmp_path / "private-log"],
+        hidden=[tmp_path / "release", tmp_path / "private"],
+    )
 
 
 @pytest.mark.parametrize("change", [{"provider": None}, {"api": None}, {"gateway_host": "0.0.0.0"}])

@@ -47,6 +47,15 @@ from environments.skill_trigger.trajectory import convert_trace
 from environments.skill_trigger.verifier import EvidenceStore, load_case
 
 
+def check_private_mounts(*, sources: list[Path], hidden: list[Path]) -> None:
+    """Reject mounts containing private data or exposing any part of it."""
+    protected = [path.resolve() for path in hidden]
+    for source in sources:
+        source = source.resolve()
+        if any(path.is_relative_to(source) or source.is_relative_to(path) for path in protected):
+            raise EvidenceError("Container can access private evidence or the release manifest")
+
+
 class SkillOptions(AgentOptions):
     release: str
     manifest_sha256: str
@@ -135,11 +144,10 @@ class SkillAgent(BaseAgent):
         self.container = TrialContainer(result.stdout.strip())
         info = json.loads(await command("docker", "inspect", self.container.id))[0]
         # Harbor's logs are deliberately mounted; private evidence and labels must not be.
-        for mount in info["Mounts"]:
-            source = Path(mount["Source"]).resolve()
-            for hidden in (self.store.path, Path(options.release).resolve()):
-                if hidden.is_relative_to(source):
-                    raise EvidenceError("Container can access private evidence or the release manifest")
+        check_private_mounts(
+            sources=[Path(mount["Source"]) for mount in info["Mounts"]],
+            hidden=[Path(options.evidence_root), Path(options.release)],
+        )
         metadata = await self.container.validate()
         await self.container.isolate_catalog()
         if await self.container.catalog_hashes() != self.case.mounted_hashes:
