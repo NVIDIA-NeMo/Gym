@@ -117,6 +117,18 @@ class InferenceGateway:
         """Listen on an explicitly chosen host; return the allocated port."""
         if self._runner is not None:
             raise EvidenceError("Gateway already started")
+        # A fresh Harbor Ray worker has no Gym CLI context. Initialize the shared
+        # client without parsing Ray's argv, retaining injected settings if present.
+        from nemo_gym.global_config import maybe_get_global_config_dict
+        from nemo_gym.server_utils import (
+            GlobalAIOHTTPAsyncClientConfig,
+            is_global_aiohttp_client_setup,
+            set_global_aiohttp_client,
+        )
+
+        if not is_global_aiohttp_client_setup():
+            settings = maybe_get_global_config_dict()
+            set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig.model_validate(settings or {}))
         app = web.Application(client_max_size=30_000_000)
         app.router.add_get("/health", self._health)
         app.router.add_post("/v1/{endpoint:.*}", self._handle)

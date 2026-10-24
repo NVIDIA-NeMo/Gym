@@ -261,3 +261,41 @@ async def test_authenticated_readiness_before_prompt_release_does_not_call_provi
                 assert await response.text() == "ready"
     assert received == gateway.budget.requests == []
     assert list(gateway.evidence_dir.iterdir()) == []
+
+
+async def test_cold_worker_client_does_not_parse_ray_command_line(tmp_path, monkeypatch):
+    from nemo_gym import global_config, server_utils
+
+    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+    monkeypatch.delenv("NEMO_GYM_CONFIG_DICT", raising=False)
+
+    def no_cli(*args, **kwargs):
+        raise AssertionError("A Harbor worker must not parse Ray's argv as Gym options")
+
+    monkeypatch.setattr(server_utils, "get_global_config_dict", no_cli)
+
+    async def root(payload):
+        return "root"
+
+    gateway = InferenceGateway(
+        budget=TrialBudget(model="test-model", root_session_id="root", preserve_payload=False),
+        upstream_url="http://127.0.0.1:1/v1",
+        api_key="synthetic-key",
+        evidence_dir=tmp_path / "wire",
+        resolve_session=root,
+    )
+    try:
+        await gateway.start(bind_host="127.0.0.1")
+        response = await server_utils.request(
+            "GET",
+            f"http://127.0.0.1:{gateway.port}/health",
+            headers={"Authorization": "Bearer " + gateway.token},
+            _max_num_tries=1,
+        )
+        async with response:
+            assert response.status == 200 and await response.text() == "ready"
+    finally:
+        await gateway.close()
+        if server_utils.is_global_aiohttp_client_setup():
+            await server_utils.get_global_aiohttp_client().close()

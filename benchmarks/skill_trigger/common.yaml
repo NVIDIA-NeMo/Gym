@@ -14,7 +14,8 @@ skill_trigger_settings:
   model_catalog_path: null
   model_catalog_sha256: null
 skills:
-  path: ${skill_trigger_settings.release}/catalogs/${skill_trigger_settings.catalog}
+  # The E2E collector needs a concrete path; the runner overrides this per catalog.
+  path: benchmarks/skill_trigger/data/release/catalogs/bionemo-9984d9c3ec80
 num_samples_in_parallel: 2
 count_failure_classes_as_zero: []
 count_missing_rollouts_as_zero: false
@@ -34,6 +35,7 @@ skill_trigger:
       description: Skill-opening benchmark using pinned Harbor harnesses and verified
         catalog provenance.
       harbor_unique_job_names: true
+      harbor_ray_max_retries: 0
       harbor_reward_key: reward
       harbor_worker_env:
         SKILL_MODEL_API_KEY: ${oc.env:SKILL_MODEL_API_KEY,''}

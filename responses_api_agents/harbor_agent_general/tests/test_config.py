@@ -63,6 +63,7 @@ def test_gym_defaults_and_native_timeout_defaults(tmp_path: Path) -> None:
     assert job.environment_build_timeout_multiplier is None
     assert config.harbor_reward_key == "reward"
     assert config.harbor_ray_task_num_cpus == 0.25
+    assert config.harbor_ray_max_retries is None
 
 
 def test_native_options_survive_worker_serialization_and_trials_are_isolated(tmp_path: Path) -> None:

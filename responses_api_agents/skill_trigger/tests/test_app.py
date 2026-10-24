@@ -108,3 +108,25 @@ async def test_bad_catalog_is_failure_without_dispatch(prepared, tmp_path, monke
     assert response.response.status == "failed"
     assert response.model_dump()["_ng_failure_class"] == "harbor_failed"
     assert response.model_dump()["error"]
+
+
+async def test_aggregation_averages_repetitions_within_skills_not_pass_at_k(prepared, tmp_path, monkeypatch):
+    from nemo_gym.config_types import AggregateMetricsRequest
+
+    config, _ = inputs(prepared, tmp_path)
+    monkeypatch.setattr(bridge, "get_global_config_dict", lambda: {})
+    agent = SkillHarborAgent.model_construct(config=config)
+    rows = [
+        {"reward": reward, TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: repeat}
+        for task, rewards in enumerate(([0, 0, 0], [1]))
+        for repeat, reward in enumerate(rewards)
+    ]
+    result = await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+    assert result.key_metrics["skill_opening_rate"] == 0.5
+    assert result.key_metrics["skills_scored"] == 2
+    assert result.key_metrics["trials_scored"] == 4
+    assert not any("pass" in key for key in result.agent_metrics)
+    assert agent.compute_metrics([]) == {}
+    assert agent.get_key_metrics({}) == {}
+    with pytest.raises(ValueError, match="valid binary"):
+        agent.compute_metrics([[{"reward": 0, "_ng_failure_class": "harbor_failed"}]])

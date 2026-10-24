@@ -13,10 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from harbor.models.trajectories import Trajectory
@@ -308,3 +309,39 @@ def test_failure_response_uses_native_agent_model(agent: HarborAgent, tmp_path: 
     response = agent.failure_response(body, RuntimeError("trial failed"))
     assert response.response.model == "native-model"
     assert response.response.status == "failed"
+
+
+@pytest.mark.parametrize("retries", [None, 0, 2])
+async def test_run_forwards_explicit_ray_retry_policy(monkeypatch, tmp_path, retries):
+    from responses_api_agents.harbor_agent_general.app import HarborAgentConfig, HarborRunRequest
+
+    config = HarborAgentConfig.model_validate(
+        {
+            "name": "harbor_agent_general",
+            "host": "127.0.0.1",
+            "port": 8080,
+            "entrypoint": "app.py",
+            "harbor_ray_max_retries": retries,
+            "job": {
+                "jobs_dir": str(tmp_path / "jobs"),
+                "datasets": [{"path": str(tmp_path)}],
+                "agents": [{"name": "opencode", "model_name": "test-model"}],
+            },
+        }
+    )
+    completed = asyncio.get_running_loop().create_future()
+    completed.set_result(str(tmp_path / "trial"))
+    worker = Mock()
+    worker.options.return_value.remote.return_value = completed
+    monkeypatch.setattr(app, "harbor_job_worker", worker)
+    expected = object()
+    agent = SimpleNamespace(config=config, _sem=asyncio.Semaphore(1), success_response=Mock(return_value=expected))
+    body = HarborRunRequest.model_validate(
+        {"task_name": "task", "_ng_task_index": 37, "_ng_rollout_index": 0, "responses_create_params": {"input": []}}
+    )
+    assert await HarborAgent.run(agent, body) is expected
+    options = {"num_cpus": 0.25}
+    if retries is not None:
+        options["max_retries"] = retries
+    worker.options.assert_called_once_with(**options)
+    worker.options.return_value.remote.assert_called_once()

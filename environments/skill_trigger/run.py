@@ -116,6 +116,7 @@ def plan_run(
         gateway_host=options.gateway_host,
     )
     repeats = 1 if pilot else 3
+    indices = {case["id"]: index for index, case in enumerate(manifest["cases"])}
     groups = {}
     for case in cases:
         groups.setdefault(case["catalog"], []).append(case)
@@ -126,12 +127,20 @@ def plan_run(
         input_file = directory / "input.jsonl"
         input_file.write_text(
             "".join(
-                json.dumps({"task_name": case["task_name"], "responses_create_params": {"input": []}}) + "\n"
+                json.dumps(
+                    {
+                        "task_name": case["task_name"],
+                        "_ng_task_index": indices[case["id"]],
+                        "responses_create_params": {"input": []},
+                    }
+                )
+                + "\n"
                 for case in group
             )
         )
         config = {
             "config_paths": [str(BENCHMARK_DIR / "configs" / harness / "config.yaml")],
+            "skills": {"path": str(release / "catalogs" / catalog)},
             "policy_model_name": model,
             "policy_base_url": endpoint,
             "skill_trigger_settings": {

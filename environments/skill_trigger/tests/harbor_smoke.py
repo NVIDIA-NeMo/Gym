@@ -235,7 +235,18 @@ async def smoke(
         gym_response = None
         bridge_error = None
         result = None
-        if engine in {"gym-job", "gym-ray", "gym-http"}:
+        if engine == "gym-cli":
+            from environments.skill_trigger.tests.cli_collection import collect_cli
+
+            gym_response = await collect_cli(root=root, config=config, expect_failure=scenario == "provider-error")
+            results = list((root / "jobs").glob("*/*/result.json"))
+            if gym_response.response.status == "failed":
+                bridge_error = gym_response.model_dump().get("error")
+            else:
+                assert len(results) == 1, "Expected one retained successful trial"
+                result = TrialResult.model_validate_json(results[0].read_bytes())
+            (root / "gym-response.json").write_text(gym_response.model_dump_json(indent=2))
+        elif engine in {"gym-job", "gym-ray", "gym-http"}:
             # Both paths use the real bridge; gym-ray also crosses its worker boundary.
             # gym-http additionally crosses HTTP and persists collector results.
             from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
@@ -251,6 +262,7 @@ async def smoke(
                     "port": 8080,
                     "entrypoint": "app.py",
                     "harbor_unique_job_names": True,
+                    "harbor_ray_max_retries": 0,
                     "harbor_worker_env": {
                         "SYNTHETIC_PROVIDER_KEY": "dummy-not-a-real-key",
                         "NEMO_GYM_CONFIG_DICT": json.dumps({"num_samples_in_parallel": 1}),
@@ -381,7 +393,9 @@ async def smoke(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--engine", choices=["harbor-trial", "gym-job", "gym-ray", "gym-http"], default="harbor-trial")
+    parser.add_argument(
+        "--engine", choices=["harbor-trial", "gym-job", "gym-ray", "gym-http", "gym-cli"], default="harbor-trial"
+    )
     parser.add_argument("--image", required=True)
     parser.add_argument("--gateway-host", required=True)
     parser.add_argument("--gateway-port", type=int, default=0)

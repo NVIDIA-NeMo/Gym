@@ -26,6 +26,7 @@ from benchmarks.skill_trigger.prepare import BENCHMARK_DIR, Selection, digest, e
 from environments.skill_trigger import run
 from environments.skill_trigger.scoring import EvidenceError
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from responses_api_agents.harbor_agent_general.app import HarborAgentConfig
 
 
@@ -69,6 +70,8 @@ def test_all_cases_and_catalogs_appear_once_and_gym_resolves_them(release, tmp_p
         case["id"] for case in selected
     )
     by_id = {case["id"]: case for case in selected}
+    indices = {case["id"]: index for index, case in enumerate(manifest["cases"])}
+    seen_indices = set()
     for group in plan["groups"]:
         directory = plan_path.parent / "groups" / group["catalog"]
         parser_options = GlobalConfigDictParserConfig(
@@ -83,6 +86,16 @@ def test_all_cases_and_catalogs_appear_once_and_gym_resolves_them(release, tmp_p
             | OmegaConf.to_container(resolved.skill_trigger.responses_api_agents.skill_trigger, resolve=True)
         )
         assert Path(resolved.skills.path).name == group["catalog"]
+        # Gym's E2E collector converts OmegaConf without resolve=True; the input
+        # path must already be concrete at this boundary.
+        collection = RolloutCollectionConfig.model_validate(
+            OmegaConf.to_container(resolved)
+            | {
+                "input_jsonl_fpath": str(directory / "input.jsonl"),
+                "output_jsonl_fpath": str(directory / "rollouts.jsonl"),
+            }
+        )
+        assert collection.skills.path == str(folder / "catalogs" / group["catalog"])
         assert resolved.skill_trigger.responses_api_agents.skill_trigger.datasets[0].num_repeats == plan["repetitions"]
         assert resolved.skill_trigger.responses_api_agents.skill_trigger.datasets[0].jsonl_fpath == str(
             directory / "input.jsonl"
@@ -90,6 +103,17 @@ def test_all_cases_and_catalogs_appear_once_and_gym_resolves_them(release, tmp_p
         rows = [json.loads(line) for line in (directory / "input.jsonl").read_text().splitlines()]
         assert [row["task_name"] for row in rows] == [by_id[c]["task_name"] for c in group["cases"]]
         assert all(by_id[c]["catalog"] == group["catalog"] for c in group["cases"])
+        assert [row["_ng_task_index"] for row in rows] == [indices[c] for c in group["cases"]]
+        assert not seen_indices.intersection(row["_ng_task_index"] for row in rows)
+        seen_indices.update(row["_ng_task_index"] for row in rows)
+        expanded = RolloutCollectionHelper().preprocess_examples(
+            rows,
+            agent_map={"_default": "skill_trigger"},
+            num_repeats=plan["repetitions"],
+        )
+        assert [row["_ng_task_index"] for row in expanded] == [
+            index for case_id in group["cases"] for index in [indices[case_id]] * plan["repetitions"]
+        ]
         assert not resolved.count_missing_rollouts_as_zero and not resolved.count_failure_classes_as_zero
         assert config.job.retry.max_retries == 0
         assert config.job.agents[0].model_name == "test-model"

@@ -64,9 +64,11 @@ def test_profiles_resolve_to_exact_harness_and_shared_verifier(harness, tmp_path
     assert config.job.n_attempts == config.job.n_concurrent_trials == 1
     assert config.job.retry.max_retries == 0 and config.job.environment.delete
     assert config.job.environment.cpu_enforcement_policy == "ignore"
+    assert config.harbor_ray_max_retries == 0
     assert config.harbor_unique_job_names and config.harbor_reward_key == "reward"
     assert resolved.count_failure_classes_as_zero == [] and not resolved.count_missing_rollouts_as_zero
     assert resolved.skills.path.endswith("/catalogs/bionemo-9984d9c3ec80")
+    assert "${" not in OmegaConf.to_container(resolved)["skills"]["path"]
     assert "api_key" not in agent.kwargs and profile.api_key_env == "SKILL_MODEL_API_KEY"
     manifest = load_manifest(path.with_name("manifest.yaml"))
     assert manifest.experimental and manifest.prompt_source == "agent"
