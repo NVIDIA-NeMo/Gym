@@ -15,6 +15,7 @@
 import json
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.encoders import jsonable_encoder
@@ -30,6 +31,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
 from resources_servers.equivalence_llm_judge.app import (
@@ -40,6 +42,23 @@ from resources_servers.equivalence_llm_judge.app import (
     _extract_question_text,
     _match_verdict_labels,
 )
+
+
+def test_aggregation_hook_excludes_masked_and_preserves_headline_score():
+    server = SimpleNamespace(config=SimpleNamespace(report_hle_domains=True))
+    rows = [
+        {"_ng_task_index": 0, "_ng_rollout_index": 0, "category": "Math", "reward": 1},
+        {"_ng_task_index": 1, "_ng_rollout_index": 0, "category": "Math", "reward": 0},
+        {"_ng_task_index": 2, "_ng_rollout_index": 0, "category": "Math", "reward": 1, "mask_sample": True},
+    ]
+    result = compute_aggregate_metrics(
+        rows, compute_metrics_fn=lambda tasks: LLMJudgeResourcesServer.compute_metrics(server, tasks)
+    )
+    assert result.agent_metrics["domains/category/Math/mean/reward"] == 0.5
+    assert result.agent_metrics["domains/category/Math/question_count"] == 2
+    assert result.key_metrics["mean/reward"] == 0.5
+    server.config.report_hle_domains = False
+    assert LLMJudgeResourcesServer.compute_metrics(server, [[rows[0]]]) == {}
 
 
 async def test_hle_verified_fixture() -> None:
@@ -764,3 +783,86 @@ class TestJudgeParsing:
             metrics.update({"judgement_parsing_issue_rate": 0.4, "judgement_parsing_issue_rate/no_verdict": 0.4})
             expected["judgement_parsing_issue_rate"] = 0.4
         assert server.get_key_metrics(metrics) == expected
+
+
+@mark.parametrize("has_image,modality", [(False, "text"), (True, "vision")])
+async def test_verify_response_preserves_domain_labels_through_aggregation(has_image, modality):
+    config = LLMJudgeResourcesServerConfig(
+        host="127.0.0.1",
+        port=8080,
+        entrypoint="",
+        report_hle_domains=True,
+        judge_prompt_template_fpath=str(
+            Path(__file__).resolve().parents[1] / "prompt_templates/equivalence_llm_judge.txt"
+        ),
+        judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+        judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+    )
+    server = LLMJudgeResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    test = TestApp()
+    reply = MagicMock(ok=True)
+    reply.read = AsyncMock(return_value=test._create_response("judge", test._msg("[[A=B]]")).encode())
+    server.server_client.post = AsyncMock(return_value=reply)
+    request = LLMJudgeVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        response=NeMoGymResponse.model_validate_json(test._create_response("policy", test._msg("answer"))),
+        expected_answer="answer",
+        category="Math",
+        raw_subject="Algebra/Geometry",
+        has_image=has_image,
+    )
+    verified = await server.verify(request)
+    payload = json.loads(verified.model_dump_json())
+    assert payload["reward"] == 1
+    assert payload["category"] == "Math"
+    assert payload["raw_subject"] == "Algebra/Geometry"
+    assert payload["modality"] == modality
+    assert "has_image" not in payload
+    reverified = await server.verify(
+        LLMJudgeVerifyRequest.model_validate(
+            {**request.model_dump(exclude={"has_image"}), "modality": payload["modality"]}
+        )
+    )
+    assert reverified.modality == modality
+    assert reverified.category == "Math"
+    payload.update(_ng_task_index=0, _ng_rollout_index=0)
+    result = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[payload]))
+    assert result.agent_metrics[f"domains/{modality}/category/Math/question_count"] == 1
+    assert result.agent_metrics["domains/category/missing_label_rollouts"] == 0
+    assert result.agent_metrics["domains/modality/missing_label_rollouts"] == 0
+    assert "mean/has_image" not in result.key_metrics
+    assert "mean/has_image" not in result.agent_metrics
+    config.report_hle_domains = False
+    disabled = json.loads((await server.verify(request)).model_dump_json())
+    assert not {"category", "raw_subject", "modality", "has_image"} & disabled.keys()
+
+
+async def test_domain_aggregation_runs_off_event_loop():
+    import asyncio
+    import threading
+    from unittest.mock import patch
+
+    from nemo_gym.config_types import AggregateMetrics
+
+    config = LLMJudgeResourcesServerConfig(
+        host="127.0.0.1",
+        port=8080,
+        entrypoint="",
+        report_hle_domains=True,
+        judge_prompt_template_fpath=str(
+            Path(__file__).resolve().parents[1] / "prompt_templates/equivalence_llm_judge.txt"
+        ),
+        judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+        judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+    )
+    server = LLMJudgeResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    loop_thread = threading.get_ident()
+    worker_threads = []
+
+    def aggregate(*args, **kwargs):
+        worker_threads.append(threading.get_ident())
+        return AggregateMetrics(agent_metrics={}, key_metrics={}, group_level_metrics=[])
+
+    with patch("resources_servers.equivalence_llm_judge.app.compute_aggregate_metrics", side_effect=aggregate):
+        await asyncio.wait_for(server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[])), timeout=5)
+    assert worker_threads and worker_threads[0] != loop_thread

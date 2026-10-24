@@ -14,13 +14,18 @@ purpose. The judge question comes from ``responses_create_params.input`` (last u
 from the row's ``question`` field.
 """
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
+
+    category: Optional[str] = None
+    raw_subject: Optional[str] = None
+    has_image: Optional[bool] = None
+    modality: Optional[Literal["text", "vision"]] = None
 
     expected_answer: Optional[str] = Field(
         default=None,

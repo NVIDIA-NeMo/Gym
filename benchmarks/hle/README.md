@@ -127,3 +127,27 @@ Deployments requiring an additional policy must supply their combined policy fil
 through the Tavily resource's `exclude_domains_file_path`; keep private policies
 outside the public repository. This list reduces answer exposure but cannot
 guarantee that every answer-bearing page is excluded.
+
+### Domain metrics
+
+Text and vision preparation retain `category`, `raw_subject` and explicit
+`has_image` metadata. The HLE and HLE-Verified judge configurations enable `report_hle_domains`; existing cached
+HLE datasets need to be prepared again to retain these labels.
+
+Aggregation emits flat `domains/<field>/<URL-encoded-label>/...` keys in
+`agent_metrics`: question/rollout counts, `mean/reward` (accuracy as a fraction),
+`mean/output_tokens`, `ci_low_95_across_repeats/<metric>` /
+`ci_high_95_across_repeats/<metric>`.
+Modality slices use `domains/modality/text/...` and `domains/modality/vision/...`
+with the same metrics. Missing `has_image` metadata is counted and never assumed
+to be text. The overall headline includes the full evaluated set; its score and
+grading are unchanged.
+Missing labels are counted; incomplete token usage suppresses the token mean and
+interval rather than silently averaging a subset. Masked outcomes are excluded
+by the normal aggregation pipeline.
+
+Each slice reuses Gym's public `compute_aggregate_metrics` function for means and
+Student-t intervals across repeat-level means, with at least two repeats covering
+the same questions. `ci_available/<metric>` indicates
+availability; single-repeat evaluations have no default interval. Bounds are not
+clipped. These intervals measure generation variability on a fixed benchmark.
