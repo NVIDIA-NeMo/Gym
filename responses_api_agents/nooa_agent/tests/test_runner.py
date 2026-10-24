@@ -575,6 +575,7 @@ async def test_swallowed_infrastructure_failure_never_becomes_gradable(source: s
         )
     assert caught.value.__cause__ is failure
     assert caught.value.result.termination_reason is None
+    assert caught.value.result.model_status_code is None
     root = caught.value.result.trajectory.invocations[0]
     assert root.status == "failed" and root.error_type == "ConnectionError"
 
@@ -638,6 +639,7 @@ async def test_generation_error_without_output_limit_or_with_transport_failure_i
             )
         )
     assert caught.value.result.termination_reason is None
+    assert caught.value.result.model_status_code is None
     assert isinstance(caught.value.__cause__, GenerationError)
 
 
@@ -707,6 +709,7 @@ async def test_arbitrary_loop_error_is_not_a_policy_termination(wrapped: bool) -
             )
         )
     assert caught.value.result.termination_reason is None
+    assert caught.value.result.model_status_code is None
     assert type(caught.value.__cause__) is (GenerationError if wrapped else LoopDetectedError)
 
 
@@ -744,6 +747,7 @@ async def test_model_rejection_preserves_original_provider_error(status: int, wr
 
     assert runner._server_client.post.await_count == (3 if wrapped else 1)
     assert result.termination_reason is NOOATerminationReason.MODEL_REJECTED
+    assert result.model_status_code == status
     assert result.termination_error == str(failure)
     response, observations = finalize_run_result(result)
     assert response.status == "failed"
@@ -770,6 +774,7 @@ async def test_other_model_http_errors_remain_ungradable(status: int, wrapped: b
         )
 
     assert caught.value.result.termination_reason is None
+    assert caught.value.result.model_status_code is None
     cause = caught.value.__cause__
     assert (cause.__cause__ if wrapped else cause) is failure
 
@@ -800,6 +805,7 @@ async def test_successful_model_retry_clears_rejection(status: int) -> None:
     assert result.return_value == "recovered"
     assert result.termination_reason is None
     assert result.termination_error is None
+    assert result.model_status_code is None
 
 
 @pytest.mark.asyncio
@@ -830,6 +836,7 @@ async def test_only_propagated_model_rejection_is_gradable(handling: str) -> Non
             )
         )
     assert caught.value.result.termination_reason is None
+    assert caught.value.result.model_status_code is None
 
 
 @pytest.mark.asyncio
@@ -857,6 +864,7 @@ async def test_resource_infrastructure_failure_vetoes_model_rejection(outbound: 
         )
     assert caught.value.__cause__ is resource_failure
     assert caught.value.result.termination_reason is None
+    assert caught.value.result.model_status_code is None
 
 
 @pytest.mark.asyncio
@@ -883,6 +891,7 @@ async def test_cleanup_marker_anywhere_in_trusted_model_chain_vetoes_grading(mar
             )
         )
     assert caught.value.result.termination_reason is None
+    assert caught.value.result.model_status_code is None
 
 
 @pytest.mark.asyncio
@@ -944,6 +953,7 @@ async def test_benchagent_cleanup_failure_overrides_model_rejection(
         )
 
     assert caught.value.result.termination_reason is None
+    assert caught.value.result.model_status_code is None
     assert len(solve_errors) == 1
     assert caught.value.__cause__ is solve_errors[0]
     assert solve_errors[0].__cause__ is failure

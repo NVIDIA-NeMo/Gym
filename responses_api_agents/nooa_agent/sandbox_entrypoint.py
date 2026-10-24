@@ -75,6 +75,7 @@ class SandboxResult(BaseModel):
     resource_cookies: dict[str, str]
     termination_reason: NOOATerminationReason | None = None
     termination_error: str | None = None
+    model_status_code: int | None = Field(default=None, ge=400, le=599, strict=True)
     error: RunnerError | None = None
 
     def run_result(self) -> NOOARunResult:
@@ -88,6 +89,7 @@ class SandboxResult(BaseModel):
             resource_cookies=self.resource_cookies,
             termination_reason=self.termination_reason,
             termination_error=self.termination_error,
+            model_status_code=self.model_status_code,
             trajectory=self.trajectory,
         )
 
@@ -132,6 +134,7 @@ def _checkpoint_snapshot(result: NOOARunResult) -> SandboxCheckpoint:
         ),
         model_cookies=result.model_cookies,
         resource_cookies=result.resource_cookies,
+        model_status_code=result.model_status_code,
     ).model_copy(deep=True)
 
 
@@ -250,6 +253,7 @@ async def execute(
         resource_cookies=payload.request.resource_cookies,
         termination_reason=result.termination_reason if result else None,
         termination_error=result.termination_error if result else None,
+        model_status_code=result.model_status_code if result else None,
         error=error,
     )
 
