@@ -643,7 +643,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 )
             if params.sanitize_repo_git:
                 sanitize_script = (Path(__file__).parent / "setup_scripts" / "sanitize_repo_git.sh").read_text()
-                sanitized = await sandbox.exec(f"set -- /testbed\n{sanitize_script}", timeout_s=900, user="root")
+                sanitized = await sandbox.exec(sanitize_script, timeout_s=900, user="root")
                 if sanitized.return_code != 0:
                     raise RuntimeError(f"repo git sanitize failed: {(sanitized.stderr or '')[:300]}")
             runtime_dir = "/sandbox/agent_deps_runtime" if external_runtime else "/agent_deps_mount"
