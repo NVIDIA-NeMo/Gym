@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 from kernelbench.eval import eval_kernel_against_ref
+from triton.runtime import driver
 
 
 reference = Path("/workspace/reference.py").read_text()
@@ -15,7 +16,9 @@ try:
         raise RuntimeError("CUDA is not available in the verifier sandbox")
     device = torch.device("cuda:0")
     torch.cuda.synchronize(device=device)
-    # After the device preflight, exceptions can originate in the submitted code.
+    # Triton builds its driver helper here; a missing compiler is an infrastructure failure.
+    driver.active.get_current_device()
+    # After the toolchain preflight, exceptions can originate in the submitted code.
     evaluation_completed = True
     result = eval_kernel_against_ref(
         original_model_src=reference,
