@@ -1293,6 +1293,58 @@ async def test_explicit_entrypoint_runs_service(tmp_path):
         assert output.read_text() == "started"
 
 
+class WorkdirStrictShellProvider(ShellProvider):
+    """``ShellProvider`` with OpenSandbox's rule: an exec whose working directory does not exist is refused (400
+    ``working directory does not exist``), and, with ``no_root``, one that asks for ``root`` is refused too (a cell
+    that drops ``CAP_SETUID``)."""
+
+    def __init__(self, *, no_root=False):
+        super().__init__()
+        self.calls = []
+        self.no_root = no_root
+
+    async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        import os
+
+        self.calls.append((command, cwd, user))
+        if cwd is not None and not os.path.isdir(cwd):
+            raise RuntimeError(f"INVALID_REQUEST_BODY: working directory does not exist: {cwd}")
+        if user == "root" and self.no_root:
+            raise RuntimeError("switching to uid=0 gid=0 requires CAP_SETUID/CAP_SETGID")
+        return await super().exec(handle, command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("no_root", [False, True])
+async def test_a_working_directory_the_image_lacks_is_created_before_the_first_exec(tmp_path, no_root):
+    """M35 D5: a pull-mode ``main`` (``FROM base`` plus ``WORKDIR /app``, nothing else) starts with the task's workdir
+    as its spec's, every exec defaults to it, and nothing created it: the group's own ``mkdir -p <runtime>`` was the
+    first command and OpenSandbox refused it. Docker creates a missing ``working_dir`` at container create; the group
+    now does the same once the sandbox is up, as root from ``/`` (or as the image's user where root is refused),
+    before anything else runs in the service."""
+    workdir = tmp_path / "app"
+    seen = tmp_path / "seen"
+    provider = WorkdirStrictShellProvider(no_root=no_root)
+    document = {
+        "services": {
+            "main": {
+                "image": "example/app:1",
+                "command": ["sh", "-c", f"pwd > {seen} && sleep 1"],
+                "working_dir": str(workdir),
+            }
+        }
+    }
+    async with make_compose(provider, document, poll_interval_s=0.01) as group:
+        await group._wait("main", "service_started")
+        assert workdir.is_dir()
+        assert seen.read_text().strip() == str(workdir)
+    assert provider.calls[0] == (f"mkdir -p {workdir}", "/", "root")
+    if no_root:
+        assert provider.calls[1] == (f"mkdir -p {workdir}", "/", None)
+    # Every later exec in the service ran in the directory the group had just created.
+    assert all(cwd == str(workdir) for _, cwd, _ in provider.calls[1 + no_root :]), provider.calls
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("startup", [{}, {"entrypoint": [], "command": []}])
 async def test_unresolved_startup_rejected_before_provisioning(startup):
@@ -1345,3 +1397,78 @@ async def test_cleanup_failure_still_attempts_volume_helper_and_transport():
     healthy.stop.assert_awaited_once()
     helper.stop.assert_awaited_once()
     provider.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_spec_env_wins_over_compose_environment_only_where_the_caller_gives_one(tmp_path):
+    """A spec's env is the caller's host-resolved override, so it beats the service's Compose ``environment`` (a
+    ``${HF_TOKEN:-}`` that interpolated to empty upstream must not hide the host value, as in Harbor, where the
+    task's env override file is merged after the task's Compose file). A key only the Compose file sets is kept,
+    and a sidecar given an empty spec env keeps its Compose ``environment``."""
+    from nemo_gym.sandbox.providers.base import SandboxSpec
+
+    main_out, side_out = tmp_path / "main", tmp_path / "side"
+    provider = ShellProvider()
+    group = make_compose(
+        provider,
+        {
+            "services": {
+                "main": {
+                    "image": "image",
+                    "command": [
+                        "sh",
+                        "-c",
+                        f'printf "%s|%s|%s|%s" "$HF_TOKEN" "$ONLY_COMPOSE" "$TASK_ID" "$ONLY_SPEC" > {main_out}; sleep 1',
+                    ],
+                    "environment": {"HF_TOKEN": "", "ONLY_COMPOSE": "c", "TASK_ID": "t016"},
+                    "healthcheck": {"test": ["CMD-SHELL", f"test -f {main_out}"], "interval": "1ms"},
+                },
+                "side": {
+                    "image": "image",
+                    "command": ["sh", "-c", f'printf "%s" "$HF_TOKEN" > {side_out}; sleep 1'],
+                    "environment": {"HF_TOKEN": "sidecar-literal"},
+                    "healthcheck": {"test": ["CMD-SHELL", f"test -f {side_out}"], "interval": "1ms"},
+                },
+            }
+        },
+        service_specs={
+            "main": SandboxSpec(env={"HF_TOKEN": "hostval", "ONLY_SPEC": "s"}, ttl_s=30),
+            "side": SandboxSpec(env={}, ttl_s=30),
+        },
+        poll_interval_s=0.01,
+    )
+    async with group:
+        assert group._plans["main"]["spec"].env == {
+            "HF_TOKEN": "hostval",
+            "ONLY_COMPOSE": "c",
+            "TASK_ID": "t016",
+            "ONLY_SPEC": "s",
+        }
+        assert group._plans["side"]["spec"].env == {"HF_TOKEN": "sidecar-literal"}
+        assert main_out.read_text() == "hostval|c|t016|s"
+        assert side_out.read_text() == "sidecar-literal"
+
+
+@pytest.mark.asyncio
+async def test_unsupported_fields_are_refused_with_the_shared_message_before_creating():
+    """The adapter raises the first message of the pure field check prepare also runs, before it asks the provider
+    for anything; ``pull_policy`` is one of the refused keys, so the Harbor layer drops it upstream."""
+    from nemo_gym.sandbox.compose_fields import unsupported_compose_fields
+
+    provider = Provider()
+    document = {
+        "services": {
+            "main": {"image": "a"},
+            "task-server": {"image": "b", "platform": "linux/amd64", "deploy": {}, "pull_policy": "always"},
+        }
+    }
+    expected = "Service 'task-server': unsupported Compose fields ['deploy', 'platform', 'pull_policy']"
+    assert unsupported_compose_fields(document) == [expected]
+    group = make_compose(provider, document)
+    with pytest.raises(NotImplementedError, match=re.escape(expected)):
+        await group.start()
+    assert provider.created == []
+    top = make_compose(provider, {"x-extra": 1, "services": {"main": {"image": "a", "deploy": {}}}})
+    with pytest.raises(NotImplementedError, match=re.escape("Unsupported Compose fields: ['x-extra']")):
+        await top.start()
+    assert provider.created == []

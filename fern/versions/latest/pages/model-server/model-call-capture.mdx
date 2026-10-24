@@ -78,6 +78,12 @@ No content is delivered during generation, so buffered SSE does not reduce time 
 Worker streaming with external capture remains unsupported. Training reconstruction reads
 the external staged tokens, not the SSE text.
 
+The staging ledger's wire models (`nemo_gym/token_id_capture/staging/records.py`) forbid unknown
+fields, so the model server that stages a call and the framework that rebuilds the rollout from
+the staged rows must run the same Gym version. A framework whose Gym predates a column the model
+server writes, such as `capture_key` or `finish_reason`, rejects every manifest row as
+`invalid_manifest_row` and masks the rollout.
+
 ### Rollout-record attachment
 
 `rollout_collection` attaches available model-call data to each rollout. This representative example
@@ -134,6 +140,10 @@ omit request and response payloads; those remain in `CaptureStore`. If projectio
 remain attached and `gaps` includes `trajectory_projection_failed`. LabBench rows with the
 `multimodal_history_redacted` gap omit payload copies from `ng_trajectory`.
 
+A capture write started by a cancelled call runs detached, so a rollout's outstanding writes are
+waited for before its record is snapshotted. If one has not landed by the drain timeout, `gaps`
+includes `model_call_capture_pending`.
+
 The attachment is additive: it does not replace or rewrite the existing response, reward,
 `NeMoGymResponse`, token-id, or log-prob fields. Aggregate-metrics requests exclude it, and W&B
 rollout tables omit `ng_trajectory` and model-call request and response payloads.
@@ -182,8 +192,8 @@ the collector clears any existing capture for the exact rollout-attempt id.
 Read raw records programmatically when you need more than the rollout attachment:
 
 ```python
-from nemo_gym.base_responses_api_model import (
-    CaptureStore,
+from nemo_gym.base_responses_api_model import CaptureStore
+from nemo_gym.observability.model_calls import (
     aggregate_model_call_metrics,
     read_model_call_records,
 )
@@ -263,8 +273,7 @@ also emit `ng_agent_observations`; `rollout_collection` exact-joins the availabl
 See [Rollout evidence](/main/observability/rollout-evidence) for the full pipeline, exact correlation
 rules, payload retention, agent observations, gaps, and performance summaries. Agent-side coverage
 varies by producer and execution path; the
-[trajectory capability matrix](/main/reference/trajectory-capabilities) records the evaluated
-coverage.
+[trajectory capability matrix](/main/reference/trajectory-capabilities) shows measured harness checks.
 
 ## Framework-owned media staging
 

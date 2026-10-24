@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Capture Pi JSON events; the shared process supervisor owns deadlines and cleanup."""
+"""Capture Pi JSON events; the supervisor bounds execution; the sandbox owner stops task services."""
 
 import json
 import os
@@ -37,39 +37,47 @@ def run(params: dict) -> int:
             stdout=subprocess.PIPE,
             stderr=stderr,
         )
-        pending = bytearray()
+        try:
+            pending = bytearray()
 
-        def capture(line: bytes) -> None:
-            try:
-                event = json.loads(line.decode(errors="replace"))
-            except (ValueError, RecursionError):
-                return
-            if isinstance(event, dict):
-                events.write(json.dumps([time(), event]) + "\n")
-                events.flush()
+            def capture(line: bytes) -> None:
+                try:
+                    event = json.loads(line.decode(errors="replace"))
+                except (ValueError, RecursionError):
+                    return
+                if isinstance(event, dict):
+                    events.write(json.dumps([time(), event]) + "\n")
+                    events.flush()
 
-        # A detached tool can inherit stdout. Drain available data after Pi exits,
-        # without waiting for that tool to close its pipe; the supervisor reaps it.
-        with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ)
-            while True:
-                if stopping and process.poll() is None:
-                    process.terminate()
-                    stopping = False
-                ready = selector.select(timeout=0.05)
-                if ready:
-                    chunk = os.read(process.stdout.fileno(), 64 * 1024)
-                    if not chunk:
+            # A detached tool can inherit stdout. Drain available data after Pi exits,
+            # without waiting for that tool to close its pipe. Resources may retain
+            # task services through verification.
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                while True:
+                    if stopping and process.poll() is None:
+                        process.terminate()
+                        stopping = False
+                    ready = selector.select(timeout=0.05)
+                    if ready:
+                        chunk = os.read(process.stdout.fileno(), 64 * 1024)
+                        if not chunk:
+                            break
+                        pending.extend(chunk)
+                        while b"\n" in pending:
+                            line, _, pending = pending.partition(b"\n")
+                            capture(line)
+                    elif process.poll() is not None:
                         break
-                    pending.extend(chunk)
-                    while b"\n" in pending:
-                        line, _, pending = pending.partition(b"\n")
-                        capture(line)
-                elif process.poll() is not None:
-                    break
-        if pending:
-            capture(pending)
-        return process.wait()
+            if pending:
+                capture(pending)
+            return process.wait()
+        finally:
+            # An I/O/capture error must not leave the CLI changing the task.
+            # Only stop our direct CLI; task services belong to the sandbox owner.
+            if process.poll() is None:
+                process.kill()
+            process.wait()
 
 
 def main() -> None:

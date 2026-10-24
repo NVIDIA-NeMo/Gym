@@ -123,8 +123,9 @@ async def restore(environment, artifacts_dir):
             await upload_file(environment.main, host, target)
 
 
-async def run_verifier(environment, directory, diagnostics):
+async def run_verifier(environment, directory, diagnostics, timeout_sec=None):
     settings = environment.task.config.verifier
+    timeout_sec = settings.timeout_sec if timeout_sec is None else timeout_sec
     logs = Path(directory) / "verifier"
     logs.mkdir(parents=True, exist_ok=True)
 
@@ -142,7 +143,7 @@ async def run_verifier(environment, directory, diagnostics):
         return {"rewards": rewards, **counts.model_dump(exclude_none=True)}
 
     try:
-        return await asyncio.wait_for(execute(), timeout=settings.timeout_sec)
+        return await asyncio.wait_for(execute(), timeout=timeout_sec)
     except TimeoutError as exc:
         # Preserve diagnostics on timeout without turning partial reward files
         # into a completed evaluation (the reference aborts this verifier).
@@ -150,4 +151,4 @@ async def run_verifier(environment, directory, diagnostics):
             await download_dir(environment.main, "/logs/verifier", logs)
         except Exception as download_exc:
             diagnostics.append({"operation": "verifier_logs", "error": str(download_exc)})
-        raise VerifierTimeoutError(f"Verifier execution timed out after {settings.timeout_sec} seconds") from exc
+        raise VerifierTimeoutError(f"Verifier execution timed out after {timeout_sec} seconds") from exc

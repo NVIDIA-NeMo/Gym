@@ -15,6 +15,7 @@
 """Provider-neutral public sandbox API."""
 
 import asyncio
+import inspect
 import tempfile
 import threading
 import time
@@ -22,9 +23,11 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
 
+from nemo_gym.sandbox.observability import span_attributes as default_span_attributes
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
     SandboxEndpoint,
@@ -41,6 +44,7 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxPauseResume,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
+    SupportsSandboxSidecars,
     create_provider,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
@@ -173,7 +177,7 @@ class SandboxPty:
                 env=env,
                 rows=rows,
                 cols=cols,
-                user=user,
+                user=user if user is not None else sandbox.default_user,
                 pty=pty,
             ),
         )
@@ -385,6 +389,18 @@ def _sandbox_id(handle: Any) -> str | None:
     return getattr(handle, "sandbox_id", None)
 
 
+def _missing_keywords(method: Callable[..., Any], keywords: Mapping[str, Any]) -> list[str]:
+    """The names in ``keywords`` that ``method`` does not take, none when it takes them all or ``**kwargs``."""
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        # No inspectable signature (a builtin or a mock): the call itself decides.
+        return []
+    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return []
+    return [name for name in keywords if name not in parameters]
+
+
 class AsyncSandbox:
     """Async sandbox object backed by a runtime provider.
 
@@ -411,6 +427,11 @@ class AsyncSandbox:
         self._counted_active = False
         self.pty = SandboxPty(self)
 
+    @property
+    def sandbox_id(self) -> str | None:
+        """The provider's id for this sandbox, or None before it has started or connected."""
+        return _sandbox_id(self._handle)
+
     def _telemetry_provider_name(self) -> str:
         """Provider name for span attributes (`docker`, `daytona`, `opensandbox`, ...)."""
         return getattr(self._provider, "name", type(self._provider).__name__)
@@ -423,6 +444,8 @@ class AsyncSandbox:
     async def start(
         self,
         spec: SandboxSpec | None = None,
+        *,
+        span_attributes: Mapping[str, Any] | None = None,
     ) -> "AsyncSandbox":
         if self._closed:
             raise RuntimeError("Sandbox has been stopped")
@@ -431,6 +454,9 @@ class AsyncSandbox:
         requested_spec = spec if spec is not None else self._spec
         if requested_spec is None:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
+        if requested_spec.sidecars and not isinstance(self._provider, SupportsSandboxSidecars):
+            provider_name = getattr(self._provider, "name", type(self._provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")
 
         if is_span_group_enabled(GymSpanGroup.SANDBOX):
             provider_name = self._telemetry_provider_name()
@@ -438,7 +464,7 @@ class AsyncSandbox:
             with managed_span(
                 GymSpanGroup.SANDBOX,
                 "gym.sandbox.start",
-                **{"nemo.gym.sandbox.provider": provider_name},
+                **{"nemo.gym.sandbox.provider": provider_name, **default_span_attributes(span_attributes)},
             ) as span:
                 handle = await self._provider.create(requested_spec)
                 if span is not None:
@@ -492,13 +518,14 @@ class AsyncSandbox:
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
         preserve_background_services: bool = False,
+        span_attributes: Mapping[str, Any] | None = None,
     ) -> SandboxExecResult:
         """Run a command, optionally preserving services needed by later commands.
 
         ``preserve_background_services`` selects a provider's service-preserving
         execution when available; other providers use ordinary exec. Services
-        must redirect stdout and stderr. This mode does not accept per-command
-        ``env`` or ``user`` overrides on providers with a service-preserving path.
+        must redirect stdout and stderr. Per-command ``env`` and ``user``
+        overrides apply to the service-preserving execution too.
         """
         if not is_span_group_enabled(GymSpanGroup.SANDBOX):
             return await self._exec_uninstrumented(
@@ -520,7 +547,7 @@ class AsyncSandbox:
         with managed_span(
             GymSpanGroup.SANDBOX,
             "gym.sandbox.exec",
-            **{"nemo.gym.sandbox.provider": provider_name},
+            **{"nemo.gym.sandbox.provider": provider_name, **default_span_attributes(span_attributes)},
         ) as span:
             result = await self._exec_uninstrumented(
                 command,
@@ -553,13 +580,23 @@ class AsyncSandbox:
         preserve_background_services: bool = False,
     ) -> SandboxExecResult:
         if preserve_background_services and isinstance(self._provider, SupportsSandboxBackgroundServices):
-            if env is not None or user is not None:
-                raise ValueError("Service-preserving execution does not support per-command env or user overrides")
+            overrides = {name: value for name, value in (("env", env), ("user", user)) if value is not None}
+            # Older custom providers implement only cwd and timeout_s. They still serve a command without
+            # overrides; one with them is refused by name here rather than by a TypeError from inside the call.
+            missing = _missing_keywords(self._provider.exec_with_background_services, overrides)
+            if missing:
+                raise TypeError(
+                    f"{type(self._provider).__name__}.exec_with_background_services does not accept "
+                    f"{' or '.join(missing)}, so the per-command {' and '.join(missing)} override of this "
+                    "service-preserving exec cannot be applied. Add the keyword(s) to the provider "
+                    "(SupportsSandboxBackgroundServices takes cwd, env, timeout_s and user)."
+                )
             return await self._provider.exec_with_background_services(
                 self._require_handle(),
                 command,
                 cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
                 timeout_s=timeout_s,
+                **overrides,
             )
         return await self._provider.exec(
             self._require_handle(),
@@ -567,14 +604,38 @@ class AsyncSandbox:
             cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
             env=env,
             timeout_s=timeout_s,
-            user=user,
+            user=user if user is not None else self.default_user,
         )
+
+    @property
+    def default_user(self) -> str | int | None:
+        """The user an exec runs as when it names none: ``SandboxSpec.user``, else the provider's own default."""
+        return self._spec.user if self._spec is not None else None
+
+    def set_default_user(self, user: str | int | None) -> None:
+        """Change the default exec user of a running sandbox.
+
+        A Dockerfile overlay creates the task's user inside the sandbox after it started, so the
+        sandbox is created without one and switches to it once the user exists. ``serialize()``
+        carries the new value, so a harness that reattaches gets the same default.
+        """
+        self._spec = replace(self._spec, user=user) if self._spec is not None else SandboxSpec(user=user)
 
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
         await self._provider.upload_file(self._require_handle(), Path(local_path), remote_path)
 
     async def download(self, remote_path: str, local_path: Path | str) -> None:
         await self._provider.download_file(self._require_handle(), remote_path, Path(local_path))
+
+    def sidecar(self, name: str) -> "AsyncSandboxSidecar":
+        """Return a sidecar container declared in ``SandboxSpec.sidecars``, to run commands in and read files from."""
+        if not isinstance(self._provider, SupportsSandboxSidecars):
+            provider_name = getattr(self._provider, "name", type(self._provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")
+        declared = [sidecar.name for sidecar in self._spec.sidecars] if self._spec is not None else []
+        if name not in declared:
+            raise ValueError(f"Sidecar {name!r} was not declared in SandboxSpec.sidecars; declared: {declared!r}")
+        return AsyncSandboxSidecar(self._provider, self._require_handle(), name)
 
     async def status(self) -> SandboxStatus:
         if self._handle is None:
@@ -640,6 +701,7 @@ class AsyncSandbox:
                     **{
                         "nemo.gym.sandbox.provider": self._telemetry_provider_name(),
                         "nemo.gym.sandbox.id": _sandbox_id(self._handle),
+                        **default_span_attributes(),
                     },
                 ):
                     await self._provider.close(self._handle)
@@ -688,6 +750,15 @@ class AsyncSandbox:
             descriptor = {**descriptor, "workdir": self._spec.workdir}
         if isinstance(descriptor, dict) and self._spec is not None and self._spec.ports:
             descriptor = {**descriptor, "ports": list(self._spec.ports)}
+        # Carry the declared sidecars so a borrower that connects can use `sidecar(name)` without re-declaring them.
+        # Only name and image travel: a sidecar's environment may hold secrets, and a borrower never starts it.
+        if isinstance(descriptor, dict) and self._spec is not None and self._spec.sidecars:
+            sidecars = [{"name": sidecar.name, "image": sidecar.image} for sidecar in self._spec.sidecars]
+            descriptor = {**descriptor, "sidecars": sidecars}
+        # Carry the default user too, so a harness that reattaches runs commands as the same user.
+        if isinstance(descriptor, dict) and descriptor.get("user") is None and self._spec is not None:
+            if self._spec.user is not None:
+                descriptor = {**descriptor, "user": self._spec.user}
         return descriptor
 
     @classmethod
@@ -704,7 +775,13 @@ class AsyncSandbox:
         handle = await provider.connect(descriptor)
         workdir = descriptor.get("workdir") if isinstance(descriptor, Mapping) else None
         ports = descriptor.get("ports", ()) if isinstance(descriptor, Mapping) else ()
-        sandbox = cls(provider, SandboxSpec(workdir=workdir, ports=ports), owns_provider=owns_provider)
+        sidecars = descriptor.get("sidecars", ()) if isinstance(descriptor, Mapping) else ()
+        user = descriptor.get("user") if isinstance(descriptor, Mapping) else None
+        sandbox = cls(
+            provider,
+            SandboxSpec(workdir=workdir, ports=ports, sidecars=sidecars, user=user),
+            owns_provider=owns_provider,
+        )
         sandbox._handle = handle
         sandbox._stopped = False
         sandbox._connected = True
@@ -715,6 +792,30 @@ class AsyncSandbox:
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         await self.stop()
+
+
+class AsyncSandboxSidecar:
+    """A sidecar container of a started sandbox; get one with ``AsyncSandbox.sidecar(name)``."""
+
+    def __init__(self, provider: SupportsSandboxSidecars, handle: SandboxHandle, name: str) -> None:
+        self._provider = provider
+        self._handle = handle
+        self.name = name
+
+    async def exec(
+        self, *argv: str, timeout_s: int | float, on_stdout: Callable[[str], None] | None = None
+    ) -> SandboxExecResult:
+        """Run ``argv`` without a shell (sidecar images can be distroless) and wait for it to exit.
+
+        ``on_stdout`` receives stdout text as it arrives, so a caller can follow a long-running service.
+        """
+        return await self._provider.sidecar_exec(
+            self._handle, self.name, list(argv), timeout_s=timeout_s, on_stdout=on_stdout
+        )
+
+    async def download(self, remote_path: str, local_path: Path | str) -> None:
+        """Download one file from the sidecar's filesystem."""
+        await self._provider.download_sidecar_file(self._handle, self.name, remote_path, Path(local_path))
 
 
 class _AsyncLoopRunner:

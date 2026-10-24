@@ -32,8 +32,7 @@ def main() -> None:
     assert response["usage"]["input_tokens"] > 0
     assert response["usage"]["output_tokens"] > 0
     assert rollout["reward"] == 1.0
-    assert rollout["initial_count"] == 3
-    assert rollout["expected_count"] == 6
+    # Episode results contain the verifier response, not a copy of task seed metadata.
 
     resource_names = {"increment_counter", "get_counter_value"}
     calls = [item for item in response["output"] if item.get("type") == "function_call"]
@@ -46,6 +45,7 @@ def main() -> None:
 
     trajectory = rollout["ng_trajectory"]
     assert trajectory["turns"]
+    assert trajectory["model_calls"]
     assert any(turn["model_calls"] for turn in trajectory["turns"])
     tool_calls = [call for call in trajectory["tool_calls"] if call["tool_name"] in resource_names]
     assert [call["tool_name"] for call in tool_calls] == [name for name, _ in resource_calls]
@@ -54,7 +54,9 @@ def main() -> None:
 
     observations = rollout["ng_agent_observations"]
     assert observations["source"] == "nooa"
-    assert rollout["agent_ref"] == {"name": "example_session_state_mgmt_nooa_agent"}
+    assert rollout["_ng_environment_server"] == "example_session_state_mgmt_environment_server"
+    assert rollout["_ng_result_type"] == "single_agent_turn"
+    assert rollout["_ng_task_id"] == {"taskset": "nooa-counter", "task_id": "counter-0"}
 
 
 if __name__ == "__main__":

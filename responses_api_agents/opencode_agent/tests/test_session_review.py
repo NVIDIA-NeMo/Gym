@@ -13,14 +13,26 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
-from responses_api_agents.opencode_agent.sandbox import format_sandbox_error
+from responses_api_agents.opencode_agent.sandbox import format_error_message
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
     active_sessions,
     capture_observations,
     close_body,
+    rejected_events,
     seed,
     setup,  # noqa: F401
 )
+
+
+@pytest.mark.parametrize("version,warn", [("1.17.11", False), ("1.18.0", True)])
+def test_session_warns_about_untested_opencode_version(setup, caplog, version, warn):
+    agent, sandbox = setup
+    agent.config.opencode_version = version
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+    assert ("error classification is validated on 1.17.11" in caplog.text) == warn
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -37,7 +49,12 @@ def test_session_uploads_shared_plugin_only_with_model_capture(setup, enabled, t
         payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         plugin = Path(sandbox.directory) / OBSERVABILITY_PATCH.name
-        assert config.get("plugin", []) == ([plugin.as_uri()] if enabled else [])
+        task_env_plugin = Path(sandbox.directory) / "task_environment.mjs"
+        assert config["plugin"] == ([plugin.as_uri()] if enabled else []) + [task_env_plugin.as_uri()]
+        assert (
+            sandbox.files[str(task_env_plugin)]
+            == Path(__file__).parents[1].joinpath("task_environment.mjs").read_text()
+        )
         assert (str(plugin) in sandbox.files) is enabled
         if enabled:
             assert sandbox.files[str(plugin)] == OBSERVABILITY_PATCH.read_text()
@@ -101,8 +118,12 @@ def test_observation_parse_failure_preserves_response(setup, caplog):
 
 
 @pytest.mark.parametrize("failure", ["provider_timeout", "missing_export", "snapshot"])
-def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp_path, failure):
+@pytest.mark.parametrize("model_rejected", [False, True])
+def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp_path, failure, model_rejected):
     agent, sandbox = setup
+    if model_rejected:
+        sandbox.events = rejected_events(after_work=True)
+        sandbox.result["return_code"] = 1
     capture_observations(sandbox, tmp_path)
     execute = sandbox.run_exec
     download = sandbox.download
@@ -205,7 +226,7 @@ def test_malformed_capture_never_replaces_provider_failure(setup, artifact):
 def test_combined_diagnostics_are_bounded_and_stderr_is_not_duplicated(stderr_already_in_error):
     stderr = "e" * 16000 + "STDERR TAIL"
     message = "OpenCode failed" + (f": {stderr}" if stderr_already_in_error else "")
-    result = format_sandbox_error(message, output="o" * 16000 + "OUTPUT TAIL", stderr=stderr)
+    result = format_error_message(message, output="o" * 16000 + "OUTPUT TAIL", stderr=stderr)
     assert len(result) <= 16000
     assert result.startswith("OpenCode failed")
     assert "OUTPUT TAIL" in result
@@ -237,3 +258,32 @@ def test_model_error_502_uses_the_same_combined_diagnostic_bound(setup):
         assert "MODEL ERROR TAIL" in detail
         assert detail.count("STDERR TAIL") == 1
         client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+
+
+@pytest.mark.parametrize("failure,status", [("receipt", 500), ("missing_export", 500), ("malformed_export", 502)])
+def test_single_turn_failure_preserves_observations_and_runtime(setup, tmp_path, failure, status):
+    agent, sandbox = setup
+    capture_observations(sandbox, tmp_path)
+    if failure == "receipt":
+        sandbox.task_environment_receipt = None
+    elif failure == "malformed_export":
+        sandbox.events = "{malformed"
+    download = sandbox.download
+
+    async def read(source, destination):
+        if failure == "missing_export" and source.endswith("/export.json"):
+            raise FileNotFoundError("missing export")
+        await download(source, destination)
+
+    sandbox.download = read
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        session_id = created.json()["agent_session_id"]
+        state = active_sessions(agent)[session_id]
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == status, result.text
+        assert state.runtime_info.hostname == "task-container"
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        closed.raise_for_status()
+        invocation = next(r for r in closed.json()["agent_observations"]["records"] if r["kind"] == "agent_invocation")
+        assert invocation["conversation"][-1]["content"][0]["text"] == "Fixed"
