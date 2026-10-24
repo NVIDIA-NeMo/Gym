@@ -334,6 +334,22 @@ async def test_verifier_timeout_does_not_promote_partial_reward(tmp_path, monkey
     download.assert_awaited_once()
 
 
+async def test_verifier_timeout_override_replaces_the_package_timeout(tmp_path, monkeypatch):
+    cfg = TaskSettings.model_validate(
+        {"environment": {"docker_image": "a"}, "verifier": {"timeout_sec": 3600, "environment": {"docker_image": "v"}}}
+    )
+
+    async def execute(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    env = SimpleNamespace(task=SimpleNamespace(config=cfg), exec=execute, main=None)
+    from resources_servers.terminal_bench_4 import verifier
+
+    monkeypatch.setattr(verifier, "download_dir", AsyncMock())
+    with pytest.raises(VerifierTimeoutError, match="after 0.01 seconds"):
+        await run_verifier(env, tmp_path, [], timeout_sec=0.01)
+
+
 async def test_transfer_fallbacks_preserve_file_bytes_and_empty_directories(tmp_path):
     from resources_servers.terminal_bench_4.transfers import download_dir, upload_dir
 

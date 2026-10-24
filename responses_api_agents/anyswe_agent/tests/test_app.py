@@ -124,7 +124,26 @@ class TestSandboxAPI:
 
     def test_model_url_carries_rollout_correlation(self) -> None:
         assert _model_url_for_rollout("http://model-host:8000", "3-1") == "http://model-host:8000/ng-rollout/3-1"
+        # No rollout id and no exported traces: byte-for-byte unchanged.
         assert _model_url_for_rollout("http://model-host:8000", None) == "http://model-host:8000"
+        assert _model_url_for_rollout("", None) == ""
+
+    def test_model_url_carries_trace_context_without_a_rollout_id(self, monkeypatch) -> None:
+        # Capture off, traces on: the harness still gets the current span in the URL.
+        from nemo_gym import server_utils
+
+        monkeypatch.setattr(
+            server_utils, "trace_context_path_segment", lambda: "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+        )
+        assert (
+            _model_url_for_rollout("http://model-host:8000", None)
+            == "http://model-host:8000/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+        )
+        assert (
+            _model_url_for_rollout("http://model-host:8000", "3-1")
+            == "http://model-host:8000/ng-rollout/3-1/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+        )
+        assert _model_url_for_rollout("", None) == ""
 
     def test_default_provider_is_named_sandbox(self) -> None:
         config = AnySweAgentConfig(
@@ -170,6 +189,28 @@ class TestSandboxAPI:
         assert spec.metadata["sandbox-api"] == "opensandbox-sdk"
         assert spec.provider_options == {"platform": {"arch": "amd64"}}
         assert spec.files == {"/tmp/input": "data"}
+
+    def test_agent_network_policy_applies_to_agent_box_only(self) -> None:
+        policy = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.0.0.0/16"}]}
+        params = SimpleNamespace(
+            sandbox_spec={"provider_options": {"platform": {"arch": "amd64"}}},
+            sandbox_default_metadata={},
+            swebench_agent_timeout=100,
+            swebench_tests_timeout=200,
+            instance_id="astropy__astropy-12907",
+            container="image:tag",
+            resolved_sandbox_provider={"opensandbox": {}},
+            agent_network_policy=policy,
+        )
+        agent_spec = AnySweAgent._sandbox_spec(params, agent=True)
+        grading_spec = AnySweAgent._sandbox_spec(params)
+        assert agent_spec.provider_options == {"platform": {"arch": "amd64"}, "network_policy": policy}
+        assert grading_spec.provider_options == {"platform": {"arch": "amd64"}}
+
+        params.agent_network_policy = policy
+        params.resolved_sandbox_provider = {"docker": {}}
+        with pytest.raises(ValueError, match="opensandbox"):
+            AnySweAgent._sandbox_spec(params, agent=True)
 
     def test_agent_config_is_forwarded_without_harness_specific_changes(self) -> None:
         params = SimpleNamespace(

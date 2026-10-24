@@ -88,7 +88,9 @@ async def test_verify_collects_regular_outputs_without_runtime_links(
     )
     server = app.JobBenchResourcesServer.model_construct(
         config=app.JobBenchConfig.model_construct(
-            judge_model="judge", artifact_root=tmp_path / "saved" if mode != "temporary" else None
+            judge_model="judge",
+            judge_max_completion_tokens=32768,
+            artifact_root=tmp_path / "saved" if mode != "temporary" else None,
         )
     )
     server._sandboxes = {"session": sandbox}
@@ -176,6 +178,7 @@ async def test_verify_collects_regular_outputs_without_runtime_links(
         restarted = app.JobBenchResourcesServer.model_construct(config=server.config)
         recovered = await restarted.verify(request, body)
         assert recovered.reward == 1
+        assert recovered.judge_max_completion_tokens == 32768
         assert (saved / "output.tar.gz").read_bytes() == snapshot
         assert await restarted.verify(request, body) == recovered
         assert len(list(saved.glob("judge-receipt-*.json"))) == 2
@@ -189,6 +192,7 @@ async def test_verify_collects_regular_outputs_without_runtime_links(
     else:
         result = await server.verify(request, body)
         assert result.reward == 1
+        assert result.judge_max_completion_tokens == 32768
         if mode == "persisted":
             saved = server.config.artifact_root / body.artifact_id
             snapshot = (saved / "output.tar.gz").read_bytes()
@@ -247,6 +251,62 @@ def test_judge_rubric_scores_model_verdict(monkeypatch, passed: bool, expected_s
     assert result["result"]["score"] == expected_score
     assert result["result"]["criteria_results"][1]["passed"] is False
     assert debug["api_exit_code"] == 0
+
+
+def test_judge_rubric_forwards_completion_budget(monkeypatch) -> None:
+    content = json.dumps({"criteria_results": [{"passed": True}], "rubric_passed": True, "overall_reasoning": ""})
+    seen = {}
+
+    def create(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    monkeypatch.setattr(app.judge, "get_openai_client", lambda *_args: client)
+
+    app.judge.judge_rubric(
+        0, {"rubric": "r", "weight": 1}, "answer", "judge", "https://judge.example", "test", max_retries=1
+    )
+    assert seen["max_completion_tokens"] == 200000
+    app.judge.judge_rubric(
+        0,
+        {"rubric": "r", "weight": 1},
+        "answer",
+        "judge",
+        "https://judge.example",
+        "test",
+        max_retries=1,
+        max_completion_tokens=32768,
+    )
+    assert seen["max_completion_tokens"] == 32768
+
+
+def test_server_passes_configured_completion_budget(monkeypatch, tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "answer.txt").write_text("answer", encoding="utf-8")
+    rubrics_file = tmp_path / "RUBRICS.json"
+    rubrics_file.write_text(json.dumps({"rubrics": [{"rubric": "only", "weight": 1}]}), encoding="utf-8")
+    monkeypatch.setattr(app.judge, "extract_all_file_contents", lambda _: "answer")
+    monkeypatch.setattr(app.judge, "collect_image_attachments", lambda _: [])
+    budgets = []
+
+    def fake_judge(index, rubric, *args):
+        budgets.append(args[-1])
+        return {"index": index, "weight": 1, "result": {"passed": True, "score": 1}}, {"api_exit_code": 0}
+
+    monkeypatch.setattr(app.judge, "judge_rubric", fake_judge)
+    server = app.JobBenchResourcesServer.model_construct(
+        config=app.JobBenchConfig.model_construct(
+            judge_model="judge",
+            judge_base_url="https://judge.example",
+            judge_api_key="test",
+            judge_max_completion_tokens=32768,
+            max_judge_workers=1,
+        )
+    )
+    server._judge(output_dir, rubrics_file)
+    assert budgets == [32768]
 
 
 @pytest.mark.parametrize("terminal_transport_error", [False, True])
