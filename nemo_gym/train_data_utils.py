@@ -108,6 +108,9 @@ class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
     overwrite_metrics_conflicts: bool = Field(
         default=False, description="Whether or not to overwrite metrics conflicts."
     )
+    num_repeats: Optional[Union[int, Dict[str, int]]] = Field(
+        default=None, description="Rollouts per task from `--num-repeats`; when set, it replaces each dataset's own."
+    )
     task_data_validation: Literal["off", "warn", "error", "auto"] = Field(
         default="auto",
         description=(
@@ -1113,6 +1116,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
         type: DatasetType,
         server_instance_configs: List[ServerInstanceConfig],
         task_data_validation: str = "warn",
+        num_repeats: Optional[Union[int, Dict[str, int]]] = None,
     ) -> List[Path]:
         paths_to_collate = []
         used_prepare_paths: set[Path] = set()
@@ -1160,6 +1164,9 @@ This could be due to a change in how metrics are calculated, leading to outdated
                     )
                 with open(prepare_path, "w") as target:
                     for row_index, line in enumerate(self._iter_dataset_lines(d)):
+                        # --num-repeats replaces the dataset's num_repeats: keep one copy, rollout collection repeats it.
+                        if num_repeats is not None and row_index % d.num_repeats:
+                            continue
                         row = json.loads(line)
 
                         if prompt_cfg:
@@ -1257,6 +1264,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 type=type,
                 server_instance_configs=server_instance_configs,
                 task_data_validation=config.effective_task_data_validation,
+                num_repeats=config.num_repeats,
             )
             collated_fpath = parent / f"{type}.jsonl"
             with open(collated_fpath, "wb") as outfile:
