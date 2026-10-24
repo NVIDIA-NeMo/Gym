@@ -1,145 +1,36 @@
-# SWE Atlas Codebase Q&A
+# SWE Atlas Q&A resources server
 
-Evaluates the 124 Codebase Q&A tasks from [Scale AI's SWE Atlas](https://github.com/scaleapi/SWE-Atlas)
-through `harness_agent`. This subset asks an agent to investigate an existing repository and answer a question.
-It does not include the Test Writing or Refactoring subsets.
+Serves SWE Atlas Codebase Q&A for `harness_agent`. See the [benchmark README](../../benchmarks/swe_atlas_qa/README.md)
+to prepare data and run evaluations.
 
-## Preparation
+`/seed_session` creates the task sandbox from the task's pinned image with `/app` as its working directory, and
+`harness_agent` attaches to it. `/verify` collects `/logs/agent/answer.txt`, closes the agent sandbox, and runs the
+upstream evaluator in a separate sandbox. Rubrics, reference answers, and judge credentials never enter the agent
+sandbox, and agent network access is limited to the policy-model host.
 
-```bash
-python -m resources_servers.swe_atlas_qa.prepare
-```
+## Scoring
 
-`prepare.py` fetches upstream revision `c6673fe259c3493a2f834266abf63247a5d1507c`, checks the revision,
-rejects modifications to the task assets, and generates the gitignored `data/benchmark.jsonl`.
-The five checked-in smoke examples are separate and are never overwritten by preparation. Rows contain the upstream
-instruction and task ID. The resource server starts each task sandbox from the task's pinned image with `/app` as its
-working directory, so rows carry no routing metadata. Rubrics, evaluator prompts, and reference answers remain in the server's private source cache.
-The digest-pinned v1.1 task images come from the upstream task definitions on GHCR.
+`reward` is the upstream strict pass. `agg_score` is the fraction of scored rubrics passed. As upstream, unscored
+rubrics are excluded from strict pass. They are reported in `num_unscored` and `all_rubrics_scored`. Missing answers
+score zero. Infrastructure and verifier failures set `mask_sample=true` and `evaluation_completed=false`.
 
-These tasks, answers, rubrics, and resulting trajectories are **evaluation-only**. Follow the upstream canary's
-prohibition on including benchmark data in training corpora.
-
-## Harness and endpoints
-
-The resource server creates a task sandbox in `/app` and returns its descriptor from `/seed_session`.
-`harness_agent` attaches to that same sandbox. It runs the chosen harness and then calls `/verify`.
-The resource server collects `/logs/agent/answer.txt`, closes the agent sandbox, and runs the original
-upstream evaluator in a separate Python sandbox. No rubrics, reference answers, or judge credentials are staged
-in the agent sandbox. Agent network access is limited to the Gym policy-model host.
-
-Set `SWE_ATLAS_HARNESS_BUNDLE` to a local tarball prepared for `harness_agent`. It must contain
-`nemo_gym/`, the selected `responses_api_agents/<agent>/` package, and the harness's runtime and dependencies.
-Set `SWE_ATLAS_HARNESS_PYTHON` to the Python command inside the sandbox if it differs from `python3`.
-The bundle must run in the upstream task image, including Alpine/musl images. Keep task assets and credentials
-out of this archive. Runtime installation belongs to the harness, not this resource server.
-
-The upstream images are x86_64. Eight use glibc 2.31 or newer, and three (k6, MinIO, and SFTPGo) use Alpine/musl.
-A Python 3.13 runtime that ships its own glibc loader and libraries, with ELF interpreters and rpaths pointed at them,
-ran unchanged on all 11 images. Keep `SWE_ATLAS_HARNESS_PYTHON` to a command that only extends `PATH`, for example
-`env PATH=/work/gym_mount/bin:$PATH /work/gym_mount/runtime/python/bin/python3.13`. Setting `PYTHONPATH`,
-`PYTHONHOME`, or `LD_LIBRARY_PATH` there leaks into the agent's shell commands. `SWE_ATLAS_HARNESS_BUNDLE` may also
-be an `http://` or `https://` URL that the sandbox fetches with `curl`. Task sandboxes reach only the policy-model host,
-so serve the bundle from that host.
-
-Configure an OpenAI-compatible policy endpoint with the usual Gym values
-`policy_base_url`, `policy_model_name`, and `policy_api_key` (an unused placeholder for an unauthenticated server).
-Set `SWE_ATLAS_JUDGE_BASE_URL` and `SWE_ATLAS_JUDGE_MODEL` for the rubric judge. Set
-`SWE_ATLAS_JUDGE_API_KEY` if it requires authentication. The default is an unused placeholder.
-It is passed only to the evaluator process after dependency installation.
-
-```bash
-gym eval run --benchmark swe_atlas_qa --split benchmark --output runs/swe-atlas/rollouts.jsonl \
-  +use_absolute_ip=true
-```
-
-Also configure the OpenSandbox provider using its documented connection settings. Set `SWE_ATLAS_GYM_MODEL_HOST`
-to this machine's IP reachable from the task sandbox. The model server defaults to port 8000. For another port,
-set `+policy_model.responses_api_models.vllm_model.port=9000`; the sandbox URL follows that setting.
-The default configuration routes the harness through the Gym model server,
-which proxies the configured policy endpoint. The judge endpoint must be reachable from the verifier sandbox.
-
-The task sandbox must reach `SWE_ATLAS_GYM_MODEL_HOST`. A workstation behind a VPN usually is not reachable. Run Gym
-on a reachable host, or forward a reachable port to the model server and set
-`++policy_model.responses_api_models.vllm_model.host=127.0.0.1` so it binds locally.
-
-For a full run, raise `swe_atlas_qa_agent.responses_api_agents.harness_agent.concurrency` (the config default is 1) and
-set `++route_failures_to_sidecar=true`. Otherwise one failed `/run` ends the whole collection. Failed rollouts are then
-written to `rollouts_failures.jsonl`. Count them as zero and report the score over all dispatched rollouts.
-
-The default harness is OpenCode. Select another built-in harness and its corresponding `agent_kwargs`, for example:
-
-```yaml
-swe_atlas_qa_agent:
-  responses_api_agents:
-    harness_agent:
-      agent: pi
-      agent_kwargs:
-        model: ${policy_model_name}
-        command: pi
-        timeout: 10800
-```
-
-Use the same tasks and grader when comparing harnesses. Their CLI commands, model configuration, dependencies,
-and libc compatibility remain harness-specific.
-
-Each harness has a config in `benchmarks/swe_atlas_qa/` (`claude_code`, `cline`, `codex`, `deepagents`, `hermes`,
-`kilocode`, `mini_swe`, `openclaw`, `opencode`, `pi`, `prime`, `simple_strands`, and `terminus_2`). Each holds the
-settings used to run that harness on three tasks, including Alpine k6, with GLM-5.2 or DeepSeek-V4.1-Flash.
-Version pins and paths inside `/work/gym_mount` must match your bundle.
-
-```bash
-gym eval run --config benchmarks/swe_atlas_qa/claude_code.yaml --split benchmark \
-  --output runs/swe-atlas/claude_code.jsonl ++route_failures_to_sidecar=true
-```
-
-`deepagents` treats its working directory as the root of a virtual filesystem, so with `/app` the answer would land at
-`/app/logs/agent/answer.txt`. Its config sets `cwd: /`, which needs `harness_agent` to keep an explicit `agent_kwargs`
-working directory (#5051).
-
-## Scoring and validation
-
-`reward` is the upstream binary strict-pass result. `agg_score` is the fraction of scored rubrics passed.
-The upstream evaluator excludes unscored rubrics when computing strict pass. Gym preserves that behavior and reports
-`num_scored`, `num_unscored`, and `all_rubrics_scored` so incomplete judging is visible.
-Missing or empty agent answers receive zero. Infrastructure and malformed-verifier failures set
-`mask_sample=true` and `evaluation_completed=false`.
-
-With `mini_swe` (NeMo Fabric's mini-SWE-agent adapter), GLM-5.2 as the policy, and Claude Opus 4.5 as the judge,
-all 124 tasks x 3 rollouts scored 189/372 = 50.8%, counting the 8 failed rollouts as zero. The
-[public leaderboard](https://labs.scale.com/leaderboard/sweatlas-qna) reports 48.12 +/- 5.07 for GLM 5.2 with
-mini-SWE-agent. Five failures were mini-SWE-agent exits before submission. The Fabric adapter does not truncate long
-command output, and some contexts exceeded 1M tokens. Two were sandbox OOM kills and one was another adapter error.
-The collected answer is retained in the rollout so the grader's exact input can be inspected.
+## Tests and examples
 
 ```bash
 pytest resources_servers/swe_atlas_qa/tests
+gym env test +entrypoint=resources_servers/swe_atlas_qa +should_validate_data=true
 ```
 
-The checked-in `data/example.jsonl`, `data/example_metrics.json`, and `data/example_rollouts.jsonl` satisfy Gym's
-example-data validation contract. The five distinct task IDs end in `998`, `999`, `99a`, `99b`, and `9ce`.
-The recorded runs used Claude Code with `azure/anthropic/claude-opus-4-6` through `harness_agent` on OpenSandbox,
-with NVIDIA inference and the upstream evaluator. These examples come from the saved baseline run and do not
-provide an unbiased benchmark score.
-They are the first five task IDs with a nonempty answer and complete judging in that saved run, using the first
-complete attempt for each task (attempt 2 for `9ce`, attempt 1 for the others).
-
-Exports retain the exact answer, score and rubric counts, request, usage, and complete recorded response,
-including intermediate assistant messages, tool calls, and tool results.
-The metrics describe the five input rows and are generated with:
+`data/example.jsonl`, `data/example_metrics.json`, and `data/example_rollouts.jsonl` hold five Claude Code with
+Opus 4.6 baseline rollouts for Gym's example-data check. They are not a benchmark score. Regenerate the metrics with:
 
 ```bash
 gym dataset collate "+config_paths=[resources_servers/swe_atlas_qa/configs/swe_atlas_qa.yaml]" \
   +mode=example_validation +output_dirpath=/tmp/swe-atlas-examples
-gym env test +entrypoint=resources_servers/swe_atlas_qa +should_validate_data=true
 ```
-
-Supply the endpoint and harness configuration described above when collating. The full dataset, private grading assets,
-and runtime bundles remain uncommitted. The server starts with `verified: false` until benchmark review and baselining.
 
 ## Attribution
 
-The dataset and evaluator are from Scale AI's SWE Atlas, licensed under Apache-2.0. Preparation retains the upstream
-`LICENSE` with the downloaded source. Cite *SWE Atlas: Benchmarking Coding Agents Beyond Issue Resolution*
-([paper](https://arxiv.org/abs/2605.08366)). Repository task images and bundled harness runtimes retain their respective
-third-party licenses.
+The dataset and evaluator are Scale AI's SWE Atlas, licensed under Apache-2.0. Cite *SWE Atlas: Benchmarking Coding
+Agents Beyond Issue Resolution* ([paper](https://arxiv.org/abs/2605.08366)). Task images and harness runtimes keep
+their own licenses.
