@@ -991,6 +991,24 @@ def test_turn_call_scope_gap_only_gates_completeness_checks(tmp_path: Path, gap:
     assert ("task_no_successful_model_calls" in result.summary["tasks"]["0"]["flags"]) is not incomplete
 
 
+def test_runs_that_reuse_task_indices_are_not_duplicates(tmp_path: Path) -> None:
+    """`gym eval aggregate` merges runs from different environment servers, and each numbers its tasks from 0."""
+    paths = []
+    for run in ("run1", "run2"):
+        (tmp_path / run).mkdir()
+        _inventory(tmp_path / run, 1)
+        paths.append(
+            _write_fixture(tmp_path / run, [(_record(0, 0, usage={"input_tokens": 3, "output_tokens": 2}), [_call()])])
+        )
+
+    result = run_health_checks(paths, workers=1)
+
+    assert result.summary["run"]["issues"]["rollout_duplicate_identity"] == 0
+    assert all("rollout_duplicate_identity" not in {finding.check for finding in d.findings} for d in result.rollouts)
+    artifacts = result.summary["run"]["artifacts"]
+    assert (artifacts["expected"], artifacts["missing"], artifacts["healthy"]) == (2, 0, True)
+
+
 def test_duplicate_rollout_identity_counts_once_at_task_scope(tmp_path: Path) -> None:
     duplicate = _record(7, 0, usage={"input_tokens": 3, "output_tokens": 2})
     rollout_path = _write_fixture(

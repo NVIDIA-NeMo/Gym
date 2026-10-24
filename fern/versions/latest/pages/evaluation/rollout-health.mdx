@@ -50,6 +50,13 @@ gym eval health-check results/my-run \
 A relative `--rollouts-file` path resolves under the run directory. An absolute path is used as written. Reports from the
 standalone command are always written in the run directory.
 
+When `gym eval aggregate` merges shards into `rollouts.jsonl`, it lists them in `rollouts_sources.json`, and the check
+reads those shards with the failure sidecars and materialized inputs beside them, as the aggregation did: the merged
+file has none of its own. A single run merged onto itself needs no list, and drops one an earlier aggregation into it left. A run that writes to the merged file, such as a resumed `gym eval run`, drops the list with the first row it writes; one that writes none, such as a resume with nothing left to run, keeps it. The check fails if a shard is gone, or if a
+shard or the merged file changed since the aggregation; rerun `gym eval aggregate` then. A `--rollouts-file` path is
+checked alone, without the list, so a merged file with another name is checked without its shards' failures and
+inventories: recheck its shards one by one instead.
+
 Refer to the [`gym eval` CLI reference](/main/reference/cli-commands#gym-eval-health-check) for all flags.
 
 ## Required Evidence
@@ -96,7 +103,7 @@ Check IDs identify both the evidence being evaluated and the condition detected.
 | --- | --- | --- |
 | `check_execution_error` | Rollout | Another health check raises an unexpected exception while evaluating the record. The failed check is also marked unobserved, and remaining checks continue. |
 | `record_unreadable` | Rollout | A non-empty JSONL line is not a JSON object, or its `ng_trajectory` cannot be parsed as a `TrajectoryRecord`. |
-| `rollout_duplicate_identity` | Rollout | More than one input record has the same `_ng_task_index` and `_ng_rollout_index`. Every duplicated record receives the finding. |
+| `rollout_duplicate_identity` | Rollout | More than one record in the same input file has the same `_ng_task_index` and `_ng_rollout_index`. Each input numbers its rollouts on its own, so runs merged from different environment servers can reuse indices. Every duplicated record receives the finding. |
 | `rollout_missing_agent_turns` | Rollout | Agent turns are observable, but no turn contains any of the following: (1) non-empty answer or reasoning content, (2) a tool call, or (3) a model-call reference. |
 | `rollout_ended_on_failed_model_call` | Rollout | A model's own last call in the rollout has an HTTP error status, an error category, or response status `failed`, `error`, or `cancelled`. Read from the captured calls directly rather than through a reference, because a failed call carries no response ID to be referenced by. Judged per model and in `started_at` order, so a call to a different model landing later does not mask the failure, and a failure the client retried successfully produces no finding. One finding per model. When a chain mixes failures and successes and carries no timestamps it cannot be ordered, and no finding is produced. |
 | `rollout_token_count_mismatch` | Rollout | Both top-level rollout token totals and a complete set of invocation- or turn-owned policy-model-call token counts are available, but the prompt-token total or completion-token total differs from the corresponding call-level sum. |

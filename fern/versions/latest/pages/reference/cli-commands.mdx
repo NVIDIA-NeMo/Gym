@@ -930,7 +930,7 @@ gym eval submit --config submit.yaml --resolve-only --json
 
 ### `gym eval aggregate`
 
-Merge sharded rollout results into a single rollouts file with aggregate metrics. Reads every JSONL file matching `--input-glob`, recomputes aggregate metrics over the global union of records, and writes a `<output stem>_aggregate_metrics.json` next to the merged rollouts. Use this to combine shards produced by `gym eval run --no-serve --disable-aggregation`.
+Merge sharded rollout results into a single rollouts file with aggregate metrics. Reads every JSONL file matching `--input-glob`, recomputes aggregate metrics over the global union of records, and writes a `<output stem>_aggregate_metrics.json` next to the merged rollouts. It also lists the shards in `<output stem>_sources.json`, which `gym eval health-check` reads for a merged `rollouts.jsonl`. The output may be a shard only when it is the only one, and then nothing is listed. Use this to combine shards produced by `gym eval run --no-serve --disable-aggregation`.
 
 | Option | Description |
 | --- | --- |
@@ -983,13 +983,14 @@ See the [trajectory capability matrix](/reference/trajectory-capabilities#atif-e
 
 ### `gym eval health-check`
 
-Verify rollout quality for an existing run directory. The command reads `<run-dir>/rollouts.jsonl` by default and writes
+Verify rollout quality for an existing run directory. The command reads `<run-dir>/rollouts.jsonl` by default, or the
+shards `gym eval aggregate` merged into it, and writes
 `quality_summary.json` and `rollout_verdicts.jsonl` in the run directory.
 
 | Option | Description |
 | --- | --- |
 | `RUN_DIR` | Directory in which to write the health reports. |
-| `--rollouts-file PATH` | Rollout JSONL path. Relative paths resolve under `RUN_DIR`; absolute paths are used as written. Defaults to `rollouts.jsonl`. |
+| `--rollouts-file PATH` | Rollout JSONL path, checked alone. Relative paths resolve under `RUN_DIR`; absolute paths are used as written. Defaults to `rollouts.jsonl`, or to the shards `gym eval aggregate` merged into it and listed in `rollouts_sources.json`. |
 | `--workers` | Number of worker processes. Defaults to the smaller of the CPU count and 8. |
 | `--ignore-checks`, `--ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
 | `--health-max-not-final-failure-fraction`, `--health-max-final-failure-fraction` | Override the run's failure limits. Without either flag, the limits recorded in the run's `quality_summary.json` judge it again, so a recheck of the same artifacts keeps its verdict. Each flag overrides only its own limit, with a fraction in [0, 1] or `none` (any case) to remove it; a limit whose flag is not given keeps its recorded value. The summary records which limits were overridden, and a removed limit stays removed on later rechecks. |
