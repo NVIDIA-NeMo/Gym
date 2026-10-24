@@ -52,7 +52,7 @@ This tutorial is **experimental** and may contain bugs. Proceed with caution.
 {
   "messages": [
     {"role": "user", "content": "What's the weather in Paris?"},
-    {"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Paris"}}}]},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Paris"}}}]},
     {"role": "tool", "tool_call_id": "call_1", "content": "Temperature: 22°C, sunny"},
     {"role": "assistant", "content": "The weather in Paris is 22°C and sunny."}
   ],
@@ -100,7 +100,9 @@ Always filter your rollouts first before formatting them for training. Here are 
 import json
 
 
-def filter_rollouts(input_file: str, output_file: str, min_reward: float = 0.5, max_output_items: int = 40) -> None:
+def filter_rollouts(
+    input_file: str, output_file: str, min_reward: float = 0.5, max_output_items: int | None = None
+) -> None:
     """Keep unmasked rollouts that scored at least min_reward."""
     kept = total = 0
     with open(input_file) as f, open(output_file, "w") as out:
@@ -112,8 +114,11 @@ def filter_rollouts(input_file: str, output_file: str, min_reward: float = 0.5, 
             if rollout.get("reward", 0.0) < min_reward:
                 continue
             output = rollout.get("response", {}).get("output")
-            if not output or len(output) > max_output_items:
-                continue  # no model turns to train on, or a runaway trajectory
+            if not isinstance(output, list) or not output or not all(isinstance(item, dict) for item in output):
+                continue  # no flat Responses items, such as aviary_agent's per-step transitions
+            # Opt in to a length cap: tool calls add several items, so successful agent rollouts can run long.
+            if max_output_items is not None and len(output) > max_output_items:
+                continue
             out.write(line)
             kept += 1
     print(f"Kept {kept}/{total} rollouts")
@@ -163,7 +168,9 @@ After you have filtered, high-quality rollouts, format them for your chosen trai
 
 Rollouts store the conversation as Responses API items: the prompt in `responses_create_params.input` and the model's turns in `response.output`. Training libraries expect Chat Completions messages, so convert both with NeMo Gym's `ResponsesConverter`, the same converter its model servers use. It turns `function_call` items into assistant `tool_calls`, `function_call_output` items into `tool` messages, and `reasoning` items into `<think>` blocks in the assistant content. Filter out items whose `type` is `reasoning` first if you don't want to train on them. The task's `instructions`, when set, become the leading system message. `to_chat` then parses each tool call's `arguments` from a JSON string into a dict, because the Hugging Face chat templates that TRL and NeMo RL apply expect one.
 
-Some Responses fields have no Chat Completions equivalent, and the converter raises `NotImplementedError` on them. `to_chat` drops the two that rollouts commonly carry, a message's `phase` and a reasoning item's `encrypted_content`; any other, such as an image in a tool output, still raises, as do tool-call `arguments` that aren't valid JSON. Readable reasoning `content` becomes the `<think>` text when present; otherwise the snippet uses the reasoning `summary`.
+Some Responses fields have no Chat Completions equivalent, and the converter raises `NotImplementedError` on them. `to_chat` drops the two that rollouts commonly carry, a message's `phase` and a reasoning item's `encrypted_content`; any other, such as an image in a tool output, still raises. Readable reasoning `content` becomes the `<think>` text when present; otherwise the snippet uses the reasoning `summary`.
+
+The helper normalizes text messages for chat templates: it maps `developer` to `system`, joins text-only content parts, and supplies empty content on tool-call turns. Invalid or non-object tool arguments become `{}`, matching vLLM's chat-template preprocessing. This is a text-training policy, not a lossless export; inspect it against your trainer's template before training. The snippets skip missing prompts and nested transition outputs rather than inventing the task or flattening separate steps.
 
 Run these snippets in the NeMo Gym environment, in one Python session:
 
@@ -195,8 +202,18 @@ def to_chat(items: list, tools: list | None = None, instructions: str | None = N
         )
     ).model_dump(exclude_none=True)
     for message in chat["messages"]:
+        if message["role"] == "developer":
+            message["role"] = "system"
+        content = message.get("content") or ""
+        if isinstance(content, list) and all(part["type"] == "text" for part in content):
+            content = "\n".join(part["text"] for part in content)
+        message["content"] = content
         for call in message.get("tool_calls", []):
-            call["function"]["arguments"] = json.loads(call["function"]["arguments"])
+            try:
+                arguments = json.loads(call["function"]["arguments"] or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+            call["function"]["arguments"] = arguments if isinstance(arguments, dict) else {}
     return chat
 
 
@@ -219,6 +236,8 @@ def process_sft_data(filtered_rollout_file: str, output_file: str) -> None:
             messages = chat["messages"]
             while messages and messages[-1]["role"] != "assistant":
                 messages.pop()  # end on the model's last turn, as NeMo RL's SFT loader requires
+            if not any(message["role"] == "user" for message in messages):
+                continue  # the agent did not record its task prompt
             example = {"messages": messages, "reward": rollout["reward"]}
             if chat.get("tools"):
                 example["tools"] = chat["tools"]
@@ -242,7 +261,10 @@ def create_dpo_pairs(rollout_file: str, output_file: str, min_margin: float = 0.
     with open(rollout_file) as f:
         for line in f:
             rollout = json.loads(line)
-            if rollout.get("mask_sample") or not rollout.get("response", {}).get("output"):
+            if rollout.get("mask_sample"):
+                continue
+            output = rollout.get("response", {}).get("output")
+            if not isinstance(output, list) or not output or not all(isinstance(item, dict) for item in output):
                 continue
             task = rollout["responses_create_params"]
             prompt_key = json.dumps([task["input"], task.get("instructions"), task.get("tools")], sort_keys=True)
@@ -258,12 +280,19 @@ def create_dpo_pairs(rollout_file: str, output_file: str, min_margin: float = 0.
                 continue
             task = chosen["responses_create_params"]
             prompt = to_chat(prompt_items(chosen), task.get("tools"), task.get("instructions"))
+            if not any(message["role"] == "user" for message in prompt["messages"]):
+                continue  # DPO needs a recorded prompt separate from each completion
             pair = {
                 "prompt": prompt["messages"],
                 "chosen": to_chat(chosen["response"]["output"])["messages"],
                 "rejected": to_chat(rejected["response"]["output"])["messages"],
                 "reward_margin": margin,
             }
+            for side in (pair["chosen"], pair["rejected"]):
+                while side and side[-1]["role"] != "assistant":
+                    side.pop()  # end on the model's last turn, as in the SFT snippet
+            if not pair["chosen"] or not pair["rejected"]:
+                continue
             if prompt.get("tools"):
                 pair["tools"] = prompt["tools"]
             out.write(json.dumps(pair) + "\n")
