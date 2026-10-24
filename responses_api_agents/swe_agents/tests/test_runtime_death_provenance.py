@@ -92,6 +92,7 @@ for attempt in range(2 if os.environ['OBSERVER_CASE'] in {'retry_after_action', 
     ("case", "cause"),
     [
         ("pre_execution", "pre_execution"),
+        ("forwarding_launcher", "pre_execution"),
         ("setup", "unknown"),
         ("controller_setup", "unknown"),
         ("self_kill", "unknown"),
@@ -114,9 +115,13 @@ async def test_observer_tracks_real_processes_and_retries(runtime_fixture, case,
         OBSERVER_CASE=case,
         OBSERVER_OVERLAY=str(OVERLAY),
     )
+    command = [sys.executable, str(runtime_fixture)]
+    if case == "forwarding_launcher":
+        launcher = runtime_fixture.parents[3] / "poetry"
+        launcher.write_text("import subprocess, sys\nsubprocess.run([sys.executable, *sys.argv[3:]], check=True)\n")
+        command = [sys.executable, str(launcher), "run", "python", str(runtime_fixture)]
     process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        str(runtime_fixture),
+        *command,
         env=environment,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -152,3 +157,21 @@ def test_observer_failure_preserves_token_capture_overlay(monkeypatch):
         with pytest.raises(OSError, match="observer unavailable"):
             spec.loader.exec_module(module)
         capture_overlay.assert_called_once_with("/nemo_gym_capture_overlay/sitecustomize.py")
+
+
+@pytest.mark.parametrize(
+    "entrypoint",
+    [
+        ["poetry", "run", "python", "evaluation/benchmarks/swe_bench/run_infer.py"],
+        ["poetry", "run", "python", "-m", "openhands.runtime.action_execution_server"],
+    ],
+)
+def test_forwarding_launcher_does_not_register_as_runtime(monkeypatch, entrypoint):
+    monkeypatch.setenv("NEMO_GYM_RUNTIME_NONCE", "test-run")
+    monkeypatch.setattr(sys, "orig_argv", ["python", *entrypoint])
+    monkeypatch.delenv("NEMO_GYM_MODEL_SERVER_BASE_URL", raising=False)
+    spec = importlib.util.spec_from_file_location("test_runtime_launcher", OVERLAY / "sitecustomize.py")
+    module = importlib.util.module_from_spec(spec)
+    with patch("socket.socket") as socket_factory:
+        spec.loader.exec_module(module)
+        socket_factory.assert_not_called()

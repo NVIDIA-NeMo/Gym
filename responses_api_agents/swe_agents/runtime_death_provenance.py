@@ -82,14 +82,16 @@ class RuntimeDeathMonitor:
             if uid != os.getuid() or not self._belongs_to_run(pid):
                 return
             identity = (pid, _identity(pid)[1])
-            argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-            is_server = any(
-                argv[i : i + 2] == [b"-m", b"openhands.runtime.action_execution_server"] for i in range(len(argv))
-            )
-            is_controller = any(
-                arg.endswith(b"/evaluation/benchmarks/swe_bench/run_infer.py")
-                or arg == b"evaluation/benchmarks/swe_bench/run_infer.py"
-                for arg in argv
+            argv = [os.fsdecode(arg) for arg in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if arg]
+            # The pinned launcher uses Python SCRIPT or Python -u -m MODULE.
+            # A trailing script argument to `poetry run` is not a controller.
+            target = argv[1:]
+            if target[:1] == ["-u"]:
+                target = target[1:]
+            is_server = target[:2] == ["-m", "openhands.runtime.action_execution_server"]
+            is_controller = bool(target) and (
+                target[0].endswith("/evaluation/benchmarks/swe_bench/run_infer.py")
+                or target[0] == "evaluation/benchmarks/swe_bench/run_infer.py"
             )
             if not (is_server or is_controller) or identity in self.peers:
                 return

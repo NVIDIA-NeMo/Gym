@@ -48,12 +48,14 @@ class Observer:
 def install():
     if not os.getenv("NEMO_GYM_RUNTIME_NONCE"):
         return
-    args = getattr(sys, "orig_argv", [])
-    is_server = any(args[i : i + 2] == ["-m", "openhands.runtime.action_execution_server"] for i in range(len(args)))
-    is_controller = any(
-        arg.endswith("/evaluation/benchmarks/swe_bench/run_infer.py")
-        or arg == "evaluation/benchmarks/swe_bench/run_infer.py"
-        for arg in args
+    # Match the Python entrypoint, not arguments forwarded by Poetry.
+    target = getattr(sys, "orig_argv", [])[1:]
+    if target[:1] == ["-u"]:
+        target = target[1:]
+    is_server = target[:2] == ["-m", "openhands.runtime.action_execution_server"]
+    is_controller = bool(target) and (
+        target[0].endswith("/evaluation/benchmarks/swe_bench/run_infer.py")
+        or target[0] == "evaluation/benchmarks/swe_bench/run_infer.py"
     )
     if not (is_server or is_controller):
         return
