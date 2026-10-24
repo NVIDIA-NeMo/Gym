@@ -175,12 +175,14 @@ class LaunchContext:
         resume: bool,
         legacy_run: Optional[LegacyRun],
         park: Optional[Callable[[], Awaitable[None]]] = None,
+        label: Optional[str] = None,
     ) -> None:
         self.sandbox = sandbox
         self.state = state
         self.resume = resume
         self.park = park
         self._legacy_run = legacy_run
+        self._label = label
 
     async def run(self, command: str, *, timeout_s: Optional[float]) -> SandboxExecResult:
         """Run the harness's long command so that a checkpoint pauses it, or stops it and everything it started.
@@ -190,7 +192,7 @@ class LaunchContext:
         Run short commands, such as reading the session, with ``sandbox.exec``.
         """
         return await run_until_park_requested(
-            self.sandbox, command, self._legacy_run, timeout_s=timeout_s, park=self.park
+            self.sandbox, command, self._legacy_run, timeout_s=timeout_s, park=self.park, label=self._label
         )
 
     async def wait_park_requested(self) -> None:
@@ -478,7 +480,12 @@ class _HarnessRun(Generic[OutcomeT]):
         pauses_at_checkpoints = getattr(self.adapter, "pauses_at_checkpoints", None)
         pausing = self.legacy_run is not None and pauses_at_checkpoints is not None and pauses_at_checkpoints()
         launch = LaunchContext(
-            self.sandbox, state, resume=resume, legacy_run=self.legacy_run, park=park if pausing else None
+            self.sandbox,
+            state,
+            resume=resume,
+            legacy_run=self.legacy_run,
+            park=park if pausing else None,
+            label=self.rollout_id,
         )
         async with self.step("wait"):
             try:

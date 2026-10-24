@@ -66,6 +66,11 @@ _PAUSE_CHECKS = 50
 _PAUSE_CHECK_INTERVAL_S = 0.1
 # Tries to continue a paused launch before it is stopped instead.
 _CONTINUE_ATTEMPTS = 3
+# Budget of one pause or continue command. Both scan every process of the sandbox on each pass, which is slow in a
+# sandbox running many processes; a command that runs out of budget is killed before it prints its result.
+_PAUSE_TIMEOUT_S = 120.0
+# Tries to pause a launch whose pause command printed nothing before it ran out of budget.
+_PAUSE_ATTEMPTS = 2
 # What the first stop pass prints, instead of signalling, for a launch whose command had already returned.
 _ENDED = "NEMO_GYM_HARNESS_ENDED"
 
@@ -227,9 +232,10 @@ async def run_until_park_requested(
     *,
     timeout_s: Optional[float],
     park: Optional[Callable[[], Awaitable[None]]] = None,
+    label: Optional[str] = None,
 ) -> SandboxExecResult:
     """Run the harness ``command`` in ``sandbox``; with a checkpointed run, pause or stop it when a checkpoint asks
-    to park.
+    to park. ``label``, such as the rollout ID, names the run in pause diagnostics.
 
     Returns the command's result when it ends first, or when it had ended by the time the park request came and
     its result was still on its way. With ``park``, a park request pauses the launch, then awaits ``park()``, which
@@ -254,7 +260,7 @@ async def run_until_park_requested(
                 result = exec_task.result()
                 await _remove_files(sandbox, launch)
                 return result
-            if park is None or await _pause(sandbox, launch) != "paused":
+            if park is None or await _pause(sandbox, launch, label=label) != "paused":
                 return await _stop(sandbox, launch, exec_task)
             try:
                 await park()
@@ -281,23 +287,55 @@ async def _kill(sandbox: AsyncSandbox, launch: HarnessLaunch) -> None:
             LOGGER.warning("Could not kill harness launch %s: %r", launch.id, error)
 
 
-async def _pause(sandbox: AsyncSandbox, launch: HarnessLaunch) -> Literal["paused", "ended", "failed"]:
+async def _pause(
+    sandbox: AsyncSandbox, launch: HarnessLaunch, *, label: Optional[str] = None
+) -> Literal["paused", "ended", "failed"]:
     """Pause the launch. ``ended``: its command had returned, and the stop keeps its late result. ``failed``: the
-    pause was not confirmed and is withdrawn, so the stop can end the launch."""
-    started = time.monotonic()
-    try:
-        result = await sandbox.exec(command=launch.pause_command(), timeout_s=30)
-        lines = [line for line in (result.stdout or "").split("\n") if line]
-    except Exception as error:
-        lines = [f"error: {error!r}"]
-    if _ENDED in lines:
-        return "ended"
-    if lines and (lines[-1].startswith("PAUSED ") or lines[-1] == "NOT_STARTED"):
-        LOGGER.info(
-            "Harness launch %s paused for a checkpoint in %.2f s: %s", launch.id, time.monotonic() - started, lines[-1]
-        )
-        return "paused"
-    LOGGER.warning("Could not pause harness launch %s (%s); stopping it instead", launch.id, "; ".join(lines))
+    pause was not confirmed and is withdrawn, so the stop can end the launch.
+
+    A pause that printed nothing although it ended within its budget is tried once more: the script always prints
+    its outcome, so its output was lost. One that used up its budget is not, since it would run out again.
+    """
+    for attempt in range(1, _PAUSE_ATTEMPTS + 1):
+        started = time.monotonic()
+        details = ""
+        try:
+            result = await sandbox.exec(command=launch.pause_command(), timeout_s=_PAUSE_TIMEOUT_S)
+            lines = [line for line in (result.stdout or "").split("\n") if line]
+            details = f"exit {result.return_code}"
+            if result.error_type:
+                details += f", {result.error_type} error"
+            if result.stderr:
+                details += f", stderr {result.stderr.strip()[:300]!r}"
+        except Exception as error:
+            lines = [f"error: {error!r}"]
+        elapsed_s = time.monotonic() - started
+        if _ENDED in lines:
+            return "ended"
+        if lines and (lines[-1].startswith("PAUSED ") or lines[-1] == "NOT_STARTED"):
+            LOGGER.info("Harness launch %s paused for a checkpoint in %.2f s: %s", launch.id, elapsed_s, lines[-1])
+            return "paused"
+        reason = "; ".join(lines) or "no output"
+        if not lines and attempt < _PAUSE_ATTEMPTS and elapsed_s < _PAUSE_TIMEOUT_S:
+            LOGGER.warning(
+                "Pause of harness launch %s of %s printed nothing after %.1f s (%s); trying again",
+                launch.id,
+                label,
+                elapsed_s,
+                details,
+            )
+            continue
+        break
+    LOGGER.warning(
+        "Could not pause harness launch %s of %s (%s; %s; %.1f s, attempt %d/%d); stopping it instead",
+        launch.id,
+        label,
+        reason,
+        details or "no result",
+        elapsed_s,
+        attempt,
+        _PAUSE_ATTEMPTS,
+    )
     await _continue(sandbox, launch)
     return "failed"
 
@@ -309,7 +347,7 @@ async def _continue(sandbox: AsyncSandbox, launch: HarnessLaunch) -> bool:
             if attempt:
                 await asyncio.sleep(_SURVIVOR_CHECK_INTERVAL_S)
             try:
-                result = await sandbox.exec(command=launch.continue_command(), timeout_s=30)
+                result = await sandbox.exec(command=launch.continue_command(), timeout_s=_PAUSE_TIMEOUT_S)
             except Exception as error:
                 LOGGER.warning("Could not continue harness launch %s: %r", launch.id, error)
                 continue

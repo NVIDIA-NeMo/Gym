@@ -8,6 +8,7 @@ launches started, so they are safe on any Linux host.
 """
 
 import asyncio
+import logging
 import os
 import re
 import shutil
@@ -434,3 +435,89 @@ async def test_cancelling_a_paused_run_kills_the_launch_and_everything_it_starte
 
     assert not alive(int(pids.read_text())), "the paused detached process is gone"
     assert not launch_states(launch_id(shell)), "no process is left"
+
+
+# -- pause diagnostics and retry ----------------------------------------------------------------------------------
+
+
+class TimeoutRecordingShell(LocalShell):
+    """Records the budget of every pause and continue command."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.budgets: dict[str, list[Optional[float]]] = {"pause": [], "continue": []}
+
+    async def exec(self, command: str, *, timeout_s: Optional[float] = None) -> SandboxExecResult:
+        if "kill -STOP" in command:
+            self.budgets["pause"].append(timeout_s)
+        elif "kill -CONT" in command:
+            self.budgets["continue"].append(timeout_s)
+        return await super().exec(command, timeout_s=timeout_s)
+
+
+async def test_pause_and_continue_commands_get_the_longer_budget() -> None:
+    shell, park = TimeoutRecordingShell(), ParkRequest()
+    parker = Parker(park)
+    run = run_pausing(shell, "sleep 1 && echo done", park, parker, timeout_s=60)
+    await asyncio.sleep(0.3)
+    park.requested.set()
+    await asyncio.wait_for(parker.parked.wait(), 10)
+    parker.opened.set()
+
+    assert (await asyncio.wait_for(run, 30)).stdout == "done\n"
+    assert shell.budgets == {"pause": [harness._PAUSE_TIMEOUT_S], "continue": [harness._PAUSE_TIMEOUT_S]}
+    assert harness._PAUSE_TIMEOUT_S == 120.0
+
+
+async def test_a_pause_that_printed_nothing_is_tried_once_more_and_then_parks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    real_pause_command = HarnessLaunch.pause_command
+    first = tmp_path / "first-pause-done"
+
+    def pause_command(self: HarnessLaunch) -> str:
+        # The first pause loses its output, as the 16-node runs saw; the second is the real one.
+        return f"if [ -e {first} ]; then {real_pause_command(self)}; else touch {first}; fi"
+
+    monkeypatch.setattr(HarnessLaunch, "pause_command", pause_command)
+    shell, park = LocalShell(), ParkRequest()
+    parker = Parker(park)
+    with caplog.at_level(logging.WARNING, logger=harness.__name__):
+        run = asyncio.create_task(
+            run_until_park_requested(  # type: ignore[arg-type]
+                shell, "sleep 1 && echo done", park, timeout_s=60, park=parker, label="rollout-7"
+            )
+        )
+        await asyncio.sleep(0.3)
+        park.requested.set()
+        await asyncio.wait_for(parker.parked.wait(), 10)
+        parker.opened.set()
+        result = await asyncio.wait_for(run, 30)
+
+    assert result.stdout == "done\n" and parker.calls == 1, "the second pause held, so the launch parked"
+    [retry] = [r.getMessage() for r in caplog.records if "printed nothing" in r.getMessage()]
+    assert "rollout-7" in retry and "exit 0" in retry and "trying again" in retry
+    assert not [r for r in caplog.records if "Could not pause" in r.getMessage()]
+
+
+async def test_a_pause_that_keeps_printing_nothing_reports_why_and_stops_the_launch(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(HarnessLaunch, "pause_command", lambda self: "exit 3")
+    shell, park = LocalShell(), ParkRequest()
+    parker = Parker(park)
+    with caplog.at_level(logging.WARNING, logger=harness.__name__):
+        run = asyncio.create_task(
+            run_until_park_requested(  # type: ignore[arg-type]
+                shell, "sleep 300", park, timeout_s=600, park=parker, label="rollout-9"
+            )
+        )
+        await asyncio.sleep(0.5)
+        park.requested.set()
+        with pytest.raises(HarnessInterrupted):
+            await asyncio.wait_for(run, timeout=30)
+
+    assert parker.calls == 0
+    assert len([r for r in caplog.records if "printed nothing" in r.getMessage()]) == 1, "one retry"
+    [failure] = [r.getMessage() for r in caplog.records if "Could not pause" in r.getMessage()]
+    assert "rollout-9" in failure and "no output" in failure and "exit 3" in failure and "attempt 2/2" in failure
