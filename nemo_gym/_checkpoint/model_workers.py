@@ -77,6 +77,8 @@ _MAX_FRAME_BYTES = 64 * 1024 * 1024
 _REPLY_GRACE_SECONDS = 10.0
 # Timeout for messages that do no slow work (registration, reports, claims, reopening).
 _MESSAGE_TIMEOUT_SECONDS = 30.0
+# A stopping worker only announces itself; shutdown must not wait on a coordinator that is gone.
+_STOPPING_TIMEOUT_SECONDS = 1.0
 
 
 class CoordinatorUnavailableError(ControlError):
@@ -221,8 +223,12 @@ class _Channel:
 
 
 class _Worker:
-    def __init__(self, channel: _Channel) -> None:
+    def __init__(self, channel: _Channel, pid: Optional[int] = None) -> None:
         self.channel = channel
+        # Logged when the worker joins or leaves, to match uvicorn's own lines about its child processes.
+        self.pid = pid
+        # Set when the worker says it is shutting down, so its departure is not reported as a loss.
+        self.stopping = False
         self.report: Optional[GateReport] = None
         # Reports can arrive out of order across the reply and push paths; keep the newest.
         self.report_seq = -1
@@ -262,9 +268,16 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
 
     # -- workers --------------------------------------------------------------------------------
 
-    def join(self, worker_index: int, channel: _Channel) -> dict[str, Any]:
+    def join(self, worker_index: int, channel: _Channel, pid: Optional[int] = None) -> dict[str, Any]:
         """Register a worker and return the state it must adopt."""
-        self.workers[worker_index] = _Worker(channel)
+        self.workers[worker_index] = _Worker(channel, pid)
+        LOGGER.info(
+            "policy worker %d (pid %s) joined; %d of %d workers connected",
+            worker_index,
+            pid,
+            len(self.workers),
+            self.expected_workers,
+        )
         return {
             "accepting": self.accepting,
             "generation": self.generation,
@@ -276,11 +289,24 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
         }
 
     async def leave(self, worker_index: int) -> None:
-        if self.workers.pop(worker_index, None) is not None:
+        worker = self.workers.pop(worker_index, None)
+        if worker is not None:
             self.worker_left = True
             self.restored_targets.clear()
             if not self.accepting:
                 self.lost_worker = True
+            if worker.stopping:
+                LOGGER.info("policy worker %d (pid %s) stopped", worker_index, worker.pid)
+            else:
+                # A crash, or uvicorn killing a hung worker; uvicorn starts a replacement.
+                LOGGER.warning(
+                    "policy worker %d (pid %s) was lost; %d of %d workers connected; %s",
+                    worker_index,
+                    worker.pid,
+                    len(self.workers),
+                    self.expected_workers,
+                    "the open checkpoint cannot commit" if self.lost_worker else "no checkpoint was open",
+                )
         await self.notify()
 
     async def receive_report(self, worker_index: int, generation: int, seq: int, report: GateReport) -> None:
@@ -288,6 +314,11 @@ class CoordinatedPolicyParticipant(CheckpointParticipant):
         if worker is not None and generation == self.generation and not self.accepting:
             worker.keep(seq, report)
             await self.notify()
+
+    def stopping(self, worker_index: int) -> None:
+        worker = self.workers.get(worker_index)
+        if worker is not None:
+            worker.stopping = True
 
     def claim_cut(self, capture_key: str) -> Optional[GenerationCutRecord]:
         return self.restored_cuts.pop(capture_key, None)
@@ -512,7 +543,10 @@ class PolicyCoordinator:
 
         async def handle(kind: str, body: dict[str, Any]) -> dict[str, Any]:
             if kind == "register":
-                return self.participant.join(worker_index, channel)
+                return self.participant.join(worker_index, channel, body.get("pid"))
+            if kind == "stopping":
+                self.participant.stopping(worker_index)
+                return {}
             if kind == "report":
                 report = GateReport.model_validate(body["report"])
                 await self.participant.receive_report(worker_index, body["generation"], body["seq"], report)
@@ -644,6 +678,11 @@ class PolicyWorkerLink:
     async def disconnect(self) -> None:
         self._disconnecting = True
         if self._channel is not None:
+            try:
+                # Best effort: without it the coordinator reports this shutdown as a lost worker.
+                await self._channel.call("stopping", {}, timeout=_STOPPING_TIMEOUT_SECONDS)
+            except Exception:
+                LOGGER.debug("could not tell the policy checkpoint coordinator this worker is stopping", exc_info=True)
             self._channel.close()
         if self._reader_task is not None:
             await asyncio.gather(self._reader_task, return_exceptions=True)

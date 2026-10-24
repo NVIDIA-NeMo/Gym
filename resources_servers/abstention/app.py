@@ -294,6 +294,10 @@ class AbstentionVerifyResponse(BaseVerifyResponse):
 
 
 class AbstentionServer(SimpleResourcesServer):
+    # Each verification matches the abstention phrase or makes one judge call: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: AbstentionConfig
 
     def setup_webserver(self) -> FastAPI:

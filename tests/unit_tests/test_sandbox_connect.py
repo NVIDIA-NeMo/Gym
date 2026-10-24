@@ -130,6 +130,7 @@ def test_connectable_provider_isinstance() -> None:
 
 def test_serialize_then_connect_round_trip(tmp_path: Path) -> None:
     async def _run() -> None:
+        assert AsyncSandbox(FakeConnectableProvider(), SandboxSpec(workdir="/w")).sandbox_id is None
         sandbox = await AsyncSandbox(FakeConnectableProvider(), SandboxSpec(workdir="/w")).start()
         payload = tmp_path / "f.txt"
         payload.write_text("hello-connect")
@@ -142,12 +143,46 @@ def test_serialize_then_connect_round_trip(tmp_path: Path) -> None:
 
         # A separate provider instance rebuilds a working handle from the descriptor.
         reattached = await AsyncSandbox.connect(descriptor, provider=FakeConnectableProvider())
+        assert reattached.sandbox_id == sandbox.sandbox_id == descriptor["sandbox_id"]
         result = await reattached.exec("cat /w/f.txt")
         assert result.return_code == 0
         assert result.stdout == "hello-connect"
 
         # The reattached sandbox defaults exec to the original working directory.
         assert (await reattached.exec("pwd")).stdout == "/w"
+
+    asyncio.run(_run())
+
+
+def test_descriptor_carries_the_default_user_to_a_reattached_sandbox() -> None:
+    class RecordingProvider(FakeConnectableProvider):
+        users: list = []
+
+        async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
+            RecordingProvider.users.append(user)
+            return await super().exec(handle, command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+    async def _run() -> None:
+        sandbox = await AsyncSandbox(RecordingProvider(), SandboxSpec(workdir="/w", user="agent")).start()
+        descriptor = await sandbox.serialize()
+        assert descriptor["user"] == "agent"
+
+        reattached = await AsyncSandbox.connect(descriptor, provider=RecordingProvider())
+        assert reattached.default_user == "agent"
+        await reattached.exec("id")
+        await reattached.exec("id", user="root")
+        assert RecordingProvider.users == ["agent", "root"]
+
+        # A sandbox created without a user carries none, and a reattached one keeps the provider default.
+        plain = await AsyncSandbox(RecordingProvider(), SandboxSpec(workdir="/w")).start()
+        assert "user" not in await plain.serialize()
+        assert (await AsyncSandbox.connect(await plain.serialize(), provider=RecordingProvider())).default_user is None
+        # A default user set after the start (an overlay created it) is carried the same way.
+        plain.set_default_user("agent")
+        assert plain.default_user == "agent" and (await plain.serialize())["user"] == "agent"
+        assert (
+            await AsyncSandbox.connect(await plain.serialize(), provider=RecordingProvider())
+        ).default_user == "agent"
 
     asyncio.run(_run())
 

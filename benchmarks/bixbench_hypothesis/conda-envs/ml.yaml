@@ -1,0 +1,16 @@
+channels:
+  - conda-forge
+dependencies:
+  - keras
+  - optuna
+  - imbalanced-learn
+  - lightgbm
+  - statsmodels
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - scikit-misc
+  - scikit-posthocs
+  - scikit-survival
+  - lifelines
