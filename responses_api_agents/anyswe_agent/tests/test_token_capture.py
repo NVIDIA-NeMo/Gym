@@ -33,6 +33,20 @@ def test_model_url_carries_the_training_capture_prefix() -> None:
     assert _model_url_for_rollout("http://model-host:8000", None, token_capture=True) == "http://model-host:8000"
 
 
+@pytest.mark.parametrize("rollout_id", [None, "7-2"])
+def test_model_url_keeps_trace_context_with_and_without_capture(
+    monkeypatch: pytest.MonkeyPatch, rollout_id: str | None
+) -> None:
+    trace_segment = "/ng-trace/00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+    monkeypatch.setattr("nemo_gym.server_utils.trace_context_path_segment", lambda: trace_segment)
+    capture_prefix = f"/ng-rollout/{rollout_id}/training-token-capture" if rollout_id else ""
+
+    assert (
+        _model_url_for_rollout("http://policy:8000", rollout_id, token_capture=True)
+        == f"http://policy:8000{capture_prefix}{trace_segment}"
+    )
+
+
 def _agent(tmp_path: Path, *, capture: bool, custom_url: str | None = None) -> AnySweAgent:
     server = AnySweServerConfig(
         run_session_id="s",
