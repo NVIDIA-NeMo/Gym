@@ -33,10 +33,10 @@ Also configure the OpenSandbox provider's connection settings.
 
 ## Harness bundle
 
-The bundle is extracted to `/work/gym_mount` in each task sandbox. It holds `nemo_gym/`, the harness's
-`responses_api_agents/<agent>/` package, and the harness runtime. The task images are x86_64, and three of them
-(k6, MinIO, and SFTPGo) are Alpine/musl, so ship a runtime with its own glibc loader. Serve a URL bundle from the
-model host. Keep `harness_python` to `PATH` changes, since other variables leak into the agent's commands.
+`harness_bundle` is a tarball with `nemo_gym/`, the harness's `responses_api_agents/<agent>/` package, and a Linux
+x86_64 runtime for the harness. Each task sandbox unpacks it to `/work/gym_mount` and starts it with `harness_python`.
+The runtime must also run on the three Alpine images (k6, MinIO, and SFTPGo). A URL must be on the model host, the only
+host task sandboxes can reach.
 
 ## Harnesses
 
