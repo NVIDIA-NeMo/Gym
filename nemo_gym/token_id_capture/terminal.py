@@ -276,7 +276,7 @@ def _served_item_id(item: dict) -> str:
     assigned to the call; both the chat and the Responses formats keep that
     id. Any other item is identified by its ``id``.
     """
-    if item.get("type") == "function_call":
+    if item.get("type") in ("function_call", "custom_tool_call"):
         return str(item.get("call_id") or "")
     return str(item.get("id") or "")
 
@@ -304,6 +304,8 @@ def _item_content_key(item: dict) -> tuple:
     """
     if item.get("type") == "function_call":
         return ("function_call", _tool_name_key(item.get("name")), canonicalize_tool_arguments(item.get("arguments")))
+    if item.get("type") == "custom_tool_call":
+        return ("custom_tool_call", _tool_name_key(item.get("name")), canonicalize_tool_arguments(item.get("input")))
     return ("message", tuple(_content_of(item.get("content"))))
 
 

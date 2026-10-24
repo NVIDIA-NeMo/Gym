@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from nemo_gym.sandbox import SandboxExecResult
 from resources_servers.terminal_bench_4.collection import collect
 from resources_servers.terminal_bench_4.task import TaskSettings
 from resources_servers.terminal_bench_4.verifier import (
@@ -332,6 +333,62 @@ async def test_verifier_timeout_does_not_promote_partial_reward(tmp_path, monkey
     with pytest.raises(VerifierTimeoutError):
         await run_verifier(env, tmp_path, [])
     download.assert_awaited_once()
+
+
+async def test_verifier_timeout_override_replaces_the_package_timeout(tmp_path, monkeypatch):
+    cfg = TaskSettings.model_validate(
+        {"environment": {"docker_image": "a"}, "verifier": {"timeout_sec": 3600, "environment": {"docker_image": "v"}}}
+    )
+
+    async def execute(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    env = SimpleNamespace(task=SimpleNamespace(config=cfg), exec=execute, main=None)
+    from resources_servers.terminal_bench_4 import verifier
+
+    monkeypatch.setattr(verifier, "download_dir", AsyncMock())
+    with pytest.raises(VerifierTimeoutError, match="after 0.01 seconds"):
+        await run_verifier(env, tmp_path, [], timeout_sec=0.01)
+
+
+async def test_a_provider_timeout_within_the_budget_is_not_a_verifier_timeout(tmp_path, monkeypatch):
+    cfg = TaskSettings.model_validate(
+        {"environment": {"docker_image": "a"}, "verifier": {"timeout_sec": 3600, "environment": {"docker_image": "v"}}}
+    )
+
+    async def execute(*args, **kwargs):
+        raise TimeoutError("provider RPC timed out")
+
+    env = SimpleNamespace(task=SimpleNamespace(config=cfg), exec=execute, main=None)
+    from resources_servers.terminal_bench_4 import verifier
+
+    download = AsyncMock()
+    monkeypatch.setattr(verifier, "download_dir", download)
+    with pytest.raises(TimeoutError, match="provider RPC timed out") as raised:
+        await run_verifier(env, tmp_path, [])
+    assert not isinstance(raised.value, VerifierTimeoutError)
+    download.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failing", ["chmod", "/tests/test.sh"])
+async def test_a_sandbox_without_a_command_outcome_is_not_a_missing_reward(tmp_path, monkeypatch, failing):
+    cfg = TaskSettings.model_validate(
+        {"environment": {"docker_image": "a"}, "verifier": {"environment": {"docker_image": "v"}}}
+    )
+
+    async def execute(command, **kwargs):
+        if command.startswith(failing):
+            return SandboxExecResult(stdout=None, stderr="no command outcome", return_code=125, error_type="sandbox")
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    env = SimpleNamespace(task=SimpleNamespace(config=cfg), exec=execute, main=None)
+    from resources_servers.terminal_bench_4 import verifier
+
+    download = AsyncMock()
+    monkeypatch.setattr(verifier, "download_dir", download)
+    with pytest.raises(RuntimeError, match="in the sandbox: sandbox: no command outcome"):
+        await run_verifier(env, tmp_path, [])
+    download.assert_not_awaited()
 
 
 async def test_transfer_fallbacks_preserve_file_bytes_and_empty_directories(tmp_path):
