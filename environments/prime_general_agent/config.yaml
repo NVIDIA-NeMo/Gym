@@ -1,0 +1,23 @@
+prime_general_agent:
+  responses_api_agents:
+    prime_general_agent:
+      entrypoint: app.py
+      domain: agent
+      description: Self-growing toolbench environment with synthetic tool-use tasks from Prime Intellect.
+      value: Improve multi-turn tool use across diverse task families.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ""
+      vf_env_id: general-agent-solver-local
+      vf_env_args: {}
+      group_size: 1
+      max_concurrent_generation: -1
+      max_concurrent_scoring: -1
+      max_tokens: 16000
+      temperature: 1.0
+      top_p: 1.0
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: environments/prime_general_agent/data/example.jsonl
