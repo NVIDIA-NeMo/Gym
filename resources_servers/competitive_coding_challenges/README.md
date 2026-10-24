@@ -23,21 +23,23 @@ competitive_coding_challenges
     test_batch_size: 32
     num_parallel_requests: 16
     time_scale: 2.0
-    shared_dir: ${oc.env:SHARED_TEMP_DIR,/tmp}
-    local_compile_dir: ${oc.env:LOCAL_COMPILE_DIR,/tmp/nemo-gym-compile}
+    shared_dir: ${oc.env:CCC_SHARED_TEMP_DIR,${oc.env:SHARED_TEMP_DIR,/tmp}}
+    local_compile_dir: ${oc.env:CCC_LOCAL_COMPILE_DIR,${oc.env:LOCAL_COMPILE_DIR,/tmp/nemo-gym-compile}}
 ```
 
 You must set the following at runtime:
-- `export SHARED_TEMP_DIR=` shared directory for code-execution artifacts that must be visible to all Ray nodes
+- `export CCC_SHARED_TEMP_DIR=` shared directory for code-execution artifacts that must be visible to all Ray nodes
 - `export CCC_TEST_FILE=` path to metadata.jsonl file which contains data test cases and necessary execution artifacts
 
 and optionally can set to following:
 - `export CCC_LOG_JSONL_PATH=` set path to view generations and runtime/compilation information (ex: stderr, stdout)
-- `export LOCAL_COMPILE_DIR=` override the default `/tmp/nemo-gym-compile` staging directory before completed artifacts are published to `SHARED_TEMP_DIR`
-- `local_compile_dir: null` disable local compilation staging and compile directly in `SHARED_TEMP_DIR`
+- `export CCC_LOCAL_COMPILE_DIR=` override the default `/tmp/nemo-gym-compile` staging directory before completed artifacts are published to `shared_dir`
+- `local_compile_dir: null` disable local compilation staging and compile directly in `shared_dir`
 - `test_batch_size` per problem test case parallelism
 - `num_parallel_requests` number of problems to evaluate in parallel
 - `time_scale` timeout limit factor, multiply's each problem's inherent time limit
+
+The unprefixed `SHARED_TEMP_DIR` and `LOCAL_COMPILE_DIR` are still read as fallbacks when the `CCC_`-prefixed variables are unset; prefer the prefixed names.
 
 One can also override via the config, ex: `++env.nemo_gym.competitive_coding_challenges_resources_server.resources_servers.competitive_coding_challenges.test_file=`.
 
@@ -50,10 +52,24 @@ There is no published image — build it from the NeMo-Skills repo:
 
 ```bash
 git clone --depth 1 https://github.com/NVIDIA-NeMo/Skills.git /tmp/NeMo-Skills \
-  && docker build -t nemo-skills-sandbox \
+  && docker build -t nemo-skills-sandbox --build-arg GITHUB_CI=1 \
        -f /tmp/NeMo-Skills/dockerfiles/Dockerfile.sandbox /tmp/NeMo-Skills \
-  && docker run --rm -p 6000:6000 nemo-skills-sandbox
+  && docker run --rm -p 6000:6000 -v /tmp:/tmp nemo-skills-sandbox
 ```
+
+- `--build-arg GITHUB_CI=1` skips the image's SciCode test-data download from
+  Google Drive. CCC does not use that file, and the download fails when the
+  file's Drive quota is used up.
+- `-v /tmp:/tmp` lets the sandbox see the solutions CCC writes to `shared_dir`
+  (default `/tmp`). Without it nothing compiles: each compile stops with
+  `CCC_WORK_DIR_NOT_VISIBLE_TO_SANDBOX`, and `/verify` excludes the sample from
+  scoring (`mask_sample: true`, `failure_kind: provider_unavailable`). If you
+  set `CCC_SHARED_TEMP_DIR`, mount that directory at the same path instead.
+
+A sample is masked only when the sandbox never measured it: the work directory
+was not visible before compiling, or no test request reached the sandbox. If
+the sandbox fails after at least one test of a solution ran, the sample stays
+scored, because the solution itself may have broken the sandbox.
 
 The server defaults to `http://127.0.0.1:6000/execute`; override with
 `NEMO_SKILLS_SANDBOX_HOST` / `NEMO_SKILLS_SANDBOX_PORT` if the sandbox is

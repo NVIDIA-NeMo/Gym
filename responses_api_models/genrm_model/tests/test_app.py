@@ -196,3 +196,21 @@ class TestGenRMPreprocess:
         assert msgs[1] == {"role": "user", "content": "Hi"}
         assert msgs[2] == {"role": "response_1", "content": "A"}
         assert msgs[3] == {"role": "response_2", "content": "B"}
+
+
+def test_get_converter_forwards_the_custom_tool_strategy():
+    """The mixin's converter carries the config's custom-tool strategy."""
+    server = _TestServer()
+    server.config = GenRMModelConfig(
+        host="localhost",
+        port=8000,
+        entrypoint="app.py",
+        name="test_genrm_model",
+        model="test-model",
+        return_token_id_information=False,
+        uses_reasoning_parser=False,
+        vllm_serve_kwargs={"tensor_parallel_size": 1, "data_parallel_size": 2},
+        vllm_serve_env_vars={},
+        custom_tool_strategy="function_bridge",
+    )
+    assert server.get_converter().custom_tool_strategy == "function_bridge"

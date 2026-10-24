@@ -250,8 +250,9 @@ are unaffected.
 
 - **Normal** — the command's real `return_code`, `error_type=None`.
 - **Timeout** — `return_code=125`, `error_type="timeout"`.
-- **Apptainer runtime failure** (instance gone, etc., detected via stderr markers like
-  `FATAL:`) — `return_code=125`, `error_type="sandbox"`.
+- **Apptainer runtime failure** (instance gone, etc., detected via Apptainer's own
+  stderr lines: a line starting with `FATAL:`, a missing-instance message, or an
+  `ERROR:` line with exit code 255) — `return_code=125`, `error_type="sandbox"`.
 
 `125` is the sentinel `SANDBOX_RUNTIME_RETURN_CODE`, signaling "the sandbox runtime
 failed" rather than "the command exited 125".
@@ -270,8 +271,9 @@ failed" rather than "the command exited 125".
   private anonymous mappings (Linux 4.7+), not the sandbox as a whole: a command that
   forks N workers can still use up to N times the cap. Runtimes that reserve large
   writable address ranges at startup may fail under a low cap; size it generously.
-- **Runtime-failure detection is heuristic.** It keys off stderr markers, so a user
-  command whose own output contains `FATAL:` could be misclassified as a sandbox error.
+- **Runtime-failure detection is heuristic.** It keys off Apptainer's stderr line format,
+  so a user command that prints a line starting with `FATAL:` could be misclassified as a
+  sandbox error.
 
 ## Development
 

@@ -3,7 +3,10 @@
 
 import asyncio
 import hashlib
+import importlib.metadata
 import io
+import os
+import subprocess
 import tarfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -81,8 +84,11 @@ async def test_bootstrap_without_python_caches_assets_across_concurrent_tasks(tm
         assert (remote / "uv").stat().st_mode & 0o111 == 0o111
         assert (remote / "uv-calls").read_text().splitlines() == [
             f"--no-config venv {remote}/venv --python {remote}/python/bin/python3",
-            f"--no-config pip install --python {remote}/venv/bin/python mini-swe-agent==2.4.6",
+            f"--no-config pip install --python {remote}/venv/bin/python -r {remote}/requirements.txt",
         ]
+        assert (remote / "requirements.txt").read_bytes() == (
+            Path(module.__file__).with_name("runtime") / "requirements.txt"
+        ).read_bytes()
         assert not (remote / "runner.py").exists()
 
 
@@ -95,3 +101,20 @@ async def test_failed_download_does_not_poison_cache(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="checksum"):
         await bootstrap.cached_download("https://example.com/python.tar.gz", sha256="bad")
     assert list(tmp_path.iterdir()) == []
+
+
+def test_native_runtime_dependencies_are_isolated_from_gym(native_python: Path) -> None:
+    assert importlib.metadata.version("mcp").startswith("1.")
+    subprocess.run(
+        [
+            str(native_python),
+            "-c",
+            "from importlib.metadata import version; "
+            "from litellm.responses.mcp.litellm_proxy_mcp_handler import LiteLLM_Proxy_MCP_Handler; "
+            "assert version('litellm') == '1.106.0'; "
+            "assert version('mini-swe-agent') == '2.4.6'; "
+            "assert version('mcp') == '2.2.0'",
+        ],
+        check=True,
+        env={**os.environ, "LITELLM_LOCAL_MODEL_COST_MAP": "true"},
+    )

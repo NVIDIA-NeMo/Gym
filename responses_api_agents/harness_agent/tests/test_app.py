@@ -161,15 +161,15 @@ def test_sandbox_model_url_preserves_remote_hostname_and_port():
     assert url == "http://model-host:8000"
 
 
-def test_sandbox_model_url_prefers_backend_base_url_and_strips_v1():
+def test_sandbox_model_url_defaults_to_model_server_not_backend():
     agent = _make_agent(model_server={"type": "responses_api_models", "name": "policy_model"})
     agent.server_client.global_config_dict = MagicMock()
-    with patch(
-        "responses_api_agents.harness_agent.app.get_first_server_config_dict",
-        return_value={"base_url": "http://vllm-node:9000/v1"},
-    ):
+    agent.server_client._build_server_base_url = MagicMock(return_value="http://model-host:6990")
+    backends = {"base_url": ["http://vllm-a:8000/v1", "http://vllm-b:8000/v1"]}
+    with patch("responses_api_agents.harness_agent.app.get_first_server_config_dict", return_value=backends):
         url = agent._sandbox_model_url(MagicMock())
-    assert url == "http://vllm-node:9000"
+    assert url == "http://model-host:6990"
+    agent.server_client._build_server_base_url.assert_called_once_with(backends)
 
 
 @pytest.mark.parametrize("hostname", ["sandbox-gateway", "localhost"])
@@ -194,15 +194,16 @@ def test_sandbox_model_url_preserves_training_rollout_prefix():
     agent.server_client.global_config_dict = MagicMock()
     request = SimpleNamespace(path_params={}, url=SimpleNamespace(path="/run"))
     token = _RUN_CONTEXT.set({"url_prefix": "/ng-rollout/rollout-1/training-token-capture"})
+    agent.server_client._build_server_base_url = MagicMock(return_value="http://model:6990")
     try:
         with patch(
             "responses_api_agents.harness_agent.app.get_first_server_config_dict",
-            return_value={"base_url": "http://model:8000/v1"},
+            return_value={"base_url": "http://vllm:8000/v1"},
         ):
             url = agent._sandbox_model_url(request)
     finally:
         _RUN_CONTEXT.reset(token)
-    assert url == "http://model:8000/ng-rollout/rollout-1/training-token-capture"
+    assert url == "http://model:6990/ng-rollout/rollout-1/training-token-capture"
 
 
 async def test_run_preserves_rollout_path_and_verifier_fields():
@@ -538,6 +539,18 @@ async def test_download_json_requires_exactly_one_row():
 
     with pytest.raises(RuntimeError, match="expected one JSON row.*got 2"):
         await agent._download_json(MagicMock(), "/work/rollouts.jsonl")
+
+
+async def test_download_json_keeps_unicode_line_separators():
+    # A response quoting document text carries U+2028 / U+0085 inside strings; model_dump_json()
+    # leaves them unescaped, and they must not split the single JSONL row.
+    row = {"output": [{"type": "message", "content": "line\u2028break and\u0085next"}]}
+    agent = _make_agent()
+    agent._provider.download_file = AsyncMock(
+        side_effect=lambda _, __, path: path.write_text(json.dumps(row, ensure_ascii=False) + "\n")
+    )
+
+    assert await agent._download_json(MagicMock(), "/work/response.json") == row
 
 
 def test_gym_source_prebuilt_path_and_url():

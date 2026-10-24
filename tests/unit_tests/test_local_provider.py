@@ -21,7 +21,7 @@ import signal
 import sys
 from json import loads
 from pathlib import Path
-from shlex import join
+from shlex import join, quote
 
 import pytest
 
@@ -46,22 +46,25 @@ async def test_supervisor_deadline_finishes_before_provider_hard_timeout(tmp_pat
         "time.sleep(60)\n"
     )
     receipt_path = tmp_path / "cleanup.json"
-    command = join(
-        [
-            sys.executable,
-            "-I",
-            process_supervisor.__file__,
-            "--timeout",
-            "1",
-            "--cleanup-timeout",
-            "0.5",
-            "--receipt",
-            str(receipt_path),
-            "--",
-            sys.executable,
-            "-I",
-            str(worker),
-        ]
+    command = (
+        join(
+            [
+                sys.executable,
+                "-I",
+                process_supervisor.__file__,
+                "--timeout",
+                "1",
+                "--cleanup-timeout",
+                "0.5",
+                "--receipt",
+                str(receipt_path),
+                "--",
+                sys.executable,
+                "-I",
+                str(worker),
+            ]
+        )
+        + f" >{quote(str(tmp_path / 'output.log'))} 2>&1"
     )
     try:
         result = await provider.exec(
@@ -74,8 +77,8 @@ async def test_supervisor_deadline_finishes_before_provider_hard_timeout(tmp_pat
         assert receipt["timed_out"] is True
         assert receipt["return_code"] == -signal.SIGKILL
         assert receipt["error"] is None
-        with pytest.raises(ProcessLookupError):
-            os.kill(int((tmp_path / "child.pid").read_text()), 0)
+        child_pid = int((tmp_path / "child.pid").read_text())
+        assert not Path(f"/proc/{child_pid}").exists(), "in-flight detached tool survived"
     finally:
         if (tmp_path / "child.pid").exists():
             try:
@@ -183,8 +186,16 @@ async def test_timeout_returns_even_when_a_child_escapes_the_process_group(tmp_p
     provider = LocalProvider(workspace_root=str(tmp_path))
     handle = await provider.create(SandboxSpec())
 
-    escaped = "python3 -c 'import os,time;os.setsid();time.sleep(60)' & sleep 30"
-    result = await asyncio.wait_for(provider.exec(handle, escaped, timeout_s=0.5), timeout=15)
+    # The escaped child outlives the provider's kill, so it exits only once the test releases it.
+    release = tmp_path / "release"
+    child = (
+        f"import os, pathlib, time\nos.setsid()\nwhile not pathlib.Path({str(release)!r}).exists(): time.sleep(0.05)"
+    )
+    escaped = join(["python3", "-c", child]) + " & sleep 30"
+    try:
+        result = await asyncio.wait_for(provider.exec(handle, escaped, timeout_s=0.5), timeout=15)
+    finally:
+        release.touch()
 
     assert result.return_code == 125 and result.error_type == "timeout"
 
