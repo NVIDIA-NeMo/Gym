@@ -308,3 +308,46 @@ def test_failure_response_uses_native_agent_model(agent: HarborAgent, tmp_path: 
     response = agent.failure_response(body, RuntimeError("trial failed"))
     assert response.response.model == "native-model"
     assert response.response.status == "failed"
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_worker_initializes_and_flushes_telemetry_inside_runtime_environment(monkeypatch, fails):
+    import asyncio
+    import os
+
+    from opentelemetry import trace
+
+    events = []
+    loop = asyncio.new_event_loop()
+    monkeypatch.setattr(app, "_RAY_WORKER_EVENT_LOOP", loop)
+    monkeypatch.setattr(
+        app,
+        "init_telemetry",
+        lambda **kwargs: events.append(("init", os.environ["NEMO_GYM_OTEL_ENABLED"])) or object(),
+    )
+    monkeypatch.setattr(
+        trace,
+        "get_tracer_provider",
+        lambda: SimpleNamespace(
+            force_flush=lambda **kwargs: events.append(("flush", os.environ["NEMO_GYM_OTEL_ENABLED"]))
+        ),
+    )
+
+    async def run_job(config, task_name):
+        events.append(("run", task_name))
+        if fails:
+            raise RuntimeError("trial failed")
+        return "/synthetic/trial"
+
+    monkeypatch.setattr(app.HarborAgent, "run_job", run_job)
+    monkeypatch.delenv("NEMO_GYM_OTEL_ENABLED", raising=False)
+    try:
+        if fails:
+            with pytest.raises(RuntimeError, match="trial failed"):
+                app.harbor_job_worker._function({}, "example", {"NEMO_GYM_OTEL_ENABLED": "1"})
+        else:
+            assert app.harbor_job_worker._function({}, "example", {"NEMO_GYM_OTEL_ENABLED": "1"}) == "/synthetic/trial"
+        assert events == [("init", "1"), ("run", "example"), ("flush", "1")]
+        assert "NEMO_GYM_OTEL_ENABLED" not in os.environ
+    finally:
+        loop.close()

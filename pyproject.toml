@@ -511,7 +511,6 @@ exclude-dependencies = [
     # Exclude unwanted dependencies from mlflow
     "alembic",
     "blinker",
-    "cryptography",
     "flask",
     "flask-cors",
     "graphene",
