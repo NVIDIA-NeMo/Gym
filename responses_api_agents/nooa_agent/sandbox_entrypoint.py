@@ -57,6 +57,7 @@ class SandboxInput(BaseModel):
     model_server_name: str
     max_policy_calls: int | None = Field(default=None, gt=0)
     context_window: int | None = Field(default=None, gt=0)
+    media_inputs: tuple[Literal["image", "audio", "video", "pdf"], ...] = ()
 
 
 class RunnerError(BaseModel):
@@ -228,6 +229,7 @@ async def execute(
             max_policy_calls=payload.max_policy_calls,
             on_progress=on_progress,
             context_window=payload.context_window,
+            media_inputs=payload.media_inputs,
         )
         with rollout_context(payload.request.rollout_id):
             result = await runner.run(payload.request)
