@@ -68,6 +68,15 @@ LITELLM_LOCAL_MODEL_COST_MAP=True python -m pytest \
 
 ## Runtime development
 
+On Linux, install Docker, uv, Python 3.13.14, and Node 22 or later. From a fresh checkout, install the agent's declared Python dependencies and activate its environment:
+
+```bash
+uv sync --project responses_api_agents/skill_trigger --python 3.13.14 --no-default-groups
+source responses_api_agents/skill_trigger/.venv/bin/activate
+```
+
+Keep `uv`, `node`, and `npm` on `PATH`; the ordinary Gym launcher creates separate server environments. Preparation, component tests, and the synthetic smoke below use this environment. They require no inference credentials. Record the resolved package versions with each run; the harness versions are pinned, while Gym's dependency ranges can resolve newer packages.
+
 Build the pinned Codex/Hermes container from public sources:
 
 ```bash
@@ -152,4 +161,6 @@ Set the release manifest hash, model name and endpoint, image, task paths, and D
 Related work: [Gym skill evaluation infrastructure](https://github.com/NVIDIA-NeMo/Gym/issues/1256), [SkillsBench task-performance integration](https://github.com/NVIDIA-NeMo/Gym/pull/1870), and [native Harbor job configuration](https://github.com/NVIDIA-NeMo/Gym/pull/4620). This proposal complements these efforts without changing existing benchmark behavior.
 
 
-`--engine gym-cli` runs the same synthetic task through `gym eval run`, including the head server, isolated server environments, Ray, collection, and aggregation. A successful Pi read passed this complete path and retained its catalog and nonzero global task index. A separate provider-error check made one request and persisted one unscored failure, with no scored rows. The benchmark disables Ray worker retries as well as Harbor and collector retries. Its reported `skill_opening_rate` averages repetitions within each skill, then averages the skills; it is not pass@k. This single-catalog check does not establish full catalog-runner execution, real-model migration, or clean-clone readiness.
+`--engine gym-cli` runs the same synthetic task through `gym eval run`, including the head server, isolated server environments, Ray, collection, and aggregation. A successful Pi read passed this complete path and retained its catalog and nonzero global task index. A separate provider-error check made one request and persisted one unscored failure, with no scored rows. The benchmark disables Ray worker retries as well as Harbor and collector retries. Its reported `skill_opening_rate` averages repetitions within each skill, then averages the skills; it is not pass@k.
+
+A fresh public clone independently installed the declared Python dependencies and locked Node packages, built the image, audited all 110 cases across 43 catalogs, and passed 185 component tests. Pi's synthetic success passed both direct Harbor and the ordinary Gym CLI using Python 3.13.14, Harbor 0.24.0, and Ray 2.59.0. No source overlays or copied package environments were used; Docker could reuse build layers. This verifies the documented synthetic setup, not full catalog-runner execution or the required real-model migration.
