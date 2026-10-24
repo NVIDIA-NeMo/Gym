@@ -23,6 +23,7 @@ from typing import Any, Literal, Protocol
 
 import aiohttp
 from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, ToolCall, UnifiedLLM
+from nooa.unifiedllm.limits import REPLY_CAP_KEYS, ContextLimits
 from pydantic import BaseModel
 
 from nemo_gym.config_types import ModelServerRef
@@ -238,8 +239,9 @@ class GymResponsesLLM(UnifiedLLM):
         on_call: Callable[[GymModelCall], None] | None = None,
         on_response: Callable[[], None] | None = None,
         sampling_overrides: dict[str, Any] | None = None,
+        context_window: int | None = None,
     ) -> None:
-        super().__init__(model=model)
+        super().__init__(model=model, context_window=context_window)
         self._server_client = server_client
         self._model_server_name = model_server_name
         self._model_url_path = model_url_path
@@ -250,6 +252,21 @@ class GymResponsesLLM(UnifiedLLM):
         self._cookies = cookies
         self._calls = 0
         self._lock = asyncio.Lock()
+
+    def get_context_limits(
+        self, overrides: dict[str, Any] | None = None, *, fallback_reserve: int = 0
+    ) -> ContextLimits:
+        """Reserve the same reply cap that the Gym request will actually send."""
+        params = dict(overrides or {})
+        cap = self._sampling_overrides.get("max_output_tokens")
+        if cap is not None:
+            params = {key: value for key, value in params.items() if key not in REPLY_CAP_KEYS}
+            if params.get("extra_body"):
+                params["extra_body"] = {
+                    key: value for key, value in params["extra_body"].items() if key not in REPLY_CAP_KEYS
+                }
+            params["max_tokens"] = cap
+        return super().get_context_limits(params, fallback_reserve=fallback_reserve)
 
     @property
     def calls(self) -> int:
@@ -281,6 +298,7 @@ class GymResponsesLLM(UnifiedLLM):
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
+        limits = self.get_context_limits(kwargs)
         self._state.charge()
         self._calls += 1
 
@@ -303,15 +321,17 @@ class GymResponsesLLM(UnifiedLLM):
                 }
             }
 
-        aliases = {"max_tokens": "max_output_tokens"}
         supported = set(NeMoGymResponseCreateParamsNonStreaming.model_fields) - {"model"}
         for name, value in kwargs.items():
-            destination = aliases.get(name, name)
-            if destination in supported and value is not None:
-                request[destination] = value
+            if name not in REPLY_CAP_KEYS and name in supported and value is not None:
+                request[name] = value
 
         # Explicit Gym rollout controls take precedence over NOOA's per-call settings.
         request.update(self._sampling_overrides)
+        if limits.reserve_is_fallback:
+            request.pop("max_output_tokens", None)
+        else:
+            request["max_output_tokens"] = limits.reserved_output_tokens
         body = NeMoGymResponseCreateParamsNonStreaming.model_validate(request)
         call = GymModelCall(
             model_ref=ModelServerRef(name=self._model_server_name, type="responses_api_models"),
