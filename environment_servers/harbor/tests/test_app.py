@@ -938,6 +938,14 @@ TASK_TOOL_CONTEXT_DECLARATIONS = {
 }
 
 
+def http_error_with_body(status: int, body: bytes) -> ClientResponseError:
+    """An HTTP error as ``raise_for_status`` raises it: the server's own reason is only in the response body."""
+    request_info = RequestInfo(URL("http://agent/v1/agent_sessions"), "POST", CIMultiDictProxy(CIMultiDict()))
+    error = ClientResponseError(request_info, (), status=status, message="Request failed")
+    error.response_content = body
+    return error
+
+
 def task_tool_context_toml(declaration: str) -> str:
     """TASK_TOML whose ``[environment]`` table also carries the given tool declaration."""
     return TASK_TOML + TASK_TOOL_CONTEXT_DECLARATIONS[declaration]
@@ -1038,6 +1046,47 @@ class TestAgentStage:
 
         assert response.failure.stage == "agent" and response.failure.terminal is terminal
         assert "agent said no" in response.failure.failure_reason
+        assert sandbox.stopped and not server._sandboxes
+
+    @pytest.mark.parametrize(
+        ("path", "status", "stage", "terminal"),
+        [
+            # An agent refuses a seed it cannot serve (AgentSeedRejectedError) with a final 422.
+            ("/v1/agent_sessions", 422, "agent", True),
+            ("/ng-rollout/r1/v1/responses", 422, "agent", True),
+            ("/v1/agent_sessions/close", 503, "cleanup", False),
+        ],
+    )
+    async def test_agent_http_error_body_reaches_the_failure_reason(
+        self, tmp_path, monkeypatch, path, status, stage, terminal
+    ):
+        """str(ClientResponseError) names only the status and URL; the agent's own reason is in the response body."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.fail_with[path] = http_error_with_body(
+            status, b'{"detail":"Simple Agent does not support required sandbox access"}'
+        )
+
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert failure.stage == stage and failure.terminal is terminal
+        assert "Simple Agent does not support required sandbox access" in failure.failure_reason
+        assert sandbox.stopped and not server._sandboxes
+
+    async def test_seed_http_error_body_reaches_the_failure_reason(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+
+        async def unreachable_access(session):
+            raise http_error_with_body(502, b'{"detail":"sandbox endpoint unreachable"}')
+
+        monkeypatch.setattr(server, "_sandbox_access", unreachable_access)
+
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert failure.stage == "seed" and not failure.terminal
+        assert failure.failure_reason.startswith("ClientResponseError: ")
+        assert "sandbox endpoint unreachable" in failure.failure_reason
         assert sandbox.stopped and not server._sandboxes
 
     async def test_failed_turn_closes_the_session_and_keeps_the_agents_evidence(self, tmp_path, monkeypatch):
