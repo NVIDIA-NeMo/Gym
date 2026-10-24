@@ -75,9 +75,60 @@ Missing, malformed, or unsupported reports yield null counts. Verifier timeouts
 also yield null counts. Report parsing diagnostics identify the source file.
 The official reward and evaluation-completion rules remain unchanged.
 
+## Other pinned Harbor datasets
+
+`manifest_path` selects the pinned dataset. It defaults to Terminal-Bench 4.0; a relative
+path is read from the repository root. Task names take the dataset's organization prefix, so
+[Terminal-Bench-Science](../../benchmarks/terminal_bench_science/README.md) serves
+`terminal-bench-science/<task>`. Its packages pass the same content-hash check.
+
+Packages that ship only Dockerfiles leave `docker_image` unset. Supply images through
+`environment.task_images`:
+
+- `agent` and `verifier`: templates that accept `{org}`, `{task}` and `{digest}`.
+- `service`: a template for Compose services that the package builds from a Dockerfile. It
+  also accepts `{service}`, the Compose service name.
+- `by_task.<task>.agent|verifier` and `by_task.<task>.services.<service>`: explicit per-task
+  images, which take precedence over the templates. The server refuses to start when a key
+  names a task its manifest lacks.
+
+An image declared by the package always wins. A separate verifier without
+`[verifier.environment]` uses the agent image, as in Harbor. A role with no image fails at
+seed, before allocation.
+
+Such packages' Compose files can build sidecars (`build:`). The server then runs each
+sidecar's configured image, and `main` runs the agent image. It also applies Harbor's `CPUS`
+and `MEMORY` Compose variables from the task's resources. These images have no published
+name, so their `compose_image_configs` records are keyed `<task>/<service>`. Records keyed by
+image name take precedence. `environment.compose_ignored_settings` lists Compose service
+settings, or `networks`, that the deployment cannot enforce; they are removed instead of
+rejected. It is empty by default, and a benchmark that sets it documents what it drops.
+
+Two opt-in verifier settings adapt packages to a deployment. Both default to the package
+values:
+
+- `environment.verifier_resources_from_agent: true` gives a separate verifier environment
+  that declares no CPUs or memory the agent environment's values. Without it, the provider
+  default applies.
+- `environment.verifier_timeout_overrides: {<task>: <seconds>}` replaces a task's
+  `[verifier].timeout_sec`. An applied override is recorded in diagnostics. As with
+  `by_task`, a key that names no manifest task stops the server at startup.
+
+For local checks on a workstation, a single-container task can also use Gym's `docker`
+sandbox provider. An offline verifier then runs with `docker run --network none`. EFS logs
+and Compose still require OpenSandbox.
+
+`/verify` also reports `partial_credit`: the fraction of reported tests that passed
+(`num_tests_passed / num_tests_total`, so skipped tests count as not passed), never below the
+official reward. Without usable test counts it equals the official reward. `reward` stays the
+official binary grade. When the official evaluation did not complete, both are 0, so a mean over
+the same rows uses the same denominator for both. `evaluation_completed: false` and
+`infrastructure_error` mark those rows, which are left out of the default aggregates unless
+`count_failure_classes_as_zero` counts them.
+
 ## Non-root Compose services
 
-When loading agent Compose YAML, two task-specific adaptations use the
+When loading agent Compose YAML, three task-specific adaptations use the
 [Compose extensions](../../fern/versions/latest/pages/infrastructure/sandbox/compose.mdx):
 
 - `medical-claims-processing`: `playwright-mcp` keeps `pwuser`, disables host-file
@@ -86,8 +137,13 @@ When loading agent Compose YAML, two task-specific adaptations use the
 - `payments-pipeline-fix`: `kafka` keeps `appuser` and disables host-file injection.
   Its single-broker controller uses localhost; clients retain the `kafka` alias
   needed by the advertised listener.
+- Terminal-Bench-Science `protein-active-learning`: `submission` keeps its `submission`
+  user, disables host-file injection, and receives its only peer URL as
+  `ASSAY_STATUS=http://assay:8080/status`, resolved to the assay sandbox IP. The image's
+  server must read that variable; see the
+  [benchmark README](../../benchmarks/terminal_bench_science/README.md#protein-active-learning-submission).
 
-Both services use their image's default user, omitting the redundant explicit
+These services use their image's default user, omitting the redundant explicit
 `user` value copied from image metadata. This avoids the provider attempting
 `su` from a non-root process to the same user.
 
