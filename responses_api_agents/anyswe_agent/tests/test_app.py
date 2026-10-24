@@ -158,6 +158,7 @@ class TestSandboxAPI:
         )
         assert config.sandbox_provider == "sandbox"
         assert config.agent_runtime_source == "baked"
+        assert config.sanitize_repo_git is True
 
     def test_image_uses_swebench_tag_format(self) -> None:
         image = AnySweAgent._sandbox_image(
@@ -282,6 +283,42 @@ class TestSandboxAPI:
 
 
 class TestSetupScriptsExist:
+    def test_sanitize_repo_git_keeps_only_head_ancestry(self, tmp_path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        # The script registers the repo as a safe.directory in the global git config.
+        env = os.environ | {
+            "HOME": str(tmp_path),
+            "GIT_CONFIG_GLOBAL": str(tmp_path / ".gitconfig"),
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        }
+
+        def git(*args: str) -> subprocess.CompletedProcess:
+            return subprocess.run(["git", *args], cwd=repo, env=env, capture_output=True, text=True)
+
+        git("init", "-q", "-b", "main")
+        (repo / "a.py").write_text("bug\n")
+        git("add", "-A")
+        git("commit", "-qm", "base")
+        base = git("rev-parse", "HEAD").stdout.strip()
+        (repo / "a.py").write_text("fix\n")
+        git("commit", "-qam", "upstream fix")
+        fix = git("rev-parse", "HEAD").stdout.strip()
+        git("tag", "v1.0")
+        git("remote", "add", "origin", "https://example.com/repo.git")
+        git("checkout", "-q", base)
+
+        script = Path(__file__).parent.parent / "setup_scripts" / "sanitize_repo_git.sh"
+        subprocess.run(["bash", str(script), str(repo)], env=env, check=True, capture_output=True)
+
+        assert git("rev-parse", "HEAD").stdout.strip() == base
+        assert git("log", "--all", "--format=%H").stdout.split() == [base]
+        assert git("remote").stdout == ""
+        assert git("cat-file", "-e", fix).returncode != 0
+
     def test_supported_agents_have_deps_scripts(self) -> None:
         scripts = Path(__file__).parent.parent / "setup_scripts"
         assert (scripts / "hermes_agent_deps.sh").exists()
