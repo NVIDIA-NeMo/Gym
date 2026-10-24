@@ -13,11 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import hashlib
+import re
 import subprocess
 import sys
 import tempfile
 import venv
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -152,6 +154,37 @@ def test_run_substep_fail_returns_stderr():
     assert "ValueError" in result["error"]
 
 
+@pytest.mark.parametrize(
+    "early_exit",
+    [
+        "raise SystemExit(0)",
+        "import sys\nsys.exit()",
+        "exit()",
+        "import os\nos._exit(0)",
+        "import atexit, os\natexit.register(lambda: os._exit(0))",
+    ],
+)
+def test_run_substep_fails_a_program_that_exits_before_its_tests(early_exit):
+    """Model code runs first, so exiting with status 0 must not skip the sub-step's assertions."""
+    result = run_substep(f"{early_exit}\nassert False, 'tests must run'", timeout_secs=10.0)
+    assert result["passed"] is False
+    assert result["returncode"] == 0
+    assert result["error"] == "the program exited before its tests finished"
+
+
+@pytest.mark.parametrize(
+    "program",
+    [
+        "print('partial line', end='')\nassert 1 == 1",
+        "import io, sys\nsys.stdout = io.StringIO()\nprint('captured')\nassert 1 == 1",
+    ],
+)
+def test_run_substep_passes_tests_that_finish_whatever_they_print(program):
+    result = run_substep(program, timeout_secs=10.0)
+    assert result["passed"] is True
+    assert "scicode-substep-complete" not in result["stdout_tail"]
+
+
 def test_run_substep_timeout():
     result = run_substep("import time\ntime.sleep(5)", timeout_secs=0.5)
     # the three legacy keys, plus the execution details the record carries (no exit code on a timeout)
@@ -186,6 +219,12 @@ def test_run_substep_reports_interpreter_launch_error():
     assert result["infrastructure_error"] is True
 
 
+def _completed_run(args, **kwargs):
+    """A stand-in for subprocess.run whose program ran to its end: it echoes the completion sentinel."""
+    sentinel = re.search(r"scicode-substep-complete-[0-9a-f]+", Path(args[1]).read_text()).group(0)
+    return subprocess.CompletedProcess(args=args, returncode=0, stdout=f"\n{sentinel}\n".encode(), stderr=b"")
+
+
 def test_run_substep_limits_numerical_library_threads():
     with (
         patch.dict(
@@ -194,7 +233,7 @@ def test_run_substep_limits_numerical_library_threads():
         ),
         patch(
             "resources_servers.scicode.scicode_integration.runner.subprocess.run",
-            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b""),
+            side_effect=_completed_run,
         ) as mocked_run,
     ):
         result = run_substep("assert True", timeout_secs=10.0)
