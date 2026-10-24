@@ -74,7 +74,7 @@ Build the pinned Codex/Hermes container from public sources:
 docker build -t gym-skill-harnesses:local environments/skill_trigger
 ```
 
-The Dockerfile checks the Codex release checksum and retains the exact Hermes Git revision. Codex, Hermes, and Hermes-guidance startup were exercised in this image with networking disabled and stopped before prompt release. This is profile validation, not a scored rollout; Codex-guidance startup still needs its effective model catalog.
+The Dockerfile checks the Codex release checksum and retains the exact Hermes Git revision. Codex, Hermes, and Hermes-guidance startup were exercised in this image with networking disabled and stopped before prompt release. Codex-guidance startup also passed with a frozen effective model catalog: the pinned binary retained the enabled guidance flag and rendered base instructions equal to the supplied template. This tested one reference route, with networking disabled and the task prompt withheld. It is profile validation, not a scored rollout or a comparison of complete inference prompts.
 
 The shared adapter uses Harbor's Docker lifecycle, independent file observation, the inference gateway, canonical traces, ATIF conversion, and the host verifier. Pi's SDK runs on the host with Docker-backed tools and no network in the task container. Hermes runs inside the container and needs an explicitly reachable gateway.
 

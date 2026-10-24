@@ -62,16 +62,21 @@ class Access(Record):
     at: float = Field(ge=0)
 
 
-class ToolResult(Record):
-    session_id: str
-    call_id: str
+class ReadResult(Record):
+    """Returned tool content, without claiming session or timing validation."""
+
     tool: str
     text: str
     success: bool
-    at: float = Field(ge=0)
     # Set only for a read of the exact staged SKILL.md, or skill_view with
     # matching requested AND returned skill names and no support-file request.
     resolved_skill: str | None = None
+
+
+class ToolResult(ReadResult):
+    session_id: str
+    call_id: str
+    at: float = Field(ge=0)
 
 
 class Spawn(Record):
@@ -224,6 +229,30 @@ def validate_evidence(evidence: TrialEvidence, expected: Identity) -> dict[str, 
     return sessions
 
 
+def matches_skill_read(output: ReadResult, *, skill: str, sources: dict[str, str], harness: str) -> bool:
+    """Classify returned instructions; caller must prove access, lineage and limits.
+
+    Kept separate for replaying older transcripts without inventing the timing
+    records required by score_trial. This predicate alone is not a trial score.
+    """
+    if not output.success:
+        return False
+    if harness == "pi":
+        if output.tool not in {"read", "bash"} or output.tool == "read" and output.resolved_skill != skill:
+            return False
+    elif harness in {"codex", "codex_guidance"}:
+        if output.tool != "terminal":
+            return False
+    elif harness in {"hermes", "hermes_guidance"}:
+        if output.tool not in {"terminal", "skill_view", "read_file"}:
+            return False
+    else:
+        raise EvidenceError(f"Unsupported harness: {harness}")
+    direct = output.resolved_skill == skill and output.tool in {"read", "read_file", "skill_view"}
+    competitors = [] if direct else [text for other, text in sources.items() if other != skill]
+    return has_excerpt(output.text, sources[skill], competing=competitors, javascript=harness == "pi")
+
+
 def score_trial(evidence: TrialEvidence, *, expected: Identity, sources: dict[str, str], target: str) -> Score:
     """Score positive skill opening; invalid evidence raises instead of inventing a miss."""
     sessions = validate_evidence(evidence, expected)
@@ -233,7 +262,7 @@ def score_trial(evidence: TrialEvidence, *, expected: Identity, sources: dict[st
     if any(a.skill not in sources for a in evidence.accesses):
         raise EvidenceError("Observer recorded a skill outside the frozen catalog")
     reads = []
-    for name, source in sources.items():
+    for name in sources:
         if name not in accessed:
             continue
         for output in evidence.outputs:
@@ -243,18 +272,7 @@ def score_trial(evidence: TrialEvidence, *, expected: Identity, sources: dict[st
                 or output.call_id in sessions[output.session_id].inherited_call_ids
             ):
                 continue
-            if expected.harness == "pi":
-                if output.tool not in {"read", "bash"}:
-                    continue
-                if output.tool == "read" and output.resolved_skill != name:
-                    continue
-            elif expected.harness.startswith("codex") and output.tool != "terminal":
-                continue
-            elif output.tool not in {"terminal", "skill_view", "read_file"}:
-                continue
-            direct = output.resolved_skill == name and output.tool in {"read", "read_file", "skill_view"}
-            competitors = [] if direct else [text for other, text in sources.items() if other != name]
-            if has_excerpt(output.text, source, competing=competitors, javascript=expected.harness == "pi"):
+            if matches_skill_read(output, skill=name, sources=sources, harness=expected.harness):
                 reads.append(ReadEvidence(skill=name, session_id=output.session_id, call_id=output.call_id))
                 break
     loaded = sorted(read.skill for read in reads)
