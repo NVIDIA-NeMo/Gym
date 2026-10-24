@@ -192,6 +192,24 @@ def test_order_needs_the_first_step_in_an_earlier_message():
     assert calls.check_order(refused, value, {}, {}, 0) == [(False, "no first step before edit a.py")]
 
 
+@pytest.mark.parametrize(
+    "first_path,then_path,ok",
+    [
+        ("a.py", "b.py", False),
+        ("/w/a.py", "a.py", True),
+        ("/w/docs/a.py", "a.py", False),
+        (None, "a.py", False),
+    ],
+)
+def test_order_with_same_needs_the_first_step_on_the_same_file(first_path, then_path, ok):
+    value = {"first": {"tool": "read"}, "then": {"tool": "edit"}, "same": "path"}
+    read = call("read", "a", **({"path": first_path} if first_path else {}))
+    steps = [message(read), message(call("edit", "b", path=then_path))]
+    assert calls.check_order(steps, value, {}, {"workdir": "/w"}, 0)[0][0] is ok
+    # without `same`, any earlier first step counts
+    assert calls.check_order(steps, {"first": {"tool": "read"}, "then": {"tool": "edit"}}, {}, {}, 0)[0][0] is True
+
+
 def test_a_planted_file_is_the_very_file_the_task_planted():
     value = {"first": {"tool": "read", "arg": {"field": "path", "regex": "AGENTS\\.md$", "planted": True}}}
     value["then"] = {"tool": "edit"}
@@ -252,6 +270,20 @@ def test_args_grade_where_bash_deletes_and_writes():
     assert grade_args(steps, writes)[:2] == [(True, "bash writes '/tmp/out.txt'"), (False, "bash writes '/w/out.txt'")]
 
 
+def test_bash_paths_without_a_call_workdir_are_read_from_the_runs_working_folder():
+    private = {"tool": "bash", "field": "command", "bash_writes": True, "must_not_match": "^/app/private/"}
+    steps = [message(call("bash", command="echo x > private/result.txt"))]
+    assert grade_args(steps, private, facts={"workdir": "/app"})[0] == (False, "bash writes '/app/private/result.txt'")
+    inside = {"tool": "bash", "field": "command", "bash_writes": True, "must_match": "^/app/"}
+    assert grade_args([message(call("bash", command="echo x > result.txt"))], inside, facts={"workdir": "/app"})[0][0]
+    deletes = {"tool": "bash", "field": "command", "deletes_must_match": "^/tmp/"}
+    steps = [message(call("bash", command="rm -rf cache"))]
+    assert grade_args(steps, deletes, facts={"workdir": "/app"})[0] == (False, "bash deletes '/app/cache'")
+    # the call's own workdir wins, and absolute paths stay as they are
+    steps = [message(call("bash", command="rm -rf cache /tmp/x", workdir="/tmp"))]
+    assert [ok for ok, _ in grade_args(steps, deletes, facts={"workdir": "/app"})][:2] == [True, True]
+
+
 def test_args_grade_what_the_workspace_diff_shows():
     changed = call("bash", command="make fmt")
     changed.update(changed_repo=True, changed_paths=["src/a.py", "out.xml"], test_output_paths=["out.xml"])
@@ -296,6 +328,25 @@ def test_calls_avoid_until_the_user_speaks_again():
     avoid = {"calls_avoid": {"tool": "bash", "arg": {"field": "command", "regex": "pytest"}}}
     assert after_event(steps, avoid, 1) == [(False, "called: bash pytest")]
     lifted = steps[:2] + [user("Go on."), steps[2]]
+    assert after_event(lifted, avoid, 1) == [(True, "no call of the avoided kind")]
+
+
+def test_only_the_events_own_session_lifts_its_window():
+    def child_user(text):
+        return {"role": "user", "session_id": "child", "text": text, "planted": False}
+
+    avoid = {"calls_avoid": {"tool": "bash", "arg": {"field": "command", "regex": "pytest"}}}
+    root_event = [
+        message(call("bash", "a", command="pytest")),
+        result("a", "FAILED", error=True, planted=True),
+        message(call("task", "t", prompt="Look into the failure")),
+        child_user("Look into the failure"),
+        message(call("bash", "b", command="pytest")),
+    ]
+    # a subagent's task prompt is not the event's user speaking again
+    assert after_event(root_event, avoid, 1) == [(False, "called: bash pytest")]
+    # the event's own user still lifts it
+    lifted = root_event[:4] + [user("Go on."), root_event[4]]
     assert after_event(lifted, avoid, 1) == [(True, "no call of the avoided kind")]
 
 

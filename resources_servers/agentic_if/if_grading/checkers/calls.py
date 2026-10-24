@@ -154,15 +154,25 @@ def check_order(
 ) -> list[Outcome]:
     """Every `then` call has a `first` call in an earlier message (the calls of one message are sent before any of
     their results come back, so a first step sent beside the graded call did not come before it). A call the harness
-    refused is no step."""
-    first, then = value["first"], value["then"]
+    refused is no step. With `same` (an argument, such as `path`), the first call must also name what the graded call
+    names: for `path` the same file, read from the working folder; a call without the argument matches none."""
+    first, then, same = value["first"], value["then"], value.get("same")
+
+    def same_target(previous: Call, current: Call) -> bool:
+        if same is None:
+            return True
+        left, right = arg_value(previous["args"], same), arg_value(current["args"], same)
+        if left is None or right is None:
+            return False
+        return same_file(left, right, facts.get("workdir")) if same == "path" else left == right
+
     out, seen = [], []
     for _i, m, c in assistant_calls(steps, start, rejected=False):
         if call_matches(c, then, facts):
-            earlier = any(pm < m for pm in seen)
+            earlier = any(pm < m and same_target(previous, c) for pm, previous in seen)
             out.append((earlier, ("first step done before %s" if earlier else "no first step before %s") % _show(c)))
         if call_matches(c, first, facts):
-            seen.append(m)
+            seen.append((m, c))
     return out
 
 
@@ -284,14 +294,16 @@ def check_args(steps: list[Step], value: Parameters, check: Parameters, facts: F
     (`repo_changes`) or created (`new_files`)."""
     out = []
     for _i, _m, c in assistant_calls(steps, start):
+        # A bash call without its own workdir runs in the run's working folder.
+        shell_wd = arg_value(c["args"], "workdir") or facts.get("workdir")
         if value.get("deletes_must_match") and tool_matches(c["tool"], "bash"):
-            for t in bash_delete_targets(str(arg_value(c["args"], "command") or ""), arg_value(c["args"], "workdir")):
+            for t in bash_delete_targets(str(arg_value(c["args"], "command") or ""), shell_wd):
                 ok = re.search(value["deletes_must_match"], t, re.S) is not None
                 out.append((ok, "bash deletes %r" % t[:80]))
         named = []  # the files this call's own arguments name, graded once
         if value.get("bash_writes") and tool_matches(c["tool"], "bash"):
             command = str(arg_value(c["args"], "command") or "")
-            for t, _kind in bash_write_targets(command, arg_value(c["args"], "workdir")):
+            for t, _kind in bash_write_targets(command, shell_wd):
                 t = _norm(t)
                 named.append(t)
                 out.append((_path_ok(value, t), "bash writes %r" % t[:80]))
@@ -391,8 +403,13 @@ def check_after_event(
     then = value["then"]
     if isinstance(then, dict) and len(then) != 1:
         raise ValueError("after_event: `then` takes one condition, not %r" % (sorted(then),))
-    # the event binds until the user speaks again: "OK, go on" after a stop lifts it
-    end = next((i for i in range(ev + 1, len(steps)) if steps[i]["role"] == "user"), len(steps))
+    # the event binds until its session's user speaks again: "OK, go on" after a stop lifts it; a subagent's task
+    # prompt, a user message of another session, does not
+    session = steps[ev].get("session_id")
+    end = next(
+        (i for i in range(ev + 1, len(steps)) if steps[i]["role"] == "user" and steps[i].get("session_id") == session),
+        len(steps),
+    )
     after = [x for x in assistant_calls(steps, ev + 1) if x[0] < end]
 
     def any_spec(c: Call, specs: CallSpec | list[CallSpec]) -> bool:
