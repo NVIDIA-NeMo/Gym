@@ -24,6 +24,8 @@ export VLLM_USE_V2_MODEL_RUNNER=1
 
 export VLLM_USE_RUST_FRONTEND=1
 
+export PYTORCH_CUDA_ALLOC_CONF=roundup_power2_divisions:8
+
 # @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
 # @bxyu-nvidia: We set --prefix-match-unit 128 because the Mooncake store prefill lookup gets more expensive the smaller this number is
 # and caused prefill bottlenecks as a result when using Mooncake.
