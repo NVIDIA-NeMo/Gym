@@ -1,0 +1,174 @@
+---
+title: "Inspect NeMo User Sim Rollouts"
+description: "Inspect conversations, tools, scores, invocations, and captured participant model calls."
+position: 1
+---
+
+Use this guide after completing
+[Run Multi-turn User Simulation with NeMo User Sim](/tutorials/evaluation-tutorials/nemo-user-sim-rollout-collection).
+The examples assume:
+
+```bash
+task_index=0
+rollout_index=0
+rollouts=results/nemo_user_sim/rollouts.jsonl
+inputs=results/nemo_user_sim/rollouts_materialized_inputs.jsonl
+capture_dir="$(pwd)/results/nemo_user_sim/model-calls"
+```
+
+## Inspect the scenario and persona
+
+The materialized-input file is the authoritative record of the sampled inputs:
+
+```bash
+jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
+  'select(._ng_task_index == $task and ._ng_rollout_index == $repeat)
+   | .task_input.resolved_row
+   | {
+       probe_type,
+       persona: {
+         id: .persona_uuid,
+         name: ([.persona.first_name, .persona.last_name] | map(select(. != null)) | join(" "))
+       },
+       trajectory_id,
+       theme,
+       tool_subset
+     }' \
+  "${inputs}"
+```
+
+## Inspect the conversation and tools
+
+NeMo User Sim keeps User messages, Assistant messages, function calls, and tool results in their original order:
+
+```bash
+jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
+  'select(._ng_task_index == $task and ._ng_rollout_index == $repeat)
+   | {
+       probe_type: .verification.verifier_data.probe_type,
+       num_turns: .usersim_result.num_turns,
+       num_tool_calls: .usersim_result.num_tool_calls,
+       conversation: .usersim_result.conversation_messages
+     }' \
+  "${rollouts}"
+```
+
+Read consecutive User and Assistant messages as one conversation. Do not remove intervening tool messages when
+diagnosing behavior.
+
+To display only function calls and tool results:
+
+```bash
+jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
+  'select(._ng_task_index == $task and ._ng_rollout_index == $repeat)
+   | .usersim_result.conversation_messages
+   | map(select(.role == "tool" or ((.tool_calls // []) | length > 0)))' \
+  "${rollouts}"
+```
+
+## Interpret the score
+
+The Resources Server calls NeMo User Sim's `TrajectoryEvaluatorGenerator.agenerate()` and the scorer selected
+for the prepared probe. The integration evaluates Assistant behavior, not the simulated User.
+
+Two related fields expose quality:
+
+- `verification.verifier_data.normalized_axis_scores` is the full User Sim quality map.
+- `reward_components` is Gym's flat metrics projection. It repeats quality axes with a `quality.` prefix and
+  adds completion/scoring flags plus `assistant_quality`, so aggregate metrics can consume them directly.
+
+The duplication is intentional: the first field preserves User Sim's structured verifier evidence, while the
+second uses Gym's standard scalar metrics contract.
+
+```bash
+jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
+  'select(._ng_task_index == $task and ._ng_rollout_index == $repeat)
+   | {
+       conversation_status: .usersim_result.conversation_status,
+       scenario_completed: .verification.scenario_completed,
+       reward,
+       mask_sample,
+       reward_components,
+       quality_scores: .verification.verifier_data.normalized_axis_scores,
+       task_check: {
+         name: .verification.verifier_data.scorer_name,
+         result: .verification.verifier_data.scorer_result
+       },
+       judge_axes: .verification.verifier_data.assistant_eval.axes,
+       failure_kind,
+       failure_reason
+     }' \
+  "${rollouts}"
+```
+
+Interpret the fields as follows:
+
+- `scenario_completed` requires a completed conversation, both participants, and a passing applicable probe check.
+- `reward` is the mean of normalized helpfulness, accuracy, and coherence when `scenario_completed` is `true`
+  and all three axes exist; otherwise it is `0.0`.
+- `mask_sample: false` includes the reward in aggregate metrics. `true` preserves the row but excludes its reward.
+- `scorer_result` contains probe-specific evidence. A failed applicable check is a measured policy result.
+- `assistant_eval.axes` contains the judge's original scores and explanations.
+
+## Inspect Environment-owned invocations
+
+The top-level `invocations` ledger records User and Assistant Agent activations and support-model calls made by
+the Environment Server:
+
+```bash
+jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
+  'select(._ng_task_index == $task and ._ng_rollout_index == $repeat)
+   | .invocations[]
+   | {
+       sequence,
+       role,
+       request,
+       response,
+       observations,
+       state_after,
+       termination_reason
+     }' \
+  "${rollouts}"
+```
+
+Roles can include `user`, `assistant`, `judge`, `summary`, and `tool_simulation`. Use `invocations` to inspect
+support-model calls. Native function calls and tool results remain in `usersim_result.conversation_messages`.
+
+## Inspect captured participant model calls
+
+`ng_model_call_capture` and the capture JSONL files contain provider-level calls made through the User and
+Assistant Agents. They do not include plain support-model or Resources-verifier calls; inspect those through
+`invocations` and `verification`.
+
+```bash
+jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
+  'select(._ng_task_index == $task and ._ng_rollout_index == $repeat)
+   | .ng_model_call_capture
+   | {rollout_id, metrics, calls}' \
+  "${rollouts}"
+
+find "${capture_dir}" -maxdepth 3 -type f -print
+```
+
+To inspect a capture file:
+
+```bash
+capture_rollout_id=$(jq -r --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
+  'select(._ng_task_index == $task and ._ng_rollout_index == $repeat)
+   | .ng_model_call_capture.rollout_id' \
+  "${rollouts}")
+capture_file="${capture_dir}/${capture_rollout_id}.capture.jsonl"
+jq -s '.[0] | {model_call_id, model_ref, status_code, latency_ms, request, response}' "${capture_file}"
+```
+
+For execution records normalized across Agent implementations, inspect:
+
+```bash
+jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
+  'select(._ng_task_index == $task and ._ng_rollout_index == $repeat)
+   | .ng_trajectory' \
+  "${rollouts}"
+```
+
+`ng_trajectory.gaps` identifies information that the participating Agent did not expose. The complete User Sim
+conversation remains available in `usersim_result.conversation_messages`.
