@@ -18,7 +18,7 @@ kernel_gym:
 
       container_formatter: "{docker_image}"
       sandbox_provider: ${sandbox}
-      sandbox_model_base_url: ${oc.env:NEMO_GYM_SANDBOX_MODEL_BASE_URL,https://inference-api.nvidia.com/v1}
+      sandbox_model_base_url: ${oc.env:NEMO_GYM_SANDBOX_MODEL_BASE_URL,https://inference-api.nvidia.com}
       concurrency: 48
 
       model_server:
