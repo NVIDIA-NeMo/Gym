@@ -1,10 +1,19 @@
-# Nemotron 3.5 Super GA MTP-boosted BF16 — 2P2D.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Nemotron 3.5 Super GA MTP-boosted BF16 — 2P2D with local CPU HiCache.
+# GPU/CPU HiCache is prefill-only; NIXL still transfers live KV to decode.
+# Each prefill engine has its own local cache; no shared L3 storage is configured.
+# Startup patches the SGLang 0.5.20 HiCache layer span for Nemotron's sparse IDs.
+# This addresses the scheduler IndexError; GPU cache-restoration validation is pending.
+# Host-memory starting budget per prefill node: TP4 * 64 GB HiCache,
+# plus runtime overhead. Size against available host RAM.
 # Analytical candidate; full-scale startup, accuracy and throughput are unmeasured.
 # P/D counts mean whole four-GPU nodes. Larger D roles are one shared engine.
 # Source checkpoint: nim-mtp-boosted-09212026 (83 registry-hash-verified files).
 # Runtime: SGLang 0.5.20, git 94602c9c2b7cbdb8efd5c52802dac6a1c180089e;
-# Torch 2.13.0+cu130, FlashInfer 0.6.18, NIXL 1.4.1, router 0.3.2,
-# mooncake-transfer-engine-cuda13 0.3.13. Bind the container alias to this runtime.
+# Torch 2.13.0+cu130, FlashInfer 0.6.18, NIXL 1.4.1, router 0.3.2.
+# Bind the container alias to this runtime.
 # Image tag recorded; installed digest was not freshly exposed by the devbox API.
 # Benchmark hardware was GB300 with 189470 MiB free/GPU before loading.
 # This is a GB200 memory-capacity simulation, not measured GB200 compute speed.
@@ -20,7 +29,7 @@
 # Serving capacity does not enlarge the external CPU/sandbox resource budget.
 
 schema: 2
-name: nemotron35-ga-gb200-2p2d-theoretical
+name: nemotron35-ga-gb200-2p2d-hicache
 model:
   path: "$MODEL"
   container: sglang-nemotron35-v0520-validated
@@ -28,7 +37,12 @@ model:
 resources:
   gpu_type: gb200
   gpus_per_node: 4
+sbatch_directives:
+  # Allocate node host memory for the local HiCache pools and runtime.
+  mem: '0'
 engine: sglang
+# SRT resolves setup_script relative to /configs; reuse the /opt/Gym mount.
+setup_script: ../opt/Gym/benchmarks/nemotron_3.5_super/sglang_configs/patch-hicache-mamba.sh
 dynamo:
   install: false
 identity:
@@ -47,7 +61,7 @@ frontend:
     pool-max-idle-per-host: 0
     pool-idle-timeout-secs: 2
     health-check-interval-secs: 5
-    log-level: info
+    log-level: error
     dp-aware: false
     prefill-policy: cache_aware
     decode-policy: cache_aware
@@ -57,19 +71,20 @@ frontend:
 container_mounts:
   "$GYM_REPO": /opt/Gym
 
-# Gym's inference-metrics collector handles vLLM metrics; SRT collects engine telemetry here.
+# SRT collects telemetry; Gym also exports worker metrics during rollout collection.
 observability:
   enabled: true
 
 benchmark:
   type: custom
   container_image: gym-eval
-  client_placement: last_decode
+  placement:
+    node: last_decode
   stream_output: true
   env:
     GYM_CONFIG: benchmarks/swebench/verified/opencode.yaml
     POLICY_MODEL_NAME: &served_model_name nemotron-3.5-super-ga-mtp-boosted
-    EXPERIMENT_NAME: sglang-2p2d-gym
+    EXPERIMENT_NAME: sglang-2p2d-hicache-gym
     EXPORT_TO_CSV: '0'
     EXPORT_CSV_TO_MODEL_DIR: '0'
   command: |
@@ -87,12 +102,37 @@ benchmark:
     mkdir -p "$output_dir"
     rollouts_fpath="$output_dir/rollouts.jsonl"
 
+    # SRT supplies one endpoint per logical engine, including multi-node engines.
+    inference_metrics_config="$output_dir/inference-metrics.yaml"
+    python - "$inference_metrics_config" <<'PY_METRICS'
+    import json
+    import os
+    import sys
+    from pathlib import Path
+
+    endpoints = {}
+    for role in ("prefill", "decode"):
+        variable = f"SRT_{role.upper()}_ENDPOINTS"
+        addresses = os.environ.get(variable, "")
+        if not addresses.strip():
+            raise SystemExit(f"SRT must provide {variable} for inference metrics")
+        for index, address in enumerate(addresses.split(",")):
+            endpoints[f"{role}{index}"] = f"http://{address.strip()}/metrics"
+    metrics = {"enabled": True, "endpoints": endpoints}
+    # SRT provides this service address only for Mooncake HiCache recipes.
+    if mooncake_host := os.environ.get("SRT_SERVICE_HICACHE_MASTER_IPS"):
+        metrics["mooncake_endpoint"] = f"http://{mooncake_host}:9003/metrics"
+    # JSON is valid YAML and safely quotes endpoint addresses.
+    Path(sys.argv[1]).write_text(json.dumps({"inference_metrics": metrics}))
+    PY_METRICS
+
     gym eval prepare --config $GYM_CONFIG +use_cached_prepared_benchmarks=true
 
     gym eval run \
       --config $GYM_CONFIG \
       --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml \
       --config benchmarks/nemotron_3.5_super/policy_model_override.yaml \
+      --config "$inference_metrics_config" \
       "+wandb_project=${NEMO_GYM_USER}-gym-eval" \
       "+wandb_name=$experiment_name" \
       +uv_venv_dir=/opt/uv_venvs \
@@ -128,7 +168,6 @@ roles:
       UCX_CUDA_IPC_ENABLE_MNNVL: y
       NCCL_MNNVL_ENABLE: '1'
       NCCL_CUMEM_ENABLE: '1'
-      UCX_PROTO_INFO: y
       UCX_LOG_LEVEL: error
       SGLANG_DISABLE_USAGE_REPORT: '1'
       HF_HOME: /tmp/nemotron35-hf
@@ -147,10 +186,16 @@ roles:
       disaggregation-mode: prefill
       skip-server-warmup: true
       attention-backend: trtllm_mha
-      chunked-prefill-size: 8192
+      chunked-prefill-size: 131072
       context-length: 262144
       disaggregation-transfer-backend: nixl
       dtype: bfloat16
+      enable-hierarchical-cache: true
+      # GB per TP rank; the hybrid host budget covers attention KV and Mamba states.
+      hicache-size: 128
+      hicache-mem-layout: page_first
+      hicache-io-backend: kernel
+      hicache-write-policy: write_through
       enable-cache-report: true
       enable-metrics: true
       ep-size: 4
@@ -160,8 +205,8 @@ roles:
       mamba-full-memory-ratio: 4
       mamba-radix-cache-strategy: extra_buffer
       mamba-ssm-dtype: float32
-      max-prefill-tokens: 16384
-      max-running-requests: 256
+      max-prefill-tokens: 131072
+      max-running-requests: 1024
       mem-fraction-static: 0.9
       moe-a2a-backend: none
       page-size: 64
@@ -170,8 +215,8 @@ roles:
       speculative-algorithm: EAGLE
       speculative-draft-model-path: /model
       speculative-eagle-topk: 1
-      speculative-num-draft-tokens: 4
-      speculative-num-steps: 3
+      speculative-num-draft-tokens: 2
+      speculative-num-steps: 1
       tokenizer-worker-num: 4
       tool-call-parser: qwen3_coder
       tp-size: 4
@@ -193,7 +238,6 @@ roles:
       UCX_CUDA_IPC_ENABLE_MNNVL: y
       NCCL_MNNVL_ENABLE: '1'
       NCCL_CUMEM_ENABLE: '1'
-      UCX_PROTO_INFO: y
       UCX_LOG_LEVEL: error
       SGLANG_DISABLE_USAGE_REPORT: '1'
       HF_HOME: /tmp/nemotron35-hf
@@ -213,8 +257,8 @@ roles:
       skip-server-warmup: true
       attention-backend: trtllm_mha
       context-length: 262144
-      cuda-graph-max-bs-decode: 128
-      disaggregation-decode-extra-slots: 0
+      cuda-graph-max-bs-decode: 256
+      disaggregation-decode-extra-slots: 64
       disaggregation-transfer-backend: nixl
       dtype: bfloat16
       enable-cache-report: true
@@ -225,8 +269,8 @@ roles:
       mamba-backend: flashinfer
       mamba-radix-cache-strategy: extra_buffer
       mamba-ssm-dtype: float32
-      max-running-requests: 128
-      max-total-tokens: 16777216
+      max-running-requests: 256
+      max-total-tokens: 67108864
       mem-fraction-static: 0.8
       moe-a2a-backend: none
       page-size: 64
@@ -235,8 +279,8 @@ roles:
       speculative-algorithm: EAGLE
       speculative-draft-model-path: /model
       speculative-eagle-topk: 1
-      speculative-num-draft-tokens: 4
-      speculative-num-steps: 3
+      speculative-num-draft-tokens: 6
+      speculative-num-steps: 5
       tokenizer-worker-num: 4
       tool-call-parser: qwen3_coder
       tp-size: 4

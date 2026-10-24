@@ -336,6 +336,14 @@ def test_is_runtime_failure() -> None:
     assert apptainer_provider._is_runtime_failure("FATAL: no instance found") is True
     assert apptainer_provider._is_runtime_failure("instance not found") is True
     assert apptainer_provider._is_runtime_failure("ls: cannot access") is False
+    assert apptainer_provider._is_runtime_failure("FATAL   : container creation failed") is True
+    assert apptainer_provider._is_runtime_failure("some output\nFATAL:   exec failed") is True
+    # The user's own stderr must not be classified as an apptainer failure.
+    assert apptainer_provider._is_runtime_failure("fatal: not a git repository (or any parent)") is False
+    assert apptainer_provider._is_runtime_failure("Error: file /testbed/foo.py does not exist") is False
+    assert apptainer_provider._is_runtime_failure("ERROR: tests/test_x.py::test_y - AssertionError", 1) is False
+    # "ERROR:" lines only count together with apptainer's own exit code.
+    assert apptainer_provider._is_runtime_failure("ERROR  : could not open image", 255) is True
 
 
 def test_constructor_requires_binary(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -704,6 +712,23 @@ async def test_exec_command_failure_is_not_runtime_error(
     assert result.error_type is None
 
 
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "fatal: not a git repository (or any of the parent directories): .git",
+        "FileNotFoundError: path /testbed/data.csv does not exist",
+    ],
+)
+async def test_exec_user_stderr_is_not_runtime_error(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stderr: str
+) -> None:
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (128, "", stderr))
+    result = await provider.exec(_make_handle(tmp_path), "git log")
+
+    assert result.return_code == 128
+    assert result.error_type is None
+
+
 # --------------------------------------------------------------------------- #
 # upload / download
 # --------------------------------------------------------------------------- #
@@ -1011,7 +1036,7 @@ async def test_run_real_timeout(fake_binary: str) -> None:
 
 
 @pytest.mark.skipif(shutil.which("sh") is None, reason="sh not available")
-async def test_run_daemonizing_returns_despite_lingering_child(fake_binary: str) -> None:
+async def test_run_daemonizing_returns_despite_lingering_child(fake_binary: str, tmp_path: Path) -> None:
     """Regression: a backgrounded child inheriting stdout must not wedge the read.
 
     Mirrors ``apptainer instance start``, which forks a long-lived instance that
@@ -1019,10 +1044,15 @@ async def test_run_daemonizing_returns_despite_lingering_child(fake_binary: str)
     until timeout; the daemonizing path waits only for the foreground process.
     """
     provider = apptainer_provider.ApptainerProvider()
-    # Foreground prints and exits immediately; the backgrounded `sleep` holds the
-    # inherited stdout fd open well past the (generous) timeout.
-    argv = [shutil.which("sh"), "-c", "sleep 30 & printf started"]
-    code, out, _err = await provider._run(argv, timeout_s=10, daemonize=True)
+    # Foreground prints and exits immediately.
+    # The backgrounded loop holds the inherited stdout fd open until the test releases it, well past the timeout.
+    release = tmp_path / "release"
+    lingering = f"while [ ! -e {shlex.quote(str(release))} ]; do sleep 0.05; done"
+    argv = [shutil.which("sh"), "-c", f"{lingering} & printf started"]
+    try:
+        code, out, _err = await provider._run(argv, timeout_s=10, daemonize=True)
+    finally:
+        release.touch()
     assert code == 0
     assert out == "started"
 

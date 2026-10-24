@@ -1,0 +1,121 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# GDPval-AA v2 (agentic office work): 220 real-world work tasks (reports, spreadsheets, slide
+# decks, ...), one sample each. The model works as Gym's Stirrup agent, up to 250 turns per
+# task, in a sandbox where it can run code, read and write files and search the web; a judge
+# model scores the files it delivers.
+#
+#   nemotron_recipes/super-3.5/run.sh gdpval
+#
+# Tech report (agent_metrics of gdpval_stirrup_agent):
+#   GDPVal-AA-v2 ELO: comparison/stage_1/eval_elo
+#   GDPVal-AA-v2 norm ELO: comparison/stage_1/normalized_elo
+#
+# Set in .env: POLICY_API_KEY, JUDGE_API_KEY, TAVILY_API_KEY
+#
+# Needs (details: reproducibility.md, "GDPval-AA v2"):
+#   * A judge endpoint (judge_base_url in env.yaml, or gdpval_judge_base_url for this recipe
+#     only) serving gemini-3.1-pro-preview on Chat Completions (<base_url>/chat/completions): at
+#     this Gym commit every panel call goes to that model (see the panel below).
+#   * A Tavily API key (https://tavily.com) for the agent's web search: one key, or
+#     '[key1,key2]' to rotate.
+#   * Root, or a container where you are root: the sandbox starts with --home /root, and the
+#     scoring server apt-installs LibreOffice on startup to convert Office files for the judges.
+#   * Apptainer, and the sandbox image built from Gym's definition at this commit (several GB,
+#     tens of minutes), from the Gym repo root after run.sh has pinned it once:
+#       (cd responses_api_agents/stirrup_agent/containers && \
+#        apptainer build "$PWD/gdpval.sif" gdpval.def)
+#     (add --fakeroot if you build as a non-root user), then export
+#     GDPVAL_CONTAINER_PATH=<path to gdpval.sif>. On aarch64, five pinned packages
+#     are left out (see gdpval_aa_v2_arm64_exclusions.txt).
+#
+# run.sh first sources gdpval.setup.sh, which checks the image path and Tavily key and picks
+# the scoring mode:
+#   * rubric (default): the judge scores each deliverable against the task's rubric. Needs no
+#     reference deliverables, but it is not the published metric.
+#   * comparison (the published metric): the judge compares each deliverable with a reference
+#     model's deliverable for the same task, and an ELO is fitted against references of known
+#     rating, in two stages (45 tasks, each against one reference drawn from all of them; then all
+#     220, each against one of the 4 nearest).
+#     Set GDPVAL_REFS to a directory with one subdirectory of reference deliverables per
+#     reference model, named as in gdpval.setup.sh (<GDPVAL_REFS>/<name>/task_<id>/...). You
+#     generate them yourself by running each reference model through this benchmark with
+#     EXECUTE_ONLY=true.
+#
+# PARALLEL sets both Gym's and the agent's concurrency (the published run's agent used 220; the
+# agent's default is 32). A full comparison run takes hours and makes about a thousand judge
+# calls. LIMIT works in rubric mode; a comparison run needs every stage's tasks.
+
+# Gym commit the published number was produced with; run.sh pins to it. It comes from Gym pull
+# request #3333, which was squash-merged, so it is not on main: run.sh fetches it by its id.
+gym_commit: df3e201d942f6397def1ec8c10037d29115fcbbd
+# Gym benchmark config this recipe builds on.
+benchmark_config: benchmarks/gdpval/config.yaml
+
+# Judge server for the panel below. At this Gym commit it sends every call as its own model
+# (gemini-3.1-pro-preview), whatever the panel member; set gdpval_judge_gemini_model in env.yaml
+# only if your provider serves it under a different id.
+gdpval_judge_model:
+  responses_api_models:
+    openai_model:
+      openai_base_url: ${oc.select:gdpval_judge_base_url,${judge_base_url}}
+      openai_api_key: ${oc.select:gdpval_judge_api_key,${judge_api_key}}
+      openai_model: ${oc.select:gdpval_judge_gemini_model,gemini-3.1-pro-preview}
+      # As in the published run.
+      max_concurrent_requests: 10
+
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      # The published run's panel; it replaces the benchmark default (lists are not merged), so,
+      # as in that run, no judge reads audio or video natively. Each call samples one member's
+      # reasoning settings but goes to the judge server's model (above).
+      judge_panel:
+      - name: gpt-5.5
+        model: gpt-5.5
+        create_params_overrides: {reasoning_effort: medium}
+      - name: gemini-3.1-pro
+        model: ${oc.select:gdpval_judge_gemini_model,gemini-3.1-pro-preview}
+        create_params_overrides: {extra_body: {reasoning_effort: high}}
+      - name: claude-opus-4.8
+        model: claude-opus-4-8
+        create_params_overrides: {extra_body: {thinking: {type: enabled}}}
+      # Reproducible judge sampling, as in the published run (default: per-task only).
+      judge_sampling_seed: 42
+      num_comparison_trials: 4
+      persist_raw_judge_responses: true
+      preconvert_max_concurrent: 30
+
+gdpval_stirrup_agent:
+  responses_api_agents:
+    stirrup_agent:
+      agent_max_turns: 250
+      tavily_api_key: ${oc.env:TAVILY_API_KEY,null}
+
+# Two-stage ELO for comparison mode (gdpval.setup.sh enables it), as in the published run.
+multistage:
+  enabled: false
+  retry_inprocess: true
+  stages:
+  - num_tasks: 45
+    partial_completion:
+      min_success_fraction: 0.9
+      min_per_reference_success_fraction: 0.5
+      min_successful_rows_per_reference: 1
+      waivable_failure_classes: [timeout_exceeded, transient]
+      tolerate_unresolved: true
+  - num_tasks: 220
+    num_models: 4

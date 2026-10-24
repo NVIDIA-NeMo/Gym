@@ -234,6 +234,7 @@ class VerifiersNeMoGymResponse(NeMoGymResponse):
     output: list[dict[str, Any]]
     reward: float
     metrics: dict[str, Any] = Field(default_factory=dict)
+    exported_state: dict[str, Any] = Field(default_factory=dict, exclude_if=lambda value: not value)
     parallel_tool_calls: bool = True
     tool_choice: str = "auto"
     tools: list = Field(default_factory=list)
@@ -269,6 +270,11 @@ class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
 
     vf_env_id: str = Field(default="", description="Verifiers environment ID")
     vf_env_args: dict = Field(default_factory=dict, description="Verifiers environment arguments")
+    export_state_columns: list[str] = Field(
+        default_factory=list,
+        description="Extra verifiers State keys (JSON-serializable) copied into response.exported_state, e.g. "
+        "['assertion_results'] for AutomationBench per-assertion verdicts. Empty leaves rollouts unchanged.",
+    )
 
     max_tokens: int = Field(default=8192, description="Max tokens for generation")
 
@@ -310,7 +316,6 @@ class VerifiersAgentRunRequest(BaseRunRequest):
 
 
 class VerifiersAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
     config: VerifiersAgentConfig
 
@@ -411,7 +416,8 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         cache_key = self.config.model_server.name
         if cache_key not in self.client_cache:
             openai_client = AsyncOpenAI(
-                base_url=self.resolve_model_base_url(self.config.model_server.name),
+                # Shared across rollouts, so it must not name the span that happens to be current now.
+                base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
                 api_key="EMPTY",  # pragma: allowlist secret
                 # DefaultAsyncHttpxClient keeps the SDK's pool limits and redirect
                 # policy. Pass the bare CookieJar: httpx.Cookies adopts a CookieJar
@@ -452,13 +458,31 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 output.append(NeMoGymEasyInputMessage(role=role, content=_text(msg.get("content"))).model_dump())
 
         if not any(item.get("generation_token_ids") for item in output):
+            has_assistant_turn = any(
+                item.get("type") == "function_call"
+                or (item.get("type") == "message" and item.get("role") == "assistant")
+                for item in output
+            )
             err = rollout_output.get("error") or {}
             err_msg = err.get("error") or err.get("error_chain_repr") or "unknown (no error info on rollout_output)"
-            logger.warning(
-                "[verifiers_agent] rollout produced no trainable tokens. This can happen when sandbox concurrency quota is exceeded. Returning empty trajectory. "
-                "Underlying error: %s",
-                err_msg,
-            )
+            if not has_assistant_turn:
+                logger.warning(
+                    "[verifiers_agent] rollout produced no trainable tokens. This can happen when sandbox concurrency quota is exceeded. Returning empty trajectory. "
+                    "Underlying error: %s",
+                    err_msg,
+                )
+            elif err:
+                # verifiers stores a mid-rollout error on the state without logging it; this is its only Gym-side log.
+                logger.warning(
+                    "[verifiers_agent] rollout ended with an error after its assistant turns. Underlying error: %s",
+                    err_msg,
+                )
+            else:
+                # Eval mode (return_token_id_information: false) never returns token ids; the trajectory is complete.
+                logger.debug(
+                    "[verifiers_agent] no token ids on assistant turns; token ids were likely not requested. "
+                    "Appending the empty training placeholder."
+                )
             output.append(
                 NeMoGymResponseOutputMessageForTraining(
                     id=_EMPTY_OUTPUT_ITEM_ID,
@@ -585,17 +609,22 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 "temperature": getattr(body.responses_create_params, "temperature", None) or self.config.temperature,
                 "top_p": getattr(body.responses_create_params, "top_p", None) or self.config.top_p,
             }
+            extra_columns = [c for c in self.config.export_state_columns if c != "trajectory"]
             outputs = await vf_env.run_group(
                 group_inputs=[rollout_input],
                 client=client,
                 model=self.config.model_name,
                 sampling_args=sampling_args,
-                state_columns=["trajectory"],
+                state_columns=["trajectory", *extra_columns],
             )
 
             rollout_output = outputs[0]
             reward = rollout_output.get("reward", 0.0) or 0.0
             metrics = rollout_output.get("metrics", {}) or {}
+            # verifiers exports a column missing from the State as None (a typo, or the rubric never set it).
+            exported_state = {c: rollout_output[c] for c in extra_columns if rollout_output.get(c) is not None}
+            if missing := [c for c in extra_columns if c not in exported_state]:
+                logger.warning(f"Task {task_idx}: export_state_columns {missing} not on the verifiers State, omitted")
 
             output = self._convert_trajectory_to_output(rollout_output)
 
@@ -625,6 +654,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 group_id=str(task_idx),
                 reward=reward,
                 metrics=metrics,
+                exported_state=exported_state,
             )
         except Exception as e:
             logger.error(f"Exception in responses(): {type(e).__name__}: {e}")
