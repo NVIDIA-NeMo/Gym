@@ -5,11 +5,14 @@
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 from responses_api_agents.anyswe_agent.app import AnySweAgent, AnySweInstanceConfig, _r2e_resolved
 from responses_api_agents.anyswe_agent.tests.test_app import _config
@@ -43,7 +46,11 @@ def _run(script: str, cwd: Path) -> str:
 
 
 class TestR2ETestSetup:
-    def test_run_tests_finds_the_hidden_tests_only_after_the_link(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("colored", [False, True])
+    def test_run_tests_finds_the_hidden_tests_only_after_the_link(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, colored: bool
+    ) -> None:
+        monkeypatch.setenv("PY_COLORS", "1" if colored else "0")
         repo, tests = _r2e_image_layout(tmp_path)
         instance = {"FAIL_TO_PASS": ["r2e_tests/test_1.py::test_fixed"], "PASS_TO_PASS": []}
 
@@ -55,7 +62,8 @@ class TestR2ETestSetup:
         setup = AnySweAgent._r2e_test_setup_script(str(repo), str(tests))
         after = _run(setup + "bash run_tests.sh", repo)
         assert f">>>>> Linked {tests} into {repo}" in after
-        assert "PASSED r2e_tests/test_1.py::test_fixed" in after
+        plain_after = re.sub(r"\x1b\[[0-9;]*m", "", after)
+        assert "PASSED r2e_tests/test_1.py::test_fixed" in plain_after
         assert _r2e_resolved(instance, after) is True
         assert (repo / "r2e_tests").is_symlink()
 
