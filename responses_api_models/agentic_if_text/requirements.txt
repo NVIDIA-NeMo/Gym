@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+jsonschema==4.23.0

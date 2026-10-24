@@ -803,6 +803,8 @@ extend-exclude = [
     "*.ipynb",
     # Vendored apple/ToolSandbox source — kept verbatim (see its VENDORING.md).
     "resources_servers/toolsandbox/tool_sandbox",
+    # Original strict policy bodies are checked against their frozen source hashes.
+    "resources_servers/agentic_if_realworld/benchmark/policy",
 ]
 [tool.ruff.lint]
 # Configure linting rules

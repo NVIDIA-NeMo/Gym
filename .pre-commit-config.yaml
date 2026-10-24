@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Original policy bodies are byte-checked; only SPDX headers are added.
+exclude: ^resources_servers/agentic_if_realworld/benchmark/policy/
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.4.0
