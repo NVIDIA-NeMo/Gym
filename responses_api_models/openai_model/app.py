@@ -103,6 +103,20 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     openai_api_key: str
     openai_model: str
 
+    retry_empty_completions: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Re-issue the upstream request up to N extra times when the model "
+            "stopped without any visible output: a chat completion whose message "
+            "has neither content nor tool_calls, or a response whose output has "
+            "no tool call and no message text (reasoning only). Some always-thinking reasoning models end a "
+            "fraction of agentic turns this way, and agent harnesses typically "
+            "treat the empty assistant message as fatal. Responses truncated by "
+            "the token limit are not retried. 0 (default) disables."
+        ),
+    )
+
     extra_body: Dict[str, Any] = Field(default_factory=dict)
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
@@ -350,7 +364,17 @@ class SimpleModelServer(SimpleResponsesAPIModel):
                 }
             return NeMoGymResponse.model_validate(response_dict)
 
-        return await self._call_upstream(create_and_validate)
+        response = await self._call_upstream(create_and_validate)
+        for attempt in range(self.config.retry_empty_completions):
+            if not _response_is_empty(response.model_dump()):
+                break
+            LOG.warning(
+                "Upstream response has no visible output (reasoning only); retrying (%d/%d)",
+                attempt + 1,
+                self.config.retry_empty_completions,
+            )
+            response = await self._call_upstream(create_and_validate)
+        return response
 
     async def chat_completions(
         self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
@@ -362,7 +386,63 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             response_dict = await self._client.create_chat_completion(**body_dict)
             return NeMoGymChatCompletion.model_validate(response_dict)
 
-        return await self._call_upstream(create_and_validate)
+        response = await self._call_upstream(create_and_validate)
+        for attempt in range(self.config.retry_empty_completions):
+            if not _chat_completion_is_empty(response.model_dump()):
+                break
+            LOG.warning(
+                "Upstream chat completion has neither content nor tool_calls; retrying (%d/%d)",
+                attempt + 1,
+                self.config.retry_empty_completions,
+            )
+            response = await self._call_upstream(create_and_validate)
+        return response
+
+
+def _has_text(content: Any) -> bool:
+    if isinstance(content, str):
+        return content.strip() != ""
+    return bool(content)
+
+
+def _chat_completion_is_empty(response_dict: Dict[str, Any]) -> bool:
+    """True when the first choice stopped with no content and no tool calls (e.g. reasoning only)."""
+    choices = response_dict.get("choices") or []
+    if not choices:
+        return False
+    choice = choices[0] or {}
+    if choice.get("finish_reason") != "stop":
+        return False  # preserve truncations, filtering, and other terminal outcomes
+    message = choice.get("message") or {}
+    return (
+        not _has_text(message.get("content"))
+        and not _has_text(message.get("refusal"))
+        and not message.get("tool_calls")
+        and not message.get("function_call")
+    )
+
+
+def _response_is_empty(response_dict: Dict[str, Any]) -> bool:
+    """True when a completed response's output has no tool call and no non-empty message text."""
+    if response_dict.get("status") not in (None, "completed") or response_dict.get("error"):
+        return False  # do not resample terminal failures or token-budget truncations
+    output = response_dict.get("output")
+    if not isinstance(output, list):
+        return False
+    for item in output:
+        if not isinstance(item, dict):
+            return False
+        item_type = item.get("type")
+        if item_type == "reasoning":
+            continue
+        if item_type == "message":
+            parts = item.get("content")
+            if isinstance(parts, list) and not any(
+                isinstance(part, dict) and _has_text(part.get("text") or part.get("refusal")) for part in parts
+            ):
+                continue
+        return False
+    return True
 
 
 if __name__ == "__main__":
