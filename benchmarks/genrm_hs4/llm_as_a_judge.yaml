@@ -1,0 +1,21 @@
+config_paths:
+  - benchmarks/genrm_hs4/config.yaml
+  - resources_servers/genrm_eval/configs/llm_as_a_judge_model.yaml
+
+genrm_hs4_benchmark_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: genrm_hs4_llm_as_a_judge
+          type: benchmark
+          jsonl_fpath: benchmarks/genrm_hs4/data/hs4_llm_as_a_judge_validation.jsonl
+          prepare_script: benchmarks/genrm_hs4/prepare_llm_as_a_judge.py
+          prompt_config: null
+          num_repeats: 1
+          license: NVIDIA Internal Use Only, Do Not Distribute
+
+responses_create_params:
+  temperature: 1.0
+  top_p: 0.95
+  max_output_tokens: 16384
+  stream: false
