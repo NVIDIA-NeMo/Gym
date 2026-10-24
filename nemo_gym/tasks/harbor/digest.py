@@ -117,17 +117,28 @@ def inputs_digest(context: Path, settings: Mapping[str, str] | None = None) -> s
     as ``NUL key NUL value LF`` records sorted by key. Folder ownership is not part of it: a build does not
     read it, and it differs between hosts that hold the same folder.
     """
+    digest = hashlib.sha256()
+    for relative, kind, mode, payload in _tree_entries(context):
+        digest.update(f"{relative}\0{kind}\0{mode:o}\0{payload}\n".encode())
+    for key, value in sorted((settings or {}).items()):
+        digest.update(f"\0{key}\0{value}\n".encode())
+    return digest.hexdigest()
+
+
+def _tree_entries(context: Path) -> list[tuple[str, str, int, str]]:
+    """Every entry under the context folder ``context`` as :func:`inputs_digest` reads it, sorted by relative posix
+    path: ``(relative_path, kind, st_mode, payload)``."""
     context = Path(context)
     if not context.is_dir():
         raise ValueError(f"Not a build context folder: {context}")
-    entries: list[tuple[str, Path]] = []
+    paths: list[tuple[str, Path]] = []
     for root, dirs, files in os.walk(context, followlinks=False):
         root_path = Path(root)
         for name in dirs + files:
             path = root_path / name
-            entries.append((path.relative_to(context).as_posix(), path))
-    digest = hashlib.sha256()
-    for relative, path in sorted(entries, key=lambda item: item[0]):
+            paths.append((path.relative_to(context).as_posix(), path))
+    entries: list[tuple[str, str, int, str]] = []
+    for relative, path in sorted(paths, key=lambda item: item[0]):
         mode = path.lstat().st_mode
         if stat.S_ISLNK(mode):
             kind, payload = "l", os.readlink(path)
@@ -138,7 +149,38 @@ def inputs_digest(context: Path, settings: Mapping[str, str] | None = None) -> s
                 kind, payload = "f", hashlib.file_digest(stream, "sha256").hexdigest()
         else:
             kind, payload = "o", ""
-        digest.update(f"{relative}\0{kind}\0{mode:o}\0{payload}\n".encode())
-    for key, value in sorted((settings or {}).items()):
-        digest.update(f"\0{key}\0{value}\n".encode())
-    return digest.hexdigest()
+        entries.append((relative, kind, mode, payload))
+    return entries
+
+
+_KIND_NAMES = {"f": "a file", "l": "a link", "d": "a folder", "o": "another kind of entry"}
+
+
+def inputs_differences(ours: Path, theirs: Path) -> list[tuple[str, str | None, str | None]]:
+    """Where the context folders ``ours`` and ``theirs`` differ in what :func:`inputs_digest` reads, in path order.
+
+    One item per entry that is in one tree only or reads differently in the two: ``(relative_path, in ours, in
+    theirs)``, each side a short description (``a file 0755``, ``a link 0777 -> target``, ``a folder 0755``, with
+    ``(content <sha256 prefix>)`` on a file whose bytes differ from the other side's) or ``None`` where the tree has
+    no such entry. Empty exactly when the two trees' :func:`inputs_digest` agree.
+    """
+    mine = {relative: (kind, mode, payload) for relative, kind, mode, payload in _tree_entries(ours)}
+    other = {relative: (kind, mode, payload) for relative, kind, mode, payload in _tree_entries(theirs)}
+    differences: list[tuple[str, str | None, str | None]] = []
+    for relative in sorted(set(mine) | set(other)):
+        here, there = mine.get(relative), other.get(relative)
+        if here != there:
+            differences.append((relative, _describe_entry(here, there), _describe_entry(there, here)))
+    return differences
+
+
+def _describe_entry(entry: tuple[str, int, str] | None, against: tuple[str, int, str] | None) -> str | None:
+    if entry is None:
+        return None
+    kind, mode, payload = entry
+    text = f"{_KIND_NAMES[kind]} {stat.S_IMODE(mode):04o}"
+    if kind == "l":
+        return f"{text} -> {payload}"
+    if kind == "f" and against is not None and against[0] == "f" and against[2] != payload:
+        return f"{text} (content {payload[:12]})"
+    return text

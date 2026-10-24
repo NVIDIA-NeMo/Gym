@@ -88,6 +88,7 @@ from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
 from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+from nemo_gym.tasks.harbor.verifier_env import TESTS_DOCKERFILE
 
 
 LOGGER = logging.getLogger(__name__)
@@ -179,6 +180,8 @@ class HarborEnvironmentServer(
         # Resolved Compose documents and the compose.yaml each is written to, by task snapshot and digest.
         self._compose_documents: dict[tuple[Path, str], asyncio.Task[tuple[dict[str, Any], Path]]] = {}
         self._snapshots = tempfile.TemporaryDirectory(prefix="nemo-gym-harbor-tasks-")
+        # Built or declared verifier images found without /tests/test.sh, each warned about once.
+        self._verifier_images_without_tests: set[str] = set()
         self._shutting_down = False
         artifacts = self.config.artifacts_dir
         if artifacts is None or not artifacts.is_absolute():
@@ -490,10 +493,14 @@ class HarborEnvironmentServer(
                 422, f"Task {task.task_id!r} declares no image; sandbox-less tasks are not supported yet"
             )
         if not task.config.is_shared_verifier and _verifier_image(task) is None:
+            # The loader refuses this shape (no [verifier.environment].docker_image and no verifier image built from
+            # tests/Dockerfile recorded); kept as the seed's invariant for a task object that did not come from it.
             raise HTTPException(
                 422,
-                f"Task {task.task_id!r} needs a separate verifier built from tests/Dockerfile; "
-                "only prebuilt verifier images are supported yet",
+                f"Task {task.task_id!r} has no image for its separate verifier: [verifier.environment] names no "
+                f"docker_image and no verifier image built from {TESTS_DOCKERFILE} is recorded in "
+                f"{task.path.parent / BUILT_IMAGES_FILE}; prepare the dataset again (it builds the file when builds "
+                "are enabled, and leaves the task out saying why otherwise), or name a prebuilt image",
             )
         # Fail before provisioning; retain templates in the snapshot and resolve at use time.
         resolve_env_templates(task.env)
@@ -543,10 +550,12 @@ class HarborEnvironmentServer(
             image_user = await self._image_user_name(sandbox, task, names)
             # The working directory and /logs exist before the entrypoint starts, as Harbor's bind mounts do.
             session.workdir = await self._prepare_workdir(sandbox, task, task.workdir)
+            # A Compose group's main was started by the adapter, its entrypoint run and its image healthcheck waited.
+            managed = compose is not None
             launch = session.entrypoint = await self._start_entrypoint(
-                sandbox, task, image_user, prepared_workdir=session.workdir
+                sandbox, task, image_user, prepared_workdir=session.workdir, compose_managed=managed
             )
-            await self._wait_healthy(sandbox, task, launch, user=image_user)
+            await self._wait_healthy(sandbox, task, launch, user=image_user, compose_managed=managed)
             await self._write_task_context(sandbox, task)
             if launch is not None:
                 # The last look before the hand-over: an entrypoint that died during the seed's remaining steps

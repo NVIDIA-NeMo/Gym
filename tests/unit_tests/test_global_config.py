@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib
 import importlib.metadata
 import sys
 from contextlib import nullcontext as does_not_raise
@@ -3773,3 +3774,16 @@ class TestAbsoluteIpServerTypes:
 
         with raises(ConfigError, match=match):
             GlobalConfigDictParser().parse(_absolute_ip_parse_config({"absolute_ip_server_types": value}))
+
+
+def test_the_cli_parse_leaves_hydras_argument_parser_as_it_found_it(monkeypatch: MonkeyPatch) -> None:
+    """The parser is patched for the call only. Left patched, every parse used to wrap the previous wrapper, one
+    frame deeper each time, until a long test session recursed past the limit inside hydra's parser."""
+    hydra_main_module = importlib.import_module("hydra.main")
+    original = hydra_main_module.get_args_parser
+
+    monkeypatch.setattr(sys, "argv", ["gym"])
+    for _ in range(4):
+        GlobalConfigDictParser().parse_global_config_dict_from_cli()
+
+    assert hydra_main_module.get_args_parser is original

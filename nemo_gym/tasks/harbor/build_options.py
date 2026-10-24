@@ -6,7 +6,7 @@
 BuildOptions carries whether builds are enabled, which tool to use, the repository to push to
 and the platform to build for. It is read from a Hydra config mapping and, before the run
 config exists, from the command line overrides and env.yaml by a side-effect-free Hydra parse.
-The module depends on the build tool list and the repository variable only.
+The module depends on the build tool list, the repository variable and the platform parser only.
 """
 
 import os
@@ -17,6 +17,7 @@ from typing import Any
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.tasks.harbor.build_plan import BUILD_TOOLS, REPOSITORY_ENV
+from nemo_gym.tasks.harbor.registry import ImageConfigError, platform_pair
 
 
 # The top-level configuration block that sets Dockerfile builds up, and the settings it takes.
@@ -52,7 +53,8 @@ class BuildOptions:
 
         ``config`` is the merged global configuration (``env.yaml``, ``--config`` files and
         ``++builds.<setting>=<value>`` overrides) or any dict shaped like it; a missing block keeps
-        every default. Unknown settings and values of the wrong type are refused.
+        every default. Unknown settings, values of the wrong type and a ``platform`` the records could not tell
+        from the baseline (an amd64 micro-architecture level above it, see :func:`_check_platform`) are refused.
         """
         block = (config or {}).get(BUILDS_KEY)
         if block is None:
@@ -70,6 +72,7 @@ class BuildOptions:
         tool = _build_setting(block, "tool")
         if tool is not None and tool not in BUILD_TOOLS:
             raise ValueError(f"`{BUILDS_KEY}.tool` must be one of {', '.join(BUILD_TOOLS)}; got {tool!r}")
+        _check_platform(block)
         return cls(
             enabled=enabled,
             tool=tool,
@@ -85,6 +88,23 @@ def _build_setting(block: Mapping[str, Any], name: str) -> str | None:
     if not isinstance(value, str):
         raise ValueError(f"`{BUILDS_KEY}.{name}` must be a string; got {value!r}")
     return value
+
+
+def _check_platform(block: Mapping[str, Any]) -> None:
+    """Refuse a ``platform`` setting :func:`~nemo_gym.tasks.harbor.registry.platform_pair` refuses, where it enters.
+
+    An amd64 micro-architecture level above the baseline (``linux/amd64/v3``) is another platform to docker, but
+    the records keep an image's os and architecture only, so a sidecar built for it (of a task whose ``main`` is
+    prebuilt, with no base image to record first) would be pushed and recorded as ``linux/amd64`` and reused by a
+    later baseline run. ``ImageBuilder`` repeats the check for a :class:`BuildOptions` made in code.
+    """
+    platform = _build_setting(block, "platform")
+    if platform is None:
+        return
+    try:
+        platform_pair(platform)
+    except ImageConfigError as exc:
+        raise ValueError(f"`{BUILDS_KEY}.platform`: {exc}") from exc
 
 
 def build_options_from_overrides(overrides: list[str]) -> BuildOptions:

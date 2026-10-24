@@ -102,7 +102,8 @@ class PreparedTaskset:
     rows_path: Path
     output_dir: Path
     skipped: dict[str, str] = field(default_factory=dict)
-    # Every distinct image the prepared tasks start from, for pre-pulling.
+    # Every distinct image a run of the prepared tasks starts, for pre-pulling (``run_images``): the task images,
+    # the separate verifiers' (declared or built from tests/Dockerfile) and the Compose services' as recorded.
     images: tuple[str, ...] = ()
 
 
@@ -162,9 +163,13 @@ def prepare_target(
     # before the tasks load; a base image the registry cannot resolve stops the preparation here. Only
     # the selected tasks' images are recorded, so an image a left-out task uses cannot stop it. A target
     # that is itself a task folder always loads (discover_tasks raises for it); selection applies after.
-    # A missing or unreadable target is reported by discover_tasks below, in its own words.
+    # A missing or unreadable target is reported by discover_tasks below, in its own words. Images are
+    # recorded for the platform the sandboxes run, ``builds.platform`` (linux/amd64 unless set), as the
+    # built ones are.
     images = (
-        record_base_images(folder, select=None if is_task_folder(folder) else selected) if folder.is_dir() else None
+        record_base_images(folder, select=None if is_task_folder(folder) else selected, platform=build.platform)
+        if folder.is_dir()
+        else None
     )
     if images is not None:
         print(f"Base image configurations recorded in {images}")
@@ -204,7 +209,7 @@ def prepare_target(
         raise _no_runnable_task(folder, errors)
     # A Compose file that does not resolve leaves its task out the same way; the others' images are still recorded.
     unresolved: dict[str, str] = {}
-    images = record_compose_images(tasks, tasks[0].path.parent, skipped=unresolved)
+    images = record_compose_images(tasks, tasks[0].path.parent, skipped=unresolved, platform=build.platform)
     if unresolved:
         for task_id, reason in unresolved.items():
             errors[task_id] = HarborTaskError(reason)
@@ -258,6 +263,11 @@ def run_images(tasks: list[HarborTask], image_configs: Mapping[str, Any]) -> tup
     for task in tasks:
         if task.image:
             images.add(task.image)
+        if task.verifier_image:
+            # The separate verifier's sandbox starts this image: the one prepare built from tests/Dockerfile
+            # (recorded under the tests/ digest, never a Compose service, so nothing below would name it) or the
+            # declared one, which the check below names too (HarborTask.verifier_image covers both).
+            images.add(task.verifier_image)
         verifier_environment = task.config.verifier.environment
         if (
             not task.config.is_shared_verifier
