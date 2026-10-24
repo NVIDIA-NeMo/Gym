@@ -19,7 +19,18 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, ValidationInfo, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    ValidationInfo,
+    model_validator,
+)
+from typing_extensions import TypedDict
 
 from nemo_gym.token_id_capture.records import (  # noqa: F401  (re-exported for staging consumers)
     LEDGER_ROW_MISSING_CHAIN_HASH_REASON,
@@ -39,10 +50,34 @@ from nemo_gym.token_id_capture.staging.digest import (
 
 CaptureDisposition = Literal["staged", "capture_failed"]
 CaptureMode = Literal["token_in", "text"]
+CompletionStatus = Literal["completed", "incomplete", "failed", "unknown"]
+RootReason = Literal[
+    "first_call",
+    "no_prefix_match",
+    "non_user_suffix",
+    "render_options_changed",
+    "worker_rooted",
+    "ambiguous_candidate",
+]
 Identifier = Annotated[StrictStr, Field(min_length=1)]
 NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
 PositiveInt = Annotated[StrictInt, Field(ge=1)]
 DigestHex = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
+class OutputValidationText(TypedDict, total=False):
+    """Original text read by the framework's output detectors."""
+
+    text: StrictStr
+
+
+class OutputValidationItem(TypedDict, total=False):
+    """Minimal output evidence; no transport arrays or unrelated response fields."""
+
+    type: StrictStr | None
+    content: list[OutputValidationText]
+    summary: list[OutputValidationText]
+
 
 # Only the explicit local builder supplies this identity; it is never a wire field.
 _BUILD_STAGING_DIGEST = object()
@@ -97,6 +132,37 @@ class _DigestWireModel(_WireModel):
     extras_digest_version: Literal[EXTRAS_DIGEST_VERSION] = EXTRAS_DIGEST_VERSION
 
 
+class ReplayItem(_WireModel):
+    """Prompt-content identity before gateway conversion, without media payloads."""
+
+    role: Literal["system", "developer", "user", "assistant", "tool", "envelope"]
+    digest: DigestHex
+    empty_tool_content_digest: DigestHex | None = None
+
+
+class ReplayContext(_WireModel):
+    """Versioned comparison facts; only the framework decides compatibility."""
+
+    normalization_version: Literal[1] = 1
+    items: list[ReplayItem]
+    render_digest: DigestHex | None = None
+
+
+class ReplaySummary(_WireModel):
+    """Bounded evidence for an ordered source history, stored once per call.
+
+    The next request supplies its items transiently so Gym can compare
+    the corresponding prefix. Historical per-item arrays are not persisted.
+    """
+
+    normalization_version: Literal[1] = 1
+    item_count: NonNegativeInt
+    source_digest: DigestHex
+    # Alternate source identity only; RL must prove renderer equivalence.
+    empty_tool_content_digest: DigestHex | None = None
+    render_digest: DigestHex | None = None
+
+
 class GenerationCutContinuation(_WireModel):
     """A checkpointed prefix of the same call, which the worker continues instead of regenerating.
 
@@ -139,17 +205,29 @@ class CaptureAdmission(_WireModel):
     model_call_id: Identifier
     parent_call_id: Identifier | None = None
     prev_len: NonNegativeInt = 0
-    mode: CaptureMode
+    mode: Literal["token_in", "text", "candidate"]
     required_prefix_token_ids: list[StrictInt] = Field(default_factory=list)
     staging_chain: list[str] = Field(default_factory=list)
     parent_chain_hash: DigestHex | None = None
     generation_cut: GenerationCutContinuation | None = None
+    request_replay: ReplayContext | None = None
+    candidate_replay: ReplaySummary | None = None
+    # Gym matched source history; RL qualifies the actual renderer when needed.
+    requires_empty_tool_content_equivalence: StrictBool | None = None
+    root_reason: RootReason | None = None
 
     @model_validator(mode="after")
     def _validate_prefix_contract(self) -> Self:
         if any(token_id < 0 for token_id in self.required_prefix_token_ids):
             raise ValueError("required_prefix_token_ids must be non-negative")
-        if self.mode == "token_in":
+        if self.mode == "candidate":
+            if self.request_replay is None or self.candidate_replay is None:
+                raise ValueError("candidate admission requires source request and predecessor evidence")
+            if self.requires_empty_tool_content_equivalence is None:
+                raise ValueError("candidate admission requires an explicit source-match proof")
+        elif self.candidate_replay is not None or self.requires_empty_tool_content_equivalence is not None:
+            raise ValueError("source-match proof is only valid for candidate admissions")
+        if self.mode in ("token_in", "candidate"):
             if self.parent_call_id is None or self.prev_len == 0:
                 raise ValueError("token_in admission requires a parent_call_id and prev_len > 0")
             if self.parent_chain_hash is None:
@@ -379,6 +457,13 @@ class CommitCoords(_DigestWireModel):
         return self
 
 
+class OutputItemEvidence(_WireModel):
+    """Original served item identity and a content witness, without token arrays."""
+
+    id: str | None = None
+    fingerprint: DigestHex
+
+
 class CallRecord(_DigestWireModel):
     """One token-free call manifest row in a rollout's capture ledger."""
 
@@ -407,6 +492,13 @@ class CallRecord(_DigestWireModel):
     # Canonicalization version of the fingerprints above; 0 means none were
     # recorded. Attribution ignores fingerprints from a different version.
     fingerprint_version: NonNegativeInt = 0
+    replay: ReplaySummary | None = None
+    output_items: list[OutputItemEvidence] | None = None
+    # None means absent evidence (including older rows), not an unknown outcome.
+    response_status: CompletionStatus | None = None
+    last_output_item: OutputValidationItem | None = None
+    root_reason: RootReason | None = None
+
     # The capture key this call was staged under, when it is not the receipt's own.
     # A checkpoint restore continues an episode under its next attempt,
     # and the calls made before the checkpoint stay staged under the earlier attempt's key.
@@ -463,6 +555,11 @@ class RolloutManifest(_WireModel):
     rollout_id: Identifier
     records: list[CallRecord] = Field(default_factory=list)
     failures: list[ManifestFailure] = Field(default_factory=list)
+    attempted_call_ids: list[Identifier] = Field(default_factory=list)
+    # No successful custody acknowledgement, not proof that a worker is active
+    # or wrote nothing. A terminal consumer may mask the attempt, but must leave
+    # these calls' possible late staging writes out of immediate cleanup.
+    pending_call_ids: list[Identifier] = Field(default_factory=list)
 
 
 class RolloutRemoval(_WireModel):
@@ -481,6 +578,8 @@ class RolloutReceipt(_DigestWireModel):
     reward: float | None = None
     terminal_model_call_id: Identifier | None = None
     manifest: list[CallRecord] = Field(default_factory=list)
+    attempted_call_ids: list[Identifier] = Field(default_factory=list)
+    pending_call_ids: list[Identifier] = Field(default_factory=list)
     capture_poisoned: bool = False
     failure_reason: str | None = None
     # How ``terminal_model_call_id`` was chosen: ``declared`` when the agent

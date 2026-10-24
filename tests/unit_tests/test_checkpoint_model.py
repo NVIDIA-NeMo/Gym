@@ -41,7 +41,7 @@ from nemo_gym.rollout_correlation import RolloutContextMiddleware, current_rollo
 from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
 from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
 from nemo_gym.token_id_capture.lineage import FileLineageStore
-from nemo_gym.token_id_capture.protocols import RolloutRetiredError
+from nemo_gym.token_id_capture.protocols import CaptureAdmissionError, RolloutRetiredError
 from nemo_gym.token_id_capture.records import ParentResolutionStatus
 from nemo_gym.token_id_capture.sink import NG_COMMIT_COORDS_FIELD, CaptureContext, current_capture_context
 from nemo_gym.token_id_capture.staging.records import (
@@ -416,6 +416,7 @@ def _restore_request(checkpoint_id: str, checkpoint_dir: Path, episode_ids: list
 async def test_restored_ledger_lets_the_next_attempt_resolve_its_parent(tmp_path: Path) -> None:
     ledger, _, controller = await _ledger_participant(tmp_path / "before")
     await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r", staging_chain=("r/c1",)))
+    await ledger.close_admissions("r")
     await controller.prepare(CheckpointRequest(**control()))
     commit = await controller.commit(_commit_request("c1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
     # A row written after the cut belongs to an execution the restore replaces.
@@ -434,6 +435,26 @@ async def test_restored_ledger_lets_the_next_attempt_resolve_its_parent(tmp_path
     assert restored.retired.marks() == {"r": 0}
     # The carried-over call stays staged under the attempt that made it.
     assert [record.capture_key for record in manifest.records] == ["r"]
+    assert not any(row.get("admissions_closed") for row in restored_ledger.export_rows("r-a1"))
+    await restored_ledger.begin_call("r-a1", "next")
+    assert (await restored_ledger.manifest("r-a1"))["pending_call_ids"] == ["next"]
+    with pytest.raises(CaptureAdmissionError, match="closed"):
+        await ledger.begin_call("r", "still-closed")
+
+
+async def test_restore_reopens_closed_admissions_from_older_checkpoint_rows(tmp_path: Path) -> None:
+    ledger = FileLineageStore(tmp_path / "live")
+    await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r"))
+    await ledger.close_admissions("r")
+    record = ModelRecord(episode_id=EpisodeId(rollout_id="r"), rows=ledger.export_rows("r"))
+    restored = FileLineageStore(tmp_path / "restored")
+    import_model_records(restored, [record])
+    await restored.begin_call("r-a1", "next")
+    manifest = RolloutManifest.model_validate(await restored.manifest("r-a1"))
+    assert [row.model_call_id for row in manifest.records] == ["c1"]
+    assert manifest.pending_call_ids == ["next"] and not manifest.failures
+    with pytest.raises(CaptureAdmissionError, match="closed"):
+        await ledger.begin_call("r", "still-closed")
 
 
 async def test_model_commit_requires_the_continued_episodes(tmp_path: Path) -> None:

@@ -637,7 +637,17 @@ def export_model_records(
     records = []
     for episode_id in episode_ids:
         key = episode_id.capture_key
-        rows = [row for row in ledger.export_rows(key) if row.get("model_call_id") not in undelivered]
+        # Admission intents belong to the live attempt, not to its delivered history.
+        # A restored attempt reissues undelivered calls with new IDs; carrying their
+        # intents over would leave captures pending forever, including across servers.
+        # Closure also belongs to the old attempt; the replacement must admit new calls.
+        rows = [
+            row
+            for row in ledger.export_rows(key)
+            if not row.get("intent")
+            and not row.get("admissions_closed")
+            and row.get("model_call_id") not in undelivered
+        ]
         cuts = list(cuts_by_key.get(key, []))
         # A restored cut that no re-issued call has consumed yet is still this episode's prefix,
         # unless a newer call of the episode was cut since.
@@ -753,6 +763,8 @@ def _with_capture_key(rows: list[dict[str, Any]], episode_id: EpisodeId) -> list
         if row.get("staging_key") is not None and row.get("capture_key") is None
         else row
         for row in rows
+        # Also reopen records exported by versions that retained this live-attempt marker.
+        if not row.get("admissions_closed")
     ]
 
 

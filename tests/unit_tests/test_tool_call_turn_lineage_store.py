@@ -250,7 +250,7 @@ async def test_custody_column_survives_restart_and_checkpoint_import(tmp_path) -
     rows = writer.export_rows("r")
     assert rows[0]["tool_call_turn_fingerprint"] == tool_call_turn_fingerprint(_turn())
     assert "cumulative_token_ids" not in rows[0]
-    assert "output_items" not in rows[0]
+    assert rows[0].get("output_items") is None
     for reader in (FileLineageStore(tmp_path / "source"), FileLineageStore(tmp_path / "restored")):
         reader.import_rows("r", rows)
         result = await reader.resolve("r", _request())

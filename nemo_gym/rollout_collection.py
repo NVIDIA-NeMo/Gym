@@ -4362,6 +4362,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
+        retry_requests: bool = True,
         run_timing: Optional[RunTimingReport] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
@@ -4454,11 +4455,18 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 succeeded = False
                 try:
                     request_body = _episode_request_body(row) if _materialized_taskset(row) else row
-                    if is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active():
-                        with _dispatch_span(row, self._dispatch_name(row), server_name=server_name):
-                            res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
-                    else:
-                        res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
+                    dispatch_span = (
+                        _dispatch_span(row, self._dispatch_name(row), server_name=server_name)
+                        if is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active()
+                        else nullcontext()
+                    )
+                    with dispatch_span:
+                        res = await server_client.post(
+                            server_name=server_name,
+                            url_path="/run",
+                            json=request_body,
+                            **({"_resend_after_disconnect": False} if not retry_requests else {}),
+                        )
                     await raise_for_status(res)
                     result = await get_response_json(res)
                     if run_timing is not None and isinstance(result, Mapping):
@@ -4528,6 +4536,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
+        retry_requests: bool = True,
     ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -4586,6 +4595,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         by the dispatch budget gets ``_ng_failure_class="cancelled"`` with the ``_ng_dispatch_drained``
         and ``_ng_no_persist`` markers, and a failed `/run` under ``route_failures_to_sidecar`` gets a
         failure row with ``_ng_failure_*`` fields.
+
+        ``retry_requests=False`` disables automatic HTTP replay of a mutating `/run`.
+        Connections that were never established can still be retried safely.
+        It does not convert failures to successful result rows.
         """
 
         return _RowResultIterator(
@@ -4599,6 +4612,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 dispatch_budget_s=dispatch_budget_s,
                 drain_margin_s=drain_margin_s,
                 latency_tracker=latency_tracker,
+                **({"retry_requests": False} if not retry_requests else {}),
             )
         )
 
