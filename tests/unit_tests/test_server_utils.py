@@ -507,6 +507,16 @@ class TestServerUtils:
             await nemo_gym.server_utils.request("POST", "https://example.test", _max_num_tries=attempt_cap)
         client.request.assert_not_awaited()
 
+    async def test_request_sends_a_json_body_with_an_integer_wider_than_64_bits(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        client = self._mock_global_client(monkeypatch, ClientOSError(), failures=0)
+        body = {"name": "f", "arguments": {"id": 2**70, "note": "ü"}}
+        await nemo_gym.server_utils.request("POST", "https://example.test", json=body)
+        sent = client.request.call_args.kwargs
+        assert sent["data"] == ('{"name":"f","arguments":{"id":%d,"note":"ü"}}' % 2**70).encode("utf-8")
+        assert sent["headers"]["Content-Type"] == "application/json"
+
     @mark.parametrize("tracing_enabled", [False, True])
     async def test_explicit_transport_attempt_cap_counts_mixed_errors(
         self,
