@@ -45,7 +45,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxSpec
 from nemo_gym.sandbox.providers.registry import create_provider
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, raise_for_status, trace_context_path_segment
 
 
 LOG = logging.getLogger(__name__)
@@ -235,7 +235,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             base_url = urlunsplit((parsed.scheme or "http", netloc, parsed.path, parsed.query, parsed.fragment))
             base = base_url
         prefix = _RUN_CONTEXT.get().get("url_prefix") or self.url_path_for_request("", request)
-        return f"{base.rstrip('/')}{prefix}"
+        # The harness inside the sandbox sends no traceparent; the URL names this run's span instead.
+        return f"{base.rstrip('/')}{prefix}{trace_context_path_segment()}"
 
     def _runner(self) -> tuple[str, dict, str]:
         script = (Path(__file__).parent / "agent_runner.py").read_text()
