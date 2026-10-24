@@ -10,7 +10,7 @@ from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.rollout_observability import AgentObservationBundle
 from responses_api_agents.nooa_agent.observability import ensure_verifier_final_message, finalize_observation_gaps
 from responses_api_agents.nooa_agent.runner import NOOARunResult
-from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason, cleanup_errors
 
 
 def set_response_lifecycle(
@@ -21,8 +21,10 @@ def set_response_lifecycle(
         return response.model_copy(update={"status": "completed", "error": None})
     if reason in {
         NOOATerminationReason.POLICY_BUDGET_EXCEEDED,
+        NOOATerminationReason.INVALID_POLICY_OUTPUT,
         NOOATerminationReason.MAX_ITERATIONS_EXCEEDED,
         NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED,
+        NOOATerminationReason.LOOP_DETECTED,
     }:
         return response.model_copy(update={"status": "incomplete", "error": None})
     if reason is NOOATerminationReason.CANCELLED:
@@ -57,18 +59,24 @@ def finalize_run_result(run_result: NOOARunResult) -> tuple[NeMoGymResponse, Age
 
 
 def is_transient_infrastructure_error(error: BaseException) -> bool:
-    """Recognize retryable transport failures through NOOA exception wrapping."""
+    """Recognize retryable transport failures in task and retained cleanup errors."""
     seen: set[int] = set()
-    while id(error) not in seen:
+    pending = [error]
+    while pending:
+        error = pending.pop()
+        if id(error) in seen:
+            continue
         seen.add(id(error))
+        pending.extend(cleanup_errors(error))
         if isinstance(
             error, (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError, TimeoutError, ConnectionError)
         ):
             return True
         if isinstance(error, aiohttp.ClientResponseError):
-            return error.status in {408, 425, 429} or error.status >= 500
+            if error.status in {408, 425, 429} or error.status >= 500:
+                return True
+            continue
         cause = error.__cause__ or error.__context__
-        if cause is None:
-            break
-        error = cause
+        if cause is not None:
+            pending.append(cause)
     return False

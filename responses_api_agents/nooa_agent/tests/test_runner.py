@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from nooa import Agent, strategy
-from nooa.errors import GenerationError
+from nooa.errors import GenerationError, LoopDetectedError
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
 from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
@@ -325,7 +325,7 @@ async def test_real_strategy_budget_failure_keeps_completed_calls() -> None:
     )
     assert result.termination_reason is NOOATerminationReason.POLICY_BUDGET_EXCEEDED
     assert len(calls) == len(result.trajectory.turns) == 2
-    assert any(invocation.status == "failed" for invocation in result.trajectory.invocations)
+    assert any(invocation.status == "incomplete" for invocation in result.trajectory.invocations)
 
 
 @pytest.mark.asyncio
@@ -568,6 +568,8 @@ async def test_swallowed_infrastructure_failure_never_becomes_gradable(source: s
         )
     assert caught.value.__cause__ is failure
     assert caught.value.result.termination_reason is None
+    root = caught.value.result.trajectory.invocations[0]
+    assert root.status == "failed" and root.error_type == "ConnectionError"
 
 
 @pytest.mark.asyncio
@@ -584,6 +586,7 @@ async def test_real_codeact_output_limit_is_gradable_and_preserves_model_evidenc
         )
     )
     assert result.termination_reason is NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED
+    assert result.trajectory.invocations[0].status == "incomplete"
     assert runner._server_client.post.await_count == 3
     assert len(result.trajectory.turns) == 3
     assert all(turn.model_calls[0].response_id == "truncated" for turn in result.trajectory.turns)
@@ -629,3 +632,116 @@ async def test_generation_error_without_output_limit_or_with_transport_failure_i
         )
     assert caught.value.result.termination_reason is None
     assert isinstance(caught.value.__cause__, GenerationError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("main_failed", [False, True])
+@pytest.mark.parametrize("summary_failed", [False, True])
+async def test_summary_transport_state_is_separate_from_main(main_failed: bool, summary_failed: bool) -> None:
+    from nooa.agents.summarization import _in_summary_fork
+
+    runner, _ = make_runner()
+    main_error = ConnectionError("unrecovered main call")
+    responses = [
+        main_error if main_failed else FakeHTTPResponse(model_response()),
+        ConnectionError("contained summary call") if summary_failed else FakeHTTPResponse(model_response()),
+    ]
+    runner._server_client.post = AsyncMock(side_effect=responses)
+
+    async def complete(agent, request):
+        try:
+            await agent.llm.acall([{"role": "user", "content": "main"}])
+        except ConnectionError:
+            pass
+        token = _in_summary_fork.set(True)
+        try:
+            try:
+                await agent.llm.acall([{"role": "user", "content": "summary"}])
+            except ConnectionError:
+                pass
+        finally:
+            _in_summary_fork.reset(token)
+        return "completed"
+
+    runner._invocation_adapter = complete
+    request = NOOARunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+        model_url_path="/v1/responses",
+    )
+    if main_failed:
+        with pytest.raises(NOOARunFailure) as caught:
+            await runner.run(request)
+        assert caught.value.__cause__ is main_error
+    else:
+        result = await runner.run(request)
+        assert result.return_value == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_arbitrary_loop_error_is_not_a_policy_termination(wrapped: bool) -> None:
+    runner, _ = make_runner()
+    error = LoopDetectedError("not raised by the pinned loop guard")
+
+    async def invoke(agent, request):
+        try:
+            raise error
+        except LoopDetectedError as cause:
+            if wrapped:
+                raise GenerationError("arbitrary wrapper") from cause
+            raise
+
+    runner._invocation_adapter = invoke
+    with pytest.raises(NOOARunFailure) as caught:
+        await runner.run(
+            NOOARunRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+                model_url_path="/v1/responses",
+            )
+        )
+    assert caught.value.result.termination_reason is None
+    assert type(caught.value.__cause__) is (GenerationError if wrapped else LoopDetectedError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["model", "resource"])
+async def test_fatal_transport_then_policy_stop_finalizes_root_as_failed(source: str) -> None:
+    from responses_api_agents.nooa_agent.gym_llm import PolicyCallBudgetExceeded
+
+    runner, _ = make_runner()
+    failure = ConnectionError("transport unavailable")
+    runner._max_policy_calls = 1
+
+    async def fail_then_exhaust(agent, request):
+        try:
+            if source == "model":
+                await agent.llm.acall([{"role": "user", "content": "first"}])
+            else:
+                await agent.get_weather(city="Paris")
+        except ConnectionError:
+            pass
+        if source == "resource":
+            await agent.llm.acall([{"role": "user", "content": "first"}])
+        return await agent.llm.acall([{"role": "user", "content": "over budget"}])
+
+    runner._invocation_adapter = fail_then_exhaust
+    if source == "model":
+        runner._server_client.post = AsyncMock(side_effect=failure)
+    else:
+        resource_tools.request.side_effect = failure
+        runner._server_client.post = AsyncMock(return_value=FakeHTTPResponse(model_response()))
+    with pytest.raises(NOOARunFailure) as caught:
+        await runner.run(
+            NOOARunRequest(
+                responses_create_params=responses_create_params("Paris"),
+                model_url_path="/v1/responses",
+                tool_access=grant(),
+            )
+        )
+    result = caught.value.result
+    assert result.termination_reason is None
+    root = result.trajectory.invocations[0]
+    assert root.status == "failed"
+    assert root.error_type == ("PolicyCallBudgetExceeded" if source == "model" else "ConnectionError")
+    assert isinstance(caught.value.__cause__, PolicyCallBudgetExceeded if source == "model" else ConnectionError)
+    assert runner._server_client.post.await_count == 1

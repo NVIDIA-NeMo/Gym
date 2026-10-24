@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from time import perf_counter, time
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic_core import to_json
@@ -48,7 +48,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from responses_api_agents.nooa_agent.gym_llm import GymModelCall, RolloutLLMState
-from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason, policy_termination
 
 
 def _json_output(value: Any) -> str:
@@ -106,7 +106,13 @@ class GymTraceHooks:
         if not isinstance(context, _AgentCall):
             return
         invocation = self._invocations[context.invocation_id]
-        invocation.status = "failed" if exception is not None else "completed"
+        invocation.status = (
+            "incomplete"
+            if policy_termination(exception)[0] is not None
+            else "failed"
+            if exception is not None
+            else "completed"
+        )
         invocation.error_type = type(exception).__name__ if exception is not None else None
         invocation.duration_ms = max(0.0, (perf_counter() - context.started) * 1000)
         self._current.reset(context.token)
@@ -220,8 +226,14 @@ class GymTraceHooks:
         rollout_id: str,
         default_model: str = "nooa",
         partial: bool = False,
+        root_status: Literal["completed", "failed", "incomplete"] | None = None,
+        root_error_type: str | None = None,
     ) -> tuple[AgentEpisode, TrajectoryRecord]:
-        """Project evidence, omitting pending tool outputs only in partial snapshots."""
+        """Project evidence, applying the runner's final status only to the first root.
+
+        Partial snapshots omit pending tool outputs and retain each invocation's
+        contemporaneous outcome until the runner supplies a final root status.
+        """
 
         invocations = {key: record.model_copy(deep=True) for key, record in self._invocations.items()}
         output: list[Any] = []
@@ -317,6 +329,14 @@ class GymTraceHooks:
 
         if not invocations:
             invocations["root"] = AgentInvocation(invocation_id="root", status="completed")
+        if root_status is not None:
+            # The runner owns final classification after adapter cleanup and fatal
+            # transport checks. Other invocations (including detached summaries)
+            # and earlier checkpoints keep their own outcomes.
+            root = next((item for item in invocations.values() if item.parent_invocation_id is None), None)
+            if root is not None:
+                root.status = root_status
+                root.error_type = root_error_type
         if not initialized_inputs:
             root = next((item for item in invocations.values() if item.parent_invocation_id is None), None)
             if root is not None:
