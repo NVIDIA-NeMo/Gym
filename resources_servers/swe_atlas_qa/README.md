@@ -82,21 +82,15 @@ swe_atlas_qa_agent:
 Use the same tasks and grader when comparing harnesses. Their CLI commands, model configuration, dependencies,
 and libc compatibility remain harness-specific.
 
-These settings beyond `agent` were used to run each harness on three tasks, including Alpine k6, with GLM-5.2:
+Each harness that completed this benchmark has a config in `benchmarks/swe_atlas_qa/`
+(`claude_code`, `cline`, `codex`, `kilocode`, `mini_swe`, `openclaw`, `opencode`, `pi`, `prime`, `simple_strands`,
+and `terminus_2`). Each holds the settings used to run that harness on three tasks, including Alpine k6, with GLM-5.2.
+Version pins and paths inside `/work/gym_mount` must match your bundle.
 
-| Harness | Settings |
-|---|---|
-| `claude_code` | `max_turns: null`, `disallowed_tools: WebSearch,WebFetch` |
-| `cline` | `command: cline`, `workspace_root` outside `/app`, `cline_version` matching the bundled CLI |
-| `codex` | `codex_version` (required) |
-| `kilocode` | `command: kilo`, `context_window: 200000` (the 32768 default overflowed), and `responses_api_agents/opencode_agent/` in the bundle |
-| `mini_swe` | a provider-prefixed `model` such as `openai/<name>`, `fabric_config: {runtime: {max_turns: 500}}`, `LITELLM_LOCAL_MODEL_COST_MAP=True` and `MSWEA_COST_TRACKING=ignore_errors` in the runner environment, a LiteLLM release compatible with Gym's `mcp<2` pin, and NeMo Fabric's data files under the interpreter prefix |
-| `openclaw` | `command: openclaw`, `openclaw_version` (required), `node_bin_dir` |
-| `opencode` | `workspace_root` outside `/app`, `opencode_config.permission.external_directory` allowing `/logs/*` |
-| `pi` | `command: pi` |
-| `prime` | `thinking: high` for models that reject the default effort |
-| `simple_strands` | `workspace_root` outside `/app` |
-| `terminus_2` | `tmux` and `script` in the bundle, linked onto the login-shell `PATH` with `setup_commands` |
+```bash
+gym eval run --config benchmarks/swe_atlas_qa/claude_code.yaml --split benchmark \
+  --output runs/swe-atlas/claude_code.jsonl ++route_failures_to_sidecar=true
+```
 
 `hermes` currently rejects the request `metadata` that every row carries. `deepagents` writes `/logs/agent/answer.txt`
 inside its virtual filesystem rooted at `/app`, so the answer is not collected. Both need adapter fixes before they can
