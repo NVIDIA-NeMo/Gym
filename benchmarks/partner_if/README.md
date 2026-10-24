@@ -29,7 +29,7 @@ task checks whether the model follows its instructions, graded against versioned
 ## Task contract
 
 - **Harness:** the policy model runs in Gym's `simple_agent`, and in OpenCode (`opencode_agent`) on the SWE
-  tasks.
+  tasks. The SWE scores depend on OpenCode 1.17.11: the harness and its version are part of what they measure.
 - **Routing:** `partner_if_dispatcher` routes each task to its environment, so all 25 tasks share one
   dataset and one score. Gym aggregates metrics per environment server, so without it the four task
   families would be four benchmarks with separate scores.

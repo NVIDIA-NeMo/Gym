@@ -106,13 +106,17 @@ class Verdict(StrictModel):
 
 
 def payload(items: list[GradingItem], evidence: EvidenceBundle) -> dict:
-    """Send only rubric fields and evidence sources; analogues, taxonomy and actor identity stay out."""
+    """Send only rubric fields and evidence sources, plus an output-format cue; analogues, taxonomy and actor
+    identity stay out."""
     return {
         "evidence_sources": {key: value.payload() for key, value in evidence_sources(evidence).items()},
         "rubrics": [
             r.model_dump(include={"id", "constraint", "dimension", "category", "guidance", "provenance"})
             for r in items
         ],
+        # The system prompt asks for JSON, but some hosted OpenAI-compatible routes accept JSON-object output only
+        # when the user message says JSON.
+        "_judge_output_format": "JSON object with an items array",
     }
 
 

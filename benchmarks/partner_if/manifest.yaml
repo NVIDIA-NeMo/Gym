@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 name: partner_if
-version: 0.1.0
+version: 0.2.0
 experimental: true
 kind: benchmark
 integration_profile: external-agent-loop
