@@ -7428,6 +7428,27 @@ class TestUnrepresentableRequestFields:
 
         assert client.post("/v1/responses", json=self.BODY).status_code == 200
         assert "include" not in captured["value"].model_dump(exclude_unset=True)
+
+    TOOLS_BODY = {
+        "input": "hi",
+        "tools": [
+            {"type": "function", "name": "get_weather", "parameters": None, "strict": None},
+            {"type": "web_search_preview"},
+        ],
+    }
+
+    def test_hosted_tool_refused_by_default(self, monkeypatch: MonkeyPatch) -> None:
+        client, _ = self._client(monkeypatch, drop=False)
+
+        with raises(NotImplementedError, match="tool type"):
+            client.post("/v1/responses", json=self.TOOLS_BODY)
+
+    def test_hosted_tool_dropped_when_configured(self, monkeypatch: MonkeyPatch) -> None:
+        client, captured = self._client(monkeypatch, drop=True)
+
+        assert client.post("/v1/responses", json=self.TOOLS_BODY).status_code == 200
+        tools = captured["value"].model_dump(exclude_unset=True)["tools"]
+        assert [tool["function"]["name"] for tool in tools] == ["get_weather"]
         assert captured["value"].messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
 
     def test_dropped_on_the_streaming_path_too(self, monkeypatch: MonkeyPatch) -> None:
