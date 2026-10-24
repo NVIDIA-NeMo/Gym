@@ -1,5 +1,10 @@
 -e nemo-gym[dev] @ ../../
-nemo-fabric[claude,codex,deepagents,hermes-agent,mini-swe-agent]==0.2.0
+nemo-fabric[claude,codex,deepagents,hermes-agent,mini-swe-agent,openclaw,openhands,relay]==0.5.0
+# The openhands extra installs the adapter only. These are the OpenHands packages NeMo Fabric 0.5.0 validates.
+openhands-sdk==1.50.0
+openhands-tools==1.50.0
+# LiteLLM 1.103 and later import mcp 2 types, while nemo-gym pins mcp<2.
+litellm<1.103
 hermes-agent @ git+https://github.com/NousResearch/hermes-agent@0ee05d72f2b30385d4861fd8e30511c6d51100e4
 # Require a Python 3.13-compatible wheel instead of resolving tokenizers 0.13.3,
 # whose source build fails with current Rust (invalid_reference_casting).

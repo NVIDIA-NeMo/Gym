@@ -249,6 +249,86 @@ def _fabric_output_items(output: dict[str, Any], response_text: str) -> list[Any
     return items
 
 
+def _atif_trajectories(output: dict[str, Any]) -> list[dict[str, Any]]:
+    """Load the ATIF trajectories that NeMo Relay wrote for this invocation."""
+    trajectories = []
+    for artifact in output.get("relay_artifacts") or []:
+        if not isinstance(artifact, dict) or artifact.get("kind") != "atif" or not artifact.get("path"):
+            continue
+        try:
+            trajectories.append(json.loads(Path(artifact["path"]).read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError) as error:
+            LOG.warning("Could not read Relay ATIF trajectory %s (%s)", artifact["path"], type(error).__name__)
+    return trajectories
+
+
+def _atif_output_items(trajectories: list[dict[str, Any]], response_text: str) -> list[Any]:
+    """Response items from the agent steps of Relay ATIF trajectories, or [] when there are none."""
+    items: list[Any] = []
+    for trajectory in trajectories:
+        for step in trajectory.get("steps") or []:
+            if not isinstance(step, dict) or step.get("source") != "agent":
+                continue
+            reasoning = step.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning:
+                items.append(
+                    NeMoGymResponseReasoningItem(
+                        id=f"rs_{uuid4().hex}",
+                        summary=[NeMoGymSummary(text=reasoning, type="summary_text")],
+                    )
+                )
+            text = _content_text(step.get("message"))
+            if text and text.strip() != response_text.strip():
+                items.append(
+                    NeMoGymResponseOutputMessage(
+                        id=f"msg_{uuid4().hex}",
+                        content=[NeMoGymResponseOutputText(text=text, annotations=[])],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                )
+            for tool_call in step.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                arguments = tool_call.get("arguments")
+                if not isinstance(arguments, str):
+                    arguments = json.dumps(arguments or {}, ensure_ascii=False, sort_keys=True)
+                items.append(
+                    NeMoGymResponseFunctionToolCall(
+                        id=f"fc_{uuid4().hex}",
+                        call_id=str(tool_call.get("tool_call_id") or f"call_{uuid4().hex}"),
+                        name=str(tool_call.get("function_name") or ""),
+                        arguments=arguments,
+                        status="completed",
+                    )
+                )
+            for result in _mapping(step.get("observation")).get("results") or []:
+                if not isinstance(result, dict):
+                    continue
+                items.append(
+                    NeMoGymResponseFunctionCallOutput(
+                        id=f"fco_{uuid4().hex}",
+                        call_id=str(result.get("source_call_id") or ""),
+                        output=_content_text(result.get("content")),
+                        status="completed",
+                        type="function_call_output",
+                    )
+                )
+    if not items:
+        return []
+    items.append(
+        NeMoGymResponseOutputMessage(
+            id=f"msg_{uuid4().hex}",
+            content=[NeMoGymResponseOutputText(text=response_text, annotations=[])],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+    )
+    return items
+
+
 def _skill_paths(skills_root: Optional[str]) -> list[str]:
     if not skills_root:
         return []
@@ -319,6 +399,9 @@ class NeMoFabricAgentConfig(BaseResponsesAPIAgentConfig):
     cwd: Optional[str] = None
     harness_settings: dict[str, Any] = Field(default_factory=dict)
     fabric_config: dict[str, Any] = Field(default_factory=dict)
+    # Record each run with NeMo Relay. The response is then built from Relay's ATIF trajectory, the same shape for
+    # every adapter that supports Relay, and fabric_result carries the trajectory as relay_atif.
+    relay: bool = False
 
 
 class NeMoFabricAgentRunRequest(BaseRunRequest):
@@ -373,6 +456,7 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
         system_prompt: Optional[str],
         mcp_servers: dict[str, Any],
         skills: list[str],
+        relay_dir: Optional[Path] = None,
     ) -> FabricConfig:
         authored = deepcopy(self.config.fabric_config)
         generated: dict[str, Any] = {
@@ -400,6 +484,16 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                 }
             },
         }
+        if relay_dir is not None:
+            # Relay only runs with an artifacts root, and only writes ATIF when observability enables it.
+            atif_dir = str(relay_dir / "atif")
+            generated["runtime"]["artifacts"] = str(relay_dir / "artifacts")
+            generated["telemetry"] = {"providers": {"relay": {}}}
+            generated["relay"] = {
+                "project": "nemo-gym",
+                "output_dir": atif_dir,
+                "observability": {"version": 4, "atif": {"enabled": True, "output_directory": atif_dir}},
+            }
         merged = _deep_merge(authored, generated)
 
         authored_instruction = ((authored.get("instructions") or {}).get("system") or {}).get("content")
@@ -448,13 +542,17 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             if configured_workspace is None
             else nullcontext(str(configured_workspace))
         )
-        with workspace_context as workspace:
+        relay_context = (
+            tempfile.TemporaryDirectory(prefix="nemo_gym_relay_") if self.config.relay else nullcontext(None)
+        )
+        with relay_context as relay_dir, workspace_context as workspace:
             fabric_config = self._fabric_config(
                 model_base_url=model_base_url,
                 workspace=Path(workspace),
                 system_prompt=system_prompt,
                 mcp_servers=mcp_servers or {},
                 skills=_skill_paths(skills_path),
+                relay_dir=Path(relay_dir) if relay_dir else None,
             )
             # Fabric otherwise starts Python adapters on VIRTUAL_ENV's interpreter, which in R2E-style task images is
             # the repo's venv and lacks the adapter. This agent's interpreter has the adapters installed.
@@ -468,6 +566,8 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                     context={"nemo_gym_rollout_id": rollout_id} if rollout_id else {},
                 ),
             )
+            # The trajectory files live in relay_dir, so read them before it is removed.
+            trajectories = _atif_trajectories(_mapping(result.output)) if relay_dir else []
 
         result_mapping = result.to_mapping()
         if result.status != "succeeded":
@@ -498,7 +598,7 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             created_at=int(time()),
             model=str(output.get("model") or self.config.model),
             object="response",
-            output=_fabric_output_items(output, response_text),
+            output=_atif_output_items(trajectories, response_text) or _fabric_output_items(output, response_text),
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
@@ -513,6 +613,8 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                 total_tokens=total_tokens,
             ),
         )
+        if relay_dir:
+            result_mapping["relay_atif"] = trajectories
         return response, json.loads(json.dumps(result_mapping, default=str))
 
     async def responses(

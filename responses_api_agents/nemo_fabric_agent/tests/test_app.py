@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -24,6 +25,7 @@ from responses_api_agents.nemo_fabric_agent.app import (
     NeMoFabricAgent,
     NeMoFabricAgentConfig,
     NeMoFabricAgentRunRequest,
+    _atif_output_items,
     _content_text,
     _extract_request_input,
     _fabric_output_items,
@@ -251,6 +253,8 @@ def test_fabric_config_injects_model_workspace_mcp_and_skills(tmp_path: Path) ->
         "nemo_fabric_deepagents",
         "nemo_fabric_hermes",
         "nemo_fabric_mini_swe_agent",
+        "nemo_fabric_openclaw",
+        "nemo_fabric_openhands",
     ],
 )
 def test_harness_presets_pass_fabric_planning(preset_name: str, tmp_path: Path) -> None:
@@ -359,6 +363,96 @@ def test_run_preserves_fabric_result_and_verifies(
     dynamic = called_config["mcp"]["servers"]["resources"]
     assert dynamic["transport"] == "streamable-http"
     assert dynamic["custom_headers"] == {"X-NeMo-Gym-Session-Token": "token"}
+
+
+def test_relay_config_enables_atif_under_the_relay_directory(tmp_path: Path) -> None:
+    agent = _agent(relay=True)
+    config = agent._fabric_config(
+        model_base_url="http://model/v1",
+        workspace=tmp_path / "workspace",
+        system_prompt=None,
+        mcp_servers={},
+        skills=[],
+        relay_dir=tmp_path / "relay",
+    ).to_mapping()
+
+    atif_dir = str(tmp_path / "relay" / "atif")
+    assert config["runtime"]["artifacts"] == str(tmp_path / "relay" / "artifacts")
+    assert config["telemetry"]["providers"] == {"relay": {}}
+    assert config["relay"]["output_dir"] == atif_dir
+    assert config["relay"]["observability"]["atif"]["enabled"] is True
+    assert config["relay"]["observability"]["atif"]["output_directory"] == atif_dir
+
+
+def test_relay_off_leaves_telemetry_unset(tmp_path: Path) -> None:
+    config = (
+        _agent()
+        ._fabric_config(
+            model_base_url="http://model/v1", workspace=tmp_path, system_prompt=None, mcp_servers={}, skills=[]
+        )
+        .to_mapping()
+    )
+
+    assert "relay" not in config
+    assert "relay" not in (config.get("telemetry") or {}).get("providers", {})
+
+
+def test_relay_run_builds_response_from_atif(tmp_path: Path) -> None:
+    agent = _agent(cwd=str(tmp_path), relay=True)
+    agent.server_client.global_config_dict = {
+        "policy_model": {"responses_api_models": {"policy_model": {"host": "127.0.0.1", "port": 9002}}}
+    }
+    agent.server_client._build_server_base_url.side_effect = lambda config: f"http://{config['host']}:{config['port']}"
+    trajectory = {
+        "schema_version": "ATIF-v1.7",
+        "steps": [
+            {"step_id": 1, "source": "user", "message": "question"},
+            {
+                "step_id": 2,
+                "source": "agent",
+                "message": "Let me look.",
+                "reasoning_content": "Check the directory first.",
+                "tool_calls": [{"tool_call_id": "call_1", "function_name": "bash", "arguments": {"command": "ls"}}],
+                "observation": {"results": [{"source_call_id": "call_1", "content": "README.txt"}]},
+            },
+            {"step_id": 3, "source": "agent", "message": "fabric answer"},
+        ],
+    }
+
+    async def run(config, **kwargs):
+        relay_dir = Path(config.to_mapping()["relay"]["output_dir"])
+        relay_dir.mkdir(parents=True)
+        path = relay_dir / "trajectory.json"
+        path.write_text(json.dumps(trajectory))
+        result = _FakeResult()
+        result.output["relay_artifacts"] = [{"kind": "atif", "path": str(path)}, {"kind": "otel", "path": "x"}]
+        return result
+
+    fabric = MagicMock()
+    fabric.run = AsyncMock(side_effect=run)
+    with patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric):
+        response, fabric_result = asyncio.run(
+            agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="question"))
+        )
+
+    assert [item.type for item in response.output] == [
+        "reasoning",
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+    ]
+    assert response.output[0].summary[0].text == "Check the directory first."
+    assert response.output[2].call_id == "call_1"
+    assert json.loads(response.output[2].arguments) == {"command": "ls"}
+    assert response.output[3].call_id == "call_1"
+    assert response.output[3].output == "README.txt"
+    assert response.output[-1].content[0].text == "fabric answer"
+    assert fabric_result["relay_atif"] == [trajectory]
+
+
+def test_atif_without_agent_steps_falls_back_to_fabric_output() -> None:
+    assert _atif_output_items([{"steps": [{"source": "user", "message": "question"}]}], "answer") == []
 
 
 def test_failed_fabric_result_raises(tmp_path: Path) -> None:
