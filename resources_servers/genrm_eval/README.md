@@ -3,6 +3,8 @@
 Evaluate a GenRM model against chat preferences. `simple_agent` calls the model;
 `genrm_eval` resource server scores its ranking.
 
+[MMRB1](../../benchmarks/genrm_mmrb1/README.md) and [MMRB2](../../benchmarks/genrm_mmrb2/README.md) also support LLM as a judge; `llm_as_a_judge.yaml` uses standard messages and the published A/B verdict format.
+
 ## Inputs
 
 Preparation puts dataset records into Gym's input format and creates the
@@ -58,7 +60,7 @@ gym eval run \
   --concurrency 32
 ```
 
-Defaults: temperature 0.6, top-p 0.95, 16,384 generated tokens (reasoning plus
+Defaults: temperature 1.0, top-p 0.95, 16,384 generated tokens (reasoning plus
 final response; excludes input). Override tensor parallelism and context length
 through `policy_model.responses_api_models.genrm_model.vllm_serve_kwargs`.
 The model config defaults to eight GPUs. JudgeBench requires both candidate orders;

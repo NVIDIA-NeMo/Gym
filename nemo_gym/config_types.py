@@ -224,6 +224,11 @@ class HeadServerUnreachableError(ConfigError, ValueError):
     from it (the head server is not running, or `head_server.host` / `head_server.port` point elsewhere)."""
 
 
+class PromptConfigMalformedError(ConfigError, ValueError):
+    """A prompt config file is not valid YAML, or is not a mapping with a `user` template (and an optional `system`
+    one)."""
+
+
 ########################################
 # Dataset configs for handling and upload/download
 ########################################
@@ -999,3 +1004,4 @@ class AggregateMetrics(BaseModel):
 # the capture middleware in base_responses_api_model.py strips this prefix before routing.
 ROLLOUT_PATH_PREFIX = "ng-rollout"
 TOKEN_CAPTURE_PATH_SEGMENT = "training-token-capture"
+TRACE_CONTEXT_PATH_SEGMENT = "ng-trace"
