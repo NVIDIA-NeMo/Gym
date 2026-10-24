@@ -46,6 +46,9 @@ Use `benchmarks/skillsbench/harbor_opensandbox.yaml` with `gym eval submit`.
 The general Harbor adapter runs OpenHands in a Ray worker alongside Gym's model
 server; terminal commands execute in OpenSandbox, so the worker needs no Docker
 daemon. Set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` in the driver job.
+Preparation installs Ray in the driver environment, as required by the general
+adapter. Set `skillsbench_max_input_tokens` to match the policy model context
+limit; this avoids indexing the native Harbor agent list in flat launcher overrides.
 The SkillsBench entrypoint resolves the named provider and passes credentials
 only to the worker, outside Harbor's retained job and trial configurations.
 

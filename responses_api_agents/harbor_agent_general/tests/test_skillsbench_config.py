@@ -20,11 +20,11 @@ from responses_api_agents.harbor_agent_general.skillsbench_app import (
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def _config(opensandbox: bool) -> SkillsBenchHarborAgentConfig:
+def _config(opensandbox: bool, max_input_tokens: int = 131072) -> SkillsBenchHarborAgentConfig:
     configs = [OmegaConf.load(ROOT / "benchmarks/skillsbench/harbor.yaml")]
     if opensandbox:
         configs.append(OmegaConf.load(ROOT / "benchmarks/skillsbench/harbor_opensandbox.yaml"))
-    merged = OmegaConf.merge(*configs, {"policy_model_name": "test-policy"})
+    merged = OmegaConf.merge(*configs, {"policy_model_name": "test-policy", "skillsbench_max_input_tokens": max_input_tokens})
     raw = OmegaConf.to_container(
         merged.skillsbench_harbor_agent.responses_api_agents.harbor_agent_general, resolve=True
     )
@@ -82,3 +82,9 @@ def test_entrypoint_starts_ray_and_rows_follow_general_adapter_contract():
         }
     )
     assert row.task_name == "example-task"
+
+
+def test_flat_context_limit_override_reaches_native_agent_list():
+    config = _config(opensandbox=True, max_input_tokens=65536)
+    job = config.build_job_config("example-task", "t0-r0")
+    assert job.agents[0].kwargs["model_info"]["max_input_tokens"] == 65536
