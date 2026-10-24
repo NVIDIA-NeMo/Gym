@@ -1,6 +1,6 @@
 # Skill opening across agent harnesses
 
-**Implementation draft: this benchmark is not runnable yet.** Source preparation and its tests are implemented. Harness adapters, scoring, and live migration checks remain pending. This draft does not register a benchmark or report new model results.
+**Implementation draft: this benchmark is not runnable yet.** Source preparation, scoring, trace conversion, and shared-budget components have offline tests. Runtime collection, harness adapters, and live migration checks remain pending. This draft does not register a benchmark or report new model results.
 
 The question is whether a model opens the relevant skill instructions when a task calls for them. Task-performance benchmarks measure whether work gets done; this benchmark measures an earlier step. Opening instructions is not evidence that the agent followed them or completed the task.
 
@@ -39,6 +39,17 @@ Same-model delegated reads may count when session lineage, returned content, and
 Valid misses earn 0. Setup, provider, observation, and incomplete-evidence errors are unscored errors, not model failures. A successful opening before a deadline remains a success even if subsequent work times out. Record planned, valid, failed-budget, and infrastructure-error counts alongside scores. Average repetitions within skills, then skills; report each collection and harness separately. The headline is the percentage of valid trials opening the intended skill, with coverage disclosed, not pass@3.
 
 The initial comparison uses three forwarded model requests including retries, 120 seconds from prompt release, and 8,192 output tokens per response. Setup precedes the clock. Record reasoning settings and provider adapters; equal requested settings do not imply equal compute. No outcome-dependent retries are permitted.
+
+The shared implementation is under [`environments/skill_trigger`](../../environments/skill_trigger). It extracts successful model-visible tool results, checks session lineage and observation coverage, and preserves the original excerpt-matching rules, including Pi's UTF-16 character counting. Exact-file reads can disambiguate shared text; shell output must identify a skill by its content. Invalid evidence raises an error rather than producing a zero.
+
+Trajectory conversion reuses Harbor 0.24.0's Pi, Codex, and Hermes converters. The wrapper checks call/result IDs and rejects dropped or invented records. Converted trajectories support Gym interoperability; canonical traces remain the scoring source. The shared request allowance counts retries and child requests together, anchors time to prompt release, and cancels streams at the absolute deadline. These components are not yet connected to live adapters; their tests do not prove sandbox isolation or end-to-end correctness.
+
+For the offline tests, install Gym's development dependencies and `harbor==0.24.0`, then run from the checkout root:
+
+```bash
+LITELLM_LOCAL_MODEL_COST_MAP=True python -m pytest \
+    --confcutdir=environments/skill_trigger/tests environments/skill_trigger/tests
+```
 
 ## Gym integration
 
