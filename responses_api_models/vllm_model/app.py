@@ -27,6 +27,7 @@ from typing import Any, Awaitable, ClassVar, Dict, List, Literal, Optional, Unio
 from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
+from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym._checkpoint.model import note_generation_backend, note_generation_request
@@ -685,13 +686,18 @@ class VLLMModel(SimpleResponsesAPIModel):
         # Chat Completion Create Params -> Chat Completion
         chat_completion_response = await self.chat_completions(request, chat_completion_create_params)
 
-        return self._converter.chat_completion_to_response(
+        response = self._converter.chat_completion_to_response(
             responses_create_params=body,
             chat_completion=chat_completion_response,
             # Keep the backend envelope id only for captured requests. Terminal
             # attribution matches it to the ledger row.
             preserve_envelope_id=self._preserve_envelope_id(),
         )
+
+        execution = getattr(request.state, "nemo_gym_model_execution", {})
+        if isinstance(execution, dict) and execution.get("local_response_reason") == "context_length_exceeded":
+            response.metadata = {**(response.metadata or {}), "nemo_gym_context_window_exceeded": "true"}
+        return response
 
     def _apply_sampling_overrides(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Force ``config.sampling_overrides`` onto an outbound body, in place.
@@ -1260,6 +1266,16 @@ class VLLMModel(SimpleResponsesAPIModel):
                     _mark_propagated_overflow(e)
                     raise
                 res = self._create_empty_chat_completion()
+                # The backend rejected this request before model execution. Preserve
+                # known zero usage instead of making multi-call totals unknown.
+                # Input usage counts processed tokens, not the rejected prompt length.
+                res.usage = CompletionUsage(
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    total_tokens=0,
+                    prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
+                    completion_tokens_details=CompletionTokensDetails(reasoning_tokens=0),
+                )
                 res.choices[0].finish_reason = "length"
                 execution.update(response_source="local", local_response_reason="context_length_exceeded")
                 return res
@@ -1608,6 +1624,16 @@ class VLLMModel(SimpleResponsesAPIModel):
                     _mark_propagated_overflow(e)
                     raise
                 res = self._create_empty_chat_completion()
+                # The backend rejected this request before model execution. Preserve
+                # known zero usage instead of making multi-call totals unknown.
+                # Input usage counts processed tokens, not the rejected prompt length.
+                res.usage = CompletionUsage(
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    total_tokens=0,
+                    prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
+                    completion_tokens_details=CompletionTokensDetails(reasoning_tokens=0),
+                )
                 res.choices[0].finish_reason = "length"
                 execution.update(response_source="local", local_response_reason="context_length_exceeded")
                 return res
