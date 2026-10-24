@@ -393,7 +393,16 @@ class TestApp:
         # A session returns its agent evidence at close, which becomes the episode's ng_agent_observations.
         observations = close.json()["agent_observations"]
         if observability_enabled:
-            assert [record["kind"] for record in observations["records"]] == ["agent_invocation"]
+            invocation, tool = observations["records"]
+            assert invocation["kind"] == "agent_invocation"
+            # The executed tool call comes back without its output, which stays in the invocation's conversation.
+            assert (tool["kind"], tool["invocation_id"], tool["tool_name"], tool["status"]) == (
+                "tool_call",
+                "root",
+                "get_weather",
+                "completed",
+            )
+            assert "output" not in tool
             assert observations["source"] == "simple_agent"
         else:
             assert observations is None
