@@ -1,0 +1,50 @@
+{
+  "selection_basis": "Reuse the historical nine-case engineering subset; freeze it before any new Gym outcomes. It covers all three collections, different catalog sizes, and short and long prompts. It is not a random sample or an aggregate-score estimate.",
+  "cases": [
+    {
+      "id": "boltz2-nim::upstream_trigger::boltz2-nim::trigger_evals::0",
+      "prompt_sha256": "24d686975a82b855c6dcc8513f67dd829abfd3b916f6777e39969c4bb6dc3e0c",
+      "reason": "Short direct scientific tool request; full 35-skill catalog."
+    },
+    {
+      "id": "codonfm-finetune::adapted_completion::codonfm-finetune::evals::codonfm-finetune-001",
+      "prompt_sha256": "b8c223766134f38fe43c22d1e1b31358e626701035431165af6f89271be1a8b4",
+      "reason": "Longer scientific planning request; full catalog."
+    },
+    {
+      "id": "parabricks::adapted_completion::parabricks::evals::parabricks-005",
+      "prompt_sha256": "02279bc8216b366eda3fd72fa0d3b6e08e821a10191a2f3bf4a3bd442788e3bf",
+      "reason": "Workflow routing request; full catalog."
+    },
+    {
+      "id": "sb-qutip-a67920dcb3ec-pos-1",
+      "prompt_sha256": "1d68d273eade663ebe5fbbf838831590ffea2fb6b3947f6cb0ad030f0e6df6c7",
+      "reason": "Single-skill scientific catalog."
+    },
+    {
+      "id": "sb-rdkit-8f787cc7bff8-pos-1",
+      "prompt_sha256": "5c44e85d4e4429e356fa67f3673e282cd36bc31568931efb5acc9be3b0a32a69",
+      "reason": "Three-skill chemistry catalog."
+    },
+    {
+      "id": "sb-find-bugs-a00d13a75c4d-pos-1",
+      "prompt_sha256": "37cc1c6fc7858218f7babdd9c57e78bfeb5e350ce705775e9c2d5f90183cc9a3",
+      "reason": "Six-skill software catalog."
+    },
+    {
+      "id": "addy::api-and-interface-design::upstream_positive::0",
+      "prompt_sha256": "aaf27ebc0b61c1bd80a35775a81272045546fe00d07e7267eda2892e55669bda",
+      "reason": "Short process request; full 25-skill catalog."
+    },
+    {
+      "id": "addy::browser-testing-with-devtools::upstream_positive::2",
+      "prompt_sha256": "9b25b36a7e34243bf6f545ecb145123e383a5c6b05720c3dc1c74d1ad041e015",
+      "reason": "Long process request; full catalog."
+    },
+    {
+      "id": "addy::test-driven-development::upstream_positive::1",
+      "prompt_sha256": "5efb243639e384f81a3c0a7f0b26a01af03fafce073ee1d5aa06d8902127f981",
+      "reason": "Development workflow request; full catalog."
+    }
+  ]
+}
