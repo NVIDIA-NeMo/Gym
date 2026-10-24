@@ -212,6 +212,15 @@ def _request() -> SingleAgentTurnRequest:
     )
 
 
+async def test_resources_seed_receives_the_requests_rollout_index() -> None:
+    environment_server, client = _environment_server()
+
+    await environment_server.run_request(_request().model_copy(update={"rollout_index": 3}))
+
+    seed_body = ResourcesSeedSessionRequest.model_validate(client.calls[0][2]["json"])
+    assert seed_body.rollout_index == 3
+
+
 async def test_single_agent_turn_with_direct_resources_tools() -> None:
     environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
     result = await environment_server.run_request(_request())
