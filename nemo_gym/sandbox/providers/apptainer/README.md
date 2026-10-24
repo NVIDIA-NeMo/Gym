@@ -122,6 +122,7 @@ Settings for running commands (`apptainer exec`) and global provider behavior.
 | `default_binds` | `[]` | Extra `--bind host:container` mounts added at instance start. |
 | `extra_exec_args` | `[]` | Extra raw flags appended to every `apptainer exec` (e.g. `--no-home`, `--writable-tmpfs`, `--contain`). |
 | `concurrency` | `32` | Upper bound on concurrent `apptainer` subprocesses (shared semaphore). |
+| `max_output_bytes` | `67108864` | Most bytes of stdout, and of stderr, an `exec` returns; a longer capture ends with a truncation marker. |
 
 ### `probe` — `ApptainerProbeConfig`
 
