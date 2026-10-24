@@ -60,6 +60,55 @@ class TestFernDocsLinks(unittest.TestCase):
         self.assertNotIn("Currently, only `claude_code_agent`", guide)
         self.assertIn("/main/observability/rollout-evidence", guide)
 
+    def test_model_call_capture_config_table_gives_the_capture_dir_no_default(self):
+        guide = read("fern/versions/latest/pages/model-server/model-call-capture.mdx")
+        row = next(line for line in guide.splitlines() if line.startswith("| `model_call_capture_dir` |"))
+        _, _, _, default, description, _ = row.split("|")
+
+        self.assertEqual("—", default.strip())
+        self.assertIn("Required when `observability_enabled` is true.", description)
+
+    def test_model_call_capture_links_global_config_fields_to_the_configuration_reference(self):
+        guide = read("fern/versions/latest/pages/model-server/model-call-capture.mdx")
+        section = guide[guide.index("## Configure capture") : guide.index("## If you build a custom agent")]
+
+        self.assertIn("](/main/reference/configuration)", section)
+
+    def test_model_call_capture_gives_each_routing_helper_a_table_row(self):
+        guide = read("fern/versions/latest/pages/model-server/model-call-capture.mdx")
+        section = guide[guide.index("## If you build a custom agent") : guide.index("## Add agent-side evidence")]
+
+        for helper in ("url_path_for_run", "url_path_for_request", "base_url_for_run", "rollout_id_from_run"):
+            with self.subTest(helper=helper):
+                self.assertRegex(section, rf"(?m)^\| `{helper}\(")
+
+    def test_model_call_capture_title_matches_every_link_that_names_the_page(self):
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        guide = read("fern/versions/latest/pages/model-server/model-call-capture.mdx")
+        labels = {
+            (path.relative_to(pages).as_posix(), label)
+            for path in pages.rglob("*.mdx")
+            for label in re.findall(r"\[([^\]]+)\]\((?:/main)?/model-server/model-call-capture[)#]", path.read_text())
+            if label.lower() == "model-call capture"
+        }
+
+        self.assertIn('title: "Model-Call Capture"', guide)
+        self.assertTrue(labels)
+        # Mid-sentence prose may use the lowercase common noun; a label that names the page uses its title.
+        self.assertEqual(
+            set(), {item for item in labels if item[1] not in ("Model-Call Capture", "model-call capture")}
+        )
+
+    def test_latest_docs_explain_kill_shaped_failures_in_plain_language(self):
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        jargon = sorted(
+            path.relative_to(pages).as_posix() for path in pages.rglob("*.mdx") if "kill-shaped" in path.read_text()
+        )
+        metrics = " ".join(read("fern/versions/latest/pages/observability/metrics.mdx").split())
+
+        self.assertEqual([], jargon)
+        self.assertIn("a Slurm SIGTERM, a dead Ray actor, or an out-of-memory kill", metrics)
+
     def test_observability_index_routes_both_observability_families(self):
         overview = read("fern/versions/latest/pages/observability/index.mdx")
 
@@ -136,11 +185,16 @@ class TestFernDocsLinks(unittest.TestCase):
         self.assertIn("/main/observability/configuration", guide)
 
     def test_model_server_index_links_model_call_capture(self):
-        for version in ("latest", "v0.5.0", "v0.5.1"):
+        # Versioned folders are frozen GA snapshots and keep the title they shipped with.
+        for version, title in (
+            ("latest", "Model-Call Capture"),
+            ("v0.5.0", "Model-call capture"),
+            ("v0.5.1", "Model-call capture"),
+        ):
             with self.subTest(version=version):
                 index = read(f"fern/versions/{version}/pages/model-server/index.mdx")
 
-                self.assertIn('<Card title="Model-call capture" href="/model-server/model-call-capture">', index)
+                self.assertIn(f'<Card title="{title}" href="/model-server/model-call-capture">', index)
 
     def test_development_setup_uses_supported_cold_start_docs_command(self):
         guide = read("fern/versions/latest/pages/contribute/development-setup.mdx")
@@ -277,12 +331,125 @@ class TestFernDocsLinks(unittest.TestCase):
 
         self.assertEqual([], absolute_links)
 
+    def test_cited_resources_server_configs_exist(self):
+        """Every `resources_servers/<name>/configs/<file>.yaml` a latest page cites must exist on main.
+
+        `my_weather_tool` is skipped: the single-step environment tutorial has the reader create it.
+        Scoped to `latest`. The frozen versions cite paths that have since been renamed.
+        """
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        tutorial_created = {"my_weather_tool"}
+        cited = 0
+        missing = []
+
+        for page in pages.rglob("*.mdx"):
+            for line_number, line in enumerate(page.read_text().splitlines(), start=1):
+                for match in re.finditer(r"resources_servers/([a-z0-9_]+)/configs/[A-Za-z0-9_.-]+\.yaml", line):
+                    if match.group(1) in tutorial_created:
+                        continue
+                    cited += 1
+                    if not (REPO_ROOT / match.group(0)).is_file():
+                        missing.append(f"{page.relative_to(REPO_ROOT)}:{line_number}: {match.group(0)}")
+
+        self.assertEqual([], missing)
+        self.assertGreater(cited, 0)
+
     def test_private_cli_compat_api_link_redirects_to_the_public_cli_page(self):
         redirects = read("fern/docs.yml")
         expected_redirect = """  - source: "/nemo/gym/nemo-gym/nemo_gym/cli/_compat"
     destination: "/nemo/gym/nemo-gym/nemo_gym/cli\""""
 
         self.assertIn(expected_redirect, redirects)
+
+    def test_latest_bash_blocks_have_no_placeholders_that_bash_splits(self):
+        """Two placeholder shapes that break a pasted block: `{your ...}` (`WANDB_API_KEY={your W&B API key}` runs
+        `W&B` as a command; `${Your Username}` is a bad substitution) and a `VAR=<...>` assignment
+        (`ACCOUNT=<ACCOUNT_NAME>` is a syntax error).
+
+        Runnable blocks export a sample value first and reference the variable instead. Angle-bracket
+        arguments such as `--model <your-model>` are not covered here.
+        """
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        bash_block = re.compile(r"^```(?:bash|sh|shell)[^\n]*\n(.*?)^```", re.DOTALL | re.MULTILINE)
+        placeholders = []
+
+        for page in pages.rglob("*.mdx"):
+            for block in bash_block.findall(page.read_text()):
+                for line in block.splitlines():
+                    if re.search(r"\{[Yy]our [^{}]*\}", line) or re.match(r"\s*(?:export\s+)?\w+=<", line):
+                        placeholders.append(f"{page.relative_to(REPO_ROOT)}: {line.strip()}")
+
+        self.assertEqual([], placeholders)
+
+    def test_latest_install_examples_use_the_newest_released_version(self):
+        # Bump only after the release is on PyPI and NGC; snapshots can land days earlier (no v0.6.0 NGC image).
+        newest = "v0.7.0"
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        pins = {
+            "get-started/installation.mdx": [
+                rf"nemo-gym=={newest[1:]}`",
+                rf"nvcr\.io/nvidia/nemo-gym:{newest}\n",
+                rf"\nNeMo Gym {newest}\n",
+            ],
+            "reference/rl-framework-compatibility.mdx": [rf"docker pull nvcr\.io/nvidia/nemo-gym:{newest}\n"],
+            "observability/configuration.mdx": [rf"\| `nemo\.gym\.version` \| `{newest[1:]}` \|"],
+        }
+
+        for page, patterns in pins.items():
+            text = (pages / page).read_text()
+            with self.subTest(page=page):
+                for pattern in patterns:
+                    self.assertRegex(text, pattern)
+                stale = re.findall(r"(?:nemo-gym==|nemo-gym:v|NeMo Gym v|`v?)(\d+\.\d+\.\d+)", text)
+                self.assertEqual([], [version for version in stale if f"v{version}" != newest])
+
+    def test_latest_dataset_commands_use_a_defined_existing_resource_config(self):
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        bash_block = re.compile(r"^```(?:bash|sh|shell)[^\n]*\n(.*?)^```", re.DOTALL | re.MULTILINE)
+        problems = []
+
+        for page in pages.rglob("*.mdx"):
+            for block in bash_block.findall(page.read_text()):
+                defined = re.findall(r'^resource_config_path="([^"]+)"', block, re.MULTILINE)
+                if "${resource_config_path}" in block and not defined:
+                    problems.append(f"{page.relative_to(REPO_ROOT)}: uses an undefined ${{resource_config_path}}")
+                problems += [
+                    f"{page.relative_to(REPO_ROOT)}: {path} does not exist"
+                    for path in defined
+                    if not (REPO_ROOT / path).is_file()
+                ]
+
+        self.assertEqual([], problems)
+
+    def test_latest_link_labels_are_titles_not_slugs(self):
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        slug_labels = []
+
+        for page in pages.rglob("*.mdx"):
+            for label in re.findall(r"\[([a-z0-9]+(?:-[a-z0-9]+)+)\]\(/", page.read_text()):
+                slug_labels.append(f"{page.relative_to(REPO_ROOT)}: [{label}]")
+
+        self.assertEqual([], slug_labels)
+
+    def test_latest_r070_copy_review_items(self):
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        faq = (pages / "reference/faq.mdx").read_text()
+
+        self.assertIn("`{hf_organization}/{hf_dataset_prefix}-{domain}-{resources_server OR dataset_name}`", faq)
+        self.assertNotIn("Including it assumes", faq)
+        self.assertIn("the branch must already exist", faq)
+        self.assertIn(
+            "does not run an LLM itself; it is orchestration code", (pages / "agent-server/index.mdx").read_text()
+        )
+        self.assertNotIn(
+            "synthetic data generation using",
+            (pages / "environment-tutorials/single-step-environment.mdx").read_text(),
+        )
+        self.assertNotIn("to point to the hostname", (pages / "model-server/vllm.mdx").read_text())
+        british = [
+            str(page.relative_to(REPO_ROOT)) for page in pages.rglob("*.mdx") if "behaviour" in page.read_text()
+        ]
+        self.assertEqual([], british)
 
 
 if __name__ == "__main__":

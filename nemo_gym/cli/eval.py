@@ -16,6 +16,7 @@ import asyncio
 import importlib
 import json
 import logging
+import signal
 import site
 import subprocess
 import sys
@@ -31,6 +32,7 @@ from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.benchmarks import (
     BenchmarkConfig,
     discover_benchmarks,
@@ -53,6 +55,13 @@ from nemo_gym.config_types import (
     ServerInstanceConfig,
 )
 from nemo_gym.discovery import read_config_metadata
+from nemo_gym.eval_plan import (
+    PlanBenchmark,
+    PlanGym,
+    build_eval_plan,
+    eval_plan_json_schema,
+    write_eval_plan,
+)
 from nemo_gym.global_config import (
     COMPONENT_NAME_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
@@ -66,6 +75,9 @@ from nemo_gym.global_config import (
     resolve_dataset_agent,
     taskset_environment_server_name,
 )
+from nemo_gym.health.types import QUALITY_SUMMARY_FILENAME, ROLLOUT_VERDICTS_FILENAME
+from nemo_gym.orchestration.jobs import installed_gym_commit
+from nemo_gym.package_info import __version__
 
 
 logger = logging.getLogger(__name__)
@@ -255,16 +267,8 @@ def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:
         ) from exc
 
 
-@exit_cleanly_on_config_error
-def prepare_benchmark() -> None:
-    """CLI command: prepare benchmark data."""
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=GlobalConfigDictParserConfig(
-            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        )
-    )
-    prepare_benchmark_config = PrepareBenchmarkConfig.model_validate(global_config_dict)
-
+def _datasets_to_prepare(global_config_dict: DictConfig) -> List[BenchmarkConfig]:
+    """Every dataset the resolved config prepares: benchmark datasets and other datasets with a prepare_script."""
     # A benchmark dataset may be declared by an agent block (legacy) or a resources server
     # block (decoupled layout). `resolve_dataset_agent` is the same resolver rollout dispatch
     # uses, so preparation and rollout always agree.
@@ -321,16 +325,21 @@ def prepare_benchmark() -> None:
                 if inspected_server_instances
                 else "No server instances with `responses_api_agents` were found in the resolved config."
             )
-            + " Pass a config with `gym eval prepare --config <config path>`."
+            + " Pass a config with `--config <config path>` or a benchmark with `--benchmark <name>`."
         )
 
+    return datasets_to_prepare
+
+
+def _prepare_datasets(datasets: Sequence[BenchmarkConfig], prepare_benchmark_config: PrepareBenchmarkConfig) -> None:
+    """Run each dataset's prepare script, after validating all of them."""
     # Validate all datasets before preparing any
     prepare_script_missing: List[BenchmarkConfig] = []
     prepare_function_missing: List[BenchmarkConfig] = []
 
     validated: List[Tuple[BenchmarkConfig, str]] = []
     already_prepared: List[BenchmarkConfig] = []
-    for benchmark_config in datasets_to_prepare:
+    for benchmark_config in datasets:
         prepare_script = benchmark_config.dataset.prepare_script
         if prepare_script is None:
             raise ConfigError(f"Dataset {benchmark_config.name!r} has no prepare_script")
@@ -394,6 +403,96 @@ def prepare_benchmark() -> None:
     else:
         results = map(_multiprocess_benchmark_prepare_fn, validated)
         list(tqdm(results, total=len(validated)))
+
+
+@exit_cleanly_on_config_error
+def prepare_benchmark() -> None:
+    """CLI command: prepare benchmark data."""
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        )
+    )
+    prepare_benchmark_config = PrepareBenchmarkConfig.model_validate(global_config_dict)
+    _prepare_datasets(_datasets_to_prepare(global_config_dict), prepare_benchmark_config)
+
+
+class PlanBenchmarkConfig(PrepareBenchmarkConfig):
+    """
+    Prepare one benchmark and write its plan: every task once, with a stable id and a digest of its input.
+
+    The plan file's format is versioned and printed by `--schema`.
+    Benchmarks whose rows have no `task_id`/`problem_id`/`instance_id`, and benchmarks with a prompt template,
+    are refused.
+
+    Examples:
+
+    ```bash
+    gym eval plan --benchmark terminal_bench_2_1/terminus_2 --out plan.json
+    gym eval plan --schema
+    ```
+    """
+
+    plan_output_fpath: Path | None = Field(default=None, description="Where to write the plan file")
+    plan_task_ids: List[str] | None = Field(default=None, description="Only plan these task ids")
+    print_plan_schema: bool = Field(default=False, description="Print the plan file's JSON Schema and exit")
+
+
+def _gym_relative_path(path: str) -> str:
+    """A config path relative to the Gym checkout when it lies inside it, so plans match across machines."""
+    try:
+        return str(Path(path).resolve().relative_to(PARENT_DIR.resolve()))
+    except ValueError:
+        return str(path)
+
+
+@exit_cleanly_on_config_error
+def plan_benchmark() -> None:
+    """CLI command: write a benchmark's evaluation plan."""
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        )
+    )
+    plan_config = PlanBenchmarkConfig.model_validate(global_config_dict)
+    if plan_config.print_plan_schema:
+        print(eval_plan_json_schema(), end="")
+        return
+    if plan_config.plan_output_fpath is None:
+        raise ConfigError("Pass `--out <path>` for the plan file.")
+
+    # Other datasets with a prepare script are not benchmarks, so they are not part of the plan.
+    benchmarks = [
+        dataset
+        for dataset in _datasets_to_prepare(global_config_dict)
+        if isinstance(dataset.dataset, BenchmarkDatasetConfig)
+    ]
+    if len(benchmarks) != 1:
+        raise ConfigError(
+            f"A plan covers exactly one benchmark, but the config declares {len(benchmarks)}: "
+            f"{[benchmark.name for benchmark in benchmarks]}."
+        )
+    benchmark = benchmarks[0]
+    if benchmark.dataset.prompt_config is not None:
+        raise ConfigError(
+            f"Benchmark {benchmark.name!r} declares a prompt template ({benchmark.dataset.prompt_config}); "
+            "plans do not support prompt templates yet."
+        )
+
+    _prepare_datasets([benchmark], plan_config)
+    rows = [json.loads(line) for line in benchmark.dataset.jsonl_fpath.read_text().splitlines() if line.strip()]
+    plan = build_eval_plan(
+        rows,
+        benchmark=PlanBenchmark(
+            name=benchmark.name,
+            config_paths=[_gym_relative_path(path) for path in global_config_dict.get("config_paths") or []],
+        ),
+        taskset=benchmark.dataset.taskset or benchmark.name,
+        gym=PlanGym(version=__version__, commit=installed_gym_commit()),
+        selected_task_ids=plan_config.plan_task_ids,
+    )
+    write_eval_plan(plan, plan_config.plan_output_fpath)
+    print(f"Wrote the plan for {benchmark.name} ({len(plan.tasks)} tasks) to {plan_config.plan_output_fpath}")
 
 
 def _validate_split_datasets_declared(split: str, server_instance_configs: Sequence[ServerInstanceConfig]) -> None:
@@ -525,7 +624,8 @@ def e2e_rollout_collection():  # pragma: no cover
 {f"Rollout collection driver: {driver_path}" if driver_path else ""}
 """
     )
-    collection_completed = False
+    _remove_health_reports(output_fpath)
+    _interrupt_on_sigterm()
     try:
         if driver_path:
             module_name, _, fn_name = driver_path.partition(":")
@@ -536,37 +636,123 @@ def e2e_rollout_collection():  # pragma: no cover
             asyncio.run(driver_fn(rollout_collection_config, resolved_config))
         else:
             asyncio.run(rch.run_from_config(rollout_collection_config))
-        collection_completed = True
     except KeyboardInterrupt:
         if rollout_collection_config.require_complete:
             raise RuntimeError("EVAL FAILED: rollout collection interrupted; partial artifacts retained.") from None
         pass
     finally:
-        rh.shutdown()
-
-    if health_check_enabled and collection_completed:
-        from nemo_gym.rollout_health import format_health_report, run_health_checks
-
+        # Before the server shutdown, so a run Slurm stops writes its summary within KillWait.
+        # A failed or interrupted run reports health too, so its failed and missing rollouts are counted.
         try:
-            health_result = run_health_checks(
+            if health_check_enabled:
+                # A custom driver keeps no landed keys, so its stopped run gets the full check.
+                _health_check_collected_rollouts(
+                    output_fpath, rollout_collection_config, None if driver_path else rch._landed_keys
+                )
+        finally:
+            rh.shutdown()
+    _exit_if_terminated()
+
+
+_terminated = False
+
+
+def _interrupt_on_sigterm() -> None:
+    """Make Slurm's SIGTERM (scancel, time limit, preemption) unwind like Ctrl-C, so ``finally`` blocks run.
+
+    Python's default SIGTERM action exits without unwinding, which would skip the quality summary.
+    """
+
+    def _on_sigterm(signum: int, frame: Any) -> None:
+        global _terminated
+        _terminated = True
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
+
+def _exit_if_terminated() -> None:
+    """A run stopped by SIGTERM exits as a SIGTERM kill would, so it never looks successful."""
+    if _terminated:
+        sys.exit(128 + signal.SIGTERM)
+
+
+def _remove_health_reports(output_fpath: Path) -> None:
+    # A fresh run or a resume reports its own health; a report left by an earlier job must not stand for it.
+    for report in (QUALITY_SUMMARY_FILENAME, ROLLOUT_VERDICTS_FILENAME):
+        (output_fpath.parent / report).unlink(missing_ok=True)
+
+
+def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_keys: set | None = None) -> None:
+    """Write the quality summary for whatever a run collected; a run that never started collection has none.
+
+    After SIGTERM, Slurm kills the job once KillWait (120 s on some clusters) is over, and the full check can take
+    minutes on a large run. So a stopped run with ``landed_keys`` gets the provisional summary: the run
+    accounting only, without reading the rollouts.
+    """
+    if not output_fpath.exists():
+        return
+    from nemo_gym.rollout_health import format_health_report, run_health_checks, write_provisional_summary
+
+    if _terminated and landed_keys is not None:
+        try:
+            summary_path = write_provisional_summary(
                 output_fpath,
-                workers=rollout_collection_config.health_check_workers,
-                ignored_checks=rollout_collection_config.health_check_ignored_checks,
+                landed_keys,
+                limits=config.run_health_limits,
+                ignored_checks=config.health_check_ignored_checks,
             )
         except Exception:
-            logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
+            logger.exception("Writing the provisional quality summary failed; rollout artifacts are still available.")
         else:
-            print(format_health_report(health_result))
+            print(f"Provisional quality summary (run accounting only): {summary_path}")
+        return
+    try:
+        health_result = run_health_checks(
+            output_fpath,
+            workers=config.health_check_workers,
+            ignored_checks=config.health_check_ignored_checks,
+            limits=config.run_health_limits,
+        )
+    except Exception:
+        logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
+    else:
+        print(format_health_report(health_result))
 
 
 @exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.telemetry.setup import (
+        configure_telemetry_env,
+        init_telemetry,
+        shutdown_telemetry,
+        telemetry_config_from_global_config,
+    )
 
-    config = RolloutCollectionConfig.model_validate(get_global_config_dict())
+    global_config_dict = get_global_config_dict()
+    config = RolloutCollectionConfig.model_validate(global_config_dict)
     rch = RolloutCollectionHelper()
+    health_check_enabled = not config.disable_aggregation and not config.disable_health_check
+    config.disable_health_check = True  # Run once below, also when collection fails.
 
-    asyncio.run(rch.run_from_config(config))
+    # A standalone driver starts no supervisor, so it sets up its own telemetry for the `gym.job` span and driver metrics.
+    configure_telemetry_env(telemetry_config_from_global_config(global_config_dict))
+    init_telemetry(server_name="driver", server_type="driver")
+    _remove_health_reports(Path(config.output_jsonl_fpath))
+    _interrupt_on_sigterm()
+    try:
+        asyncio.run(rch.run_from_config(config))
+    except KeyboardInterrupt:
+        if not _terminated:
+            raise
+    finally:
+        try:
+            shutdown_telemetry()
+        finally:
+            if health_check_enabled:
+                _health_check_collected_rollouts(Path(config.output_jsonl_fpath), config, rch._landed_keys)
+    _exit_if_terminated()
 
 
 @exit_cleanly_on_config_error
@@ -586,9 +772,15 @@ def health_check_rollouts(
     rollout_file: str | Path | None = None,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
+    limits: Any = None,
     json_output: bool = False,
 ):
-    """Run rollout quality verification for an existing run directory."""
+    """Run rollout quality verification for an existing run directory.
+
+    By default the run's persisted limits judge it again. Each limit set explicitly on ``limits`` (a
+    ``RunHealthLimits``) overrides only that persisted limit, and ``None`` removes it; a limit not set keeps its
+    persisted value.
+    """
     from nemo_gym.rollout_health import health_check_run_dir
 
     return health_check_run_dir(
@@ -596,6 +788,7 @@ def health_check_rollouts(
         rollout_file=rollout_file,
         workers=workers,
         ignored_checks=ignored_checks,
+        limits=limits,
         json_output=json_output,
     )
 

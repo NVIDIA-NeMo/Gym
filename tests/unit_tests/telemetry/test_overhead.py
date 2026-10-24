@@ -24,6 +24,7 @@ here is a **ratio between two timings taken in the same process on the same run*
 is the only reproducible form (see the convention's "compare deltas, never absolutes").
 """
 
+import time
 import timeit
 from contextlib import nullcontext
 
@@ -43,11 +44,13 @@ _REPEAT = 5
 
 
 def _min_ns(stmt, globals_dict):
-    """Minimum per-call nanoseconds over `_REPEAT` runs.
+    """Minimum per-call nanoseconds of this thread's CPU time over `_REPEAT` runs.
 
-    Minimum rather than mean: it is the run least disturbed by other processes.
+    CPU time leaves out the time the scheduler gives to other processes.
+    Wall-clock time charges that to whichever statement was running, which can reverse a comparison on a loaded host.
+    Minimum rather than mean: it is the run least disturbed by cache and frequency effects.
     """
-    timings = timeit.repeat(stmt, number=_NUMBER, repeat=_REPEAT, globals=globals_dict)
+    timings = timeit.repeat(stmt, number=_NUMBER, repeat=_REPEAT, globals=globals_dict, timer=time.thread_time)
     return min(timings) / _NUMBER * 1e9
 
 

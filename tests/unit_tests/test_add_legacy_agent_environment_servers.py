@@ -73,8 +73,23 @@ def test_migrates_a_config_outside_the_repository(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("resources", [None, {"type": "resources_servers", "name": "my_resources"}])
-@pytest.mark.parametrize("agent_type", ["hermes_agent", "osworld_agent"])
-def test_migration_respects_hermes_native_session_template(
+@pytest.mark.parametrize(
+    "agent_type",
+    [
+        "hermes_agent",
+        "pi_agent",
+        "codex_agent",
+        "openclaw_agent",
+        "opencode_agent",
+        "kilocode_agent",
+        "claude_code_agent",
+        "osworld_agent",
+        "harbor_oracle_agent",
+        "terminus_2_sandboxed_agent",
+        "miniswe_sandboxed_agent",
+    ],
+)
+def test_migration_respects_agent_session_templates(
     tmp_path: Path, resources: dict[str, str] | None, agent_type: str
 ) -> None:
     config = tmp_path / "agent.yaml"
@@ -82,24 +97,152 @@ def test_migration_respects_hermes_native_session_template(
         yaml.safe_dump(
             {
                 "my_agent": {
-                    "responses_api_agents": {
-                        agent_type: {
-                            "entrypoint": "app.py",
-                            "resources_server": resources,
-                        }
-                    }
+                    "responses_api_agents": {agent_type: {"entrypoint": "app.py", "resources_server": resources}}
                 }
             }
         )
     )
     before = config.read_text()
-
     assert migration.main([str(config)]) == 0
-
-    if agent_type == "hermes_agent" and resources is None:
+    if agent_type != "osworld_agent" and resources is None:
         assert config.read_text() == before
     else:
         assert _environment_servers(yaml.safe_load(config.read_text())) == {"my_agent": ["my_environment_server"]}
+
+
+@pytest.mark.parametrize(
+    "agent_type",
+    [
+        "hermes_agent",
+        "pi_agent",
+        "codex_agent",
+        "openclaw_agent",
+        "opencode_agent",
+        "kilocode_agent",
+        "claude_code_agent",
+        "harbor_oracle_agent",
+        "terminus_2_sandboxed_agent",
+        "miniswe_sandboxed_agent",
+    ],
+)
+def test_agent_session_capable_overlay_keeps_inherited_resources(tmp_path: Path, agent_type: str) -> None:
+    base = tmp_path / "base.yaml"
+    base.write_text(AGENT_CONFIG.replace("simple_agent", agent_type))
+    overlay = tmp_path / "overlay.yaml"
+    overlay.write_text(
+        f"renamed_agent:\n  _inherit_from: my_{agent_type}\n  responses_api_agents:\n    {agent_type}: {{}}\n"
+    )
+    before = overlay.read_text()
+    assert migration.main([str(base), str(overlay)]) == 0
+    # Gym follows the agent rename while preserving the source server's identity (#4141).
+    assert overlay.read_text() == before
+    assert _environment_servers(yaml.safe_load(base.read_text())) == {f"my_{agent_type}": ["my_environment_server"]}
+    resolved = _parse(base, overlay, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["my_environment_server"]}
+    assert resolved.renamed_agent.responses_api_agents[agent_type].resources_server.name == "my_resources"
+
+
+def test_default_pi_composes_with_exactly_one_session_environment(tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    default = SCRIPT.parents[1] / "responses_api_agents/pi_agent/configs/pi_agent.yaml"
+    config.write_text(default.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "policy_model_name: test-model\n"
+        + _server_fronting("pi_agent", name="session_environment", server_type="single_agent_turn_legacy")
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"pi_agent": ["session_environment"]}
+    assert resolved.pi_agent.responses_api_agents.pi_agent.resources_server is None
+
+
+def test_default_codex_composes_with_exactly_one_session_environment(tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    default = SCRIPT.parents[1] / "responses_api_agents/codex_agent/configs/codex_agent.yaml"
+    config.write_text(default.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "policy_model_name: test-model\n"
+        + _server_fronting("codex_agent", name="session_environment", server_type="single_agent_turn_legacy")
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"codex_agent": ["session_environment"]}
+    assert resolved.codex_agent.responses_api_agents.codex_agent.resources_server is None
+
+
+def test_default_kilocode_composes_with_exactly_one_session_environment(tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    default = SCRIPT.parents[1] / "responses_api_agents/kilocode_agent/configs/kilocode_sandboxed.yaml"
+    config.write_text(default.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "policy_model_name: test-model\n"
+        + _server_fronting("kilocode_agent", name="session_environment", server_type="single_agent_turn_legacy")
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"kilocode_agent": ["session_environment"]}
+    assert resolved.kilocode_agent.responses_api_agents.kilocode_agent.resources_server is None
+
+
+def test_default_claude_composes_with_exactly_one_session_environment(tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    default = SCRIPT.parents[1] / "responses_api_agents/claude_code_agent/configs/claude_code_agent.yaml"
+    config.write_text(default.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "anthropic_api_key: test-key\n"
+        + _server_fronting("claude_code_agent", name="session_environment", server_type="single_agent_turn")
+    )
+    before = config.read_text()
+
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"claude_code_agent": ["session_environment"]}
+    assert resolved.claude_code_agent.responses_api_agents.claude_code_agent.resources_server is None
+
+
+def test_opencode_session_template_composes_with_one_environment(tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    default = SCRIPT.parents[1] / "responses_api_agents/opencode_agent/configs/opencode_agent.yaml"
+    config.write_text(default.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "policy_model_name: test-model\n"
+        + _server_fronting("opencode_agent", name="session_environment", server_type="single_agent_turn_legacy")
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"opencode_agent": ["session_environment"]}
+    assert resolved.opencode_agent.responses_api_agents.opencode_agent.resources_server is None
+
+
+def test_session_openclaw_template_composes_with_one_environment(tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    default = SCRIPT.parents[1] / "responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml"
+    config.write_text(default.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "policy_model_name: test-model\n"
+        + _server_fronting("openclaw_agent", name="session_environment", server_type="single_agent_turn_legacy")
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"openclaw_agent": ["session_environment"]}
+    assert resolved.openclaw_agent.responses_api_agents.openclaw_agent.resources_server is None
 
 
 def test_hermes_overlay_keeps_its_inherited_resources_binding(tmp_path: Path) -> None:
@@ -123,14 +266,14 @@ def test_hermes_overlay_keeps_its_inherited_resources_binding(tmp_path: Path) ->
     assert resolved.renamed_agent.responses_api_agents.hermes_agent.resources_server.name == "my_resources"
 
 
-def test_default_hermes_composes_with_exactly_one_native_environment(tmp_path: Path) -> None:
+def test_default_hermes_composes_with_exactly_one_session_environment(tmp_path: Path) -> None:
     config = tmp_path / "hermes.yaml"
     default = SCRIPT.parents[1] / "responses_api_agents/hermes_agent/configs/hermes_agent.yaml"
     config.write_text(default.read_text())
     composition = tmp_path / "run.yaml"
     composition.write_text(
         "policy_model_name: test-model\n"
-        + _server_fronting("hermes_agent", name="native_environment", server_type="single_agent_turn_legacy")
+        + _server_fronting("hermes_agent", name="session_environment", server_type="single_agent_turn_legacy")
     )
     before = config.read_text()
 
@@ -139,7 +282,7 @@ def test_default_hermes_composes_with_exactly_one_native_environment(tmp_path: P
 
     assert config.read_text() == before
     resolved = _parse(config, composition, strict=True)
-    assert _environment_servers_by_agent(resolved) == {"hermes_agent": ["native_environment"]}
+    assert _environment_servers_by_agent(resolved) == {"hermes_agent": ["session_environment"]}
     assert resolved.hermes_agent.responses_api_agents.hermes_agent.resources_server is None
 
 
