@@ -9,6 +9,12 @@ task checks whether the model follows its instructions, graded against versioned
 - **Source:** NVIDIA-internal rows in Gym's GitLab dataset registry: dataset `partner_if`, version
   `2.1.4`, file `partner_if.jsonl`. `prepare.py` pins the file's sha256 and refuses any other content. The
   rows are not in this repository.
+- **Public examples:** the rows above are internal, but the partner_if resources server ships synthetic rows in
+  the same format: five text tasks in
+  [`data/example.jsonl`](../../resources_servers/partner_if/data/example.jsonl) and two mock-tool tasks in
+  [`data/mock_tools_example.jsonl`](../../resources_servers/partner_if/data/mock_tools_example.jsonl), with
+  recorded rollouts of both, plus a sandboxed version of the mock-tool tasks. Its
+  [Usage](../../resources_servers/partner_if/README.md#usage) section shows how to run them.
 - **License:** internal.
 - **Size:** 25 tasks with 86 IF rubric items, plus 4 completion items: 17 text tasks, 2 search-tool tasks,
   3 build-tool tasks and 3 SWE tasks. There is one split, `benchmark`.
