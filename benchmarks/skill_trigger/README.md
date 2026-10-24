@@ -1,6 +1,6 @@
 # Skill opening across agent harnesses
 
-**Implementation draft: this benchmark is not runnable yet.** Source preparation, scoring, trace conversion, shared budgets, inference transport, and the host-side Harbor verifier have component tests. Codex/Hermes launch profiles are ported. The shared adapter has passed synthetic Pi integration through Harbor and Codex live session-attribution checks; complete Codex/Hermes integration and live migration checks remain pending. This draft does not register a benchmark or report new model results.
+**Implementation draft: this benchmark is not runnable yet.** Source preparation, task packaging, scoring, trace conversion, shared budgets, inference transport, and the host-side Harbor verifier have component tests. Codex/Hermes launch profiles are ported. The shared adapter has passed synthetic Pi integration through Harbor and Codex live session-attribution checks; complete Codex/Hermes integration and live migration checks remain pending. This draft does not register a benchmark or report new model results.
 
 The question is whether a model opens the relevant skill instructions when a task calls for them. Task-performance benchmarks measure whether work gets done; this benchmark measures an earlier step. Opening instructions is not evidence that the agent followed them or completed the task.
 
@@ -29,6 +29,8 @@ python -m pytest --confcutdir=benchmarks/skill_trigger/tests benchmarks/skill_tr
 ```
 
 Use a new output directory for each preparation. Normal preparation refuses unresolved blockers. Only a `prepared-release` artifact may eventually be packaged for execution; `source-audit` is metadata only. The manifest contains labels and original prompt provenance and must remain outside the agent sandbox. Copies of root and nested attribution notices accompany permitted prepared catalogs. No scientific software or model weights referenced by a skill are downloaded or executed during preparation.
+
+Once release terms are resolved, `python -m environments.skill_trigger.package --release RELEASE --manifest-sha256 SHA256 --output NEW_TASKS --image PINNED_IMAGE --harness pi --gateway-host 127.0.0.1` packages every case for Harbor. Select another of the five harness configurations to preserve its network profile. This validates the manifest and skill files, retains each original catalog, and keeps labels outside task images. The same packager is used by the synthetic integration checks; it refuses audit-only artifacts and existing output directories. Named Gym configurations and their execution commands remain unfinished.
 
 ## Scoring
 
@@ -86,6 +88,8 @@ LITELLM_LOCAL_MODEL_COST_MAP=True python -m environments.skill_trigger.tests.har
 ```
 
 The smoke uses a local scripted provider and synthetic instructions, not model inference or a benchmark case. Pi's successful-read and missed-read paths passed with both `openai-responses` and `openai-completions`; three-request stops preserve earlier successful reads, and scripted provider failures remain unscored. Select the API with `--api` and a boundary case with `--scenario miss`, `request-limit`, or `provider-error`. Each attempt needs a new output directory. This is integration evidence, not the live migration comparison or a clean-clone acceptance run.
+
+Add `--engine gym-job` to exercise Gym's actual Harbor Job execution and response conversion. Synthetic Pi success, miss, request-limit, and provider-error cases passed on this path. A provider failure remains marked `harbor_failed` and keeps private evidence after the bridge removes its failed trial result. Gym's collector excludes marked failures by default; keep `count_failure_classes_as_zero=[]` and `count_missing_rollouts_as_zero=false` for this benchmark. The check calls the bridge in-process and does not exercise Ray dispatch, the HTTP server, or collector persistence. It requires Gym's Ray dependency (tested with the lockfile's Ray 2.58.0); no Ray cluster is started.
 
 Codex selects the root from the CLI's `thread.started` event, verifies child ownership against canonical spawn calls/results, and excludes inherited records using the child's explicit history ordinal plus a matching parent prefix. The watcher rejects incomplete or altered files. Live admission checks passed for fresh and forked children using the actual pinned binary, scripted replies, and network-disabled containers. Each admitted three requests across two proven sessions and produced linked ATIF trajectories. These checks use pipes instead of the HTTP gateway and do not score a benchmark trial. To reproduce, run `python -m environments.skill_trigger.tests.codex_live_smoke --image skill-trigger-harnesses --output /tmp/new-codex-check`, adding `--fork` in a separate fresh directory for inherited history.
 

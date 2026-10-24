@@ -22,16 +22,17 @@ import argparse
 import asyncio
 import json
 import os
-import shutil
 import time
 import uuid
 from pathlib import Path
 
 from aiohttp import web
 from harbor.models.trial.config import TrialConfig
+from harbor.models.trial.result import TrialResult
 from harbor.trial.trial import Trial
 
 from benchmarks.skill_trigger.prepare import digest, encode, tree_digest
+from environments.skill_trigger.package import package_tasks
 
 
 async def smoke(
@@ -44,6 +45,7 @@ async def smoke(
     node_binary: str,
     api: str,
     scenario: str,
+    engine: str,
 ) -> None:
     if harness != "pi" and (api != "openai-responses" or scenario != "success"):
         raise ValueError("Additional scripted scenarios currently exercise Pi only")
@@ -52,8 +54,8 @@ async def smoke(
     release = root / "release"
     folder = release / "catalogs/synthetic/synthetic"
     folder.mkdir(parents=True)
-    body = "Parse the table using the stated column names. Reject missing required values, count the valid rows, and report the validation results before writing the output."
-    skill = "---\nname: synthetic\ndescription: Synthetic table parsing\n---\n" + body
+    skill_body = "Parse the table using the stated column names. Reject missing required values, count the valid rows, and report the validation results before writing the output."
+    skill = "---\nname: synthetic\ndescription: Synthetic table parsing\n---\n" + skill_body
     (folder / "SKILL.md").write_text(skill)
     files = [("SKILL.md", digest(skill.encode()))]
     members = [{"name": "synthetic", "files": files, "mounted_sha256": tree_digest(files)}]
@@ -76,40 +78,15 @@ async def smoke(
     }
     raw = encode(manifest)
     (release / "manifest.json").write_bytes(raw)
-    task = root / "case-synthetic"
-    env = task / "environment"
-    env.mkdir(parents=True)
-    (task / "tests").mkdir()
-    (task / "tests/test.sh").write_text("#!/bin/sh\nexit 1\n")
-    (task / "instruction.md").write_text(prompt)
-    shutil.copytree(release / "catalogs/synthetic", env / "skills")
-    (env / "Dockerfile").write_text(f"FROM {image}\nCOPY skills /skills\n")
-    (env / "docker-compose.yaml").write_text("""services:
-  main:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: ${MAIN_IMAGE_NAME}
-    command: sleep infinity
-    user: "1000"
-    cpus: 0.5
-    mem_limit: 768m
-    pids_limit: 256
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-""")
-    (task / "task.toml").write_text(f"""version = "1.0"
-[agent]
-timeout_sec = 180
-[verifier]
-timeout_sec = 30
-[environment]
-build_timeout_sec = 300
-cpus = 1
-memory_mb = 768
-network_mode = {json.dumps("no-network" if harness == "pi" else "allowlist")}
-allowed_hosts = {"[]" if harness == "pi" else json.dumps([gateway_host])}
-""")
+    dataset = package_tasks(
+        release=release,
+        manifest_sha256=digest(raw),
+        output=root / "tasks",
+        image=image,
+        harness=harness,
+        gateway_host=gateway_host,
+    )
+    task = dataset / "case-synthetic"
     calls = []
 
     async def responses(request):
@@ -253,35 +230,103 @@ allowed_hosts = {"[]" if harness == "pi" else json.dumps([gateway_host])}
                 },
             }
         )
-        trial = await Trial.create(config)
-        result = await trial.run()
-        (root / "result.json").write_text(result.model_dump_json(indent=2))
+        gym_response = None
+        bridge_error = None
+        result = None
+        if engine == "gym-job":
+            # Exercise Gym's real Job execution and response conversion without
+            # starting Ray or a webserver; this does not test those boundaries.
+            from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+            from responses_api_agents.harbor_agent_general.app import HarborAgent, HarborAgentConfig, HarborRunRequest
+
+            os.environ["NEMO_GYM_CONFIG_DICT"] = json.dumps({"num_samples_in_parallel": 1})
+            bridge_config = HarborAgentConfig.model_validate(
+                {
+                    "name": "skill_trigger",
+                    "host": "127.0.0.1",
+                    "port": 8080,
+                    "entrypoint": "app.py",
+                    "harbor_unique_job_names": True,
+                    "job": {
+                        "jobs_dir": str(root / "jobs"),
+                        "datasets": [{"path": str(task.parent)}],
+                        "agents": [config.agent.model_dump(mode="json")],
+                        "environment": config.environment.model_dump(mode="json"),
+                        "verifier": config.verifier.model_dump(mode="json"),
+                        "retry": {"max_retries": 0},
+                    },
+                }
+            )
+            bridge = HarborAgent.model_construct(config=bridge_config)
+            body = HarborRunRequest.model_validate(
+                {
+                    "task_name": task.name,
+                    TASK_INDEX_KEY_NAME: 0,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    "responses_create_params": {"input": []},
+                }
+            )
+            job = bridge_config.build_job_config(task_name=task.name, job_name="synthetic")
+            (root / "job.json").write_text(job.model_dump_json(indent=2))
+            try:
+                trial_dir = Path(await bridge.run_job(job.model_dump(mode="json"), task.name))
+            except RuntimeError as error:
+                if scenario != "provider-error":
+                    raise
+                bridge_error = str(error)
+                gym_response = bridge.failure_response(body, error)
+            else:
+                result = TrialResult.model_validate_json((trial_dir / "result.json").read_bytes())
+                gym_response = bridge.success_response(body, trial_dir)
+            (root / "gym-response.json").write_text(gym_response.model_dump_json(indent=2))
+        else:
+            trial = await Trial.create(config)
+            result = await trial.run()
+        if result is not None:
+            (root / "result.json").write_text(result.model_dump_json(indent=2))
         records = list((root / "private").glob("*/evidence.json"))
         evidence = json.loads(records[0].read_text())["evidence"] if len(records) == 1 else {}
         summary = {
             "kind": "synthetic-harbor-smoke",
             "model_inference": False,
             "harness": harness,
+            "engine": engine,
             "api": api,
             "scenario": scenario,
             "root": str(root),
             "provider_requests": len(calls),
             "outcome": evidence.get("outcome"),
             "finished_at": evidence.get("finished_at"),
-            "exception": result.exception_info.model_dump(mode="json") if result.exception_info else None,
-            "rewards": result.verifier_result.rewards if result.verifier_result else None,
+            "exception": result.exception_info.model_dump(mode="json")
+            if result is not None and result.exception_info
+            else bridge_error,
+            "rewards": result.verifier_result.rewards if result is not None and result.verifier_result else None,
+            "gym_failure_class": getattr(gym_response, "_ng_failure_class", None),
+            "gym_response_status": gym_response.response.status if gym_response else None,
+            "gym_response_reward": gym_response.reward if gym_response else None,
         }
         (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
         print(json.dumps(summary, indent=2))
         if scenario == "provider-error":
-            assert result.exception_info and summary["rewards"] is None and len(calls) == 1, summary
+            assert summary["exception"] and summary["rewards"] is None and len(calls) == 1, summary
             assert evidence.get("outcome") == "provider_error", summary
+            if gym_response is not None:
+                assert summary["gym_failure_class"] == "harbor_failed", summary
+                assert gym_response.response.status == "failed", summary
+                assert list((root / "private").glob("*/failure.json")), "Private failure evidence must survive"
+                assert not list((root / "jobs").glob("*/*/result.json")), "Bridge must invalidate failed trial result"
         else:
             expected_reward = 0 if scenario == "miss" else 1
             expected_outcome = "routing_horizon" if scenario == "request-limit" else "completed"
             expected_requests = {"success": 2, "miss": 1, "request-limit": 3}[scenario]
-            assert not result.exception_info and summary["rewards"] == {"reward": expected_reward}, summary
+            assert not summary["exception"] and summary["rewards"] == {"reward": expected_reward}, summary
             assert evidence.get("outcome") == expected_outcome and len(calls) == expected_requests, summary
+            if gym_response is not None:
+                assert summary["gym_failure_class"] is None and gym_response.reward == expected_reward, summary
+                assert gym_response.response.status == "completed" and gym_response.response.model == "test-model"
+                assert gym_response.responses_create_params.input[0].content == prompt
+                if expected_reward:
+                    assert skill_body in json.dumps(gym_response.response.model_dump(mode="json"))
     finally:
         await runner.cleanup()
         from nemo_gym.server_utils import get_global_aiohttp_client, is_global_aiohttp_client_setup
@@ -293,6 +338,7 @@ allowed_hosts = {"[]" if harness == "pi" else json.dumps([gateway_host])}
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--engine", choices=["harbor-trial", "gym-job"], default="harbor-trial")
     parser.add_argument("--image", required=True)
     parser.add_argument("--gateway-host", required=True)
     parser.add_argument("--gateway-port", type=int, default=0)
