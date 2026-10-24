@@ -6,9 +6,10 @@
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import uuid4
+from warnings import warn
 
 from fastapi import Body
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, ValidationInfo, field_validator
 
 from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepMode, seed_restarts, seed_verify_mode
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
@@ -46,6 +47,8 @@ from nemo_gym.failure_kinds import (
     MODEL_TRANSPORT_ERROR,
 )
 from nemo_gym.global_config import (
+    SKIP_VERIFICATION_KEY_NAME,
+    SKIP_VERIFICATION_REWARD_KEY_NAME,
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
@@ -154,6 +157,10 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
     agent_server: AgentServerRef
     agent_outcome_policy: AgentOutcomePolicyConfig = Field(default_factory=AgentOutcomePolicyConfig)
     resources_tool_transports: list[Literal["direct_http", "mcp"]] = Field(default_factory=list)
+    # Unset, each falls back to the bound agent's own setting, which also carries the global flag.
+    # A pairing moved off the legacy_agent relay then keeps skipping as its agent's /run did.
+    skip_verification: bool | None = None
+    skip_verification_reward: float | None = None
 
 
 class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequest, SingleAgentTurnResponse]):
@@ -165,7 +172,18 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     response_model = SingleAgentTurnResponse
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
-        """Forward to the resources server, which owns verification in this protocol."""
+        """Forward to the resources server, which owns verification in this protocol.
+
+        Without verification there is nothing to aggregate, so a skipping server returns empty metrics.
+        """
+        if self._skipped_verification_reward() is not None:
+            warn(
+                "Skipping aggregate metrics because skip_verification=True; "
+                "use disable_aggregation=True to avoid writing aggregate metric files.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return AggregateMetrics()
         response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/aggregate_metrics",
@@ -306,8 +324,16 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     "trajectory": dumped_trajectory(),
                 },
             )
-            async with self.checkpoint_step(request, handles.resources_verify):
-                verification = await self._verify(request, handles, agent_response, observations, trajectory)
+            skipped_reward = self._skipped_verification_reward()
+            if skipped_reward is None:
+                async with self.checkpoint_step(request, handles.resources_verify):
+                    verification = await self._verify(request, handles, agent_response, observations, trajectory)
+            else:
+                # The flag marks the fixed reward, so anything reading the result can tell it from a measured one.
+                verification = SingleAgentTurnResult.model_validate(
+                    self._verify_body(request, agent_response)
+                    | {"reward": skipped_reward, "verification_skipped": True}
+                )
             stage = "return"
 
         # Every path ends here, at the return stage.
@@ -512,20 +538,12 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         observations: AgentObservationBundle | None,
         trajectory: TrajectoryRecord | None = None,
     ) -> SingleAgentTurnResult:
-        task_input = request.task.task_input
         try:
             verify_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                # The Resources Server's own flat verify body, as an Agent's /run sends it; the session
-                # cookie identifies the episode.
-                json=task_input.task_data
-                | {
-                    "responses_create_params": task_input.responses_create_params.model_dump(
-                        mode="json", exclude_unset=True
-                    ),
-                    "response": agent_response.model_dump(mode="json"),
-                },
+                # The session cookie identifies the episode.
+                json=self._verify_body(request, agent_response),
                 cookies=handles.resources_cookies,
                 # Final cleanup closes the session, so the Resources Server keeps tracking it until then.
                 headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
@@ -541,6 +559,35 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 agent_observations=observations,
                 trajectory=trajectory,
             ) from error
+
+    @staticmethod
+    def _verify_body(request: SingleAgentTurnRequest, agent_response: NeMoGymResponse) -> dict[str, Any]:
+        """The Resources Server's own flat verify body, as an Agent's /run sends it."""
+        task_input = request.task.task_input
+        return task_input.task_data | {
+            "responses_create_params": task_input.responses_create_params.model_dump(mode="json", exclude_unset=True),
+            "response": agent_response.model_dump(mode="json"),
+        }
+
+    def _skipped_verification_reward(self) -> float | None:
+        """The fixed reward that replaces /verify, or None to verify.
+
+        This server's own setting wins; otherwise the bound agent's applies.
+        The agent's raw values are parsed as the agent's own config parses them, so a string "false" stays false.
+        """
+        agent_config = get_first_server_config_dict(
+            self.server_client.global_config_dict,
+            self.config.agent_server.name,
+        )
+        skip = self.config.skip_verification
+        if skip is None:
+            skip = TypeAdapter(bool).validate_python(agent_config.get(SKIP_VERIFICATION_KEY_NAME, False))
+        if not skip:
+            return None
+        reward = self.config.skip_verification_reward
+        if reward is None:
+            reward = TypeAdapter(float).validate_python(agent_config.get(SKIP_VERIFICATION_REWARD_KEY_NAME, 0.0))
+        return reward
 
     def _agent_responses_path(self, request: SingleAgentTurnRequest) -> str:
         block = self.server_client.global_config_dict.get(TOKEN_ID_CAPTURE_BLOCK) or {}
