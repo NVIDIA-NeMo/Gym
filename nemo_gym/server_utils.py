@@ -1742,7 +1742,12 @@ class SimpleServer(BaseServer):
             minted = SESSION_ID_KEY not in session
             session[SESSION_ID_KEY] = session.get(SESSION_ID_KEY, new_session_id)
             if claim is None:
-                return await call_next(request)
+                response = await call_next(request)
+                if minted and response.status_code >= 400:
+                    # A failed request keeps nothing under a new session, so its reply names none: a seed refused
+                    # for another episode's resources_session_id must not hand this client that session's cookie.
+                    del session[SESSION_ID_KEY]
+                return response
 
             # With several workers, a session nobody claims, new or named by a cookie whose claim ended,
             # is claimed only if the handler uses it, before the reply leaves this worker,
@@ -1759,8 +1764,9 @@ class SimpleServer(BaseServer):
             if used and not claim():
                 # Another worker claimed the same ID meanwhile; serving the request here would split the session.
                 return JSONResponse({"detail": "This session's ID is already claimed. Retry it."}, status_code=409)
-            if not used and minted:
-                # No cookie names an ID that nothing holds, so a later request cannot name an unclaimed session.
+            if minted and (not used or response.status_code >= 400):
+                # No cookie names an ID that nothing holds, so a later request cannot name an unclaimed session,
+                # and a failed request hands out no cookie, as with one worker.
                 del session[SESSION_ID_KEY]
             return response
 
