@@ -624,3 +624,26 @@ async def test_a_launch_without_an_upload_runs_unsupervised(tmp_path: Path) -> N
     )
 
     assert result.stdout is not None and "supervisor" not in result.stdout and result.return_code == 3
+
+
+async def test_a_launch_that_cannot_run_the_supervisor_still_pauses_and_says_it_is_unsupervised(
+    remote_supervisor: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(harness, "_SELECT_SUPERVISOR_PYTHON", 'PY=""')  # a sandbox without Python 3.8+
+    shell, park = SupervisedShell(), ParkRequest()
+    parker = Parker(park)
+    with caplog.at_level(logging.WARNING, logger=harness.__name__):
+        run = asyncio.create_task(
+            run_until_park_requested(  # type: ignore[arg-type]
+                shell, "sleep 1 && echo done", park, timeout_s=60, park=parker, label="rollout-u"
+            )
+        )
+        await asyncio.sleep(0.3)
+        park.requested.set()
+        await asyncio.wait_for(parker.parked.wait(), 10)
+        parker.opened.set()
+        result = await asyncio.wait_for(run, 30)
+
+    assert result.stdout == "done\n" and parker.calls == 1, "the scan paused it"
+    [warning] = [r.getMessage() for r in caplog.records if "without the process supervisor" in r.getMessage()]
+    assert "rollout-u" in warning

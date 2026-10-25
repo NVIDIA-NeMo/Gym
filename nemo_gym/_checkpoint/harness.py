@@ -74,6 +74,9 @@ _CANCEL_KILL_S = 30.0
 # A pause checks this many times, this far apart, that every process of the launch has stopped.
 _PAUSE_CHECKS = 50
 _PAUSE_CHECK_INTERVAL_S = 0.1
+# While the only processes left are in an uninterruptible system call (state D, such as a write to a slow disk), a
+# pause keeps checking for up to this many checks instead: they take the pending SIGSTOP when the call returns.
+_PAUSE_DISK_WAIT_CHECKS = 300
 # Tries to continue a paused launch before it is stopped instead.
 _CONTINUE_ATTEMPTS = 3
 # Budget of one pause or continue command. Both scan every process of the sandbox on each pass, which is slow in a
@@ -148,6 +151,7 @@ class HarnessLaunch:
         self._root_file = f"{state_dir}/nemo-gym-harness-{self.id}.root"
         self._tree_file = f"{state_dir}/nemo-gym-harness-{self.id}.tree"
         self._receipt_file = f"{state_dir}/nemo-gym-harness-{self.id}.receipt.json"
+        self._supervised = False
 
     def command(self, command: str, *, supervisor: Optional[str] = None, timeout_s: Optional[float] = None) -> str:
         """``command``, tagged, exiting with 130 instead of starting once a stop was requested, and waiting
@@ -170,6 +174,7 @@ class HarnessLaunch:
         )
         if supervisor is None:
             return f"env {LAUNCH_TAG}={self.id} bash -c {quote(script)}"
+        self._supervised = True
         budget_s = timeout_s if timeout_s is not None else _UNBOUNDED_TIMEOUT_S
         supervised = (
             f"{_SELECT_SUPERVISOR_PYTHON}\n"
@@ -201,7 +206,7 @@ class HarnessLaunch:
             f"touch {self._stop_file}\n"
             f"{ended_check}"
             f"{self._find_launch_processes()}\n"
-            f'for p in $found; do t=$(starttime "$p") && echo "$p:$t" >> {self._found_file}; done\n'
+            f"{self._record_found()}\n"
             'for p in $found; do read -r n 2>/dev/null < "/proc/$p/comm" && echo "$p $n"; done\n'
             f'for p in $found; do kill -{signal_name} "$p" 2>/dev/null; done\n'
             "true"
@@ -213,9 +218,11 @@ class HarnessLaunch:
         Prints ``PAUSED <n>`` once all are (``n`` stopped, not counting those already dead), ``NOT_STARTED`` for a
         launch that will wait instead of starting, ``NEMO_GYM_HARNESS_ENDED`` for one whose command had already
         returned (nothing is signalled), or ``PENDING`` and what did not stop within the checks. A stopped process
-        forks nothing, so the checks settle.
+        forks nothing, so the checks settle; one in an uninterruptible system call stops when the call returns, so
+        while only those are left the checks go on longer. A launch that should run under the supervisor but does
+        not (no Python 3.8+, or it could not start) also prints ``UNSUPERVISED`` first.
         """
-        record = f'for p in $found; do t=$(starttime "$p") && echo "$p:$t" >> {self._found_file}; done'
+        unsupervised = '[ -z "$sup" ] && echo UNSUPERVISED\n' if self._supervised else ""
         return self._bash(
             f"touch {self._pause_file}\n"
             f"r=$(cat {self._root_file} 2>/dev/null)\n"
@@ -224,14 +231,15 @@ class HarnessLaunch:
             "n=0\n"
             "while :; do\n"
             f"{self._find_launch_processes()}\n"
-            f"{record}\n"
-            '  pending=""; count=0\n'
+            f'if [ "$n" = 0 ]; then {unsupervised}{self._record_found()}; fi\n'
+            '  pending=""; count=0; busy=0\n'
             '  for p in $(echo $found | tr " " "\\n" | sort -nu); do '
             'read -r s 2>/dev/null < "/proc/$p/stat" || continue; s=${s##*) }; st=${s%% *}; '
-            'case "$st" in T|t) count=$((count+1));; Z|X) ;; '
-            '*) pending="$pending $p:$st"; kill -STOP "$p" 2>/dev/null;; esac; done\n'
+            'case "$st" in T|t) count=$((count+1));; Z|X) ;; D) pending="$pending $p:$st"; kill -STOP "$p" 2>/dev/null;; '
+            '*) pending="$pending $p:$st"; busy=1; kill -STOP "$p" 2>/dev/null;; esac; done\n'
             '  [ -z "$pending" ] && { echo "PAUSED $count"; exit 0; }\n'
-            f'  n=$((n+1)); [ "$n" -gt {_PAUSE_CHECKS} ] && {{ echo "PENDING$pending"; exit 0; }}\n'
+            f'  n=$((n+1)); if [ "$n" -gt {_PAUSE_CHECKS} ] && {{ [ "$busy" = 1 ] || [ "$n" -gt {_PAUSE_DISK_WAIT_CHECKS} ]; }}; '
+            'then echo "PENDING$pending"; exit 0; fi\n'
             f"  sleep {_PAUSE_CHECK_INTERVAL_S}\n"
             "done"
         )
@@ -291,6 +299,15 @@ class HarnessLaunch:
             'for f in $frontier; do [ "$2" = "$f" ] && case " $found $next " in *" $c "*) ;; *) next="$next $c";; '
             'esac; done; done; found="$found $next"; frontier=$next; done\n'
             "fi"
+        )
+
+    def _record_found(self) -> str:
+        """Append the found processes with their start times to the found file, so a later pass that cannot find
+        them otherwise (a child the stop orphaned, untagged) still can, and a reused PID is never taken for one.
+        Reads ``/proc/<pid>/stat`` with builtins only: a subshell per process is slow for a launch of thousands."""
+        return (
+            'for p in $found; do read -r s 2>/dev/null < "/proc/$p/stat" || continue; s=${s##*) }; set -- $s; '
+            f'echo "$p:${{20}}"; done >> {self._found_file}'
         )
 
     @staticmethod
@@ -400,6 +417,14 @@ async def _pause(
         except Exception as error:
             lines = [f"error: {error!r}"]
         elapsed_s = time.monotonic() - started
+        if "UNSUPERVISED" in lines:
+            lines.remove("UNSUPERVISED")
+            LOGGER.warning(
+                "Harness launch %s of %s runs without the process supervisor (no Python 3.8+ in the sandbox, or it "
+                "could not start); its pause, continue, and stop scan every process of the sandbox",
+                launch.id,
+                label,
+            )
         if _ENDED in lines:
             return "ended"
         if lines and (lines[-1].startswith("PAUSED ") or lines[-1] == "NOT_STARTED"):
