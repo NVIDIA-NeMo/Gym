@@ -662,6 +662,68 @@ def test_openclaw_cli_is_provisioned_only_for_the_openclaw_adapter() -> None:
         ensure_openclaw.assert_called_once_with("2026.9.4")
 
 
+def test_native_output_keeps_claude_thinking_and_codex_reasoning() -> None:
+    claude = {
+        "events": [
+            {
+                "type": "AssistantMessage",
+                "message": {"content": [{"thinking": "Check the cases.", "signature": ""}, {"text": "Working."}]},
+            }
+        ]
+    }
+    codex = {"events": [{"type": "reasoning", "id": "rs_1", "summary": ["Plan the search."], "content": []}]}
+
+    for output, text in ((claude, "Check the cases."), (codex, "Plan the search.")):
+        items = _fabric_output_items(output, "answer")
+        assert items[0].type == "reasoning"
+        assert items[0].summary[0].text == text
+
+
+def test_normalized_usage_fills_codex_reasoning_tokens_from_adapter_usage() -> None:
+    usage = _normalized_usage(
+        {"usage": {"input_tokens": 10, "output_tokens": 5}},
+        {"usage": {"total": {"inputTokens": 99, "reasoningOutputTokens": 4}}},
+    )
+
+    assert _usage_value(usage, "input_tokens", "inputTokens") == 10
+    assert _usage_value(usage, "reasoning_tokens", "reasoningOutputTokens") == 4
+
+
+def test_turns_used_reads_adapter_metadata_counters() -> None:
+    assert _turns_used({}, {"iterations": 7}) == 7
+    assert _turns_used({}, {"pi_turn_count": 12}) == 12
+    assert _turns_used({"num_turns": 3}, {"iterations": 7}) == 3
+
+
+def test_relay_tokens_fill_missing_adapter_usage(tmp_path: Path) -> None:
+    agent = _agent(cwd=str(tmp_path), relay=True)
+    agent.server_client.global_config_dict = {
+        "policy_model": {"responses_api_models": {"policy_model": {"host": "127.0.0.1", "port": 9002}}}
+    }
+    agent.server_client._build_server_base_url.side_effect = lambda config: f"http://{config['host']}:{config['port']}"
+    trajectory = {
+        "steps": [{"source": "agent", "message": "fabric answer"}],
+        "final_metrics": {"total_prompt_tokens": 120, "total_completion_tokens": 30},
+    }
+
+    async def run(config, **kwargs):
+        relay_dir = Path(config.to_mapping()["relay"]["output_dir"])
+        relay_dir.mkdir(parents=True)
+        (relay_dir / "t.json").write_text(json.dumps(trajectory))
+        result = _FakeResult()
+        result.output["usage"] = {"api_calls": 1}
+        result.output["relay_artifacts"] = [{"kind": "atif", "path": str(relay_dir / "t.json")}]
+        return result
+
+    fabric = MagicMock()
+    fabric.plan.return_value.to_mapping.return_value = {"adapter": {"telemetry": {"providers": {"relay": {}}}}}
+    fabric.run = AsyncMock(side_effect=run)
+    with patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric):
+        response, _ = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="question")))
+
+    assert (response.usage.input_tokens, response.usage.output_tokens, response.usage.total_tokens) == (120, 30, 150)
+
+
 def test_atif_without_agent_steps_falls_back_to_fabric_output() -> None:
     assert _atif_output_items([{"steps": [{"source": "user", "message": "question"}]}], "answer") == []
 

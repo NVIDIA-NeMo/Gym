@@ -98,6 +98,12 @@ def _extract_request_input(body_input: Any) -> tuple[Any, Optional[str]]:
     return request_input, "\n\n".join(instruction_parts) or None
 
 
+def _reasoning_item(text: str) -> NeMoGymResponseReasoningItem:
+    return NeMoGymResponseReasoningItem(
+        id=f"rs_{uuid4().hex}", summary=[NeMoGymSummary(text=text, type="summary_text")]
+    )
+
+
 def _fabric_event_items(events: list[Any], response_text: str) -> list[Any]:
     items: list[Any] = []
     for event in events:
@@ -152,6 +158,9 @@ def _fabric_event_items(events: list[Any], response_text: str) -> list[Any]:
                             type="function_call_output",
                         )
                     )
+                elif isinstance(block.get("thinking"), str):
+                    if block["thinking"]:
+                        items.append(_reasoning_item(block["thinking"]))
                 else:
                     text = _content_text(block.get("text"))
                     if text and text.strip() != response_text.strip():
@@ -164,6 +173,12 @@ def _fabric_event_items(events: list[Any], response_text: str) -> list[Any]:
                                 type="message",
                             )
                         )
+        elif etype == "reasoning":
+            summary = "\n".join(
+                part if isinstance(part, str) else _content_text([part]) for part in event.get("summary") or []
+            )
+            if summary:
+                items.append(_reasoning_item(summary))
         elif etype == "agentMessage":
             text = _content_text(event.get("text"))
             if text and text.strip() != response_text.strip():
@@ -457,21 +472,24 @@ def _usage_value(usage: dict[str, Any], *names: str) -> int:
 
 
 def _normalized_usage(result: dict[str, Any], output: dict[str, Any]) -> dict[str, Any]:
-    usage = _mapping(result.get("usage"))
-    if not usage:
-        output_usage = _mapping(output.get("usage"))
-        usage = _mapping(output_usage.get("total")) or output_usage
+    output_usage = _mapping(output.get("usage"))
+    # Fabric's normalized usage wins. The adapter's own usage fills fields it lacks, such as Codex reasoning tokens.
+    usage = _deep_merge(_mapping(output_usage.get("total")) or output_usage, _mapping(result.get("usage")))
     details = _deep_merge(_mapping(usage.get("extensions")), _mapping(usage.get("metadata")))
     return _deep_merge(details, usage)
 
 
-def _turns_used(output: dict[str, Any]) -> int:
+def _turns_used(output: dict[str, Any], adapter_metadata: Optional[dict[str, Any]] = None) -> int:
     usage = _mapping(output.get("usage"))
+    adapter_metadata = adapter_metadata or {}
     for value in (
         output.get("turns_used"),
         output.get("num_turns"),
         output.get("api_calls"),
         usage.get("api_calls"),
+        adapter_metadata.get("iterations"),
+        adapter_metadata.get("pi_turn_count"),
+        adapter_metadata.get("turn_count"),
     ):
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             return value
@@ -708,6 +726,10 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             usage, "cache_write_input_tokens", "cache_creation_input_tokens", "cacheWriteInputTokens"
         )
         reasoning_tokens = _usage_value(usage, "reasoning_tokens", "reasoning_output_tokens", "reasoningOutputTokens")
+        if not (input_tokens or output_tokens) and trajectories:
+            metrics = [_mapping(trajectory.get("final_metrics")) for trajectory in trajectories]
+            input_tokens = sum(_usage_value(m, "total_prompt_tokens") for m in metrics)
+            output_tokens = sum(_usage_value(m, "total_completion_tokens") for m in metrics)
         total_tokens = _usage_value(usage, "total_tokens", "totalTokens") or input_tokens + output_tokens
         response_text = output.get("response", output.get("output"))
         if not isinstance(response_text, str):
@@ -795,7 +817,9 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             return NeMoFabricAgentVerifyResponse.model_validate(
                 verify_json
                 | {
-                    "turns_used": _turns_used(fabric_output),
+                    "turns_used": _turns_used(
+                        fabric_output, _mapping(_mapping(fabric_result.get("metadata")).get("adapter"))
+                    ),
                     "finished_naturally": finished_naturally,
                     "fabric_result": fabric_result,
                 }
