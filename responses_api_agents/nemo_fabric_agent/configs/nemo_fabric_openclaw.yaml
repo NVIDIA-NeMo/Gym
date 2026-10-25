@@ -10,6 +10,11 @@ nemo_fabric_openclaw:
       harness_settings:
         # The gateway can take longer than the 30 s default to start.
         startup_timeout_seconds: 120
+        # One gateway request covers the whole run, so the invocation timeout bounds it, not the 600 s default.
+        read_timeout_seconds: 86400
+        # Fabric allows the adapter host 10 s to stop, the same as the adapter's default wait for the gateway to
+        # exit, so a slow exit failed a finished run. Kill the gateway sooner.
+        shutdown_timeout_seconds: 5
       fabric_config: {}
 
 nemo_fabric_openclaw_environment_server:
