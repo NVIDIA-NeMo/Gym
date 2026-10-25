@@ -34,7 +34,7 @@ from nemo_gym.tasks.harbor.image_configs import (
     record_compose_images,
     with_built_images,
 )
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, write_json_record
+from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, read_image_configs, record_lock, write_json_record
 from nemo_gym.tasks.harbor.registry import ImageConfigError, RegistryClient, parse_image_ref
 from nemo_gym.tasks.harbor.task import discover_tasks
 
@@ -1899,19 +1899,29 @@ class TestRecordImageConfigsUnderTheLock:
 
         class RacingClient(FakeClient):
             def image_config(self, reference: str) -> dict:
-                # Another process records the same reference, and one more, while this lookup is in flight.
+                # Another Gym process records the same reference, and one more, while this lookup is in flight:
+                # as every writer does, it merges into the file under the lock rather than replacing it.
                 if reference == "redis:7-alpine":
-                    write_json_record(record_path, {"redis:7-alpine": competitor, "busybox:1": competitor})
+                    with record_lock(record_path):
+                        merged = read_image_configs(tmp_path)
+                        merged.update({"redis:7-alpine": competitor, "busybox:1": competitor})
+                        write_json_record(record_path, merged)
                 return super().image_config(reference)
 
         client = RacingClient()
-        assert record_compose_images(discover_tasks(tmp_path), tmp_path, client=client) == record_path
+        resolved_now: list[str] = []
+        assert (
+            record_compose_images(discover_tasks(tmp_path), tmp_path, client=client, resolved_now=resolved_now)
+            == record_path
+        )
         recorded = json.loads(record_path.read_text())
         # Neither writer's entries are lost, and the first recording of a reference is the one kept.
         assert sorted(recorded) == sorted([MAIN_IMAGE, SIDECAR_IMAGE, "redis:7-alpine", "busybox:1"])
         assert recorded["redis:7-alpine"] == competitor and recorded["busybox:1"] == competitor
         assert recorded[MAIN_IMAGE]["image"] == MAIN_IMAGE
         assert client.resolved == [MAIN_IMAGE, SIDECAR_IMAGE, "redis:7-alpine"]
+        # The lookup of redis:7-alpine was in flight when the competitor won it, so it is not counted as resolved here.
+        assert resolved_now == [MAIN_IMAGE, SIDECAR_IMAGE]
         assert (tmp_path / "compose-images.json.lock").is_file()
         assert not [path for path in tmp_path.iterdir() if path.name.endswith(".tmp")]
 
@@ -2107,3 +2117,105 @@ class TestComposeFields:
             "deployment platform linux/amd64",
         ):
             check_task_compose_fields(tasks[0], load_compose_document(tasks[0]), platform="linux/x86_64")
+
+
+class TestResumableRecords:
+    """Each image's record is written as soon as it resolves, so a run that dies keeps its progress and
+    concurrent preparations of one folder share it."""
+
+    def three_base_images(self, root: Path) -> Path:
+        write_task(root, "a", image=None, dockerfile="FROM alpha:1\nRUN true\n")
+        write_task(root, "b", image=None, dockerfile="FROM beta:2\nRUN true\n")
+        write_task(root, "c", image=None, dockerfile="FROM gamma:3\nRUN true\n")
+        return root / "compose-images.json"
+
+    def test_a_failure_after_k_images_leaves_k_records_and_the_next_run_resolves_only_the_rest(self, tmp_path):
+        record_path = self.three_base_images(tmp_path)
+
+        class DiesOnTheThird(FakeClient):
+            def image_config(self, reference: str) -> dict:
+                if reference == "gamma:3":
+                    raise ImageConfigError(
+                        "gamma: registry returned HTTP 429 for manifests/3 (gave up after 8 attempts)"
+                    )
+                return super().image_config(reference)
+
+        with pytest.raises(ImageConfigError, match=r"base image 'gamma:3' \(used by task\(s\) c\): gamma: .*HTTP 429"):
+            record_base_images(tmp_path, client=DiesOnTheThird())
+        recorded = json.loads(record_path.read_text())
+        assert sorted(recorded) == ["alpha:1", "beta:2"], "the two images resolved before the failure are on disk"
+        assert recorded["alpha:1"]["image"] == "alpha:1" and recorded["alpha:1"]["record_version"] == 2
+        # The next run reads the partial record and asks the registry for the missing image only.
+        client = FakeClient()
+        resolved_now: list[str] = []
+        assert record_base_images(tmp_path, client=client, resolved_now=resolved_now) == record_path
+        assert client.resolved == ["gamma:3"] and resolved_now == ["gamma:3"]
+        assert sorted(json.loads(record_path.read_text())) == ["alpha:1", "beta:2", "gamma:3"]
+        # And a third run, with a complete record, makes no registry request at all.
+        client = FakeClient()
+        resolved_now = []
+        record_base_images(tmp_path, client=client, resolved_now=resolved_now)
+        assert client.resolved == [] and resolved_now == []
+
+    def test_a_partial_record_on_disk_means_only_the_missing_images_are_fetched(self, tmp_path):
+        record_path = self.three_base_images(tmp_path)
+        write_json_record(record_path, {"beta:2": FakeClient().image_config("beta:2")})
+        client = FakeClient()
+        resolved_now: list[str] = []
+        record_base_images(tmp_path, client=client, resolved_now=resolved_now)
+        assert client.resolved == ["alpha:1", "gamma:3"] and resolved_now == ["alpha:1", "gamma:3"]
+        assert sorted(json.loads(record_path.read_text())) == ["alpha:1", "beta:2", "gamma:3"]
+
+    def test_two_interleaved_preparations_of_one_folder_share_progress_and_leave_one_consistent_record(self, tmp_path):
+        """Two threads prepare the same folder. The first one's lookup of the first image is held until the
+        second has recorded every image; the first then finds each image recorded (one under the lock, the
+        others before asking the registry) and asks for nothing more."""
+        record_path = self.three_base_images(tmp_path)
+        second_done = threading.Event()
+        first_asked = threading.Event()
+
+        class HeldClient(FakeClient):
+            def image_config(self, reference: str) -> dict:
+                first_asked.set()
+                assert second_done.wait(timeout=10), "the second preparation did not finish"
+                return super().image_config(reference)
+
+        first_client, second_client = HeldClient(), FakeClient()
+        first_resolved: list[str] = []
+        second_resolved: list[str] = []
+        errors: list[BaseException] = []
+
+        def first():
+            try:
+                record_base_images(tmp_path, client=first_client, resolved_now=first_resolved)
+            except BaseException as exc:  # pragma: no cover - surfaced by the assertion below
+                errors.append(exc)
+
+        thread = threading.Thread(target=first)
+        thread.start()
+        assert first_asked.wait(timeout=10)
+        # The first preparation read an empty record and is asking the registry for alpha:1; the second runs now.
+        record_base_images(tmp_path, client=second_client, resolved_now=second_resolved)
+        second_done.set()
+        thread.join(timeout=10)
+        assert not thread.is_alive() and errors == []
+        recorded = json.loads(record_path.read_text())
+        assert sorted(recorded) == ["alpha:1", "beta:2", "gamma:3"]
+        assert all(recorded[reference]["record_version"] == 2 for reference in recorded)
+        assert second_client.resolved == ["alpha:1", "beta:2", "gamma:3"]
+        assert second_resolved == ["alpha:1", "beta:2", "gamma:3"]
+        # The first asked for alpha:1 only (its lookup was in flight), lost it under the lock, and skipped the rest.
+        assert first_client.resolved == ["alpha:1"] and first_resolved == []
+        assert not [path for path in tmp_path.iterdir() if path.name.endswith(".tmp")]
+
+    def test_each_image_is_on_disk_before_the_next_is_asked_for(self, tmp_path):
+        record_path = self.three_base_images(tmp_path)
+        seen: list[list[str]] = []
+
+        class Watching(FakeClient):
+            def image_config(self, reference: str) -> dict:
+                seen.append(sorted(json.loads(record_path.read_text())) if record_path.exists() else [])
+                return super().image_config(reference)
+
+        record_base_images(tmp_path, client=Watching())
+        assert seen == [[], ["alpha:1"], ["alpha:1", "beta:2"]]

@@ -720,6 +720,7 @@ def record_image_configs(
     client: RegistryClient | None = None,
     what: str = "image",
     platform: str | None = None,
+    resolved_now: list[str] | None = None,
 ) -> Path | None:
     """Record the configuration of ``references`` (image reference to the tasks using it) into ``folder``.
 
@@ -736,13 +737,19 @@ def record_image_configs(
     :class:`ImageConfigError` naming the image, the tasks and the registry's answer. ``platform``
     (``os/arch``, ``builds.platform``; linux/amd64 when ``None``) is the platform the default client
     resolves references for, and the one a record must be of to be kept; a ``client`` given carries
-    its own.
+    its own. With ``resolved_now`` given, every reference this call resolved and wrote is appended to
+    it, so a caller can say how much was new.
 
-    The registry is asked outside the file's sidecar lock (:func:`record_lock`), so a slow
-    registry never holds up another process; the file is then read again, merged and replaced
-    under the lock, and an entry another process recorded in the meantime is kept over the
-    one resolved here, as a pinned entry of this platform always is (a legacy or other-platform
-    entry is replaced by its re-read).
+    Each image is written as soon as the registry answers for it, not once every image has:
+    the file is read again, merged and replaced atomically under its sidecar lock
+    (:func:`record_lock`) per image. A preparation that dies after N images leaves N records
+    on disk and the next one resolves only the rest; several preparations on one folder (the
+    Slurm jobs of a fan-out, or ``gym eval run`` and ``gym dataset validate`` of one ``harbor:``
+    ref) share their progress through the file rather than racing: before each lookup the
+    file is read again and an image another process recorded in the meantime is skipped, and
+    under the lock the first recording of a reference is the one kept, as a pinned entry of
+    this platform always is (a legacy or other-platform entry is replaced by its re-read). The
+    registry is asked outside the lock, so a slow registry never holds up another process.
     """
     if not references:
         return None
@@ -758,11 +765,16 @@ def record_image_configs(
     if client is None:
         client = RegistryClient() if platform is None else RegistryClient(platform=platform_pair(platform))
     LOGGER.info(f"Recording the configuration of {len(missing)} {what}(s) into {path}")
-    resolved: dict[str, Any] = {}
-    for reference in missing:
-        pinned = (recorded.get(reference) or {}).get("image")
+    for index, reference in enumerate(missing, 1):
+        # Another preparation on this folder may have recorded it since the file was read (the replace is
+        # atomic, so the file is read without the lock); its entry is kept, and no registry request is made.
+        current = read_image_configs(folder).get(reference)
+        if reusable_record(current, requested):
+            LOGGER.info(f"{what} {reference} was recorded by another process meanwhile ({index}/{len(missing)})")
+            continue
+        pinned = ((current if isinstance(current, dict) else None) or recorded.get(reference) or {}).get("image")
         try:
-            resolved[reference] = client.image_config(pinned or reference)
+            record = client.image_config(pinned or reference)
         except PlatformMismatchError as exc:
             # The pin is a single manifest of another platform: no manifest for this one is behind it.
             tasks = ", ".join(references[reference][:5]) or "-"
@@ -775,12 +787,15 @@ def record_image_configs(
             raise ImageConfigError(
                 f"Could not record the configuration of {what} {reference!r} (used by task(s) {tasks}): {exc}"
             ) from exc
-    with record_lock(path):
-        recorded = read_image_configs(folder)
-        for reference, record in resolved.items():
-            if not reusable_record(recorded.get(reference), requested):
-                recorded[reference] = record
-        write_json_record(path, recorded)
+        with record_lock(path):
+            merged = read_image_configs(folder)
+            if reusable_record(merged.get(reference), requested):
+                continue
+            merged[reference] = record
+            write_json_record(path, merged)
+        if resolved_now is not None:
+            resolved_now.append(reference)
+        LOGGER.info(f"Recorded {what} {reference} ({index}/{len(missing)})")
     return path
 
 
@@ -809,6 +824,7 @@ def record_compose_images(
     shared_storage: bool | None = None,
     gpu_shared_storage: bool | None = None,
     overlay: HarborComposeOverlay | None = None,
+    resolved_now: list[str] | None = None,
 ) -> Path | None:
     """Write ``compose-images.json`` in ``folder`` for the Compose tasks among ``tasks``.
 
@@ -836,7 +852,8 @@ def record_compose_images(
     a fixed task file needs no new registry round-trip. Once the image configurations are recorded, a sidecar
     whose image runs as a non-root user (which the group starts without host injection) must declare no
     ``extra_hosts`` (:func:`check_task_sidecar_extra_hosts`), the way the adapter decides it at seed. An image the
-    registry cannot resolve still raises for the whole set, as :func:`record_image_configs` says.
+    registry cannot resolve still raises for the whole set, as :func:`record_image_configs` says; the images
+    recorded before it stay on disk, and ``resolved_now`` collects what this call resolved.
     """
     references: dict[str, list[str]] = {}
     failures: dict[str, str] = {}
@@ -875,7 +892,9 @@ def record_compose_images(
         raise ImageConfigError(f"{len(failures)} Compose task(s) do not resolve: " + "; ".join(failures.values()))
     if failures:
         skipped.update(failures)
-    path = record_image_configs(references, folder, client=client, what="Compose image", platform=platform)
+    path = record_image_configs(
+        references, folder, client=client, what="Compose image", platform=platform, resolved_now=resolved_now
+    )
     if path is not None:
         recorded = json.loads(path.read_text())
         for task, document in documents:
@@ -894,15 +913,22 @@ def record_base_images(
     client: RegistryClient | None = None,
     select: Callable[[str], bool] | None = None,
     platform: str | None = None,
+    resolved_now: list[str] | None = None,
 ) -> Path | None:
     """Record the base image of every Dockerfile under ``folder`` next to the task folders, before they load.
 
     ``select`` limits the scan to the tasks whose folder name it accepts (see
     :func:`dockerfile_base_images`). Returns the file's path, or ``None`` when no task has a
-    Dockerfile the loader resolves. ``platform`` is as :func:`record_image_configs` takes it.
+    Dockerfile the loader resolves. ``platform`` is as :func:`record_image_configs` takes it, and
+    ``resolved_now`` collects the references this call resolved (see :func:`record_image_configs`).
     """
     folder = Path(folder).resolve()
     parent = folder.parent if is_task_folder(folder) else folder
     return record_image_configs(
-        dockerfile_base_images(folder, select=select), parent, client=client, what="base image", platform=platform
+        dockerfile_base_images(folder, select=select),
+        parent,
+        client=client,
+        what="base image",
+        platform=platform,
+        resolved_now=resolved_now,
     )
