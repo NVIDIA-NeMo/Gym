@@ -152,6 +152,19 @@ class TestEvidence:
         """The run timing table counts BrowseComp's `timed_out`; this section classifies the same way."""
         assert section({"timed_out": 1, "reward": 0.0})["by_limit"] == {"timed_out": 1}
 
+    def test_a_terminus_rollout_stopped_by_its_run_budget_is_timed_out(self) -> None:
+        """Terminus 2 scores a rollout its budget stopped, and records the stop only on the response it returns."""
+        metadata = {"terminus2_outcome": "timeout", "terminus2_error_type": "TimeoutError"}
+
+        result = section({"response": {"metadata": metadata}, "reward": 0.0})
+
+        assert result["by_limit"] == {"response.metadata.terminus2_outcome=timeout": 1}
+
+    def test_a_completed_terminus_rollout_is_not_timed_out(self) -> None:
+        row = {"response": {"metadata": {"terminus2_outcome": "completed"}}, "reward": 1.0}
+
+        assert section(row)["timed_out"] == 0
+
     def test_a_slow_failure_with_no_signal_is_never_counted_as_timed_out(self) -> None:
         row = {NG_FAILURE_CLASS_KEY: "agent_run_error", ELAPSED_S_KEY: 10_000.0}
 

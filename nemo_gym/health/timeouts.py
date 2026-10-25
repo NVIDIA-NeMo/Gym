@@ -116,6 +116,13 @@ LEGACY_TIMEOUT_SIGNALS = (
     ),
     # BrowseComp's per-rollout `rollout_timeout_s`.
     LegacySignal("timed_out", None, "responses_api_agents/browsecomp_agent/app.py", 'update={"timed_out": int(bool('),
+    # Terminus 2's run budget (the task's `[agent].timeout_sec`), recorded on the response it returns.
+    LegacySignal(
+        "response.metadata.terminus2_outcome",
+        "timeout",
+        "responses_api_agents/terminus_2_sandboxed_agent/app.py",
+        'outcome = "timeout"',
+    ),
     # Terminal-Bench's agent termination record, which the row carries.
     LegacySignal(
         "termination.reason",
