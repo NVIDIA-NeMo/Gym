@@ -29,8 +29,8 @@ rna_design_claude_code_agent:
       agent_kwargs:
         model: ${policy_model_name}
         anthropic_api_key: unused  # pragma: allowlist secret
-        max_turns: 40
-        timeout: 2400
+        max_turns: 1000
+        timeout: 3600
         bare: true
         system_prompt: |
           You act through the rna_design MCP tools. Call campaign_state first: it shows the target, how designs are ranked, the budget and the best designs so far, and it costs nothing. Each other tool returns the campaign state after it runs. Stop when further calls will not improve the result.
@@ -76,7 +76,7 @@ rna_design_claude_code_agent:
           MCP_TOOL_TIMEOUT: "1800000"
           CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: "1800000"
           API_TIMEOUT_MS: "1800000"
-      rollout_timeout: 2700
+      rollout_timeout: 3900
       concurrency: 4
       datasets:
       - name: example
