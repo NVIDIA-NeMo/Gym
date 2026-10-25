@@ -1458,22 +1458,29 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def drop_litellm_provider_specific_fields(cls, value: Any) -> Any:
-        """Drop ``provider_specific_fields`` from replayed assistant history.
+        """Drop ``provider_specific_fields`` and ``cache_control`` from message history.
 
-        litellm's ``Message.model_dump()`` emits that key on every assistant turn
-        (holding response fields it does not model, such as ``refusal``), and
-        harnesses built on litellm replay the dump verbatim. It carries nothing
-        a model server needs, and the strict message schema would reject it.
+        litellm's ``Message.model_dump()`` emits ``provider_specific_fields`` on every
+        assistant turn (holding response fields it does not model, such as ``refusal``),
+        and harnesses built on litellm replay the dump verbatim. Harnesses such as NOOA
+        also mark messages and content parts with Anthropic ``cache_control`` prompt-caching
+        hints. Neither carries anything an OpenAI-compatible model server needs, and the
+        strict message schema would reject both.
         """
         if not isinstance(value, dict) or not isinstance(value.get("messages"), list):
             return value
         value = value.copy()
-        value["messages"] = [
-            {k: v for k, v in message.items() if k != "provider_specific_fields"}
-            if isinstance(message, dict)
-            else message
-            for message in value["messages"]
-        ]
+        messages = []
+        for message in value["messages"]:
+            if isinstance(message, dict):
+                message = {k: v for k, v in message.items() if k not in ("provider_specific_fields", "cache_control")}
+                if isinstance(message.get("content"), list):
+                    message["content"] = [
+                        {k: v for k, v in part.items() if k != "cache_control"} if isinstance(part, dict) else part
+                        for part in message["content"]
+                    ]
+            messages.append(message)
+        value["messages"] = messages
         return value
 
     messages: List[NeMoGymChatCompletionMessageParam]
