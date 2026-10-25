@@ -1,0 +1,31 @@
+# Pi sandboxed preset on the 728 text-only HLE-Diamond questions. Mirrors benchmarks/hle/pi.yaml.
+config_paths:
+- benchmarks/hle_diamond/config.yaml
+- responses_api_agents/pi_sandboxed_agent/configs/benchmark.yaml
+hle_diamond_pi_agent:
+  _inherit_from: pi_benchmark_agent
+  responses_api_agents:
+    pi_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: hle_diamond_equivalence_llm_judge_resources_server
+      datasets:
+      - name: hle_diamond_text
+        type: benchmark
+        jsonl_fpath: benchmarks/hle_diamond/data/hle_diamond_benchmark_text.jsonl
+        prompt_config: benchmarks/hle_diamond/prompts/opencode.yaml
+        prepare_script: benchmarks/hle_diamond/prepare_text.py
+        num_repeats: 1
+      # Diamond's "reasoning high" on this harness (D4): the adapter passes it to Pi as `--thinking high`
+      # (Pi levels: off, minimal, low, medium, high, xhigh, max). Gym's
+      # ++responses_create_params.reasoning.effort does not reach Pi's own model call. Override per run
+      # with ++hle_diamond_pi_agent.responses_api_agents.pi_sandboxed_agent.thinking=<level>
+      thinking: high
+equivalence_llm_judge_simple_agent: null
+hle_diamond_equivalence_llm_judge_simple_agent: null
+
+hle_diamond_equivalence_llm_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: hle_diamond_pi_agent

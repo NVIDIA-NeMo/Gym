@@ -38,8 +38,33 @@ in the rollout and trial result; `verifier_result.source` is
 `sandbox_resource_limit`, and test counts remain null. The original agent
 termination and diagnostics are preserved, but the result carries no
 infrastructure-failure marker. Recognition requires an explicit provider death
-report. Setup failures, node-pressure evictions, unrelated sandbox losses, and
-verifier failures retain their existing infrastructure-error handling.
+report. Setup failures, node-pressure evictions, unrelated sandbox losses, and a
+verifier that fails to start retain their existing infrastructure-error handling.
+
+A verifier that runs but times out, or that leaves no reward file, an empty one
+or one that cannot be parsed, scores `reward: 0.0` and counts in the pass-rate
+denominator. This is how Terminal-Bench scores it: Harbor never retries these
+outcomes and counts a trial without a reward as 0. The response keeps
+`evaluation_completed: false`, names the exception in `failure_reason`, and sets
+`failure_kind: verifier_error`. Only the verifier's own budget makes a timeout: a
+provider call that times out within it, or a sandbox that reports no command
+outcome, keeps the infrastructure-error handling. So does a trial whose agent
+ended on an infrastructure failure, whatever its verifier did next, because
+Harbor decides a retry from the trial's first exception.
+
+The verifier command runs under the per-command limit
+`environment.default_exec_timeout_s`, and that limit must be at least the task's
+verifier budget (`[verifier].timeout_sec`, or its entry in
+`environment.verifier_timeout_overrides`). A shorter limit could end the
+verifier inside its budget, and the sandbox reports no evidence of that, so the
+missing reward would read as the task's own zero. The server therefore refuses
+to start when an override is longer than the limit, and refuses a task whose
+package budget is longer, when it loads and before any sandbox starts or the
+agent runs. The failure is `ExecLimitConfigurationError`, an infrastructure
+failure marked terminal so that a resume does not retry it, and its message
+names both values. Neither value is changed: raise the limit to fix it. An
+equal limit is supported, because the verifier's budget starts before the
+command is submitted and so expires first.
 
 The wire models in `models.py` are resources-owned. Agent implementations use
 their own HTTP models and need not import this server. `termination.reason` accepts
