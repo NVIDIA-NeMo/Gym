@@ -126,6 +126,8 @@ object retains the complete verifier response.
 - Infrastructure or non-Assistant simulation failure: zero, `mask_sample: true`.
 - Scorer/evaluator error or timeout: zero, `mask_sample: true`.
 - Inconclusive scorer or missing required judge quality: zero, `mask_sample: true`.
+- Resources session unknown, closed, or expired at verification: zero, `mask_sample: true`, with `failure_kind`
+  `session_lost` or `session_expired`.
 
 For commands and examples, see
 [Troubleshoot NeMo User Sim Rollouts](/tutorials/evaluation-tutorials/nemo-user-sim-rollout-collection/rollout-troubleshooting).

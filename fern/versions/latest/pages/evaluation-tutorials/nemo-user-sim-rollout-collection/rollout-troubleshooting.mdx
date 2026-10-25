@@ -79,6 +79,8 @@ The main cases are:
 - A scorer or trajectory evaluator raises or returns an error: masked as `verifier_error`.
 - A completed scenario has no Assistant quality score: masked as `judge_failed`.
 - A verifier timeout: masked; `failure_reason` reports the configured evaluation timeout.
+- The Resources session is gone at verification: masked as `session_lost`, or `session_expired` when the seed
+  outlived `session_ttl_seconds`. See [Session cleanup failures](#session-cleanup-failures).
 
 NeMo User Sim scorer results classified as `not_applicable`, including its documented skipped sentinel, do not
 gate the episode.
@@ -118,7 +120,8 @@ gym eval prepare --config environments/nemo_user_sim/config.yaml
 ## Session cleanup failures
 
 The Environment registers cleanup before seeding and closes participant and Resources sessions on every outcome.
-Cleanup is idempotent. Unknown or expired active Resources sessions return HTTP 404 during verification.
+Cleanup is idempotent. Verifying an unknown or closed Resources session returns a masked zero reward with
+`failure_kind` `session_lost`; a session whose seed outlived `session_ttl_seconds` returns `session_expired`.
 
 When diagnosing session errors, preserve the failure stage and HTTP status. Session-related 404 and 409 responses
 are infrastructure failures, not Assistant-policy failures.
