@@ -29,3 +29,11 @@ kernel_gym:
         - name: kernelbench
           type: example
           jsonl_fpath: responses_api_agents/kernel_gym/data/kernelbench.jsonl
+
+kernel_gym_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: kernel_gym
