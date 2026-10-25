@@ -9,9 +9,7 @@ target.
 - **Benchmark:** eight fixed suites built from the published [RNAInvBench](https://github.com/COLA-Laboratory/RNAInvBench)
   sets: Eterna100 v1 and v2, Rfam learn and Taneda, ArchiveII, and three anta sets (1,694 targets in all). Three
   model-free baselines run on the same budget.
-- **Training environment:** any compatible training dataset, similar to the benchmark sources. Train on the Claude Code
-  workload: its model calls go through the Gym model server, which records the token IDs. Agent mode starts every round
-  from a fresh prompt, so it is for evaluation.
+- **Training environment:** any compatible training dataset, similar to the benchmark sources.
 
 The code is in [`responses_api_agents/rna_design_agent`](../../responses_api_agents/rna_design_agent/README.md) (the
 fixed workflow, agent loop and tools) and [`resources_servers/rna_design`](../../resources_servers/rna_design/README.md) (the same
