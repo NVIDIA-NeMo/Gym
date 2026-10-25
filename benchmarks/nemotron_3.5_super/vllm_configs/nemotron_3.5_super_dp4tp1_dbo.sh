@@ -6,6 +6,14 @@ ENABLE_PREFILL_DBO="${ENABLE_PREFILL_DBO:-1}"
 # Collect per-engine DBO execution/fallback, microbatch, and overlap metrics on prefill.
 # Enable for both the DBO run and its control; requires the updated Rust frontend.
 ENABLE_DBO_METRICS="${ENABLE_DBO_METRICS:-0}"
+# Per-forward workload/timing JSONL and matching Nsight markers; diagnostic runs only.
+# Uses the existing DBO events, with no additional GPU synchronization.
+# Files include hostname, DP rank and PID; no request text or token IDs are recorded.
+TRACE_DBO="${TRACE_DBO:-0}"
+if [[ "${TRACE_DBO}" == "1" ]]; then
+    ENABLE_DBO_METRICS=1
+    export VLLM_DBO_TRACE_DIR="${VLLM_DBO_TRACE_DIR:-${SLURM_SUBMIT_DIR:-$PWD}/results/dbo-traces/${SLURM_JOB_ID:-local}}"
+fi
 
 # Leave room for the observed 32-block NCCL kernels alongside TRTLLM cooperative routing.
 # On GB200 (152 SMs), this gives routing 120 SMs; override for comparison runs.
