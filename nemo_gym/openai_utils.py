@@ -177,6 +177,7 @@ from openai.types.responses.tool_param import (
     Mcp,
 )
 from openai.types.shared.chat_model import ChatModel
+from openai.types.shared.reasoning import Reasoning as OpenAIResponseReasoning
 from openai.types.shared_params import ComparisonFilter, CompoundFilter, FunctionDefinition
 from pydantic import (
     BaseModel,
@@ -979,6 +980,18 @@ NeMoGymToolChoice: TypeAlias = Union[
 ]
 
 
+NeMoGymReasoningEffort: TypeAlias = Union[ReasoningEffort, Literal["max"]]
+
+
+class NeMoGymReasoning(Reasoning, total=False):
+    # GPT-6.1 supports max before it appears in Gym's pinned SDK schema.
+    effort: Optional[NeMoGymReasoningEffort]
+
+
+class NeMoGymResponseReasoning(OpenAIResponseReasoning):
+    effort: Optional[NeMoGymReasoningEffort] = None
+
+
 class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     """
     This class is a copy of openai.types.responses.response_create_params.ResponseCreateParamsNonStreaming
@@ -1015,7 +1028,7 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     parallel_tool_calls: bool = True  # OpenAI default
     previous_response_id: Optional[str] = None
     prompt: Optional[ResponsePromptParam] = None
-    reasoning: Optional[Reasoning] = None
+    reasoning: Optional[NeMoGymReasoning] = None
     service_tier: Optional[Literal["auto", "default", "flex", "scale", "priority"]] = None
     store: Optional[bool] = None
     # These fields mirror the SDK request schema.
@@ -1175,6 +1188,7 @@ def accumulate_response_usage(
 
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
+    reasoning: Optional[NeMoGymResponseReasoning] = None
     usage: Optional[NeMoGymResponseUsage] = None
     metrics: Optional[Dict[str, JsonValue]] = None
     # OpenAI-compatible providers may return provider-specific service-tier names.
