@@ -469,7 +469,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             observation_collector=observation_collector,
         )
 
-        return self._response_from_output(body, output_items, model_name, run_metadata)
+        return self._response_from_output(body, output_items, model_name, run_metadata, status=run_metadata["status"])
 
     def _conversation_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str | None]:
         """Use the established local last-user/leading-system prompt contract in both modes."""

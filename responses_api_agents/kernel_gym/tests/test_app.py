@@ -8,10 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
+from nemo_gym.server_utils import ServerClient
 from responses_api_agents.kernel_gym import app
-from responses_api_agents.kernel_gym.app import KernelGymAgent, KernelGymInstanceConfig
+from responses_api_agents.kernel_gym.app import KernelGymAgent, KernelGymInstanceConfig, KernelGymRunRequest
 
 
 def test_instance_uses_instance_id_as_task_name() -> None:
@@ -48,10 +49,22 @@ def sandbox_run(tmp_path: Path, monkeypatch):
         container="image",
         ray_queue_timestamp=time.time(),
         agent_command_str="run-agent",
+        results_dir=tmp_path / "results",
     )
     instances = []
     verifier_outcomes = []
     agent_error = []
+    agent_response = NeMoGymResponse(
+        id="agent-response",
+        created_at=0,
+        model="actual-model",
+        object="response",
+        status="completed",
+        output=[{"type": "function_call", "call_id": "call-1", "name": "bash", "arguments": "{}"}],
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+    ).model_dump(mode="json")
 
     class Sandbox:
         def __init__(self, provider, spec):
@@ -84,7 +97,7 @@ def sandbox_run(tmp_path: Path, monkeypatch):
                     {
                         "/workspace/reference.py": "agent changed reference",
                         "/workspace/solution.py": "submitted solution",
-                        "/trajectories_mount/response.json": "{}",
+                        "/trajectories_mount/response.json": json.dumps(agent_response),
                         "/tests/verify.py": "agent changed verifier",
                         "/logs/verifier/reward.txt": "1",
                     }
@@ -123,11 +136,11 @@ def sandbox_run(tmp_path: Path, monkeypatch):
             local.write_text(self.files[remote])
 
     monkeypatch.setattr(app, "AsyncSandbox", Sandbox)
-    return cfg, instances, verifier_outcomes, agent_error
+    return cfg, instances, verifier_outcomes, agent_error, agent_response
 
 
 async def test_verifier_uses_fresh_sandbox_and_original_reference(sandbox_run):
-    cfg, instances, _, _ = sandbox_run
+    cfg, instances, _, _, _ = sandbox_run
     assert await KernelGymAgent._run_kernel(None, cfg)
     assert len(instances) == 2 and all(s.stopped for s in instances)
     metrics = json.loads(cfg.metrics_fpath.read_text())
@@ -144,7 +157,7 @@ async def test_verifier_uses_fresh_sandbox_and_original_reference(sandbox_run):
     ],
 )
 async def test_inconclusive_verification_retries_in_fresh_sandbox(sandbox_run, failure):
-    cfg, instances, outcomes, _ = sandbox_run
+    cfg, instances, outcomes, _, _ = sandbox_run
     outcomes.append(failure)
     assert await KernelGymAgent._run_kernel(None, cfg)
     assert len(instances) == 3 and all(s.stopped for s in instances)
@@ -154,7 +167,7 @@ async def test_inconclusive_verification_retries_in_fresh_sandbox(sandbox_run, f
 
 
 async def test_exhausted_verifier_retries_mask_the_sample(sandbox_run):
-    cfg, instances, outcomes, _ = sandbox_run
+    cfg, instances, outcomes, _, _ = sandbox_run
     outcomes.extend([{"evaluation_completed": False, "error": "CUDA unavailable"}] * 2)
     assert not await KernelGymAgent._run_kernel(None, cfg)
     assert len(instances) == 3 and all(s.stopped for s in instances)
@@ -163,7 +176,7 @@ async def test_exhausted_verifier_retries_mask_the_sample(sandbox_run):
 
 
 async def test_incorrect_kernel_is_scored_without_retry_or_mask(sandbox_run):
-    cfg, instances, outcomes, _ = sandbox_run
+    cfg, instances, outcomes, _, _ = sandbox_run
     outcomes.append({"compiled": True, "correctness": False, "speedup": 0, "evaluation_completed": True})
     assert not await KernelGymAgent._run_kernel(None, cfg)
     assert len(instances) == 2
@@ -180,7 +193,7 @@ async def test_incorrect_kernel_is_scored_without_retry_or_mask(sandbox_run):
     ],
 )
 async def test_failed_agent_does_not_grade_seeded_solution(sandbox_run, failure):
-    cfg, instances, _, agent_error = sandbox_run
+    cfg, instances, _, agent_error, _ = sandbox_run
     agent_error.append(failure)
     assert not await KernelGymAgent._run_kernel(None, cfg)
     assert len(instances) == 1 and instances[0].stopped
@@ -190,8 +203,44 @@ async def test_failed_agent_does_not_grade_seeded_solution(sandbox_run, failure)
 
 
 async def test_cancellation_stops_agent_without_starting_verification(sandbox_run):
-    cfg, instances, _, agent_error = sandbox_run
+    cfg, instances, _, agent_error, _ = sandbox_run
     agent_error.append(asyncio.CancelledError())
     with pytest.raises(asyncio.CancelledError):
         await KernelGymAgent._run_kernel(None, cfg)
     assert len(instances) == 1 and instances[0].stopped
+
+
+@pytest.mark.parametrize(
+    "status,error",
+    [
+        ("failed", None),
+        ("completed", {"code": "server_error", "message": "inference failed"}),
+        ("failed", {"code": "server_error", "message": "inference failed"}),
+    ],
+)
+async def test_failed_harness_response_is_masked_and_preserved(sandbox_run, monkeypatch, status, error):
+    cfg, instances, _, _, agent_response = sandbox_run
+    agent_response.update(status=status, error=error)
+    agent = KernelGymAgent(config=cfg, server_client=ServerClient.model_construct(global_config_dict={}))
+    monkeypatch.setattr(KernelGymAgent, "_setup_params", lambda self, body, rollout_id=None: cfg)
+
+    result = await agent.run(KernelGymRunRequest(responses_create_params=cfg.body))
+
+    assert result.reward == 0 and result.mask_sample and not result.evaluation_completed
+    assert len(instances) == 1 and instances[0].stopped
+    assert result.response.status == status
+    assert (result.response.error.model_dump() if result.response.error else None) == error
+    assert result.response.output == NeMoGymResponse.model_validate(agent_response).output
+    assert json.loads((cfg.persistent_dir / "response.json").read_text()) == agent_response
+    assert not (cfg.persistent_dir / "solution.py").exists()
+
+
+async def test_incomplete_harness_can_submit_a_kernel(sandbox_run):
+    cfg, instances, _, _, agent_response = sandbox_run
+    agent_response.update(status="incomplete", incomplete_details={"reason": "max_output_tokens"})
+
+    assert await KernelGymAgent._run_kernel(None, cfg)
+
+    assert len(instances) == 2 and all(s.stopped for s in instances)
+    metrics = json.loads(cfg.metrics_fpath.read_text())
+    assert metrics["evaluation_completed"] and not metrics["mask_sample"]

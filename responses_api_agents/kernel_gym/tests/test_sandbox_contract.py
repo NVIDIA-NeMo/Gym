@@ -14,7 +14,7 @@ from responses_api_agents.kernel_gym.tests.test_app import sandbox_run  # noqa: 
 
 @pytest.mark.parametrize("failure", [None, "upload", "agent_cancel", "verifier_cancel"])
 async def test_run_kernel_uses_real_sandbox_lifecycle(sandbox_run, monkeypatch, failure):
-    cfg, _, _, _ = sandbox_run
+    cfg, _, _, _, agent_response = sandbox_run
     providers = []
     events = []
 
@@ -42,7 +42,7 @@ async def test_run_kernel_uses_real_sandbox_lifecycle(sandbox_run, monkeypatch, 
                 if failure == "agent_cancel":
                     raise asyncio.CancelledError()
                 self.files["/workspace/solution.py"] = "submitted solution"
-                self.files["/trajectories_mount/response.json"] = "{}"
+                self.files["/trajectories_mount/response.json"] = json.dumps(agent_response)
             else:
                 assert events.index((0, "close")) < events.index((1, "create"))
                 assert self.files["/workspace/solution.py"] == "submitted solution"
