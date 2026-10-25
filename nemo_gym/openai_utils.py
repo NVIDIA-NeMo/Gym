@@ -1383,6 +1383,8 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     tool_calls: Optional[NeMoGymChatCompletionMessageToolCallsParam] = None
     # Some harnesses replay reasoning on assistant history in Chat Completions.
     reasoning_content: str | None
+    # OpenAI SDK clients replay the assistant message as the SDK dumped it, including `annotations: null`.
+    annotations: Optional[Any]
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(

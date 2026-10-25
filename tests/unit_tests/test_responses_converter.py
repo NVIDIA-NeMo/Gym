@@ -1102,6 +1102,20 @@ def test_output_text_accepts_null_annotations():
     assert output_text.annotations == []
 
 
+def test_assistant_message_accepts_null_annotations():
+    """An OpenAI SDK client replays the assistant message as the SDK dumped it."""
+    params = NeMoGymChatCompletionCreateParamsNonStreaming(
+        model="my-model",
+        messages=[
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello", "annotations": None},
+            {"role": "user", "content": "again"},
+        ],
+    )
+
+    assert params.messages[1]["annotations"] is None
+
+
 def test_assistant_message_accepts_null_routed_experts():
     """A dense model returns no routing, and a client replays the field as it received it."""
     params = NeMoGymChatCompletionCreateParamsNonStreaming(

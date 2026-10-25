@@ -137,6 +137,20 @@ def test_preprocess_chat_completion_create_params_strips_strict(monkeypatch: Mon
     assert "strict" not in body_dict["tools"][0]["function"]
 
 
+def test_preprocess_chat_completion_create_params_drops_replayed_annotations(monkeypatch: MonkeyPatch) -> None:
+    server = TestApp()._setup_server(monkeypatch)
+    params = NeMoGymChatCompletionCreateParamsNonStreaming(
+        model="my-model",
+        messages=[
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello", "annotations": None},
+            {"role": "user", "content": "again"},
+        ],
+    )
+    body_dict = server._preprocess_chat_completion_create_params(MagicMock(), params.model_dump(exclude_unset=True))
+    assert body_dict["messages"][1] == {"role": "assistant", "content": "hello"}
+
+
 def test_transport_io_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_path) -> None:
     log_path = tmp_path / "model-io-transport.jsonl"
     monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))

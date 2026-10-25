@@ -865,6 +865,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             ``client.create_chat_completion``.
         """
         self._strip_hosted_only_tool_fields(body_dict)
+        # Replayed OpenAI response annotations are client-side citation data, so they never reach the chat template.
+        for message_dict in body_dict.get("messages") or []:
+            message_dict.pop("annotations", None)
 
         if self.config.replace_developer_role_with_system:
             for message_dict in body_dict["messages"]:
