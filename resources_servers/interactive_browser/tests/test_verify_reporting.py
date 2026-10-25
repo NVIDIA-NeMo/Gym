@@ -207,3 +207,73 @@ def test_only_the_first_finish_is_graded():
     state = server._session_id_to_state["rollout-1"]
     assert state.answer == "first"
     assert "about.html" in state.finished_url
+
+
+def _url_contains_reward(url: str, expected: str) -> float:
+    server = _server()
+    server._session_id_to_state["rollout-1"] = _SessionState(backend=_LiveBackend(url), gt={"url_contains": expected})
+    return asyncio.run(server.verify(_request(), _body())).reward
+
+
+@pytest.mark.parametrize(
+    ("expected", "url"),
+    [
+        ("about.html", "data:text/html,about.html"),
+        ("about.html", "data:text/html,<p>never visited</p>#about.html"),
+        ("about.html", "about:blank#about.html"),
+        ("about.html", "file:///srv/site/index.html#about.html"),
+        ("about.html", "file:///srv/site/index.html?about.html"),
+        ("about.html", "https://example.com/index.html?next=about.html"),
+        ("iana.org", "https://example.com/iana.org"),
+        ("iana.org", "https://example.com/?q=iana.org"),
+        ("iana.org", "https://iana.org.example.com/"),
+    ],
+)
+def test_url_contains_is_not_met_by_a_page_the_target_does_not_name(expected, url):
+    """`browser_navigate` takes any URL, so the target text alone does not show the page was reached."""
+    assert _url_contains_reward(url, expected) == 0.0
+
+
+@pytest.mark.parametrize(
+    ("expected", "url"),
+    [
+        # The shipped rows (data/example.jsonl, data/example_remote.jsonl) on their target pages.
+        ("about.html", "file:///srv/site/about.html"),
+        ("form.html", "file:///srv/site/form.html"),
+        ("index.html", "file:///srv/site/index.html"),
+        ("iana.org", "https://www.iana.org/help/example-domains"),
+        ("example-domains", "https://www.iana.org/help/example-domains"),
+        # The same pages in other forms a browser can report.
+        ("about.html", "https://example.com/about.html?ref=nav#team"),
+        ("about.html", "HTTP://example.com/about.html"),
+        ("iana.org", "https://iana.org/"),
+        ("www.iana.org", "https://www.iana.org/"),
+        ("example-domains", "https://www.iana.org/help/example-domains/"),
+    ],
+)
+def test_url_contains_still_accepts_the_target_page(expected, url):
+    assert _url_contains_reward(url, expected) == 1.0
+
+
+@pytest.mark.parametrize(
+    ("expected", "url", "reward"),
+    [
+        # A value that names part of a URL keeps whole-URL substring matching.
+        ("search?q=shoes", "https://shop.example/search?q=shoes#results", 1.0),
+        ("q=shoes", "https://shop.example/search?q=shoes", 1.0),
+        ("#/settings", "https://app.example/#/settings", 1.0),
+        ("/checkout", "https://shop.example/checkout-step-2", 1.0),
+        ("https://www.iana.org/help", "https://www.iana.org/help/example-domains", 1.0),
+        # A bare name no longer matches inside a query, a fragment or part of a segment.
+        # Each needs the URL syntax it relies on: "q=shoes", "#/settings", "/checkout",
+        # "iana.org" and "/data.csv".
+        ("shoes", "https://shop.example/search?q=shoes", 0.0),
+        ("settings", "https://app.example/#/settings", 0.0),
+        ("checkout", "https://shop.example/checkout-step-2", 0.0),
+        ("iana", "https://www.iana.org/", 0.0),
+        ("data.csv", "https://files.example/data.csv", 0.0),
+    ],
+)
+def test_url_contains_specs_written_for_whole_url_matching(expected, url, reward):
+    """`url_contains` used to be a substring of the whole URL; these pin what changed."""
+    assert _url_contains_reward(url, expected) == reward
