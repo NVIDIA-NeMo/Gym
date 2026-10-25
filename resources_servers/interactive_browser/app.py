@@ -166,7 +166,10 @@ def _url_contains(url: str, expected: str) -> bool:
     Text the policy appends to a page's query or fragment therefore cannot satisfy a name,
     and a domain cannot be satisfied by a path on another host.
     """
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+    except ValueError:  # e.g. an unclosed IPv6 bracket: not the address of a page
+        return False
     if parts.scheme not in _PAGE_URL_SCHEMES:
         return False
     if _URL_PART_CHARACTERS.intersection(expected):

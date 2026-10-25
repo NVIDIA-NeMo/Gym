@@ -283,3 +283,16 @@ def test_url_contains_still_accepts_the_target_page(expected, url):
 def test_url_contains_specs_written_for_whole_url_matching(expected, url, reward):
     """`url_contains` used to be a substring of the whole URL; these pin what changed."""
     assert _url_contains_reward(url, expected) == reward
+
+
+def test_a_malformed_url_is_a_mismatch_not_a_browser_failure():
+    """`urlsplit` rejects an unclosed IPv6 bracket; that is a wrong page, not an unreachable browser."""
+    server = _server()
+    server._session_id_to_state["rollout-1"] = _SessionState(
+        backend=_LiveBackend("https://[::1/about.html"), gt={"url_contains": "about.html"}
+    )
+
+    dumped = asyncio.run(server.verify(_request(), _body())).model_dump()
+
+    assert dumped["reward"] == 0.0
+    assert dumped["failure_reason"] is None
