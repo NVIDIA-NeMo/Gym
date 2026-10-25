@@ -1,4 +1,4 @@
-# Needs the openclaw npm CLI on PATH. The Python extra installs only the adapter.
+# Needs the OpenClaw CLI on PATH (npm install --global openclaw@2026.9.4). The Python extra installs only the adapter.
 config_paths:
   - responses_api_agents/nemo_fabric_agent/configs/nemo_fabric_agent.yaml
 

@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import asyncio
-import ipaddress
 import json
 import logging
 import os
@@ -14,7 +12,6 @@ from copy import deepcopy
 from pathlib import Path
 from time import time
 from typing import Any, Optional
-from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import Body, Request
@@ -43,9 +40,6 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 
 LOG = logging.getLogger(__name__)
 _MODEL_API_KEY_ENV = "NEMO_GYM_FABRIC_MODEL_API_KEY"  # pragma: allowlist secret
-_OPENCLAW_ADAPTER_ID = "nvidia.fabric.openclaw"
-# The OpenClaw release the NeMo Fabric 0.5.0 adapter documents.
-_FABRIC_OPENCLAW_VERSION = "2026.9.4"
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -382,67 +376,6 @@ def _tool_output_counts(items: list[Any]) -> tuple[int, int]:
     return sum(1 for output in outputs if output), len(outputs)
 
 
-class _LoopbackProxy:
-    """Serve a remote plain-HTTP model URL on a loopback port for one invocation.
-
-    The Claude and Codex Relay gateways accept a plain-HTTP upstream only on loopback. Other URLs pass through
-    unchanged. Leaving the context closes the listener and every connection it accepted.
-    """
-
-    def __init__(self, base_url: str, enabled: bool = True) -> None:
-        self._parts = urlsplit(base_url)
-        host = self._parts.hostname or ""
-        try:
-            loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
-        except ValueError:
-            loopback = False
-        self._needed = enabled and self._parts.scheme == "http" and not loopback
-        self._server: Optional[asyncio.Server] = None
-        self._handlers: set[asyncio.Task] = set()
-
-    async def __aenter__(self) -> str:
-        if not self._needed:
-            return self._parts.geturl()
-        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
-        port = self._server.sockets[0].getsockname()[1]
-        return self._parts._replace(netloc=f"127.0.0.1:{port}").geturl()
-
-    async def __aexit__(self, *exc_info: Any) -> None:
-        if self._server is None:
-            return
-        self._server.close()
-        for task in list(self._handlers):
-            task.cancel()
-        await asyncio.gather(*self._handlers, return_exceptions=True)
-        await self._server.wait_closed()
-
-    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        task = asyncio.current_task()
-        self._handlers.add(task)
-        upstream_writer = None
-        try:
-            upstream_reader, upstream_writer = await asyncio.open_connection(
-                self._parts.hostname, self._parts.port or 80
-            )
-            await asyncio.gather(_pipe(reader, upstream_writer), _pipe(upstream_reader, writer))
-        except OSError:
-            pass
-        finally:
-            for stream in (writer, upstream_writer):
-                if stream is not None:
-                    stream.close()
-            self._handlers.discard(task)
-
-
-async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    try:
-        while data := await reader.read(65536):
-            writer.write(data)
-            await writer.drain()
-    finally:
-        writer.close()
-
-
 def _skill_paths(skills_root: Optional[str]) -> list[str]:
     if not skills_root:
         return []
@@ -479,17 +412,13 @@ def _normalized_usage(result: dict[str, Any], output: dict[str, Any]) -> dict[st
     return _deep_merge(details, usage)
 
 
-def _turns_used(output: dict[str, Any], adapter_metadata: Optional[dict[str, Any]] = None) -> int:
+def _turns_used(output: dict[str, Any]) -> int:
     usage = _mapping(output.get("usage"))
-    adapter_metadata = adapter_metadata or {}
     for value in (
         output.get("turns_used"),
         output.get("num_turns"),
         output.get("api_calls"),
         usage.get("api_calls"),
-        adapter_metadata.get("iterations"),
-        adapter_metadata.get("pi_turn_count"),
-        adapter_metadata.get("turn_count"),
     ):
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             return value
@@ -552,10 +481,6 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
-        if self.config.adapter_id == _OPENCLAW_ADAPTER_ID:
-            from responses_api_agents.openclaw_agent.setup_openclaw import ensure_openclaw
-
-            ensure_openclaw(_FABRIC_OPENCLAW_VERSION)
 
     def _resources_server_base_url(self) -> str:
         config = get_first_server_config_dict(
@@ -691,20 +616,19 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             )
             if relay_dir and not self._adapter_supports_relay(self._fabric_config(**config_kwargs), workspace):
                 relay_dir = None
-            async with _LoopbackProxy(model_base_url, enabled=bool(relay_dir)) as config_kwargs["model_base_url"]:
-                fabric_config = self._fabric_config(**config_kwargs, relay_dir=Path(relay_dir) if relay_dir else None)
-                # Fabric otherwise starts Python adapters on VIRTUAL_ENV's interpreter, which in R2E-style task
-                # images is the repo's venv and lacks the adapter. This agent's interpreter has the adapters installed.
-                os.environ.setdefault("ADAPTER_PYTHON", sys.executable)
-                result = await Fabric().run(
-                    fabric_config,
-                    base_dir=workspace,
-                    request=RunRequest(
-                        input=request_input,
-                        request_id=rollout_id or f"request-{uuid4().hex}",
-                        context={"nemo_gym_rollout_id": rollout_id} if rollout_id else {},
-                    ),
-                )
+            fabric_config = self._fabric_config(**config_kwargs, relay_dir=Path(relay_dir) if relay_dir else None)
+            # Fabric otherwise starts Python adapters on VIRTUAL_ENV's interpreter, which in R2E-style task
+            # images is the repo's venv and lacks the adapter. This agent's interpreter has the adapters installed.
+            os.environ.setdefault("ADAPTER_PYTHON", sys.executable)
+            result = await Fabric().run(
+                fabric_config,
+                base_dir=workspace,
+                request=RunRequest(
+                    input=request_input,
+                    request_id=rollout_id or f"request-{uuid4().hex}",
+                    context={"nemo_gym_rollout_id": rollout_id} if rollout_id else {},
+                ),
+            )
             # The trajectory files live in relay_dir, so read them before it is removed.
             trajectories = _atif_trajectories(_mapping(result.output)) if relay_dir else []
 
@@ -817,9 +741,7 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             return NeMoFabricAgentVerifyResponse.model_validate(
                 verify_json
                 | {
-                    "turns_used": _turns_used(
-                        fabric_output, _mapping(_mapping(fabric_result.get("metadata")).get("adapter"))
-                    ),
+                    "turns_used": _turns_used(fabric_output),
                     "finished_naturally": finished_naturally,
                     "fabric_result": fabric_result,
                 }

@@ -30,7 +30,6 @@ from responses_api_agents.nemo_fabric_agent.app import (
     _content_text,
     _extract_request_input,
     _fabric_output_items,
-    _LoopbackProxy,
     _mapping,
     _normalized_usage,
     _skill_paths,
@@ -259,8 +258,7 @@ def test_fabric_config_injects_model_workspace_mcp_and_skills(tmp_path: Path) ->
         "nemo_fabric_openhands",
     ],
 )
-@patch("responses_api_agents.openclaw_agent.setup_openclaw.ensure_openclaw")
-def test_harness_presets_pass_fabric_planning(ensure_openclaw, preset_name: str, tmp_path: Path) -> None:
+def test_harness_presets_pass_fabric_planning(preset_name: str, tmp_path: Path) -> None:
     configs_dir = Path(__file__).parents[1] / "configs"
     base = OmegaConf.load(configs_dir / "nemo_fabric_agent.yaml").nemo_fabric_agent
     preset = OmegaConf.load(configs_dir / f"{preset_name}.yaml")[preset_name]
@@ -522,66 +520,6 @@ def test_send_model_base_url_false_leaves_base_url_out(tmp_path: Path) -> None:
     assert "base_url" not in config["models"]["default"]
 
 
-def test_loopback_proxy_forwards_remote_http_and_leaves_other_urls() -> None:
-    async def scenario() -> None:
-        async def echo(reader, writer):
-            writer.write(b"pong:" + await reader.read(4))
-            await writer.drain()
-            writer.close()
-
-        upstream = await asyncio.start_server(echo, "127.0.0.1", 0)
-        remote = f"http://127.0.0.1:{upstream.sockets[0].getsockname()[1]}/v1"
-        for url in ("http://127.0.0.1:9000/v1", "https://models.example/v1"):
-            async with _LoopbackProxy(url) as proxied:
-                assert proxied == url
-        async with _LoopbackProxy("http://models.example:9000/v1", enabled=False) as proxied:
-            assert proxied == "http://models.example:9000/v1"
-
-        with patch("responses_api_agents.nemo_fabric_agent.app.ipaddress.ip_address") as ip_address:
-            ip_address.return_value.is_loopback = False
-            proxy = _LoopbackProxy(remote)
-        async with proxy as url:
-            assert url != remote and url.startswith("http://127.0.0.1:") and url.endswith("/v1")
-            reader, writer = await asyncio.open_connection("127.0.0.1", int(url.split(":")[2].split("/")[0]))
-            writer.write(b"ping")
-            await writer.drain()
-            assert await reader.read() == b"pong:ping"
-        upstream.close()
-
-    asyncio.run(scenario())
-
-
-def test_loopback_proxy_closes_open_connections_on_exit() -> None:
-    async def scenario() -> None:
-        upstream_eof = asyncio.Event()
-
-        async def hold_open(reader, writer):
-            await reader.read()
-            upstream_eof.set()
-            writer.close()
-
-        upstream = await asyncio.start_server(hold_open, "127.0.0.1", 0)
-        remote = f"http://127.0.0.1:{upstream.sockets[0].getsockname()[1]}/v1"
-        with patch("responses_api_agents.nemo_fabric_agent.app.ipaddress.ip_address") as ip_address:
-            ip_address.return_value.is_loopback = False
-            proxy = _LoopbackProxy(remote)
-        with pytest.raises(RuntimeError, match="fabric failed"):
-            async with proxy as url:
-                _, writer = await asyncio.open_connection("127.0.0.1", int(url.split(":")[2].split("/")[0]))
-                writer.write(b"keep")
-                await writer.drain()
-                while not proxy._handlers:
-                    await asyncio.sleep(0.01)
-                raise RuntimeError("fabric failed")
-
-        await asyncio.wait_for(upstream_eof.wait(), timeout=5)
-        assert not proxy._handlers
-        writer.close()
-        upstream.close()
-
-    asyncio.run(scenario())
-
-
 @pytest.mark.parametrize("native_output", ["README.txt", ""])
 def test_relay_keeps_native_items_when_atif_lacks_tool_outputs(native_output: str, tmp_path: Path) -> None:
     agent = _agent(cwd=str(tmp_path), relay=True)
@@ -654,14 +592,6 @@ def test_base_config_declares_relay_options() -> None:
     assert agent.send_model_base_url is True
 
 
-def test_openclaw_cli_is_provisioned_only_for_the_openclaw_adapter() -> None:
-    with patch("responses_api_agents.openclaw_agent.setup_openclaw.ensure_openclaw") as ensure_openclaw:
-        _agent()
-        ensure_openclaw.assert_not_called()
-        _agent(adapter_id="nvidia.fabric.openclaw")
-        ensure_openclaw.assert_called_once_with("2026.9.4")
-
-
 def test_native_output_keeps_claude_thinking_and_codex_reasoning() -> None:
     claude = {
         "events": [
@@ -687,12 +617,6 @@ def test_normalized_usage_fills_codex_reasoning_tokens_from_adapter_usage() -> N
 
     assert _usage_value(usage, "input_tokens", "inputTokens") == 10
     assert _usage_value(usage, "reasoning_tokens", "reasoningOutputTokens") == 4
-
-
-def test_turns_used_reads_adapter_metadata_counters() -> None:
-    assert _turns_used({}, {"iterations": 7}) == 7
-    assert _turns_used({}, {"pi_turn_count": 12}) == 12
-    assert _turns_used({"num_turns": 3}, {"iterations": 7}) == 3
 
 
 def test_relay_tokens_fill_missing_adapter_usage(tmp_path: Path) -> None:
