@@ -317,6 +317,15 @@ def interrupt_commands(sandbox: FakeSandbox) -> list[str]:
     return [c for c in sandbox.commands if is_interrupt(c)]
 
 
+def harness_script(command: str) -> str:
+    """The script a launch runs: the launch wraps it in ``bash -c '...'``, and a supervised launch wraps that in a
+    launcher that ends by running it unsupervised when it cannot run the supervisor."""
+    script = shlex.split(command)[-1]
+    if "exec bash -c " in script:
+        script = shlex.split(script.rsplit("exec bash -c ", 1)[1])[0]
+    return script
+
+
 def launch_id(command: str) -> Optional[str]:
     """The harness launch a launch or stop command names (``NEMO_GYM_HARNESS_LAUNCH=<id>``)."""
     match = re.search(rf"{LAUNCH_TAG}=([0-9a-f]+)", command)
@@ -401,7 +410,7 @@ async def test_a_checkpoint_interrupts_opencode_and_the_resume_continues_the_ses
     assert "interrupted" not in second, "the resume adds no user turn"
     assert data_home_of(first) == data_home_of(second) == record.episode["state"]["data_home"]
     assert 'test -x "$HOME/.opencode/bin/opencode"' in second, "the install is skipped when the binary is present"
-    script = shlex.split(second)[-1]  # the launch wraps its script in bash -c '...'
+    script = harness_script(second)
     assert _SELECT_RESUME_PYTHON in script and f'"$NEMO_GYM_RESUME_PYTHON" {_REMOTE_RESUME_HELPER}' in script, (
         "the helper runs on a Python 3.8+ interpreter, not the task environment's python3"
     )

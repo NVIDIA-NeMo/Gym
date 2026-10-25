@@ -115,10 +115,27 @@ PHASES = {
 }
 
 
+class SupervisedShell(LocalShell):
+    """A sandbox that takes uploads, so a checkpointed launch runs under the process supervisor."""
+
+    async def upload(self, local_path: str, remote_path: str) -> None:
+        shutil.copyfile(local_path, remote_path)
+
+
+@pytest.fixture
+def remote_supervisor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "process_supervisor.py"
+    monkeypatch.setattr(harness, "_REMOTE_SUPERVISOR", str(path))
+    return path
+
+
+@pytest.mark.parametrize("supervised", [False, True], ids=["scan", "supervised"])
 @pytest.mark.parametrize("phase", sorted(PHASES))
-async def test_a_park_request_stops_the_launch_and_everything_it_started(tmp_path: Path, phase: str) -> None:
+async def test_a_park_request_stops_the_launch_and_everything_it_started(
+    tmp_path: Path, phase: str, supervised: bool, remote_supervisor: Path
+) -> None:
     started, pids = tmp_path / "started", tmp_path / "pids"
-    shell, park = LocalShell(), ParkRequest()
+    shell, park = (SupervisedShell() if supervised else LocalShell()), ParkRequest()
     run = asyncio.create_task(
         run_until_park_requested(
             shell, PHASES[phase].format(started=started, pids=pids, python=quote(sys.executable)), park, timeout_s=600
@@ -521,3 +538,89 @@ async def test_a_pause_that_keeps_printing_nothing_reports_why_and_stops_the_lau
     assert len([r for r in caplog.records if "printed nothing" in r.getMessage()]) == 1, "one retry"
     [failure] = [r.getMessage() for r in caplog.records if "Could not pause" in r.getMessage()]
     assert "rollout-9" in failure and "no output" in failure and "exit 3" in failure and "attempt 2/2" in failure
+
+
+# -- launches under the process supervisor ----------------------------------------------------------------------
+
+
+def tagged_states(tag: str) -> dict[int, tuple[str, str]]:
+    """``(state, command name)`` of every live process carrying the launch's tag."""
+    states = {}
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            if f"{LAUNCH_TAG}={tag}".encode() not in (proc / "environ").read_bytes().split(b"\0"):
+                continue
+            name, rest = (proc / "stat").read_text().split(" (", 1)[1].rsplit(") ", 1)
+        except OSError:
+            continue
+        if rest[0] not in "ZX":
+            states[int(proc.name)] = (rest[0], name)
+    return states
+
+
+async def test_a_supervised_launch_runs_under_the_supervisor_and_returns_the_commands_output_and_exit_code(
+    remote_supervisor: Path,
+) -> None:
+    shell = SupervisedShell()
+
+    result = await run_until_park_requested(  # type: ignore[arg-type]
+        shell, "echo \"parent: $(tr '\\0' ' ' < /proc/$PPID/cmdline)\"; exit 7", ParkRequest(), timeout_s=60
+    )
+
+    assert remote_supervisor.exists(), "the supervisor was uploaded"
+    assert result.stdout is not None and "supervisor" in result.stdout, (
+        f"the command ran under the supervisor: {result.stdout!r}"
+    )
+    assert result.return_code == 7, "the command's own exit code, not the supervisor's"
+    assert not list(Path("/tmp").glob(f"nemo-gym-harness-{launch_id(shell)}.*")), "no file is left"
+
+
+async def test_a_supervised_pause_stops_every_process_including_detached_and_regrouped_ones(
+    tmp_path: Path, remote_supervisor: Path
+) -> None:
+    started = tmp_path / "started"
+    command = (
+        # A daemon whose parent exits at once (the supervisor adopts it), one in a session of its own, and a crowd.
+        # Daemons send their output elsewhere: one holding the launch's stdout would keep its command from ending.
+        "bash -c 'setsid sleep 300 >/dev/null 2>&1 & nohup sleep 300 >/dev/null 2>&1 &'; "
+        "setsid sleep 300 >/dev/null 2>&1 & "
+        f"for i in $(seq 200); do sleep 300 & done; touch {started}; sleep 3; echo done"
+    )
+    shell, park = SupervisedShell(), ParkRequest()
+    parker = Parker(park)
+    run = run_pausing(shell, command, park, parker, timeout_s=120)
+    await until(started.exists)
+    await asyncio.sleep(0.5)
+    tag = launch_id(shell)
+    before = tagged_states(tag)
+    assert len(before) >= 204, f"the launch's processes are running: {len(before)}"
+
+    park.requested.set()
+    await asyncio.wait_for(parker.parked.wait(), 30)
+    paused = tagged_states(tag)
+    # Only the launcher shell and the supervisor keep running; everything they started is stopped.
+    running = {pid: name for pid, (state, name) in paused.items() if state not in "Tt"}
+    names = sorted(running.values())
+    assert len(names) == 2 and names[0] == "bash" and names[1].startswith("python"), (
+        f"only the launcher and the supervisor run while paused: {running}"
+    )
+    parker.opened.set()
+
+    result = await asyncio.wait_for(run, 60)
+    assert result.stdout is not None and result.stdout.endswith("done\n"), "the launch continued in place"
+    assert result.return_code == 0
+    leftover = {pid: s for pid, s in tagged_states(tag).items() if s[0] in "Tt"}
+    assert not leftover, f"nothing is left stopped: {leftover}"
+    kill_launch(shell)
+
+
+async def test_a_launch_without_an_upload_runs_unsupervised(tmp_path: Path) -> None:
+    shell = LocalShell()
+
+    result = await run_until_park_requested(  # type: ignore[arg-type]
+        shell, "echo \"parent: $(tr '\\0' ' ' < /proc/$PPID/cmdline)\"; exit 3", ParkRequest(), timeout_s=60
+    )
+
+    assert result.stdout is not None and "supervisor" not in result.stdout and result.return_code == 3

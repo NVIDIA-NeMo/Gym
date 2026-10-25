@@ -32,6 +32,15 @@ runs, or never started: an ended launch keeps its result instead of being interr
 
 A launch whose caller is cancelled, such as a run whose client went away, is killed the same way, shielded and
 time-limited, before the cancellation goes on: nothing else stops it once the sandbox outlives the run.
+
+Where the sandbox has Python 3.8+, the launch runs under ``nemo_gym/agent_utils/process_supervisor.py``, uploaded
+beside it. The supervisor puts the harness in a process group of its own and adopts every process it orphans
+(``PR_SET_CHILD_SUBREAPER``), so while the supervisor runs, every process of the launch is in its process tree:
+pause, continue, and stop find them by walking ``/proc/<pid>/task/*/children`` from it, one read per process of
+the launch, instead of reading every process of the sandbox. Harnesses whose commands start thousands of processes
+made that scan take minutes, past the command budget, so their pauses failed and the runs were stopped instead.
+Without such a Python, when the supervisor cannot launch, or once it has exited, the scan above is used. The
+launch's result still carries the harness's own exit code, which the supervisor records.
 """
 
 import asyncio
@@ -45,6 +54,7 @@ from uuid import uuid4
 from anyio import CancelScope, move_on_after
 
 from nemo_gym._checkpoint.agent import LegacyRun
+from nemo_gym.agent_utils import process_supervisor
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 
 
@@ -73,6 +83,31 @@ _PAUSE_TIMEOUT_S = 120.0
 _PAUSE_ATTEMPTS = 2
 # What the first stop pass prints, instead of signalling, for a launch whose command had already returned.
 _ENDED = "NEMO_GYM_HARNESS_ENDED"
+# The process supervisor a checkpointed launch runs under, and where it is uploaded in the sandbox.
+_SUPERVISOR = process_supervisor.__file__
+_REMOTE_SUPERVISOR = "/tmp/nemo-gym-process-supervisor.py"
+# The supervisor needs Python 3.8+. A task image's own environment may come first on PATH and be older (SWE-bench's
+# testbed is Python 3.5 or 3.6 for old Django, scikit-learn and astropy versions), so take the first one new enough.
+_SELECT_SUPERVISOR_PYTHON = (
+    'PY=""; for py in python3 /usr/bin/python3 /opt/miniconda3/bin/python3 /usr/local/bin/python3; do '
+    'command -v "$py" >/dev/null 2>&1 && "$py" -c \'import sys; sys.exit(sys.version_info < (3, 8))\' '
+    '>/dev/null 2>&1 && { PY=$(command -v "$py"); break; }; done'
+)
+# Reads the supervisor's receipt: the harness's exit code (128 + n when signal n ended it), 130 when a stop kept it
+# from starting, "fallback" when the supervisor could not launch it at all, so the launch runs unsupervised.
+_RECEIPT_EXIT_CODE = (
+    "import json, sys\n"
+    "r = json.load(open(sys.argv[1]))\n"
+    "rc = r.get('return_code')\n"
+    "if rc is not None:\n"
+    "    print(128 - rc if rc < 0 else rc)\n"
+    "elif r.get('error') and r.get('cleanup_confirmed'):\n"
+    "    print('fallback')\n"
+    "else:\n"
+    "    print(1 if r.get('error') else 130)\n"
+)
+# A command without a timeout still needs a finite one for the supervisor.
+_UNBOUNDED_TIMEOUT_S = 10 * 365 * 24 * 3600.0
 
 
 class HarnessInterrupted(Exception):
@@ -111,14 +146,20 @@ class HarnessLaunch:
         self._pause_file = f"{state_dir}/nemo-gym-harness-{self.id}.pause"
         self._found_file = f"{state_dir}/nemo-gym-harness-{self.id}.found"
         self._root_file = f"{state_dir}/nemo-gym-harness-{self.id}.root"
+        self._tree_file = f"{state_dir}/nemo-gym-harness-{self.id}.tree"
+        self._receipt_file = f"{state_dir}/nemo-gym-harness-{self.id}.receipt.json"
 
-    def command(self, command: str) -> str:
+    def command(self, command: str, *, supervisor: Optional[str] = None, timeout_s: Optional[float] = None) -> str:
         """``command``, tagged, exiting with 130 instead of starting once a stop was requested, and waiting
         instead of starting while a pause is.
 
         The root file holds the launch's ``pid:starttime`` while ``command`` runs and ``ended`` once it returned.
         The pause wait comes after the root file is written: a pause that finds no root file can count on the
         launch to wait.
+
+        With ``supervisor``, the path of an uploaded ``process_supervisor.py``, the command runs under it when the
+        sandbox has Python 3.8+ (``timeout_s`` bounds it there too). The tree file then holds the supervisor's
+        ``pid:starttime``, and the launch exits with the command's exit code from the supervisor's receipt.
         """
         script = (
             f"test ! -e {self._stop_file} || exit 130\n"
@@ -127,7 +168,23 @@ class HarnessLaunch:
             f"{command}\n"
             f"rc=$?; echo ended > {self._root_file}; exit $rc"
         )
-        return f"env {LAUNCH_TAG}={self.id} bash -c {quote(script)}"
+        if supervisor is None:
+            return f"env {LAUNCH_TAG}={self.id} bash -c {quote(script)}"
+        budget_s = timeout_s if timeout_s is not None else _UNBOUNDED_TIMEOUT_S
+        supervised = (
+            f"{_SELECT_SUPERVISOR_PYTHON}\n"
+            f'if [ -n "$PY" ] && [ -f {quote(supervisor)} ]; then\n'
+            f'  "$PY" {quote(supervisor)} --timeout {budget_s:g} --receipt {self._receipt_file} '
+            f"--stop-file {self._stop_file} -- bash -c {quote(script)} &\n"
+            '  sup=$!; read -r s 2>/dev/null < "/proc/$sup/stat" && { s=${s##*) }; set -- $s; '
+            f'echo "$sup:${{20}}" > {self._tree_file}; }}\n'
+            '  wait "$sup"\n'
+            f'  rc=$("$PY" -c {quote(_RECEIPT_EXIT_CODE)} {self._receipt_file} 2>/dev/null)\n'
+            f'  case "$rc" in fallback) rm -f {self._tree_file};; "") exit 1;; *) exit "$rc";; esac\n'
+            "fi\n"
+            f"exec bash -c {quote(script)}"
+        )
+        return f"env {LAUNCH_TAG}={self.id} bash -c {quote(supervised)}"
 
     def stop_command(self, signal_name: str, *, unless_ended: bool = False) -> str:
         """Request the stop, then send ``signal_name`` to every process of the launch; prints them, one per line.
@@ -200,15 +257,30 @@ class HarnessLaunch:
 
     def cleanup_command(self) -> str:
         """Remove the launch's files; only once the launch has ended, while the stop file still guards it."""
-        return f"rm -f {self._stop_file} {self._pause_file} {self._found_file} {self._root_file}"
+        return (
+            f"rm -f {self._stop_file} {self._pause_file} {self._found_file} {self._root_file} {self._tree_file} "
+            f"{self._receipt_file} {self._receipt_file.removesuffix('.json')}.tmp"
+        )
 
     def _find_launch_processes(self) -> str:
-        """Set ``$found``: tagged processes, those earlier passes recorded (if still the same process), and all their
-        descendants. ``/proc/<pid>/stat`` holds the parent PID and start time after the parenthesised name."""
+        """Set ``$found``: every process of the launch.
+
+        While the launch's supervisor runs, those are its descendants: a walk of ``/proc/<pid>/task/*/children``.
+        The ``children`` file has no trailing newline, so ``read`` fails at its end; what it read is kept.
+        Otherwise they are the tagged processes, those earlier passes recorded (if still the same process), and all
+        their descendants. ``/proc/<pid>/stat`` holds the parent PID and start time after the parenthesised name.
+        """
         return (
             'starttime() { local s; read -r s 2>/dev/null < "/proc/$1/stat" || return 1; s=${s##*) }; set -- $s; '
             'echo "${20}"; }\n'
-            'found=""\n'
+            'found=""; sup=""\n'
+            f"if [ -f {self._tree_file} ]; then IFS=: read -r tp tt < {self._tree_file}; "
+            '[ -n "$tp" ] && [ "$(starttime "$tp")" = "$tt" ] && sup=$tp; fi\n'
+            'if [ -n "$sup" ]; then\n'
+            "tree() { local t c p; for t in /proc/$1/task/*; do c=''; read -r -d '' c 2>/dev/null < \"$t/children\"; "
+            'for p in $c; do echo "$p"; tree "$p"; done; done; }\n'
+            'found=$(tree "$sup")\n'
+            "else\n"
             'for d in /proc/[0-9]*; do p=${d#/proc/}; [ "$p" = "$$" ] && continue; '
             f'while IFS= read -r -d "" kv; do [ "$kv" = "{LAUNCH_TAG}={self.id}" ] && '
             '{ found="$found $p"; break; }; done 2>/dev/null < "$d/environ"; done\n'
@@ -217,7 +289,8 @@ class HarnessLaunch:
             'frontier=$found\nwhile [ -n "$frontier" ]; do next=""; for d in /proc/[0-9]*; do '
             'read -r s 2>/dev/null < "$d/stat" || continue; s=${s##*) }; set -- $s; c=${d#/proc/}; '
             'for f in $frontier; do [ "$2" = "$f" ] && case " $found $next " in *" $c "*) ;; *) next="$next $c";; '
-            'esac; done; done; found="$found $next"; frontier=$next; done'
+            'esac; done; done; found="$found $next"; frontier=$next; done\n'
+            "fi"
         )
 
     @staticmethod
@@ -248,7 +321,10 @@ async def run_until_park_requested(
     if legacy_run is None:
         return await sandbox.exec(command=command, timeout_s=timeout_s)
     launch = HarnessLaunch()
-    exec_task = asyncio.ensure_future(sandbox.exec(command=launch.command(command), timeout_s=timeout_s))
+    supervisor = await _upload_supervisor(sandbox)
+    exec_task = asyncio.ensure_future(
+        sandbox.exec(command=launch.command(command, supervisor=supervisor, timeout_s=timeout_s), timeout_s=timeout_s)
+    )
     try:
         while True:
             park_task = asyncio.ensure_future(legacy_run.wait_park_requested())
@@ -275,6 +351,20 @@ async def run_until_park_requested(
         await _kill(sandbox, launch)
         exec_task.cancel()
         raise
+
+
+async def _upload_supervisor(sandbox: AsyncSandbox) -> Optional[str]:
+    """Upload the process supervisor for a launch to run under; ``None`` (an unsupervised launch) when the
+    sandbox has no upload or it fails."""
+    upload = getattr(sandbox, "upload", None)
+    if not callable(upload):
+        return None
+    try:
+        await upload(_SUPERVISOR, _REMOTE_SUPERVISOR)
+    except Exception as error:
+        LOGGER.warning("Could not upload the process supervisor; launching unsupervised: %r", error)
+        return None
+    return _REMOTE_SUPERVISOR
 
 
 async def _kill(sandbox: AsyncSandbox, launch: HarnessLaunch) -> None:
