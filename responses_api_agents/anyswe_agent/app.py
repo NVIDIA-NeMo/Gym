@@ -787,8 +787,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         )
         persistent_dir.mkdir(parents=True, exist_ok=True)
         server_config = self._server.model_dump()
-        if not self.config.sandbox_model_base_url:
-            server_config["model_server_url"] = _model_url_for_rollout(server_config["model_server_url"], rollout_id)
+        # A sandbox_model_base_url relays to the same model server, so it keeps the rollout path that attributes calls.
+        server_config["model_server_url"] = _model_url_for_rollout(server_config["model_server_url"], rollout_id)
         params = AnySweInstanceConfig(
             **self.config.model_dump(),
             **server_config,
