@@ -243,7 +243,7 @@ async def test_local_archive_is_uploaded_instead_of_downloaded(agent, tmp_path):
     assert not any("curl" in c.kwargs["command"] for c in sandbox.exec.await_args_list)
 
 
-@pytest.mark.parametrize("failure", ["exit", "timeout"])
+@pytest.mark.parametrize("failure", ["exit", "timeout", "returned_timeout"])
 async def test_execution_failure_scores_zero_and_keeps_transcript(agent, failure):
     server, sandbox, _ = agent
     run_exec = sandbox.exec.side_effect
@@ -253,15 +253,18 @@ async def test_execution_failure_scores_zero_and_keeps_transcript(agent, failure
             return await run_exec(command, **kwargs)
         if failure == "timeout":
             raise TimeoutError()
+        if failure == "returned_timeout":
+            # The Docker provider returns its timeout instead of raising it.
+            return SimpleNamespace(return_code=125, error_type="timeout", stdout="")
         return SimpleNamespace(return_code=1, error_type=None, stdout="")
 
     sandbox.exec.side_effect = failing
     result = await server.run(SimpleNamespace(cookies={}), run_body())
     assert result.reward == 0 and result.goose_failed
-    assert result.goose_error_type == ("TimeoutError" if failure == "timeout" else None)
+    assert result.goose_error_type == {"timeout": "TimeoutError", "returned_timeout": "timeout"}.get(failure)
     assert server.server_client.post.await_args.kwargs["json"]["response"]["output"] == []
     assert result.response.output  # The original generation is retained for inspection.
-    if failure == "timeout":
+    if failure != "exit":
         assert any(
             c.args == () and "goose run" not in c.kwargs["command"] and "tar czf" in c.kwargs["command"]
             for c in sandbox.exec.await_args_list
@@ -286,6 +289,66 @@ async def test_infrastructure_failures_propagate_and_stop_sandbox(agent, failure
         await server.run(SimpleNamespace(cookies={}), run_body())
     assert not any(c.kwargs["url_path"] == "/verify" for c in server.server_client.post.await_args_list)
     sandbox.stop.assert_awaited_once()
+
+
+async def test_sandbox_stays_up_until_verification_returns(agent):
+    server, sandbox, _ = agent
+    post = server.server_client.post.side_effect
+
+    async def checked(**kwargs):
+        if kwargs["url_path"] == "/verify":
+            # A resource-owned sandbox is graded in place.
+            sandbox.stop.assert_not_awaited()
+        return await post(**kwargs)
+
+    server.server_client.post.side_effect = checked
+    result = await server.run(SimpleNamespace(cookies={}), run_body())
+    assert result.reward == 1
+    sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize("error", [RuntimeError("verifier down"), asyncio.CancelledError()])
+async def test_verify_failure_or_cancellation_still_stops_the_sandbox(agent, error):
+    server, sandbox, _ = agent
+    post = server.server_client.post.side_effect
+
+    async def failing(**kwargs):
+        if kwargs["url_path"] == "/verify":
+            raise error
+        return await post(**kwargs)
+
+    server.server_client.post.side_effect = failing
+    with pytest.raises(type(error)):
+        await server.run(SimpleNamespace(cookies={}), run_body())
+    sandbox.stop.assert_awaited_once()
+
+
+async def test_request_instructions_reach_the_system_prompt(agent):
+    server, sandbox, staged = agent
+    body = run_body()
+    body.responses_create_params.instructions = "Return only the digit."
+    await server.run(SimpleNamespace(cookies={}), body)
+    assert next(v for k, v in staged.items() if k.endswith("system.txt")) == (
+        "Be brief.\n\nReturn only the digit.\n\nUse tools."
+    )
+
+
+@pytest.mark.parametrize("base_url", ["https://inference.example/v1", None])
+async def test_restricted_network_allows_the_endpoint_goose_calls(agent, monkeypatch, base_url):
+    server, _, _ = agent
+    server.config.network_access = "model_only"
+    server.config.base_url = base_url
+    allowed = {}
+    monkeypatch.setattr(app, "create_provider", lambda _: SimpleNamespace(name="opensandbox"))
+    monkeypatch.setattr(app, "resolve_provider_config", lambda *_: {})
+    monkeypatch.setattr(app, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app, "restricted_network_policy", lambda provider, urls: allowed.setdefault("urls", urls))
+    started = AsyncMock()
+    monkeypatch.setattr(app, "AsyncSandbox", lambda provider: SimpleNamespace(start=started))
+    await type(server)._start_sandbox(server, {})
+    assert allowed["urls"] == [base_url or "http://model.example:8000"]
+    started.assert_awaited_once()
 
 
 def test_archive_names_and_concurrency():

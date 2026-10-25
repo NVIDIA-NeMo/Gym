@@ -65,8 +65,8 @@ LOG = logging.getLogger(__name__)
 GOOSE_VERSION = "1.54.0"
 # sha256 of the official static (musl) release archives, keyed by `uname -m`.
 GOOSE_ARCHIVE_SHA256 = {
-    "x86_64": "777e49b6ae128fae06600f94bf51ff05c81572fce63c1581e9ea94bc49d64e42",
-    "aarch64": "baeb3e1b188fce75b444af35b5955f255e68fde87f60a5ba01f032227618a4ed",
+    "x86_64": "777e49b6ae128fae06600f94bf51ff05c81572fce63c1581e9ea94bc49d64e42",  # pragma: allowlist secret
+    "aarch64": "baeb3e1b188fce75b444af35b5955f255e68fde87f60a5ba01f032227618a4ed",  # pragma: allowlist secret
 }
 GOOSE_RELEASE_URL = f"https://github.com/aaif-goose/goose/releases/download/v{GOOSE_VERSION}"
 
@@ -244,7 +244,8 @@ class GooseAgent(SimpleResponsesAPIAgent):
         metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config)
         metadata = metadata | options.pop("metadata", {}) | {"nemo_gym_agent": self.config.name}
         if self.config.network_access != "inherit":
-            urls = [sandbox_server_url(self.config.model_server.name, require_reachable=True)]
+            # Allow the endpoint Goose actually calls: a configured base_url, else the Gym model server.
+            urls = [self.config.base_url or sandbox_server_url(self.config.model_server.name, require_reachable=True)]
             if self.config.network_access == "model_and_tools":
                 if not self.config.tool_servers:
                     raise ValueError("model_and_tools requires tool_servers")
@@ -299,7 +300,7 @@ class GooseAgent(SimpleResponsesAPIAgent):
     ) -> dict[str, Any]:
         params = body.responses_create_params
         messages = [{"role": "user", "content": params.input}] if isinstance(params.input, str) else params.input
-        prompt, system = [], [self.config.system_prompt] if self.config.system_prompt else []
+        prompt, system = [], [text for text in (self.config.system_prompt, params.instructions) if text]
         for item in messages:
             item = item if isinstance(item, dict) else item.model_dump()
             content = item.get("content")
@@ -354,6 +355,8 @@ class GooseAgent(SimpleResponsesAPIAgent):
         except Exception as exc:
             error_type = type(exc).__name__
             LOG.exception("Goose sandbox execution failed")
+        # The Docker provider returns a timeout as a result (error_type="timeout") instead of raising it.
+        error_type = error_type or getattr(result, "error_type", None)
         if error_type and "timeout" in error_type.lower():
             # The run was cut off before archiving its sessions.
             await sandbox.exec(
@@ -366,7 +369,6 @@ class GooseAgent(SimpleResponsesAPIAgent):
             archive.extractall(root, filter="data")
         sessions = await to_thread(read_goose_sessions, root / "sessions" / "sessions.db")
         return_code = getattr(result, "return_code", None)
-        error_type = error_type or getattr(result, "error_type", None)
         return {
             "sessions": sessions,
             "goose_failed": bool(error_type or return_code != 0),
@@ -432,35 +434,36 @@ class GooseAgent(SimpleResponsesAPIAgent):
             sandbox = await self._start_sandbox(seed)
             try:
                 execution = await self._run_goose(sandbox, body, mcp, root)
+                sessions = execution.pop("sessions")
+                response = self._response(body, sessions)
+                children = [s for s in sessions if s.get("parent_session_id")]
+                execution["goose_subagents"] = len(children)
+                execution["goose_max_concurrent_subagents"] = max_concurrent(
+                    [
+                        (min(m["created"] for m in s["messages"]), max(m["created"] for m in s["messages"]))
+                        for s in children
+                        if s["messages"]
+                    ]
+                )
+                payload = body.model_dump(mode="json") | {"response": response.model_dump(mode="json")}
+                (root / "generation.json").write_text(json.dumps(payload | execution))
+                result = await verify_agent_response(
+                    self.server_client,
+                    self.config.resources_server,
+                    body,
+                    response,
+                    cookies,
+                    force_zero_reward=execution["goose_failed"] and self.config.execution_failure_reward_zero,
+                )
+                return GooseAgentVerifyResponse.model_validate(result | execution)
             finally:
+                # A resource-owned sandbox is graded in place, so it stays up until verification returns.
                 # Goose keeps running in the sandbox after a cancelled request. Only stopping the sandbox ends it.
                 with CancelScope(shield=True):
                     try:
                         await sandbox.stop()
                     except Exception:
                         LOG.exception("Failed to stop Goose sandbox")
-            sessions = execution.pop("sessions")
-            response = self._response(body, sessions)
-            children = [s for s in sessions if s.get("parent_session_id")]
-            execution["goose_subagents"] = len(children)
-            execution["goose_max_concurrent_subagents"] = max_concurrent(
-                [
-                    (min(m["created"] for m in s["messages"]), max(m["created"] for m in s["messages"]))
-                    for s in children
-                    if s["messages"]
-                ]
-            )
-            payload = body.model_dump(mode="json") | {"response": response.model_dump(mode="json")}
-            (root / "generation.json").write_text(json.dumps(payload | execution))
-            result = await verify_agent_response(
-                self.server_client,
-                self.config.resources_server,
-                body,
-                response,
-                cookies,
-                force_zero_reward=execution["goose_failed"] and self.config.execution_failure_reward_zero,
-            )
-            return GooseAgentVerifyResponse.model_validate(result | execution)
 
 
 if __name__ == "__main__":
