@@ -171,7 +171,9 @@ def _as_list(value: Any) -> list[str]:
 
 def _r2e_resolved(instance: Dict[str, Any], log: str) -> bool:
     statuses: Dict[str, str] = {}
-    for line in log.splitlines():
+    # pytest can color both the status and parts of the test ID in its summary.
+    plain_log = re.sub(r"\x1b\[[0-9;]*m", "", log)
+    for line in plain_log.splitlines():
         fields = line.strip().replace(" - ", " ").split()
         if len(fields) > 1 and fields[0] in ("PASSED", "FAILED", "ERROR", "XFAIL", "SKIPPED"):
             statuses[fields[1]] = fields[0]
