@@ -261,6 +261,22 @@ class InferenceMetricsCollector:
     @staticmethod
     def add_derived_metrics(metrics: dict[str, float], prefix: str) -> None:
         """Derive interval cache percentages and observation-weighted prefill averages."""
+        overlap_prefix = f"{prefix}dbo_overlap_seconds_sum_per_second"
+        overlaps = {
+            key.removeprefix(overlap_prefix): value
+            for key, value in metrics.items()
+            if key == overlap_prefix or key.startswith(overlap_prefix + "/engine/")
+        }
+        for phase in ("comm", "compute"):
+            pooled_overlap = pooled_duration = 0.0
+            for suffix, overlap in overlaps.items():
+                duration = metrics.get(f"{prefix}dbo_{phase}_seconds_sum_per_second{suffix}")
+                if duration is not None and duration > 0:
+                    metrics[f"{prefix}dbo_{phase}_overlap_fraction{suffix}"] = overlap / duration
+                    pooled_overlap += overlap
+                    pooled_duration += duration
+            if pooled_duration > 0:
+                metrics[f"{prefix}dbo_{phase}_overlap_fraction"] = pooled_overlap / pooled_duration
         # Preserve each DP engine's readiness counts and pool sums/counts for the
         # node summary. Missing/reset engines cannot contribute an interval rate.
         step_prefix = f"{prefix}prefill_readiness_steps_per_second"
@@ -478,7 +494,10 @@ class InferenceMetricsCollector:
                     values = [metrics[metric] for metrics in replica_metrics]
                     total = sum(values)
                     name = metric.split("/", 1)[0]
-                    if namespace == "vllm" and name in PREFILL_DERIVED_METRICS:
+                    if namespace == "vllm" and (
+                        name in PREFILL_DERIVED_METRICS
+                        or name in {"dbo_comm_overlap_fraction", "dbo_compute_overlap_fraction"}
+                    ):
                         continue  # Recompute from pooled sums/counts; never sum or average ratios.
                     if name == "cache_inventory":
                         continue  # Keep per-engine inventories; hashes are not globally additive.

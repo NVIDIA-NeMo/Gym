@@ -630,6 +630,54 @@ def test_dbo_metrics_preserve_engine_outcome_and_microbatch_labels():
     assert second[prefix + "steps_per_second/engine/1/outcome/below_threshold"] == 0
 
 
+def test_dbo_overlap_fractions_use_sampled_duration_and_skip_idle_or_reset_intervals():
+    collector = InferenceMetricsCollector(config())
+
+    def scrape(observations, now):
+        registry = CollectorRegistry()
+        for phase, values in zip(("compute", "comm", "overlap"), zip(*observations)):
+            histogram = Histogram(f"vllm:dbo_{phase}_seconds", "Sampled seconds", ["engine"], registry=registry)
+            for engine, value in enumerate(values):
+                histogram.labels(str(engine)).observe(value)
+        return collector.parse("prefill0", generate_latest(registry).decode(), now)
+
+    assert not any("overlap_fraction" in key for key in scrape([(0, 0, 0), (0, 0, 0)], 10))
+    second = scrape([(8, 4, 2), (2, 1, 1)], 12)
+    prefix = "vllm/prefill0/dbo_"
+    assert second[prefix + "comm_overlap_fraction/engine/0"] == 0.5
+    assert second[prefix + "comm_overlap_fraction/engine/1"] == 1
+    assert second[prefix + "comm_overlap_fraction"] == pytest.approx(3 / 5)
+    assert second[prefix + "compute_overlap_fraction"] == pytest.approx(3 / 10)
+    assert not any("overlap_fraction" in key for key in scrape([(8, 4, 2), (2, 1, 1)], 14))
+    assert not any("overlap_fraction" in key for key in scrape([(0, 0, 0), (0, 0, 0)], 16))
+
+
+async def test_total_dbo_overlap_fraction_is_duration_weighted(monkeypatch):
+    collector = InferenceMetricsCollector(
+        InferenceMetricsConfig(enabled=True, endpoints={"a": "http://localhost:1", "b": "http://localhost:2"})
+    )
+    stop = asyncio.Event()
+
+    async def scrape(replica, url):
+        stop.set()
+        overlap, comm = (2, 4) if replica == "a" else (1, 1)
+        result = {
+            f"vllm/{replica}/dbo_overlap_seconds_sum_per_second/engine/0": overlap,
+            f"vllm/{replica}/dbo_comm_seconds_sum_per_second/engine/0": comm,
+        }
+        collector.add_derived_metrics(result, f"vllm/{replica}/")
+        return result
+
+    monkeypatch.setattr(collector, "scrape", scrape)
+    publish = MagicMock()
+    monkeypatch.setattr(metrics_module, "export_metrics", publish)
+    await collector.run(stop)
+    result = publish.call_args.args[0]
+    assert result["vllm/total/dbo_comm_overlap_fraction"] == pytest.approx(3 / 5)
+    assert result["vllm/total/dbo_comm_overlap_fraction/engine/0"] == pytest.approx(3 / 5)
+    assert "vllm/mean/dbo_comm_overlap_fraction" not in result
+
+
 def test_derived_cache_and_source_prompt_metrics():
     collector = InferenceMetricsCollector(config())
 

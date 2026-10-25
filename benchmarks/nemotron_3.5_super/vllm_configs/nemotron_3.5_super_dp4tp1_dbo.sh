@@ -3,7 +3,7 @@
 NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-5}"
 # Use 0 for a matching eager control run before comparing throughput.
 ENABLE_PREFILL_DBO="${ENABLE_PREFILL_DBO:-1}"
-# Collect per-engine DBO execution/fallback and microbatch metrics on prefill.
+# Collect per-engine DBO execution/fallback, microbatch, and overlap metrics on prefill.
 # Enable for both the DBO run and its control; requires the updated Rust frontend.
 ENABLE_DBO_METRICS="${ENABLE_DBO_METRICS:-0}"
 
