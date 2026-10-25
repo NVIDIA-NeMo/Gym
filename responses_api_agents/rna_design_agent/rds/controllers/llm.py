@@ -169,4 +169,4 @@ class LLMController:
         # One call per round: the first is run and the rest are counted.
         self.dropped_this_round = max(0, len(reply.tool_calls) - 1)
         call = reply.tool_calls[0]
-        return Action(call.name, call.arguments, rationale=(reply.reasoning or reply.text)[:500])
+        return Action(call.name, call.arguments, rationale=(reply.reasoning or reply.text)[:500], error=call.error)

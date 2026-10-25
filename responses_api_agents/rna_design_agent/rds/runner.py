@@ -36,6 +36,8 @@ class Action:
     tool: str
     arguments: dict[str, Any]
     rationale: str = ""
+    #: Why the call's arguments could not be read, when they could not.
+    error: str = ""
 
     STOP = "stop"
 
@@ -130,14 +132,18 @@ def apply_tool_call(
     objective: dict[str, Any] | None,
     failures: list[str],
     offered: set[str] | None = None,
+    invalid: str = "",
 ) -> Any:
     """Run one tool call against a campaign and fold its result into the state. Returns the tool's result.
 
     Shared by the campaign loop and by harnesses that call tools one at a time. `offered` is set for a call a model
     chose: it must name an offered tool and may not set an operator field. None means an operator-written control.
+    `invalid` says why the model's arguments could not be read, and the call fails with it.
     """
     started = time.monotonic()
     try:
+        if invalid:
+            raise ValueError(f"{tool}: {invalid}")
         if offered is not None:
             spec = registry.get(tool)
             if spec.name not in offered:
@@ -239,6 +245,9 @@ def run_campaign(
         started = time.monotonic()
         with _only(controller, "report.rules") if reflecting else nullcontext():
             action = controller.next_action(view)
+            # What this decision was offered. The allowance is restored when the reflection context closes.
+            offered = getattr(controller, "allowed", None)
+            offered = None if offered is None else set(offered)
         usage = getattr(controller, "last_reply", None)
         spent = getattr(getattr(usage, "usage", None), "input_tokens", 0) + getattr(
             getattr(usage, "usage", None), "output_tokens", 0
@@ -264,8 +273,9 @@ def run_campaign(
             break
 
         try:
-            offered = getattr(controller, "allowed", None)
-            apply_tool_call(action.tool, action.arguments, state, budget, rank_by, objective, failures, offered)
+            apply_tool_call(
+                action.tool, action.arguments, state, budget, rank_by, objective, failures, offered, action.error
+            )
         except Exception:  # recorded as a failure inside, and the campaign goes on
             continue
 

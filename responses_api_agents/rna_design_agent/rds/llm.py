@@ -61,6 +61,8 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    #: Why the model's arguments could not be read. The call then fails as the model's own mistake.
+    error: str = ""
 
 
 @dataclass(frozen=True)
@@ -189,11 +191,12 @@ class GatewayProvider:
         for call in message.get("tool_calls") or []:
             function = call.get("function") or {}
             raw = function.get("arguments") or "{}"
+            arguments, error = {}, ""
             try:
                 arguments = json.loads(raw) if isinstance(raw, str) else dict(raw)
             except json.JSONDecodeError as exc:
-                raise RuntimeError(f"tool call {function.get('name')!r} had invalid JSON: {exc}") from exc
-            calls.append(ToolCall(id=call.get("id", ""), name=function.get("name", ""), arguments=arguments))
+                error = f"the arguments were not valid JSON: {exc}"
+            calls.append(ToolCall(call.get("id", ""), function.get("name", ""), arguments, error))
         text = message.get("content") or ""
         if not calls:
             calls = _tool_calls_in_text(text)

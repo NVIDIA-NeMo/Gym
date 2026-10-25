@@ -96,7 +96,9 @@ def _request(suite: str, target_name: str) -> RnaDesignRunRequest:
 
 
 class _ScriptedModelServer:
-    """A local OpenAI-style endpoint whose model plays a fixed list of (tool, arguments) calls, then stops."""
+    """A local OpenAI-style endpoint whose model plays a fixed list of (tool, arguments) calls, then stops.
+
+    A string is sent as the raw arguments, so a test can send malformed JSON."""
 
     def __init__(self, script: list[tuple[str, dict]] = ()) -> None:
         import json
@@ -112,7 +114,8 @@ class _ScriptedModelServer:
             def do_POST(self) -> None:
                 self.rfile.read(int(self.headers["Content-Length"]))
                 name, arguments = next(calls, ("stop", {"reason": "done"}))
-                call = {"id": "c1", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
+                raw = arguments if isinstance(arguments, str) else json.dumps(arguments)
+                call = {"id": "c1", "type": "function", "function": {"name": name, "arguments": raw}}
                 body = {
                     "choices": [
                         {
@@ -239,6 +242,28 @@ class TestReviewFixes:
 
         state, budget = self._campaign(tmp_path)
         summary = run_campaign(Offered(), state, budget, rank_by="m", max_rounds=5)
+        assert state.count() == 0 and "is not offered" in summary["failures"][0]
+        state.close()
+
+    def test_a_reflection_round_runs_only_the_reflection_tool(self, tmp_path: Path) -> None:
+        """A reflection round offers only report.rules, so a scorer the model may use otherwise is refused there."""
+        from responses_api_agents.rna_design_agent.rds.runner import Action, run_campaign
+
+        class Model:
+            name = "model"
+            allowed = {"score.constraints", "report.rules"}
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def next_action(self, view):
+                self.calls += 1
+                if self.calls > 1:
+                    return Action("stop", {})
+                return Action("score.constraints", {"sequences": ["GGGGAAACCCCA"], "target": "review_hairpin"})
+
+        state, budget = self._campaign(tmp_path)
+        summary = run_campaign(Model(), state, budget, rank_by="m", max_rounds=3, reflect_every=1)
         assert state.count() == 0 and "is not offered" in summary["failures"][0]
         state.close()
 
@@ -458,6 +483,23 @@ class TestRun:
 
         assert out.tool_calls == 2 and out.tool_failures == 2 and out.environment_faults == 0
         assert out.mask_sample is False and out.reward == 0.0
+
+    @pytest.mark.asyncio
+    async def test_malformed_tool_call_json_is_the_models_failed_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Arguments that are not JSON are the model's mistake: a failed call scored 0, not a masked crash."""
+        stub = _ScriptedModelServer([("score_constraints", "{")])
+        agent = _agent(tmp_path, arm="agent", model_name="stub")
+        monkeypatch.setattr(RnaDesignAgent, "stub_url", stub.base_url, raising=False)
+        try:
+            out = await agent.run(MagicMock(cookies={}), _request("rnainvbench_eterna100_v1", "eterna100_v1_57"))
+        finally:
+            stub.close()
+
+        assert out.tool_calls == 1 and out.tool_failures == 1 and out.environment_faults == 0
+        assert out.mask_sample is False and out.reward == 0.0 and out.tokens_in > 0
+        assert "not valid JSON" in out.response.output[0].content[0].text
 
     @pytest.mark.asyncio
     async def test_the_worker_runs_under_the_configured_python(self, tmp_path: Path) -> None:
