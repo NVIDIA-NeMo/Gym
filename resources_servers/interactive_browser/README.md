@@ -90,7 +90,8 @@ reward by default (least reward-hackable); extend `_score()` with new keys as ne
 `?`, `#` or `=` names part of a URL and is matched as a substring of the whole
 URL. Any other value is a name:
 
-- a domain such as `iana.org` must be the page's host or a parent domain of it;
+- a domain such as `iana.org` must be the host of an `http` or `https` page,
+  or a parent domain of that host;
 - a file such as `about.html` (a dotted name ending in a page suffix like `html`
   or `php`), or an undotted name such as `example-domains`, must be a whole path
   segment.

@@ -227,6 +227,10 @@ def _url_contains_reward(url: str, expected: str) -> float:
         ("iana.org", "https://example.com/iana.org"),
         ("iana.org", "https://example.com/?q=iana.org"),
         ("iana.org", "https://iana.org.example.com/"),
+        ("iana.org", "file://iana.org/"),
+        ("about.html", "https://about.html/"),
+        ("example-domains", "https://example-domains/"),
+        ("about.html", "https://example.com/not%2Fabout.html"),
     ],
 )
 def test_url_contains_is_not_met_by_a_page_the_target_does_not_name(expected, url):
@@ -246,7 +250,9 @@ def test_url_contains_is_not_met_by_a_page_the_target_does_not_name(expected, ur
         # The same pages in other forms a browser can report.
         ("about.html", "https://example.com/about.html?ref=nav#team"),
         ("about.html", "HTTP://example.com/about.html"),
+        ("about.html", "https://example.com/%61bout.html"),
         ("iana.org", "https://iana.org/"),
+        ("iana.org", "https://www.iana.org./"),
         ("www.iana.org", "https://www.iana.org/"),
         ("example-domains", "https://www.iana.org/help/example-domains/"),
     ],

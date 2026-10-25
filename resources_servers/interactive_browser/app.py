@@ -161,8 +161,8 @@ class _SessionState:
 def _url_contains(url: str, expected: str) -> bool:
     """Whether ``url`` is an http, https or file page that ``expected`` points at.
 
-    A value naming part of a URL is a substring of the whole URL. A domain matches the
-    page's host or a parent domain of it, and any other name must be a whole path segment.
+    A value naming part of a URL is a substring of the whole URL. A domain matches an
+    http(s) host or a parent domain of it, and any other name must be a whole path segment.
     Text the policy appends to a page's query or fragment therefore cannot satisfy a name,
     and a domain cannot be satisfied by a path on another host.
     """
@@ -171,13 +171,11 @@ def _url_contains(url: str, expected: str) -> bool:
         return False
     if _URL_PART_CHARACTERS.intersection(expected):
         return expected in url
-    host, name = parts.hostname or "", expected.lower()
-    if host == name or host.endswith("." + name):
-        return True
+    host, name = (parts.hostname or "").removesuffix("."), expected.lower()
     _, dot, suffix = name.rpartition(".")
     if dot and suffix.isalpha() and suffix not in _PAGE_FILE_SUFFIXES:
-        return False
-    return expected in unquote(parts.path).split("/")
+        return parts.scheme in ("http", "https") and (host == name or host.endswith("." + name))
+    return any(unquote(segment) == expected for segment in parts.path.split("/"))
 
 
 class InteractiveBrowserResourcesServer(SimpleResourcesServer):

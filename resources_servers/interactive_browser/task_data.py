@@ -40,7 +40,7 @@ class TaskData(BaseModel):
         description=(
             "Scores 1.0 when the graded page's http, https or file URL matches this. A value "
             "containing '/', '?', '#' or '=' is a substring of the whole URL. Otherwise it is a "
-            "name: a domain (e.g. 'iana.org') matches the host or a parent domain, and a file "
+            "name: a domain (e.g. 'iana.org') matches an http(s) host or a parent domain, and a file "
             "('about.html') or any other name must be a whole path segment."
         ),
         json_schema_extra={"consumed_by": ["verify"], "legacy_location": "verifier_metadata"},
