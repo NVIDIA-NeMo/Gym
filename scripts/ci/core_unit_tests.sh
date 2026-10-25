@@ -30,5 +30,13 @@ if [[ -n "${GYM_CI_JUNIT_DIR:-}" ]]; then
     printf -v junit_xml_path '%q' "${GYM_CI_JUNIT_DIR%/}/core.xml"
     pytest_addopts+=" --junitxml=${junit_xml_path} --junit-prefix=nemo_gym.core"
 fi
+# A CI provider that grants more CPUs can ask for parallel pytest-xdist workers; unset runs serially.
+if [[ -n "${GYM_CI_PYTEST_WORKERS:-}" ]]; then
+    if [[ ! "${GYM_CI_PYTEST_WORKERS}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "GYM_CI_PYTEST_WORKERS must be a positive integer: ${GYM_CI_PYTEST_WORKERS}" >&2
+        exit 2
+    fi
+    pytest_addopts+=" -n ${GYM_CI_PYTEST_WORKERS}"
+fi
 export PYTEST_ADDOPTS="${pytest_addopts}"
 exec ng_dev_test
