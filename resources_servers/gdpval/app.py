@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -55,15 +55,20 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
+    ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    ResourcesSessionFence,
+    ResourcesSessionLostError,
     ReverifyMode,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.deliverables import is_deliverable
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import AGENT_TIMEOUT, JUDGE_FAILED
+from nemo_gym.failure_kinds import AGENT_TIMEOUT, JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
@@ -604,10 +609,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
         if self.config.num_workers not in (None, 1):
             raise ValueError("GDPVal sessions are process-local and require num_workers=1")
         self._sessions: Dict[str, _TaskSession] = {}
-        self._closed_sessions: Dict[str, EpisodeId] = {}
         # (task_id, repeat) of the persisted directory each live session will write, to the session holding it.
         self._claimed_directories: Dict[Tuple[str, int], str] = {}
-        self._session_locks: Dict[str, asyncio.Lock] = {}
+        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
         # Normalize the reference-model set: prefer the multi-reference
         # ``reference_models`` mapping; fall back to the legacy single-reference
         # fields (treated as a single reference id ``"reference"``).
@@ -659,19 +663,29 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
     async def seed_session(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
         session_id = body.resources_session_id
-        request.session[SESSION_ID_KEY] = session_id
-        async with self._session_locks.setdefault(session_id, asyncio.Lock()):
-            if session_id in self._closed_sessions:
-                raise ValueError(f"Resources session is already closed: {session_id}")
+        # The cookie is set only on success: a refusal's reply passes through the session middleware too, and must
+        # not hand the caller a cookie for a session that another episode holds.
+        async with self._fence.locked(session_id):
+            self._fence.raise_if_closed(session_id)
             session = self._sessions.get(session_id)
             if session is not None:
                 if (session.episode_id, session.task_id) != (body.episode_id, body.task_id):
-                    raise ValueError("resources_session_id is already bound to another episode or task")
+                    raise ResourcesSessionConflictError(
+                        "resources_session_id is already bound to another episode or task"
+                    )
+                request.session[SESSION_ID_KEY] = session_id
                 return await self._seed_response(session_id, session)
-            task = TaskData.model_validate(body.task_data)
+            try:
+                task = TaskData.model_validate(body.task_data)
+            except ValidationError as error:
+                raise ResourcesSeedRejectedError(f"task_data is not a GDPVal task: {error}") from error
             if body.task_id.task_id != task.task_id:
-                raise ValueError("TaskId does not match the GDPVal task_id")
-            repeat = persisted_layout.repeat_from_rollout_id(body.episode_id.rollout_id)
+                raise ResourcesSeedRejectedError("TaskId does not match the GDPVal task_id")
+            try:
+                repeat = persisted_layout.repeat_from_rollout_id(body.episode_id.rollout_id)
+            except ValueError as error:
+                # A retry sends the same rollout_id, so no retry can fix it.
+                raise ResourcesSeedRejectedError(str(error)) from error
             directory = (task.task_id, repeat)
             owner = self._claimed_directories.get(directory)
             if owner is not None:
@@ -703,6 +717,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 await self._release(session)
                 raise
             self._sessions[session_id] = session
+            request.session[SESSION_ID_KEY] = session_id
             return response
 
     async def _download_reference_files(self, task: TaskData, reference_dir: Path) -> List[str]:
@@ -732,21 +747,22 @@ class GDPValResourcesServer(SimpleResourcesServer):
         self, request: Request, body: ResourcesCloseSessionRequest
     ) -> ResourcesCloseSessionResponse:
         session_id = body.resources_session_id
-        async with self._session_locks.setdefault(session_id, asyncio.Lock()):
-            if session_id not in self._closed_sessions:
+        async with self._fence.locked(session_id):
+            closed_episode = self._fence.closed_episode(session_id)
+            if closed_episode is None:
                 session = self._sessions.get(session_id)
                 if session is not None:
                     if session.episode_id != body.episode_id:
-                        raise ValueError("episode_id does not match the seeded resources session")
+                        raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
                     try:
                         await self._release(session)
                     finally:
                         # A failed stop must not hold the directory: every later seed of it would get a terminal 409.
                         self._claimed_directories.pop((session.task_id.task_id, session.repeat), None)
                     del self._sessions[session_id]
-                self._closed_sessions[session_id] = body.episode_id
-            elif self._closed_sessions[session_id] != body.episode_id:
-                raise ValueError("episode_id does not match the closed resources session")
+                self._fence.mark_closed(session_id, body.episode_id)
+            elif closed_episode != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
         request.session.pop(SESSION_ID_KEY, None)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
@@ -777,7 +793,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
     def _get_session(self, request: Request) -> _TaskSession:
         session = self._sessions.get(request.session.get(SESSION_ID_KEY))
         if session is None:
-            raise HTTPException(status_code=400, detail="No seeded GDPVal session for this request")
+            raise ResourcesSessionLostError("No seeded GDPVal session for this request")
         return session
 
     async def finish(self, request: Request, body: FinishRequest) -> str:
@@ -987,8 +1003,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
         elif body.deliverables_dir is None:
             # A session that is gone (a restart, a checkpoint restore) took its files with it, and judging the
             # transcript alone would score the agent as if it had submitted nothing.
-            raise HTTPException(
-                status_code=409, detail="No live GDPVal session and no deliverables_dir: there is nothing to judge"
+            return GDPValVerifyResponse(
+                **body.model_dump(),
+                verify_mode=self.config.reward_mode,
+                **lost_session_verification(
+                    "No live GDPVal session and no deliverables_dir: there is nothing to judge"
+                ),
             )
         if not self.config.judge_deliverables:
             return GDPValVerifyResponse(
@@ -1923,7 +1943,13 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     extra["comparison/expected_final_stage_index"] = expected_final_stage_index
 
                 final_stage_present = expected_stage_consistent and expected_final_stage_index in staged
-                final_stage_rows = staged.get(expected_final_stage_index, [])
+                # A lost session's masked sample stays in the stage for coverage, but it holds no measurement, so it
+                # is not an observed row when deciding whether the final stage is complete.
+                final_stage_rows = [
+                    vr
+                    for vr in staged.get(expected_final_stage_index, [])
+                    if vr.get("failure_kind") not in (SESSION_LOST, SESSION_EXPIRED)
+                ]
                 observed_final_stage_count = len(
                     {
                         (

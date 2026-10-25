@@ -108,6 +108,10 @@ async def prepare_session(session, loader):
     await session.slots.acquire()
     session.owns_slot = True
     session.task = await loader.load(session.request.task_name, session.request.task_ref)
+    # Before any sandbox starts or the agent runs: this task's settings could not produce a valid verification.
+    session.config.environment.require_exec_limit_covers(
+        session.task.name, session.config.environment.verifier_timeout_sec(session.task)
+    )
     session.environment = Environment(session.task, session.config.environment, session.session_id, session.directory)
     # Construct and validate the verifier configuration before allocating
     # either environment, but allocate its resources only after collection.
