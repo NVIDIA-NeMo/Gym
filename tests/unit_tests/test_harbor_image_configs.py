@@ -5,7 +5,9 @@ import base64
 import io
 import json
 import logging
+import random
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -34,7 +36,13 @@ from nemo_gym.tasks.harbor.image_configs import (
     record_compose_images,
     with_built_images,
 )
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, read_image_configs, record_lock, write_json_record
+from nemo_gym.tasks.harbor.records import (
+    BUILT_IMAGES_FILE,
+    entry_lock_path,
+    read_image_configs,
+    record_lock,
+    write_json_record,
+)
 from nemo_gym.tasks.harbor.registry import ImageConfigError, RegistryClient, parse_image_ref
 from nemo_gym.tasks.harbor.task import discover_tasks
 
@@ -856,6 +864,18 @@ class FakeClient:
             "os": "linux",
             "record_version": 2,
         }
+
+
+def image_locks(folder: Path) -> list[str]:
+    """The per-image lock files in ``folder`` (``compose-images.json.<hash>.lock``, not the record's own
+    ``compose-images.json.lock``), by name."""
+    return sorted(
+        path.name
+        for path in folder.iterdir()
+        if path.name.startswith("compose-images.json.")
+        and path.name.endswith(".lock")
+        and path.name != "compose-images.json.lock"
+    )
 
 
 class TestComposeVariablesAndEnvFile:
@@ -2145,12 +2165,15 @@ class TestResumableRecords:
         recorded = json.loads(record_path.read_text())
         assert sorted(recorded) == ["alpha:1", "beta:2"], "the two images resolved before the failure are on disk"
         assert recorded["alpha:1"]["image"] == "alpha:1" and recorded["alpha:1"]["record_version"] == 2
+        # The recorded images' lock files are gone; the one of the image nobody recorded stays until someone does.
+        assert image_locks(tmp_path) == [entry_lock_path(record_path, "gamma:3").name]
         # The next run reads the partial record and asks the registry for the missing image only.
         client = FakeClient()
         resolved_now: list[str] = []
         assert record_base_images(tmp_path, client=client, resolved_now=resolved_now) == record_path
         assert client.resolved == ["gamma:3"] and resolved_now == ["gamma:3"]
         assert sorted(json.loads(record_path.read_text())) == ["alpha:1", "beta:2", "gamma:3"]
+        assert image_locks(tmp_path) == []
         # And a third run, with a complete record, makes no registry request at all.
         client = FakeClient()
         resolved_now = []
@@ -2166,18 +2189,21 @@ class TestResumableRecords:
         assert client.resolved == ["alpha:1", "gamma:3"] and resolved_now == ["alpha:1", "gamma:3"]
         assert sorted(json.loads(record_path.read_text())) == ["alpha:1", "beta:2", "gamma:3"]
 
-    def test_two_interleaved_preparations_of_one_folder_share_progress_and_leave_one_consistent_record(self, tmp_path):
-        """Two threads prepare the same folder. The first one's lookup of the first image is held until the
-        second has recorded every image; the first then finds each image recorded (one under the lock, the
-        others before asking the registry) and asks for nothing more."""
+    def test_a_second_preparation_takes_the_free_images_and_waits_for_the_one_in_flight_instead_of_asking(
+        self, tmp_path
+    ):
+        """Two threads prepare the same folder. The first one's lookup of alpha:1 is held while the second runs:
+        the second finds alpha:1 locked, records beta:2 and gamma:3 meanwhile, then blocks on alpha:1 until
+        the first has written it, reads the record and asks for nothing more."""
         record_path = self.three_base_images(tmp_path)
-        second_done = threading.Event()
         first_asked = threading.Event()
+        release_first = threading.Event()
 
         class HeldClient(FakeClient):
             def image_config(self, reference: str) -> dict:
+                assert reference == "alpha:1"
                 first_asked.set()
-                assert second_done.wait(timeout=10), "the second preparation did not finish"
+                assert release_first.wait(timeout=10), "the first preparation was never released"
                 return super().image_config(reference)
 
         first_client, second_client = HeldClient(), FakeClient()
@@ -2185,37 +2211,98 @@ class TestResumableRecords:
         second_resolved: list[str] = []
         errors: list[BaseException] = []
 
-        def first():
+        def prepare(client, resolved_now):
             try:
-                record_base_images(tmp_path, client=first_client, resolved_now=first_resolved)
+                record_base_images(tmp_path, client=client, resolved_now=resolved_now)
             except BaseException as exc:  # pragma: no cover - surfaced by the assertion below
                 errors.append(exc)
 
-        thread = threading.Thread(target=first)
-        thread.start()
+        first = threading.Thread(target=prepare, args=(first_client, first_resolved))
+        first.start()
         assert first_asked.wait(timeout=10)
-        # The first preparation read an empty record and is asking the registry for alpha:1; the second runs now.
-        record_base_images(tmp_path, client=second_client, resolved_now=second_resolved)
-        second_done.set()
-        thread.join(timeout=10)
-        assert not thread.is_alive() and errors == []
+        assert entry_lock_path(record_path, "alpha:1").is_file(), "the image in flight is locked"
+        second = threading.Thread(target=prepare, args=(second_client, second_resolved))
+        second.start()
+        # The second records the two free images while the first's lookup is in flight, then waits on alpha:1.
+        deadline = time.monotonic() + 10
+        while len(second_client.resolved) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert second_client.resolved == ["beta:2", "gamma:3"]
+        assert second.is_alive() and not second.join(timeout=0.3) and second.is_alive(), "blocked on alpha:1"
+        release_first.set()
+        first.join(timeout=10)
+        second.join(timeout=10)
+        assert not first.is_alive() and not second.is_alive() and errors == []
         recorded = json.loads(record_path.read_text())
         assert sorted(recorded) == ["alpha:1", "beta:2", "gamma:3"]
         assert all(recorded[reference]["record_version"] == 2 for reference in recorded)
-        assert second_client.resolved == ["alpha:1", "beta:2", "gamma:3"]
-        assert second_resolved == ["alpha:1", "beta:2", "gamma:3"]
-        # The first asked for alpha:1 only (its lookup was in flight), lost it under the lock, and skipped the rest.
-        assert first_client.resolved == ["alpha:1"] and first_resolved == []
+        # Three images, three lookups in all: the second never asked for alpha:1.
+        assert first_client.resolved == ["alpha:1"] and first_resolved == ["alpha:1"]
+        assert second_client.resolved == ["beta:2", "gamma:3"] and second_resolved == ["beta:2", "gamma:3"]
+        assert image_locks(tmp_path) == []
         assert not [path for path in tmp_path.iterdir() if path.name.endswith(".tmp")]
 
-    def test_each_image_is_on_disk_before_the_next_is_asked_for(self, tmp_path):
+    @pytest.mark.parametrize("preparations", [2, 7])
+    def test_simultaneous_preparations_of_one_folder_cost_one_lookup_per_image(self, tmp_path, preparations):
+        """Equally fast preparations started together (the Slurm jobs of a fan-out) share the work: N images cost
+        N registry lookups in all, each image is resolved by exactly one of them, and they spread over different
+        images rather than queueing on the same one."""
+        images = [f"img{index}:1" for index in range(12)]
+        for index, image in enumerate(images):
+            write_task(tmp_path, f"t{index:02d}", image=None, dockerfile=f"FROM {image}\nRUN true\n")
+        record_path = tmp_path / "compose-images.json"
+
+        class JitteredClient(FakeClient):
+            """A registry whose answers take 20-60 ms, so lookups overlap and no preparation runs ahead."""
+
+            def __init__(self, seed: int):
+                super().__init__()
+                self.random = random.Random(seed)
+
+            def image_config(self, reference: str) -> dict:
+                time.sleep(self.random.uniform(0.02, 0.06))
+                return super().image_config(reference)
+
+        clients = [JitteredClient(seed) for seed in range(preparations)]
+        resolved_now: list[list[str]] = [[] for _ in clients]
+        errors: list[BaseException] = []
+
+        def prepare(client, resolved):
+            try:
+                record_base_images(tmp_path, client=client, resolved_now=resolved)
+            except BaseException as exc:  # pragma: no cover - surfaced by the assertion below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=prepare, args=pair) for pair in zip(clients, resolved_now)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert not any(thread.is_alive() for thread in threads) and errors == []
+        lookups = [reference for client in clients for reference in client.resolved]
+        assert sorted(lookups) == sorted(images), f"{len(lookups)} lookups for {len(images)} images: {lookups}"
+        assert sorted(reference for resolved in resolved_now for reference in resolved) == sorted(images)
+        assert all(client.resolved == resolved for client, resolved in zip(clients, resolved_now))
+        assert sum(1 for resolved in resolved_now if resolved) > 1, "the work was shared, not done by one"
+        recorded = json.loads(record_path.read_text())
+        assert sorted(recorded) == sorted(images)
+        assert all(recorded[image]["image"] == image and recorded[image]["record_version"] == 2 for image in images)
+        assert image_locks(tmp_path) == []
+        assert not [path for path in tmp_path.iterdir() if path.name.endswith(".tmp")]
+
+    def test_each_image_is_on_disk_before_the_next_is_asked_for_and_locked_while_it_is_asked(self, tmp_path):
         record_path = self.three_base_images(tmp_path)
         seen: list[list[str]] = []
+        locked: list[list[str]] = []
 
         class Watching(FakeClient):
             def image_config(self, reference: str) -> dict:
                 seen.append(sorted(json.loads(record_path.read_text())) if record_path.exists() else [])
+                locked.append(image_locks(tmp_path))
                 return super().image_config(reference)
 
         record_base_images(tmp_path, client=Watching())
         assert seen == [[], ["alpha:1"], ["alpha:1", "beta:2"]]
+        # Only the image being asked for is locked, and no per-image lock file is left once all are recorded.
+        assert locked == [[entry_lock_path(record_path, image).name] for image in ("alpha:1", "beta:2", "gamma:3")]
+        assert image_locks(tmp_path) == []

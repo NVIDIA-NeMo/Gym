@@ -576,9 +576,12 @@ without a record is built and the context's other services are left as recorded.
 it was built, pushed and inspected, and each one as soon as it is done, so an interrupted prepare resumes
 where it stopped. The configurations read from the registry (base images, Compose sidecars) are written the
 same way, each as soon as the registry answers for it, and a run that finds an image recorded (by an earlier
-run, or by another run on the same folder meanwhile) does not ask the registry for it; a registry answer of
-429 or 5xx is retried with backoff, honouring `Retry-After`, before the preparation gives up on it. Both record
-files are replaced atomically under a sidecar lock file next to them
+run, or by another run on the same folder meanwhile) does not ask the registry for it. Each such image is
+resolved under its own lock file next to the record (`compose-images.json.<hash>.lock`, removed once the
+image is recorded), so runs preparing one folder at the same time never ask the registry for the same image
+twice: a run that finds an image locked takes the free ones first, then waits for it and reads it from the
+record. A registry answer of 429 or 5xx is retried with backoff, honouring `Retry-After`, before the
+preparation gives up on it. Both record files are replaced atomically under a sidecar lock file next to them
 (`built-images.json.lock`, `compose-images.json.lock`), so two Gym commands recording into one datasets
 folder keep each other's entries and a reader never sees a half-written file. A failed build leaves its tasks
 out with the reason and the others prepare. Prepare also writes every

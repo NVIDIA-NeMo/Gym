@@ -74,6 +74,8 @@ from nemo_gym.tasks.harbor.models import HarborTaskConfig
 from nemo_gym.tasks.harbor.records import (
     IMAGE_CONFIGS_FILE,
     MAIN_SERVICE,
+    discard_entry_lock,
+    entry_lock,
     read_image_configs,
     record_lock,
     write_json_record,
@@ -745,11 +747,17 @@ def record_image_configs(
     (:func:`record_lock`) per image. A preparation that dies after N images leaves N records
     on disk and the next one resolves only the rest; several preparations on one folder (the
     Slurm jobs of a fan-out, or ``gym eval run`` and ``gym dataset validate`` of one ``harbor:``
-    ref) share their progress through the file rather than racing: before each lookup the
-    file is read again and an image another process recorded in the meantime is skipped, and
-    under the lock the first recording of a reference is the one kept, as a pinned entry of
-    this platform always is (a legacy or other-platform entry is replaced by its re-read). The
-    registry is asked outside the lock, so a slow registry never holds up another process.
+    ref) share the work through the file rather than racing for it: each image is resolved
+    under its own sidecar lock (:func:`entry_lock`, ``compose-images.json.<hash>.lock``), held
+    from reading the record to writing the entry, so an image another preparation is fetching
+    is never asked for twice. A preparation first takes the images nobody else holds, in
+    order, and comes back to the ones it found held, waits for each, reads the record and
+    finds it there; N images cost N registry lookups however many preparations run, and they
+    spread over different images instead of queueing on the same one. Under :func:`record_lock`
+    the first recording of a reference is the one kept, as a pinned entry of this platform
+    always is (a legacy or other-platform entry is replaced by its re-read). The per-image lock
+    file is removed once its entry is on disk; one stays behind only for an image no preparation
+    managed to record.
     """
     if not references:
         return None
@@ -765,13 +773,16 @@ def record_image_configs(
     if client is None:
         client = RegistryClient() if platform is None else RegistryClient(platform=platform_pair(platform))
     LOGGER.info(f"Recording the configuration of {len(missing)} {what}(s) into {path}")
-    for index, reference in enumerate(missing, 1):
+
+    def record_one(reference: str, index: int) -> None:
         # Another preparation on this folder may have recorded it since the file was read (the replace is
-        # atomic, so the file is read without the lock); its entry is kept, and no registry request is made.
+        # atomic, so the file is read without the record lock); its entry is kept, and no registry request
+        # is made. Under this image's lock nobody else is fetching it right now.
         current = read_image_configs(folder).get(reference)
         if reusable_record(current, requested):
             LOGGER.info(f"{what} {reference} was recorded by another process meanwhile ({index}/{len(missing)})")
-            continue
+            discard_entry_lock(path, reference)
+            return
         pinned = ((current if isinstance(current, dict) else None) or recorded.get(reference) or {}).get("image")
         try:
             record = client.image_config(pinned or reference)
@@ -789,13 +800,29 @@ def record_image_configs(
             ) from exc
         with record_lock(path):
             merged = read_image_configs(folder)
-            if reusable_record(merged.get(reference), requested):
-                continue
-            merged[reference] = record
-            write_json_record(path, merged)
-        if resolved_now is not None:
+            # A writer that does not take the per-image lock (an older Gym) may have recorded it meanwhile.
+            won = not reusable_record(merged.get(reference), requested)
+            if won:
+                merged[reference] = record
+                write_json_record(path, merged)
+        discard_entry_lock(path, reference)
+        if won and resolved_now is not None:
             resolved_now.append(reference)
         LOGGER.info(f"Recorded {what} {reference} ({index}/{len(missing)})")
+
+    # First the images no other preparation holds, then the held ones: by the time this preparation gets
+    # their lock, the other has recorded them (or failed, and they are fetched here).
+    held: list[tuple[int, str]] = []
+    for index, reference in enumerate(missing, 1):
+        with entry_lock(path, reference, blocking=False) as taken:
+            if taken:
+                record_one(reference, index)
+            else:
+                LOGGER.info(f"{what} {reference} is being recorded by another process ({index}/{len(missing)})")
+                held.append((index, reference))
+    for index, reference in held:
+        with entry_lock(path, reference):
+            record_one(reference, index)
     return path
 
 

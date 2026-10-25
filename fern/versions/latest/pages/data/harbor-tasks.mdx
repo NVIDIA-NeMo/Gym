@@ -490,8 +490,10 @@ Recording an image's configuration takes about two registry requests. Docker Hub
 per hour and per IP address, which a login node's jobs share, so a dataset of hundreds of images runs into
 HTTP 429. Prepare retries 429 and 5xx answers with exponential backoff (honouring `Retry-After`, up to eight
 attempts per request) and writes each image's record as soon as it resolves, so a preparation that gives up or is
-killed keeps what it recorded; start it again and it resolves only the missing images. Two preparations on one
-folder share their progress through the record file.
+killed keeps what it recorded; start it again and it resolves only the missing images. Preparations that run at
+the same time on one folder share the work: each image is resolved under its own lock file next to the record, so one
+that another preparation is fetching is waited for and then read from the record, never asked for twice, and the
+preparations spread over different images instead of queueing on the same one.
 </Note>
 
 ## `gym eval run` with a task target
