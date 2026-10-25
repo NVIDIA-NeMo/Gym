@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import io
 import json
 import tarfile
@@ -245,6 +246,46 @@ async def test_failed_execution_scores_zero(tmp_path, monkeypatch):
     assert result.kimi_failed and result.kimi_exit_code == 1 and result.reward == 0
     # The failed generation is kept for inspection.
     assert result.response.output[-1].content[0].text == "9 and 25"
+
+
+async def test_sandbox_stays_up_until_verification_returns(tmp_path, monkeypatch):
+    server, sandbox, _ = make_agent(tmp_path, monkeypatch)
+    verify = server.server_client.post.side_effect
+
+    async def post(**kwargs):
+        if kwargs["url_path"] == "/verify":
+            # A resource-owned sandbox is graded in place.
+            sandbox.stop.assert_not_awaited()
+        return await verify(**kwargs)
+
+    server.server_client.post.side_effect = post
+    result = await server.run(SimpleNamespace(cookies={}), request_body())
+    assert result.reward == 1
+    sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize("error", [RuntimeError("verifier down"), asyncio.CancelledError()])
+async def test_verify_failure_or_cancellation_still_stops_the_sandbox(tmp_path, monkeypatch, error):
+    server, sandbox, _ = make_agent(tmp_path, monkeypatch)
+    verify = server.server_client.post.side_effect
+
+    async def post(**kwargs):
+        if kwargs["url_path"] == "/verify":
+            raise error
+        return await verify(**kwargs)
+
+    server.server_client.post.side_effect = post
+    with pytest.raises(type(error)):
+        await server.run(SimpleNamespace(cookies={}), request_body())
+    sandbox.stop.assert_awaited_once()
+
+
+def test_to_toml_keeps_non_bmp_unicode_and_escapes_del():
+    data = {
+        "permission": {"rules": [{"decision": "deny", "pattern": "Bash(echo \U0001f600)"}]},
+        "\U0001f600 key": ["\U0001f600", "a\x7fb", "literal \\u0041"],
+    }
+    assert tomllib.loads(to_toml(data)) == data
 
 
 def test_to_toml_round_trips_nested_tables_and_rule_arrays():

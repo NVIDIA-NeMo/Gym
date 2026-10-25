@@ -114,12 +114,17 @@ class KimiCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     ng_agent_observations: AgentObservationBundle | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
+def _toml_str(value: Any) -> str:
+    # JSON with raw Unicode is a valid TOML value. TOML rejects surrogate escapes like \ud83d and a literal DEL.
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
+
+
 def to_toml(data: dict[str, Any], path: tuple[str, ...] = (), header: str | None = None) -> str:
     """Serialize nested dicts, arrays of tables, and scalars; JSON strings and arrays are valid TOML values."""
     lines = [header or f"[{'.'.join(path)}]"] if path else []
     tables = []
     for key, value in data.items():
-        name = json.dumps(str(key))
+        name = _toml_str(str(key))
         if value is None:
             continue
         if isinstance(value, dict):
@@ -128,7 +133,7 @@ def to_toml(data: dict[str, Any], path: tuple[str, ...] = (), header: str | None
             array = ".".join((*path, name))
             tables.extend(to_toml(item, (*path, name), header=f"[[{array}]]") for item in value)
         else:
-            lines.append(f"{name} = {json.dumps(value)}")
+            lines.append(f"{name} = {_toml_str(value)}")
     return "\n".join(["\n".join(lines), *tables]).strip() + "\n"
 
 
@@ -431,67 +436,67 @@ class KimiCodeSandboxedAgent(SimpleResponsesAPIAgent):
             sandbox = await self._start_sandbox(seed, body)
             try:
                 execution = await self._run_kimi(sandbox, body, mcp, root)
+                stdout = (root / "stdout.jsonl").read_text(errors="replace")
+                output = parse_stream_json(stdout)
+                # Agents can start other kimi processes in the box, so pick this run's session by the id it printed.
+                session_id = next(
+                    (
+                        m["session_id"]
+                        for m in map(_json_or_none, stdout.splitlines())
+                        if isinstance(m, dict) and m.get("session_id")
+                    ),
+                    None,
+                )
+                sessions = list((root / "sessions").glob(f"*/{session_id}")) if session_id else []
+                usage, subagents = parse_session(sessions[0]) if sessions else (None, [])
+                failed = bool(
+                    execution["error_type"]
+                    or execution["return_code"] != 0
+                    or not any(getattr(item, "type", None) == "message" for item in output)
+                )
+                response = NeMoGymResponse(
+                    id=f"resp_{uuid4().hex}",
+                    created_at=int(time()),
+                    model=self.config.model_server.name,
+                    object="response",
+                    output=output,
+                    tool_choice="auto",
+                    tools=[],
+                    parallel_tool_calls=True,
+                    usage=usage,
+                )
+                metadata = {
+                    "kimi_failed": failed,
+                    "kimi_exit_code": execution["return_code"],
+                    "kimi_error_type": execution["error_type"],
+                    "kimi_results_dir": str(root),
+                    "kimi_num_subagents": len(subagents),
+                    "kimi_max_concurrent_subagents": max_concurrency(subagents),
+                    "kimi_subagents": subagents,
+                }
+                if rollout_id is not None:
+                    metadata["ng_agent_observations"] = self._observations(
+                        rollout_id, subagents, sandbox, execution, failed
+                    ).model_dump(mode="json")
+                payload = body.model_dump(mode="json") | {"response": response.model_dump(mode="json")}
+                (root / "generation.json").write_text(json.dumps(payload | metadata))
+                result = await verify_agent_response(
+                    self.server_client,
+                    self.config.resources_server,
+                    body,
+                    response,
+                    cookies,
+                    force_zero_reward=failed and self.config.execution_failure_reward_zero,
+                )
+                return KimiCodeSandboxedAgentVerifyResponse.model_validate(result | metadata)
             finally:
+                # A resource-owned sandbox is graded in place, so it stays up until verification returns.
                 # Cancellation is re-delivered at every await; an unshielded stop would leave the box generating.
                 with CancelScope(shield=True):
                     try:
                         await sandbox.stop()
                     except Exception:
                         LOG.exception("Failed to stop Kimi Code sandbox")
-
-        stdout = (root / "stdout.jsonl").read_text(errors="replace")
-        output = parse_stream_json(stdout)
-        # Agents can start other kimi processes in the box, so pick this run's session by the id it printed.
-        session_id = next(
-            (
-                m["session_id"]
-                for m in map(_json_or_none, stdout.splitlines())
-                if isinstance(m, dict) and m.get("session_id")
-            ),
-            None,
-        )
-        sessions = list((root / "sessions").glob(f"*/{session_id}")) if session_id else []
-        usage, subagents = parse_session(sessions[0]) if sessions else (None, [])
-        failed = bool(
-            execution["error_type"]
-            or execution["return_code"] != 0
-            or not any(getattr(item, "type", None) == "message" for item in output)
-        )
-        response = NeMoGymResponse(
-            id=f"resp_{uuid4().hex}",
-            created_at=int(time()),
-            model=self.config.model_server.name,
-            object="response",
-            output=output,
-            tool_choice="auto",
-            tools=[],
-            parallel_tool_calls=True,
-            usage=usage,
-        )
-        metadata = {
-            "kimi_failed": failed,
-            "kimi_exit_code": execution["return_code"],
-            "kimi_error_type": execution["error_type"],
-            "kimi_results_dir": str(root),
-            "kimi_num_subagents": len(subagents),
-            "kimi_max_concurrent_subagents": max_concurrency(subagents),
-            "kimi_subagents": subagents,
-        }
-        if rollout_id is not None:
-            metadata["ng_agent_observations"] = self._observations(
-                rollout_id, subagents, sandbox, execution, failed
-            ).model_dump(mode="json")
-        payload = body.model_dump(mode="json") | {"response": response.model_dump(mode="json")}
-        (root / "generation.json").write_text(json.dumps(payload | metadata))
-        result = await verify_agent_response(
-            self.server_client,
-            self.config.resources_server,
-            body,
-            response,
-            cookies,
-            force_zero_reward=failed and self.config.execution_failure_reward_zero,
-        )
-        return KimiCodeSandboxedAgentVerifyResponse.model_validate(result | metadata)
 
     @staticmethod
     def _observations(
