@@ -1373,8 +1373,15 @@ class NeMoGymChatCompletionAssistantMessageForTrainingParam(
 
 
 class NeMoGymChatCompletionToolMessageParam(ChatCompletionToolMessageParam):
-    # Override the iterable which is annoying to work with.
-    content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+    # Override the iterable which is annoying to work with. Unlike the OpenAI SDK type, the content may also hold image
+    # parts: a vision tool may return the image it loaded for a vision-capable model to see, and vLLM parses a tool
+    # message's content parts like any other message's, leaving their rendering to the chat template.
+    content: Required[
+        Union[
+            str,
+            List[Union[NeMoGymChatCompletionContentPartTextParam, NeMoGymChatCompletionContentPartImageParam]],
+        ]
+    ]
     # Not in the OpenAI SDK type. OpenHands' Message serializer includes name
     # alongside tool_call_id on tool-result messages.
     name: NotRequired[str]

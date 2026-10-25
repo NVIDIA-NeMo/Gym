@@ -504,9 +504,16 @@ async def test_real_model_rollouts_are_either_finished_or_continued_after_a_cras
         # An episode the checkpoint holds cannot reply until resume, which never comes before the crash.
         replied_while_prepared = [rollout_id for rollout_id in continued if runs[rollout_id].done()]
         first_results = [(await runs[rollout_id]).json() for rollout_id in sorted(finished)]
-        records = records_file(tmp_path / "ckpt/gym/environment/environment").read_text().splitlines()
-        next_steps = sorted(json.loads(line)["boundary"]["next"] for line in records)
-        agent_sessions = records_file(tmp_path / "ckpt/gym/agent/agent").read_text().splitlines()
+        records = [
+            json.loads(line)
+            for line in records_file(tmp_path / "ckpt/gym/environment/environment").read_text().splitlines()
+        ]
+        next_step = {record["episode_id"]["rollout_id"]: record["boundary"]["next"] for record in records}
+        next_steps = sorted(next_step.values())
+        agent_sessions = {
+            json.loads(line)["episode_id"]["rollout_id"]
+            for line in records_file(tmp_path / "ckpt/gym/agent/agent").read_text().splitlines()
+        }
         await crash_and_restore(deployment, tmp_path / "ckpt", continued)
         for rollout_id in continued:
             runs[rollout_id].cancel()
@@ -523,7 +530,12 @@ async def test_real_model_rollouts_are_either_finished_or_continued_after_a_cras
     assert continued, "the checkpoint caught no rollout mid-episode"
     assert not replied_while_prepared
     # An episode checkpointed inside its agent step continues the agent's own session, not the step.
-    assert len(agent_sessions) == next_steps.count("invoke_agent")
+    # The episode holds that session until its close_agent step finishes,
+    # so an episode parked before close_agent is exported with its session too.
+    holding = {rollout_id for rollout_id, step in next_step.items() if step in ("invoke_agent", "close_agent")}
+    assert holding <= agent_sessions
+    # An agent seed still in flight at prepare is exported as well, with its episode parked before the seed step.
+    assert agent_sessions <= holding | {rollout_id for rollout_id, step in next_step.items() if step == "seed"}
     assert all(response.status_code == 200 and response.json().get("failure") is None for response in replacements)
 
 

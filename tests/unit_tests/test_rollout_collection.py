@@ -16,6 +16,8 @@ import asyncio
 import gc
 import json
 import pickle
+import signal
+import sys
 import time
 import warnings
 import weakref
@@ -30,17 +32,25 @@ from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
+import uvicorn
 import yaml
-from aiohttp import ClientConnectorError, ClientResponseError, ServerDisconnectedError
+from aiohttp import ClientConnectorError, ClientResponseError, ClientSession, ServerDisconnectedError
+from anyio import CancelScope
 from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationError
 
 import nemo_gym.batch_status
 import nemo_gym.rollout_collection
+import nemo_gym.server_utils
 import nemo_gym.token_id_capture.delivery
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.batch_status import observe_materialized_rows
-from nemo_gym.config_types import AmbiguousEnvironmentServerError, ConfigError, ConfigPathNotFoundError
+from nemo_gym.config_types import (
+    AmbiguousEnvironmentServerError,
+    BaseServerConfig,
+    ConfigError,
+    ConfigPathNotFoundError,
+)
 from nemo_gym.failure_kinds import CANCELLED
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -95,6 +105,7 @@ from nemo_gym.rollout_collection import (
     migrate_invalid_judge_main_rows,
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.server_utils import ClientDisconnectCancellationMiddleware, ServerClient
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
@@ -4013,13 +4024,18 @@ class TestRolloutCollection:
         assert all(file.closed for file in opened_files)
         assert not upload_spool_fpath.exists()
 
-    async def test_run_from_config_processing_failure_cancels_bounded_resident_tasks(
+    @pytest.mark.parametrize("window", [None, 3])
+    @pytest.mark.parametrize("timing_report", [False, True])
+    async def test_run_from_config_processing_failure_cancels_resident_tasks(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         empty_global_config: MagicMock,
+        window: int | None,
+        timing_report: bool,
+        capsys: pytest.CaptureFixture,
     ) -> None:
-        window = 3
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
         offered = 12
         started: set[int] = set()
         cancelled: set[int] = set()
@@ -4071,6 +4087,7 @@ class TestRolloutCollection:
                 dispatch_budget_s=None,
                 drain_margin_s=None,
                 latency_tracker=None,
+                run_timing=None,
             ):
                 awaitables = map(
                     lambda row: self._post(
@@ -4080,6 +4097,8 @@ class TestRolloutCollection:
                     ),
                     examples,
                 )
+                if max_resident_tasks is None:
+                    return nemo_gym.rollout_collection._EagerCompletionIterator(awaitables, total=len(examples))
                 return nemo_gym.rollout_collection._BoundedCompletionIterator(
                     awaitables,
                     max_resident_tasks=max_resident_tasks,
@@ -4090,6 +4109,7 @@ class TestRolloutCollection:
             input_jsonl_fpath=str(input_fpath),
             output_jsonl_fpath=str(tmp_path / "output.jsonl"),
             max_resident_rollout_tasks=window,
+            dispatch_start_report_within_s=60 if timing_report else None,
             disable_aggregation=True,
             disable_health_check=True,
             upload_rollouts=True,
@@ -4103,7 +4123,7 @@ class TestRolloutCollection:
         )
 
         async def release_after_window_is_resident():
-            while len(started) < window:
+            while len(started) < (window or offered):
                 await asyncio.sleep(0)
             release_first.set()
 
@@ -4115,10 +4135,12 @@ class TestRolloutCollection:
             releaser.cancel()
 
         assert 0 in started
-        assert len(started) <= window + 1
+        assert len(started) <= (window + 1 if window else offered)
         assert cancelled == started - {0}
-        assert len(started) < offered
+        assert len(started) < offered if window else len(started) == offered
         assert not (tmp_path / "output.jsonl.upload.tmp").exists()
+        assert signal.getsignal(signal.SIGTERM) == previous_sigterm
+        assert ("Run timing summary" in capsys.readouterr().out) == timing_report
 
     async def test_run_from_config_non_retaining_resume_counts_cached_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
@@ -6316,6 +6338,558 @@ class TestRolloutCollection:
         output_fpath = tmp_path / "output.jsonl"
         result = await helper._call_aggregate_metrics([], [], output_fpath)
         assert result is None
+
+
+class TestRunExamplesAclose:
+    """``run_examples``' iterator can be closed, cancelling the rollouts still in flight."""
+
+    @staticmethod
+    def _row(task_index: int) -> dict:
+        return {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: task_index,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+        }
+
+    @pytest.mark.parametrize("count", [32, 128, 1024])
+    async def test_concurrent_consumption_has_linear_wakeups(self, monkeypatch, count: int) -> None:
+        gates = [asyncio.Event() for _ in range(count)]
+        consumed = asyncio.Queue()
+        consumer_calls = 0
+
+        async def post(server_name, url_path, json):  # noqa: A002
+            index = json[TASK_INDEX_KEY_NAME]
+            await gates[index].wait()
+            return FakeResponse(200, {"task": index})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        completions = RolloutCollectionHelper().run_examples([self._row(i) for i in range(count)])
+
+        async def consume(awaitable):
+            result = await awaitable
+            consumed.put_nowait(result)
+            return result
+
+        def profile(frame, event, arg):
+            nonlocal consumer_calls
+            # Python profiles each coroutine entry/resumption as a call. Count our own
+            # consumer, without depending on Gym's queue implementation or wall time.
+            if event == "call" and frame.f_code is consume.__code__:
+                consumer_calls += 1
+
+        previous_profile = sys.getprofile()
+        tasks = []
+        try:
+            sys.setprofile(profile)
+            tasks = [asyncio.create_task(consume(awaitable)) for awaitable in completions]
+            await asyncio.sleep(0)  # Every consumer parks before any rollout is released.
+            assert consumer_calls == count
+            async with asyncio.timeout(30):  # Deadlock watchdog, not a performance threshold.
+                for index in reversed(range(count)):
+                    gates[index].set()
+                    row, result = await consumed.get()
+                    assert row[TASK_INDEX_KEY_NAME] == index
+                    assert result == {"task": index}
+                results = await asyncio.gather(*tasks)
+            resumptions = consumer_calls - count
+            print(f"{count} individually arriving outcomes: {resumptions} consumer resumptions")
+            assert count <= resumptions <= 2 * count
+            assert sorted(row[TASK_INDEX_KEY_NAME] for row, _ in results) == list(range(count))
+        finally:
+            sys.setprofile(previous_profile)
+            await asyncio.wait_for(completions.aclose(), timeout=5)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def test_cancelled_notified_consumer_does_not_lose_completion(self, monkeypatch) -> None:
+        gate = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def post(server_name, url_path, json):  # noqa: A002
+            index = json[TASK_INDEX_KEY_NAME]
+            if index != 0:
+                await asyncio.Event().wait()
+            await gate.wait()
+            finished.set()
+            return FakeResponse(200, {"task": index})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        completions = RolloutCollectionHelper().run_examples([self._row(i) for i in range(3)])
+        consumers = [asyncio.create_task(awaitable) for awaitable in completions]
+        try:
+            async with asyncio.timeout(5):
+                await asyncio.sleep(0)
+                gate.set()
+                await finished.wait()
+                # The done callback notifies the first consumer on this turn; cancel it
+                # before it resumes so another parked consumer must claim the outcome.
+                await asyncio.sleep(0)
+                assert all(not consumer.done() for consumer in consumers)
+                consumers[0].cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await consumers[0]
+                row, result = await consumers[1]
+                assert row[TASK_INDEX_KEY_NAME] == 0
+                assert result == {"task": 0}
+                await completions.aclose()
+                with pytest.raises(asyncio.CancelledError):
+                    await consumers[2]
+        finally:
+            await asyncio.wait_for(completions.aclose(), timeout=5)
+            for consumer in consumers:
+                consumer.cancel()
+            await asyncio.gather(*consumers, return_exceptions=True)
+
+    @pytest.mark.parametrize("max_resident_tasks", [None, 4])
+    @pytest.mark.parametrize("finish_before_drain", [False, True])
+    async def test_drain_wakes_multiple_parked_consumers(
+        self, monkeypatch, max_resident_tasks: int | None, finish_before_drain: bool
+    ) -> None:
+        gates = [asyncio.Event() for _ in range(8)]
+        finished = asyncio.Event()
+        started, cancelled = [], []
+
+        async def post(server_name, url_path, json):  # noqa: A002
+            index = json[TASK_INDEX_KEY_NAME]
+            started.append(index)
+            try:
+                await gates[index].wait()
+            except asyncio.CancelledError:
+                cancelled.append(index)
+                raise
+            if index == 1:
+                finished.set()
+            return FakeResponse(200, {"task": index})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        completions = RolloutCollectionHelper().run_examples(
+            [self._row(i) for i in range(8)], max_resident_tasks=max_resident_tasks
+        )
+        consumers = [asyncio.create_task(awaitable) for awaitable in completions]
+        try:
+            async with asyncio.timeout(5):
+                while len(started) < (max_resident_tasks or 8):
+                    await asyncio.sleep(0)
+                assert all(not consumer.done() for consumer in consumers)
+                admitted = list(started)
+                if finish_before_drain:
+                    gates[0].set()
+                    gates[1].set()
+                    await finished.wait()  # Drain before a parked consumer can claim either result.
+                drained = await completions.aclose_and_drain()
+                outcomes = await asyncio.gather(*consumers, return_exceptions=True)
+                assert all(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes)
+                results = [await future for future in drained]
+                expected = [0, 1] if finish_before_drain else []
+                assert sorted(row[TASK_INDEX_KEY_NAME] for row, _ in results) == expected
+                assert all(result == {"task": row[TASK_INDEX_KEY_NAME]} for row, result in results)
+                assert started == admitted
+                assert sorted(cancelled) == sorted(set(admitted) - set(expected))
+                assert await completions.aclose_and_drain() == []
+                with pytest.raises(StopIteration):
+                    next(completions)
+        finally:
+            await asyncio.wait_for(completions.aclose(), timeout=5)
+            for consumer in consumers:
+                consumer.cancel()
+            await asyncio.gather(*consumers, return_exceptions=True)
+
+    @pytest.mark.parametrize("max_resident_tasks", [None, 4])
+    async def test_drain_preserves_backlog_and_stops_admission(self, monkeypatch, max_resident_tasks) -> None:
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1}))
+        started, cancelled = [], []
+        completions = self._helper({3, 4, 5, 6}, started, cancelled).run_examples(
+            [self._row(i) for i in range(7)], max_resident_tasks=max_resident_tasks
+        )
+        first = await next(completions)
+        await asyncio.sleep(0)
+        admitted = list(started)
+        try:
+            drained = await completions.aclose_and_drain()
+            results = [first, *[await future for future in drained]]
+            assert sorted(row[TASK_INDEX_KEY_NAME] for row, _ in results) == [0, 1, 2]
+            assert started == admitted
+            assert set(cancelled) == set(admitted) - {0, 1, 2}
+            if max_resident_tasks is not None:
+                assert admitted == [0, 1, 2, 3, 4]
+            assert await completions.aclose_and_drain() == []
+            with pytest.raises(StopIteration):
+                next(completions)
+        finally:
+            await completions.aclose()
+
+    @pytest.mark.parametrize("bounded", [False, True])
+    @pytest.mark.parametrize("fails", [False, True])
+    async def test_drain_claims_finished_tasks_before_waiter_resumes(self, bounded: bool, fails: bool) -> None:
+        gate = asyncio.Event()
+        started, finished = [], []
+
+        async def rollout(index):
+            started.append(index)
+            await gate.wait()
+            finished.append(index)
+            if fails and index == 3:
+                raise ValueError("queued failure")
+            return _CompletedRollout(row={"id": index}, result={"reward": 1}, rollout_latency_ms=None)
+
+        awaitables = (rollout(i) for i in range(4))
+        internal = (
+            nemo_gym.rollout_collection._BoundedCompletionIterator(awaitables, total=4, max_resident_tasks=4)
+            if bounded
+            else nemo_gym.rollout_collection._EagerCompletionIterator(awaitables, total=4)
+        )
+        completions = nemo_gym.rollout_collection._RowResultIterator(internal)
+        waiter = asyncio.ensure_future(next(completions))
+        try:
+            while len(started) < 4:
+                await asyncio.sleep(0)
+            gate.set()
+            await asyncio.sleep(0)  # Work has finished, but completion callbacks/waiters have not run.
+            assert finished == [0, 1, 2, 3]
+            assert not waiter.done()
+            drained = await completions.aclose_and_drain()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+            results, errors = [], []
+            for future in drained:
+                assert future.done()
+                try:
+                    results.append((await future)[0]["id"])
+                except ValueError as error:
+                    errors.append(str(error))
+            assert sorted(results) == list(range(3 if fails else 4))
+            assert errors == (["queued failure"] if fails else [])
+        finally:
+            await completions.aclose()
+            await asyncio.gather(waiter, return_exceptions=True)
+
+    @pytest.mark.parametrize("max_resident_tasks", [None, 2])
+    async def test_drain_before_start_and_after_exhaustion(self, monkeypatch, max_resident_tasks) -> None:
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1}))
+        started = []
+        helper = self._helper(set(), started, [])
+        completions = helper.run_examples([self._row(0)], max_resident_tasks=max_resident_tasks)
+        assert await completions.aclose_and_drain() == []
+        assert started == []
+        for rows in ([], [self._row(0), self._row(1)]):
+            completions = helper.run_examples(rows, max_resident_tasks=max_resident_tasks)
+            results = [await future for future in completions]
+            assert len(results) == len(rows)
+            assert await completions.aclose_and_drain() == []
+
+    @pytest.mark.parametrize("bounded", [False, True])
+    async def test_drain_preserves_preexisting_cancellation(self, bounded: bool) -> None:
+        finished = asyncio.Event()
+
+        async def cancelled_rollout():
+            finished.set()
+            raise asyncio.CancelledError
+
+        internal = (
+            nemo_gym.rollout_collection._BoundedCompletionIterator(
+                iter([cancelled_rollout()]), total=1, max_resident_tasks=1
+            )
+            if bounded
+            else nemo_gym.rollout_collection._EagerCompletionIterator(iter([cancelled_rollout()]), total=1)
+        )
+        completions = nemo_gym.rollout_collection._RowResultIterator(internal)
+        waiter = asyncio.ensure_future(next(completions))
+        await finished.wait()
+        drained = await completions.aclose_and_drain()
+        assert len(drained) == 1
+        assert drained[0].cancelled()
+        with pytest.raises(asyncio.CancelledError):
+            await drained[0]
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+    @pytest.mark.parametrize("bounded", [False, True])
+    async def test_abandoned_drain_retrieves_errors_and_releases_payloads(self, bounded: bool) -> None:
+        class Payload(dict):
+            pass
+
+        refs, unhandled = [], []
+        loop = asyncio.get_running_loop()
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+
+        async def rollout(index):
+            if index == 1:
+                raise ValueError("unconsumed drain failure")
+            payload = Payload(reward=1)
+            refs.append(weakref.ref(payload))
+            return _CompletedRollout(row={"id": index}, result=payload, rollout_latency_ms=None)
+
+        try:
+            awaitables = (rollout(i) for i in range(3))
+            internal = (
+                nemo_gym.rollout_collection._BoundedCompletionIterator(awaitables, total=3, max_resident_tasks=3)
+                if bounded
+                else nemo_gym.rollout_collection._EagerCompletionIterator(awaitables, total=3)
+            )
+            completions = nemo_gym.rollout_collection._RowResultIterator(internal)
+            waiter = asyncio.ensure_future(next(completions))
+            # Pause after the underlying tasks finish, before the waiter claims one.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            drained = await completions.aclose_and_drain()
+            assert len(drained) == 3
+            await asyncio.gather(waiter, return_exceptions=True)
+            del drained, waiter
+            gc.collect()
+            assert len(refs) == 2 and all(ref() is None for ref in refs)
+            assert unhandled == []
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+    @staticmethod
+    def _helper(slow_task_indices: set, started: list, cancelled: list) -> RolloutCollectionHelper:
+        async def post(server_name, url_path, json):  # noqa: A002
+            task_index = json[TASK_INDEX_KEY_NAME]
+            started.append(task_index)
+            if task_index in slow_task_indices:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.append(task_index)
+                    raise
+            return MagicMock(status=200)
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(side_effect=post)
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {
+                "my_agent": {"responses_api_agents": {"impl": {}}},
+                "my_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}
+                },
+            }
+        )
+
+        class MockHelper(RolloutCollectionHelper):
+            def setup_server_client(self, *args, **kwargs):
+                return mock_server_client
+
+        return MockHelper()
+
+    @pytest.mark.parametrize("max_resident_tasks", [None, 4])
+    async def test_aclose_cancels_rollouts_still_running(
+        self, monkeypatch: pytest.MonkeyPatch, max_resident_tasks: int | None
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+        started: list = []
+        cancelled: list = []
+        rows = [self._row(i) for i in range(4)]
+        completions = self._helper({2, 3}, started, cancelled).run_examples(
+            rows, max_resident_tasks=max_resident_tasks
+        )
+
+        finished = [await asyncio.wait_for(next(completions), timeout=1) for _ in range(2)]
+        assert sorted(row[TASK_INDEX_KEY_NAME] for row, _result in finished) == [0, 1]
+
+        straggler = asyncio.ensure_future(next(completions))
+        await asyncio.sleep(0)
+        assert not straggler.done()
+
+        await asyncio.wait_for(completions.aclose(), timeout=1)
+
+        assert sorted(cancelled) == [2, 3]
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(straggler, timeout=1)
+        with pytest.raises(StopIteration):
+            next(completions)
+        # Idempotent.
+        await asyncio.wait_for(completions.aclose(), timeout=1)
+
+    async def test_aclose_before_first_use_starts_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        started: list = []
+        cancelled: list = []
+        completions = self._helper(set(), started, cancelled).run_examples([self._row(0), self._row(1)])
+
+        await asyncio.wait_for(completions.aclose(), timeout=1)
+
+        assert started == []
+        with pytest.raises(StopIteration):
+            next(completions)
+
+    async def test_full_iteration_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+        started: list = []
+        cancelled: list = []
+        rows = [self._row(i) for i in range(3)]
+        completions = self._helper(set(), started, cancelled).run_examples(rows)
+
+        results = [await future for future in completions]
+
+        assert started == [0, 1, 2], "rows still start in input order"
+        assert sorted(row[TASK_INDEX_KEY_NAME] for row, _result in results) == [0, 1, 2]
+        assert all(result == {"reward": 1.0} for _row, result in results)
+        await completions.aclose()
+        assert cancelled == []
+
+    async def test_eager_aclose_retrieves_unconsumed_failure(self) -> None:
+        loop = asyncio.get_running_loop()
+        previous_handler = loop.get_exception_handler()
+        unhandled = []
+        loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+
+        async def rollout(index):
+            if index == 1:
+                raise RuntimeError("unconsumed rollout failure")
+            return index
+
+        try:
+            completions = nemo_gym.rollout_collection._EagerCompletionIterator((rollout(i) for i in range(3)), total=3)
+            assert await next(completions) == 0
+            await asyncio.wait_for(completions.aclose(), timeout=1)
+            del completions
+            gc.collect()
+            assert unhandled == []
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+    @pytest.mark.parametrize("close_early", [False, True])
+    async def test_eager_releases_completed_payloads(self, monkeypatch: pytest.MonkeyPatch, close_early: bool) -> None:
+        class Payload(dict):
+            pass
+
+        payload_refs = []
+
+        async def response_json(response):
+            result = Payload(reward=1.0)
+            payload_refs.append(weakref.ref(result))
+            return result
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", response_json)
+        completions = self._helper(set(), [], []).run_examples([self._row(i) for i in range(3)])
+        if close_early:
+            await next(completions)
+            await asyncio.wait_for(completions.aclose(), timeout=1)
+        else:
+            for future in completions:
+                await future
+        gc.collect()
+        assert len(payload_refs) == 3
+        assert all(ref() is None for ref in payload_refs)
+
+    async def test_eager_exhausting_awaitables_preserves_cancellation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        started, cancelled = [], []
+        completions = self._helper({0, 1, 2}, started, cancelled).run_examples([self._row(i) for i in range(3)])
+        awaitables = list(completions)
+        await asyncio.sleep(0)
+        assert started == [0, 1, 2]
+        await asyncio.wait_for(completions.aclose(), timeout=1)
+        outcomes = await asyncio.wait_for(asyncio.gather(*awaitables, return_exceptions=True), timeout=1)
+        assert all(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes)
+        assert sorted(cancelled) == [0, 1, 2]
+
+    @pytest.mark.parametrize("fails", [False, True])
+    async def test_eager_handed_out_awaitable_preserves_finished_outcome(self, fails: bool) -> None:
+        finished = asyncio.Event()
+
+        async def rollout():
+            finished.set()
+            if fails:
+                raise ValueError("already failed")
+            return _CompletedRollout(row={"id": 1}, result={"reward": 1}, rollout_latency_ms=None)
+
+        completions = nemo_gym.rollout_collection._RowResultIterator(
+            nemo_gym.rollout_collection._EagerCompletionIterator(iter([rollout()]), total=1)
+        )
+        future = next(completions)
+        await asyncio.wait_for(finished.wait(), timeout=1)
+        await asyncio.wait_for(completions.aclose(), timeout=1)
+        if fails:
+            with pytest.raises(ValueError, match="already failed"):
+                await future
+        else:
+            assert await future == ({"id": 1}, {"reward": 1})
+
+    @pytest.mark.parametrize("max_resident_tasks", [None, 1])
+    async def test_aclose_disconnects_http_without_waiting_for_server_cleanup(
+        self, monkeypatch: pytest.MonkeyPatch, max_resident_tasks: int | None
+    ) -> None:
+        handler_started = asyncio.Event()
+        handler_cancelled = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        cleanup_finished = asyncio.Event()
+        requests = []
+
+        async def app(scope, receive, send):
+            assert scope["path"] == "/run"
+            requests.append(scope["path"])
+            while (await receive()).get("more_body", False):
+                pass
+            handler_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                handler_cancelled.set()
+                # Model an agent that needs time to clean up after handler cancellation.
+                with CancelScope(shield=True):
+                    await release_cleanup.wait()
+                    cleanup_finished.set()
+                raise
+
+        middleware = ClientDisconnectCancellationMiddleware(app)
+        server = uvicorn.Server(
+            uvicorn.Config(middleware, host="127.0.0.1", port=0, lifespan="off", log_level="warning")
+        )
+        serve_task = asyncio.create_task(server.serve())
+        completions = consumer = None
+        try:
+            async with asyncio.timeout(5):
+                while not server.started:
+                    await asyncio.sleep(0.01)
+            port = server.servers[0].sockets[0].getsockname()[1]
+            server_client = ServerClient(
+                head_server_config=BaseServerConfig(host="127.0.0.1", port=port),
+                global_config_dict=OmegaConf.create(
+                    {
+                        "my_agent": {"responses_api_agents": {"impl": {}}},
+                        "environment": {
+                            "environment_servers": {
+                                "legacy_agent": {
+                                    "agent_server": {"name": "my_agent"},
+                                    "host": "127.0.0.1",
+                                    "port": port,
+                                }
+                            }
+                        },
+                    }
+                ),
+            )
+            monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", lambda *args: server_client)
+            async with ClientSession() as session:
+                monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", session)
+                completions = RolloutCollectionHelper().run_examples(
+                    [self._row(0)], max_resident_tasks=max_resident_tasks
+                )
+                consumer = asyncio.create_task(next(completions))
+                await asyncio.wait_for(handler_started.wait(), timeout=5)
+                await asyncio.wait_for(completions.aclose(), timeout=5)
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(consumer, timeout=5)
+                await asyncio.wait_for(handler_cancelled.wait(), timeout=5)
+                assert not cleanup_finished.is_set()
+                release_cleanup.set()
+                await asyncio.wait_for(cleanup_finished.wait(), timeout=5)
+                assert middleware.num_cancelled == 1
+                assert requests == ["/run"]
+        finally:
+            release_cleanup.set()
+            if completions is not None:
+                await asyncio.wait_for(completions.aclose(), timeout=5)
+            if consumer is not None:
+                await asyncio.wait_for(asyncio.gather(consumer, return_exceptions=True), timeout=5)
+            server.should_exit = True
+            await asyncio.wait_for(serve_task, timeout=5)
 
 
 class TestDispatchBudget:
