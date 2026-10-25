@@ -21,13 +21,15 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.failure_kinds import VERIFIER_ERROR
+from nemo_gym.rollout_collection import NG_TERMINAL_KEY
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     is_nemo_gym_fastapi_entrypoint,
 )
 from resources_servers.terminal_bench_4 import lifecycle
-from resources_servers.terminal_bench_4.environment import EnvironmentConfig
+from resources_servers.terminal_bench_4.environment import EnvironmentConfig, ExecLimitConfigurationError
 from resources_servers.terminal_bench_4.lifecycle import NATIVE_VERSION, Session
 from resources_servers.terminal_bench_4.models import (
     AgentTermination,
@@ -62,6 +64,26 @@ def atomic_json(path, value):
     temporary.replace(path)
 
 
+# Verifier outcomes that Terminal-Bench never retries and counts as a 0: Harbor excludes them from retries and counts a
+# trial without a reward as 0. They are scored zeros here too, so the task stays in the pass-rate denominator.
+_ZERO_SCORED_VERIFIER_FAILURES = frozenset(
+    {"VerifierTimeoutError", "RewardFileNotFoundError", "RewardFileEmptyError", "VerifierOutputParseError"}
+)
+
+
+def _scored_verifier_failure(diagnostics) -> str | None:
+    """The outcome a verifier that ran ended in, when Terminal-Bench scores it as 0. Read from the verifier's own
+    diagnostic: an agent that exited on a timeout or a nonzero code is recorded first, as the trial's exception."""
+    for diagnostic in reversed(diagnostics or []):
+        if (
+            isinstance(diagnostic, dict)
+            and diagnostic.get("subphase") == "verifier_execution"
+            and diagnostic.get("exception_type") in _ZERO_SCORED_VERIFIER_FAILURES
+        ):
+            return diagnostic["exception_type"]
+    return None
+
+
 class TerminalBench4ResourcesServer(SimpleResourcesServer):
     config: TerminalBench4Config
 
@@ -84,6 +106,9 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         ):
             if unknown := sorted(set(keys) - names):
                 raise ValueError(f"environment.{setting} names tasks that {manifest_path.name} lacks: {unknown}")
+        # Overrides are known before any task loads; package budgets are checked when each task loads.
+        for name, timeout_sec in environment.verifier_timeout_overrides.items():
+            environment.require_exec_limit_covers(name, timeout_sec)
         self._sessions: dict[str, Session] = {}
         self._by_identity: dict[str, str] = {}
         self._slots = asyncio.Semaphore(self.config.max_concurrent_sessions)
@@ -296,9 +321,15 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             partial_credit = max(float(rewards["reward"]), fraction)
         failure = None
         failure_type = None
+        verifier_failure = None
         if not completed:
-            failure = (result.get("exception_info") or {}).get("exception_type", "MissingOfficialReward")
-            failure_type = failure
+            # An agent infrastructure failure stays retryable whatever its verifier did next: Harbor decides a retry
+            # from the trial's first exception, which is the agent's.
+            if session.termination.reason != "infrastructure_error":
+                verifier_failure = _scored_verifier_failure(session.diagnostics)
+            if verifier_failure is None:
+                failure = (result.get("exception_info") or {}).get("exception_type", "MissingOfficialReward")
+                failure_type = failure
         elif session.termination.reason == "infrastructure_error" and not result.get("sandbox_resource_limit"):
             failure = session.termination.detail or "Agent infrastructure failure"
         return SandboxedVerifyResponse(
@@ -316,13 +347,16 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             evaluation_completed=completed,
             termination=session.termination,
             infrastructure_error=failure,
-            failure_reason=failure,
+            failure_reason=failure or verifier_failure,
+            failure_kind=VERIFIER_ERROR if verifier_failure else None,
             artifacts={"trial": str(session.directory)},
             timings={
                 key: result.get(key) for key in ("environment_setup", "agent_setup", "agent_execution", "verifier")
             },
             **({"_ng_failure_class": "infrastructure_error"} if failure else {}),
             **({"_ng_failure_type": failure_type} if failure_type else {}),
+            # A retry would fail the same way: only a configuration change can fix it.
+            **({NG_TERMINAL_KEY: True} if failure_type == ExecLimitConfigurationError.__name__ else {}),
         )
 
     def _session(self, request, session_id):

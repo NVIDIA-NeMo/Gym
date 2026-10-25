@@ -328,6 +328,8 @@ class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     # Applied to the agent box only; grading boxes keep their network to fetch test deps.
     agent_network_policy: Optional[Dict[str, Any]] = None
     agent_runtime_source: str = "baked"
+    # Seconds allowed to download agent_deps_url into the box.
+    agent_runtime_fetch_timeout_s: int = 600
     swebench_tests_timeout: int = 1800
     swebench_agent_timeout: int = 2700
     concurrency: int = 256
@@ -769,7 +771,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                     "elif command -v python3 >/dev/null 2>&1; then "
                     f"python3 -c {python_fetch}; "
                     "else echo 'runtime download requires curl, wget, or python3' >&2; exit 127; fi",
-                    timeout_s=600,
+                    timeout_s=params.agent_runtime_fetch_timeout_s,
                     user="root",
                 )
                 if fetched.return_code != 0:
