@@ -9,7 +9,8 @@ ENABLE_DBO_METRICS="${ENABLE_DBO_METRICS:-0}"
 
 # Leave room for the observed 32-block NCCL kernels alongside TRTLLM cooperative routing.
 # On GB200 (152 SMs), this gives routing 120 SMs; override for comparison runs.
-export FLASHINFER_TRTLLM_MOE_OVERLAP_RESERVED_SMS="${FLASHINFER_TRTLLM_MOE_OVERLAP_RESERVED_SMS:-32}"
+# Default is 8
+export FLASHINFER_TRTLLM_MOE_OVERLAP_RESERVED_SMS="${FLASHINFER_TRTLLM_MOE_OVERLAP_RESERVED_SMS:-8}"
 
 # Optional detailed Nsight Systems capture on PD prefill nodes only.
 # PROFILE_PREFILL=1 auto-installs nsys if needed in root Ubuntu containers.
