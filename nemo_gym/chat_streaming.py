@@ -32,8 +32,8 @@ Only the SSE envelope is synthesized -- there is no true token-by-token streamin
 sends keepalive comments while the backend computes, then emits the complete answer. Backend
 failures after the stream starts become terminal SSE errors. External staging stores training
 tokens separately; token ids and training logprobs are not carried in the ``chat.completion.chunk``
-schema. A client that does not set ``stream_options.include_usage``
-gets no usage chunk, so a model-call record reconstructed from this stream will lack token counts.
+schema. A client that does not set ``stream_options.include_usage`` gets no usage chunk, so the
+dispatch hands the backend's usage to model-call capture directly.
 """
 
 import json
