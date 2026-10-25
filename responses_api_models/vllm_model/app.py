@@ -2012,6 +2012,11 @@ class VLLMModel(SimpleResponsesAPIModel):
         session_id = current_rollout_id() or request.session[SESSION_ID_KEY]
         own = self._own_client(session_id, placed_index)
         client = self._session_id_to_client.get(session_id)
+        if placed_index is not None and not self.config.route_around_failing_endpoints:
+            # The shared placement decides. This worker may have cached the hash endpoint while the
+            # placement file was unavailable, and another worker may since have placed the rollout
+            # elsewhere; without failover nothing else would reconcile the two.
+            client = own
         if self.config.route_around_failing_endpoints:
             if client is not own and self._endpoint_serves(own):
                 # The session's own endpoint serves again, or is due for its trial

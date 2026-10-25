@@ -1625,6 +1625,43 @@ class TestApp:
 
         assert picked is server._clients[self._hashed_client_idx("task-3-0", 4)]
 
+    async def test_a_worker_adopts_the_shared_placement_after_a_failed_lookup(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        state_path = str(tmp_path / "state.sqlite")
+        worker_a, worker_b = (self._setup_least_loaded_server(monkeypatch, state_path) for _ in range(2))
+        for worker in (worker_a, worker_b):
+            worker._clients = worker._clients[:2]
+        rollout = "task-9-0"
+        hashed = self._hashed_client_idx(rollout, 2)
+        placed = 1 - hashed
+        # A live rollout already on the hash endpoint, so a successful placement picks the other one.
+        worker_b._least_loaded._connect().execute(
+            "insert into placements values (?, ?, ?, ?)", ("busy-rollout", hashed, 2, time.time())
+        )
+        # Worker A's first lookup fails, as when the shared file is briefly unavailable.
+        lookup = worker_a._least_loaded.endpoint_for
+        failed_once = []
+
+        async def flaky_lookup(rollout_id: str, n_endpoints: int):
+            if not failed_once:
+                failed_once.append(True)
+                return None
+            return await lookup(rollout_id, n_endpoints)
+
+        monkeypatch.setattr(worker_a._least_loaded, "endpoint_for", flaky_lookup)
+
+        with rollout_context(rollout):
+            first_on_a = await worker_a._resolve_client_for_call(self._request_for_session("session-0"))
+            on_b = await worker_b._resolve_client_for_call(self._request_for_session("session-1"))
+            later_on_a = [
+                await worker_a._resolve_client_for_call(self._request_for_session(f"session-{i}")) for i in (2, 3, 4)
+            ]
+
+        assert worker_a._clients.index(first_on_a) == hashed
+        assert worker_b._clients.index(on_b) == placed
+        assert [worker_a._clients.index(client) for client in later_on_a] == [placed, placed, placed]
+
     async def test_a_least_loaded_rollout_returns_to_its_placement_after_failover(
         self, monkeypatch: MonkeyPatch, tmp_path
     ) -> None:
