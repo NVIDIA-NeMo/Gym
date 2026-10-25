@@ -74,10 +74,10 @@ DATASETS_AND_LOADERS_FUNCTIONS = {
         dataset_name, config_name, split="test"
     ),
     BenchmarkDataset.HLE.value: lambda dataset_name, config_name: (
-        load_dataset(dataset_name, split="test", revision="021a3d71f516a7ac28ceb8d284969902edf1edeb")
+        load_dataset(dataset_name, split="test", revision="021a3d71f516a7ac28ceb8d284969902edf1edeb") # pragma: allowlist secret
         if config_name != "train_test_split"
         else load_dataset(
-            dataset_name, split="test", revision="021a3d71f516a7ac28ceb8d284969902edf1edeb"
+            dataset_name, split="test", revision="021a3d71f516a7ac28ceb8d284969902edf1edeb" # pragma: allowlist secret
         ).train_test_split(test_size=0.5, shuffle=True, seed=42)
     ),
     BenchmarkDataset.LIVECODEBENCH.value: lambda dataset_name, config_name: load_dataset(
@@ -91,22 +91,22 @@ DATASETS_AND_LOADERS_FUNCTIONS = {
         split="test",
     ),
     BenchmarkDataset.CODE_CONTESTS.value: lambda dataset_name, config_name: load_dataset(
-        dataset_name, split="test", revision="802411c3010cb00d1b05bad57ca77365a3c699d6"
+        dataset_name, split="test", revision="802411c3010cb00d1b05bad57ca77365a3c699d6" # pragma: allowlist secret
     ),
     BenchmarkDataset.MTBENCH_101.value: lambda dataset_name, config_name: load_dataset(
         "json", data_files={"test": config_name}, split="test"
     ),
     BenchmarkDataset.OPUS100.value: lambda dataset_name, config_name: load_dataset(
-        dataset_name, config_name, split="test", revision="805090dc28bf78897da9641cdf08b61287580df9"
+        dataset_name, config_name, split="test", revision="805090dc28bf78897da9641cdf08b61287580df9" # pragma: allowlist secret
     ),
     BenchmarkDataset.CHATRAG_BENCH.value: lambda dataset_name, config_names: concatenate_datasets(
         [
-            load_dataset(dataset_name, config_name, split="test", revision="af6c7d420ddddf21f54f8ab3394bbf462aad2577")
+            load_dataset(dataset_name, config_name, split="test", revision="af6c7d420ddddf21f54f8ab3394bbf462aad2577") # pragma: allowlist secret
             for config_name in config_names
         ]
     ),
     BenchmarkDataset.MMLU_PRO.value: lambda dataset_name, config_name: load_dataset(
-        dataset_name, split="test", revision="30527804ea8854662078e457808040d872ecdf29"
+        dataset_name, split="test", revision="30527804ea8854662078e457808040d872ecdf29" # pragma: allowlist secret
     ),
     BenchmarkDataset.ADALEVAL_STACKSELECT.value: lambda dataset_name, config_name: load_dataset(
         "json", data_files={"test": config_name}, split="test"
