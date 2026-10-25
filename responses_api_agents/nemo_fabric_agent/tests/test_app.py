@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -29,7 +30,7 @@ from responses_api_agents.nemo_fabric_agent.app import (
     _content_text,
     _extract_request_input,
     _fabric_output_items,
-    _loopback_proxy,
+    _LoopbackProxy,
     _mapping,
     _normalized_usage,
     _skill_paths,
@@ -258,7 +259,8 @@ def test_fabric_config_injects_model_workspace_mcp_and_skills(tmp_path: Path) ->
         "nemo_fabric_openhands",
     ],
 )
-def test_harness_presets_pass_fabric_planning(preset_name: str, tmp_path: Path) -> None:
+@patch("responses_api_agents.openclaw_agent.setup_openclaw.ensure_openclaw")
+def test_harness_presets_pass_fabric_planning(ensure_openclaw, preset_name: str, tmp_path: Path) -> None:
     configs_dir = Path(__file__).parents[1] / "configs"
     base = OmegaConf.load(configs_dir / "nemo_fabric_agent.yaml").nemo_fabric_agent
     preset = OmegaConf.load(configs_dir / f"{preset_name}.yaml")[preset_name]
@@ -529,26 +531,59 @@ def test_loopback_proxy_forwards_remote_http_and_leaves_other_urls() -> None:
 
         upstream = await asyncio.start_server(echo, "127.0.0.1", 0)
         remote = f"http://127.0.0.1:{upstream.sockets[0].getsockname()[1]}/v1"
-        assert await _loopback_proxy("http://127.0.0.1:9000/v1") == ("http://127.0.0.1:9000/v1", None)
-        assert await _loopback_proxy("https://models.example/v1") == ("https://models.example/v1", None)
+        for url in ("http://127.0.0.1:9000/v1", "https://models.example/v1"):
+            async with _LoopbackProxy(url) as proxied:
+                assert proxied == url
+        async with _LoopbackProxy("http://models.example:9000/v1", enabled=False) as proxied:
+            assert proxied == "http://models.example:9000/v1"
 
         with patch("responses_api_agents.nemo_fabric_agent.app.ipaddress.ip_address") as ip_address:
             ip_address.return_value.is_loopback = False
-            url, proxy = await _loopback_proxy(remote)
-        try:
-            assert url.startswith("http://127.0.0.1:") and url.endswith("/v1")
+            proxy = _LoopbackProxy(remote)
+        async with proxy as url:
+            assert url != remote and url.startswith("http://127.0.0.1:") and url.endswith("/v1")
             reader, writer = await asyncio.open_connection("127.0.0.1", int(url.split(":")[2].split("/")[0]))
             writer.write(b"ping")
             await writer.drain()
             assert await reader.read() == b"pong:ping"
-        finally:
-            proxy.close()
-            upstream.close()
+        upstream.close()
 
     asyncio.run(scenario())
 
 
-def test_relay_keeps_native_items_when_atif_lacks_tool_outputs(tmp_path: Path) -> None:
+def test_loopback_proxy_closes_open_connections_on_exit() -> None:
+    async def scenario() -> None:
+        upstream_eof = asyncio.Event()
+
+        async def hold_open(reader, writer):
+            await reader.read()
+            upstream_eof.set()
+            writer.close()
+
+        upstream = await asyncio.start_server(hold_open, "127.0.0.1", 0)
+        remote = f"http://127.0.0.1:{upstream.sockets[0].getsockname()[1]}/v1"
+        with patch("responses_api_agents.nemo_fabric_agent.app.ipaddress.ip_address") as ip_address:
+            ip_address.return_value.is_loopback = False
+            proxy = _LoopbackProxy(remote)
+        with pytest.raises(RuntimeError, match="fabric failed"):
+            async with proxy as url:
+                _, writer = await asyncio.open_connection("127.0.0.1", int(url.split(":")[2].split("/")[0]))
+                writer.write(b"keep")
+                await writer.drain()
+                while not proxy._handlers:
+                    await asyncio.sleep(0.01)
+                raise RuntimeError("fabric failed")
+
+        await asyncio.wait_for(upstream_eof.wait(), timeout=5)
+        assert not proxy._handlers
+        writer.close()
+        upstream.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("native_output", ["README.txt", ""])
+def test_relay_keeps_native_items_when_atif_lacks_tool_outputs(native_output: str, tmp_path: Path) -> None:
     agent = _agent(cwd=str(tmp_path), relay=True)
     agent.server_client.global_config_dict = {
         "policy_model": {"responses_api_models": {"policy_model": {"host": "127.0.0.1", "port": 9002}}}
@@ -572,7 +607,7 @@ def test_relay_keeps_native_items_when_atif_lacks_tool_outputs(tmp_path: Path) -
                 "content": "",
                 "tool_calls": [{"id": "c1", "name": "bash", "args": {"command": "ls"}}],
             },
-            {"role": "tool", "content": "README.txt"},
+            {"role": "tool", "content": native_output},
             {"role": "assistant", "content": "fabric answer"},
         ]
         return result
@@ -586,8 +621,45 @@ def test_relay_keeps_native_items_when_atif_lacks_tool_outputs(tmp_path: Path) -
         )
 
     assert [item.type for item in response.output] == ["function_call", "function_call_output", "message"]
-    assert response.output[1].output == "README.txt"
+    assert response.output[0].call_id == response.output[1].call_id == "c1"
+    assert response.output[1].output == native_output
     assert fabric_result["relay_atif"] == [trajectory]
+
+
+def test_atif_keeps_relay_structured_tool_results() -> None:
+    fixture = Path(__file__).parents[3] / "tests/unit_tests/fixtures/relay_atif_v1_7_tool_trajectory.json"
+    items = _atif_output_items([json.loads(fixture.read_text())], "answer")
+
+    calls = [item for item in items if item.type == "function_call"]
+    outputs = [item for item in items if item.type == "function_call_output"]
+    assert [call.call_id for call in calls] == [output.call_id for output in outputs] == ["call-weather-1"]
+    assert json.loads(outputs[0].output) == {"condition": "sunny", "temperature_f": 72}
+
+
+@pytest.mark.parametrize(("value", "expected"), [(False, "false"), (0, "0"), (None, "null"), ("text", "text")])
+def test_atif_structured_tool_result_presence_is_not_truthiness(value: Any, expected: str) -> None:
+    step = {
+        "source": "agent",
+        "tool_calls": [{"tool_call_id": "c1", "function_name": "f", "arguments": {}}],
+        "observation": {"results": [{"source_call_id": "c1", "extra": {"tool_result": value}}]},
+    }
+
+    assert _atif_output_items([{"steps": [step]}], "answer")[1].output == expected
+
+
+def test_base_config_declares_relay_options() -> None:
+    config = OmegaConf.load(Path(__file__).parents[1] / "configs/nemo_fabric_agent.yaml")
+    agent = config.nemo_fabric_agent.responses_api_agents.nemo_fabric_agent
+    assert agent.relay is False
+    assert agent.send_model_base_url is True
+
+
+def test_openclaw_cli_is_provisioned_only_for_the_openclaw_adapter() -> None:
+    with patch("responses_api_agents.openclaw_agent.setup_openclaw.ensure_openclaw") as ensure_openclaw:
+        _agent()
+        ensure_openclaw.assert_not_called()
+        _agent(adapter_id="nvidia.fabric.openclaw")
+        ensure_openclaw.assert_called_once_with("2026.9.4")
 
 
 def test_atif_without_agent_steps_falls_back_to_fabric_output() -> None:

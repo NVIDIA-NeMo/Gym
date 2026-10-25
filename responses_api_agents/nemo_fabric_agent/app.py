@@ -43,6 +43,9 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 
 LOG = logging.getLogger(__name__)
 _MODEL_API_KEY_ENV = "NEMO_GYM_FABRIC_MODEL_API_KEY"  # pragma: allowlist secret
+_OPENCLAW_ADAPTER_ID = "nvidia.fabric.openclaw"
+# The OpenClaw release the NeMo Fabric 0.5.0 adapter documents.
+_FABRIC_OPENCLAW_VERSION = "2026.9.4"
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -322,11 +325,17 @@ def _atif_trajectory_items(trajectory: dict[str, Any], response_text: str, items
                     _atif_trajectory_items(subagent, response_text, items)
             if wrapper:
                 continue
+            content = result.get("content")
+            extra = _mapping(result.get("extra"))
+            if content is None and "tool_result" in extra:
+                # Relay stores non-text tool returns here because ATIF content is text or image parts only.
+                value = extra["tool_result"]
+                content = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
             items.append(
                 NeMoGymResponseFunctionCallOutput(
                     id=f"fco_{uuid4().hex}",
                     call_id=str(result.get("source_call_id") or ""),
-                    output=_content_text(result.get("content")),
+                    output=_content_text(content),
                     status="completed",
                     type="function_call_output",
                 )
@@ -352,45 +361,71 @@ def _atif_output_items(trajectories: list[dict[str, Any]], response_text: str) -
     return items
 
 
-def _tool_output_count(items: list[Any]) -> int:
-    return sum(1 for item in items if getattr(item, "type", None) == "function_call_output" and item.output)
+def _tool_output_counts(items: list[Any]) -> tuple[int, int]:
+    """(non-empty tool outputs, all tool outputs). An empty output is still a completed call."""
+    outputs = [item.output for item in items if getattr(item, "type", None) == "function_call_output"]
+    return sum(1 for output in outputs if output), len(outputs)
 
 
-async def _loopback_proxy(base_url: str) -> tuple[str, Optional[asyncio.Server]]:
-    """Serve a remote plain-HTTP model URL on a loopback port, or return the URL unchanged.
+class _LoopbackProxy:
+    """Serve a remote plain-HTTP model URL on a loopback port for one invocation.
 
-    The Claude and Codex Relay gateways accept a plain-HTTP upstream only on loopback.
+    The Claude and Codex Relay gateways accept a plain-HTTP upstream only on loopback. Other URLs pass through
+    unchanged. Leaving the context closes the listener and every connection it accepted.
     """
-    parts = urlsplit(base_url)
-    host = parts.hostname or ""
-    try:
-        loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        loopback = False
-    if parts.scheme != "http" or loopback:
-        return base_url, None
 
-    async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    def __init__(self, base_url: str, enabled: bool = True) -> None:
+        self._parts = urlsplit(base_url)
+        host = self._parts.hostname or ""
         try:
-            while data := await reader.read(65536):
-                writer.write(data)
-                await writer.drain()
+            loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = False
+        self._needed = enabled and self._parts.scheme == "http" and not loopback
+        self._server: Optional[asyncio.Server] = None
+        self._handlers: set[asyncio.Task] = set()
+
+    async def __aenter__(self) -> str:
+        if not self._needed:
+            return self._parts.geturl()
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        port = self._server.sockets[0].getsockname()[1]
+        return self._parts._replace(netloc=f"127.0.0.1:{port}").geturl()
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        if self._server is None:
+            return
+        self._server.close()
+        for task in list(self._handlers):
+            task.cancel()
+        await asyncio.gather(*self._handlers, return_exceptions=True)
+        await self._server.wait_closed()
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        self._handlers.add(task)
+        upstream_writer = None
+        try:
+            upstream_reader, upstream_writer = await asyncio.open_connection(
+                self._parts.hostname, self._parts.port or 80
+            )
+            await asyncio.gather(_pipe(reader, upstream_writer), _pipe(upstream_reader, writer))
         except OSError:
             pass
         finally:
-            writer.close()
+            for stream in (writer, upstream_writer):
+                if stream is not None:
+                    stream.close()
+            self._handlers.discard(task)
 
-    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        try:
-            upstream_reader, upstream_writer = await asyncio.open_connection(host, parts.port or 80)
-        except OSError:
-            writer.close()
-            return
-        await asyncio.gather(pipe(reader, upstream_writer), pipe(upstream_reader, writer))
 
-    server = await asyncio.start_server(handle, "127.0.0.1", 0)
-    port = server.sockets[0].getsockname()[1]
-    return parts._replace(netloc=f"127.0.0.1:{port}").geturl(), server
+async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    try:
+        while data := await reader.read(65536):
+            writer.write(data)
+            await writer.drain()
+    finally:
+        writer.close()
 
 
 def _skill_paths(skills_root: Optional[str]) -> list[str]:
@@ -499,6 +534,10 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
+        if self.config.adapter_id == _OPENCLAW_ADAPTER_ID:
+            from responses_api_agents.openclaw_agent.setup_openclaw import ensure_openclaw
+
+            ensure_openclaw(_FABRIC_OPENCLAW_VERSION)
 
     def _resources_server_base_url(self) -> str:
         config = get_first_server_config_dict(
@@ -634,14 +673,11 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             )
             if relay_dir and not self._adapter_supports_relay(self._fabric_config(**config_kwargs), workspace):
                 relay_dir = None
-            model_proxy = None
-            if relay_dir:
-                config_kwargs["model_base_url"], model_proxy = await _loopback_proxy(model_base_url)
-            fabric_config = self._fabric_config(**config_kwargs, relay_dir=Path(relay_dir) if relay_dir else None)
-            # Fabric otherwise starts Python adapters on VIRTUAL_ENV's interpreter, which in R2E-style task images is
-            # the repo's venv and lacks the adapter. This agent's interpreter has the adapters installed.
-            os.environ.setdefault("ADAPTER_PYTHON", sys.executable)
-            try:
+            async with _LoopbackProxy(model_base_url, enabled=bool(relay_dir)) as config_kwargs["model_base_url"]:
+                fabric_config = self._fabric_config(**config_kwargs, relay_dir=Path(relay_dir) if relay_dir else None)
+                # Fabric otherwise starts Python adapters on VIRTUAL_ENV's interpreter, which in R2E-style task
+                # images is the repo's venv and lacks the adapter. This agent's interpreter has the adapters installed.
+                os.environ.setdefault("ADAPTER_PYTHON", sys.executable)
                 result = await Fabric().run(
                     fabric_config,
                     base_dir=workspace,
@@ -651,9 +687,6 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                         context={"nemo_gym_rollout_id": rollout_id} if rollout_id else {},
                     ),
                 )
-            finally:
-                if model_proxy is not None:
-                    model_proxy.close()
             # The trajectory files live in relay_dir, so read them before it is removed.
             trajectories = _atif_trajectories(_mapping(result.output)) if relay_dir else []
 
@@ -684,9 +717,10 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
         atif_items = _atif_output_items(trajectories, response_text)
         native_items = _fabric_output_items(output, response_text)
         # Some adapters' trajectories drop tool outputs or collapse the run into one step. Keep the fuller record.
+        atif_counts, native_counts = _tool_output_counts(atif_items), _tool_output_counts(native_items)
         output_items = (
             atif_items
-            if atif_items and _tool_output_count(atif_items) >= _tool_output_count(native_items)
+            if atif_items and all(atif >= native for atif, native in zip(atif_counts, native_counts))
             else native_items
         )
         response = NeMoGymResponse(

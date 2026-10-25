@@ -19,4 +19,6 @@ nemo_fabric_agent:
       cwd: null
       harness_settings: ???
       fabric_config: ???
+      relay: false
+      send_model_base_url: true
       datasets: []
