@@ -71,8 +71,10 @@ rna_design_claude_code_agent:
           cpu: 2
           memory_mib: 4096
         env:
-          # gRNAde on a busy CPU node runs for minutes, past Claude Code's 60 s default for an MCP call.
+          # gRNAde on a busy CPU node runs for minutes, past Claude Code's limits on an MCP call: 60 s in all and
+          # 300 s with no progress.
           MCP_TOOL_TIMEOUT: "1800000"
+          CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: "1800000"
           API_TIMEOUT_MS: "1800000"
       rollout_timeout: 2700
       concurrency: 4

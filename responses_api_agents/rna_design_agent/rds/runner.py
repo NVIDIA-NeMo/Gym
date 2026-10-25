@@ -141,6 +141,8 @@ def apply_tool_call(
     `invalid` says why the model's arguments could not be read, and the call fails with it.
     """
     started = time.monotonic()
+    length = (objective or {}).get("target_length")
+    rna = f"{length} nt of A, C, G and U" if length else "written in A, C, G and U"
     try:
         if invalid:
             raise ValueError(f"{tool}: {invalid}")
@@ -151,7 +153,17 @@ def apply_tool_call(
             fixed = {f.name for f in dataclasses.fields(spec.model) if f.metadata.get("operator")} & set(arguments)
             if fixed:
                 raise ValueError(f"{', '.join(sorted(fixed))} is set by the operator, not in a tool call")
-        result = registry.dispatch(tool, _expand_selectors(arguments, state, rank_by, tool))
+        call = _expand_selectors(arguments, state, rank_by, tool)
+        typed = call.get("sequences")
+        if isinstance(typed, list):
+            # One mistyped sequence would fail a scorer's whole call, so it is dropped like a generated one below.
+            wrong = [
+                s for s in typed if not isinstance(s, str) or (length and len(s) != length) or set(s) - set("ACGU")
+            ]
+            if wrong:
+                failures.append(f"{tool}: dropped {len(wrong)} sequences that are not {rna}")
+                call = {**call, "sequences": [s for s in typed if s not in wrong]}
+        result = registry.dispatch(tool, call)
     except Exception as exc:  # a failing tool is data, not a crash
         environment = isinstance(exc, ENVIRONMENT_FAULTS)
         failures.append(f"{tool}: {type(exc).__name__}: {exc}")
@@ -176,12 +188,10 @@ def apply_tool_call(
     )
 
     produced = _sequences_from(result)
-    length = (objective or {}).get("target_length")
     # A design for the wrong puzzle, or not written in RNA, is not a design, so it never enters the population.
     wrong = [s for s in produced if (length and len(s) != length) or set(s) - set("ACGU")]
     if wrong:
         produced = [s for s in produced if s not in wrong]
-        rna = f"{length} nt of A, C, G and U" if length else "written in A, C, G and U"
         failures.append(f"{tool}: dropped {len(wrong)} sequences that are not {rna}")
     room = budget.limits.candidates - budget.spend.candidates if budget.limits.candidates else None
     added = state.add_candidates(produced, source=tool, limit=room)
@@ -190,8 +200,9 @@ def apply_tool_call(
     budget.charge(candidates=added)
     scored = state.score(_scores_from(result))
     state.record("state_update", added=added, scored=scored, total=state.count())
-    if not added and not scored:
-        # A call that changed nothing spent budget and reads as success, so the controller repeats it.
+    if not added and not scored and spec.name != "report.rules":
+        # A call that changed nothing spent budget and reads as success, so the controller repeats it. Reporting
+        # rules never changes the pool, so the hint would tell the model its rules were refused.
         failures.append(f"{tool}: changed nothing — same arguments will waste the next round too")
     return result
 

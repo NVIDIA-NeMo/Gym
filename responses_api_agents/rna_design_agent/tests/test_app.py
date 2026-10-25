@@ -289,6 +289,39 @@ class TestReviewFixes:
         assert "dropped 1 sequences that are not 12 nt of A, C, G and U" in failures[-1]
         state.close()
 
+    def test_a_mistyped_sequence_does_not_fail_the_rest_of_the_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from responses_api_agents.rna_design_agent.rds import runner
+
+        def fold_match(tool: str, arguments: dict) -> dict:  # the real scorer refuses a sequence of the wrong length
+            if any(len(s) != 12 for s in arguments["sequences"]):
+                raise ValueError("length mismatch")
+            return {"tool": tool, "results": [{"sequence": s, "match": {"f1": 1.0}} for s in arguments["sequences"]]}
+
+        monkeypatch.setattr(runner.registry, "dispatch", fold_match)
+        state, budget = self._campaign(tmp_path)
+        failures: list[str] = []
+        arguments = {"sequences": ["GGGGAAACCCCAA", "GGGGAAACCCCA"], "target": "review_hairpin"}
+        runner.apply_tool_call("score.fold_match", arguments, state, budget, "m", {"target_length": 12}, failures)
+        assert [row["sequence"] for row in state.candidates()] == ["GGGGAAACCCCA"]
+        assert failures == ["score.fold_match: dropped 1 sequences that are not 12 nt of A, C, G and U"]
+        state.close()
+
+    def test_reported_rules_are_not_called_a_call_that_changed_nothing(self, tmp_path: Path) -> None:
+        from responses_api_agents.rna_design_agent.rds.runner import apply_tool_call
+
+        state, budget = self._campaign(tmp_path)
+        failures: list[str] = []
+        rules = {"rules": [], "out_dir": str(tmp_path / "rules")}
+        apply_tool_call("report.rules", rules, state, budget, "m", {"target_length": 12}, failures)
+        assert failures == []
+        scored = {"sequences": ["GGGGAAACCCCA"], "target": "review_hairpin"}
+        for _ in range(2):
+            apply_tool_call("score.constraints", scored, state, budget, "m", {"target_length": 12}, failures)
+        assert failures == ["score.constraints: changed nothing — same arguments will waste the next round too"]
+        state.close()
+
     def test_final_scoring_applies_each_gates_declared_rule(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from responses_api_agents.rna_design_agent.rds import evaluate
         from responses_api_agents.rna_design_agent.rds.campaign import Campaign, Scoring

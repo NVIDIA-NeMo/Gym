@@ -215,8 +215,8 @@ class RnaDesignAgent(SimpleResponsesAPIAgent):
             "seed": self.config.seed,
             "generator": self.config.generator,
         }
-        started = time.time()
         async with self._sem:
+            started = time.time()
             try:
                 out = await self._run_worker(job)
             finally:
