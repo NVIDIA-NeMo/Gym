@@ -111,6 +111,16 @@ def _writable_dir(path: Path) -> bool:
         return False
 
 
+# Probe results per (HOME, APPTAINER_CONFIGDIR). A provider is constructed per sandbox, so without the
+# cache every sandbox would mkdir + write + rmtree on the home filesystem for an answer that does not
+# change within a process. ``_reset_config_dir_cache`` is for tests.
+_CONFIG_DIR_CACHE: dict[tuple[str | None, str | None], str | None] = {}
+
+
+def _reset_config_dir_cache() -> None:
+    _CONFIG_DIR_CACHE.clear()
+
+
 def _apptainer_config_dir(env: Mapping[str, str]) -> str | None:
     """Return a fallback ``APPTAINER_CONFIGDIR`` when apptainer's default (``~/.apptainer``) is unusable.
 
@@ -118,11 +128,20 @@ def _apptainer_config_dir(env: Mapping[str, str]) -> str | None:
     "failed to create instance log files" when it cannot write there, e.g. when the home directory is a
     read-only or full mount inside a container. An explicit ``APPTAINER_CONFIGDIR`` is always kept; otherwise
     the default is used if writable, else a private per-user directory under the temp dir. Returns ``None``
-    when no override is needed (or no usable fallback exists).
+    when no override is needed (or no usable fallback exists). The probe runs once per process for each
+    ``(HOME, APPTAINER_CONFIGDIR)`` pair.
     """
     if env.get("APPTAINER_CONFIGDIR"):
         return None
     home = env.get("HOME") or str(Path.home())
+    key = (home, env.get("APPTAINER_CONFIGDIR"))
+    if key in _CONFIG_DIR_CACHE:
+        return _CONFIG_DIR_CACHE[key]
+    _CONFIG_DIR_CACHE[key] = result = _probe_apptainer_config_dir(home)
+    return result
+
+
+def _probe_apptainer_config_dir(home: str) -> str | None:
     if _writable_dir(Path(home) / ".apptainer"):
         return None
     fallback = Path(tempfile.gettempdir()) / f"nemo-gym-apptainer-config-{os.getuid()}"

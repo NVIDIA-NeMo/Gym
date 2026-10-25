@@ -29,20 +29,17 @@ where Docker is unavailable).
   If no usable fallback exists, it leaves the default unchanged; Apptainer may
   still fail to start.
 
-The config-directory probe runs once per provider construction. Passing a provider
-mapping to `Sandbox` or `AsyncSandbox` constructs a new provider for each sandbox,
-so each sandbox probes again and logs a warning if it selects the fallback. The
-result is not cached across providers: free space, quota, permissions, and fallback
-directory availability can change while the server process is running. Each
-provider keeps its selected environment for its lifetime so commands use the same
-instance-state directory.
+The config-directory probe runs once per server process for each `(HOME,
+APPTAINER_CONFIGDIR)` pair and its answer is cached; a provider is constructed per
+sandbox, so without the cache every sandbox would touch the home filesystem. The
+cached answer is not re-checked while the process runs: if the home filesystem
+fills up or loses write permission later, restart the server.
 
-To avoid repeated probes on a shared home filesystem, set a non-empty
-`APPTAINER_CONFIGDIR` to a writable directory before starting Gym. An explicit
-setting is honored without probing or selecting a fallback; ensuring that it stays
-writable is then the caller's responsibility. Use the same setting for manual
-`apptainer instance list` or `apptainer instance stop` commands to find Gym's
-instances.
+To skip the probe entirely, set a non-empty `APPTAINER_CONFIGDIR` to a writable
+directory before starting Gym. An explicit setting is honored without probing or
+selecting a fallback; ensuring that it stays writable is then the caller's
+responsibility. Use the same setting for manual `apptainer instance list` or
+`apptainer instance stop` commands to find Gym's instances.
 
 ## Quick start
 
