@@ -116,6 +116,24 @@ class EnvironmentConfig(Settings):
     def verifier_timeout_sec(self, task: Task) -> float:
         return self.verifier_timeout_overrides.get(task.name.split("/")[-1], task.config.verifier.timeout_sec)
 
+    def require_exec_limit_covers(self, task_name: str, verifier_timeout_sec: float) -> None:
+        """Reject a verifier budget longer than the per-command limit that ``test.sh`` runs under.
+
+        Otherwise the sandbox could end the verifier command inside its budget, and the sandbox reports no evidence of
+        that, so the missing reward would read as the task's own zero. An equal limit is supported: the verifier's
+        budget starts before ``test.sh`` is submitted, so it always expires first.
+        """
+        if self.default_exec_timeout_s < verifier_timeout_sec:
+            raise ExecLimitConfigurationError(
+                f"{task_name}: environment.default_exec_timeout_s ({self.default_exec_timeout_s:g} s) is shorter than "
+                f"the verifier budget ({verifier_timeout_sec:g} s) and could end the verifier command early. Set "
+                f"environment.default_exec_timeout_s to at least {verifier_timeout_sec:g}."
+            )
+
+
+class ExecLimitConfigurationError(ValueError):
+    """A configuration that cannot verify a task within its official verifier budget."""
+
 
 class HealthcheckError(RuntimeError):
     pass

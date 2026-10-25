@@ -679,3 +679,94 @@ def test_per_task_settings_must_name_manifest_tasks(tmp_path, monkeypatch, overr
     config = TerminalBench4Config.model_validate(resources | {"host": "", "port": 0, "name": "terminal_bench_science"})
     with pytest.raises(ValueError, match=f"environment.{setting} names tasks that manifest.json lacks: \\['"):
         TerminalBench4ResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def exec_limit_server(tmp_path, monkeypatch, exec_limit_sec):
+    monkeypatch.chdir(tmp_path)
+    resources = OmegaConf.to_container(
+        benchmark_config(
+            tbsci_jobs_dir=str(tmp_path / "jobs")
+        ).terminal_bench_science.resources_servers.terminal_bench_4,
+        resolve=True,
+    )
+    resources["environment"]["default_exec_timeout_s"] = exec_limit_sec
+    config = TerminalBench4Config.model_validate(resources | {"host": "", "port": 0, "name": "terminal_bench_science"})
+    return TerminalBench4ResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+@pytest.mark.parametrize("exec_limit_sec", [7199, 1800])
+def test_server_start_rejects_a_verifier_override_longer_than_the_exec_limit(tmp_path, monkeypatch, exec_limit_sec):
+    with pytest.raises(ValueError, match=r"certified-sparse-regression: .*\(7200 s\).*at least 7200"):
+        exec_limit_server(tmp_path, monkeypatch, exec_limit_sec)
+
+
+@pytest.mark.parametrize(
+    ("exec_limit_sec", "package_timeout", "rejected"),
+    [
+        (7200, 7201, True),
+        # A package without its own [verifier].timeout_sec has the 600 s default budget.
+        (7200, None, False),
+        (7200, 7200, False),
+        (64800, 10800, False),
+    ],
+)
+async def test_seed_rejects_a_task_whose_verifier_budget_outlasts_the_exec_limit(
+    tmp_path, monkeypatch, exec_limit_sec, package_timeout, rejected
+):
+    from resources_servers.terminal_bench_4 import lifecycle
+
+    server = exec_limit_server(tmp_path, monkeypatch, exec_limit_sec)
+    ref = next(task["ref"] for task in preparation.load_manifest()["tasks"] if task["name"] == "leaky-bloch-meep")
+    verifier = {"environment": {"docker_image": "v"}} | ({"timeout_sec": package_timeout} if package_timeout else {})
+    task = SimpleNamespace(
+        name="terminal-bench-science/leaky-bloch-meep",
+        config=TaskSettings.model_validate({"environment": {"docker_image": "a"}, "verifier": verifier}),
+    )
+    monkeypatch.setattr(server._loader, "load", AsyncMock(return_value=task))
+    sandboxes = []
+
+    def environment(*args, **kwargs):
+        sandboxes.append(kwargs)
+        raise RuntimeError("stopped after the exec-limit check")
+
+    monkeypatch.setattr(lifecycle, "Environment", environment)
+
+    seeded = await server.seed_session(
+        SimpleNamespace(session={SESSION_ID_KEY: "cookie"}), seed_body("terminal-bench-science/leaky-bloch-meep", ref)
+    )
+
+    # A seed with a termination is never handed to the agent, so no policy call is made for it.
+    assert seeded.termination.reason == "infrastructure_error"
+    session = server._sessions[seeded.session_id]
+    if not rejected:
+        assert sandboxes and seeded.termination.detail == "RuntimeError: stopped after the exec-limit check"
+        return
+    assert sandboxes == []
+    assert seeded.termination.detail == (
+        "ExecLimitConfigurationError: terminal-bench-science/leaky-bloch-meep: environment.default_exec_timeout_s "
+        "(7200 s) is shorter than the verifier budget (7201 s) and could end the verifier command early. Set "
+        "environment.default_exec_timeout_s to at least 7201."
+    )
+    session.verify_body = SandboxedVerifyRequest(
+        session_id=session.session_id,
+        termination=seeded.termination,
+        responses_create_params={"input": []},
+        response=NeMoGymResponse(
+            id="resp",
+            created_at=0,
+            model="policy",
+            object="response",
+            output=[],
+            tool_choice="auto",
+            tools=[],
+            parallel_tool_calls=False,
+        ),
+        agent_started=False,
+    )
+    await server._finalize_session(session)
+    verified = session.verified_response.model_dump()
+    assert verified["_ng_failure_class"] == "infrastructure_error"
+    assert verified["_ng_failure_type"] == "ExecLimitConfigurationError"
+    # Resume gates a terminal failure instead of retrying it.
+    assert verified["_ng_failure_terminal"] is True
+    assert verified["reward"] == 0.0 and verified["evaluation_completed"] is False
