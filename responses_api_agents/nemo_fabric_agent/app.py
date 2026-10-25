@@ -650,10 +650,6 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             usage, "cache_write_input_tokens", "cache_creation_input_tokens", "cacheWriteInputTokens"
         )
         reasoning_tokens = _usage_value(usage, "reasoning_tokens", "reasoning_output_tokens", "reasoningOutputTokens")
-        if not (input_tokens or output_tokens) and trajectories:
-            metrics = [_mapping(trajectory.get("final_metrics")) for trajectory in trajectories]
-            input_tokens = sum(_usage_value(m, "total_prompt_tokens") for m in metrics)
-            output_tokens = sum(_usage_value(m, "total_completion_tokens") for m in metrics)
         total_tokens = _usage_value(usage, "total_tokens", "totalTokens") or input_tokens + output_tokens
         response_text = output.get("response", output.get("output"))
         if not isinstance(response_text, str):
