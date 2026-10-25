@@ -549,6 +549,156 @@ class TestRegistryClient:
         assert len(attempts) == 3
 
 
+class FlakyRegistry:
+    """A :class:`FakeRegistry` whose first answers to chosen URLs are the failures a rate-limited or ailing
+    registry gives: ``failures`` maps a URL fragment to the list of ``(status, headers)`` it fails with, in
+    order, before the real answer."""
+
+    def __init__(self, failures: dict[str, list[tuple[int, dict[str, str]]]], **kwargs):
+        self.registry = FakeRegistry(**kwargs)
+        self.failures = {fragment: list(statuses) for fragment, statuses in failures.items()}
+        self.requests = self.registry.requests
+
+    def __call__(self, request, timeout=None):
+        url = request.full_url
+        for fragment, pending in self.failures.items():
+            if fragment in url and pending:
+                status, headers = pending.pop(0)
+                self.requests.append((url, dict(request.header_items())))
+                raise urllib.error.HTTPError(url, status, "Failure", headers, io.BytesIO(b""))
+        return self.registry(request, timeout)
+
+
+@pytest.fixture
+def sleeps(monkeypatch) -> list[float]:
+    """Record what the client would sleep instead of sleeping."""
+    recorded: list[float] = []
+    monkeypatch.setattr(registry_module.time, "sleep", recorded.append)
+    return recorded
+
+
+class TestRegistryRetries:
+    """D1: HTTP 429 and 5xx are tried again with backoff, honouring Retry-After, within bounded attempts."""
+
+    def test_a_429_with_retry_after_seconds_is_retried_after_that_wait_and_logged_once(
+        self, monkeypatch, sleeps, caplog
+    ):
+        fake = FlakyRegistry({"/manifests/7-alpine": [(429, {"Retry-After": "7"}), (429, {"Retry-After": "3"})]})
+        patch_opener(monkeypatch, fake)
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.registry"):
+            entry = RegistryClient().image_config("redis:7-alpine")
+        assert entry["image"] == "library/redis@sha256:index-of-7-alpine"
+        assert sleeps == [7.0, 3.0], "the registry's Retry-After is the wait, not the backoff"
+        manifest_requests = [url for url, _ in fake.requests if url.endswith("/manifests/7-alpine")]
+        # One failed anonymous attempt, the token's challenge is not reached by a 429; then the two retries.
+        assert len(manifest_requests) == 4
+        warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+        assert len(warnings) == 1, "one WARNING per image, however many retries it takes"
+        assert warnings[0].startswith(
+            "redis:7-alpine: registry returned HTTP 429 for manifests/7-alpine; retrying in 7s"
+        )
+
+    def test_a_5xx_then_200_uses_the_exponential_backoff(self, monkeypatch, sleeps):
+        fake = FlakyRegistry({"/blobs/sha256:cfg-amd64": [(503, {}), (502, {}), (500, {})]})
+        patch_opener(monkeypatch, fake)
+        entry = RegistryClient().image_config("redis:7-alpine")
+        assert entry["config_digest"] == "sha256:cfg-amd64"
+        assert sleeps == [1.0, 2.0, 4.0]
+
+    def test_a_permanent_429_gives_up_after_the_bounded_attempts_naming_the_status(self, monkeypatch, sleeps):
+        fake = FlakyRegistry({"/manifests/7-alpine": [(429, {"Retry-After": "1"})] * 50})
+        patch_opener(monkeypatch, fake)
+        with pytest.raises(ImageConfigError) as info:
+            RegistryClient(retries=2).image_config("redis:7-alpine")
+        assert str(info.value) == (
+            "library/redis: registry returned HTTP 429 for manifests/7-alpine (gave up after 3 attempts)"
+        )
+        assert isinstance(info.value.__cause__, urllib.error.HTTPError) and info.value.__cause__.code == 429
+        assert sleeps == [1.0, 1.0]
+        assert len([url for url, _ in fake.requests if url.endswith("/manifests/7-alpine")]) == 3
+
+    def test_the_default_is_eight_attempts(self, monkeypatch, sleeps):
+        fake = FlakyRegistry({"/manifests/7-alpine": [(429, {})] * 50})
+        patch_opener(monkeypatch, fake)
+        with pytest.raises(ImageConfigError, match=r"HTTP 429 .*gave up after 8 attempts"):
+            RegistryClient().image_config("redis:7-alpine")
+        assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0]
+
+    def test_a_retry_after_http_date_is_honoured(self, monkeypatch, sleeps):
+        from email.utils import format_datetime
+
+        later = format_datetime(registry_module.datetime.now(registry_module.timezone.utc), usegmt=True)
+        # The date is "now" or a second past: the wait is clamped at zero, never negative, and the retry happens.
+        fake = FlakyRegistry({"/manifests/7-alpine": [(429, {"Retry-After": later})]})
+        patch_opener(monkeypatch, fake)
+        RegistryClient().image_config("redis:7-alpine")
+        assert len(sleeps) == 1 and 0.0 <= sleeps[0] <= 2.0
+
+    def test_a_retry_after_past_the_wait_budget_fails_at_once_naming_the_status_and_the_budget(
+        self, monkeypatch, sleeps
+    ):
+        fake = FlakyRegistry({"/manifests/7-alpine": [(429, {"Retry-After": "3600"})] * 5})
+        patch_opener(monkeypatch, fake)
+        with pytest.raises(ImageConfigError) as info:
+            RegistryClient(max_wait_s=600).image_config("redis:7-alpine")
+        message = str(info.value)
+        assert message.startswith("library/redis: registry returned HTTP 429 for manifests/7-alpine; ")
+        assert "wait 3600s, past the 600s wait budget" in message and "gave up after 1 attempts" in message
+        assert sleeps == []
+
+    def test_a_404_is_not_retried(self, monkeypatch, sleeps):
+        fake = FlakyRegistry({})
+        patch_opener(monkeypatch, fake)
+        with pytest.raises(ImageConfigError, match="library/redis: registry returned HTTP 404 for manifests/missing$"):
+            RegistryClient().image_config("redis:missing")
+        assert sleeps == []
+
+    def test_the_token_endpoint_is_retried_too(self, monkeypatch, sleeps):
+        fake = FlakyRegistry({"auth.example/token": [(429, {"Retry-After": "2"})]})
+        patch_opener(monkeypatch, fake)
+        RegistryClient().image_config("redis:7-alpine")
+        assert sleeps == [2.0]
+        token_requests = [url for url, _ in fake.requests if url.startswith("https://auth.example/token")]
+        assert len(token_requests) == 2
+
+    def test_a_token_endpoint_403_is_final(self, monkeypatch, sleeps):
+        fake = FlakyRegistry({"auth.example/token": [(403, {})]})
+        patch_opener(monkeypatch, fake)
+        with pytest.raises(ImageConfigError, match="token request failed with HTTP 403"):
+            RegistryClient().image_config("redis:7-alpine")
+        assert sleeps == []
+
+    def test_the_warning_is_logged_again_for_the_next_image(self, monkeypatch, sleeps, caplog):
+        fake = FlakyRegistry(
+            {"/manifests/7-alpine": [(429, {"Retry-After": "1"})], "ghcr.io/v2/org/app/manifests": [(503, {})]}
+        )
+        patch_opener(monkeypatch, fake)
+        client = RegistryClient()
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.registry"):
+            client.image_config("redis:7-alpine")
+            client.image_config("ghcr.io/org/app@sha256:m-amd64")
+        warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+        assert [message.split(":")[0] for message in warnings] == ["redis", "ghcr.io/org/app@sha256"]
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(None, None), ("", None), ("  ", None), ("12", 12.0), ("1.5", 1.5), ("-3", 0.0), ("soon", None)],
+    )
+    def test_parse_retry_after(self, value, expected):
+        assert registry_module.parse_retry_after(value) == expected
+
+    def test_parse_retry_after_reads_an_http_date_in_the_future(self):
+        from datetime import timedelta
+        from email.utils import format_datetime
+
+        when = registry_module.datetime.now(registry_module.timezone.utc) + timedelta(seconds=90)
+        wait = registry_module.parse_retry_after(format_datetime(when, usegmt=True))
+        assert wait is not None and 85.0 <= wait <= 90.0
+        # A date in the past is a wait of zero.
+        past = registry_module.datetime.now(registry_module.timezone.utc) - timedelta(seconds=90)
+        assert registry_module.parse_retry_after(format_datetime(past, usegmt=True)) == 0.0
+
+
 class TestComposeImageReferences:
     def test_lists_the_task_image_first_then_each_sidecar_once(self, tmp_path):
         write_task(tmp_path, "ctr", compose=COMPOSE)
