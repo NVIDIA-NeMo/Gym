@@ -17,6 +17,10 @@ local folder gets one. The dataset digest goes into the rows and the run config.
 
 Then the ordinary end-to-end rollout collection runs with that config plus the
 selected agent, environment server and model configs.
+
+``gym eval prepare <folder | harbor:dataset>`` runs the preparation alone (fetch, image
+configuration records, builds, rows), for once ahead of a fan-out of runs that then find
+the records complete and contact no registry.
 """
 
 import argparse
@@ -549,15 +553,20 @@ def prepare_target(
         if registry_credentials
         else None
     )
+    resolved_now: list[str] = []
     images = (
         record_base_images(
-            folder, select=None if is_task_folder(folder) else selected, platform=build.platform, client=client
+            folder,
+            select=None if is_task_folder(folder) else selected,
+            platform=build.platform,
+            client=client,
+            resolved_now=resolved_now,
         )
         if folder.is_dir()
         else None
     )
     if images is not None:
-        print(f"Base image configurations recorded in {images}")
+        print(f"Base image configurations recorded in {images} ({_resolved_note(resolved_now)})")
     unbuilt: dict[str, str] = {}
     if folder.is_dir():
         unbuilt = _build_dockerfiles(folder, build, select=None if is_task_folder(folder) else selected)
@@ -600,6 +609,7 @@ def prepare_target(
     # group cannot run, leaves its task out the same way, with the field named, as an unloadable task is, not as a
     # seed failure of every episode; the others' images are still recorded.
     unresolved: dict[str, str] = {}
+    resolved_now = []
     images = record_compose_images(
         tasks,
         dataset_root,
@@ -614,6 +624,7 @@ def prepare_target(
         shared_storage=shared_storage,
         gpu_shared_storage=gpu_shared_storage,
         overlay=compose_overlay,
+        resolved_now=resolved_now,
     )
     if unresolved:
         for task_id, reason in unresolved.items():
@@ -624,7 +635,7 @@ def prepare_target(
         if not tasks:
             raise _no_runnable_task(folder, errors)
     if images is not None:
-        print(f"Compose image configurations recorded in {images}")
+        print(f"Compose image configurations recorded in {images} ({_resolved_note(resolved_now)})")
     rows_path = output_dir / rows_name
     # A template's rows are labelled by the template (the taskset), not by the `rendered` folder they were loaded
     # from, which every parameterized dataset shares: the label is what groups and filters rows and results.
@@ -947,6 +958,68 @@ def refuse_disallowed_agent(dataset: GymDatasetConfig, agent: str) -> None:
         f"{dataset.path or DATASET_FILE} [gym] allowed_agents admits {admitted}, not `--agent {agent}`. "
         f"Run it with one of those harnesses, or add {agent!r} to allowed_agents in the dataset."
     )
+
+
+def _resolved_note(resolved_now: list[str]) -> str:
+    """How much of an image record this preparation had to ask the registry for."""
+    if not resolved_now:
+        return "all reused, no registry request"
+    return f"{len(resolved_now)} resolved from the registry now, the rest reused"
+
+
+@exit_cleanly_on_config_error
+def prepare_only(args: argparse.Namespace, overrides: list[str]) -> None:
+    """Entry point for ``gym eval prepare <target> ...``: the preparation of a run, without the run.
+
+    Fetches a ``harbor:`` reference, records the image configurations, builds what needs building,
+    writes the rows and the image list, and stops: no servers are started and no rollout runs. Run it
+    once before a fan-out of ``gym eval run`` jobs on the same target, so the jobs find complete records
+    next to the task folders and contact no registry (the Docker Hub anonymous limit is per IP, shared by
+    every job on a login node). The preparation resumes where an earlier one stopped, so a rate-limited
+    or killed run is simply started again.
+    """
+    sandbox = getattr(args, "sandbox", None)
+    try:
+        if sandbox is not None:
+            resolve_sandbox_config(sandbox)
+        # The `builds:` and `sandbox:` blocks come from the configuration the command names, as for `gym eval run`:
+        # the images are recorded for the deployment's platform and each Compose document is checked against its
+        # providers, so the run that follows finds nothing left to refuse.
+        prepared = prepare_target(
+            args.target,
+            exclude=_patterns(args, "exclude_tasks"),
+            only=_patterns(args, "only_tasks"),
+            build=build_options_from_overrides(overrides),
+            sandbox_provider=sandbox_provider_from_overrides(overrides, sandbox),
+            gpu_sandbox_provider=gpu_sandbox_provider_from_overrides(overrides, sandbox),
+            compose_platform=compose_platform_from_overrides(overrides),
+            volume_sources=volume_sources_from_overrides(overrides, sandbox),
+            gpu_volume_sources=gpu_volume_sources_from_overrides(overrides, sandbox),
+            shared_storage=shared_storage_from_overrides(overrides, sandbox),
+            gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
+            compose_overlay=compose_overlay_from_overrides(overrides),
+            registry_credentials=registry_credentials_from_overrides(overrides, sandbox),
+        )
+    except (
+        HarborTaskError,
+        HubError,
+        BuildError,
+        ImageConfigError,
+        ManifestError,
+        ConfigError,
+        ValueError,
+        OSError,
+        yaml.YAMLError,
+    ) as exc:
+        args._parser.error(str(exc))
+    skipped = (
+        f"; {len(prepared.skipped)} task(s) skipped, see {prepared.output_dir / 'skipped.json'}"
+        if prepared.skipped
+        else ""
+    )
+    print(f"Prepared {prepared.taskset}: {len(prepared.tasks)} task(s) in {prepared.rows_path}{skipped}")
+    quoted = shlex.quote(args.target)
+    print(f"Next: gym eval run {quoted} --agent <harness> ...  (the records are complete; no registry request)")
 
 
 def run_images(

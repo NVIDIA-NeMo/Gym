@@ -52,7 +52,7 @@ gym env status                # show running servers
 gym env schema                # print a resources server's task-data schema as JSON Schema
 
 # Evaluation
-gym eval prepare              # prepare benchmark data and dump it to disk
+gym eval prepare              # prepare benchmark data, or a Harbor task target, without running it
 gym eval plan                 # write one benchmark's task list (stable ids, digests) to a plan file
 gym eval run                  # collate data, start servers, and collect rollouts
 gym eval submit               # submit a benchmark job to Slurm
@@ -785,16 +785,27 @@ profile results.
 
 ### `gym eval prepare`
 
-Prepare a benchmark's data by running its `prepare.py` script and dump the result to disk.
+Prepare a benchmark's data by running its `prepare.py` script and dump the result to disk. With a Harbor task
+`TARGET` instead of a benchmark, run the preparation `gym eval run` would do for it, without the run: fetch a
+`harbor:` reference, record the image configurations into `compose-images.json` next to the task folders, build
+the Dockerfiles that need a build, and write the rows and image list under `results/harbor/<taskset>/`. No server
+starts. A later `gym eval run` or `gym dataset validate` on the same target reuses the records without contacting
+the registry, so run it once before a fan-out of jobs on one dataset (see [Harbor Tasks](/data/harbor-tasks)).
+The preparation resumes where an earlier one stopped.
 
 | Option | Description |
 | --- | --- |
+| `TARGET` | Harbor task folder, folder of task folders, or `harbor:<dataset>[@<version>]`. Without it, a benchmark is prepared. |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--benchmark NAME` | Load the named benchmark config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
+| `--only-tasks PATTERNS` | Comma-separated task names or globs; only matching tasks of a task TARGET are prepared. |
+| `--exclude-tasks PATTERNS` | Comma-separated task names or globs to leave out of a task TARGET. |
 
 ```bash
 gym eval prepare --benchmark aime24
+gym eval prepare harbor:terminal-bench/terminal-bench@4.0.0
+gym eval prepare ./my-dataset --exclude-tasks 'gpu-*'
 ```
 
 ### `gym eval plan`

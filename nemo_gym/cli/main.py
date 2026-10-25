@@ -747,8 +747,24 @@ def _eval_export(args: argparse.Namespace, overrides: list[str]) -> None:
     dispatch("nemo_gym.cli.eval:export_run", [f"+exporter={exporter}", *overrides])
 
 
-# `gym eval run <target>`: a Harbor task folder, a folder of task folders, or `harbor:<dataset>[@<version>]`.
-# Register-only: the target is consumed by `_eval_run`, not translated to a Hydra override.
+def _eval_prepare(args: argparse.Namespace, overrides: list[str]) -> None:
+    target = getattr(args, "target", None)
+    if target:
+        # A task folder or `harbor:<dataset>` reference: the preparation of `gym eval run`, without the run.
+        from nemo_gym.tasks.harbor.cli import prepare_only
+
+        prepare_only(args, overrides)
+        return
+    if getattr(args, "only_tasks", None) or getattr(args, "exclude_tasks", None):
+        args._parser.error(
+            "--only-tasks and --exclude-tasks apply to a task TARGET; pass a Harbor task folder or harbor: reference"
+        )
+    dispatch("nemo_gym.cli.eval:prepare_benchmark", overrides)
+
+
+# `gym eval run <target>` and `gym eval prepare <target>`: a Harbor task folder, a folder of task folders, or
+# `harbor:<dataset>[@<version>]`. Register-only: the target is consumed by `_eval_run` or `_eval_prepare`, not
+# translated to a Hydra override.
 TASK_TARGET = Flag(
     register=lambda p: p.add_argument(
         "target",
@@ -1317,9 +1333,9 @@ COMMANDS = {
     ),
     "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status.", flags=(JSON,)),
     "eval prepare": Command(
-        target="nemo_gym.cli.eval:prepare_benchmark",
-        summary="Prepare benchmark data and dump it to disk.",
-        flags=(CONFIG, BENCHMARK, SEARCH_DIR),
+        target=_eval_prepare,
+        summary="Prepare benchmark data, or a Harbor task TARGET (records, builds, rows), without running it.",
+        flags=(TASK_TARGET, SANDBOX, CONFIG, BENCHMARK, SEARCH_DIR, EXCLUDE_TASKS, ONLY_TASKS),
     ),
     "eval plan": Command(
         target="nemo_gym.cli.eval:plan_benchmark",
@@ -1937,9 +1953,9 @@ def main() -> None:
         except ValueError as exc:
             getattr(args, "_parser", parser).error(str(exc))
 
-        # argparse can capture a bare Hydra override in eval run's optional TARGET slot.
+        # argparse can capture a bare Hydra override in eval run's or eval prepare's optional TARGET slot.
         # Restore it before coalescing, keeping translated flags before raw overrides.
-        if command.target is _eval_run and args.target and _is_positional_hydra_override(args.target):
+        if command.target in (_eval_run, _eval_prepare) and args.target and _is_positional_hydra_override(args.target):
             overrides = [args.target, *overrides]
             args.target = None
 

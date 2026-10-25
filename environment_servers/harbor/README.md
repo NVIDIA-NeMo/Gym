@@ -87,7 +87,8 @@ separate-mode task that names no verifier image and ships no `tests/Dockerfile` 
 one whose `tests/Dockerfile` has no recorded build is left out at prepare like an unrecorded `environment/` build;
 the server refuses either at seed. Compose environments start as
 a sandbox group when a `compose-images.json` with the sidecar images' recorded OCI configuration sits next to
-the task folders, written by `gym dataset fetch`; on OpenSandbox the provider block also needs
+the task folders, written at prepare (`gym eval prepare <target>`, or the prepare step of `gym eval run` and
+`gym dataset validate`); on OpenSandbox the provider block also needs
 `networking.enabled: true` (with `loopback_forwarding`) and `runtime_requirements.shm_size_metadata_key` (see
 [Compose tasks on OpenSandbox](#compose-tasks-on-opensandbox)); each service's working directory is created once its sandbox is up, as Docker creates a missing `working_dir` or `WORKDIR` at container create. `[environment.healthcheck]` is polled at seed.
 A Compose file's `${NAME}` resolves as Harbor's `docker compose` would: Gym's infrastructure variables, the task's
@@ -573,7 +574,11 @@ a pushed image serves every run, a local one only runs that push nothing, and th
 service on its own record. Otherwise it is rebuilt and the record replaced, and prepare says why; a service
 without a record is built and the context's other services are left as recorded. An image is recorded only after
 it was built, pushed and inspected, and each one as soon as it is done, so an interrupted prepare resumes
-where it stopped. Both record files are replaced atomically under a sidecar lock file next to them
+where it stopped. The configurations read from the registry (base images, Compose sidecars) are written the
+same way, each as soon as the registry answers for it, and a run that finds an image recorded (by an earlier
+run, or by another run on the same folder meanwhile) does not ask the registry for it; a registry answer of
+429 or 5xx is retried with backoff, honouring `Retry-After`, before the preparation gives up on it. Both record
+files are replaced atomically under a sidecar lock file next to them
 (`built-images.json.lock`, `compose-images.json.lock`), so two Gym commands recording into one datasets
 folder keep each other's entries and a reader never sees a half-written file. A failed build leaves its tasks
 out with the reason and the others prepare. Prepare also writes every
@@ -582,6 +587,8 @@ task images (built or pulled), the separate verifiers' images (declared, or buil
 own separate verifier image included) and the Compose sidecar images as their records pin them (built or from a
 registry); the records themselves sit in
 `compose-images.json` (and `built-images.json` for the built ones) next to the task folders.
+`gym eval prepare <target>` runs this preparation on its own, without a run: do that once before a fan-out of
+`gym eval run` jobs on one dataset, so the jobs reuse complete records and none of them contacts the registry.
 
 The hash names the image; it is not the whole build. The configuration record of each built image in
 `compose-images.json` also carries an `inputs_digest` over everything its build read, beside the
