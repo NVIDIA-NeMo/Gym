@@ -128,7 +128,7 @@ class KernelGymConfig(BaseResponsesAPIAgentConfig):
         default="docker://{docker_image}",
         description="Template for the task's image reference: use as a path if it ends with .sif or starts with / or ., else as a docker:// URI.",
     )
-    sandbox_provider: Dict[str, Any] = Field(default_factory=lambda: {"docker": {}})
+    sandbox_provider: str | Dict[str, Any] = Field(default_factory=lambda: {"docker": {}})
     sandbox_default_metadata: Dict[str, Any] = Field(default_factory=dict)
     sandbox_model_base_url: Optional[str] = None
     kb_agent_timeout: int = 1800
@@ -246,8 +246,11 @@ class KernelGymAgent(SimpleResponsesAPIAgent):
                 )
                 if result.return_code != 0 or result.error_type is not None:
                     raise RuntimeError(f"Agent execution failed: {result.error_type or result.return_code}")
-                await sandbox.download("/workspace/solution.py", cfg.persistent_dir / "solution.py")
                 await sandbox.download("/trajectories_mount/response.json", cfg.persistent_dir / "response.json")
+                agent_response = json.loads((cfg.persistent_dir / "response.json").read_text())
+                if agent_response.get("status") == "failed" or agent_response.get("error") is not None:
+                    raise RuntimeError("Agent harness returned a failed response")
+                await sandbox.download("/workspace/solution.py", cfg.persistent_dir / "solution.py")
 
             # Only the submitted source crosses this boundary. The agent can change its
             # entire filesystem, including Python, the reference, and verifier outputs.
@@ -319,8 +322,9 @@ class KernelGymAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: Any) -> None:
         self._sem = Semaphore(self.config.concurrency)
-        self.config.sandbox_default_metadata = resolve_provider_metadata(
-            self.config.sandbox_provider, self.server_client.global_config_dict
+        self.config.sandbox_default_metadata = (
+            resolve_provider_metadata(self.config.sandbox_provider, self.server_client.global_config_dict)
+            | self.config.sandbox_default_metadata
         )
         self.config.sandbox_provider = resolve_provider_config(
             self.config.sandbox_provider, self.server_client.global_config_dict
@@ -437,7 +441,7 @@ class KernelGymAgent(SimpleResponsesAPIAgent):
         return NeMoGymResponse(
             id=f"kernel-gym-{params.instance_id}",
             created_at=int(time.time()),
-            model=params.model_name,
+            model=saved.model if saved is not None else params.model_name,
             object="response",
             output=saved.output if saved is not None else [],
             status=saved.status if saved is not None else None,
@@ -455,7 +459,8 @@ class KernelGymAgent(SimpleResponsesAPIAgent):
         )
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        return await self._run_response(body)
+        async with self._sem:
+            return await self._run_response(body)
 
     async def run(self, body: KernelGymRunRequest) -> KernelGymVerifyResponse:
         async with self._sem:

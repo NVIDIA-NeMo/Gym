@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-from asyncio import Semaphore
+from asyncio import CancelledError, Event, Semaphore, create_task, wait_for
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.kernel_gym.app import (
@@ -97,7 +98,7 @@ async def test_run_preserves_trajectory_and_request_and_redacts_configuration(pr
     saved = NeMoGymResponse(
         id="agent-response",
         created_at=0,
-        model="served-model",
+        model="actual-upstream-model",
         object="response",
         status="incomplete",
         incomplete_details={"reason": "max_output_tokens"},
@@ -132,13 +133,14 @@ async def test_run_preserves_trajectory_and_request_and_redacts_configuration(pr
 
     assert result.reward == 1 and result.evaluation_completed and not result.mask_sample
     assert result.response.output == saved.output
+    assert result.response.model == saved.model
     assert result.response.usage == saved.usage
     assert result.response.status == "incomplete"
     assert result.response.incomplete_details == saved.incomplete_details
     assert result.response.tools == saved.tools
     assert result.response.metadata is None
     assert result.responses_create_params.input == body.input
-    assert result.responses_create_params.model == "served-model"
+    assert result.responses_create_params.model == saved.model
     assert result.responses_create_params.temperature == 0.7
     assert result.responses_create_params.max_output_tokens == 400
     assert not result.responses_create_params.parallel_tool_calls
@@ -183,3 +185,107 @@ async def test_response_failure_keeps_traceback_and_propagates_error(protocol_ag
         await agent.responses(body)
     (traceback,) = agent._base_results_dir.glob("*/traceback.err")
     assert "OSError: cannot save submitted solution" in traceback.read_text()
+
+
+@pytest.mark.parametrize("second_endpoint", ["responses", "run"])
+@pytest.mark.parametrize("first_outcome", ["success", "exception", "cancel"])
+async def test_endpoints_share_concurrency_limit_and_release_it(
+    protocol_agent, monkeypatch, second_endpoint, first_outcome
+):
+    agent, body = protocol_agent
+    first_entered, release_first, second_started = Event(), Event(), Event()
+    calls = 0
+
+    async def run_kernel(self, params):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_entered.set()
+            await release_first.wait()
+            if first_outcome == "exception":
+                raise OSError("agent failed")
+        params.metrics_fpath.write_text(KernelBenchMetrics(evaluation_completed=True).model_dump_json())
+        return False
+
+    async def second_request():
+        second_started.set()
+        if second_endpoint == "responses":
+            return await agent.responses(body)
+        return await agent.run(KernelGymRunRequest(responses_create_params=body))
+
+    monkeypatch.setattr(KernelGymAgent, "_run_kernel", run_kernel)
+    first = create_task(agent.responses(body))
+    second = None
+    try:
+        await wait_for(first_entered.wait(), timeout=1)
+        second = create_task(second_request())
+        await wait_for(second_started.wait(), timeout=1)
+        assert calls == 1, "The second endpoint bypassed the shared concurrency limit"
+        if first_outcome == "cancel":
+            first.cancel()
+            with pytest.raises(CancelledError):
+                await first
+        else:
+            release_first.set()
+            if first_outcome == "exception":
+                with pytest.raises(OSError, match="agent failed"):
+                    await first
+            else:
+                await first
+        await wait_for(second, timeout=1)
+        assert calls == 2
+        assert not agent._sem.locked()
+    finally:
+        for task in (first, second):
+            if task is not None and not task.done():
+                task.cancel()
+                with pytest.raises(CancelledError):
+                    await task
+
+
+@pytest.mark.parametrize("named", [False, True])
+@pytest.mark.parametrize("explicit", [{}, {"owner": "agent", "purpose": "kernelbench"}])
+def test_provider_resolution_preserves_explicit_metadata(protocol_agent, monkeypatch, tmp_path, named, explicit):
+    agent, _ = protocol_agent
+    block = {"docker": {}, "default_metadata": {"owner": "provider", "pool": "gpu"}}
+    agent.server_client.global_config_dict = {"gpu": block}
+    agent.config = KernelGymConfig.model_validate(
+        agent.config.model_dump()
+        | {
+            "sandbox_provider": "gpu" if named else block,
+            "sandbox_default_metadata": explicit,
+            "results_dir": tmp_path / "results",
+        }
+    )
+    monkeypatch.setattr(SimpleResponsesAPIAgent, "model_post_init", lambda self, context: None)
+
+    agent.model_post_init(None)
+
+    assert agent.config.sandbox_provider == {"docker": {}}
+    assert agent.config.sandbox_default_metadata == {"owner": "provider", "pool": "gpu"} | explicit
+    assert block["default_metadata"] == {"owner": "provider", "pool": "gpu"}
+
+
+def test_default_provider_needs_no_named_config(protocol_agent, monkeypatch, tmp_path):
+    agent, _ = protocol_agent
+    agent.config = KernelGymConfig.model_validate(
+        agent.config.model_dump(exclude={"sandbox_provider"}) | {"results_dir": tmp_path / "results"}
+    )
+    monkeypatch.setattr(SimpleResponsesAPIAgent, "model_post_init", lambda self, context: None)
+
+    agent.model_post_init(None)
+
+    assert agent.config.sandbox_provider == {"docker": {}}
+    assert agent.config.sandbox_default_metadata == {}
+
+
+def test_unknown_provider_name_explains_how_to_configure_it(protocol_agent):
+    agent, _ = protocol_agent
+    agent.config = KernelGymConfig.model_validate(agent.config.model_dump() | {"sandbox_provider": "missing"})
+    agent.server_client.global_config_dict = {"gpu": {"docker": {}}}
+
+    with pytest.raises(ValueError, match="Sandbox provider reference 'missing' is not defined") as error:
+        agent.model_post_init(None)
+
+    assert "config_paths" in str(error.value)
+    assert "Available sandbox configs: 'gpu'" in str(error.value)

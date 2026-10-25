@@ -39,6 +39,6 @@ gym eval run --no-serve \
   --output results/kernel_gym_rollouts.jsonl
 ```
 
-For the default Claude Code harness, `NEMO_GYM_SANDBOX_MODEL_BASE_URL` is the Anthropic API root, without `/v1` (for example, `https://inference-api.nvidia.com`). The CLI adds `/v1/messages` itself. Use the model endpoint's corresponding Responses API base URL when selecting a Responses API harness instead.
+Both built-in harnesses require `NEMO_GYM_SANDBOX_MODEL_BASE_URL` to be the server root without a trailing `/v1`. For the default Claude Code harness, use the Anthropic API root (for example, `https://inference-api.nvidia.com`); the CLI appends `/v1/messages`. For SimpleAgent, use the Responses API server root (for example, `https://api.openai.com`); it appends `/v1/responses`.
 
 Each row includes the harness trajectory, reward, compilation, correctness, runtime, speedup, and mask. Five example inputs and rollouts are in `data/`.
