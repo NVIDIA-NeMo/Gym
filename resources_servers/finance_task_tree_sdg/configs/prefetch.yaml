@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Image-build prefetch set: pass as NEMO_GYM_PREFETCH_CONFIGS so every stage
+# server and the vLLM model server have baked venvs. Endpoint values are inert
+# placeholders; prefetch installs dependencies and starts no server.
+config_paths:
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+  - resources_servers/finance_task_tree_sdg/configs/question_gen.yaml
+  - resources_servers/finance_task_tree_sdg/configs/leak_proposal.yaml
+  - resources_servers/finance_task_tree_sdg/configs/leak_removal.yaml
+  - resources_servers/finance_task_tree_sdg/configs/answer_gen.yaml
+  - resources_servers/finance_task_tree_sdg/configs/adjudicate.yaml
+
+policy_base_url: http://127.0.0.1:18000/v1
+policy_api_key: not-a-real-key # pragma: allowlist secret
+policy_model_name: prefetch-placeholder
+skip_venv_if_present: true
