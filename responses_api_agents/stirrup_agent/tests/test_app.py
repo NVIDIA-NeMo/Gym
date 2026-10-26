@@ -137,6 +137,17 @@ class TestApp:
         # Unset means off: only configs that opt in (GDPVal's benchmark config) get recovery nudges.
         assert payload["client"]["truncation_recovery"] is bool(truncation_recovery)
 
+    @pytest.mark.parametrize("code_exec", [None, False, True])
+    @pytest.mark.asyncio
+    async def test_code_exec_is_forwarded_to_the_rollout(self, code_exec) -> None:
+        fields = {} if code_exec is None else {"code_exec": code_exec}
+        body = NeMoGymResponseCreateParamsNonStreaming(input="ignored", model="policy")
+
+        payload = await _runner_payload(_make_config(**fields), body)
+
+        # Unset keeps the shell, as before the option existed.
+        assert payload["code_exec"] is (code_exec is not False)
+
     @pytest.mark.asyncio
     async def test_runtime_knobs_shape_the_model_requests_the_runner_makes(self) -> None:
         config = _make_config(

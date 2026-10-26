@@ -130,6 +130,37 @@ class TestInferenceProvider:
         data = response.json()
         assert data["choices"][0]["message"]["content"] == "Hello! How can I help?"
 
+    async def test_embeddings(self) -> None:
+        server = _make_server(model="my-embed-model")
+        client = TestClient(server.setup_webserver())
+
+        # A minimal OpenAI-compatible reply: base64 vectors, no usage or object fields.
+        provider_json = {"data": [{"embedding": "AACAPwAAAEA=", "index": 0}], "model": "my-embed-model"}
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_embeddings = AsyncMock(return_value=provider_json)
+
+        response = client.post("/v1/embeddings", json={"input": "hi", "model": "ignored", "encoding_format": "base64"})
+
+        assert response.status_code == 200
+        assert response.json() == provider_json
+        server._client.create_embeddings.assert_awaited_once_with(
+            input="hi", model="my-embed-model", encoding_format="base64"
+        )
+
+    async def test_embeddings_extra_body_merge(self) -> None:
+        server = _make_server(model="my-embed-model", extra_body={"dimensions": 256, "user": "config-user"})
+        client = TestClient(server.setup_webserver())
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_embeddings = AsyncMock(return_value={"data": []})
+
+        response = client.post("/v1/embeddings", json={"input": "hi", "user": "request-user"})
+
+        assert response.status_code == 200
+        server._client.create_embeddings.assert_awaited_once_with(
+            input="hi", user="request-user", dimensions=256, model="my-embed-model"
+        )
+        assert server.config.extra_body == {"dimensions": 256, "user": "config-user"}
+
     async def test_model_default_from_config(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server(model="my-configured-model")
         app = server.setup_webserver()

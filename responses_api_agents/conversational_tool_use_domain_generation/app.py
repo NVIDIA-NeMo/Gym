@@ -32,8 +32,10 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseUsage,
+    accumulate_response_usage,
 )
-from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.responses_converter import ResponsesConverter, chat_completion_usage_to_response_usage
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
@@ -146,9 +148,11 @@ class DomainGenerationAgent(SimpleResponsesAPIAgent):
         phases: list[DomainGenerationPhaseTrace] = []
         prompt = initial_prompt
         final_response: NeMoGymChatCompletion | None = None
+        usage: NeMoGymResponseUsage | None = None
 
         for phase_index in range(self.config.followup_count + 1):
             request, response = await self._chat_completion(body, prompt)
+            usage = accumulate_response_usage(usage, chat_completion_usage_to_response_usage(response.usage))
             parsed_value, parse_error = parse_domain_response(response)
             candidates.extend(parsed_value)
             phases.append(
@@ -186,6 +190,8 @@ class DomainGenerationAgent(SimpleResponsesAPIAgent):
             response_params,
             final_response,
         )
+        # The response text is the last phase; usage covers every phase in the rollout.
+        response.usage = usage
         response_payload = body.model_dump()
         response_payload.update(
             response=response,

@@ -595,7 +595,7 @@ class TestEvalSubmitResolveOnly:
         assert "s3cr3t-value" not in record_text
         assert record_kwargs.get("private") is not True
         for env_out in (record["driver"]["env"], record["services"]["svc"]["env"]):
-            assert env_out == {"API_KEY": "host:GYM_TEST_SECRET", "MODE": "fast", "LATE": "runtime:LATE"}
+            assert env_out == env
 
         capsys.readouterr()
         _eval_submit(_args(config_path, resolve_only=True), overrides=[])

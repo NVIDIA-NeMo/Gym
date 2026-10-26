@@ -39,6 +39,7 @@ from nemo_gym.sandbox import (
     SandboxStatus,
     SupportsSandboxEndpoint,
     SupportsSandboxPauseResume,
+    clamp_resource_requests,
     create_provider,
     get_provider_class,
     list_providers,
@@ -454,9 +455,65 @@ async def test_background_services_uses_ordinary_exec_without_provider_override(
     assert call["user"] == "root"
 
 
+async def test_service_preserving_exec_supports_original_provider_signature():
+    class LegacyProvider(FakeSandboxProvider):
+        async def exec_with_background_services(self, handle, command, *, cwd=None, timeout_s=None):
+            await super().exec(handle, command, cwd=cwd, timeout_s=timeout_s)
+            return SandboxExecResult(stdout="preserved", stderr=None, return_code=0)
+
+    provider = LegacyProvider()
+    async with AsyncSandbox(provider) as sandbox:
+        await sandbox.start(SandboxSpec(image="image:tag", workdir="/work"))
+        result = await sandbox.exec("bash solve.sh", timeout_s=None, preserve_background_services=True)
+    assert result.stdout == "preserved"
+    [call] = provider.exec_calls
+    assert call["command"] == "bash solve.sh" and call["cwd"] == "/work"
+    assert call["timeout_s"] is None
+
+
+@pytest.mark.parametrize(
+    "overrides, named",
+    [
+        ({"env": {"DEBIAN_FRONTEND": "noninteractive"}}, "env"),
+        ({"user": "root"}, "user"),
+        ({"env": {}, "user": 1000}, "env or user"),
+    ],
+)
+async def test_service_preserving_exec_names_the_legacy_provider_that_cannot_take_an_override(overrides, named):
+    """The oracle always passes ``env``; a provider still on the cwd/timeout_s signature must say so by name."""
+
+    class LegacyProvider(FakeSandboxProvider):
+        async def exec_with_background_services(self, handle, command, *, cwd=None, timeout_s=None):
+            return SandboxExecResult(stdout="preserved", stderr=None, return_code=0)
+
+    provider = LegacyProvider()
+    async with AsyncSandbox(provider) as sandbox:
+        await sandbox.start(SandboxSpec(image="image:tag", workdir="/work"))
+        with pytest.raises(TypeError, match=rf"LegacyProvider\.exec_with_background_services does not accept {named}"):
+            await sandbox.exec("bash solve.sh", preserve_background_services=True, **overrides)
+    assert provider.exec_calls == []
+
+
+async def test_service_preserving_exec_forwards_overrides_to_a_keyword_catching_provider():
+    class CatchAllProvider(FakeSandboxProvider):
+        async def exec_with_background_services(self, handle, command, **kwargs):
+            await super().exec(handle, command, **kwargs)
+            return SandboxExecResult(stdout="preserved", stderr=None, return_code=0)
+
+    provider = CatchAllProvider()
+    async with AsyncSandbox(provider) as sandbox:
+        await sandbox.start(SandboxSpec(image="image:tag", workdir="/work"))
+        result = await sandbox.exec(
+            "bash solve.sh", env={"KEY": "value"}, user="root", preserve_background_services=True
+        )
+    assert result.stdout == "preserved"
+    [call] = provider.exec_calls
+    assert call["env"] == {"KEY": "value"} and call["user"] == "root" and call["cwd"] == "/work"
+
+
 class ServicePreservingSandboxProvider(FakeSandboxProvider):
-    async def exec_with_background_services(self, handle, command, *, cwd=None, timeout_s=None):
-        await super().exec(handle, command, cwd=cwd, timeout_s=timeout_s)
+    async def exec_with_background_services(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        await super().exec(handle, command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
         return SandboxExecResult(stdout="service-preserving execution", stderr=None, return_code=0)
 
 
@@ -473,14 +530,18 @@ async def test_exec_selects_service_preserving_execution_only_when_requested(mon
     assert provider.exec_calls[0]["timeout_s"] is None
 
 
-@pytest.mark.parametrize("overrides", [{"env": {"KEY": "value"}}, {"user": "root"}])
-async def test_service_preserving_exec_rejects_unsupported_overrides(overrides):
+@pytest.mark.parametrize(
+    "overrides", [{"env": {"KEY": "value"}}, {"user": "root"}, {"env": {"KEY": "value"}, "user": 1000}]
+)
+async def test_service_preserving_exec_passes_command_overrides(overrides):
     provider = ServicePreservingSandboxProvider()
     async with AsyncSandbox(provider) as sandbox:
         await sandbox.start(SandboxSpec(image="image:tag"))
-        with pytest.raises(ValueError, match="does not support per-command env or user"):
-            await sandbox.exec("bash solve.sh", preserve_background_services=True, **overrides)
-    assert provider.exec_calls == []
+        result = await sandbox.exec("bash solve.sh", preserve_background_services=True, **overrides)
+    assert result.stdout == "service-preserving execution"
+    [call] = provider.exec_calls
+    for key, value in overrides.items():
+        assert call[key] == value
 
 
 def test_sync_exec_can_preserve_background_services():
@@ -1581,6 +1642,15 @@ async def test_create_pty_requires_capability_and_start() -> None:
     assert provider.pty_specs[1].cwd == "/elsewhere"
     await sandbox.stop()
 
+    # A PTY session inherits the sandbox's default user like exec does; an explicit user still wins.
+    provider = PtySandboxProvider()
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="image:tag", user="agent"))
+    await sandbox.pty.create("id")
+    await sandbox.pty.create("id", user="root")
+    assert [spec.user for spec in provider.pty_specs] == ["agent", "root"]
+    await sandbox.stop()
+
 
 async def test_pty_exec_collects_output_and_exit() -> None:
     from nemo_gym.sandbox import SandboxPtySpec
@@ -2101,3 +2171,43 @@ def test_sandbox_config_rejects_a_non_numeric_resource_value() -> None:
 def test_sandbox_config_rejects_unknown_settings(fields: dict) -> None:
     with pytest.raises(ValidationError):
         SandboxConfig(**fields)
+
+
+def test_exec_defaults_to_the_spec_user_and_an_explicit_user_wins() -> None:
+    async def _run() -> None:
+        provider_name = f"fake-{uuid4().hex}"
+        register_provider(provider_name, FakeSandboxProvider)
+        sandbox = AsyncSandbox({provider_name: {}})
+        await sandbox.start(SandboxSpec(image="image:tag", workdir="/repo", user="agent"))
+        provider = FakeSandboxProvider.last_instance
+        assert sandbox.default_user == "agent"
+
+        await sandbox.exec("id", timeout_s=5)
+        await sandbox.exec("id", timeout_s=5, user="root")
+        assert [call["user"] for call in provider.exec_calls] == ["agent", "root"]
+
+        # Without a spec user the provider's own default applies, as before.
+        plain = AsyncSandbox({provider_name: {}})
+        await plain.start(SandboxSpec(image="image:tag"))
+        await plain.exec("id", timeout_s=5)
+        assert plain.default_user is None and FakeSandboxProvider.last_instance.exec_calls[-1]["user"] is None
+
+    asyncio.run(_run())
+
+
+def test_clamp_resource_requests_caps_each_request_at_the_declared_limit() -> None:
+    requests = {"cpu": 0.5, "memory_mib": 512, "disk_gib": 10, "gpu": 2}
+    limits = SandboxResources(cpu=1, memory_mib=2048, disk_gib=4, gpu=1)
+    clamped, changed = clamp_resource_requests(requests, limits)
+    assert clamped == {"cpu": 0.5, "memory_mib": 512, "disk_gib": 4, "gpu": 1}
+    assert changed == {"disk_gib": (10, 4), "gpu": (2, 1)}
+    assert requests["disk_gib"] == 10  # the caller's mapping is not mutated
+
+    # A key the limits do not declare passes through; equal values are not a change.
+    assert clamp_resource_requests({"disk_gib": 10, "cpu": 1}, {"cpu": 1}) == ({"disk_gib": 10, "cpu": 1}, {})
+    assert clamp_resource_requests(SandboxResources(memory_mib=3), {"memory_mib": 2}) == (
+        {"cpu": None, "memory_mib": 2, "disk_gib": None, "gpu": None, "gpu_type": None},
+        {"memory_mib": (3, 2)},
+    )
+    with pytest.raises(ValueError, match="Unknown sandbox resource keys"):
+        clamp_resource_requests({"memory_gib": 2}, limits)

@@ -36,6 +36,7 @@ DECLARED = {
     "structured_outputs": "StructuredOutputsResourcesServer",
     "terminus_judge": "TerminusJudgeResourcesServer",
     "string_match": "StringMatchResourcesServer",
+    "partner_if": "PartnerIFResourcesServer",
 }
 
 

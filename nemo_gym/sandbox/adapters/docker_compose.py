@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.compose_fields import unsupported_compose_fields
 from nemo_gym.sandbox.providers import SandboxSpec, create_provider
 from nemo_gym.sandbox.providers.base import (
     SupportsSandboxEndpoint,
@@ -48,7 +49,9 @@ class AsyncSandboxCompose:
     """Start services from a Compose YAML file and own their sandbox lifecycle.
 
     Deployment settings stay in the provider and optional ``service_specs``.
-    Compose fields override the corresponding spec fields.
+    Compose fields override the corresponding spec fields, except ``environment``: a spec's ``env`` is
+    the caller's host-resolved override for that service and wins over the service's Compose
+    ``environment`` (see ``_prepare``).
     """
 
     def __init__(
@@ -90,9 +93,11 @@ class AsyncSandboxCompose:
     def _validate(self) -> list[str]:
         if not isinstance(self.document, Mapping):
             raise ValueError("Compose requires a mapping")
-        unknown = set(self.document) - {"name", "services", "networks", "volumes"}
-        if unknown:
-            raise NotImplementedError(f"Unsupported Compose fields: {sorted(unknown)}")
+        # The field allow-list is shared with prepare (``nemo_gym.tasks.harbor.cli``), which reports a refused
+        # field per task before any sandbox exists; here it is the last line before provisioning.
+        refused = unsupported_compose_fields(self.document)
+        if refused:
+            raise NotImplementedError(refused[0])
         services = self.document.get("services")
         if not isinstance(services, Mapping) or not services:
             raise ValueError("Compose requires a non-empty services mapping")
@@ -118,30 +123,6 @@ class AsyncSandboxCompose:
                     raise ValueError(f"Service {name!r}: resolve {field} to a list of mappings upstream")
             if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", name):
                 raise ValueError(f"Invalid Compose service name: {name!r}")
-            unknown = set(service) - {
-                "image",
-                "entrypoint",
-                "command",
-                "environment",
-                "working_dir",
-                "user",
-                "depends_on",
-                "healthcheck",
-                "expose",
-                "ports",
-                "networks",
-                "volumes",
-                "cpus",
-                "mem_limit",
-                "labels",
-                "restart",
-                "network_mode",
-                "cap_add",
-                "shm_size",
-                "x-sandbox",
-            }
-            if unknown:
-                raise NotImplementedError(f"Service {name!r}: unsupported Compose fields {sorted(unknown)}")
             if service.get("restart", "no") != "no":
                 raise NotImplementedError(f"Service {name!r}: restart policies are unsupported")
             if not service.get("image"):
@@ -305,7 +286,18 @@ class AsyncSandboxCompose:
                 "spec": replace(
                     spec,
                     image=image,
-                    env={**spec.env, **env},
+                    # The spec's env is the caller's host-resolved override and wins over the service's Compose
+                    # ``environment``. This is Harbor's order for ``main``: its Docker environment appends the
+                    # task's Compose file and then its own env override file, ``{services: {main: {environment:
+                    # _startup_env()}}}`` (harbor 0.22.0 ``environments/docker/docker.py`` 363-370,
+                    # ``environments/docker/__init__.py`` 20-25), and ``_startup_env`` is the task's
+                    # ``[environment].env`` resolved on the host (``environments/base.py`` 278-285). Compose
+                    # merges later files over earlier ones per key, so a ``${X:-}`` in the task file that
+                    # interpolated to empty never hides the host value. The Harbor server passes ``main`` a
+                    # spec env already layered image ENV < this file's ``environment`` < ``[environment].env``,
+                    # so an image ENV it carries does not climb above the file. Harbor's override names ``main``
+                    # only; callers pass an empty env for sidecars, which keep their Compose ``environment``.
+                    env={**env, **spec.env},
                     workdir=service.get("working_dir", spec.workdir),
                     resources=resources,
                     ports=tuple(dict.fromkeys(ports)),
@@ -436,6 +428,32 @@ class AsyncSandboxCompose:
             interval = health.get("start_interval", "5s") if in_start_period else health.get("interval", "30s")
             await asyncio.sleep(_seconds(interval))
 
+    async def _create_workdir(self, name: str) -> None:
+        """Create the service's working directory once its sandbox is up, as Docker creates a missing
+        ``working_dir`` (or image ``WORKDIR``) at container create.
+
+        Every exec in the service defaults to that directory, this group's bootstrap ones included, and a
+        provider may refuse a command whose working directory does not exist (OpenSandbox answers 400): a
+        ``main`` started from a base image whose Dockerfile only names a ``WORKDIR`` has nothing else to create
+        it. Root from ``/``, else the default user; the caller owns it afterwards as it owns a plain sandbox's.
+        """
+        workdir = self._plans[name]["spec"].workdir
+        if not workdir or workdir == "/":
+            return
+        command = f"mkdir -p {shlex.quote(workdir)}"
+        sandbox = self.services[name]
+        try:
+            result = await sandbox.exec(command, cwd="/", user="root")
+        except Exception:
+            result = None
+        if result is None or result.return_code:
+            result = await sandbox.exec(command, cwd="/")
+        if result.return_code:
+            raise RuntimeError(
+                f"Service {name!r}: cannot create its working directory {workdir!r}: "
+                f"{result.stderr or result.stdout or f'exit status {result.return_code}'}"
+            )
+
     async def start(self):
         if self._started or self._closed:
             raise RuntimeError("Compose collection already started or closed")
@@ -452,6 +470,7 @@ class AsyncSandboxCompose:
                 for name in order:
                     self.services[name] = AsyncSandbox(self.provider, self._plans[name]["spec"], owns_provider=False)
                     await self.services[name].start()
+                    await self._create_workdir(name)
                     service = self.document["services"][name]
                     if service.get("cap_add") or service.get("shm_size") is not None:
                         await self.provider.configure_runtime(

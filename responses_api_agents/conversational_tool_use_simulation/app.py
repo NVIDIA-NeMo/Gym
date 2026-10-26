@@ -46,6 +46,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    accumulate_response_usage,
 )
 from nemo_gym.responses_converter import split_responses_input_output_items
 from nemo_gym.server_utils import get_response_json, raise_for_status
@@ -217,7 +218,8 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
             self._filter_empty_messages(model_response)
             last_model_response = model_response
             new_outputs.extend(model_response.output)
-            usage = self._merge_usage(usage, model_response)
+            usage = accumulate_response_usage(usage, model_response.usage)
+            model_response.usage = None
             agent_step_limit_reached = step >= self.config.max_agent_steps
 
             if model_response.incomplete_details:
@@ -851,20 +853,6 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
     def _message_text(self, message: NeMoGymResponseOutputMessage) -> str:
         texts = [getattr(item, "text", "") for item in message.content]
         return "\n".join(text for text in texts if text)
-
-    def _merge_usage(self, usage, model_response: NeMoGymResponse):
-        if usage is None:
-            current = model_response.usage
-            model_response.usage = None
-            return current
-        if model_response.usage:
-            usage.input_tokens += model_response.usage.input_tokens
-            usage.output_tokens += model_response.usage.output_tokens
-            usage.total_tokens += model_response.usage.total_tokens
-            usage.input_tokens_details.cached_tokens = 0
-            usage.output_tokens_details.reasoning_tokens = 0
-            model_response.usage = None
-        return usage
 
 
 if __name__ == "__main__":

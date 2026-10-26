@@ -75,7 +75,7 @@ from nemo_gym.base_responses_api_model import (
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
 )
-from nemo_gym.failure_kinds import AGENT_TIMEOUT
+from nemo_gym.failure_kinds import AGENT_TIMEOUT, SESSION_EXPIRED, SESSION_LOST
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -958,6 +958,13 @@ def tag_results(
             tid = row_task_id(row)
             if tid is not None:
                 out["task_id"] = tid
+        if out.get("failure_kind") in (SESSION_LOST, SESSION_EXPIRED) and out.get(NG_FAILURE_CLASS_KEY) is None:
+            # The resources server no longer held the session, so this masked sample holds no measurement. Keep
+            # treating it as the terminal verification failure it used to be, not as a judged success.
+            out[NG_FAILURE_CLASS_KEY] = ENVIRONMENT_SERVER_FAILURE_CLASS
+            out[NG_TERMINAL_KEY] = True
+            out["_ng_failure_stage"] = "verification"
+            out["_ng_failure_message"] = out.get("failure_reason") or out["failure_kind"]
         tagged.append(out)
     return tagged
 

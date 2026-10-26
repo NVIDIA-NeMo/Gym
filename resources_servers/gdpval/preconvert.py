@@ -50,7 +50,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 
 LOGGER = logging.getLogger(__name__)
@@ -63,6 +63,8 @@ LEGACY_OFFICE_EXTENSIONS = {".doc", ".ppt", ".xls"}
 OFFICE_EXTENSIONS = OOXML_EXTENSIONS | LEGACY_OFFICE_EXTENSIONS
 
 DEFAULT_MAX_CONCURRENT = 4
+# Used unless a deployment sets ``libreoffice_command`` (e.g. a container prefix).
+DEFAULT_LIBREOFFICE_COMMAND = ("libreoffice",)
 
 _NS0_ROOT_RE = re.compile(r'<ns0:([A-Za-z_][\w.-]*)\b([^>]*?)\bxmlns:ns0="([^"]+)"')
 _NS0_TAG_RE = re.compile(r"</?ns0:")
@@ -450,11 +452,47 @@ def _safe_basename(name: str) -> str:
     return re.sub(r"\s+", "_", p.stem) + p.suffix
 
 
-def convert_to_pdf(path: Path, output_pdf: Path | None = None) -> tuple[Path, bool, str]:
-    """Convert one file to PDF via host LibreOffice. Returns ``(path, ok, msg)``.
+def libreoffice_pdf_argv(
+    source: Path,
+    outdir: str | Path,
+    profile: Path,
+    libreoffice_command: Sequence[str] | None = None,
+) -> list[str]:
+    """Headless PDF-conversion argv; *libreoffice_command* replaces ``libreoffice``.
+
+    A container command must see *source*, *outdir* and *profile* at these same paths. It gets them as absolute
+    paths: its working directory can differ from the server's, and a relative ``persist_deliverables_dir`` would
+    otherwise resolve elsewhere.
+    """
+    if libreoffice_command:
+        source, outdir = Path(source).absolute(), Path(outdir).absolute()
+    return [
+        *(libreoffice_command or DEFAULT_LIBREOFFICE_COMMAND),
+        "--headless",
+        "--nologo",
+        "--nolockcheck",
+        "--nodefault",
+        "--norestore",
+        f"-env:UserInstallation=file://{profile.as_posix()}",
+        "--convert-to",
+        "pdf",
+        "--outdir",
+        str(outdir),
+        str(source),
+    ]
+
+
+def convert_to_pdf(
+    path: Path,
+    output_pdf: Path | None = None,
+    *,
+    libreoffice_command: Sequence[str] | None = None,
+) -> tuple[Path, bool, str]:
+    """Convert one file to PDF via LibreOffice. Returns ``(path, ok, msg)``.
 
     *output_pdf* overrides the destination: LibreOffice names output after the
     input stem, so same-stem files would otherwise race for one name.
+    *libreoffice_command* replaces the host ``libreoffice`` executable.
     """
     profile_dir = Path(tempfile.mkdtemp(prefix="lo-profile-"))
     stage_dir: Path | None = None
@@ -482,22 +520,10 @@ def convert_to_pdf(path: Path, output_pdf: Path | None = None) -> tuple[Path, bo
 
         def _run_libreoffice(source: Path, outdir: str, profile: Path) -> subprocess.CompletedProcess[str]:
             return subprocess.run(
-                [
-                    "libreoffice",
-                    "--headless",
-                    "--nologo",
-                    "--nolockcheck",
-                    "--nodefault",
-                    "--norestore",
-                    f"-env:UserInstallation=file://{profile.as_posix()}",
-                    "--convert-to",
-                    "pdf",
-                    "--outdir",
-                    outdir,
-                    str(source),
-                ],
+                libreoffice_pdf_argv(source, outdir, profile, libreoffice_command),
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=120,
             )
 
@@ -527,7 +553,7 @@ def convert_to_pdf(path: Path, output_pdf: Path | None = None) -> tuple[Path, bo
                 if retry_pdf.exists():
                     shutil.move(str(retry_pdf), str(final_pdf))
                     return path, True, f"converted {path.name} (after OOXML round-trip retry)"
-                retry_error = f"round-trip retry rc={retry_result.returncode}: {retry_result.stderr.strip()[:300]}"
+                retry_error = f"round-trip retry rc={retry_result.returncode}: {retry_result.stderr.strip()[-300:]}"
             except Exception as exc:
                 retry_error = f"round-trip retry failed: {exc!r}"
 
@@ -536,11 +562,13 @@ def convert_to_pdf(path: Path, output_pdf: Path | None = None) -> tuple[Path, bo
             path,
             False,
             f"libreoffice rc={result.returncode} did not produce {final_pdf.name}: "
-            f"{result.stderr.strip()[:300]}{retry_suffix}",
+            f"{result.stderr.strip()[-300:]}{retry_suffix}",
         )
     except subprocess.TimeoutExpired:
         return path, False, f"timeout converting {path.name}"
     except FileNotFoundError:
+        if libreoffice_command is not None:
+            return path, False, f"libreoffice_command executable not found: {libreoffice_command[0]}"
         return path, False, "libreoffice not found on host PATH (install with: apt install libreoffice)"
     except Exception as exc:
         return path, False, f"error converting {path.name}: {exc!r}"
@@ -589,6 +617,8 @@ def find_convertible_files(root_dir: str | os.PathLike) -> list[tuple[Path, Path
 def preconvert_dir(
     root_dir: str | os.PathLike,
     max_concurrent: int = DEFAULT_MAX_CONCURRENT,
+    *,
+    libreoffice_command: Sequence[str] | None = None,
 ) -> tuple[int, int, list[str]]:
     """Convert every pending Office file under ``root_dir`` to PDF.
 
@@ -620,12 +650,15 @@ def preconvert_dir(
 
     if parallel:
         with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
-            futures = [executor.submit(convert_to_pdf, src, dest) for src, dest in parallel]
+            futures = [
+                executor.submit(convert_to_pdf, src, dest, libreoffice_command=libreoffice_command)
+                for src, dest in parallel
+            ]
             for future in as_completed(futures):
                 _tally(future.result())
 
     for src, dest in serial:
-        _tally(convert_to_pdf(src, dest))
+        _tally(convert_to_pdf(src, dest, libreoffice_command=libreoffice_command))
 
     return success_count, fail_count, error_messages
 
@@ -633,5 +666,7 @@ def preconvert_dir(
 async def preconvert_dir_async(
     root_dir: str | os.PathLike,
     max_concurrent: int = DEFAULT_MAX_CONCURRENT,
+    *,
+    libreoffice_command: Sequence[str] | None = None,
 ) -> tuple[int, int, list[str]]:
-    return await asyncio.to_thread(preconvert_dir, root_dir, max_concurrent)
+    return await asyncio.to_thread(preconvert_dir, root_dir, max_concurrent, libreoffice_command=libreoffice_command)

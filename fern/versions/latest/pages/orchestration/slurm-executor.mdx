@@ -9,13 +9,13 @@ The Slurm executor is the only executor today. It targets clusters with [Pyxis](
 ## What the executor needs
 
 - **On the machine you submit from**, when `compute.<name>.hostname` is set to a different machine: `ssh` and `rsync`. Authentication must work without prompts (the connection runs with `BatchMode=yes`, so use keys or an agent) and unknown host keys are accepted on first contact (`StrictHostKeyChecking=accept-new`). Gym opens one SSH master connection and reuses it for the whole submit.
-- **On the cluster login node**: `sbatch`, plus `sacct` if a benchmark is [resumable](/orchestration/how-to/resumable-runs).
+- **On the cluster login node**: `sbatch`, plus `sacct` and `squeue` (with `--me`, Slurm 20.11 or later) if a benchmark is [resumable](/orchestration/how-to/resumable-runs).
 - **On the compute nodes**: Pyxis, and network access to pull container images and, when `gym_install` is used, to clone the repository and install `uv`.
 - **When `hostname` is unset, or equals the current machine's hostname**: nothing is copied over SSH. Commands run locally and files are copied locally. Use this when you submit from the login node.
 
 ## Submission sequence
 
-1. Validate benchmark names and, when the collector is on, check its destination, Gym telemetry settings, and token. These checks run before `--dry-run` prints anything.
+1. Validate benchmark names and, when the collector is on, check its Gym telemetry settings and resolve its token. A missing or empty token disables remote export with a warning; destination settings are required only when remote export remains enabled. These checks run before `--dry-run` prints anything.
 2. Allocate the submission identity: `gym-job-<UTC timestamp>-<6 hex>`, which is also the run directory's name. The random suffix keeps two submits in the same second from sharing a directory, which would otherwise let the copy step erase the first one's scripts.
 3. Render one script per benchmark and stage it locally, in a temporary directory, with its `logs/` and `artifacts/` directories.
 4. Open the connection and check that every mount source path exists (see [Troubleshooting](/orchestration/troubleshooting#a-mount-source-does-not-exist)).
@@ -108,4 +108,4 @@ For anything that spans nodes or is pinned, the script resolves the allocation's
 
 ## Dry-run output
 
-`--dry-run` prints `[dry-run] remote run dir: <path>` and then, for each benchmark, the full script between `=` rules. With the collector on it also prints that benchmark's rendered `otel/collector.yaml`. It does not stage, copy, or queue anything and writes no record. Because the collector checks run first, a dry run with the collector enabled still needs `otel.endpoint`, `otel.service_name`, and the token variable.
+`--dry-run` prints `[dry-run] remote run dir: <path>` and then, for each benchmark, the full script between `=` rules. With the collector on it also prints that benchmark's rendered `otel/collector.yaml`. It does not stage, copy, or queue anything and writes no record. These checks also apply to dry runs: remote export needs `otel.endpoint`, `otel.service_name`, and the token variable. A missing or empty token switches the dry run to local-only collection with a warning.

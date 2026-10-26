@@ -45,7 +45,7 @@ gives every root the job's trace id, so both of those still produce one trace pe
 | `startup` | `gym.startup`, `gym.startup.server`, `gym.server.startup`, `gym.server.startup.worker` and one child span per stage | The supervisor and every server process, once per run |
 | `server` | `GET /...`, `POST /...` | FastAPI auto-instrumentation on every server |
 | `http_client` | `HTTP POST`, `HTTP GET` | `server_utils.request()`, once per outbound call |
-| `rollout` | `gym.rollout.dispatch`, `gym.rollout` | The rollout-collection driver, once per dispatch (the root of the rollout's trace), and the agent server's `/run` endpoint |
+| `rollout` | `gym.rollout.dispatch`, `gym.rollout.health`, `gym.rollout` | The rollout-collection driver, once per dispatch (the root of the rollout's trace) and once per health-evaluated rollout (a child of the dispatch), and the agent server's `/run` endpoint |
 | `agent` | `gym.agent.responses` | The agent server's `/v1/responses` endpoint |
 | `model_call` | `gym.model.chat_completions`, `gym.model.responses`, `gym.model.messages` | Model servers |
 | `verify` | `gym.verify` | Resources servers' `/verify` endpoint |

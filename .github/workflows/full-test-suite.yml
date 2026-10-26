@@ -84,7 +84,10 @@ jobs:
 
   server-suite:
     name: Server suite (shard ${{ matrix.shard }})
-    runs-on: ubuntu-latest
+    runs-on: nemo-ci-aws-cpu-4-16
+    env:
+      NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
+      NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
     strategy:
       fail-fast: false
       matrix:
@@ -110,12 +113,17 @@ jobs:
         run: |
           export UV_CACHE_DIR="$HOME/.cache/uv"
           echo "UV_CACHE_DIR=$UV_CACHE_DIR" >> "$GITHUB_ENV"
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends git curl ca-certificates
+          bash scripts/ci/install_test_dependencies.sh
           curl -LsSf "$UV_INSTALL_URL" | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          uv --version
           uv venv
           source .venv/bin/activate
           uv sync --extra dev
+
+      - name: Check shared test-data inventory
+        run: python3 scripts/ci/check_test_data.py --nltk-cache "$HOME/.cache/gym-test-data"
 
       - name: Server tests (shard ${{ matrix.shard }}/${{ env.NUM_SHARDS }})
         run: |

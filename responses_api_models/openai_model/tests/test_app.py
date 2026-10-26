@@ -509,6 +509,37 @@ class TestApp:
         assert "reasoning" not in sent_types
         assert "message" in sent_types
 
+    async def test_embeddings(self) -> None:
+        server = self._setup_server()
+        client = TestClient(server.setup_webserver())
+
+        # A minimal OpenAI-compatible reply: base64 vectors, no usage or object fields.
+        provider_json = {"data": [{"embedding": "AACAPwAAAEA=", "index": 0}], "model": "dummy_model"}
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_embeddings = AsyncMock(return_value=provider_json)
+
+        response = client.post(
+            "/v1/embeddings",
+            json={"input": "hello world", "model": "override_model", "encoding_format": "base64"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == provider_json
+        server._client.create_embeddings.assert_awaited_once_with(
+            input="hello world", model="dummy_model", encoding_format="base64"
+        )
+
+    async def test_embeddings_retry_through_upstream_policy(self) -> None:
+        server = self._setup_server(
+            upstream_max_num_tries=1,
+            upstream_retry_policy={"max_attempts": 2, "backoff_initial_seconds": 0},
+        )
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_embeddings = AsyncMock(side_effect=[TimeoutError("transient"), {"data": []}])
+
+        assert await server.embeddings({"input": "hi"}) == {"data": []}
+        assert server._client.create_embeddings.await_count == 2
+
     @pytest.mark.parametrize("replacement, expected_effort", [("minimal", "minimal"), ("low", "low"), (None, "none")])
     async def test_responses_reasoning_effort_none_replacement_is_configurable(
         self, replacement, expected_effort
@@ -574,6 +605,31 @@ class TestApp:
             }
         assert body.input[0].type == "reasoning"
         assert response_data["reasoning"]["effort"] == "none"
+
+    async def test_embeddings_extra_body_request_wins_and_config_not_mutated(self) -> None:
+        extra_body = {"dimensions": 256, "truncate": "END"}
+        server = self._setup_server(extra_body=dict(extra_body))
+        client = TestClient(server.setup_webserver())
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_embeddings = AsyncMock(
+            return_value={
+                "data": [{"embedding": [0.0], "index": 0, "object": "embedding"}],
+                "model": "dummy_model",
+                "object": "list",
+                "usage": {"prompt_tokens": 1, "total_tokens": 1},
+            }
+        )
+
+        response = client.post("/v1/embeddings", json={"input": ["a", "b"], "dimensions": 64})
+
+        assert response.status_code == 200
+        assert server._client.create_embeddings.await_args.kwargs == {
+            "input": ["a", "b"],
+            "dimensions": 64,
+            "truncate": "END",
+            "model": "dummy_model",
+        }
+        assert server.config.extra_body == extra_body
 
     def test_semaphore_disabled_by_default(self) -> None:
         server = self._setup_server()

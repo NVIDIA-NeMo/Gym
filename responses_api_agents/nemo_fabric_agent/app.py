@@ -3,6 +3,8 @@
 
 import json
 import logging
+import os
+import sys
 import tempfile
 from asyncio import Semaphore
 from contextlib import nullcontext
@@ -454,6 +456,9 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                 mcp_servers=mcp_servers or {},
                 skills=_skill_paths(skills_path),
             )
+            # Fabric otherwise starts Python adapters on VIRTUAL_ENV's interpreter, which in R2E-style task images is
+            # the repo's venv and lacks the adapter. This agent's interpreter has the adapters installed.
+            os.environ.setdefault("ADAPTER_PYTHON", sys.executable)
             result = await Fabric().run(
                 fabric_config,
                 base_dir=workspace,

@@ -19,6 +19,7 @@ ioi26_simple_agent:
           jsonl_fpath: benchmarks/ioi26/data/ioi26_benchmark.jsonl
           prompt_config: benchmarks/prompts/generic/default.yaml
           prepare_script: benchmarks/ioi26/prepare.py
+          prepare_dependencies: [pikepdf]
           num_repeats: 50
 
 ioi26_environment_server:

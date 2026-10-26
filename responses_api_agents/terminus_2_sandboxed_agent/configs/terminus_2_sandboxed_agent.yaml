@@ -3,6 +3,9 @@ terminus_2_sandboxed_agent:
     terminus_2_sandboxed_agent:
       entrypoint: app.py
       num_workers: 4
+      # Left unset so `--agent-type terminus_2_sandboxed_agent` composes this harness onto a benchmark's
+      # agent. The Harbor run config sets it to null on its generated instance: episode sessions get their
+      # sandbox from the environment server and only the legacy /run route needs a resources server.
       resources_server:
         type: resources_servers
         name: ???

@@ -168,6 +168,21 @@ class TestOpenAIUtils:
         logged = "Request kwargs:" in capsys.readouterr().out
         assert logged is debug_enabled
 
+    async def test_create_embeddings_posts_to_embeddings_url(self, monkeypatch) -> None:
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+        response = SimpleNamespace(ok=True)
+        request = AsyncMock(return_value=response)
+        monkeypatch.setattr(client, "_request", request)
+        monkeypatch.setattr(client, "_raise_for_status", AsyncMock())
+        monkeypatch.setattr(openai_utils_module, "get_response_json", AsyncMock(return_value={"data": []}))
+
+        result = await client.create_embeddings(model="m", input="hi")
+
+        assert result == {"data": []}
+        request.assert_awaited_once_with(
+            method="POST", url="https://example.com/v1/embeddings", json={"model": "m", "input": "hi"}
+        )
+
     async def test_explicit_attempt_cap_reaches_low_level_transport(
         self,
         monkeypatch,
@@ -2581,7 +2596,7 @@ def test_duplicate_type_tags_are_documented() -> None:
     They also make an unrecognized item report errors from every union member.
     """
     duplicates = {tag for tag, owners in GYM_INPUT_TAG_OWNERS.items() if len(owners) > 1}
-    assert duplicates == {"message", "function_call", "reasoning"}, (
+    assert duplicates == {"message", "function_call", "custom_tool_call", "reasoning"}, (
         f"duplicate type tags changed: {sorted(duplicates)}. Each duplicate widens the error "
         f"report for an unrecognised item; update this test if the change is intended."
     )

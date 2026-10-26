@@ -171,6 +171,85 @@ class TestApp:
         )
         self._run_verify_test(real_request, False, 0.0, [False])
 
+    def _create_counting_composition_request(self, n_sent, n_words, response_content):
+        """Helper to create a count:counting_composition request with the instruction text it is graded against."""
+        return self._create_real_request(
+            instruction_ids=["count:counting_composition"],
+            prompt=(
+                "Write 3 paragraphs, delimited by the markdown divider: * * *, "
+                f"with exactly {n_sent} sentences each, with exactly {n_words} words in each sentence."
+            ),
+            kwargs=[{"n_sent": n_sent, "n_words": n_words}],
+            response_content=response_content,
+        )
+
+    @pytest.mark.parametrize(
+        "n_sent, n_words, response_content",
+        [
+            pytest.param(2, 2, "\n* * *\n".join(["Cats sleep. Dogs run."] * 3), id="divider-from-instruction"),
+            pytest.param(2, 2, "\n* * *\n".join(["Cats, sleep! Dogs run?"] * 3), id="punctuation-is-not-a-word"),
+            pytest.param(
+                3,
+                3,
+                "\n\n* * *\n\n".join(["Cats sleep soundly. Dogs run fast. Birds sing loudly."] * 3),
+                id="blank-lines-around-divider",
+            ),
+            pytest.param(
+                2,
+                2,
+                "Cats sleep. Dogs run.\r\n  * * *  \r\nBirds sing. Fish swim.\r\n* * *\r\nCows graze. Owls hoot.",
+                id="crlf-and-padded-divider",
+            ),
+            pytest.param(
+                2,
+                2,
+                "* * *\n" + "\n* * *\n".join(["Cats sleep. Dogs run."] * 3) + "\n* * *",
+                id="outer-dividers",
+            ),
+        ],
+    )
+    def test_counting_composition_positive(self, n_sent, n_words, response_content):
+        """Test count:counting_composition instruction - should pass when the response follows it."""
+        real_request = self._create_counting_composition_request(n_sent, n_words, response_content)
+        self._run_verify_test(real_request, True, 1.0, [True])
+
+    @pytest.mark.parametrize(
+        "response_content",
+        [
+            # The instruction names the spaced "* * *" divider; "***" is what paragraphs:paragraphs asks for.
+            pytest.param("\n***\n".join(["Cats sleep. Dogs run."] * 3), id="unspaced-divider"),
+            pytest.param("\n***\n".join(["Sleep. Run."] * 3), id="unspaced-divider-one-word-sentences"),
+            pytest.param("\n* * *\n".join(["Sleep. Run."] * 3), id="one-word-sentences"),
+            pytest.param("\n* * *\n".join(["Cats sleep soundly. Dogs run."] * 3), id="three-word-sentence"),
+            pytest.param("\n* * *\n".join(["Cats sleep. Dogs run. Birds sing."] * 3), id="three-sentences"),
+            pytest.param("\n* * *\n".join(["Cats sleep. Dogs run."] * 2), id="two-paragraphs"),
+            pytest.param("\n* * *\n".join(["Cats sleep. Dogs run."] * 4), id="four-paragraphs"),
+            pytest.param(" * * * ".join(["Cats sleep. Dogs run."] * 3), id="inline-divider"),
+            pytest.param(
+                "Cats sleep. Dogs run.\n* * *\n\n* * *\nCats sleep. Dogs run.\n* * *\nCats sleep. Dogs run.",
+                id="empty-middle-paragraph",
+            ),
+        ],
+    )
+    def test_counting_composition_negative(self, response_content):
+        """Test count:counting_composition instruction (2 sentences of 2 words) - should fail."""
+        real_request = self._create_counting_composition_request(2, 2, response_content)
+        self._run_verify_test(real_request, False, 0.0, [False])
+
+    def test_only_counting_composition_checker_is_replaced(self):
+        """Only count:counting_composition is overridden; every other instruction uses the upstream checker."""
+        from verifiable_instructions import instructions_registry
+
+        from resources_servers.instruction_following.app import INSTRUCTION_DICT
+        from resources_servers.instruction_following.counting_composition import CountingCompositionChecker
+
+        upstream = instructions_registry.INSTRUCTION_DICT
+        assert INSTRUCTION_DICT.keys() == upstream.keys()
+        assert {key for key, cls in INSTRUCTION_DICT.items() if cls is not upstream[key]} == {
+            "count:counting_composition"
+        }
+        assert INSTRUCTION_DICT["count:counting_composition"] is CountingCompositionChecker
+
     def test_multiple_constraints_positive(self):
         """Test multiple constraints together - should pass both."""
         real_request = self._create_real_request(

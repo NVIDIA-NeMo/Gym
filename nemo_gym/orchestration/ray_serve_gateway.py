@@ -208,6 +208,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # Covers the single-node path; the multi-node path exports this before `ray start` runs.
     os.environ.setdefault("RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S", "1.0")
+    os.environ.setdefault("RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING", "0")
     try:
         ray.init(address="auto")
     except ConnectionError:

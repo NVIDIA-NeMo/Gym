@@ -609,9 +609,12 @@ class TestArenaResourcesServer:
         # No judge calls should have been made
         server.server_client.post.assert_not_called()
 
-    async def test_verify_self_comparison_from_response_model_skips_judge(self, server: ArenaResourcesServer):
-        server.config.style_control_method = "reference_length"
+    @mark.parametrize("category", ["lmarena_v3", "vision_arena_v1"])
+    async def test_verify_self_comparison_from_response_model_skips_judge(
+        self, server: ArenaResourcesServer, category
+    ):
         request = self._make_verify_request("Paris.", baseline_model="test-model")
+        request.category = category
 
         result = await server.verify(request)
 
@@ -624,6 +627,7 @@ class TestArenaResourcesServer:
         server.config.style_control_method = "reference_length"
         server.config.policy_model_aliases = ["policy-alias"]
         request = self._make_verify_request("Paris.", baseline_model="policy-alias")
+        request.category = "lmarena_v3"
 
         result = await server.verify(request)
 
@@ -634,6 +638,7 @@ class TestArenaResourcesServer:
         server.config.style_control_method = "reference_length"
         self._setup_judge_responses(server, ["[[A=B]]", "[[A=B]]"])
         request = self._make_verify_request("Paris.", baseline_model="different-model")
+        request.category = "lmarena_v3"
 
         result = await server.verify(request)
 
@@ -644,6 +649,7 @@ class TestArenaResourcesServer:
         server.config.style_control_method = "reference_length"
         self._setup_judge_responses(server, ["[[A=B]]", "[[A=B]]"])
         request = self._make_verify_request("Paris.", baseline_model="meta-llama/Llama-3.1-70B-Instruct")
+        request.category = "lmarena_v3"
         request.response = request.response.model_copy(update={"model": "my-finetunes/Llama-3.1-70B-Instruct"})
 
         result = await server.verify(request)
@@ -669,9 +675,12 @@ class TestArenaResourcesServer:
         # No judge calls should have been made for an empty/whitespace response
         server.server_client.post.assert_not_called()
 
-    async def test_verify_v3_max_token_response_returns_zero_without_judging(self, server: ArenaResourcesServer):
-        server.config.style_control_method = "reference_length"
+    @mark.parametrize("category", ["lmarena_v3", "vision_arena_v1"])
+    async def test_verify_max_token_response_returns_zero_without_judging(
+        self, server: ArenaResourcesServer, category
+    ):
         request = self._make_verify_request("Truncated answer")
+        request.category = category
         request.response.incomplete_details = IncompleteDetails(reason="max_output_tokens")
 
         result = await server.verify(request)
@@ -680,6 +689,17 @@ class TestArenaResourcesServer:
         assert result.policy_answer == "Truncated answer"
         assert result.games is None
         server.server_client.post.assert_not_called()
+
+    async def test_verify_v2_truncation_is_not_zeroed_by_style_setting(self, server: ArenaResourcesServer):
+        server.config.style_control_method = "none"
+        request = self._make_verify_request("Truncated answer")
+        request.response.incomplete_details = IncompleteDetails(reason="max_output_tokens")
+        self._setup_judge_responses(server, ["[[A=B]]", "[[A=B]]"])
+
+        result = await server.verify(request)
+
+        assert result.reward == approx(0.5)
+        assert len(result.games) == 2
 
     async def test_verify_policy_wins_both_rounds(self, server: ArenaResourcesServer):
         # Game 1 (policy=A): [[A>B]] → score 1.0
@@ -965,6 +985,74 @@ class TestArenaResourcesServer:
         assert "Answer B" in messages[1].content
 
     # ── compute_metrics() ─────────────────────────────────────────────────────
+
+    async def test_verify_sends_images_to_both_judge_orderings(self, server: ArenaResourcesServer):
+        request = self._make_verify_request("The object is red.")
+        request.category = "vision_arena_v1"
+        image = {"type": "input_image", "image_url": "data:image/png;base64,dGVzdA==", "detail": "auto"}
+        request.responses_create_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+            {"input": [{"role": "user", "content": [{"type": "input_text", "text": request.question}, image]}]}
+        )
+        self._setup_judge_responses(server, ["[[A >> B]]", "[[B >> A]]"])
+
+        result = await server.verify(request)
+
+        assert result.reward == 1.0
+        assert len(result.games) == 2
+        for call in server.server_client.post.call_args_list:
+            content = call.kwargs["json"].model_dump()["input"][1]["content"]
+            assert content[1]["image_url"] == image["image_url"]
+            assert content[0]["type"] == "input_text"
+        first = result.games[0].responses_create_params.input[1].content[0]["text"]
+        second = result.games[1].responses_create_params.input[1].content[0]["text"]
+        assert "A: The object is red." in first
+        assert "B: The object is red." in second
+
+    async def test_vision_judge_requires_image(self, server: ArenaResourcesServer):
+        request = self._make_verify_request("Answer")
+        request.category = "vision_arena_v1"
+        with raises(ValueError, match="requires prompt images"):
+            await server.verify(request)
+        server.server_client.post.assert_not_called()
+
+    def test_no_style_control_uses_raw_scores(self, server: ArenaResourcesServer):
+        server.config.style_control_method = "none"
+        server._metrics = ArenaMetrics(server.config)
+        rows = [[self._rollout("[[A>>B]]", "[[B>>A]]", category="vision_arena_v1")]]
+        metrics = server.compute_metrics(rows)
+        assert metrics["win_rate"] == metrics["win_rate_no_SC"] == 1.0
+        assert metrics["win_rate_ci95_lower"] == metrics["win_rate_no_SC_ci95_lower"]
+        assert "verbosity_acceptance_rate" not in metrics
+
+    def test_vision_truncation_scores_zero(self, server: ArenaResourcesServer):
+        server.config.style_control_method = "none"
+        server._metrics = ArenaMetrics(server.config)
+        row = self._rollout("[[A>>B]]", "[[B>>A]]", category="vision_arena_v1")
+        row.update(games=None, response={"incomplete_details": {"reason": "max_output_tokens"}, "usage": {}})
+        metrics = server.compute_metrics([[row]])
+        assert metrics["win_rate"] == 0.0
+        assert metrics["rollout_failure_rate"] == 0.0
+        assert metrics["max_token_reached_rate"] == 1.0
+
+    @mark.parametrize("outcome", ["tie", "both_bad", "truncated", "reasoning_only"])
+    def test_vision_report_without_slices(self, server: ArenaResourcesServer, outcome):
+        from resources_servers.arena.scripts.compute_rollout_scores import print_slice_table
+
+        server.config.style_control_method = "none"
+        server._metrics = ArenaMetrics(server.config)
+        verdict = "[[BB]]" if outcome == "both_bad" else "[[A=B]]"
+        row = self._rollout(verdict, verdict, category="vision_arena_v1")
+        expected = 0.5
+        if outcome == "truncated":
+            row.update(games=None, response={"incomplete_details": {"reason": "max_output_tokens"}, "usage": {}})
+            expected = 0.0
+        elif outcome == "reasoning_only":
+            row.update(games=None, policy_answer=None, response={"status": "completed"})
+            expected = 0.0
+        metrics = server.compute_metrics([[row]])
+        assert metrics["arena/overall/win_rate"] == metrics["arena/overall/win_rate_no_SC"] == expected
+        assert metrics["total_prompts"] == 1
+        print_slice_table("Arena", metrics, "arena", ("overall",))
 
     def test_compute_metrics_empty(self, server: ArenaResourcesServer):
         assert server.compute_metrics([]) == {}
@@ -1291,6 +1379,7 @@ class TestArenaResourcesServer:
         reference_server = ArenaResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
         win = self._rollout("[[A>B]]", "[[B>A]]", reward=1.0)
+        win["category"] = "lmarena_v3"
         win["style_reference_token_count"] = 10
         truncated = {
             "reward": 0.0,
@@ -1301,7 +1390,7 @@ class TestArenaResourcesServer:
             "policy_answer": "Truncated answer",
             "policy_reasoning": "",
             "baseline_answer": "Baseline answer",
-            "category": "lmarena_v2",
+            "category": "lmarena_v3",
             "style_reference_token_count": 10,
             "games": None,
         }
@@ -1325,7 +1414,12 @@ class TestArenaResourcesServer:
         assert metrics["win_rate"] == approx(1 / 4, abs=0.05)
         assert metrics["verbosity_acceptance_rate"] == approx(1 / 4)
 
-    def test_compute_metrics_v2_max_token_response_remains_failure(self, server: ArenaResourcesServer):
+    @mark.parametrize("style_control_method", ["bradley_terry", "none"])
+    def test_compute_metrics_v2_max_token_response_remains_failure(
+        self, server: ArenaResourcesServer, style_control_method
+    ):
+        server.config.style_control_method = style_control_method
+        server._metrics = ArenaMetrics(server.config)
         server.config.max_rollout_failure_rate = 1.0
         truncated = {
             "reward": 0.0,

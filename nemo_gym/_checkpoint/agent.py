@@ -40,6 +40,7 @@ from typing import Any, Literal, Optional, Protocol
 from pydantic import JsonValue
 
 from nemo_gym._checkpoint.control import (
+    PARSED_JSON_CONTEXT,
     CheckpointParticipant,
     CheckpointRecord,
     CheckpointRequest,
@@ -48,7 +49,7 @@ from nemo_gym._checkpoint.control import (
     next_attempt,
 )
 from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, RolloutIdRequiredError, StaleAttemptError
-from nemo_gym._checkpoint.steps import Boundary, EpisodeSteps, StepMode
+from nemo_gym._checkpoint.steps import Boundary, EpisodeSteps, StepType
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.rollout_correlation import RolloutContextMiddleware, maybe_rollout_id_from_run_body
 
@@ -69,7 +70,7 @@ class AgentSessionRecord(CheckpointRecord):
 class ActivationOutOfOrderError(ControlError):
     """An activation index that is neither the session's last completed activation nor the next one."""
 
-    code = "activation_out_of_order"
+    code = "checkpoint_activation_out_of_order"
 
 
 class LegacyRun:
@@ -88,8 +89,8 @@ class LegacyRun:
     async def boundary(self, state: Boundary) -> None:
         await self._steps.boundary(self._key, state)
 
-    def step(self, mode: StepMode) -> AbstractAsyncContextManager[None]:
-        return self._steps.step(self._key, mode)
+    def step(self, step_type: StepType) -> AbstractAsyncContextManager[None]:
+        return self._steps.step(self._key, step_type)
 
     async def mark_restart(self) -> None:
         """A server this episode uses cannot capture its part, such as a restart-only resources server:
@@ -138,7 +139,7 @@ class _Session:
     task: Optional[asyncio.Task] = None
     resume: asyncio.Event = field(default_factory=asyncio.Event)
     # Installed by a restore and not activated since: a commit that no longer continues its episode retires it.
-    restored_pending: bool = False
+    unclaimed: bool = False
     # Set by retire, which keeps the session tracked until its activation has stopped.
     retired: bool = False
     # Set by close, which keeps the session tracked until its activation has stopped.
@@ -155,7 +156,7 @@ class Activation:
         self._participant = participant
         self._session = session
         self.continuation, session.continuation = session.continuation, None
-        session.restored_pending = False
+        session.unclaimed = False
 
     async def boundary(self, snapshot: BoundarySnapshot) -> None:
         """Record a complete loop step and park here if a checkpoint asked for it.
@@ -196,6 +197,30 @@ class AgentSessionParticipant(CheckpointParticipant):
         self._restart_calls = _RestartCalls(self.notify)
         self._open = asyncio.Event()
         self._open.set()
+
+    @staticmethod
+    def claim_key(record: CheckpointRecord) -> Optional[str]:
+        # An agent's own /run episode lives inside its /run; an agent session spans requests.
+        return record.session_key if record.episode is not None else None
+
+    @staticmethod
+    def record_identity(record: CheckpointRecord) -> Optional[str]:
+        # The agent session ID, or an agent's own /run episode's key.
+        # Several episodes can share one cookie, such as two /run episodes sent with one cookie jar.
+        return record.session_key
+
+    def unclaimed_sessions(self) -> list[str]:
+        """Restored sessions no activation or request has used yet, by session key."""
+        return sorted(key for key, session in self._sessions.items() if session.unclaimed)
+
+    async def delete_unclaimed_session(self, identity: str) -> None:
+        """Free a restored session no request has used, without refusing anything later."""
+        session = self._sessions.get(identity)
+        if session is None or not session.unclaimed:
+            return
+        await self.hooks.retire_agent_session(session.key)
+        self._remove(session)
+        self._restored_episodes.pop(session.key, None)
 
     # -- sessions and activations ---------------------------------------------------------------
 
@@ -306,16 +331,59 @@ class AgentSessionParticipant(CheckpointParticipant):
     @asynccontextmanager
     async def legacy_run(self, session_key: str, episode_id: EpisodeId) -> AsyncIterator[LegacyRun]:
         """Hold one legacy ``/run`` episode and its turn-loop session."""
-        self.open_session(session_key, episode_id)
+        await self._claim(session_key, episode_id)
         session = self._sessions[session_key]
         # This /run claims a restored episode whatever step it continues at, so a commit no longer retires it.
-        session.restored_pending = False
+        session.unclaimed = False
         self.legacy_episodes.begin(session_key, continuation=self._restored_episodes.pop(session_key, None))
         try:
             yield LegacyRun(self.legacy_episodes, session_key)
         finally:
             self._remove(session)
             await self.legacy_episodes.end(session_key)
+
+    async def _claim(self, session_key: str, episode_id: EpisodeId) -> None:
+        """Open the ``/run`` episode's session, taking its restored state from the coordinator if there is any.
+
+        A failure to install or to open the restored session leaves nothing of it in this participant.
+        The agent's installed copy is freed by the claim's teardown, which the claim retries until it succeeds.
+        Only then does the record go back to the coordinator, to be claimed again,
+        so no later checkpoint can find a copy here and another one elsewhere.
+        """
+        if self.claim_restored is None or session_key in self._sessions:
+            self.open_session(session_key, episode_id)
+            return
+        self.retired.check(episode_id)
+        installed = False
+
+        async def tear_down() -> None:
+            if installed:
+                await self.hooks.retire_agent_session(session_key)
+
+        async with self.claim_restored(session_key, teardown=tear_down) as claimed:
+            if claimed is None:
+                self.open_session(session_key, episode_id)
+                return
+            # Read back from storage and parsed from the coordinator's reply: its payloads are JSON.
+            record = AgentSessionRecord.model_validate(claimed, context=PARSED_JSON_CONTEXT)
+            restored = RestoredAgentSession(
+                session_key=session_key, episode_id=next_attempt(record.episode_id), session=record.session
+            )
+            # Registered before the agent's hook runs; until the claim is settled, prepare waits for it.
+            session = _Session(key=session_key, episode_id=restored.episode_id, continuation=record.boundary)
+            self._add(session)
+            self._restored_episodes[session_key] = record.episode
+            try:
+                await self.hooks.restore_agent_sessions([restored])
+                installed = True
+                # Refuses an attempt other than the one the record continues, which leaves the record for that one.
+                self.open_session(session_key, episode_id)
+            except BaseException:
+                # Nothing here awaits, so this happens even if the request is cancelled;
+                # the agent's copy goes in the claim's teardown.
+                self._remove(session)
+                self._restored_episodes.pop(session_key, None)
+                raise
 
     def check_session(self, session_key: str, episode_id: EpisodeId) -> None:
         """Refuse a request of ``episode_id`` for a session that is not open or belongs to another attempt.
@@ -336,13 +404,13 @@ class AgentSessionParticipant(CheckpointParticipant):
             raise StaleAttemptError(f"agent session {session_key!r} belongs to {session.episode_id.capture_key}")
         return session
 
-    def replayed(self, session_key: str, episode_id: EpisodeId) -> None:
-        """Check a request answered with a completed activation's reply, and claim a restored session for it.
+    def answered_from_saved_reply(self, session_key: str, episode_id: EpisodeId) -> None:
+        """Check a re-sent activation answered with its saved reply, and claim a restored session for it.
 
         The reply continues the live episode as an activation would,
         so a later commit that leaves the episode out no longer frees the session.
         """
-        self._session_for(session_key, episode_id).restored_pending = False
+        self._session_for(session_key, episode_id).unclaimed = False
 
     async def wait_activation(self, session_key: str, index: int) -> bool:
         """Wait until the session's running activation ends, if it has ``index``; return whether it had.
@@ -612,7 +680,7 @@ class AgentSessionParticipant(CheckpointParticipant):
                     key=session.session_key,
                     episode_id=session.episode_id,
                     continuation=record.boundary,
-                    restored_pending=True,
+                    unclaimed=True,
                 )
             )
             if record.episode is not None:
@@ -621,8 +689,8 @@ class AgentSessionParticipant(CheckpointParticipant):
     def restore_records(self, records: list[CheckpointRecord]) -> None:
         raise NotImplementedError("agent sessions restore through install(), which awaits the agent's hooks")
 
-    async def restored_pending(self) -> list[EpisodeId]:
-        return [session.episode_id for session in self._sessions.values() if session.restored_pending]
+    async def unclaimed(self) -> list[EpisodeId]:
+        return [session.episode_id for session in self._sessions.values() if session.unclaimed]
 
     def commit_reply(self, records: list[CheckpointRecord]) -> dict[str, Any]:
         # An episode an agent's own /run drives belongs to that /run;
@@ -759,6 +827,13 @@ class RestartOnlyAgentParticipant(CheckpointParticipant):
     def restore_records(self, records: list[CheckpointRecord]) -> None:
         if records:
             raise ControlError("a restart-only agent cannot restore rollouts")
+
+    def unclaimed_sessions(self) -> list[str]:
+        # Nothing of a restart-only agent is ever restored.
+        return []
+
+    async def delete_unclaimed_session(self, identity: str) -> None:
+        pass
 
 
 class _RestartCalls:

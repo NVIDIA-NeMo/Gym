@@ -19,6 +19,7 @@ import pytest
 from aviary.core import Message
 from aviary.dataset_server import TaskDatasetServer
 from aviary.envs.gsm8k import GSM8kDataset, GSM8kDatasetSplit
+from datasets import Dataset
 from fastapi import Request
 from starlette.testclient import TestClient
 
@@ -31,6 +32,20 @@ from resources_servers.aviary.notebook_app import BixBenchDataset, BixBenchResou
 from resources_servers.aviary.schemas import AviaryCloseRequest, AviarySeedSessionRequest, AviaryStepRequest
 
 
+@pytest.fixture
+def gsm8k_data():
+    # Aviary's train split excludes row 0. Keep the real dataset parsing and
+    # calculator environment while avoiding a Hugging Face download in unit tests.
+    dataset = Dataset.from_list(
+        [
+            {"question": "What is 2 + 2?", "answer": "2 + 2 = 4.\n#### 4"},
+            {"question": "What is 1 + 1?", "answer": "1 + 1 = 2.\n#### 2"},
+        ]
+    )
+    with patch("datasets.load_dataset", return_value=dataset):
+        yield
+
+
 class TestGSM8kApp:
     def test_converts_list_content(self) -> None:
         obs = Message(content=[{"type": "text", "text": "hello"}])
@@ -38,7 +53,7 @@ class TestGSM8kApp:
         assert [message.content for message in obs_msg_to_nemo_gym(obs)] == ["hello"]
 
     @pytest.mark.asyncio
-    async def test_server_lifecycle(self) -> None:
+    async def test_server_lifecycle(self, gsm8k_data) -> None:
         # Create the server
         config = AviaryResourcesServerConfig(
             name="",
@@ -128,7 +143,7 @@ class TestNotebookApp:
 
 class TestClientApp:
     @pytest.mark.asyncio
-    async def test_client_server_lifecycle(self) -> None:
+    async def test_client_server_lifecycle(self, gsm8k_data) -> None:
         dataset = GSM8kDataset(GSM8kDatasetSplit.train)
         task_server = TaskDatasetServer(dataset=dataset, port=8042)
 

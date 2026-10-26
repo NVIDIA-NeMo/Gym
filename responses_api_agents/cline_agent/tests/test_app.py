@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+import os
 from functools import partial
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -455,6 +456,18 @@ class TestEnv:
         assert env["CLINE_DATA_DIR"] == str(tmp_path)
         assert env["CLINE_PROVIDER_SETTINGS_PATH"] == str(tmp_path / "settings" / "providers.json")
 
+    def test_auto_update_disabled(self, tmp_path, monkeypatch) -> None:
+        # Cline's self-update would replace the pinned cline_version mid-collection; an ambient
+        # value must not re-enable it, and the server's own environment is left untouched.
+        monkeypatch.setenv("CLINE_NO_AUTO_UPDATE", "0")
+        assert _make_agent()._env(tmp_path)["CLINE_NO_AUTO_UPDATE"] == "1"
+        assert os.environ["CLINE_NO_AUTO_UPDATE"] == "0"
+
+    def test_config_env_can_reenable_auto_update(self, tmp_path) -> None:
+        # config.env is applied last, like for every other key, so an explicit opt-in still wins.
+        env = _make_agent(env={"CLINE_NO_AUTO_UPDATE": "0"})._env(tmp_path)
+        assert env["CLINE_NO_AUTO_UPDATE"] == "0"
+
     def test_command_permissions_serialized(self, tmp_path) -> None:
         agent = _make_agent(command_permissions={"allow": ["python3 *"], "deny": ["sudo *"]})
         env = agent._env(tmp_path)
@@ -517,6 +530,18 @@ class TestModelServer:
         assert expected in auth_argv
         assert "--json" in run_argv
         assert spawn.call_args_list[1].kwargs["env"]["OPENAI_BASE_URL"] == expected
+
+    def test_run_cline_subprocesses_disable_auto_update(self, tmp_path) -> None:
+        # Both `cline auth` and the task arm the updater on exit, so both must carry the opt-out.
+        agent = _make_model_server_agent(model="m", repo_dir=str(tmp_path), workspace_root=str(tmp_path / "ws"))
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        with patch("responses_api_agents.cline_agent.app.asyncio.create_subprocess_exec") as spawn:
+            spawn.return_value = proc
+            asyncio.run(agent._run_cline("fix it", None, "task0-rollout1"))
+        assert spawn.call_count == 2
+        assert [call.kwargs["env"]["CLINE_NO_AUTO_UPDATE"] for call in spawn.call_args_list] == ["1", "1"]
 
     def test_run_cline_skips_auth_without_model_server(self, tmp_path) -> None:
         agent = _make_agent(repo_dir=str(tmp_path), workspace_root=str(tmp_path / "ws"))

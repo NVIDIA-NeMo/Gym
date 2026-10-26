@@ -168,7 +168,7 @@ Before starting, `gym eval reverify` calls `GET /reverify_mode` on each resource
 | --- | --- |
 | `stateless` | Reverification is safe. The verifier is a pure function of `(request body, server config)`. Set `REVERIFY_MODE = ReverifyMode.STATELESS` on your resources server config once you have verified this. |
 | `unsupported` | Reverification is not safe. The verifier reads per-rollout session state that was seeded during the original run and is no longer present. Results would be silently wrong. |
-| `unknown` | The resources server has not declared its reverification behaviour. This is the **default** for all resources servers until explicitly set. Treat it as potentially unsafe. |
+| `unknown` | The resources server has not declared its reverification behavior. This is the **default** for all resources servers until explicitly set. Treat it as potentially unsafe. |
 
 Session-stateful resources servers (for example, those that use cookie-keyed state seeded by `/seed_session`) should report `unsupported`. Resources servers that have not yet been audited for reverification safety report `unknown` (the default).
 

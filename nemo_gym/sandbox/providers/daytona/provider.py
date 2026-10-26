@@ -455,6 +455,15 @@ def _configured_or_extension(spec: SandboxSpec, key: str, configured: Any) -> An
     return configured if value is None else value
 
 
+def _is_root_user(user: str | int | None) -> bool:
+    return user is None or str(user) in ("root", "0")
+
+
+def _requested_user(user: str | int | None) -> str | None:
+    """A spec's default exec user as an os_user name, or ``None`` for root (Daytona's own default)."""
+    return None if _is_root_user(user) else str(user)
+
+
 def _resources_requested(resources: SandboxResources | Mapping[str, Any]) -> bool:
     if isinstance(resources, SandboxResources):
         return any(getattr(resources, field.name) is not None for field in fields(SandboxResources))
@@ -655,6 +664,9 @@ class DaytonaProvider:
         self._operations = DaytonaOperationConfig.from_mapping(operations)
         self._batch = DaytonaBatchConfig.from_mapping(batch)
         self._connection_supplied_keys = _supplied_config_keys(connection, DaytonaConnectionConfig)
+        # The os_user each sandbox this provider created runs as, by sandbox id: a command asking for that
+        # same user needs no switch, which Daytona has no per-command form of.
+        self._os_users: dict[str, str] = {}
         self._daytona: Any | None = None
 
     def _client(self) -> Any:
@@ -720,13 +732,30 @@ class DaytonaProvider:
 
         raise RuntimeError("Daytona operation retry loop did not run")
 
+    def _os_user(self, spec: SandboxSpec) -> str | None:
+        """The os_user a sandbox for ``spec`` is created with: the configured or extension value, else the
+        spec's own default exec user. Daytona selects the user at creation only, so a requested default
+        becomes the sandbox's os_user, and one that conflicts with the configured os_user is refused here,
+        before any task command runs."""
+        os_user = _configured_or_extension(spec, "os_user", self._create.os_user)
+        requested = _requested_user(spec.user)
+        if requested is not None:
+            if os_user is None:
+                os_user = requested
+            elif str(os_user) != requested:
+                raise NotImplementedError(
+                    f"Daytona provider cannot run commands as {spec.user!r}: the sandbox is created for "
+                    f"create.os_user {os_user!r} and Daytona has no per-command user switching"
+                )
+        return None if os_user is None else str(os_user)
+
     def _base_create_kwargs(self, spec: SandboxSpec) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
         if (name := _extension_value(spec, "name")) is not None:
             kwargs["name"] = name
         if (language := _configured_or_extension(spec, "language", self._create.language)) is not None:
             kwargs["language"] = language
-        if (os_user := _configured_or_extension(spec, "os_user", self._create.os_user)) is not None:
+        if (os_user := self._os_user(spec)) is not None:
             kwargs["os_user"] = os_user
         if spec.env:
             kwargs["env_vars"] = spec.env
@@ -834,6 +863,8 @@ class DaytonaProvider:
                 f"Timed out creating Daytona sandbox after {timeout_s:g}s; image={spec.image!r}"
             ) from e
         handle = SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
+        if (os_user := self._os_user(spec)) is not None:
+            self._os_users[handle.sandbox_id] = os_user
         try:
             await self._verify_created_handle(handle)
         except Exception:
@@ -936,13 +967,26 @@ class DaytonaProvider:
     def _command_retry_count(self) -> int:
         return self._operations.command_retries
 
-    @staticmethod
-    def _effective_command(command: str, user: str | int | None) -> str:
-        if user is None or user == "root" or user == 0:
+    def _sandbox_os_user(self, handle: SandboxHandle) -> str | None:
+        """The os_user ``handle``'s sandbox runs as: recorded at create, else the sandbox's own ``user`` (a
+        connected sandbox), else the configured ``create.os_user``."""
+        recorded = self._os_users.get(handle.sandbox_id)
+        if recorded is not None:
+            return recorded
+        own = getattr(handle.raw, "user", None)
+        if isinstance(own, str) and own:
+            return own
+        return None if self._create.os_user is None else str(self._create.os_user)
+
+    def _effective_command(self, command: str, user: str | int | None, handle: SandboxHandle) -> str:
+        """``command`` as Daytona runs it: unchanged for root and for the user the sandbox already runs as (its
+        os_user), which needs no switch; any other user is refused, as Daytona has no per-command form."""
+        if _is_root_user(user) or str(user) == self._sandbox_os_user(handle):
             return command
         raise NotImplementedError(
-            "Daytona provider does not support per-command user switching. "
-            "Configure create.os_user for sandbox-level user selection until Daytona exposes native per-command users."
+            f"Daytona provider does not support per-command user switching (asked for {user!r}, the sandbox runs "
+            f"as {self._sandbox_os_user(handle) or 'root'!r}). Configure create.os_user for sandbox-level user "
+            "selection until Daytona exposes native per-command users."
         )
 
     async def _exec(
@@ -956,10 +1000,11 @@ class DaytonaProvider:
         user: str | int | None = None,
         retries: int | None = None,
     ) -> SandboxExecResult:
+        effective_command = self._effective_command(command, user, handle)  # refused before any retry loop
         try:
             response = await self._await_operation(
                 lambda: handle.raw.process.exec(
-                    self._effective_command(command, user),
+                    effective_command,
                     cwd=cwd,
                     env=env,
                     timeout=timeout_s,

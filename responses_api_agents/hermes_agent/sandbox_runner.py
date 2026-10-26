@@ -158,6 +158,13 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
         signal.signal(signal.SIGTERM, previous_handler)
     if stop_reason is not None and not result.get("failed"):
         result = {**result, "completed": False, "interrupted": True, "stop_reason": stop_reason}
+    # Hermes omits aggregates on early returns. Preserve its actual counters, including zero
+    # before any completed call, without manufacturing usage absent from the runtime.
+    result = dict(result)
+    for field in ("prompt_tokens", "completion_tokens", "cache_read_tokens", "reasoning_tokens"):
+        count = getattr(agent, f"session_{field}", None)
+        if field not in result and type(count) is int and count >= 0:
+            result[field] = count
     return {
         "observations": observer.finish(result, error),
         "result": result,

@@ -73,7 +73,7 @@ class ArenaMetrics:
                 raise ValueError("style_length_ratio_range must satisfy 0 <= lower < upper")
             if (config.style_short_reference_max_tokens is None) != (config.style_short_response_max_tokens is None):
                 raise ValueError("both short-reference limits must be set or both must be null")
-        else:
+        elif config.style_control_method != "none":
             raise NotImplementedError(f"Unknown style_control_method: {config.style_control_method}")
 
     def compute(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
@@ -133,7 +133,8 @@ class ArenaMetrics:
                 reasoning_only = bool(reasoning) and not response
                 reasoning_only_response_rollouts += int(reasoning_only)
                 incomplete_reason = ((rollout.get("response") or {}).get("incomplete_details") or {}).get("reason")
-                if self.config.style_control_method == "reference_length" and (
+                # LMArena v3 and Vision Arena score generation-limit and reasoning-only outputs zero.
+                if rollout.get("category") in {"lmarena_v3", "vision_arena_v1"} and (
                     incomplete_reason == "max_output_tokens" or (incomplete_reason is None and reasoning_only)
                 ):
                     if incomplete_reason == "max_output_tokens":
@@ -146,7 +147,7 @@ class ArenaMetrics:
                     if not category:
                         raise ValueError("category is required for scoring")
 
-                    # These unjudged v3 rollouts (generation limit or reasoning only) score zero
+                    # These unjudged rollouts (generation limit or reasoning only) score zero
                     # and do not count as rollout failures.
                     scores = np.zeros(2)
                     scores_by_category[category].append(scores)
@@ -234,7 +235,7 @@ class ArenaMetrics:
                         lmarena_v2_prompt_offsets.append(repeated_offsets)
                     for key in slice_keys:
                         slice_offsets[key].append(repeated_offsets)
-                else:
+                elif self.config.style_control_method != "none":
                     raise NotImplementedError(f"Unknown style_control_method: {self.config.style_control_method}")
 
         # Token statistics are also available for generation-only runs.
@@ -260,7 +261,8 @@ class ArenaMetrics:
                 "Check gen_answer and gen_judgment API errors."
             )
 
-        if self.config.style_control_method == "reference_length":
+        # Report generation-limit rates for LMArena v3 and Vision Arena only.
+        if any(r.get("category") in {"lmarena_v3", "vision_arena_v1"} for task in tasks for r in task):
             metrics["max_token_reached_rate"] = max_token_reached_rollouts / total_rollouts
             metrics["context_window_exceeded_rate"] = context_window_exceeded_rollouts / total_rollouts
         metrics.update(
@@ -277,6 +279,11 @@ class ArenaMetrics:
             return metrics
 
         no_sc, no_sc_lower, no_sc_upper = self._bootstrap(scores_by_category)
+        if self.config.style_control_method == "none":
+            metrics["total_prompts"] = len(tasks)
+            # VisionArena reports overall scores even without metadata or decisive slices.
+            metrics["arena/overall/win_rate"] = no_sc
+            metrics["arena/overall/win_rate_no_SC"] = no_sc
         metrics.update(
             win_rate_no_SC=no_sc,
             win_rate_no_SC_ci95_lower=no_sc_lower,
@@ -288,6 +295,8 @@ class ArenaMetrics:
             controlled, controlled_lower, controlled_upper = self._bootstrap(controlled_scores_by_category)
         elif self.config.style_control_method == "bradley_terry":
             controlled, controlled_lower, controlled_upper = self._bootstrap(scores_by_category, offsets_by_category)
+        elif self.config.style_control_method == "none":
+            controlled, controlled_lower, controlled_upper = no_sc, no_sc_lower, no_sc_upper
         else:
             raise NotImplementedError(f"Unknown style_control_method: {self.config.style_control_method}")
         metrics.update(
@@ -305,6 +314,8 @@ class ArenaMetrics:
                 controlled_lmarena_v2_score = self._bootstrap_point(
                     lmarena_v2_prompt_scores, lmarena_v2_prompt_offsets
                 )
+            elif self.config.style_control_method == "none":
+                controlled_lmarena_v2_score = metrics["win_rate_no_SC_lmarena_v2_prompts"]
             else:
                 raise NotImplementedError(f"Unknown style_control_method: {self.config.style_control_method}")
             metrics["win_rate_lmarena_v2_prompts"] = controlled_lmarena_v2_score
@@ -461,6 +472,8 @@ class ArenaMetrics:
                 controlled = self._bootstrap_point(controlled_scores[key])
             elif self.config.style_control_method == "bradley_terry":
                 controlled = self._bootstrap_point(scores[key], offsets[key])
+            elif self.config.style_control_method == "none":
+                controlled = no_sc
             else:
                 raise NotImplementedError(f"Unknown style_control_method: {self.config.style_control_method}")
             prefix = f"{namespace}/{label}"

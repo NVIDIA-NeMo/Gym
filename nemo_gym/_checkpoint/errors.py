@@ -24,7 +24,7 @@ class ControlError(Exception):
 
 
 class StaleCheckpointError(ControlError):
-    code = "stale_checkpoint"
+    code = "checkpoint_stale"
 
 
 class CheckpointConflictError(ControlError):
@@ -32,25 +32,25 @@ class CheckpointConflictError(ControlError):
 
 
 class InvalidPhaseError(ControlError):
-    code = "invalid_phase"
+    code = "checkpoint_invalid_phase"
 
 
 class DeadlineExceededError(ControlError):
-    code = "deadline_exceeded"
+    code = "checkpoint_deadline_exceeded"
 
 
 class StaleAttemptError(ControlError):
-    code = "stale_attempt"
+    code = "checkpoint_stale_attempt"
 
 
 class AdmissionClosedError(ControlError):
-    code = "admission_closed"
+    code = "checkpoint_admission_closed"
 
 
 class RetireIncompleteError(ControlError):
     """A forget for a rollout whose retire has not finished freeing it: forgetting it would make it live again."""
 
-    code = "retire_incomplete"
+    code = "checkpoint_retire_incomplete"
 
 
 class ExportFailedError(ControlError):
@@ -60,36 +60,48 @@ class ExportFailedError(ControlError):
     The controller resumes, then prepares again under a new checkpoint ID.
     """
 
-    code = "export_failed"
+    code = "checkpoint_export_failed"
+
+
+class RestoreRecoveryPendingError(ControlError):
+    """A failed restore left admission closed, and its recovery has not finished: no checkpoint may begin yet.
+
+    The recovery finishes on its own once an install that outlived the restore has finished,
+    or when the controller resumes.
+    The controller resumes, then prepares again.
+    """
+
+    status_code = 503
+    code = "checkpoint_restore_recovery_pending"
 
 
 class RestartInScopeError(ControlError):
     """A commit scope names an episode this participant reported as a restart, which it cannot continue."""
 
-    code = "restart_in_scope"
+    code = "checkpoint_restart_in_scope"
 
 
 class RolloutIdRequiredError(ControlError):
     """Agent work without a rollout id, which a checkpoint could neither record nor retire."""
 
     status_code = 400
-    code = "rollout_id_required"
+    code = "checkpoint_rollout_id_required"
 
 
 class InvalidRolloutIdError(ControlError):
     """A request whose rollout path prefix is not a valid rollout id and attempt."""
 
     status_code = 400
-    code = "invalid_rollout_id"
+    code = "checkpoint_invalid_rollout_id"
 
 
 class UnauthorizedError(ControlError):
     status_code = 401
-    code = "unauthorized"
+    code = "checkpoint_unauthorized"
 
 
 class CheckpointStateError(ControlError):
     """A participant directory is missing, corrupt, unreadable or unwritable, or belongs to another checkpoint."""
 
     status_code = 422
-    code = "invalid_checkpoint_state"
+    code = "checkpoint_invalid_state"

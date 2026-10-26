@@ -210,6 +210,71 @@ def test_coverage_gate_compares_fractional_percentages() -> None:
     assert coverage_report["fail_under"] == 95.0
 
 
+def test_full_test_server_setup_exposes_uv_in_current_and_later_steps(tmp_path: Path) -> None:
+    workflow = yaml.safe_load(FULL_TEST_WORKFLOW.read_text())
+    setup = next(step["run"] for step in workflow["jobs"]["server-suite"]["steps"] if step["name"] == "Setup for test")
+    home = tmp_path / "home"
+    home.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    github_path = tmp_path / "github-path"
+    calls = tmp_path / "uv-calls"
+    installer = tmp_path / "install-uv.sh"
+    installer.write_text(
+        'mkdir -p "$HOME/.local/bin"\n'
+        "cat > \"$HOME/.local/bin/uv\" <<'UV'\n"
+        "#!/bin/sh\n"
+        'echo "$*" >> "$UV_TEST_CALLS"\n'
+        'case "$1" in\n'
+        "  --version) echo 'uv 0.11.29' ;;\n"
+        "  venv) mkdir -p .venv/bin; : > .venv/bin/activate ;;\n"
+        "  sync) ;;\n"
+        "  *) exit 2 ;;\n"
+        "esac\n"
+        "UV\n"
+        'chmod +x "$HOME/.local/bin/uv"\n'
+    )
+    # Replace network and system package setup, not the workflow's PATH handling.
+    for name, body in {"curl": 'cat "$UV_TEST_INSTALLER"', "bash": "exit 0"}.items():
+        executable = bin_dir / name
+        executable.write_text(f"#!/bin/sh\n{body}\n")
+        executable.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        HOME=str(home),
+        PATH=f"{bin_dir}:/usr/bin:/bin",
+        GITHUB_ENV=str(tmp_path / "github-env"),
+        GITHUB_PATH=str(github_path),
+        UV_INSTALL_URL=workflow["env"]["UV_INSTALL_URL"],
+        UV_TEST_INSTALLER=str(installer),
+        UV_TEST_CALLS=str(calls),
+    )
+    bash = shutil.which("bash")
+    assert bash is not None
+
+    result = subprocess.run(
+        [bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", setup],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text().splitlines() == ["--version", "venv", "sync --extra dev"]
+    assert github_path.read_text().splitlines() == [str(home / ".local" / "bin")]
+    env["PATH"] = f"{github_path.read_text().strip()}:{env['PATH']}"
+    later_step = subprocess.run(
+        [bash, "--noprofile", "--norc", "-ec", "uv --version"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert later_step.returncode == 0, later_step.stderr
+    assert later_step.stdout.strip() == "uv 0.11.29"
+
+
 def test_full_test_suite_installs_telemetry_extra_for_coverage_gate() -> None:
     # The full test suite measures coverage against the repo-wide gate
     # (pyproject.toml fail_under). The tests/unit_tests/telemetry tests are gated on

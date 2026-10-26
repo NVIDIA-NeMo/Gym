@@ -74,9 +74,10 @@ A new pairing does not need another combined preset.
 ## Runtime and model requirements
 
 Use a pinned `codex_version` (default **0.144.4**), direct `SandboxAccess`,
-and an absolute task workdir disjoint from the adapter directories. Required Resources HTTP/MCP
-tools are rejected; Codex supplies its own tools. The task sandbox supplies isolation, so
-`sandbox_mode` must be `danger-full-access`. No Codex CLI is required on the agent-server host.
+and an absolute task workdir disjoint from the adapter directories. Codex supplies its own shell and
+file tools. Sessions also accept MCP tool grants (see [Gym MCP tools](#gym-mcp-tools)); required
+direct HTTP grants are rejected. The task sandbox supplies isolation, so `sandbox_mode` must be
+`danger-full-access`. No Codex CLI is required on the agent-server host.
 With several agent workers, session routing sends each session's requests to the worker that seeded it.
 
 The installer accepts Linux x86_64/aarch64 glibc and x86_64 musl/Alpine with Python 3.8+.
@@ -107,7 +108,7 @@ context-management controls, not generation budgets.
 Input is a string or one text user message, optionally preceded by a system/developer message.
 Configured `system_prompt`, request `instructions`, and that preceding message become Codex
 developer instructions in that order. Unsupported conversation/multimodal input, required
-external tools, provider overrides, and extra host config are rejected before activation.
+direct HTTP tools, provider overrides, and extra host config are rejected before activation.
 
 Request `max_output_tokens`, `temperature`, `top_p`, reasoning controls, and unsupported tool
 policies are rejected rather than ignored. Codex cannot enforce these request-level controls
@@ -136,7 +137,9 @@ and interrupted activations keep captured observations after session files are r
 `supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.py`
 runs inside the sandbox. Benchmark Resources session identity/verdict state stays separate.
 Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
-`worker_exit_code_unavailable` observation gaps. Positive cleanup confirmation remains
+`worker_exit_code_unavailable` observation gaps. When Codex fails before it starts a turn, the end
+of its stderr (MCP grant headers redacted) is added to the error and kept as an `agent_startup_failed`
+gap. Positive cleanup confirmation remains
 required; the adapter validates the captured terminal events without inventing an exit code.
 
 One shared Linux supervisor per activation fences delayed launches.
@@ -157,11 +160,9 @@ Cleanup coordinates lifecycle; it is not a security boundary against hostile tas
 
 Responses and close observations preserve text, reasoning, tool events, partial output,
 CLI aggregate usage, and sandbox hostname/PID/version. Wall-time and the pinned CLI's explicit
-model-output-limit event yield incomplete, potentially gradable work. Provider/API/runtime
-failures raise execution errors and bypass verification. Only Resources determines reward.
+model-output-limit event yield incomplete, potentially gradable work. Reported provider failures retain partial output and classified cause; the Environment Server decides grading and episode retries. Worker and cleanup failures remain execution errors. Only Resources determines reward.
 
-CLI events omit exact model-call join IDs and can omit failed-call usage even after a recovered
-retry. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
+Native session transcripts supply tool-call IDs and outcomes. The sandbox forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.
 Known model-metadata/compaction warnings remain visible as gaps after clean completion or a gradable model/wall-time limit.
 
@@ -295,12 +296,17 @@ codex_agent:
 - `cwd`: working root handed to `codex exec --cd`. `null` creates a fresh temp dir per request and removes it afterwards
 - `stream_idle_timeout_ms`: provider stream idle budget. Gym model servers emit the synthesized SSE only once the full response is computed, so this must cover an entire generation; `null` defaults it to `timeout * 1000`
 - `extra_config`: extra `config.toml` content deep-merged over the generated base config — add MCP servers, feature flags, `model_verbosity`, etc. Per-rollout Gym MCP entries take precedence on name collisions
+- `mcp_tool_timeout_seconds`: per-call timeout for Gym MCP tools, written as `tool_timeout_sec`; a call that runs longer returns an error to the model. At most `timeout`. `null` leaves the pinned CLI's default of 300 seconds
 
 For the full set of Codex config options see the [Codex configuration reference](https://developers.openai.com/codex/config).
 
 ## Gym MCP tools
 
-When the resources server exposes Gym-owned MCP tools (an `MCPResourcesServer` returning MCP metadata from `/seed_session`), the agent writes a per-rollout `mcp_servers` entry into the generated config.toml: a streamable HTTP server pointing at the resources server's `/mcp` endpoint, with the per-rollout session token carried on a custom header via `http_headers`. Codex advertises these tools to the model as a `namespace` tool spec; the Gym model server flattens them to plain `<namespace>__<tool>` functions on the way in and splits the names back on the way out, so third-party models can call them.
+When the resources server exposes Gym-owned MCP tools (an `MCPResourcesServer` returning MCP metadata from `/seed_session`), the agent writes a per-rollout `mcp_servers` entry into the generated config.toml: a streamable HTTP server pointing at the resources server's `/mcp` endpoint, with the per-rollout session token carried on a custom header via `http_headers`. Codex advertises these tools to the model as a `namespace` tool spec named `mcp__<server>` (Codex writes `-` in a server name as `_`); the Gym model server flattens them to plain `mcp__<server>__<tool>` functions on the way in and splits the names back on the way out, so third-party models can call them. Codex also adds its MCP resource helper tools (`list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`) whenever an MCP server is configured. Responses record an MCP call by its bare tool name, such as `finish`, so `/verify` sees the same names as over `direct_http`.
+
+Sessions use the same entries for each MCP tool grant. To pass one, set `expose_tools_over_mcp: true` on the Resources Server and `resources_tool_transports: [mcp]` on the Environment Server. A required grant is written with `required = true`: if its server does not connect, Codex stops before the first model call. The activation then fails with the cause in an `agent_startup_failed` observation gap (see above). An optional grant that does not connect is left out of the tool list without a gap; only Codex's stderr shows it. Codex starts only MCP servers whose names use letters, digits, `-` and `_`: a required grant with another name is rejected at seed time, and an optional one is left out and recorded as an `mcp_server_skipped` observation gap. The sandbox must reach the granted URL, usually the Resources Server's `/mcp` endpoint. The session token in each grant is readable inside the sandbox and gives access only to that episode's tools.
+
+Set `mcp_tool_timeout_seconds` above the slowest call the Resources Server can make. Codex runs no other tool, its shell included, while an MCP call is in flight. A call that times out keeps running on the server, and Codex does not send the next call to that server until the earlier one returns, so a later call (such as a benchmark's `finish`) can time out behind it. Codex's 30-second limit for connecting to an MCP server is not configurable here.
 
 ## Skills evaluation
 

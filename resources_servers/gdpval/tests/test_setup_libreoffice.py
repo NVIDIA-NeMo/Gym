@@ -16,7 +16,15 @@ import subprocess
 import sys
 from unittest.mock import patch
 
+import pytest
+
 from resources_servers.gdpval import setup_libreoffice as setup
+
+
+@pytest.fixture(autouse=True)
+def _probe_converts(monkeypatch):
+    """The fake `_run`s here model apt and --version only; the probe conversion is tested on its own."""
+    monkeypatch.setattr(setup, "_probe_converts", lambda *_args: True)
 
 
 def _which_from(table: dict[str, str | None]):
@@ -314,3 +322,18 @@ def test_javaldx_absent_binary_is_not_working(monkeypatch):
     """javaldx ships in libreoffice-java-common, which libreoffice does not depend on."""
     monkeypatch.setattr(setup.os.path, "exists", lambda p: False)
     assert setup._javaldx_works() is False
+
+
+def test_host_libreoffice_that_cannot_convert_fails_before_and_after_install(monkeypatch):
+    """`--version` and javaldx can pass while conversions produce no PDF; the probe decides both times."""
+    calls, probes = [], []
+    monkeypatch.setattr(setup.sys, "platform", "linux")
+    monkeypatch.setattr(setup.shutil, "which", lambda n: f"/usr/bin/{n}")
+    monkeypatch.setattr(setup, "_java_runs", lambda: True)
+    monkeypatch.setattr(setup, "_javaldx_works", lambda: True)
+    monkeypatch.setattr(setup, "_run", lambda cmd, **kw: calls.append(cmd) or (0, "LibreOffice 25.2", ""))
+    monkeypatch.setattr(setup, "_probe_converts", lambda *args: probes.append(args) or False)
+
+    assert setup.ensure_libreoffice() is False
+    assert any(c[:3] == ["apt-get", "install", "-y"] for c in calls), "a failed probe must not skip the install"
+    assert probes == [(["libreoffice"], None)] * 2

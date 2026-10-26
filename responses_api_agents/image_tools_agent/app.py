@@ -28,7 +28,7 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseUsage,
+    accumulate_response_usage,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.image_tools import (
@@ -133,22 +133,6 @@ def _extract_image_refs(params: NeMoGymResponseCreateParamsNonStreaming) -> list
             if image_url:
                 image_refs.append(image_url)
     return image_refs
-
-
-def _response_usage_add(
-    running: Optional[NeMoGymResponseUsage],
-    latest: Optional[NeMoGymResponseUsage],
-) -> Optional[NeMoGymResponseUsage]:
-    if latest is None:
-        return running
-    if running is None:
-        return latest
-    running.input_tokens += latest.input_tokens
-    running.output_tokens += latest.output_tokens
-    running.total_tokens += latest.total_tokens
-    running.input_tokens_details.cached_tokens = 0
-    running.output_tokens_details.reasoning_tokens = 0
-    return running
 
 
 def _final_assistant_response(response: NeMoGymResponse) -> NeMoGymResponse:
@@ -305,7 +289,7 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
 
             model_response, model_cookies = await self._call_model(model_body, model_cookies, model_url_path)
             new_outputs.extend(model_response.output)
-            usage = _response_usage_add(usage, model_response.usage)
+            usage = accumulate_response_usage(usage, model_response.usage)
             final_response = model_response
 
             assistant_text = _extract_text_from_response(model_response)

@@ -368,7 +368,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             name="stirrup_agent",
             max_turns=payload["max_turns"],
             tools=[
-                shell,
+                *([shell] if payload["code_exec"] else []),
                 TaskTools([tool for tool in task_tools if tool.name not in (finish_names or [])]),
             ],
             finish_tool=[tool for tool in task_tools if tool.name in finish_names] if finish_names else None,

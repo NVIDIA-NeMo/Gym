@@ -520,7 +520,7 @@ class TestTaskIndexInGroupMetrics:
 
 
 class TestMajorityNoAnswerCounting:
-    """majority@k should count tasks with no valid answers as incorrect (score 0)."""
+    """majority@k should count tasks with no valid answers as incorrect (score 0) and as no_answer (score 1)."""
 
     def test_no_answer_tasks_count_as_incorrect(self) -> None:
         tasks = [
@@ -540,6 +540,34 @@ class TestMajorityNoAnswerCounting:
         ]
         m, _, _, _ = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
         assert m["majority@2/accuracy"] == pytest.approx(0.0)
+
+    def test_majority_no_answer_counts_tasks_without_answers(self) -> None:
+        tasks = [
+            [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
+            [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
+        ]
+        m, _, _, _ = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        assert m["majority@1/no_answer"] == pytest.approx(100.0)
+        assert m["majority@2/no_answer"] == pytest.approx(100.0)
+
+    def test_majority_no_answer_only_when_all_k_answers_missing(self) -> None:
+        tasks = [
+            # Task 0: both answers present
+            [{"reward": 1.0, "extracted_answer": "A"}, {"reward": 1.0, "extracted_answer": "A"}],
+            # Task 1: first answer missing, second present
+            [{"reward": 0.0, "extracted_answer": None}, {"reward": 1.0, "extracted_answer": "B"}],
+            # Task 2: no answers at all
+            [{"reward": 0.0, "extracted_answer": None}, {"reward": 0.0, "extracted_answer": None}],
+            # Task 3: both answers present
+            [{"reward": 0.0, "extracted_answer": "C"}, {"reward": 0.0, "extracted_answer": "C"}],
+        ]
+        m, _, _, _ = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+        # k=1: tasks 1 and 2 have no first answer. k=2: only task 2 has no answer at all.
+        assert m["majority@1/no_answer"] == pytest.approx(50.0)
+        assert m["majority@2/no_answer"] == pytest.approx(25.0)
+        # Accuracy still counts unanswered votes as wrong.
+        assert m["majority@1/accuracy"] == pytest.approx(25.0)
+        assert m["majority@2/accuracy"] == pytest.approx(50.0)
 
 
 class TestComputeAggregateMetricsPerTask:

@@ -54,6 +54,10 @@ class SandboxedVerifyResponse(BaseVerifyResponse, VerifierTestCounts):
     sandbox_resource_limit: SandboxResourceLimit | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
     timings: dict[str, Any] = Field(default_factory=dict)
+    # Fraction of the reported tests that passed, never below the official reward
+    # (which it equals without usable test counts). Reported beside, never instead
+    # of, the official reward; 0 like the reward when the official evaluation did not complete.
+    partial_credit: float = 0.0
 
 
 class TerminalBench4RunRequest(BaseRunRequest):

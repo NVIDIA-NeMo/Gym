@@ -24,7 +24,7 @@ uv venv --python 3.13.14 && source .venv/bin/activate
 uv pip install nemo-gym
 ```
 
-The package includes built-in environments and CLI commands. Config and data paths resolve against the package install location automatically. To pin a release: `python3.13 -m pip install nemo-gym==0.5.1`.
+The package includes built-in environments and CLI commands. Config and data paths resolve against the package install location automatically. To pin a release: `python3.13 -m pip install nemo-gym==0.7.0`.
 
 Ray isn't included by default. To run environments that use Ray, such as `local_vllm_model` or the SWE agents, install the `ray` extra: `python3.13 -m pip install "nemo-gym[ray]"`.
 
@@ -47,7 +47,7 @@ Container choice depends on your NeMo Gym version and model recipe. See [RL Fram
 
 ### Pre-built NeMo Gym image
 
-NeMo Gym publishes a pre-built container to NGC with each release, tagged with the release version (for example `v0.5.1`):
+NeMo Gym publishes a pre-built container to NGC with each release, tagged with the release version (for example `v0.7.0`):
 
 ```bash
 docker run --gpus all -it --rm \
@@ -58,7 +58,7 @@ docker run --gpus all -it --rm \
   -p 6006:6006 \
   --ulimit memlock=-1 \
   --ulimit stack=67108864 \
-  nvcr.io/nvidia/nemo-gym:v0.5.1
+  nvcr.io/nvidia/nemo-gym:v0.7.0
 ```
 
 The image's default entrypoint is `gym`, so it drops you straight into the CLI. To get a shell instead, override the entrypoint:
@@ -73,7 +73,7 @@ docker run --gpus all -it --rm \
   -p 6006:6006 \
   --ulimit memlock=-1 \
   --ulimit stack=67108864 \
-  nvcr.io/nvidia/nemo-gym:v0.5.1
+  nvcr.io/nvidia/nemo-gym:v0.7.0
 ```
 
 <Note>
@@ -119,7 +119,7 @@ gym --version
 You should see output like:
 
 ```text
-NeMo Gym v0.5.1
+NeMo Gym v0.7.0
 Python 3.13.14
 Installation: /path/to/Gym
 ```

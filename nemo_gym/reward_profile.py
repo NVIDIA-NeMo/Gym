@@ -639,7 +639,9 @@ def compute_pass_majority_metrics(
                         if a is not None and name in s
                     ]
                     if not valid:
-                        majority_values.append(0)
+                        # No answer to vote on: the task is wrong for every score,
+                        # but it is exactly what majority@k/no_answer counts.
+                        majority_values.append(1 if name == "no_answer" else 0)
                         continue
                     counter = Counter(valid)
                     max_count = counter.most_common(1)[0][1]

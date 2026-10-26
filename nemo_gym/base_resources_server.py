@@ -12,13 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import logging
 from abc import abstractmethod
 from collections import OrderedDict
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from enum import Enum
 from time import monotonic
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypedDict, TypeVar, get_args
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator
 from starlette.middleware import Middleware
 
@@ -30,18 +35,18 @@ if TYPE_CHECKING:
     # module) and would pull the mcp SDK into agent/model processes that never need it.
     from nemo_gym.mcp_auto_exposure import MCPTool
 
-from nemo_gym._checkpoint.control import install_participant
+from nemo_gym._checkpoint.control import CheckpointMode
+from nemo_gym._checkpoint.participant_workers import install_server_participant
 from nemo_gym._checkpoint.resources import (
     MCPTokenClaims,
     ResourcesCheckpointMiddleware,
-    ResourcesCheckpointMode,
     ResourcesParticipant,
 )
 from nemo_gym._checkpoint.settings import checkpoint_settings
-from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepMode
+from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import validate_failure_kind
+from nemo_gym.failure_kinds import SESSION_LOST, validate_failure_kind
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -54,6 +59,8 @@ from nemo_gym.server_utils import SESSION_ID_KEY, BaseRunServerInstanceConfig, B
 from nemo_gym.session_routing import SessionKind
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 
+
+logger = logging.getLogger(__name__)
 
 NEMO_GYM_MCP_SESSION_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
 NEMO_GYM_MCP_METADATA_KEY = "mcp"
@@ -236,7 +243,8 @@ class ResourcesSeedSessionRequest(BaseModel):
 
     Repeating the same identifier and episode must return the existing session.
     Closing an unknown identifier must prevent a racing seed from creating it
-    for session_close_retry_window_seconds (see ClosedResourcesSessionRecords).
+    for session_close_retry_window_seconds (see ClosedResourcesSessionRecords and ResourcesSessionFence);
+    callers must use unique IDs and finish seed retries within that window.
     External resources should use provider TTLs when available. Current process-local
     session records may remain until the server shuts down.
     """
@@ -287,6 +295,71 @@ class ResourcesCloseSessionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     resources_session_id: str
+
+
+class ResourcesSeedRejectedError(HTTPException, ValueError):
+    """Refuse a seed whose input no retry can fix, such as ``task_data`` that fails validation.
+
+    FastAPI answers it with HTTP 422, which an Environment Server treats as terminal, so the episode fails once
+    with this message instead of being dispatched again with the same input. It is also a ``ValueError``, so code
+    that seeds outside a request (a direct call in a test) keeps catching it as before.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(422, detail)
+
+
+class ResourcesSessionConflictError(HTTPException, ValueError):
+    """Refuse a seed or close that conflicts with what this server recorded for the session.
+
+    Examples: a ``resources_session_id`` already bound to another episode or task, a close that names another
+    episode, or a seed for a session that already closed. FastAPI answers it with HTTP 409, which an Environment
+    Server treats as terminal. It is also a ``ValueError`` for direct callers.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(409, detail)
+
+
+class ResourcesSessionLostError(HTTPException):
+    """Answer a tool call for a session this server no longer holds with HTTP 404.
+
+    Raise this instead of returning an ordinary tool observation that says the session is gone. What a harness does
+    with the 404 varies: simple_agent returns its body to the model as the tool output and keeps going, Stirrup
+    fails the run so the episode is dispatched again, and an MCP client reports a tool error. In every case the
+    trajectory records a failed tool call whose detail names the ``failure_kind``, which a log can group by. The
+    verify for the session answers with ``lost_session_verification``, whose masked sample keeps the episode out
+    of the score.
+    """
+
+    def __init__(self, message: str, *, failure_kind: str = SESSION_LOST) -> None:
+        super().__init__(404, {"failure_kind": validate_failure_kind(failure_kind), "message": message})
+
+
+class LostSessionVerification(TypedDict):
+    """The verify response fields of a masked sample for a session the server no longer holds."""
+
+    reward: float
+    mask_sample: bool
+    failure_kind: str
+    failure_reason: str
+
+
+def lost_session_verification(reason: str, *, failure_kind: str = SESSION_LOST) -> LostSessionVerification:
+    """Return the verify response fields for an episode whose session this server no longer holds.
+
+    The sample is masked: the environment lost the state it would measure, so a reward of 0 would read as a
+    policy that solved nothing. Merge the result over the request's fields so these win, for example
+    ``BaseVerifyResponse(**(body.model_dump() | lost_session_verification("sandbox gone")))``; spreading both as
+    keyword arguments raises ``TypeError`` when a request model that allows extra fields already carries a
+    ``reward``. Use ``failure_kind=SESSION_EXPIRED`` when the server closed the session itself because its lifetime
+    ran out.
+
+    Each call logs a warning, because a masked sample is otherwise visible only in coverage metrics: many of them
+    point at a wiring fault such as a session cookie that never reaches ``/verify``.
+    """
+    logger.warning("Masking the verify of a session this server no longer holds (%s): %s", failure_kind, reason)
+    return {"reward": 0.0, "mask_sample": True, "failure_kind": failure_kind, "failure_reason": reason}
 
 
 # A resources session is the cookie session: a typed seed or close names it by resources_session_id,
@@ -348,17 +421,76 @@ class ClosedResourcesSessionRecords(Generic[ClosedRecordT]):
             self._records.popitem(last=False)
 
 
+class ResourcesSessionFence:
+    """Serialize seed and close per resources session, and refuse a seed for a session closed within the window.
+
+    A seed that arrives after its session closed (a retry, or a reply that raced the close) must not create the
+    session again, so the fence remembers each closed ``resources_session_id`` and the episode that first closed it,
+    in ``ClosedResourcesSessionRecords``. Construct it with the server's ``session_close_retry_window_seconds``, so a
+    record lasts exactly as long as the session's routing claim with several workers. A per-session lock exists only
+    while a request holds or waits for it.
+
+    TODO: also expire sessions that are never closed, as when the Environment Server dies before its close. Planned
+    rule: a fixed lifetime from the seed (the sandbox ``ttl_s`` when set, else 24 hours), checked on the next request
+    and at shutdown; an expired session is released, fenced, and verifies as ``SESSION_EXPIRED``.
+    """
+
+    def __init__(self, window_seconds: float) -> None:
+        self._window_seconds = window_seconds
+        self._locks: dict[str, _FenceLock] = {}
+        self._closed: ClosedResourcesSessionRecords[EpisodeId] = ClosedResourcesSessionRecords(window_seconds)
+
+    @asynccontextmanager
+    async def locked(self, resources_session_id: str) -> AsyncIterator[None]:
+        """Hold the lock for ``resources_session_id`` so its seed and close never interleave."""
+        entry = self._locks.setdefault(resources_session_id, _FenceLock())
+        entry.users += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            entry.users -= 1
+            if entry.users == 0:
+                del self._locks[resources_session_id]
+
+    def closed_episode(self, resources_session_id: str) -> EpisodeId | None:
+        """Return the episode that first closed ``resources_session_id`` within the window, else ``None``."""
+        return self._closed.get(resources_session_id)
+
+    def raise_if_closed(self, resources_session_id: str) -> None:
+        """Refuse a seed for a closed session with 409, which the Environment Server does not retry."""
+        if self.closed_episode(resources_session_id) is not None:
+            raise ResourcesSessionConflictError(f"Resources session is already closed: {resources_session_id}")
+
+    def mark_closed(self, resources_session_id: str, episode_id: EpisodeId) -> None:
+        """Record ``resources_session_id`` as closed; call it only after its state was released.
+
+        A retried close keeps the first close's episode and expiry.
+        """
+        self._closed.remember(resources_session_id, episode_id)
+
+    def clear(self) -> None:
+        """Forget every record, for a server that drops all of its sessions at shutdown."""
+        self._closed = ClosedResourcesSessionRecords(self._window_seconds)
+
+
+@dataclass
+class _FenceLock:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
+
+
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
     # How this server's sessions take part in partial-rollout checkpoints. "exported" servers implement the
     # ResourcesSessionHooks methods.
     # The default fails closed: its sessions' rollouts are restarts, which never hold up a checkpoint,
     # are left out of it, and start over after a crash.
-    checkpoint_mode: ClassVar[ResourcesCheckpointMode] = "restart_only"
+    checkpoint_mode: ClassVar[CheckpointMode] = "restart_only"
     # "replay" declares that /verify is safe to run again after a crash
     # and does not change checkpointed session state, so a checkpoint need not wait for it.
     # Callers learn it from the /seed_session reply.
-    checkpoint_verify: ClassVar[StepMode] = "wait"
+    checkpoint_verify: ClassVar[StepType] = "wait"
     # The routes that start a session for the request's rollout, such as a Gymnasium server's /reset.
     # Each waits out a checkpoint before its handler runs, needs a rollout prefix,
     # and binds the session to that rollout when it succeeds.
@@ -413,7 +545,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
     def setup_resources_checkpoint(self, app: FastAPI) -> None:
         # The declarations are class attributes nothing else checks: a typo would act as a mode of its own.
-        for name, allowed in (("checkpoint_mode", ResourcesCheckpointMode), ("checkpoint_verify", StepMode)):
+        for name, allowed in (("checkpoint_mode", CheckpointMode), ("checkpoint_verify", StepType)):
             if getattr(self, name) not in get_args(allowed):
                 raise ValueError(
                     f"{type(self).__name__} declares {name}={getattr(self, name)!r}; expected one of {get_args(allowed)}"
@@ -426,8 +558,6 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        if (self.config.num_workers or 1) != 1:
-            raise ValueError("resources checkpointing requires num_workers=1: sessions live in one process")
         if self.checkpoint_mode == "exported":
             # Hooks from an intermediate base class or a mixin count; only the stubs here do not.
             missing = [
@@ -437,11 +567,12 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 raise ValueError(
                     f"{type(self).__name__} declares checkpoint_mode='exported' but does not implement {missing}"
                 )
-        participant = ResourcesParticipant(self, self.checkpoint_mode, verify_mode=self.checkpoint_verify)
+        participant = ResourcesParticipant(self, self.checkpoint_mode, verify_step_type=self.checkpoint_verify)
         self._checkpoint = participant
-        install_participant(
+        install_server_participant(
             app,
             participant,
+            num_workers=self.config.num_workers or 1,
             auth_token=settings.control_auth_token,
             lease_grace_seconds=settings.lease_grace_seconds,
             instance_name=self.config.name,
@@ -562,6 +693,15 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         An Environment Server seeds with a ``ResourcesSeedSessionRequest`` and gets its caller-assigned
         ``resources_session_id`` back. An Agent's ``/run`` seeds with its legacy body and gets an empty
         response. Servers that keep per-rollout state override this method.
+
+        An override refuses a seed that no retry can make succeed with a final 4xx, never a plain exception
+        (HTTP 500), which the Environment Server retries by dispatching the whole episode again:
+
+        - ``ResourcesSeedRejectedError`` (422) for input that fails validation, such as ``task_data`` or a
+          ``TaskId`` that does not match the task row;
+        - ``ResourcesSessionConflictError`` (409) for an ID bound to another episode or task, or a closed session.
+
+        A failure that a retry may fix, such as an unavailable sandbox provider, stays a 5xx.
         """
         if isinstance(body, ResourcesSeedSessionRequest):
             return ResourcesSeedSessionResponse(resources_session_id=body.resources_session_id)
@@ -577,11 +717,16 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         An override must:
 
         - succeed when the session is already closed or was never seeded;
-        - keep a seed that arrives after the close from creating the session again;
+        - keep a seed that arrives after the close from creating the session again, for a bounded time
+          (``ResourcesSessionFence`` does this for ``session_close_retry_window_seconds``);
+        - release the session's state by ``resources_session_id`` even when the request carries no session cookie;
         - raise when releasing fails rather than recording the session as closed, so the caller can retry.
 
-        A typed seed's session cookie carries ``resources_session_id`` as its ``SESSION_ID_KEY``,
-        so a server may key state by either; they name the same session.
+        A served resources server routes sessions (see ``nemo_gym.session_routing``): a typed seed's session cookie
+        carries ``resources_session_id`` as its ``SESSION_ID_KEY``, and a typed close that carries no cookie, as when
+        the seed's reply was lost, is given that ID too, so a server may key state by either; they name the same
+        session. An app built without session routing, such as one under ``TestClient``, gives a new session a random
+        ID instead, so release by ``body.resources_session_id`` to be correct either way.
 
         ``nemo_gym.testing.session_conformance.check_resources_session_contract`` checks these rules from a server's tests.
         """
@@ -589,7 +734,13 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
     @abstractmethod
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        pass
+        """Score the episode.
+
+        A server whose score depends on per-rollout state answers a verify for a session it no longer holds
+        (never seeded, closed, or lost) with a masked sample built by ``lost_session_verification``, never a
+        plain reward of 0 and never an exception that dispatches the episode again. A tool call for such a
+        session raises ``ResourcesSessionLostError`` (404).
+        """
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         """Compute aggregate metrics from verify responses.

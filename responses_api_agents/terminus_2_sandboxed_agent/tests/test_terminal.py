@@ -167,9 +167,11 @@ async def test_exited_shell_recovery_discards_pending_input_and_reports_lost_sta
         pending.write_text(f"touch {forbidden}\n" * 32768)
         await environment.exec(f"tmux load-buffer -b queued {pending}")
         failing_command = "sleep 2; false" if exit_trigger == "failure" else "sleep 120"
+        # With PROMPT_COMMAND set, bash returns to the prompt after Ctrl-C instead of exiting under `set -e`.
+        # Login profiles can set it (systemd's 80-systemd-osc-context.sh on Ubuntu 26.04), so clear it here.
         await terminal.send_keys(
             f"touch {tmp_path}/persisted; export TERMINUS_EPHEMERAL=lost; "
-            f"mkdir {tmp_path}/sub; cd {tmp_path}/sub; set -e; {failing_command}\n",
+            f"mkdir {tmp_path}/sub; cd {tmp_path}/sub; unset PROMPT_COMMAND; set -e; {failing_command}\n",
             min_timeout_sec=0.2,
         )
         await environment.exec("tmux paste-buffer -d -b queued -t test")

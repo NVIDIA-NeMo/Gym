@@ -81,13 +81,60 @@ jq -r 'select(.attributes."nemo.gym.rollout.id") | .attributes."nemo.gym.rollout
 ls <capture_dir>/<rollout_id>.capture.jsonl
 ```
 
+### Per-Rollout Facts on Spans
+
+The rollout ID (`<task index>-<repeat index>`, such as `45-0`) names neither the task nor the outcome.
+These span attributes do, so a trace backend can show both without reading `rollouts.jsonl`:
+
+| Span | Attribute | Value |
+| --- | --- | --- |
+| `gym.rollout.dispatch` | `nemo.gym.task.id` | The task's own ID (`task_id`, `problem_id` or `instance_id`, else `task_name`). Omitted when the row has none. |
+| `gym.rollout.dispatch` | `nemo.gym.rollout.repeat` | The repeat index. |
+| `gym.verify` | `nemo.gym.rollout.reward` | The reward `/verify` returned. Omitted for a masked sample and for a result without a numeric reward. |
+| `gym.rollout.health` | `nemo.gym.health.verdict` | `healthy`, `unhealthy` or `unobserved`, as in `rollout_verdicts.jsonl`. |
+| `gym.rollout.health` | `nemo.gym.health.checks` | The distinct checks that flagged the rollout, sorted. Omitted when none did. |
+
+`gym.rollout.health` is a child of the rollout's dispatch span and carries `nemo.gym.rollout.id`. It is
+emitted when the dispatch was traced, whether or not metrics export is on.
+
 ### Engine Request Ids
 
 Inside a rollout, every call a Gym model server makes to its inference backend carries
 `X-Request-Id: <rollout id>-<8 hex chars>`. vLLM uses that header as its request id and records it
 as `gen_ai.request.id` on its request span and in its request log, so an engine span or log line
 can be matched to a rollout directly, without walking the trace. A caller's own `X-Request-Id`
-header is kept.
+header is kept. In a submitted job with `vllm_traces: true`, the job's collector also copies the rollout
+id into `nemo.gym.rollout.id` on the engine span, so it groups per rollout like every other Gym span
+(see [Collector for Submitted Jobs](/main/observability/eval-submit-collector)).
+
+### Trace Context in the Model URL
+
+Some agents hand the model URL to a client they do not instrument: a harness running inside a
+sandbox, or a third-party client library in the agent's own process. That client sends no
+`traceparent` header, so the model server's SERVER span would start a new trace and the engine
+spans under it would never join the rollout.
+
+For those clients `apply_rollout_prefix`, and so the agent's `base_url_for_run` and
+`resolve_model_base_url`, name the agent's current span in the URL itself, right after the rollout
+prefix:
+
+```text
+http://<model-server>/ng-rollout/{rollout_id}/ng-trace/{traceparent}/v1
+```
+
+Every Gym server strips `/ng-trace/{traceparent}` before routing, whether or not telemetry is on,
+and uses it as the inbound `traceparent` when the request carries none. A header the client did
+send wins. The segment is only added while this process exports traces, so URLs in a run without
+tracing are unchanged. Gym's own clients send the header and use `url_path_for_run`, which never
+adds it. A harness that parses the model URL should treat `/ng-trace/<traceparent>` as optional and
+leave it in place.
+
+The span named is the one current when the URL is built. A harness configured once per session
+therefore parents all of its model calls to the span that seeded the session, not to the activation
+that made each call; still one tree per rollout, just coarser than an instrumented client gives. A
+URL that is built once and reused across rollouts, such as the base URL of a cached client, must be
+built with `trace_context=False`, or every later rollout's calls would be parented to the first
+rollout's span.
 
 ## Span Kinds
 

@@ -1,0 +1,57 @@
+# The mock-tool example in sandboxed mode: each row of data/mock_tools_sandboxed_example.jsonl carries its own
+# tool_backend (the example NotesBackend and its notes), which runs in a fresh sandbox for each rollout.
+# Add a sandbox provider config, such as nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml.
+config_paths:
+  - resources_servers/partner_if/configs/judge.yaml
+  - responses_api_models/openai_model/configs/openai_model.yaml
+
+partner_if_mock_tools_sandboxed:
+  resources_servers:
+    partner_if:
+      entrypoint: mock_tools_app.py
+      domain: instruction_following
+      verified: false
+      description: Mock-tool variant whose tasks bring their own tool backends, each run in a fresh sandbox per rollout.
+      num_workers: 1
+      tasks_path: resources_servers/partner_if/data/mock_tools_sandboxed_example.jsonl
+      sandbox_provider: sandbox
+      sandbox_config:
+        # Any image with Python 3; the runner uses only the standard library.
+        image: python:3.13-slim
+        # Egress only to the package index, to install each bundle's pinned requirements. With an image that already
+        # has them, use `network: none`; on a provider without network policies, such as Docker, `provider_default`.
+        network: package_index
+        ttl_s: 3600
+        ready_timeout_s: 600
+        resources: {cpu: 1, memory_mib: 1024}
+        metadata:
+          environment: partner-if-tools
+      judge_model_server:
+        type: responses_api_models
+        name: partner_if_judge
+
+partner_if_mock_tools_sandboxed_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 10
+      resources_server:
+        type: resources_servers
+        name: partner_if_mock_tools_sandboxed
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+partner_if_mock_tools_sandboxed_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      cleanup_timeout_seconds: 180
+      resources_server:
+        type: resources_servers
+        name: partner_if_mock_tools_sandboxed
+      resources_tool_transports:
+        - direct_http
+      agent_server:
+        type: responses_api_agents
+        name: partner_if_mock_tools_sandboxed_simple_agent

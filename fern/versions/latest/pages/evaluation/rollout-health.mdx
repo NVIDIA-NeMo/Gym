@@ -85,6 +85,7 @@ runner derives one verdict for each rollout using this priority:
 can be correct according to its reward and still be unhealthy, or incorrect according to its reward and healthy.
 
 Task-level checks add flags to the task summary after rollout verdicts are derived. Tasks do not receive a separate verdict.
+The run-level check `run_excessive_failures` reads the run accounting in `run.artifacts`; its findings make `run.artifacts.healthy` false and add an `unhealthy_reasons` entry. Ignoring it keeps the counts and leaves the verdict to the other run accounting.
 
 ## Check Catalog
 
@@ -106,6 +107,7 @@ Check IDs identify both the evidence being evaluated and the condition detected.
 | `model_call_zero_completion_tokens` | Policy-model call | An exactly bound policy-model call reports zero completion tokens. A failed call that produced no generation is skipped. |
 | `task_consistently_unhealthy` | Task | At least two repeats are computable and every computable repeat is unhealthy. Unobserved repeats do not prevent the flag. |
 | `task_no_successful_model_calls` | Task | Every repeat has at least one turn-to-model-call reference, every turn reference resolves to exactly one captured call, and none of those turn-bound calls completed successfully. |
+| `run_excessive_failures` | Run | A failure limit is configured and the final or non-final failed rollouts reach it as a share of expected rollouts. One finding per group that reaches its limit, in `run.findings`. Unobserved when no limit is set or the run has no inventory, which is the default. |
 
 ### What Counts as Agent Activity
 
@@ -277,6 +279,18 @@ auxiliary calls. Checks with a policy-model subject evaluate only exactly bound 
 `model_call_errors.usage_unknown` counts failed calls that returned no finished response and carry no token counts. The
 token checks skip these calls, so any tokens the server spent on them before a cancellation or timeout are counted only here,
 as a number of calls.
+
+`run.artifacts` also counts the run against its `<output stem>_materialized_inputs.jsonl` inventory:
+
+- `expected`: rollouts in the inventory.
+- `failed`: the last failure row of each owed rollout in the `<output stem>_failures.jsonl` sidecar that did not later land, as `total`, `final`, `not_final` and `by_class`. `final` failures are ones a resume does not retry; `not_final` ones are still retryable. The split is by retry eligibility only and does not say whether the model or the infrastructure caused a failure. Null when there is no sidecar.
+- `missing`: owed rollouts with neither a record nor a failure row.
+- `healthy`: false when a rollout is missing, two records share a rollout identity, or the final or non-final failures reach a configured limit as a share of `expected`. The failure limits are unset by default, so failures are counted but do not make the run unhealthy until a limit is set. `unhealthy_reasons` names each cause.
+- `limits`: the limits the run was judged by (`max_not_final_failure_fraction`, `max_final_failure_fraction`, null for no limit) and, in `source`, where each limit came from: `config` for the run's own settings, `persisted` when `gym eval health-check` reused it, `override` when its own limit flag replaced it. A flag value of `none` removes the limit, recorded as null with `override`.
+
+`expected`, `missing` and `healthy` are null without an inventory. The summary is also written when collection fails or Slurm stops the job with SIGTERM.
+
+A run stopped by SIGTERM gets a provisional summary: the run accounting in `run.artifacts`, with `partial: true`, and no `run.verdicts` or `rollout_verdicts.jsonl`. It evaluates only `run_excessive_failures`, which needs no rollouts, and lists every other check in `run.artifacts.not_evaluated`. Its `healthy` is false when the accounting already has a reason and null otherwise. Run `gym eval health-check` on the run directory for the full summary; it judges the run by the limits the provisional summary recorded. A stopped run exits with status 143, or with status 1 (`EVAL FAILED`) when `require_complete` is on, which is the default under `gym eval submit`.
 
 ### `rollout_verdicts.jsonl`
 
