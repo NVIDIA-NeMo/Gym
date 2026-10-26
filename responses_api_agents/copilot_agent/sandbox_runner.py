@@ -11,6 +11,7 @@ import sys
 from contextlib import ExitStack
 from pathlib import Path
 from time import time
+from typing import Optional
 
 
 # Streaming duplicates of later complete events. Dropping them bounds what collection downloads.
@@ -90,7 +91,28 @@ def run(params: dict) -> int:
             process.wait()
 
 
+def read_compaction_state(directory: Path) -> Optional[bool]:
+    """Read persisted CLI events, including background compaction absent from stdout and spans."""
+    observed = False
+    try:
+        for path in (directory / "copilot-home/session-state").glob("*/events.jsonl"):
+            with path.open() as stream:
+                for line in stream:
+                    event = json.loads(line)
+                    if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+                        return None
+                    observed = True
+                    if event["type"] in ("session.compaction_start", "session.compaction_complete"):
+                        return True
+    except (OSError, ValueError, RecursionError):
+        return None
+    return False if observed else None
+
+
 def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == "--compaction-state":
+        print(json.dumps(read_compaction_state(Path(sys.argv[2]))))
+        return
     params = json.loads(Path(sys.argv[1]).read_text())
     raise SystemExit(run(params))
 

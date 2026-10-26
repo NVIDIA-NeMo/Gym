@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 RUNNER = Path(__file__).parents[1] / "sandbox_runner.py"
 
@@ -36,3 +38,29 @@ def test_runner_records_complete_events_and_drops_streaming_duplicates(tmp_path)
     assert (tmp_path / "stderr.log").read_text() == "stderr diagnostics\n"
     runtime = json.loads((tmp_path / "runtime.json").read_text())
     assert set(runtime) == {"hostname", "pid"}
+
+
+@pytest.mark.parametrize(
+    ("contents", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ('{"type":"session.start"}\n', False),
+        ('{"type":"session.start"}\n{"type":"session.compaction_start"}\n', True),
+        ('{"type":"session.compaction_complete","data":{"success":false}}\n', True),
+        ('{"type":"session.start"}\n{"truncated":', None),
+    ],
+)
+def test_read_persisted_compaction_state(tmp_path, contents, expected):
+    if contents is not None:
+        events = tmp_path / "copilot-home/session-state/session-id/events.jsonl"
+        events.parent.mkdir(parents=True)
+        events.write_text(contents)
+    finished = subprocess.run(
+        [sys.executable, "-I", str(RUNNER), "--compaction-state", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert finished.returncode == 0, finished.stderr
+    assert json.loads(finished.stdout) is expected

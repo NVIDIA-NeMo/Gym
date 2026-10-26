@@ -253,23 +253,26 @@ class CopilotUsage:
     reasoning_tokens: Optional[int]
     response_ids: list[str]
     compaction_usage_unavailable: bool = False
+    compaction_state_unavailable: bool = False
 
 
-def parse_copilot_usage(otel: Optional[str]) -> Optional[CopilotUsage]:
+def parse_copilot_usage(otel: Optional[str], *, compaction_state: bool | None = False) -> Optional[CopilotUsage]:
     """Sum usage over successful chat spans; a missing count stays unknown instead of becoming zero.
 
     Copilot's own usage file reports zero when the provider omits usage, so it is not used for counts.
     Returns ``None`` when no chat spans were observed. Rejected calls contribute zero
     completed-response tokens; missing usage on a successful call remains unknown.
-    Copilot 1.0.103 omits compaction calls from its spans, so observed compaction
-    makes aggregate usage unknown. Per-call counts remain in Gym model capture.
+    Copilot 1.0.103 omits compaction calls from its spans. Persisted session events
+    also detect late compaction with no following chat span. Observed compaction
+    or an unavailable native event store makes aggregate usage unknown. Per-call
+    counts remain in Gym model capture.
     """
     if otel is None:
         return None
     totals: dict[str, Optional[int]] = {"input": 0, "output": 0, "cached": 0, "reasoning": 0}
     response_ids: list[str] = []
     observed_calls = 0
-    compacted = False
+    compacted = compaction_state is True
     for line in otel.split("\n"):
         if not line.strip():
             continue
@@ -304,12 +307,13 @@ def parse_copilot_usage(otel: Optional[str]) -> Optional[CopilotUsage]:
     if not observed_calls:
         return None
     return CopilotUsage(
-        input_tokens=None if compacted else totals["input"],
-        output_tokens=None if compacted else totals["output"],
-        cached_tokens=None if compacted else totals["cached"],
-        reasoning_tokens=None if compacted else totals["reasoning"],
+        input_tokens=None if compacted or compaction_state is None else totals["input"],
+        output_tokens=None if compacted or compaction_state is None else totals["output"],
+        cached_tokens=None if compacted or compaction_state is None else totals["cached"],
+        reasoning_tokens=None if compacted or compaction_state is None else totals["reasoning"],
         response_ids=response_ids,
         compaction_usage_unavailable=compacted,
+        compaction_state_unavailable=compaction_state is None,
     )
 
 
@@ -599,6 +603,8 @@ class CopilotAgent(SimpleResponsesAPIAgent):
                     detail="Copilot omits compaction model calls from native usage spans; aggregate usage is unknown",
                 )
             )
+        if usage is not None and usage.compaction_state_unavailable:
+            gaps.append(ObservationGap(code="native_compaction_state_unavailable"))
         cleanup = state.session.cleanup
         access = state.request.sandbox_access
         if cleanup is None:
@@ -675,7 +681,10 @@ class CopilotAgent(SimpleResponsesAPIAgent):
                 state.observations = self._observations(
                     state,
                     transcript,
-                    parse_copilot_usage(partial.otel if partial else None),
+                    parse_copilot_usage(
+                        partial.otel if partial else None,
+                        compaction_state=partial.compaction_state if partial else None,
+                    ),
                     [*conversation, *transcript.output],
                     "incomplete",
                     failure=failure,
@@ -704,7 +713,7 @@ class CopilotAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         invocation_id = state.request.episode_id.capture_key
         transcript = parse_copilot_events(_events(artifacts.events), invocation_id)
-        usage = parse_copilot_usage(artifacts.otel)
+        usage = parse_copilot_usage(artifacts.otel, compaction_state=artifacts.compaction_state)
         cleanup = state.session.cleanup
         assert cleanup is not None
         reported_error = transcript.error is not None and not cleanup["timed_out"] and cleanup["error"] is None

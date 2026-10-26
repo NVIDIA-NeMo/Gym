@@ -5,6 +5,7 @@
 import asyncio
 import json
 import logging
+import shlex
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
@@ -44,6 +45,7 @@ class CopilotArtifacts(BaseModel):
     events: str
     otel: str | None = None
     usage: str | None = None
+    compaction_state: bool | None = None
 
 
 def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
@@ -121,6 +123,22 @@ class CopilotSandboxSession(AgentSessionState):
             ],
         )
 
+    async def read_compaction_state(self) -> bool | None:
+        """Inspect the private native event store after termination, before session cleanup."""
+        directory = self.session.session_dir
+        try:
+            result = await self.session.sandbox.exec(
+                shlex.join(["python3", "-I", f"{directory}/sandbox_runner.py", "--compaction-state", directory]),
+                timeout_s=30,
+            )
+            if result.return_code == 0 and not result.error_type:
+                value = json.loads(result.stdout)
+                if isinstance(value, bool):
+                    return value
+        except Exception:
+            LOG.warning("Could not inspect Copilot native compaction state", exc_info=True)
+        return None
+
     async def collect_artifacts(self) -> CopilotArtifacts:
         """Keep partial events even when runner metadata or Copilot's own files are missing."""
         try:
@@ -135,5 +153,8 @@ class CopilotSandboxSession(AgentSessionState):
             runtime_payload = None
         self.runtime_info = parse_runtime_info(runtime_payload)
         return CopilotArtifacts(
-            events=events, otel=await self.read_optional("otel.jsonl"), usage=await self.read_optional("usage.json")
+            events=events,
+            otel=await self.read_optional("otel.jsonl"),
+            usage=await self.read_optional("usage.json"),
+            compaction_state=await self.read_compaction_state(),
         )

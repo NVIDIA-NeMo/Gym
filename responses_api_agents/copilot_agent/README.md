@@ -113,9 +113,11 @@ OpenTelemetry chat spans, written locally to the session directory: counts are s
 model calls, and a count the provider omitted stays unknown rather than zero. Close returns the model-call
 references, harness tool timing, sandbox identity and execution outcome, and explicit observation gaps.
 Observed rejected model calls contribute zero completed-response tokens; missing chat telemetry stays unknown.
-Copilot 1.0.103 omits compaction calls from its native usage spans. After observed compaction, aggregate
-response usage is unknown and `compaction_model_usage_unavailable` explains the gap. Enable Gym
-Model Server capture to retain the complete per-call token counts, including compaction.
+Copilot 1.0.103 omits compaction calls from its native usage spans. The adapter also checks its persisted
+session events, including late background compaction attempts with no subsequent chat span. Aggregate
+response usage stays unknown after observed compaction (`compaction_model_usage_unavailable`) or when
+the native event store cannot be inspected (`native_compaction_state_unavailable`). Enable Gym Model
+Server capture to retain per-call token counts, including compaction.
 
 A provider error that Copilot reports (`session.error`) returns a failed response with a classified cause:
 an HTTP status becomes `model_request_error`, and an unreachable provider becomes `model_transport_error`.

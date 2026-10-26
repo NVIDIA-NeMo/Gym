@@ -113,6 +113,7 @@ class Sandbox:
         self.result = {"return_code": 0, "timed_out": False, "cleanup_confirmed": True, "error": None}
         self.events = copilot_events()
         self.otel = otel(chat_span("chatcmpl-1", usage=(10, 3)), chat_span("chatcmpl-2", usage=(5, 2)))
+        self.compaction_state = False
         self.exec = AsyncMock(side_effect=self.execute)
         self.stop = AsyncMock()
         self.disconnect = AsyncMock()
@@ -120,6 +121,8 @@ class Sandbox:
         self.payload = None
 
     async def execute(self, command, **kwargs):
+        if "--compaction-state" in command:
+            return SimpleNamespace(return_code=0, error_type=None, stdout=json.dumps(self.compaction_state), stderr="")
         if "--receipt" in command and "process_supervisor.py" in command:
             return await self.launch(command, **kwargs)
         if "install_copilot_runtime.py" in command:
@@ -386,6 +389,23 @@ def test_compaction_does_not_publish_partial_token_totals(setup, compacted):
     else:
         assert result.json()["usage"]["total_tokens"] == 20
         assert "compaction_model_usage_unavailable" not in {gap["code"] for gap in observations["gaps"]}
+
+
+@pytest.mark.parametrize("compaction_state", [False, True, None])
+def test_late_or_unobserved_compaction_does_not_publish_partial_totals(setup, compaction_state):
+    agent, sandbox = setup
+    # A background compaction can finish after the final ordinary chat: no next-chat marker exists.
+    sandbox.compaction_state = compaction_state
+    result, closed = run_session(agent)
+    assert result.json()["status"] == "completed"
+    gaps = {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
+    if compaction_state is False:
+        assert result.json()["usage"]["total_tokens"] == 20
+    else:
+        assert result.json()["usage"] is None
+        assert (
+            "compaction_model_usage_unavailable" if compaction_state else "native_compaction_state_unavailable"
+        ) in gaps
 
 
 def test_reported_provider_error_is_a_classified_failed_response(setup):
