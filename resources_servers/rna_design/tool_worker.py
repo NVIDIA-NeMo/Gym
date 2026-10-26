@@ -27,6 +27,7 @@ AGENT_DIR = Path(__file__).resolve().parents[2] / "responses_api_agents" / "rna_
 sys.path.insert(0, str(AGENT_DIR))
 
 import worker  # noqa: E402
+from rds.benchmark import anonymised  # noqa: E402
 from rds.budget import Budget, Limits  # noqa: E402
 from rds.campaign import applicable_tools, objective_view  # noqa: E402
 from rds.evaluate import ground_truth  # noqa: E402
@@ -39,14 +40,17 @@ class Campaign:
     def __init__(self, suite_path: str, target_name: str, run_dir: str) -> None:
         _, self.campaign = worker.find_campaign(suite_path, target_name)
         register(from_dict(self.campaign.inline_target))
+        # Under a goal or hidden objective the harness sees a name that names no puzzle, as in benchmark.run_one.
+        # The real campaign still judges the pool.
+        shown = self.campaign if self.campaign.objective_visibility == "metric" else anonymised(self.campaign)
         # What the native campaign runner sets: where report.rules writes, and the target a tool defaults to.
         os.environ["RDS_RUN_DIR"] = run_dir
-        os.environ["RDS_TARGET"] = self.campaign.target_name
+        os.environ["RDS_TARGET"] = shown.target_name
         self.state = CampaignState(run_dir, self.campaign.scoring.direction)
         self.budget = Budget(Limits(**self.campaign.budget))
         self.rank_by = self.campaign.scoring.primary
-        self.objective = objective_view(self.campaign)
-        self.allowed = {spec.name for spec in applicable_tools(self.campaign)}
+        self.objective = objective_view(shown)
+        self.allowed = {spec.name for spec in applicable_tools(shown)}
         self.failures: list[str] = []
         self.state.record("campaign_start", controller="harness", rank_by=self.rank_by, budget=self.budget.snapshot())
 

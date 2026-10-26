@@ -213,6 +213,11 @@ def generate_grnade(inp: GRNAdeIn) -> dict:
         raise ValueError(f"unknown mode {inp.mode!r}; this tool takes: '2d', '3d' or empty")
     if inp.filter_metric not in FILTER_METRICS:
         raise ValueError(f"unknown filter_metric {inp.filter_metric!r}; this tool takes: {', '.join(FILTER_METRICS)}")
+    whole = {name: getattr(inp, name) for name in ("n", "batch_size", "n_pass", "seed")}
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in whole.values()):
+        raise ValueError(f"n, batch_size, n_pass and seed must be whole numbers, got {whole}")
+    if not 0 <= inp.seed < 2**32:
+        raise ValueError(f"seed must be in [0, 2**32), got {inp.seed}")
     if inp.n < 1 or inp.batch_size < 1:
         raise ValueError(f"n and batch_size must be at least 1, got n={inp.n} and batch_size={inp.batch_size}")
     if not 0 < inp.temperature_min <= inp.temperature_max:
@@ -237,7 +242,8 @@ def generate_grnade(inp: GRNAdeIn) -> dict:
         getattr(target, "structure_path", "") or os.environ.get("RDS_GRNADE_PDB", "") if disclosed else ""
     )
     structure = Path(given) if given else Path("")
-    mode = inp.mode or ("3d" if given and structure.exists() else "2d")
+    # A backbone named by the task or the model means 3d, so a missing one fails instead of quietly running 2d.
+    mode = inp.mode or ("3d" if given else "2d")
     if not given or not structure.exists():
         if mode != "2d" or inp.structure:
             missing = (

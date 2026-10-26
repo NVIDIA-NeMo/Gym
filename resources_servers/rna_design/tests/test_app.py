@@ -261,8 +261,9 @@ def test_a_reply_larger_than_64_kib_still_verifies(tmp_path: Path) -> None:
     assert result["tool_calls"] == 1
 
 
-def test_closing_a_worker_stops_the_processes_it_started(tmp_path: Path) -> None:
-    """gRNAde runs as the tool worker's child. Ending the session must end it too."""
+@pytest.mark.parametrize("worker_exits_first", [False, True])
+def test_closing_a_worker_stops_the_processes_it_started(tmp_path: Path, worker_exits_first: bool) -> None:
+    """gRNAde runs as the tool worker's child. Ending the session must end it too, even after the worker died."""
     import asyncio
     import time
 
@@ -273,13 +274,15 @@ def test_closing_a_worker_stops_the_processes_it_started(tmp_path: Path) -> None
     script.write_text(
         "import subprocess, sys, time\n"
         f"child = subprocess.Popen(['sleep', '60'])\nopen({str(pid_file)!r}, 'w').write(str(child.pid))\n"
-        "time.sleep(60)\n"
+        + ("" if worker_exits_first else "time.sleep(60)\n")
     )
 
     async def scenario() -> int:
         proc = await asyncio.create_subprocess_exec(sys.executable, str(script), start_new_session=True)
         while not pid_file.exists() or not pid_file.read_text():
             await asyncio.sleep(0.05)
+        if worker_exits_first:
+            await proc.wait()
         await ToolWorker(proc, timeout_s=1).close()
         return int(pid_file.read_text())
 
@@ -300,6 +303,33 @@ def test_closing_a_worker_stops_the_processes_it_started(tmp_path: Path) -> None
 
 
 @needs_eternafold
+def test_a_hidden_objective_shows_the_harness_an_alias_not_the_puzzle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import dataclasses
+
+    from resources_servers.rna_design import tool_worker
+
+    real = tool_worker.worker.find_campaign
+
+    def hidden(suite_path, target_name):
+        suite, campaign = real(suite_path, target_name)
+        return suite, dataclasses.replace(campaign, objective_visibility="hidden")
+
+    monkeypatch.setattr(tool_worker.worker, "find_campaign", hidden)
+    for name in ("RDS_TARGET", "RDS_RUN_DIR"):  # Campaign sets these. Restore them for the other tests.
+        monkeypatch.setenv(name, os.environ.get(name, ""))
+    suite = (
+        Path(__file__).resolve().parents[3]
+        / "responses_api_agents/rna_design_agent/suites/rnainvbench_eterna100_v2.yaml"
+    )
+    campaign = tool_worker.Campaign(str(suite), "eterna100_v2_157", str(tmp_path / "run"))
+    shown = json.dumps(campaign.objective)
+    assert "eterna" not in shown and os.environ["RDS_TARGET"].startswith("target_")
+    assert campaign.campaign.target_name == "eterna100_v2_157"  # the real campaign still judges the pool
+    campaign.state.close()
+
+
 def test_reading_the_campaign_state_is_free(tmp_path: Path) -> None:
     """The agent's model sees the state every round for free. A harness reads it with campaign_state."""
     pytest.importorskip("mcp")

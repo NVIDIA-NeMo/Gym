@@ -334,9 +334,45 @@ class TestReviewFixes:
             ({"batch_size": 0}, "at least 1"),
             ({"temperature_min": 0.0}, "temperature_min <= temperature_max"),
             ({"temperature_min": 2.0, "temperature_max": 1.0}, "temperature_min <= temperature_max"),
+            ({"n": 100.0}, "whole numbers"),
+            ({"batch_size": 5.5}, "whole numbers"),
+            ({"seed": 1.5}, "whole numbers"),
+            ({"seed": -1}, "seed must be in"),
+            ({"seed": 2**40}, "seed must be in"),
         ):
             with pytest.raises(ValueError, match=says):
                 registry.dispatch("generate.grnade", {"target": "review_hairpin", **bad})
+
+    def test_a_backbone_the_task_names_but_the_machine_lacks_fails_instead_of_running_2d(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from responses_api_agents.rna_design_agent.rds import registry
+        from responses_api_agents.rna_design_agent.rds.spec import EnvironmentFault
+        from responses_api_agents.rna_design_agent.rds.targets import from_dict, register
+
+        self._campaign(tmp_path)
+        register(
+            from_dict(
+                {
+                    "name": "review_backbone",
+                    "length": 12,
+                    "target_structure": "((((...)))).",
+                    "structure_path": str(tmp_path / "no_such_backbone.pdb"),
+                }
+            )
+        )
+        monkeypatch.setenv("GRNADE_REPO", str(tmp_path))
+        with pytest.raises(EnvironmentFault, match="target structure not found"):
+            registry.dispatch("generate.grnade", {"target": "review_backbone"})
+
+    def test_an_empty_top_selection_does_not_name_the_ranking_metric(self, tmp_path: Path) -> None:
+        """Under a hidden objective the metric is withheld, so the selector's error must not reveal it."""
+        state, _ = self._campaign(tmp_path)
+        state.add_candidates(["GGGGAAACCCCA"], source="test")
+        with pytest.raises(ValueError, match="selected no candidates") as raised:
+            state.select("@top:5", rank_by="score.fold_match.match.f1")
+        assert "fold_match" not in str(raised.value)
+        state.close()
 
     def test_3d_on_a_target_without_a_backbone_is_the_models_mistake(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -510,6 +546,34 @@ class TestRun:
         assert result["campaign"].startswith("design/target_") and "eterna" not in result["campaign"]
         assert result["run"]["protocol"]["visibility"] == visibility
         assert result["official"]["designed"]["solved"] is True
+
+    @pytest.mark.parametrize("visibility", ["goal", "hidden"])
+    def test_a_hidden_objective_withholds_the_metric_from_the_view_and_the_prompt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, visibility: str
+    ) -> None:
+        import dataclasses
+
+        from responses_api_agents.rna_design_agent.rds import benchmark
+        from responses_api_agents.rna_design_agent.rds.campaign import objective_view
+        from responses_api_agents.rna_design_agent.rds.controllers.llm import BENCHMARK_PROMPT
+        from responses_api_agents.rna_design_agent.rds.suite import Suite
+
+        suite = Suite.load(Path(__file__).resolve().parents[1] / "suites/rnainvbench_eterna100_v2.yaml")
+        campaign = dataclasses.replace(next(iter(suite.campaigns())), objective_visibility=visibility)
+        view = objective_view(campaign)
+        assert "rank_candidates_by" not in view
+        assert ("hard_constraints" in view) is (visibility == "goal")
+
+        class Stop(Exception):
+            pass
+
+        def controller(provider, **kwargs):
+            raise Stop(kwargs["system_prompt"])
+
+        monkeypatch.setattr(benchmark, "LLMController", controller)
+        with pytest.raises(Stop) as stopped:
+            benchmark.run_one(campaign, tmp_path / "run", arm="agent", provider=object())
+        assert stopped.value.args[0] == BENCHMARK_PROMPT
 
     @needs_eternafold
     @pytest.mark.asyncio

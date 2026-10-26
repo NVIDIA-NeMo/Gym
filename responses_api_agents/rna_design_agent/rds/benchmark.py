@@ -38,7 +38,7 @@ from .targets import from_dict, register
 ARMS = ("generator", "fixed", "fixed_deep", "agent")
 
 
-def _anonymised(campaign):
+def anonymised(campaign):
     """The same campaign under a name that names nothing."""
     import dataclasses
     import hashlib
@@ -94,7 +94,7 @@ def run_one(
         register(from_dict(campaign.inline_target))
     if campaign.objective_visibility != "metric":
         # A published puzzle name would let a model recall a known solution.
-        campaign = _anonymised(campaign)
+        campaign = anonymised(campaign)
 
     if campaign.control == "handwritten":
         if not campaign.control_cycle:

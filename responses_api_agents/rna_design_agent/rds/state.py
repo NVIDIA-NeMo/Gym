@@ -192,7 +192,9 @@ class CampaignState:
             raise ValueError(
                 f"{selector!r} selected no candidates "
                 f"({self.count()} in state"
-                + (f"; {by_tool} has already scored them all). " if by_tool else f", ranked by {rank_by!r}). ")
+                + (
+                    f"; {by_tool} has already scored them all). " if by_tool else "). "
+                )  # no metric name: it may be hidden
                 + remedy
             )
         return [r["sequence"] for r in rows]

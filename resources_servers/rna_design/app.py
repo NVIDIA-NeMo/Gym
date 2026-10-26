@@ -29,7 +29,7 @@ import signal
 import sys
 import tempfile
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, Optional
 
@@ -126,9 +126,10 @@ class ToolWorker:
                     return reply
 
     async def close(self) -> None:
-        if self.proc.returncode is None:
-            os.killpg(self.proc.pid, signal.SIGKILL)  # the worker and the gRNAde runs it started
-            await self.proc.wait()
+        # The worker and the gRNAde runs it started, even when the worker itself has already exited.
+        with suppress(ProcessLookupError):
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        await self.proc.wait()
         if self.scratch:
             shutil.rmtree(self.scratch, ignore_errors=True)
 
