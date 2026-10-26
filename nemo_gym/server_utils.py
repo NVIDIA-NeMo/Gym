@@ -59,7 +59,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from multidict import CIMultiDict
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, PrivateAttr, model_validator
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.routing import Match
@@ -69,6 +69,7 @@ from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 from nemo_gym import WORKING_DIR
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.config_types import (
+    DEFAULT_UVICORN_BACKLOG,
     ROLLOUT_PATH_PREFIX,
     TOKEN_CAPTURE_PATH_SEGMENT,
     TRACE_CONTEXT_PATH_SEGMENT,
@@ -1136,6 +1137,12 @@ class UvicornLoggingConfig(BaseModel):
     uvicorn_logging_show_200_ok: bool = False
 
 
+class UvicornBacklogConfig(BaseModel):
+    # Connections the kernel queues for a server before it accepts them.
+    # The kernel caps it at net.core.somaxconn.
+    uvicorn_backlog: PositiveInt = DEFAULT_UVICORN_BACKLOG
+
+
 # Every IPv4 address as it appears on a dual-stack socket.
 _ALL_V4_MAPPED = ip_network("::ffff:0:0/96")
 
@@ -1943,6 +1950,7 @@ repr(e): {repr(e)}"""
         if is_main_fastapi_proc:
             report_connection_pool_capacity(connection_pool_config, pool_capacity, visible=True)
         server.setup_exception_middleware(app)
+        backlog = UvicornBacklogConfig.model_validate(global_config_dict).uvicorn_backlog
         # A worker of a multi-worker server serves a private socket in this directory and claims sessions in it.
         # The main process of a multi-worker server never serves the app.
         session_socket_dir = getenv(SESSION_SOCKET_DIR_ENV) if not is_main_fastapi_proc else None
@@ -1956,6 +1964,7 @@ repr(e): {repr(e)}"""
                 socket_dir=session_socket_dir,
                 session_cookie=session_cookie,
                 secret_key=session_cookie,
+                backlog=backlog,
                 **mcp_token_routing,
                 **server.claimed_session_routing(),
             )
@@ -1996,6 +2005,7 @@ repr(e): {repr(e)}"""
             timeout_worker_healthcheck=global_config_dict.get(UVICORN_TIMEOUT_WORKER_HEALTHCHECK, 30),
             # Ensure server keepalive > client keepalive
             timeout_keep_alive=30,
+            backlog=backlog,
             # Parse HTTP with httptools instead of pure-Python h11, and enable TCP keepalive on every accepted
             # connection. Explicit selection prevents Uvicorn from silently falling back to h11; a missing or
             # incompatible httptools wheel fails at import.
@@ -2102,7 +2112,8 @@ class HeadServer(BaseServer):
     def run_webserver(cls) -> Tuple[uvicorn.Server, Thread, "HeadServer"]:
         config = ServerClient.load_head_server_config()
         server = cls(config=config)
-        uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(get_global_config_dict())
+        global_config_dict = get_global_config_dict()
+        uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(global_config_dict)
 
         app = server.setup_webserver()
         # The head server runs on its own thread and event loop inside the supervisor process.
@@ -2114,6 +2125,7 @@ class HeadServer(BaseServer):
             port=server.config.port,
             proxy_headers=uvicorn_proxy_cfg.uvicorn_proxy_headers,
             forwarded_allow_ips=uvicorn_proxy_cfg.uvicorn_forwarded_allow_ips or [],
+            backlog=UvicornBacklogConfig.model_validate(global_config_dict).uvicorn_backlog,
         )
         uvicorn_server = uvicorn.Server(config=config)
 
