@@ -642,8 +642,9 @@ every number:
 ## Sandboxed agents (with tools)
 
 `hle_diamond/opencode` and `hle_diamond/pi` give the model sandboxed Python tools without search;
-`hle_diamond/opencode_search` and `hle_diamond/pi_search` add Tavily search and page tools. All four
-run the 728 text rows with the verbatim HLE instructions in a single user message and one repeat;
+`hle_diamond/opencode_search` and `hle_diamond/pi_search` add Tavily search and page tools;
+`hle_diamond/opencode_hle_tools` adds upstream's own two web tools behind its blocklist (Upstream web
+tools below). All of them run the 728 text rows with the verbatim HLE instructions in a single user message and one repeat;
 keep collection repeats at one. The published with-tools column was produced under upstream's
 `docs/evaluation-with-tools.md` protocol, from which these presets depart in concrete ways, so they
 support a **comparison, not a reproduction**, of that column:
@@ -704,6 +705,48 @@ these presets:
   through the Tavily resource's `exclude_domains_file_path`; keep private policies outside the public
   repository. The list reduces answer exposure but cannot guarantee that every answer-bearing page is
   excluded.
+
+### Upstream web tools (`opencode_hle_tools`)
+
+`hle_diamond/opencode_hle_tools` replaces the Tavily search and page tools of `opencode_search` with
+[`resources_servers/hle_web_tools`](../../resources_servers/hle_web_tools/README.md), a tool server
+that implements section 3 of upstream's `docs/evaluation-with-tools.md` (commit
+`22ed3074b1e7b134bcbc09028d0ba320839b0655`) and is the only tool server of the preset:
+
+- Exactly two tools over MCP, `web_search(query)` (URL, title and snippet of at most 20 results after
+  filtering) and `web_fetch(url)` (main content as Markdown, capped at 60,000 characters with a
+  truncation indicator, no image, audio or video payloads, PDFs rendered as text). OpenCode names them
+  `hle_tools_web_search` and `hle_tools_web_fetch`; its own `webfetch` and `websearch` stay denied.
+- The upstream `docs/blocklist.json`, byte-exact (digest pinned in the server and checked at start),
+  with **all seven rule families** enforced with the semantics the protocol describes, plus its query
+  refusals (a blocked `site:` domain, a verbatim span of the question: 8 consecutive words, the
+  server's choice where upstream states no length), its fetch-URL checks after percent-decoding
+  archive and proxy wrappers, its title-and-Markdown re-check of fetched and cached pages, and a log
+  line per blocked call naming the family and rule. This closes the four unenforced and one
+  approximated families of the `opencode_search` preset (Search exclusions below), which stays as the
+  Tavily-native comparison.
+- The environment note tells the model that external information is available only through
+  `web_search` and `web_fetch`.
+
+The residual difference from upstream's wrapper is the backend: the protocol names no search or
+extraction provider, and this server uses Tavily (`/search` at `max_results: 20`, `search_depth:
+advanced`; `/extract` in Markdown). Which pages a query surfaces, their ranking and the page-to-Markdown
+rendering are therefore Tavily's, and a with-tools number from this preset should say so. Everything
+else that departs from upstream in this section (harness, sandbox image and Python version, text rows
+only, effort transmission, and on the Docker provider the open egress) still applies.
+
+Pilot evidence (2026-10-26, 5 text rows, GPT-6 Astra, judge o3-mini, local Docker with host
+networking and `++use_absolute_ip=false`, egress unrestricted; comparison infrastructure only): exit 0,
+5/5 rows scored (3 correct), 4/5 rows made tool calls, among them two `web_search` calls that returned
+20 and 16 results with no Tavily error. All 14 captured OpenCode requests carried
+`reasoning_effort: high` and offered exactly `hle_tools_web_search` and `hle_tools_web_fetch` as MCP
+tools next to OpenCode's native file and shell tools. A manual `web_search` through the server's MCP
+endpoint, in a session seeded with a real question and quoting ten consecutive words of it, was
+refused with the span message and logged as
+`family=question_span rule='8 consecutive words of the question' where=query subject='8 words'`; a
+manual `web_fetch` of a Hugging Face dataset page was refused as a blocked site. Run it with the
+Quickstart's Docker recipe, `--benchmark hle_diamond/opencode_hle_tools` and `TAVILY_API_KEY`
+exported in the shell that starts the servers.
 
 ### Search exclusions
 
@@ -810,7 +853,8 @@ new `serp_url_patterns` regex is reported as dropped until `SERP_PATTERN_SUBSTRI
 ```bash
 pytest tests/unit_tests/test_hle_diamond.py tests/unit_tests/test_hle_diamond_search_exclusions.py \
     resources_servers/equivalence_llm_judge/tests/test_app.py \
-    resources_servers/tavily_search/tests/test_search_policy.py
+    resources_servers/tavily_search/tests/test_search_policy.py \
+    resources_servers/hle_web_tools/tests/test_app.py
 ```
 
 ## Licensing

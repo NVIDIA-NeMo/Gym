@@ -384,9 +384,38 @@ class TestConfigs:
         tavily = get_first_server_config_dict(_resolve(f"{variant}.yaml"), "tavily")
         assert tavily["exclude_domains_file_path"] == "benchmarks/hle_diamond/search_exclusions.json"
 
+    def test_hle_tools_preset_wires_exactly_the_upstream_tool_server(self):
+        """opencode_hle_tools: one tool server, the hle_web_tools instance over MCP, and no Tavily resource."""
+        benchmark = BenchmarkConfig.from_config_path(HLE_DIAMOND_DIR / "opencode_hle_tools.yaml", strict=False)
+        assert (benchmark.name, benchmark.agent_name, benchmark.num_repeats) == (
+            "hle_diamond_text",
+            "hle_diamond_opencode_agent",
+            1,
+        )
+
+        resolved = _resolve("opencode_hle_tools.yaml")
+        agent = get_first_server_config_dict(resolved, "hle_diamond_opencode_agent")
+        assert agent["tool_servers"] == [{"type": "resources_servers", "name": "hle_tools"}]
+        assert agent["network_access"] == "model_and_tools"
+        note = agent["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]
+        assert "web_search" in note and "web_fetch" in note and "disabled" in note and "Tavily" not in note
+        assert list(resolved["hle_tools"]["resources_servers"]) == ["hle_web_tools"]
+        tools = get_first_server_config_dict(resolved, "hle_tools")
+        assert tools["expose_tools_over_mcp"] is True
+        assert "blocklist_file_path" not in tools  # the server's pinned upstream copy, not a per-preset list
+        assert "tavily" not in resolved
+
     @pytest.mark.parametrize(
         "config_file",
-        ["config.yaml", "text.yaml", "opencode.yaml", "opencode_search.yaml", "pi.yaml", "pi_search.yaml"],
+        [
+            "config.yaml",
+            "text.yaml",
+            "opencode.yaml",
+            "opencode_search.yaml",
+            "opencode_hle_tools.yaml",
+            "pi.yaml",
+            "pi_search.yaml",
+        ],
     )
     def test_every_preset_shares_the_hle_judge_prompt_labels_and_partition_slices(self, config_file):
         judge = get_first_server_config_dict(_resolve(config_file), JUDGE_SERVER)
@@ -455,7 +484,7 @@ class TestReasoningEffort:
     """D4 on the sandboxed path: Gym's ++responses_create_params.reasoning.effort decorates only Gym's run
     request, so each harness has to request high effort in its own model call."""
 
-    @pytest.mark.parametrize("config_file", ["opencode.yaml", "opencode_search.yaml"])
+    @pytest.mark.parametrize("config_file", ["opencode.yaml", "opencode_search.yaml", "opencode_hle_tools.yaml"])
     def test_opencode_presets_make_opencode_request_high_reasoning_effort(self, config_file):
         opencode_config = get_first_server_config_dict(_resolve(config_file), "hle_diamond_opencode_agent")[
             "opencode_config"
@@ -485,6 +514,7 @@ class TestLocalDockerOverride:
         [
             ("opencode.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
             ("opencode_search.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
+            ("opencode_hle_tools.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
             ("pi.yaml", "hle_diamond_pi_agent", "hle_diamond_opencode_agent"),
             ("pi_search.yaml", "hle_diamond_pi_agent", "hle_diamond_opencode_agent"),
         ],

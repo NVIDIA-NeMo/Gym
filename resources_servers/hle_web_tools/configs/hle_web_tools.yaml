@@ -1,0 +1,11 @@
+# Standalone instance of the HLE web tools (web_search, web_fetch over MCP, Tavily backend, upstream
+# blocklist). Benchmark presets compose their own instance; see benchmarks/hle_diamond/opencode_hle_tools.yaml.
+hle_web_tools:
+  resources_servers:
+    hle_web_tools:
+      entrypoint: app.py
+      domain: agent
+      description: Upstream HLE web_search and web_fetch tools behind docs/blocklist.json, served over MCP (Tavily backend)
+      expose_tools_over_mcp: true
+      tavily_api_key: ${oc.env:TAVILY_API_KEY}
+      verified: false
