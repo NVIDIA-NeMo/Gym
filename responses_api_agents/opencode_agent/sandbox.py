@@ -388,7 +388,7 @@ class OpenCodeSandboxSession(AgentSessionState):
         except OSError as error:
             logs = await self.session.read_output_log()
             raise RuntimeError(
-                format_sandbox_error(
+                format_error_message(
                     "OpenCode sandbox runner returned no valid result", output=logs, stderr=self.stderr
                 )
             ) from error

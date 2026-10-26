@@ -40,7 +40,7 @@ class ExecOnlySandbox:
         self.disconnected = True
 
     async def exec(self, command, *, cwd=None, timeout_s=30):
-        launch = "--receipt" in command and "process_supervisor.py" in command
+        launch = "--receipt" in command and "process_supervisor.sh" in command
         if launch:
             self.deadline = timeout_s
             self.delayed_command = command
