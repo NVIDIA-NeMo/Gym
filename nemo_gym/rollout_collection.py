@@ -2937,17 +2937,18 @@ class _BoundedCompletionIterator:
 
 
 class RolloutCollectionHelper(BaseModel):
-    """Collect rollouts, optionally reusing one client for a stable deployment.
+    """Collect rollouts by sending tasks to a running Gym deployment.
 
-    Training integrations can opt in with ``RolloutCollectionHelper(reuse_server_client=True)``.
-    Reload after changing a deployment with ``setup_server_client(refresh=True)``.
-    Without opt-in, each call resolves the current configuration as before.
+    Each rollout batch fetches the deployment's configuration from the head server.
+    A caller that runs many batches against one deployment can set ``reuse_server_client=True``.
+    The helper then fetches the configuration once.
+    Build a new helper after that deployment's configuration changes.
     """
 
     reuse_server_client: bool = Field(
         default=False,
-        description="Reuse one resolved client/config per helper for a stable deployment. "
-        "Call setup_server_client(refresh=True) after changing that deployment's configuration.",
+        description="Reuse one resolved client and configuration per helper. "
+        "Build a new helper after the deployment's configuration changes.",
     )
     _cached_server_client: Optional[ServerClient] = PrivateAttr(default=None)
     _cached_head_server_config: Optional[BaseServerConfig] = PrivateAttr(default=None)
@@ -4906,19 +4907,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             )
         )
 
-    def setup_server_client(
-        self, head_server_config: Optional[BaseServerConfig] = None, *, refresh: bool = False
-    ) -> ServerClient:
-        """Resolve a client, optionally reusing a helper-local stable deployment.
+    def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
+        """Return a client for the head server, reusing the cached one when the helper opted in.
 
-        The default keeps the existing per-call reload behavior. Opted-in
-        helpers retain at most one client, invalidate it when the supplied head
-        config changes, and reload explicitly with ``refresh=True``. A failed
-        reload raises without replacing the last successful client.
+        Without opt-in, every call fetches the configuration from the head server again.
+        An opted-in helper keeps one client and fetches again only when the head config differs from the cached one.
+        Build a new helper after the configuration behind the same head changes.
         """
         if not self.reuse_server_client:
             return setup_server_client_utils(head_server_config)
-        if refresh or self._cached_server_client is None or head_server_config != self._cached_head_server_config:
+        if self._cached_server_client is None or head_server_config != self._cached_head_server_config:
             client = setup_server_client_utils(head_server_config)
             head_snapshot = head_server_config.model_copy(deep=True) if head_server_config is not None else None
             self._cached_server_client = client

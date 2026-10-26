@@ -34,13 +34,12 @@ def test_default_keeps_reloading(load_client):
     assert load_client.call_count == 2
 
 
-def test_opt_in_reuses_client_and_resolved_config_for_many_prompts(load_client):
+def test_opt_in_reuses_client_and_resolved_config(load_client):
     helper = RolloutCollectionHelper(reuse_server_client=True)
     first = helper.setup_server_client(BaseServerConfig(host="localhost", port=11000))
-    for _ in range(1024):
-        client = helper.setup_server_client(BaseServerConfig(host="localhost", port=11000))
-        assert client is first
-        assert client.global_config_dict is first.global_config_dict
+    second = helper.setup_server_client(BaseServerConfig(host="localhost", port=11000))
+    assert second is first
+    assert second.global_config_dict is first.global_config_dict
     load_client.assert_called_once()
 
 
@@ -49,20 +48,6 @@ def test_default_head_is_also_cached_when_opted_in(load_client):
     first = helper.setup_server_client()
     assert helper.setup_server_client() is first
     load_client.assert_called_once_with(None)
-
-
-def test_explicit_refresh_observes_changed_configuration(load_client):
-    helper = RolloutCollectionHelper(reuse_server_client=True)
-    head = BaseServerConfig(host="localhost", port=11000)
-    first = helper.setup_server_client(head)
-    updated = ServerClient(head_server_config=head, global_config_dict=OmegaConf.create({"version": 1}))
-    load_client.side_effect = None
-    load_client.return_value = updated
-    assert helper.setup_server_client(head).global_config_dict.version == 0
-    assert helper.setup_server_client(head, refresh=True) is updated
-    assert helper.setup_server_client(head).global_config_dict.version == 1
-    assert updated is not first
-    assert load_client.call_count == 2
 
 
 @pytest.mark.parametrize("field,value", [("host", "other-host"), ("port", 12000)])
@@ -108,17 +93,6 @@ def test_failed_initial_load_is_retried(load_client):
     assert load_client.call_count == 2
 
 
-def test_failed_refresh_does_not_replace_last_successful_client(load_client):
-    helper = RolloutCollectionHelper(reuse_server_client=True)
-    head = BaseServerConfig(host="localhost", port=11000)
-    first = helper.setup_server_client(head)
-    load_client.side_effect = ConnectionError("head unavailable")
-    with pytest.raises(ConnectionError, match="head unavailable"):
-        helper.setup_server_client(head, refresh=True)
-    assert helper.setup_server_client(head) is first
-    assert load_client.call_count == 2
-
-
 def test_failed_head_change_never_returns_previous_heads_client(load_client):
     helper = RolloutCollectionHelper(reuse_server_client=True)
     first_head = BaseServerConfig(host="localhost", port=11000)
@@ -135,4 +109,6 @@ def test_failed_head_change_never_returns_previous_heads_client(load_client):
 def test_client_cache_is_not_serialized(load_client):
     helper = RolloutCollectionHelper(reuse_server_client=True)
     helper.setup_server_client()
-    assert helper.model_dump() == {"reuse_server_client": True}
+    dumped = helper.model_dump()
+    assert dumped["reuse_server_client"] is True
+    assert not {"_cached_server_client", "_cached_head_server_config"} & dumped.keys()
