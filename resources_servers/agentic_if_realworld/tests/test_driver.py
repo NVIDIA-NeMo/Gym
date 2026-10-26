@@ -17,7 +17,10 @@ from nemo_gym import rollout_collection, server_utils
 from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.path_utils import materialized_path_for
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_health import run_health_checks
+from nemo_gym.secret_utils import recursively_hide_secrets
 from resources_servers.agentic_if_realworld.app import Verifier, VerifyRequest
 from resources_servers.agentic_if_realworld.benchmark import core
 from resources_servers.agentic_if_realworld.benchmark.synthetic import create, review
@@ -25,9 +28,21 @@ from resources_servers.agentic_if_realworld.tests.test_transport import Response
 from responses_api_agents.simple_agent.tests.test_app import _make_agent, _mock_response
 
 
-@pytest.mark.parametrize("complete_stage,fail_last_dispatch", [(1, False), (3, False), (None, False), (None, True)])
-def test_adaptive_capture_selected_parameters_and_resume(tmp_path, monkeypatch, complete_stage, fail_last_dispatch):
-    create(tmp_path / "data")
+@pytest.mark.parametrize(
+    "complete_stage,fail_last_dispatch,interrupted,fresh_resume",
+    [
+        (1, False, False, False),
+        (3, False, False, False),
+        (None, False, False, False),
+        (None, True, False, False),
+        (1, False, True, False),
+        (1, False, False, True),
+    ],
+)
+def test_adaptive_capture_selected_parameters_and_resume(
+    tmp_path, monkeypatch, complete_stage, fail_last_dispatch, interrupted, fresh_resume
+):
+    create(tmp_path / "data", examples=interrupted)
     dataset = core.Dataset(tmp_path / "data", synthetic=True)
     prepared = tmp_path / "prepared.jsonl"
     prepared.write_text("".join(json.dumps(row) + "\n" for row in dataset.prepared()))
@@ -67,16 +82,18 @@ def test_adaptive_capture_selected_parameters_and_resume(tmp_path, monkeypatch, 
         return [
             {
                 **copy.deepcopy(row),
-                "_ng_task_index": 0,
+                "_ng_task_index": index,
                 "_ng_rollout_index": 0,
                 "agent_ref": {"name": "agentic_if_realworld_agent"},
             }
-            for row in rows
+            for index, row in enumerate(rows)
         ]
 
     def run_examples(self, rows, **kwargs):
         async def completed():
             row = copy.deepcopy(rows[0])
+            if interrupted and row["task_id"] != "synthetic":
+                raise asyncio.CancelledError
             params = row["responses_create_params"]
             metadata = params["metadata"]
             receipt_id = metadata["receipt_id"]
@@ -189,8 +206,8 @@ def test_adaptive_capture_selected_parameters_and_resume(tmp_path, monkeypatch, 
         responses_create_params=None,
         input_jsonl_fpath=str(prepared),
         output_jsonl_fpath=str(tmp_path / "out.jsonl"),
-        limit=None,
-        resume_from_cache=False,
+        limit=2 if interrupted else None,
+        resume_from_cache=fresh_resume,
     )
     settings = {
         "policy_api_key": "synthetic-secret-never-save",
@@ -219,7 +236,39 @@ def test_adaptive_capture_selected_parameters_and_resume(tmp_path, monkeypatch, 
             }
         },
     }
-    asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+    if fresh_resume:
+        prewritten = OmegaConf.create(settings)
+        recursively_hide_secrets(prewritten)
+        core.write(tmp_path / "resolved-config.yaml", OmegaConf.to_container(prewritten))
+    if interrupted:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+    else:
+        asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+    inventory_path = materialized_path_for(tmp_path / "out.jsonl")
+    inventory_bytes = inventory_path.read_bytes()
+    inventory = [json.loads(line) for line in inventory_bytes.splitlines()]
+    assert len(inventory) == (2 if interrupted else 1)
+    assert inventory_path.stat().st_mode & 0o077 == 0
+    assert all("_ng_attempt_index" not in row for row in inventory)
+    assert [row["_ng_task_index"] for row in inventory] == list(range(len(inventory)))
+    health = run_health_checks(tmp_path / "out.jsonl", workers=1).summary["run"]["artifacts"]
+    assert health["expected"] == len(inventory) and health["missing"] == int(interrupted)
+    assert health["healthy"] is (not interrupted)
+    if interrupted:
+        assert core.read(tmp_path / "out.summary.json")["expected_items"] == 5
+        saved = core.read(tmp_path / "out.jsonl")["response"]
+        config.resume_from_cache = True
+        config.limit = 1
+        with pytest.raises(ValueError, match="inventory"):
+            asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+        config.limit = 2
+        with pytest.raises(ValueError, match="Ambiguous"):
+            asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+        assert inventory_path.read_bytes() == inventory_bytes
+        assert len(calls) == 2 and len(judge_calls) == 1
+        assert core.read(tmp_path / "out.jsonl")["response"] == saved
+        return
     snapshot_path = tmp_path / "resolved-config.yaml"
     snapshot = OmegaConf.load(snapshot_path)
     assert snapshot.policy_api_key == "****"
@@ -258,10 +307,20 @@ def test_adaptive_capture_selected_parameters_and_resume(tmp_path, monkeypatch, 
     before = {path: core.digest(path) for path in [*store.root.glob("*"), *verifier.receipt_dir.rglob("*.json")]}
     config.resume_from_cache = True
     asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+    assert inventory_path.read_bytes() == inventory_bytes
     assert len(calls) == last_stage + 1 and len(judge_calls) == int(complete_stage is not None)
     assert len(verification) == 2 * int(complete_stage is not None)
     assert all(core.digest(path) == digest for path, digest in before.items())
     assert core.read(tmp_path / "out.jsonl").get("response") == record.get("response")
+    preserved_inventory = inventory_path.with_suffix(".saved")
+    inventory_path.rename(preserved_inventory)
+    try:
+        with pytest.raises(ValueError, match="Missing materialized rollout inventory"):
+            asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+        assert not inventory_path.exists()
+    finally:
+        preserved_inventory.rename(inventory_path)
+    assert inventory_path.read_bytes() == inventory_bytes
     settings["agentic_if_realworld_resources"]["resources_servers"]["agentic_if_realworld"]["response_source"] = (
         "gym_response"
     )
@@ -276,6 +335,7 @@ def test_adaptive_capture_selected_parameters_and_resume(tmp_path, monkeypatch, 
         selected = core.read(next((verifier.receipt_dir / "cells").glob("*.json")))["selected"]
         receipt = core.read(Path(selected["receipt_path"]))
         paths = [
+            inventory_path,
             Path(receipt["raw_attempts"][-1]["path"]),
             next(verifier.receipt_dir.glob("judges/*/*.http")),
             next(verifier.receipt_dir.glob("judges/*/result.json")),
@@ -286,6 +346,7 @@ def test_adaptive_capture_selected_parameters_and_resume(tmp_path, monkeypatch, 
                 saved.write_text("changed")
                 with pytest.raises(ValueError):
                     asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+                assert saved.read_text() == "changed"
             finally:
                 saved.write_bytes(original)
         assert len(calls) == last_stage + 1 and len(judge_calls) == 1

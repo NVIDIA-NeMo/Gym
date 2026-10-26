@@ -124,6 +124,7 @@ class Verifier:
             or body.responses_create_params.instructions
             or body.responses_create_params.previous_response_id
             or body.responses_create_params.prompt
+            or body.responses_create_params.conversation is not None
         ):
             raise ValueError("Model-visible input changed or native tools enabled")
         if self.response_source == "gym_response":

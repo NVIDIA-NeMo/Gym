@@ -3,6 +3,7 @@
 import asyncio
 import tempfile
 from copy import deepcopy
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -247,6 +248,10 @@ def test_native_preserves_training_metadata_and_judges_separate_projection(nativ
     [
         ("instructions", "extra context"),
         ("previous_response_id", "resp_old"),
+        ("prompt", {"id": "pmpt_existing"}),
+        ("conversation", "conv_existing"),
+        ("conversation", {"id": "conv_existing"}),
+        ("conversation", ""),
         (
             "tools",
             [
@@ -262,9 +267,11 @@ def test_native_preserves_training_metadata_and_judges_separate_projection(nativ
 )
 def test_native_rejects_additional_actor_context(native, field, value):
     verifier, body = native
+    verifier.evaluate = AsyncMock(side_effect=AssertionError("Additional context must not reach the judge"))
     body["responses_create_params"][field] = value
     with pytest.raises(ValueError, match="Model-visible input changed"):
         asyncio.run(verifier.verify(VerifyRequest.model_validate(body)))
+    verifier.evaluate.assert_not_called()
 
 
 def test_native_rejects_changed_binding(native):
