@@ -698,7 +698,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 raise AgentSessionConflictError("Agent session is closing")
             if record.state is None:
                 if current is not None:
-                    raise AgentSessionConflictError("Agent session cookie names a session whose fence has expired")
+                    raise AgentSessionConflictError("Agent session cookie names a session that is no longer available")
                 record.episode_id = body.episode_id
                 try:
                     record.state = await self._seed_agent_session_state(body.model_copy(deep=True))
@@ -751,7 +751,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 return record.close_response.model_copy(deep=True)
             if record.state is None:
                 if current is not None:
-                    raise AgentSessionConflictError("Agent session fence has expired")
+                    raise AgentSessionConflictError("Agent session is no longer available")
                 result = AgentCloseSessionResponse(agent_session_id=body.agent_session_id)
             else:
                 result = await self._close_session_state(body.agent_session_id, record)

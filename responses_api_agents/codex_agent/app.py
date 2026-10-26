@@ -594,7 +594,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         marker = self._agent_session_id_from_request(request)
         # Cookies from the previous adapter must never fall back to host execution.
         if marker is None and _SANDBOX_SESSION_KEY in getattr(request, "scope", {}).get("session", {}):
-            raise AgentSessionConflictError("Codex session cookie names a session whose fence has expired")
+            raise AgentSessionConflictError("Codex session cookie names a session that is no longer available")
         return marker
 
     def _require_agent_session(self, agent_session_id: str) -> CodexSandboxSession:

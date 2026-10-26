@@ -1475,9 +1475,9 @@ async def test_close_before_seed_leaves_a_fence_that_expires(setup, monkeypatch)
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
     sandbox.exec.assert_not_awaited()
     clock[0] = 110.0
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.close_agent_session(stale, close)
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.seed_agent_session(stale, body)
     assert not agent._fenced_session_records
 

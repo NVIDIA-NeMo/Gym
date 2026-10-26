@@ -165,14 +165,14 @@ async def test_close_retry_window_begins_after_cleanup_and_is_not_extended(agent
     clock[0] = 209.0
     assert await agent.close_agent_session(request, _close(seed)) == first
     clock[0] = 210.0
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.close_agent_session(request, _close(seed))
     assert not agent._fenced_session_records
     assert not agent._session_records
     assert agent._agent_session_id_from_request(request) == seed.agent_session_id
     with pytest.raises(HTTPException):
         agent._require_agent_session(seed.agent_session_id)
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.seed_agent_session(request, seed)
 
 

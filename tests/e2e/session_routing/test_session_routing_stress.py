@@ -568,11 +568,11 @@ def test_mcp_tool_calls_with_only_the_session_token(deployment: StressDeployment
     assert all(correct) and not twice
 
 
-def test_legacy_run_seeds_that_never_read_the_session_keep_their_session_on_one_worker(
+def test_agent_run_seeds_that_never_read_the_session_keep_their_session_on_one_worker(
     deployment: StressDeployment, sampler: ClaimSampler
 ) -> None:
     """An agent's own /run seeds without a session ID, and only the later tool calls read the session."""
-    sampler.mark("legacy run seeds start")
+    sampler.mark("agent-run seeds start")
     url = deployment.url("resources")
     calls = 5
 
@@ -596,7 +596,7 @@ def test_legacy_run_seeds_that_never_read_the_session_keep_their_session_on_one_
     split = [session_id for session_id, n in created.items() if n > 1]
     left = sum(len(report["plain_live"]) for report in stats.values())
     _report(
-        "legacy_run_seeds",
+        "agent_run_seeds",
         {
             "sessions": SESSIONS,
             "calls_per_session": calls + 1,
@@ -605,7 +605,7 @@ def test_legacy_run_seeds_that_never_read_the_session_keep_their_session_on_one_
             "sessions_left": left,
         },
     )
-    sampler.mark("legacy run seeds end")
+    sampler.mark("agent-run seeds end")
     assert all(correct) and not split and not left
 
 
