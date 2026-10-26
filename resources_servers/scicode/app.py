@@ -19,21 +19,21 @@ Runs the agent's accumulated per-sub-step Python solutions against each sub-step
 (targets loaded from test_data.h5) and returns a binary reward: 1.0 iff every sub-step passes.
 Per-sub-step counts are also returned so sub-step accuracy can be computed downstream.
 
-Each sub-step is executed in a subprocess in this server's own process (instead of a
-Docker sandbox), so the subprocess inherits this server's interpreter and dependencies.
+Each sub-step is executed in a subprocess using a configured grading interpreter.
+The default grading environment isolates the pinned scientific dependencies from Gym.
 """
 
 import asyncio
 import hashlib
 import os
 import shutil
-import sys
 from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from scicode_integration.runner import build_test_program, preflight_grading_interpreter, run_substep, sanitize_test
+from setup_grading_env import ensure_grading_env
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
@@ -64,9 +64,10 @@ class ScicodeResourcesServerConfig(BaseResourcesServerConfig):
     test_data_fpath: Optional[str] = None
     # Optional checksum for binding problem/test releases. Existing SciCode configs leave this unset.
     test_data_md5: Optional[str] = None
-    # Empty preserves the existing behavior of grading with this server's interpreter.
+    grading_venv_path: str = "resources_servers/scicode/.grading_venv"
+    # Empty uses the pinned Python 3.11 grading environment.
     grading_interpreters: List[ScicodeGradingInterpreter] = Field(default_factory=list)
-    # SciCode-Verified sets this to two so a single-interpreter run cannot be mistaken for canonical.
+    # Minimum number of explicitly configured grading environments.
     required_grading_interpreters: int = Field(default=1, ge=1)
     # The canonical OR rule short-circuits after the first pass. Enable this only for diagnostics.
     run_all_grading_interpreters: bool = False
@@ -129,12 +130,9 @@ class ScicodeResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context):
         self._semaphore = asyncio.Semaphore(value=self.config.num_processes)
-        # Fail before accepting rollouts when a benchmark pins its data or requires an explicit
-        # multi-environment grading protocol. Legacy SciCode keeps both checks lazy.
         if self.config.test_data_md5:
             self._resolve_test_data()
-        if self.config.grading_interpreters or self.config.required_grading_interpreters > 1:
-            self._resolve_grading_interpreters()
+        self._resolve_grading_interpreters()
 
     def _resolve_test_data(self) -> str:
         if self._resolved_test_data_path is not None:
@@ -197,8 +195,13 @@ class ScicodeResourcesServer(SimpleResourcesServer):
                         f"{interpreter.python_executable!r}."
                     )
                 resolved.append((interpreter.name, executable))
+        elif self.config.required_grading_interpreters == 1:
+            venv_path = Path(self.config.grading_venv_path).expanduser()
+            if not venv_path.is_absolute():
+                venv_path = PARENT_DIR / venv_path
+            resolved = [("scicode", str(ensure_grading_env(venv_path)))]
         else:
-            resolved = [("current", sys.executable)]
+            resolved = []
 
         if len(resolved) < self.config.required_grading_interpreters:
             raise RuntimeError(

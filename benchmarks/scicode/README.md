@@ -59,10 +59,8 @@ to write the next function directly.
 
 ## Dependencies
 
-The resources server executes generated SciCode solutions in its own venv, so its
-`requirements.txt` pins `scipy<1.14` — the last range that keeps `scipy.integrate.simps` (used by
-some test cases, removed in scipy 1.14) while still providing Python 3.12 wheels — plus `numpy`,
-`matplotlib`, `h5py`, and `sympy`.
+SciCode executes generated solutions in a separate Python 3.11 environment with
+pinned scientific dependencies; see [Grading environment](#grading-environment).
 
 ## Running servers
 
@@ -135,3 +133,18 @@ model-generated, so treat the rollout file accordingly.
 
 Code: Apache 2.0
 Data (`SciCode1/SciCode`, `test_data.h5`): Apache 2.0
+
+## Grading environment
+
+The resources server prepares an isolated Python 3.11 environment using `uv` and
+`resources_servers/scicode/grading-requirements.lock`, including resolved transitive
+dependencies. SciPy 1.10.1 provides
+`scipy.integrate.simps`, which the problem dependencies require. Gym keeps its
+own Python interpreter and does not install the grading packages into it.
+
+The first start requires Python/package download access and a writable
+`grading_venv_path` (default `resources_servers/scicode/.grading_venv`). Set this
+path to persistent writable storage when running from a read-only checkout.
+Subsequent starts reuse a matching environment offline. A lock or Python-version
+change recreates it and synchronizes packages with `uv pip sync`. See the
+[resources-server README](../../resources_servers/scicode/README.md) for lock regeneration.
