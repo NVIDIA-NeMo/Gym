@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import shlex
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +18,7 @@ from nemo_gym.agent_activation_types import AgentContinuationRequirements
 from nemo_gym.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AgentCloseSessionRequest
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.continuation import classify_opencode_run
-from responses_api_agents.opencode_agent.sandbox_runner import snapshot
+from responses_api_agents.opencode_agent.snapshot import snapshot
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
 
 
@@ -34,11 +35,11 @@ def install_artifact_runner(sandbox, tmp_path):
     payloads = []
 
     async def launch(**kwargs):
-        path = [path for path in sandbox.files if path.endswith("/input.json")][-1]
-        payload = json.loads(sandbox.files[path])
+        runner_params = next(arg for arg in shlex.split(kwargs["command"]) if arg.endswith("/params.sh"))
+        directory = runner_params.removesuffix("/params.sh")
+        payload = sandbox.params(directory) | {"directory": directory}
         payloads.append(payload)
         index = len(payloads) - 1
-        directory = payload["directory"]
         sandbox.directory = directory
         sandbox.files[f"{directory}/task-environment.ready"] = "ready\n"
         sandbox.files[f"{directory}/stderr.log"] = ""
@@ -114,7 +115,7 @@ def install_artifact_runner(sandbox, tmp_path):
     download = sandbox.download
 
     async def download_artifacts(source, destination):
-        if source.endswith("/observations.db"):
+        if source.endswith("/opencode.db"):
             Path(destination).write_bytes(database.read_bytes())
         else:
             await download(source, destination)
@@ -280,10 +281,9 @@ async def test_close_recovery_preserves_cancelled_activation(setup, tmp_path, mo
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
-@pytest.mark.parametrize("artifact_failure", ["download", "parse"])
 @pytest.mark.parametrize("prior_success", [False, True])
 async def test_close_without_recovered_root_preserves_activation(
-    setup, tmp_path, monkeypatch, cancelled, artifact_failure, prior_success
+    setup, tmp_path, monkeypatch, cancelled, prior_success
 ):
     agent, sandbox = setup
     install_artifact_runner(sandbox, tmp_path)
@@ -308,9 +308,7 @@ async def test_close_without_recovered_root_preserves_activation(
     download = sandbox.download
 
     async def broken_observations(source, destination):
-        if source.endswith("/observations.db"):
-            if artifact_failure == "download":
-                raise OSError("observations unavailable")
+        if source.endswith("/opencode.db"):
             Path(destination).write_bytes(b"not a SQLite database")
         else:
             await download(source, destination)
@@ -374,7 +372,7 @@ def test_plain_http_delta_replay_and_cumulative_close(setup, tmp_path):
         assert payloads[1]["command"][-2:] == ["--session", "opencode-session"]
         assert payloads[0]["env"]["HOME"] == payloads[1]["env"]["HOME"]
         assert payloads[0]["env"]["XDG_DATA_HOME"] == payloads[1]["env"]["XDG_DATA_HOME"]
-        assert set(payloads[1]["previous_message_ids"]) == {"u0", "a0"}
+        assert set(sandbox.snapshots[1]["previous_message_ids"]) == {"u0", "a0"}
         receipt = close(client, request)
         invocations = roots(receipt["agent_observations"])
         assert [r["activation_id"] for r in invocations] == [1, 2]
@@ -413,7 +411,7 @@ def test_first_expiry_before_launch_can_start_next_activation(setup, tmp_path, s
         return execute.return_value
 
     async def slow_upload(source, destination):
-        if stage == "upload" and destination.endswith("process_supervisor.py"):
+        if stage == "upload" and destination.endswith("process_supervisor.sh"):
             await asyncio.sleep(0.2)
         await upload(source, destination)
 
@@ -903,7 +901,7 @@ def test_first_launched_timeout_without_assistant_can_resume(setup, tmp_path, re
         assert first.status_code == 200 and first.json()["status"] == "incomplete", first.text
         sandbox.result.update(timed_out=False, return_code=0)
         assert activate(client, 2).status_code == 200
-        assert payloads[1]["harness_session_id"] == "opencode-session"
+        assert sandbox.snapshots[1]["harness_session_id"] == "opencode-session"
         assert [r["status"] for r in roots(close(client, request)["agent_observations"])] == [
             "incomplete",
             "completed",
@@ -936,8 +934,7 @@ def test_snapshot_scopes_delta_and_keeps_cumulative_store(tmp_path):
             )
     activation = tmp_path / "activation"
     activation.mkdir()
-    (activation / "input.json").write_text(json.dumps({"harness_session_id": "root", "previous_message_ids": ["m0"]}))
-    snapshot(activation, session_directory=persistent)
+    snapshot(database, activation, harness_session_id="root", previous_message_ids=["m0"])
     export = json.loads((activation / "export.json").read_text())
     assert export["session_id"] == "root"
     assert export["activation_message_ids"] == ["m1"]
@@ -945,6 +942,5 @@ def test_snapshot_scopes_delta_and_keeps_cumulative_store(tmp_path):
     assert [info["tokens"]["input"] for info in export["usage_messages"]] == [2]
     with sqlite3.connect(activation / "observations.db") as con:
         assert con.execute("select count(*) from message").fetchone()[0] == 2
-    (activation / "input.json").write_text(json.dumps({"harness_session_id": "wrong"}))
     with pytest.raises(RuntimeError, match="unexpected session"):
-        snapshot(activation, session_directory=persistent)
+        snapshot(database, activation, harness_session_id="wrong", previous_message_ids=[])

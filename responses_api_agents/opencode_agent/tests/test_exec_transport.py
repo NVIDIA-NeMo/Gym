@@ -13,9 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-from responses_api_agents.opencode_agent import sandbox_runner
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed
 
@@ -43,13 +42,13 @@ class ExecOnlySandbox:
         self.disconnected = True
 
     async def exec(self, command, *, cwd=None, timeout_s=30):
-        if "--snapshot" in command:
+        if "opencode.db-wal" in command:
             self.snapshots += 1
             # The CLI writer must finish before capture; task services can remain.
             if self.worker_pid is not None:
                 with pytest.raises(ProcessLookupError):
                     os.kill(int(self.worker_pid.read_text()), 0)
-        launch = "--receipt" in command and "process_supervisor.py" in command
+        launch = "--receipt" in command and "process_supervisor.sh" in command
         if launch:
             self.deadline = timeout_s
             self.delayed_command = command
@@ -86,8 +85,8 @@ def make_session(tmp_path):
         ),
         runtime=str(tmp_path / "runtime"),
     )
-    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner.py")
-    assert not (directory / "process_supervisor.py").exists()
+    shutil.copyfile(HARNESS_RUNNER_SCRIPT, directory / HARNESS_RUNNER_FILE)
+    assert not (directory / "process_supervisor.sh").exists()
     database = directory / "data/opencode/opencode.db"
     database.parent.mkdir(parents=True)
     with sqlite3.connect(database) as connection:
@@ -100,15 +99,22 @@ def make_session(tmp_path):
     return state, provider, workdir
 
 
-def payload(state, code, timeout=0.5):
+def payload(state, code):
+    directory = state.session.session_dir
     return {
-        "directory": state.session.session_dir,
         "prompt": "task",
         "cwd": state.request.sandbox_access.workdir,
         "command": [sys.executable, "-c", code],
-        "env": {},
-        "timeout": timeout,
-        "cleanup_timeout": 1,
+        "env": {
+            key: f"{directory}/{name}"
+            for key, name in (
+                ("HOME", "home"),
+                ("XDG_DATA_HOME", "data"),
+                ("XDG_CONFIG_HOME", "config"),
+                ("XDG_CACHE_HOME", "cache"),
+                ("XDG_STATE_HOME", "state"),
+            )
+        },
     }
 
 
@@ -132,9 +138,7 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
         + {"natural": "print('{}')", "crash": "raise SystemExit(7)"}.get(ending, "time.sleep(60)")
     )
     deadline = 0.5 if ending == "timeout" else 60
-    task = state.task = asyncio.create_task(
-        state.execute(payload(state, code, timeout=deadline), timeout=deadline, close_timeout=3)
-    )
+    task = state.task = asyncio.create_task(state.execute(payload(state, code), timeout=deadline, close_timeout=3))
     try:
         async with asyncio.timeout(5):
             while not (workdir / "ready").exists():

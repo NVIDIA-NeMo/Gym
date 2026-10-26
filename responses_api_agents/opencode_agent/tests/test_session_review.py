@@ -46,7 +46,7 @@ def test_session_uploads_shared_plugin_only_with_model_capture(setup, enabled, t
         created.raise_for_status()
         result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         result.raise_for_status()
-        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        payload = sandbox.params()
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         plugin = Path(sandbox.directory) / OBSERVABILITY_PATCH.name
         task_env_plugin = Path(sandbox.directory) / "task_environment.mjs"
@@ -117,7 +117,7 @@ def test_observation_parse_failure_preserves_response(setup, caplog):
     assert "Failed to parse OpenCode observations" in caplog.text
 
 
-@pytest.mark.parametrize("failure", ["provider_timeout", "missing_export", "snapshot"])
+@pytest.mark.parametrize("failure", ["provider_timeout", "missing_database", "snapshot"])
 @pytest.mark.parametrize("model_rejected", [False, True])
 def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp_path, failure, model_rejected):
     agent, sandbox = setup
@@ -131,10 +131,6 @@ def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp
     async def read(source, destination):
         if source.endswith("/stderr.log"):
             Path(destination).write_text("x" * 18000 + "ROOT CAUSE")
-        elif source.endswith("/output.log"):
-            Path(destination).write_text("output" * 6000 + "OUTPUT TAIL")
-        elif failure == "missing_export" and source.endswith("/export.json"):
-            raise FileNotFoundError("missing export")
         else:
             await download(source, destination)
 
@@ -142,8 +138,10 @@ def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp
         result = await execute(command, **kwargs)
         if failure == "provider_timeout" and "--receipt" in command:
             return SimpleNamespace(return_code=0, error_type="timeout", stdout="", stderr="deadline")
-        if failure == "snapshot" and "--snapshot" in command:
-            return SimpleNamespace(return_code=1, error_type=None, stdout="", stderr="no root session")
+        if failure == "missing_database" and "opencode.db-wal" in command:
+            return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
+        if failure == "snapshot" and "opencode.db-wal" in command:
+            return SimpleNamespace(return_code=1, error_type=None, stdout="", stderr="no session directory")
         return result
 
     sandbox.download = read
@@ -163,9 +161,9 @@ def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp
         else:
             assert "ROOT CAUSE" in str(error.value)
             assert len(str(error.value)) <= 16000
-            if failure == "missing_export":
-                assert "returned no valid result" in str(error.value)
-                assert "OUTPUT TAIL" in str(error.value)
+            assert "OpenCode transcript capture failed" in str(error.value)
+            if failure == "missing_database":
+                assert "session database is missing" in str(error.value)
         assert len(state.stderr) == 16000
         assert state.session.cleanup["cleanup_confirmed"] is True
         assert any(record.kind == "sandbox" for record in state.observations.records)
@@ -260,7 +258,7 @@ def test_model_error_502_uses_the_same_combined_diagnostic_bound(setup):
         client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
 
 
-@pytest.mark.parametrize("failure,status", [("receipt", 500), ("missing_export", 500), ("malformed_export", 502)])
+@pytest.mark.parametrize("failure,status", [("receipt", 500), ("malformed_export", 502)])
 def test_single_turn_failure_preserves_observations_and_runtime(setup, tmp_path, failure, status):
     agent, sandbox = setup
     capture_observations(sandbox, tmp_path)
@@ -268,14 +266,6 @@ def test_single_turn_failure_preserves_observations_and_runtime(setup, tmp_path,
         sandbox.task_environment_receipt = None
     elif failure == "malformed_export":
         sandbox.events = "{malformed"
-    download = sandbox.download
-
-    async def read(source, destination):
-        if failure == "missing_export" and source.endswith("/export.json"):
-            raise FileNotFoundError("missing export")
-        await download(source, destination)
-
-    sandbox.download = read
     with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         session_id = created.json()["agent_session_id"]

@@ -73,8 +73,8 @@ task files must use a Resources-owned sandbox. Missing access and provider is an
 error, never a fallback to local execution.
 
 Session setup installs the pinned OpenCode runtime inside the sandbox. The image
-needs Linux, Python 3.8+ with SQLite and `fcntl`, and Bash. Missing Python/Bash can
-be installed with apt-get or apk when running as root; otherwise preinstall them.
+needs Linux and Bash; it does not need Python. Missing Bash can be installed with
+apt-get or apk when running as root; otherwise preinstall it.
 Online installation needs GitHub access, curl, tar, gzip and a Debian or RHEL CA
 bundle. Missing required packages are installed with apt-get or apk as root;
 non-root images must preinstall them. System `rg` is a best-effort optimization:
@@ -95,7 +95,7 @@ Natural CLI exit cannot distinguish unfinished tools in other sessions from serv
 those processes may still change task files. The stop-time cutoff also has adoption/PID
 races and cannot classify later service forks. It is not a security boundary.
 The CLI must exit before
-SQLite observations are captured; services must use task-owned files rather than the
+its SQLite database is copied to the agent server and exported there; services must use task-owned files rather than the
 agent session directory, which close removes. Capture requires confirmed termination.
 Missing evidence remains retryable; a final negative receipt skips capture and verification
 but permits connection release. Successful close receipts are retained for `session_close_retry_window_seconds` (default 300).
@@ -208,8 +208,7 @@ Ordinary single-turn sessions keep their existing protocol and evidence shape.
 For a sandbox without runtime-download egress, set `sandbox_executable_path` to
 an existing sandbox-visible OpenCode binary and `sandbox_executable_sha256` to its
 SHA-256. Seed verifies bytes and version before copying it into the adapter cache.
-`sandbox_python_executable` selects an existing Python interpreter (default
-`python3`); `sandbox_path_prefix` adds executable directories for installation and
+`sandbox_path_prefix` adds executable directories for installation and
 CLI/tool subprocesses while retaining the image PATH. These paths must already
 exist; the sandbox owner supplies mounts or image contents.
 

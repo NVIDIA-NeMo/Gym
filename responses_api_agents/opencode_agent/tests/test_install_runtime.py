@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -20,12 +21,11 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     """Run the real installer with an isolated PATH and no access to the host package manager."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    for name in ("bash", "uname", "getconf", "mkdir", "cp", "tar", "gzip", "chmod"):
+    for name in ("bash", "uname", "getconf", "mkdir", "cp", "tar", "gzip", "chmod", "rm", "sleep"):
         executable = shutil.which(name)
         if executable is None:
             pytest.skip(f"Installer test requires {name}")
         (bindir / name).symlink_to(executable)
-    (bindir / "python3").symlink_to(sys.executable)
     scripts = {
         "rg": '#!/bin/bash\necho "ripgrep test fixture"\n',
         "id": '#!/bin/bash\necho "${TEST_UID:-0}"\n',
@@ -217,14 +217,54 @@ def test_optional_ripgrep_failure_does_not_block_runtime(sandbox, cached, unavai
         assert not (root / "packages.log").exists()
 
 
-@pytest.mark.skipif(shutil.which("python3.8") is None, reason="Python 3.8 is not installed")
-def test_python38_can_bootstrap_runtime(sandbox: tuple[Path, dict[str, str]]) -> None:
+def cache_runtime(root: Path) -> None:
+    (root / "runtime").mkdir()
+    (root / "runtime/opencode").write_text("#!/bin/bash\necho 1.17.11\n")
+    (root / "runtime/opencode").chmod(0o755)
+
+
+def test_lock_of_a_killed_installer_is_reclaimed(sandbox: tuple[Path, dict[str, str]]) -> None:
     root, env = sandbox
-    (root / "bin/python3").unlink()
-    (root / "bin/python3").symlink_to(shutil.which("python3.8"))
+    cache_runtime(root)
+    killed = subprocess.Popen(["true"])
+    killed.wait()
+    (root / "runtime.lock.d").mkdir()
+    (root / "runtime.lock.d/pid").write_text(f"{killed.pid}\n")
     result = run_installer(root, env)
-    assert result.returncode == 19, result.stderr
-    assert (root / "download.log").exists()
+    assert result.returncode == 0, result.stderr
+    assert not (root / "runtime.lock.d").exists()
+
+
+@pytest.mark.parametrize("lock", ["mkdir", "flock"])
+def test_concurrent_installers_wait_for_the_lock_holder(sandbox: tuple[Path, dict[str, str]], lock: str) -> None:
+    root, env = sandbox
+    cache_runtime(root)
+    if lock == "flock":
+        if shutil.which("flock") is None:
+            pytest.skip("flock is not installed")
+        (root / "bin/flock").symlink_to(shutil.which("flock"))
+        # One process holds the lock, so killing it releases the lock.
+        held = 'exec 9>"$1.lock"; flock 9; : >"$1.held"; exec sleep 30'
+        holder = subprocess.Popen(["bash", "-c", held, "_", str(root / "runtime")])
+        while not (root / "runtime.held").exists():
+            time.sleep(0.01)
+    else:
+        holder = subprocess.Popen(["sleep", "30"])
+        (root / "runtime.lock.d").mkdir()
+        (root / "runtime.lock.d/pid").write_text(f"{holder.pid}\n")
+    try:
+        installer = subprocess.Popen(
+            [str(root / "bin/bash"), str(root / "install.sh"), str(root / "runtime"), "1.17.11"], env=env
+        )
+        time.sleep(0.5)
+        assert installer.poll() is None
+        # The waiting installer proceeds once the holder exits, however it exits.
+        holder.kill()
+        holder.wait()
+        assert installer.wait(timeout=10) == 0
+    finally:
+        holder.kill()
+        holder.wait()
 
 
 def test_musl_bootstraps_with_apk_and_downloads_matching_binary(sandbox: tuple[Path, dict[str, str]]) -> None:
