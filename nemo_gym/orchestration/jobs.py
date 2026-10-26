@@ -51,7 +51,7 @@ from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, JsonValue
 
 
 logger = logging.getLogger(__name__)
@@ -174,6 +174,7 @@ class SubmissionRecord(BaseModel):
     # above cannot express -- a k8s namespace, say. Free-form because the shape
     # is the executor's business; a reader keys off `executor` before reading it.
     executor_metadata: dict[str, str] = {}
+    provenance: dict[str, JsonValue] = Field(default_factory=dict)
     schema_version: int = SCHEMA_VERSION
 
     @property

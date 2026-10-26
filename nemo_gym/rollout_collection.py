@@ -3527,6 +3527,20 @@ class RolloutCollectionHelper(BaseModel):
             if environment_server_client is not None
             else get_global_config_dict()
         )
+        from nemo_gym.provenance import write_run_provenance
+
+        await asyncio.to_thread(
+            write_run_provenance,
+            output_fpath,
+            global_config,
+            prompt_config=config.prompt_config,
+            input_jsonl_fpath=config.input_jsonl_fpath,
+            model_server_config=lambda: (
+                environment_server_client.global_config_dict
+                if environment_server_client is not None
+                else ServerClient.load_from_global_config().global_config_dict
+            ),
+        )
         capture_dirs = model_call_capture_dirs_from_config(global_config)
         observability_enabled = observability_enabled_from_config(global_config)
         # Live health metrics follow the metrics exporter alone: `disable_health_check` only gates the post-run
