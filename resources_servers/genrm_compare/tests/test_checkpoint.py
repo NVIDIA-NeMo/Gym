@@ -59,7 +59,7 @@ CHECKPOINT = CheckpointRequest(checkpoint_id="c1", deadline_ts=time.time() + 360
 def participant_server(config, *, judge=None) -> tuple[genrm.GenRMCompareResourcesServer, ResourcesParticipant]:
     """A server behind the real resources participant, so sessions bind and restore as they do in Gym."""
     server = genrm.GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
-    participant = ResourcesParticipant(server, "exported", verify_mode="replay")
+    participant = ResourcesParticipant(server, "exported", verify_step_type="replay")
     server._checkpoint = participant
     server._run_single_comparison = judge or AsyncMock(return_value=comparison_result())
     return server, participant
