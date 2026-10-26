@@ -6,6 +6,7 @@ import json
 import logging
 import sqlite3
 from collections.abc import Collection
+from contextlib import closing
 from pathlib import Path
 
 
@@ -17,7 +18,8 @@ def snapshot(
 ) -> None:
     """Export root messages and retain the full session tree for observations."""
     previous_ids = set(previous_message_ids)
-    with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as source:
+    # Close both connections even on errors; the caller removes the directory afterwards.
+    with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as source:
         source.row_factory = sqlite3.Row
         sessions = source.execute(
             "select id from session where parent_id is null order by time_created, id"
@@ -57,7 +59,7 @@ def snapshot(
         )
         # A missing observation store costs only observation evidence, not the export.
         try:
-            with sqlite3.connect(directory / "observations.db") as destination:
+            with closing(sqlite3.connect(directory / "observations.db")) as destination:
                 source.backup(destination)
         except sqlite3.Error:
             LOG.exception("Failed to copy OpenCode observations")

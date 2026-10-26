@@ -4,6 +4,7 @@
 
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from nemo_gym.openai_utils import (
@@ -21,8 +22,8 @@ def read_kilo_snapshot(
     directory: Path, *, fallback_invocation_id: str
 ) -> tuple[AgentObservationBundle, NeMoGymResponseUsage | None]:
     """Read ``kilo.db`` copied with its WAL files, through one consistent copy that includes WAL contents."""
-    with sqlite3.connect(directory / "kilo.db") as source:
-        with sqlite3.connect(directory / "observations.db") as destination:
+    with closing(sqlite3.connect(directory / "kilo.db")) as source:
+        with closing(sqlite3.connect(directory / "observations.db")) as destination:
             source.backup(destination)
     return read_kilo_observations(directory / "observations.db", fallback_invocation_id=fallback_invocation_id)
 
