@@ -217,12 +217,7 @@ def _fabric_output_items(output: dict[str, Any], response_text: str) -> list[Any
                 continue
             reasoning = message.get("reasoning_content")
             if isinstance(reasoning, str) and reasoning:
-                items.append(
-                    NeMoGymResponseReasoningItem(
-                        id=f"rs_{uuid4().hex}",
-                        summary=[NeMoGymSummary(text=reasoning, type="summary_text")],
-                    )
-                )
+                items.append(_reasoning_item(reasoning))
             text = _content_text(message.get("content"))
             if text:
                 items.append(
@@ -293,12 +288,7 @@ def _atif_trajectory_items(trajectory: dict[str, Any], response_text: str, items
         if not wrapper:
             reasoning = step.get("reasoning_content")
             if isinstance(reasoning, str) and reasoning:
-                items.append(
-                    NeMoGymResponseReasoningItem(
-                        id=f"rs_{uuid4().hex}",
-                        summary=[NeMoGymSummary(text=reasoning, type="summary_text")],
-                    )
-                )
+                items.append(_reasoning_item(reasoning))
             text = _content_text(step.get("message"))
             if text and text.strip() != response_text.strip():
                 items.append(
