@@ -262,13 +262,7 @@ class E2BProvider:
         return params
 
     def _request_params(self) -> dict[str, Any]:
-        """Per-request options for calls on an existing sandbox object.
-
-        ``commands.run``, ``files.*`` and ``is_running`` take ``request_timeout``
-        only -- the sandbox already carries the connection config, and handing
-        them the full ``ApiParams`` raises ``TypeError: unexpected keyword
-        argument 'api_key'``.
-        """
+        """Return the request timeout; data-plane methods reject connection parameters."""
         if self._connection.request_timeout_s is None:
             return {}
         return {"request_timeout": self._connection.request_timeout_s}
@@ -456,6 +450,16 @@ class E2BProvider:
         )
         return SandboxHandle(sandbox_id=str(sandbox.sandbox_id), provider_name=self.name, raw=sandbox)
 
+    async def pause(self, handle: SandboxHandle) -> None:
+        """Pause the sandbox through the E2B SDK without replaying failed requests."""
+        await self._sandbox(handle).pause(**self._request_params())
+
+    async def resume(self, handle: SandboxHandle) -> None:
+        """Resume the sandbox and replace its SDK handle only after success."""
+        self._sandbox(handle)
+        e2b = _require_e2b_sdk()
+        handle.raw = await e2b.AsyncSandbox.connect(handle.sandbox_id, **self._api_params())
+
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         e2b = _require_e2b_sdk()
         sandbox = self._sandbox(handle)
@@ -465,12 +469,15 @@ class E2BProvider:
             if isinstance(exc, type)
         )
         try:
-            running = await sandbox.is_running(**self._request_params())
+            # Control-plane status avoids waking paused sandboxes with a health check.
+            info = await sandbox.get_info(**self._request_params())
         except not_found:
             return SandboxStatus.STOPPED
         except Exception:  # noqa: BLE001 - status must not raise for transient issues
             return SandboxStatus.UNKNOWN
-        return SandboxStatus.RUNNING if running else SandboxStatus.STOPPED
+        return {"running": SandboxStatus.RUNNING, "paused": SandboxStatus.PAUSED}.get(
+            info.state, SandboxStatus.UNKNOWN
+        )
 
     async def close(self, handle: SandboxHandle) -> None:
         e2b = _require_e2b_sdk()
