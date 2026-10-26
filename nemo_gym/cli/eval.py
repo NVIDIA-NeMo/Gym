@@ -423,8 +423,6 @@ class PlanBenchmarkConfig(PrepareBenchmarkConfig):
 
     The plan file's format is versioned and printed by `--schema`.
     Benchmarks whose rows have no `task_id`/`problem_id`/`instance_id` are refused.
-    A task's digest covers its prepared row. A prompt template (`prompt_config`) is applied when a run starts,
-    so it is not part of the digest.
 
     Examples:
 
