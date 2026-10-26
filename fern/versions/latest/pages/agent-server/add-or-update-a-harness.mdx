@@ -405,7 +405,7 @@ Keep harness-specific response parsing and model and tool behavior in the adapte
 
 **1. Define the session state.** Subclass `AgentSessionState` and compose a `SandboxSession`. Implement two hooks:
 
-- `stage_activation` uploads the activation input and returns `SandboxCommand(argv=...)`. Install the runtime earlier, during seed.
+- `stage_activation` uploads the activation input and returns `SandboxCommand(argv=...)`. Install the runtime earlier, during seed. A CLI harness runs through the shared bash runner, whose name never mentions python. Set `stdlib_runner=True` only for a Python runner that needs nothing beyond the standard library and whose `argv` starts with its interpreter: the runner then runs as `bin/gym-runner`, so a `pkill -f python3` in the task cannot stop it. Upload such a runner without a `.py` suffix, as Codex does.
 - `collect` copies artifacts to the Agent Server after harness termination is confirmed, including partial output from interrupted runs. It may run a bounded snapshot command, but it must not restart the harness. Bound the size of what it downloads: trim large logs inside the sandbox first and keep the tail with a truncation marker. For example, the older `hermes_sandboxed_agent`, which calls the process supervisor directly, keeps the last 1 MiB of its runner log; apply the same bound in `collect`.
 
 ```python
@@ -506,6 +506,7 @@ All control files live under `session_dir`, and their names are defined in `supe
 | File | Writer and purpose |
 | --- | --- |
 | `process_supervisor.sh` | `SandboxSession` uploads it after staging input and before launch. |
+| `bin/gym-runner` | The launch shell links it to the binary behind the interpreter of a runner that sets `stdlib_runner`, and runs the runner through it, so the runner's process name doesn't mention python. If the link can't be made, the runner runs unchanged. |
 | `launch.claim` | The launch or stop shell creates it atomically, either to claim execution or to fence a delayed launch. |
 | `supervisor.pid` | The launch shell records the PID that becomes the supervisor when the shell executes it. |
 | `stop.request` | The stop shell writes this cancellation marker; the supervisor polls for it. A signal is not used, so the harness keeps the default `SIGTERM` disposition. |

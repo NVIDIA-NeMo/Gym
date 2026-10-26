@@ -5,14 +5,17 @@
 import asyncio
 import os
 import shutil
+import sys
 from pathlib import Path
 from shlex import quote
 
 import pytest
 
+from nemo_gym.agent_utils.sandbox_session import SandboxCommand
 from nemo_gym.agent_utils.supervisor_client import (
     CLEANUP_RECEIPT_FILE,
     LAUNCH_CLAIM_FILE,
+    RUNNER_INTERPRETER,
     SUPERVISOR_FILE,
     SUPERVISOR_PID_FILE,
     SUPERVISOR_SCRIPT,
@@ -155,20 +158,98 @@ async def test_close_during_preflight_fences_later_launch(tmp_path: Path, remove
     assert not worker_started.exists()
 
 
-async def test_bootstrap_quotes_private_paths(tmp_path: Path) -> None:
+async def test_launch_delayed_before_linking_does_not_recreate_a_removed_session(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    (session_dir / SUPERVISOR_FILE).write_text("")
+    resolving = tmp_path / "resolving"
+    resume = tmp_path / "resume"
+    python = tmp_path / "python"
+    python.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$2" = -c ]; then touch {quote(str(resolving))}; '
+        f"while [ ! -e {quote(str(resume))} ]; do sleep 0.01; done; fi\n"
+        f'exec {quote(sys.executable)} "$@"\n'
+    )
+    python.chmod(0o755)
+    sandbox = LocalSandbox()
+    launch = asyncio.create_task(
+        sandbox.exec(
+            supervised_launch_command(
+                session_dir=str(session_dir),
+                command=[str(python), "worker"],
+                timeout=1,
+                cleanup_timeout=1,
+                stdlib_runner=True,
+            )
+        )
+    )
+    try:
+        async with asyncio.timeout(5):
+            while not resolving.exists():
+                await asyncio.sleep(0.01)
+        await stop_and_confirm_cleanup(
+            sandbox, session_dir=str(session_dir), workdir=None, timeout=1, harness="bootstrap-test"
+        )
+        await remove_session_directory(
+            sandbox, session_dir=str(session_dir), workdir=None, timeout=1, harness="bootstrap-test"
+        )
+    finally:
+        resume.touch()
+        await asyncio.wait_for(launch, timeout=5)
+    assert not session_dir.exists()
+
+
+@pytest.mark.parametrize("stdlib_runner", [False, True])
+@pytest.mark.parametrize("linkable", [True, False])
+async def test_bootstrap_quotes_private_paths(tmp_path: Path, linkable: bool, stdlib_runner: bool) -> None:
+    # The runner link resolves /proc/self/exe; elsewhere the launch runs the given argv.
+    linkable = linkable and sys.platform == "linux"
     session_dir = tmp_path / "session's $(touch unintended) files"
     session_dir.mkdir()
+    if not linkable:
+        (session_dir / "bin").write_text("not a directory")  # The launch must fall back to the given argv.
+    runtime = tmp_path / "runtime's $(touch unintended) files"
+    runtime.mkdir()
+    python = runtime / "python interpreter"
+    python.symlink_to(sys.executable)
     supervisor = session_dir / SUPERVISOR_FILE
     arguments = session_dir / "arguments"
     supervisor.write_text(f'printf "%s\\n" "$@" > {quote(str(arguments))}\n')
     command = supervised_launch_command(
         session_dir=str(session_dir),
-        command=["worker", "$(touch unintended)", "argument's value"],
+        command=[str(python), "worker", "$(touch unintended)", "argument's value"],
         timeout=1,
         cleanup_timeout=1,
+        stdlib_runner=stdlib_runner,
     )
     result = await LocalSandbox().exec(command, cwd=str(tmp_path))
     assert result.return_code == 0, result.stderr
-    assert arguments.read_text().splitlines()[-3:] == ["worker", "$(touch unintended)", "argument's value"]
+    captured = arguments.read_text().splitlines()
+    runner = session_dir / RUNNER_INTERPRETER if linkable and stdlib_runner else python
+    assert captured[captured.index("--") + 1 :] == [str(runner), "worker", "$(touch unintended)", "argument's value"]
+    assert runner.resolve() == python.resolve()
     assert not (tmp_path / "unintended").exists()
     assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("launch")
+
+
+@pytest.mark.parametrize("argv", [["python3"], []])
+def test_stdlib_runner_rejects_an_argv_without_an_interpreter_and_runner(argv: list[str]) -> None:
+    with pytest.raises(ValueError, match="stdlib_runner requires"):
+        supervised_launch_command(
+            session_dir="/session", command=argv, timeout=1, cleanup_timeout=1, stdlib_runner=True
+        )
+    with pytest.raises(ValueError, match="stdlib_runner requires"):
+        SandboxCommand(argv=argv, stdlib_runner=True)
+
+
+def test_other_harness_commands_keep_their_interpreter() -> None:
+    command = supervised_launch_command(
+        session_dir="/session",
+        command=["/runtime/venv/bin/python", "runner"],
+        timeout=1,
+        cleanup_timeout=1,
+    )
+    assert command.endswith("-- /runtime/venv/bin/python runner >/session/output.log 2>&1")
+    assert RUNNER_INTERPRETER not in command
+    assert SandboxCommand(argv=["/runtime/venv/bin/python", "runner"]).stdlib_runner is False

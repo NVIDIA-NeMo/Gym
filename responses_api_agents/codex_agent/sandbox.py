@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxCommand, SandboxSession
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
@@ -95,9 +95,10 @@ class CodexSandboxSession(AgentSessionState):
             argv=[
                 "python3",
                 "-I",
-                f"{self.session.session_dir}/sandbox_runner.py",
+                f"{self.session.session_dir}/{RUNNER_FILE}",
                 f"{self.session.session_dir}/input.json",
             ],
+            stdlib_runner=True,
         )
 
     async def collect_artifacts(self) -> str:
@@ -118,7 +119,7 @@ class CodexSandboxSession(AgentSessionState):
         self.runtime_info = parse_runtime_info(runtime_payload)
         try:
             snapshot = await self.session.sandbox.exec(
-                f"python3 -I {shlex.quote(self.session.session_dir + '/sandbox_runner.py')} "
+                f"python3 -I {shlex.quote(f'{self.session.session_dir}/{RUNNER_FILE}')} "
                 f"--snapshot {shlex.quote(self.session.session_dir)}",
                 timeout_s=10,
             )

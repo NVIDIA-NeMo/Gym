@@ -77,7 +77,7 @@ def make_session(tmp_path):
         ),
         runtime=str(tmp_path / "runtime"),
     )
-    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner.py")
+    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner")
     return state, provider, workdir
 
 

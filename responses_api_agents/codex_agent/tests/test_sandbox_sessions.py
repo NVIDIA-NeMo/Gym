@@ -139,7 +139,7 @@ class Sandbox:
         payload = json.loads(self.files[payload_path])
         assert payload["cwd"] == getattr(self, "expected_workdir", "/app")
         assert kwargs["cwd"] == getattr(self, "expected_workdir", "/app")
-        assert "sandbox_runner.py" in kwargs["command"]
+        assert "/sandbox_runner " in kwargs["command"] and "/bin/gym-runner" in kwargs["command"]
         self.directory = payload["directory"]
         self.started.set()
         if not self.blocked:
@@ -195,8 +195,9 @@ def test_http_agent_session_flow_runs_codex_in_borrowed_sandbox(setup):
             assert f"{directory}/process_supervisor.sh" not in sandbox.files
             installer = f"{directory}/install_codex_runtime.sh"
             assert installer in sandbox.files
-            for filename in ("sandbox_runner.py", "sandbox_transport.py"):
-                assert sandbox.files[f"{directory}/{filename}"] == (Path(__file__).parents[1] / filename).read_text()
+            staged = {"sandbox_runner": "sandbox_runner.py", "sandbox_transport.py": "sandbox_transport.py"}
+            for name, source in staged.items():
+                assert sandbox.files[f"{directory}/{name}"] == (Path(__file__).parents[1] / source).read_text()
             assert agent.config.resources_server is None
             assert not sandbox.launch.called
             assert not any(path.startswith("/app/") for path in sandbox.files)
@@ -1735,7 +1736,7 @@ async def local_session(setup, tmp_path):
     state.session.session_dir = str(directory)
     from responses_api_agents.codex_agent import sandbox_runner
 
-    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner.py")
+    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner")
     sandbox.upload = AsyncMock(side_effect=shutil.copyfile)
     sandbox.download = AsyncMock(side_effect=shutil.copyfile)
 

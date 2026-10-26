@@ -153,6 +153,29 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
                     pass
 
 
+async def test_supervisor_and_runner_run_under_neutral_names(tmp_path):
+    """A task agent's `pkill -f python3` or `killall python3` must not match the processes above OpenClaw."""
+    state, provider, workdir = make_session(tmp_path)
+    code = "import pathlib,time; pathlib.Path('ready').touch(); time.sleep(60)"
+    task = state.task = asyncio.create_task(
+        state.execute(payload(state, code, timeout=60), timeout=60, close_timeout=3)
+    )
+    try:
+        async with asyncio.timeout(5):
+            while not (workdir / "ready").exists():
+                await asyncio.sleep(0.01)
+        supervisor_pid = int((Path(state.session.session_dir) / "supervisor.pid").read_text())
+        # The supervisor is bash, and the bash runner execs the CLI, so no process above the CLI is python.
+        assert Path(f"/proc/{supervisor_pid}/comm").read_text().strip() == "bash"
+        cmdline = Path(f"/proc/{supervisor_pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+        assert "python" not in cmdline and ".py" not in cmdline, cmdline
+    finally:
+        await state.close(3)
+        await asyncio.gather(task, return_exceptions=True)
+    assert state.session.cleanup["cleanup_confirmed"] is True
+    assert provider.disconnected
+
+
 async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
     state, provider, workdir = make_session(tmp_path)
     provider.lost_launch = True
