@@ -1610,8 +1610,9 @@ async def test_close_confirms_cleanup_before_provider_cancellation(local_session
         cli_pid, task_pid, wrapper_pid = processes
         assert not Path(f"/proc/{cli_pid}").exists()
         assert not Path(f"/proc/{wrapper_pid}").exists()
-        # A tool that left the harness process group belongs to the sandbox owner, not the supervisor.
-        assert Path(f"/proc/{task_pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        # The in-flight detached tool is stopped before borrowed-session release; init may still hold it as a zombie.
+        stat = Path(f"/proc/{task_pid}/stat")
+        assert not stat.exists() or stat.read_text().rsplit(")", 1)[1].split()[0] in "ZX"
         state.session.sandbox.disconnect.assert_awaited_once()
         state.session.sandbox.stop.assert_not_awaited()
     finally:

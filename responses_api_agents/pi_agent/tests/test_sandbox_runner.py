@@ -77,10 +77,9 @@ def test_capture_stdin_and_environment(tmp_path, monkeypatch):
 @pytest.mark.parametrize("ending", ["natural", "timeout", "cancel"])
 def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
     try:
-        # A completed tool leaves its detached service adopted before close.
-        script = "setsid sleep 60 </dev/null >/dev/null 2>&1 & echo $! > child.pid; touch ready; " + (
-            "sleep 60" if ending != "natural" else "true"
-        )
+        # A completed tool leaves its detached service, which no longer descends from the CLI at the stop.
+        tool = "setsid sleep 60 </dev/null >/dev/null 2>&1 & echo $! > child.pid"
+        script = f"bash -c '{tool}'; touch ready; " + ("sleep 60" if ending != "natural" else "true")
         process = launch(tmp_path, script, timeout=3)
         if ending == "cancel":
             for _ in range(200):
