@@ -15,6 +15,7 @@
 
 import asyncio
 import base64
+import contextlib
 import copy
 import json
 import logging
@@ -25,6 +26,7 @@ import shlex
 import shutil
 import tempfile
 import signal
+import ssl
 import sys
 from asyncio import Semaphore
 from collections.abc import Mapping
@@ -38,7 +40,7 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from openai.types.responses.response import IncompleteDetails
-from pydantic import ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
@@ -455,6 +457,52 @@ def _tmp_roots(paths: list[Optional[str]]) -> list[str]:
     return roots
 
 
+# Session-sandbox environment: the model endpoint and where OpenCode keeps its session database. Nothing else
+# of this agent's environment (which holds credentials) reaches the sandbox.
+_SANDBOX_SESSION_ENV_KEYS = ("XDG_DATA_HOME", "OPENAI_BASE_URL", "OPENAI_API_KEY")
+_SANDBOX_DEFAULT_ENV = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/root"}
+_SANDBOX_MARK = "@@ng-opencode@@"
+
+
+class OpenCodeSessionSandboxConfig(BaseModel):
+    """Run each OpenCode session in its own sandbox from a nemo_gym.sandbox provider (e.g. OpenSandbox).
+
+    The model's tool code then runs in an isolated container with its own CPU/memory limits instead of on
+    this agent's hosts. The session's run dir (OpenCode config, task images) is uploaded to the same
+    absolute paths in the sandbox, OpenCode runs there and calls the model through this agent as usual,
+    and the session database is downloaded back. Each sandbox is deleted after its session.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Single-key nemo_gym.sandbox provider config, e.g. {"opensandbox": {"connection": {...}, "operations": {...}}}.
+    # Keep credentials out of it: see provider_secret_env.
+    provider: dict[str, Any]
+    # Fields of the provider's `connection` block read from environment variables when the provider is
+    # created, e.g. {"domain": "OPENSANDBOX_DOMAIN", "api_key": "OPENSANDBOX_API_KEY"}, so they never
+    # appear in configs or logs.
+    provider_secret_env: dict[str, str] = Field(default_factory=dict)
+    # SandboxSpec fields for every session sandbox: image, resources, metadata, provider_options (for
+    # example {"snapshot_id": ...}), ready_timeout_s, ttl_s (default: timeout + setup_timeout + 600 s).
+    spec: dict[str, Any] = Field(default_factory=dict)
+    # The OpenCode command inside the sandbox (used instead of `command`).
+    command: str = "opencode"
+    # Shell command run in each sandbox before OpenCode, e.g. installing the toolkit when the image or
+    # snapshot does not have it.
+    setup_command: Optional[str] = None
+    setup_timeout: int = 900
+    # Environment for OpenCode in the sandbox, on top of the model endpoint, XDG_DATA_HOME and this
+    # agent's `env` (PATH and HOME default to the image's usual values).
+    env: dict[str, str] = Field(default_factory=dict)
+    # PEM file this agent process trusts in addition to its default CAs, e.g. a provider server's
+    # self-signed certificate. Applied by pointing SSL_CERT_FILE at a merged bundle.
+    ca_file: Optional[str] = None
+    # At most this many sessions create and prepare their sandbox at once (the rest wait): a burst of
+    # hundreds of concurrent creates, each polled by the SDK until ready, starves this agent's event loop
+    # and every OpenSandbox request then times out. 0 = no limit.
+    max_concurrent_starts: int = 64
+
+
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: Optional[ModelServerRef] = None
@@ -553,6 +601,13 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # OpenCode session database comes back. Needs Ray and identical paths on every node
     # (OpenCode, this venv). 1 = run locally as a subprocess.
     session_nodes: int = 1
+    # Ray actor class names (e.g. "MegatronPolicyWorker") whose nodes never host sessions: RL training
+    # nodes need their host memory while computing logprobs and training (sessions there hit host OOM).
+    # Looked up once, when the session nodes are first chosen; empty = every alive node is eligible.
+    session_exclude_actor_classes: list[str] = Field(default_factory=list)
+    # Run each session in its own sandbox instead of on a cluster node (see OpenCodeSessionSandboxConfig).
+    # Takes the place of session_nodes and private_tmp: a sandbox is private by construction.
+    session_sandbox: Optional[OpenCodeSessionSandboxConfig] = None
 
     @property
     def command_parts(self) -> list[str]:
@@ -626,6 +681,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         self._tracked_runs: dict[str, list[TrackedCall]] = {}
         self._session_nodes: Optional[list[str]] = None
         self._next_session_node = 0
+        self._sandbox_provider: Any = None
+        if self.config.session_sandbox is not None and self.config.session_nodes > 1:
+            raise ValueError("session_sandbox and session_nodes > 1 are alternatives; set only one")
         if self.config.track_token_ids and self.config.model_server is None:
             raise ValueError("track_token_ids requires model_server")
         if self.config.track_token_ids and (self.config.num_workers or 1) > 1:
@@ -836,16 +894,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             path.write_bytes(data)
             files.append(str(path.resolve()))
 
-        cmd = [*self.config.command_parts, "run", "-m", self._effective_model(), "--dir", str(project_dir)]
+        opencode_args = ["run", "-m", self._effective_model(), "--dir", str(project_dir)]
         if self.config.system_prompt_mode == "replace":
-            cmd.extend(["--agent", "build"])
+            opencode_args.extend(["--agent", "build"])
         if self.config.thinking:
-            cmd.append("--thinking")
-        cmd.extend(self.config.extra_args)
-        cmd.append(prompt)
+            opencode_args.append("--thinking")
+        opencode_args.extend(self.config.extra_args)
+        opencode_args.append(prompt)
         # Repeated -f (an array flag), after the positional prompt so it cannot absorb it.
-        cmd.extend(arg for path in files for arg in ("-f", path))
-        if self.config.private_tmp:
+        opencode_args.extend(arg for path in files for arg in ("-f", path))
+        cmd = [*self.config.command_parts, *opencode_args]
+        if self.config.private_tmp and self.config.session_sandbox is None:
             keep = _tmp_roots(
                 [str(work_dir), str(project_dir), str(Path(__file__)), sys.prefix, sys.base_prefix, sys.executable]
                 + [shutil.which(self.config.command_parts[0]) if self.config.command_parts else None]
@@ -858,7 +917,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             ]
 
         try:
-            if self.config.session_nodes > 1:
+            if self.config.session_sandbox is not None:
+                returncode, stderr, timed_out = await self._run_sandbox_session(
+                    opencode_args, work_dir, project_dir, env, timeout
+                )
+            elif self.config.session_nodes > 1:
                 returncode, stderr, timed_out = await self._run_remote_session(
                     cmd, work_dir, project_dir, env, timeout
                 )
@@ -938,18 +1001,49 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             _kill_process_group(proc.pid)
         return proc.returncode, stderr, timed_out
 
+    def _excluded_session_node_ids(self) -> set[str]:
+        """Nodes running an alive actor of a session_exclude_actor_classes class."""
+        if not self.config.session_exclude_actor_classes:
+            return set()
+        from ray.util.state import list_actors
+
+        excluded = set()
+        for class_name in self.config.session_exclude_actor_classes:
+            actors = list_actors(
+                filters=[("class_name", "=", class_name), ("state", "=", "ALIVE")],
+                # Ray's state API rejects limits above 10,000 (RAY_MAX_LIMIT_FROM_API_SERVER).
+                limit=10_000,
+                raise_on_missing_output=False,
+            )
+            excluded.update(actor.node_id for actor in actors if actor.node_id)
+        return excluded
+
     def _session_node_ids(self) -> list[str]:
-        """This server's Ray node, then other alive nodes (sorted by IP), up to session_nodes."""
+        """This server's Ray node, then other alive nodes (sorted by IP), up to session_nodes,
+        skipping nodes that run a session_exclude_actor_classes actor."""
         if self._session_nodes is None:
             import ray
 
+            excluded = self._excluded_session_node_ids()
             own = ray.get_runtime_context().get_node_id()
             others = sorted(
                 (node for node in ray.nodes() if node["Alive"] and node["NodeID"] != own),
                 key=lambda node: node["NodeManagerAddress"],
             )
-            self._session_nodes = [own] + [node["NodeID"] for node in others][: self.config.session_nodes - 1]
-            LOG.warning("OpenCode sessions spread over %d Ray nodes", len(self._session_nodes))
+            candidates = [own] + [node["NodeID"] for node in others]
+            nodes = [node_id for node_id in candidates if node_id not in excluded][: self.config.session_nodes]
+            if not nodes:
+                raise RuntimeError(
+                    f"No Ray node left for OpenCode sessions after excluding nodes running "
+                    f"{self.config.session_exclude_actor_classes} ({len(excluded)} nodes)"
+                )
+            self._session_nodes = nodes
+            LOG.warning(
+                "OpenCode sessions spread over %d Ray nodes (%d excluded for %s)",
+                len(nodes),
+                len(excluded),
+                self.config.session_exclude_actor_classes,
+            )
         return self._session_nodes
 
     async def _run_remote_session(
@@ -972,6 +1066,119 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_bytes(data)
         return returncode, stderr, timed_out
+
+    def _trust_ca_file(self, ca_file: str) -> None:
+        """Make this process trust ``ca_file`` on top of its current CAs (SSL_CERT_FILE -> merged bundle)."""
+        try:
+            import certifi
+
+            certifi_bundle = certifi.where()
+        except ModuleNotFoundError:
+            certifi_bundle = None
+        sources = [os.environ.get("SSL_CERT_FILE"), ssl.get_default_verify_paths().cafile, certifi_bundle, ca_file]
+        bundle = []
+        for source in dict.fromkeys(source for source in sources if source):
+            if os.path.isfile(source):
+                bundle.append(Path(source).read_text())
+        if not os.path.isfile(ca_file):
+            raise FileNotFoundError(f"session_sandbox.ca_file not found: {ca_file}")
+        target = Path(self.config.workspace_root).expanduser() / f"ca_bundle_{os.getpid()}.pem"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("\n".join(bundle))
+        os.environ["SSL_CERT_FILE"] = str(target)
+
+    def _session_sandbox_provider(self) -> Any:
+        """The sandbox provider shared by all session sandboxes (created on first use)."""
+        if self._sandbox_provider is None:
+            sandbox_config = self.config.session_sandbox
+            provider_config = copy.deepcopy(sandbox_config.provider)
+            if len(provider_config) != 1:
+                raise ValueError("session_sandbox.provider must contain exactly one provider name")
+            provider_kwargs = next(iter(provider_config.values()))
+            connection = provider_kwargs.setdefault("connection", {})
+            for field_name, env_name in sandbox_config.provider_secret_env.items():
+                value = os.environ.get(env_name)
+                if not value:
+                    raise RuntimeError(f"session_sandbox: environment variable {env_name} is not set")
+                connection[field_name] = value
+            if sandbox_config.ca_file:
+                self._trust_ca_file(sandbox_config.ca_file)
+            self._sandbox_provider = create_provider(provider_config)
+        return self._sandbox_provider
+
+    def _sandbox_start_limit(self) -> Any:
+        """Context manager admitting at most session_sandbox.max_concurrent_starts sandbox starts at once."""
+        limit = self.config.session_sandbox.max_concurrent_starts
+        if limit <= 0:
+            return contextlib.nullcontext()
+        if getattr(self, "_sandbox_start_sem", None) is None:
+            self._sandbox_start_sem = Semaphore(limit)
+        return self._sandbox_start_sem
+
+    async def _run_sandbox_session(
+        self, opencode_args: list[str], work_dir: Path, project_dir: Path, env: dict[str, str], timeout: float
+    ) -> tuple[Optional[int], bytes, bool]:
+        """Run one OpenCode session in its own sandbox; copy its session database back here.
+
+        A sandbox infrastructure failure is reported like a failed OpenCode run (no answer), not raised:
+        one bad sandbox must not abort the rollout batch.
+        """
+        sandbox_config = self.config.session_sandbox
+        provider = self._session_sandbox_provider()
+        spec = SandboxSpec(**{"ttl_s": int(timeout) + sandbox_config.setup_timeout + 600, **sandbox_config.spec})
+        sandbox_env = {**_SANDBOX_DEFAULT_ENV, **{key: env[key] for key in _SANDBOX_SESSION_ENV_KEYS if env.get(key)}}
+        sandbox_env.update({key: value for key, value in self.config.env.items() if value})
+        sandbox_env.update(sandbox_config.env)
+        data_home = sandbox_env["XDG_DATA_HOME"]
+        inputs = [path for path in work_dir.rglob("*") if path.is_file()]
+        directories = {str(work_dir), str(project_dir), data_home, *(str(path.parent) for path in inputs)}
+        stderr_path = f"{work_dir}/.opencode-stderr"
+        handle = None
+        try:
+            async with self._sandbox_start_limit():
+                handle = await provider.create(spec)
+                prepare = "mkdir -p " + " ".join(shlex.quote(directory) for directory in sorted(directories))
+                if sandbox_config.setup_command:
+                    prepare = f"{prepare} && {sandbox_config.setup_command}"
+                prepared = await provider.exec(handle, prepare, timeout_s=sandbox_config.setup_timeout)
+                if prepared.return_code != 0:
+                    detail = f"{prepared.stdout or ''}{prepared.stderr or ''}"[-2000:]
+                    return None, f"sandbox setup failed ({prepared.return_code}): {detail}".encode(), False
+                for path in inputs:
+                    await provider.upload_file(handle, path, str(path))
+            command = [*shlex.split(sandbox_config.command), *opencode_args]
+            script = (
+                f"cd {shlex.quote(str(project_dir))} && "
+                f"timeout -k 10 {int(timeout)} {shlex.join(command)} >/dev/null 2>{shlex.quote(stderr_path)}; "
+                f"rc=$?; tail -c 4000 {shlex.quote(stderr_path)}; echo; echo {_SANDBOX_MARK}rc=$rc; "
+                f"for f in {shlex.quote(data_home)}/opencode/opencode.db*; "
+                f'do [ -f "$f" ] && echo "{_SANDBOX_MARK}db=$f"; done; exit 0'
+            )
+            result = await provider.exec(handle, script, env=sandbox_env, timeout_s=timeout + 120)
+            output = f"{result.stdout or ''}\n{result.stderr or ''}"
+            returncode = None
+            databases = []
+            stderr_lines = []
+            for line in output.splitlines():
+                if line.startswith(f"{_SANDBOX_MARK}rc="):
+                    returncode = int(line.removeprefix(f"{_SANDBOX_MARK}rc="))
+                elif line.startswith(f"{_SANDBOX_MARK}db="):
+                    databases.append(line.removeprefix(f"{_SANDBOX_MARK}db="))
+                else:
+                    stderr_lines.append(line)
+            for database in databases:
+                await provider.download_file(handle, database, Path(database))
+            # timeout(1) exits 124 when it stopped the command, 137 when it had to SIGKILL it.
+            return returncode, "\n".join(stderr_lines).encode()[-4000:], returncode in (124, 137)
+        except Exception as e:
+            LOG.warning("OpenCode session sandbox failed: %r", e)
+            return None, f"sandbox session failed: {e!r}".encode()[-4000:], False
+        finally:
+            if handle is not None:
+                try:
+                    await provider.close(handle)
+                except Exception as e:
+                    LOG.warning("failed to delete session sandbox %s: %r", handle.sandbox_id, e)
 
     async def _create_episode(
         self,

@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -1521,3 +1522,239 @@ class TestRemoteSessionTask:
             1.0,
         )
         assert timed_out and outputs == {}
+
+
+class TestSessionNodes:
+    NODES = [
+        {"NodeID": "own", "Alive": True, "NodeManagerAddress": "10.0.0.5"},
+        {"NodeID": "train", "Alive": True, "NodeManagerAddress": "10.0.0.1"},
+        {"NodeID": "a", "Alive": True, "NodeManagerAddress": "10.0.0.2"},
+        {"NodeID": "dead", "Alive": False, "NodeManagerAddress": "10.0.0.3"},
+        {"NodeID": "b", "Alive": True, "NodeManagerAddress": "10.0.0.4"},
+    ]
+
+    def _nodes(self, excluded: set[str], **kwargs) -> list[str]:
+        agent = _make_agent(**kwargs)
+        agent._session_nodes = None
+        context = MagicMock()
+        context.get_node_id.return_value = "own"
+        with (
+            patch("ray.get_runtime_context", return_value=context),
+            patch("ray.nodes", return_value=self.NODES),
+            patch.object(OpenCodeAgent, "_excluded_session_node_ids", return_value=excluded),
+        ):
+            return agent._session_node_ids()
+
+    def test_own_node_first_then_by_ip(self) -> None:
+        assert self._nodes(set(), session_nodes=3) == ["own", "train", "a"]
+
+    def test_skips_excluded_nodes(self) -> None:
+        assert self._nodes({"train"}, session_nodes=10) == ["own", "a", "b"]
+
+    def test_skips_excluded_own_node(self) -> None:
+        assert self._nodes({"own", "train"}, session_nodes=10) == ["a", "b"]
+
+    def test_lookup_uses_alive_actors_of_listed_classes(self) -> None:
+        agent = _make_agent(session_exclude_actor_classes=["MegatronPolicyWorker"])
+        actors = [MagicMock(node_id="train"), MagicMock(node_id="train"), MagicMock(node_id=None)]
+        with patch("ray.util.state.list_actors", return_value=actors) as list_actors:
+            assert agent._excluded_session_node_ids() == {"train"}
+        assert list_actors.call_args.kwargs["filters"] == [
+            ("class_name", "=", "MegatronPolicyWorker"),
+            ("state", "=", "ALIVE"),
+        ]
+        assert list_actors.call_args.kwargs["limit"] <= 10_000  # Ray's state API maximum
+
+    def test_no_classes_no_lookup(self) -> None:
+        with patch("ray.util.state.list_actors") as list_actors:
+            assert _make_agent()._excluded_session_node_ids() == set()
+        list_actors.assert_not_called()
+
+
+class _FakeSandboxProvider:
+    """Records sandbox calls; plays a session that writes a database and exits with `rc`."""
+
+    def __init__(self, rc: int = 0, fail_on: str | None = None) -> None:
+        self.rc, self.fail_on = rc, fail_on
+        self.specs, self.execs, self.uploads, self.closed = [], [], {}, []
+
+    async def create(self, spec):
+        from nemo_gym.sandbox import SandboxHandle
+
+        if self.fail_on == "create":
+            raise RuntimeError("no capacity")
+        self.specs.append(spec)
+        return SandboxHandle(sandbox_id="sbx-1", provider_name="fake", raw=None)
+
+    async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        from nemo_gym.sandbox import SandboxExecResult
+
+        self.execs.append({"command": command, "env": env, "timeout_s": timeout_s})
+        if command.startswith("mkdir"):
+            return SandboxExecResult(stdout="", stderr=None, return_code=0)
+        if self.fail_on == "run":
+            raise RuntimeError("proxy 502")
+        data_home = env["XDG_DATA_HOME"]
+        stdout = f"boom\n@@ng-opencode@@rc={self.rc}\n@@ng-opencode@@db={data_home}/opencode/opencode.db\n"
+        return SandboxExecResult(stdout=stdout, stderr=None, return_code=0)
+
+    async def upload_file(self, handle, source_path, target_path):
+        self.uploads[target_path] = source_path.read_bytes()
+
+    async def download_file(self, handle, source_path, target_path):
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b"db")
+
+    async def close(self, handle):
+        self.closed.append(handle.sandbox_id)
+
+
+class TestSessionSandbox:
+    SANDBOX = {"provider": {"opensandbox": {}}, "spec": {"image": "python:3.12-slim"}, "env": {"EXTRA": "1"}}
+
+    def _run(self, tmp_path: Path, provider: _FakeSandboxProvider, **sandbox):
+        agent = _make_agent(session_sandbox={**self.SANDBOX, **sandbox}, env={"OMP_NUM_THREADS": "1"}, timeout=60)
+        agent._sandbox_provider = provider
+        work = tmp_path / "opencode_x"
+        (work / ".opencode-data").mkdir(parents=True)
+        (work / "image_0.png").write_bytes(b"png")
+        (work / "opencode.json").write_text("{}")
+        env = {
+            "XDG_DATA_HOME": str(work / ".opencode-data"),
+            "OPENAI_BASE_URL": "http://10.0.0.1:5000/ng-tok/k/v1",
+            "OPENAI_API_KEY": "EMPTY",  # pragma: allowlist secret
+            "WANDB_API_KEY": "secret",  # pragma: allowlist secret
+            "OPENSANDBOX_API_KEY": "secret",  # pragma: allowlist secret
+        }
+        result = asyncio.run(
+            agent._run_sandbox_session(["run", "-m", "nemo/m", "--dir", str(work), "q"], work, work, env, 60)
+        )
+        return result, work
+
+    def test_runs_session_in_sandbox_and_fetches_database(self, tmp_path: Path) -> None:
+        provider = _FakeSandboxProvider(rc=0)
+        (rc, stderr, timed_out), work = self._run(tmp_path, provider)
+        assert (rc, timed_out) == (0, False) and b"boom" in stderr
+        assert set(provider.uploads) == {str(work / "image_0.png"), str(work / "opencode.json")}
+        assert (work / ".opencode-data" / "opencode" / "opencode.db").read_bytes() == b"db"
+        assert provider.specs[0].image == "python:3.12-slim" and provider.specs[0].ttl_s == 60 + 900 + 600
+        run = provider.execs[-1]
+        assert "timeout -k 10 60 opencode run -m nemo/m" in run["command"] and run["timeout_s"] == 180
+        assert provider.closed == ["sbx-1"]
+
+    def test_sandbox_env_carries_no_agent_credentials(self, tmp_path: Path) -> None:
+        provider = _FakeSandboxProvider()
+        self._run(tmp_path, provider)
+        env = provider.execs[-1]["env"]
+        assert "WANDB_API_KEY" not in env and "OPENSANDBOX_API_KEY" not in env
+        assert env["OPENAI_BASE_URL"].endswith("/ng-tok/k/v1") and env["OPENAI_API_KEY"] == "EMPTY"
+        assert env["OMP_NUM_THREADS"] == "1" and env["EXTRA"] == "1" and env["HOME"] == "/root"
+
+    def test_timeout_exit_codes_mark_timed_out(self, tmp_path: Path) -> None:
+        for rc in (124, 137):
+            (returncode, _, timed_out), _ = self._run(tmp_path / str(rc), _FakeSandboxProvider(rc=rc))
+            assert (returncode, timed_out) == (rc, True)
+
+    def test_setup_command_runs_before_opencode(self, tmp_path: Path) -> None:
+        provider = _FakeSandboxProvider()
+        self._run(tmp_path, provider, setup_command="sh /opt/setup.sh")
+        assert provider.execs[0]["command"].startswith("mkdir -p ") and provider.execs[0]["command"].endswith(
+            "&& sh /opt/setup.sh"
+        )
+
+    def test_infrastructure_failure_is_a_failed_run_not_an_exception(self, tmp_path: Path) -> None:
+        for fail_on, closed in (("create", []), ("run", ["sbx-1"])):
+            provider = _FakeSandboxProvider(fail_on=fail_on)
+            (rc, stderr, timed_out), _ = self._run(tmp_path / fail_on, provider)
+            assert rc is None and not timed_out and b"sandbox session failed" in stderr
+            assert provider.closed == closed
+
+    def test_provider_secrets_come_from_environment(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("OSB_DOMAIN_FOR_TEST", "sandbox.example")
+        agent = _make_agent(
+            session_sandbox={
+                "provider": {"opensandbox": {"connection": {"protocol": "https"}}},
+                "provider_secret_env": {"domain": "OSB_DOMAIN_FOR_TEST"},
+            },
+            workspace_root=str(tmp_path),
+        )
+        agent._sandbox_provider = None
+        with patch("responses_api_agents.opencode_agent.app.create_provider") as create_provider:
+            agent._session_sandbox_provider()
+        assert create_provider.call_args.args[0] == {
+            "opensandbox": {"connection": {"protocol": "https", "domain": "sandbox.example"}}
+        }
+        assert agent.config.session_sandbox.provider == {"opensandbox": {"connection": {"protocol": "https"}}}
+
+    def test_missing_secret_env_fails_loudly(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.delenv("OSB_MISSING_FOR_TEST", raising=False)
+        agent = _make_agent(
+            session_sandbox={
+                "provider": {"opensandbox": {}},
+                "provider_secret_env": {"api_key": "OSB_MISSING_FOR_TEST"},
+            }
+        )
+        agent._sandbox_provider = None
+        try:
+            agent._session_sandbox_provider()
+        except RuntimeError as e:
+            assert "OSB_MISSING_FOR_TEST" in str(e)
+        else:
+            raise AssertionError("expected RuntimeError")
+
+    def test_ca_file_is_added_to_trusted_bundle(self, tmp_path: Path, monkeypatch) -> None:
+        ca = tmp_path / "server.pem"
+        ca.write_text("-----BEGIN CERTIFICATE-----\nPINNED\n-----END CERTIFICATE-----\n")
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        agent = _make_agent(workspace_root=str(tmp_path / "ws"))
+        agent._trust_ca_file(str(ca))
+        bundle = Path(os.environ["SSL_CERT_FILE"]).read_text()
+        monkeypatch.delenv("SSL_CERT_FILE")
+        assert "PINNED" in bundle and bundle.count("BEGIN CERTIFICATE") > 1
+
+    def test_sandbox_starts_are_capped_but_sessions_overlap(self, tmp_path: Path) -> None:
+        class _SlowProvider(_FakeSandboxProvider):
+            starting = running = max_starting = max_running = 0
+
+            async def create(self, spec):
+                type(self).starting += 1
+                type(self).max_starting = max(self.max_starting, self.starting)
+                await asyncio.sleep(0.01)
+                return await super().create(spec)
+
+            async def exec(self, handle, command, **kwargs):
+                if command.startswith("mkdir"):
+                    type(self).starting -= 1
+                    return await super().exec(handle, command, **kwargs)
+                type(self).running += 1
+                type(self).max_running = max(self.max_running, self.running)
+                await asyncio.sleep(0.05)
+                type(self).running -= 1
+                return await super().exec(handle, command, **kwargs)
+
+        agent = _make_agent(session_sandbox={**self.SANDBOX, "max_concurrent_starts": 2}, timeout=60)
+        agent._sandbox_provider = _SlowProvider()
+
+        async def session(i: int):
+            work = tmp_path / f"opencode_{i}"
+            (work / ".opencode-data").mkdir(parents=True)
+            env = {"XDG_DATA_HOME": str(work / ".opencode-data"), "OPENAI_BASE_URL": "http://h/v1"}
+            return await agent._run_sandbox_session(["run", "q"], work, work, env, 60)
+
+        async def main():
+            return await asyncio.gather(*(session(i) for i in range(6)))
+
+        results = asyncio.run(main())
+        assert [rc for rc, _, _ in results] == [0] * 6
+        assert _SlowProvider.max_starting == 2 and _SlowProvider.max_running > 2
+
+    def test_sandbox_and_session_nodes_are_exclusive(self) -> None:
+        try:
+            OpenCodeAgent(
+                config=_config(session_sandbox=self.SANDBOX, session_nodes=4),
+                server_client=MagicMock(spec=ServerClient),
+            )
+        except ValueError as e:
+            assert "session_sandbox" in str(e)
+        else:
+            raise AssertionError("expected ValueError")
