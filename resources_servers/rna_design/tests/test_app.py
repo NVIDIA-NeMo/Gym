@@ -330,6 +330,20 @@ def test_a_hidden_objective_shows_the_harness_an_alias_not_the_puzzle(
     campaign.state.close()
 
 
+def test_a_harness_that_gives_up_releases_the_rollout_by_the_seeded_id(tmp_path: Path) -> None:
+    """The seed reply names the session, so a harness that abandons the rollout can close it at /close_session."""
+    pytest.importorskip("mcp")
+    server = _server(tmp_path)
+    with _client(tmp_path, server) as client:
+        sid = client.post("/seed_session", json=SEED).json()["resources_session_id"]
+        worker = server.workers[sid]
+        close = {"resources_session_id": sid, "episode_id": {"rollout_id": "abandoned"}}
+        assert client.post("/close_session", json=close).status_code == 200
+        assert sid not in server.workers and worker.proc.returncode is not None
+        assert client.post("/close_session", json=close).status_code == 200  # closing twice is fine
+        assert client.post("/seed_session", json=SEED).status_code == 409  # a late seed cannot reopen it
+
+
 def test_reading_the_campaign_state_is_free(tmp_path: Path) -> None:
     """The agent's model sees the state every round for free. A harness reads it with campaign_state."""
     pytest.importorskip("mcp")

@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, Request
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym import failure_kinds
 from nemo_gym.base_resources_server import (
@@ -43,6 +43,9 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSessionFence,
     SimpleResourcesServer,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -134,15 +137,22 @@ class ToolWorker:
             shutil.rmtree(self.scratch, ignore_errors=True)
 
 
+class RnaDesignSeedSessionResponse(BaseSeedSessionResponse):
+    # Names the rollout's session, so a harness that gives up on the rollout can release it at /close_session.
+    resources_session_id: str
+
+
 class RnaDesignResourcesServer(SimpleResourcesServer):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     config: RnaDesignResourcesServerConfig
     workers: dict[str, ToolWorker] = Field(default_factory=dict)
     tool_names: dict[str, str] = Field(default_factory=dict)  # model-facing name -> registry name
+    _fence: ResourcesSessionFence = PrivateAttr()
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
+        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
         sys.path.insert(0, str(AGENT_DIR))
         from prepare import ensure_suites
         from rds import registry
@@ -197,51 +207,66 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
             raise ValueError(f"unknown suite {suite!r}; known suites: {sorted(known)}")
         return known[suite]
 
-    async def seed_session(self, request: Request, body: RnaDesignSeedSessionRequest) -> BaseSeedSessionResponse:
+    async def seed_session(self, request: Request, body: RnaDesignSeedSessionRequest) -> RnaDesignSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
-        suite_path = self._suite_path(body.suite)  # before any process starts, so a bad row leaves nothing running
-        # A rollout that fails before /verify never closes its session. Close it on a re-seed, or once it is stale.
-        now = time.monotonic()
-        stale = [
-            sid for sid, w in self.workers.items() if sid == session_id or now - w.started > self.config.session_ttl_s
-        ]
-        for sid in stale:
-            if worker := self.workers.pop(sid, None):
-                await worker.close()
-        if stale:
-            LOG.warning("closed %d rna_design session(s) that never reached /verify", len(stale))
-        base = Path(self.config.work_dir) if self.config.work_dir else Path(tempfile.gettempdir()) / "rna_design"
-        base.mkdir(parents=True, exist_ok=True)
-        run_dir = Path(tempfile.mkdtemp(prefix="run_", dir=base))
-        proc = await asyncio.create_subprocess_exec(
-            self.config.worker_python or sys.executable,
-            "-I",
-            str(HERE / "tool_worker.py"),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True,
-            limit=2**26,  # one reply is one JSON line, and a transcript can pass asyncio's 64 KiB default
-            # A tool that outlives the call limit would answer the next call instead, so tools stop a minute short.
-            env={**os.environ, "RDS_TOOL_TIMEOUT_S": str(max(self.config.call_timeout_s - 60, 60))},
-        )
-        worker = ToolWorker(proc, self.config.call_timeout_s, scratch=None if self.config.work_dir else run_dir)
-        try:
-            opened = await worker.ask(
-                {
-                    "op": "open",
-                    "suite_path": str(suite_path),
-                    "target_name": str(body.target.get("name", "")),
-                    "run_dir": str(run_dir),
-                }
+        # One seed or close per session at a time, and no seed may reopen a session that was just closed.
+        async with self._fence.locked(session_id):
+            self._fence.raise_if_closed(session_id)
+            suite_path = self._suite_path(body.suite)  # before any process starts, so a bad row leaves nothing running
+            # A rollout that fails before /verify never closes its session. Close it on a re-seed, or once it is stale.
+            now = time.monotonic()
+            stale = [
+                sid
+                for sid, w in self.workers.items()
+                if sid == session_id or now - w.started > self.config.session_ttl_s
+            ]
+            for sid in stale:
+                if worker := self.workers.pop(sid, None):
+                    await worker.close()
+            if stale:
+                LOG.warning("closed %d rna_design session(s) that never reached /verify", len(stale))
+            base = Path(self.config.work_dir) if self.config.work_dir else Path(tempfile.gettempdir()) / "rna_design"
+            base.mkdir(parents=True, exist_ok=True)
+            run_dir = Path(tempfile.mkdtemp(prefix="run_", dir=base))
+            proc = await asyncio.create_subprocess_exec(
+                self.config.worker_python or sys.executable,
+                "-I",
+                str(HERE / "tool_worker.py"),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True,
+                limit=2**26,  # one reply is one JSON line, and a transcript can pass asyncio's 64 KiB default
+                # A tool that outlives the call limit would answer the next call instead, so tools stop a minute short.
+                env={**os.environ, "RDS_TOOL_TIMEOUT_S": str(max(self.config.call_timeout_s - 60, 60))},
             )
-            if not opened["ok"]:
-                raise RuntimeError(opened["error"])
-        except BaseException:
-            await worker.close()  # whatever failed, the process and its run directory go with it
-            raise
-        self.workers[session_id] = worker
-        return BaseSeedSessionResponse()
+            worker = ToolWorker(proc, self.config.call_timeout_s, scratch=None if self.config.work_dir else run_dir)
+            try:
+                opened = await worker.ask(
+                    {
+                        "op": "open",
+                        "suite_path": str(suite_path),
+                        "target_name": str(body.target.get("name", "")),
+                        "run_dir": str(run_dir),
+                    }
+                )
+                if not opened["ok"]:
+                    raise RuntimeError(opened["error"])
+            except BaseException:
+                await worker.close()  # whatever failed, the process and its run directory go with it
+                raise
+            self.workers[session_id] = worker
+        return RnaDesignSeedSessionResponse(resources_session_id=str(session_id))
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        """Release a rollout's tool worker, named by its seed reply's resources_session_id, as a harness does when it
+        gives up on the rollout. Closing a session that is gone or was never seeded succeeds."""
+        async with self._fence.locked(body.resources_session_id):
+            if worker := self.workers.get(body.resources_session_id):
+                await worker.close()
+                self.workers.pop(body.resources_session_id, None)  # only once closed, so a failed close can be retried
+            self._fence.mark_closed(body.resources_session_id, body.episode_id)
+        return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
     async def campaign_state(self, request: Request, body: dict) -> dict:
         """Show the campaign: the target and its constraints, how designs are ranked, the budget left, the best
