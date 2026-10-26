@@ -9,7 +9,7 @@ rollout-prefixed Gym Model Server with `COPILOT_OFFLINE=true`. It needs no GitHu
 no Copilot service calls. Authentication, client telemetry, built-in MCP servers, and auto-update are disabled; task tools can still access the network.
 
 [configs/copilot_agent.yaml](configs/copilot_agent.yaml) is the default agent configuration. This harness
-implements evaluation and observability with task sandboxes. Resources tool grants and training-token capture are not supported. Subagent hierarchy and compaction observations are reported as gaps.
+implements evaluation with task sandboxes and the observability limits described below. Resources tool grants and training-token capture are not supported. Subagent hierarchy and compaction observations are reported as gaps.
 
 ## Configure and run
 
@@ -121,6 +121,8 @@ A provider error that Copilot reports (`session.error`) returns a failed respons
 an HTTP status becomes `model_request_error`, and an unreachable provider becomes `model_transport_error`.
 The Environment Server decides grading and retries. Copilot retries 429 and 5xx responses itself before
 reporting. A timeout returns partial work as incomplete. Other runner or termination failures are execution
-errors.
+errors. A deadline can interrupt a tool before Copilot reports its result. That tool remains incomplete,
+with its observed start and a timing gap; the adapter does not invent a terminal output. Such a partial
+rollout can be graded, but it does not fulfill the strict retained-artifact tool evidence checks.
 
 Response metadata includes `harness_execution: sandbox`, hostname, runner PID, and `copilot_version`.
