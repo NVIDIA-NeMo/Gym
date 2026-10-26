@@ -18,6 +18,7 @@ from scripts.harness_conformance.provider import Probe
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS
 
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.config_types import ConfigError
 from nemo_gym.harness_capabilities.cli import json_rows
 from nemo_gym.observability.model_calls import build_model_call_record
@@ -480,13 +481,32 @@ def retained_episode(tmp_path):
     return tmp_path, witness
 
 
-@pytest.mark.parametrize("mutation", [None, "missing_response", "completed", "missing_error", "lost_detail"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        None,
+        "missing_response",
+        "completed",
+        "missing_error",
+        "lost_detail",
+        "missing_metadata",
+        "missing_outcome",
+        "malformed_outcome",
+        "unknown_kind",
+        "unregistered_kind",
+        "wrong_status",
+        "invalid_status",
+    ],
+)
 def test_terminal_model_error_must_be_reported_to_environment(retained_episode, mutation):
     directory, witness = retained_episode
     witness["attempts"] = [
         {"status_code": 400, "request": {}, "response": {"error": {"message": "controlled model failure"}}}
     ]
     response = {"status": "failed", "error": {"code": "server_error", "message": "HTTP 400: controlled model failure"}}
+    response["metadata"] = {
+        AGENT_OUTCOME_METADATA_KEY: json.dumps({"failure_kind": "model_request_error", "status_code": 400})
+    }
     witness["agent_responses"] = [response]
     if mutation == "missing_response":
         witness["agent_responses"] = []
@@ -496,6 +516,18 @@ def test_terminal_model_error_must_be_reported_to_environment(retained_episode, 
         response["error"] = None
     elif mutation == "lost_detail":
         response["error"]["message"] = "unknown failure"
+    elif mutation == "missing_metadata":
+        del response["metadata"]
+    elif mutation == "missing_outcome":
+        response["metadata"] = {}
+    elif mutation is not None:
+        response["metadata"][AGENT_OUTCOME_METADATA_KEY] = {
+            "malformed_outcome": "{",
+            "unknown_kind": json.dumps({"failure_kind": "unknown"}),
+            "unregistered_kind": json.dumps({"failure_kind": "invented"}),
+            "wrong_status": json.dumps({"failure_kind": "model_request_error", "status_code": 503}),
+            "invalid_status": json.dumps({"failure_kind": "model_request_error", "status_code": "400"}),
+        }[mutation]
     (directory / "witness.json").write_text(json.dumps(witness))
     result = inspect_episode(SCENARIO["model_error"], directory, {"returncode": 0, "timed_out": False})
     check = next(c for c in result["checks"] if c["id"] == "model.terminal_error")
