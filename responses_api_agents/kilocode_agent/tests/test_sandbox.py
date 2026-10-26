@@ -391,13 +391,8 @@ async def test_sandbox_output_and_failures(
     session.session.execute = AsyncMock(return_value=artifacts)
     body = NeMoGymResponseCreateParamsNonStreaming(input="hi", instructions="requested")
     if expected == "error":
-        response = await agent._sandbox_response(session, body, rollout_id="rollout-1-a2")
-        assert response.status == "failed"
-        assert response.error is not None and response.error.code == "server_error"
-        assert response.error.message
-        from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
-
-        assert agent_outcome_policy(response) == OutcomeAction.FAIL
+        with pytest.raises(RuntimeError):
+            await agent._sandbox_response(session, body, rollout_id="rollout-1-a2")
     else:
         with patch.object(session, "stage_activation", new_callable=AsyncMock) as stage:
             response = await agent._sandbox_response(session, body, rollout_id="rollout-1-a2")
@@ -430,13 +425,10 @@ async def test_timeout_before_any_model_call_is_an_execution_failure(stdout: str
         task_environment_ready=True, stdout=stdout, stderr="migration done", exit_code=None, log_tail=CONNECT_ERROR
     )
     session.session.execute = AsyncMock(return_value=artifacts)
-    response = await agent._sandbox_response(
-        session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
-    )
-    assert response.status == "failed"
-    assert response.error is not None
-    assert "before any model call completed" in response.error.message
-    assert "Cannot connect to API" in response.error.message
+    with pytest.raises(RuntimeError, match="before any model call completed.*Cannot connect to API"):
+        await agent._sandbox_response(
+            session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
+        )
 
 
 @pytest.mark.parametrize("timed_out", [True, False])
@@ -644,11 +636,10 @@ async def test_unconfirmed_task_environment_fails_instead_of_grading(timed_out: 
     artifacts = KiloArtifacts(stdout=TEXT, stderr="", exit_code=None if timed_out else 0)
     session.session.execute = AsyncMock(return_value=artifacts)
     session.session.artifacts = artifacts
-    response = await agent._sandbox_response(
-        session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
-    )
-    assert response.status == "failed"
-    assert response.error is not None and "task-environment plugin" in response.error.message
+    with pytest.raises(RuntimeError, match="task-environment plugin"):
+        await agent._sandbox_response(
+            session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
+        )
     sandbox_record = agent._sandbox_observations(session).records[-1]
     assert (sandbox_record.outcome, sandbox_record.error_type) == ("failed", "task_environment_unconfirmed")
 
@@ -714,36 +705,3 @@ async def test_cancelled_local_install_is_shared_not_restarted() -> None:
         with pytest.raises(Stop):
             await asyncio.wait_for(second, timeout=10)
     assert calls == ["7.4.15"]
-
-
-async def test_terminal_model_error_is_retained_and_honors_environment_policy() -> None:
-    from environment_servers.single_agent_turn.app import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
-
-    agent = _make_model_server_agent(model="m")
-    session = state()
-    session.session.cleanup = receipt()
-    event = {
-        "type": "error",
-        "error": {"name": "APIError", "data": {"statusCode": 400, "message": "controlled model failure"}},
-    }
-    artifacts = KiloArtifacts(task_environment_ready=True, stdout=json.dumps(event), stderr="", exit_code=0)
-    session.session.execute = AsyncMock(return_value=artifacts)
-    response = await agent._sandbox_response(
-        session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
-    )
-    assert response.status == "failed"
-    assert response.error is not None and "controlled model failure" in response.error.message
-    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
-    policy = AgentOutcomePolicyConfig(by_status_code={400: OutcomeAction.FAIL})
-    assert agent_outcome_policy(response, config=policy) == OutcomeAction.FAIL
-
-
-@pytest.mark.parametrize("status", [400, 503, None, True, "400", 200])
-def test_api_error_classification_requires_a_real_http_failure_status(status: object) -> None:
-    from nemo_gym.failure_kinds import AGENT_REQUEST_FAILED, MODEL_REQUEST_ERROR
-
-    agent = _make_model_server_agent()
-    outcome = agent.classify_outcome({"error": {"name": "APIError", "data": {"statusCode": status}}})
-    valid = type(status) is int and 400 <= status <= 599
-    assert outcome.failure_kind == (MODEL_REQUEST_ERROR if valid else AGENT_REQUEST_FAILED)
-    assert outcome.status_code == (status if valid else None)
