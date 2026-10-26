@@ -48,6 +48,13 @@ class SkillsBenchHarborAgent(HarborAgent):
         # This internal field is deliberately excluded from request serialization.
         identity["_ng_rollout_id"] = body.capture_rollout_id
         job_config.agents[0].kwargs["api_base"] = self.base_url_for_run(root, identity) + "/v1"
+        kwargs = job_config.agents[0].kwargs
+        kwargs["responses_create_params"] = {
+            **(kwargs.get("responses_create_params") or {}),
+            **body.responses_create_params.model_dump(
+                include={"temperature", "top_p", "max_output_tokens"}, exclude_none=True
+            ),
+        }
 
 
 if __name__ == "__main__":

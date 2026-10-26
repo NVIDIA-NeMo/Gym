@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 from openhands.tools.terminal.definition import TerminalAction
 
+from benchmarks.skillsbench import openhands_agent
 from benchmarks.skillsbench.openhands_agent import (
     _EXECUTORS,
     OpenSandboxTerminalExecutor,
@@ -84,6 +85,85 @@ async def test_no_skill_setup_rejects_failed_removal():
     environment = SimpleNamespace(exec=AsyncMock(return_value=SimpleNamespace(return_code=1, stderr="denied")))
     with pytest.raises(RuntimeError, match="denied"):
         await SkillsBenchOpenHands.setup(SimpleNamespace(skill_mode="no-skill"), environment)
+
+
+@pytest.mark.asyncio
+async def test_deadline_discards_completed_command_descendants_and_joins_worker():
+    waiting_for_model = threading.Event()
+    worker_finished = threading.Event()
+    stopped = threading.Event()
+    observations = []
+
+    async def sandbox_exec(command, **_kwargs):
+        assert not stopped.is_set()
+        if command == "pwd":
+            return SimpleNamespace(return_code=0, stdout="/workspace\n")
+        return SimpleNamespace(return_code=0, stdout="service ready", stderr="")
+
+    async def sandbox_stop(**_kwargs):
+        stopped.set()
+
+    def run_openhands(_instruction, _environment, _context, instance_id, _cwd, control):
+        try:
+            executor = _EXECUTORS[instance_id]
+            observations.append(executor(TerminalAction(command="nohup server >/tmp/server.log 2>&1 &")))
+            observations.append(executor(TerminalAction(command="curl localhost:8000")))
+            waiting_for_model.set()
+            assert control.cancelled.wait(timeout=5)
+        finally:
+            worker_finished.set()
+
+    environment = SimpleNamespace(exec=sandbox_exec, stop=sandbox_stop)
+    agent = SimpleNamespace(_run_openhands=run_openhands)
+    task = asyncio.create_task(SkillsBenchOpenHands.run(agent, "Task", environment, None))
+    assert await asyncio.to_thread(waiting_for_model.wait, 5)
+    assert [observation.exit_code for observation in observations] == [0, 0]
+    assert not stopped.is_set()
+    task.cancel()
+    with pytest.raises(RuntimeError, match="surviving descendants"):
+        await task
+    assert stopped.is_set()
+    assert worker_finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_deadline_does_not_signal_completed_command_with_stale_pid():
+    control = _RunControl()
+    future = Future()
+    future.set_result(SimpleNamespace(return_code=0))
+    # Completion can race with cleanup before the executor updates bookkeeping.
+    control.active_commands["/tmp/skillsbench-openhands-stale.pid"] = future
+    environment = SimpleNamespace(exec=AsyncMock())
+    with pytest.raises(RuntimeError, match="completed before termination"):
+        await SkillsBenchOpenHands._terminate_active_commands(environment, control)
+    environment.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("overrides", [{}, {"temperature": 0, "top_p": 1, "max_output_tokens": 1024}])
+def test_sampling_overrides_reach_openhands_llm_without_mutating_model_info(tmp_path, monkeypatch, overrides):
+    model_info = {"max_input_tokens": 65536, "max_output_tokens": 32768}
+    agent = SkillsBenchOpenHands(
+        logs_dir=tmp_path,
+        model_name="test-policy",
+        api_base="http://model.example/v1",
+        model_info=model_info,
+        temperature=1.0,
+        top_p=0.95,
+        responses_create_params=overrides,
+    )
+    received = {}
+
+    def capture_llm(**kwargs):
+        received.update(kwargs)
+        raise RuntimeError("stop after LLM construction")
+
+    monkeypatch.setattr(openhands_agent, "LLM", capture_llm)
+    with pytest.raises(RuntimeError, match="stop after LLM construction"):
+        agent._run_openhands("task", None, None, "id", "/root", _RunControl())
+    expected = {"temperature": 1.0, "top_p": 0.95, "max_output_tokens": 32768} | overrides
+    assert all(received[key] == value for key, value in expected.items())
+    assert received["max_input_tokens"] == 65536
+    assert model_info == {"max_input_tokens": 65536, "max_output_tokens": 32768}
 
 
 @pytest.mark.asyncio

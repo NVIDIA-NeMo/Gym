@@ -53,6 +53,9 @@ class _RunControl:
         self.conversation: LocalConversation | None = None
         self.lock = threading.Lock()
         self.active_commands: dict[str, Future[Any]] = {}
+        # An exited shell can leave detached descendants. Without sandbox-wide
+        # process ownership, its completion cannot authorize deadline grading.
+        self.completed_commands = False
 
 
 class OpenSandboxTerminalExecutor(ToolExecutor):
@@ -155,6 +158,7 @@ class OpenSandboxTerminalExecutor(ToolExecutor):
         finally:
             with self.control.lock:
                 if future is not None and self.control.active_commands.get(pidfile) is future and future.done():
+                    self.control.completed_commands = True
                     self.control.active_commands.pop(pidfile, None)
 
         output = result.stdout or ""
@@ -227,7 +231,10 @@ class SkillsBenchOpenHands(BaseAgent):
         self.max_turns = max_turns
         self.temperature = (responses_create_params or {}).get("temperature", temperature)
         self.top_p = (responses_create_params or {}).get("top_p", top_p)
-        self.model_info = model_info or {}
+        self.model_info = dict(model_info or {})
+        limit = (responses_create_params or {}).get("max_output_tokens")
+        if limit is not None:
+            self.model_info["max_output_tokens"] = limit
 
     @staticmethod
     def name() -> str:
@@ -257,10 +264,12 @@ class SkillsBenchOpenHands(BaseAgent):
     @staticmethod
     async def _terminate_active_commands(environment: BaseEnvironment, control: _RunControl) -> None:
         with control.lock:
+            if control.completed_commands:
+                raise RuntimeError("Completed terminal commands may have surviving descendants; discard the sandbox")
             active = list(control.active_commands.items())
         for pidfile, future in active:
             if future.done():
-                continue
+                raise RuntimeError("Terminal command completed before termination could be confirmed")
             # The remote exec may still be starting. Check for its marker
             # before signaling; a missing marker while it is active is unsafe.
             for _ in range(20):
@@ -273,7 +282,7 @@ class SkillsBenchOpenHands(BaseAgent):
             else:
                 raise RuntimeError(f"Could not locate active OpenHands command {pidfile}")
             if future.done():
-                continue
+                raise RuntimeError("Terminal command completed before termination could be confirmed")
             # Interactive shell startup can emit warnings into stdout. Frame
             # the PID so those diagnostics cannot be mistaken for its value.
             pid_marker = "__OPENHANDS_PGID__"
@@ -282,8 +291,6 @@ class SkillsBenchOpenHands(BaseAgent):
                 timeout_sec=5,
             )
             if pid_result.return_code != 0:
-                if future.done():
-                    continue
                 raise RuntimeError(f"Could not read active OpenHands command {pidfile}")
             pid_values = [
                 line.removeprefix(pid_marker)
@@ -323,14 +330,15 @@ class SkillsBenchOpenHands(BaseAgent):
             control.cancelled.set()
             try:
                 await SkillsBenchOpenHands._terminate_active_commands(environment, control)
-                if control.conversation is not None:
-                    await asyncio.to_thread(control.conversation.pause)
-                await asyncio.shield(worker)
             except BaseException:
                 # Fail closed: Harbor must not verify a sandbox that might
                 # still contain a command running past the agent deadline.
                 await environment.stop(delete=True)
                 raise
+            finally:
+                if control.conversation is not None:
+                    await asyncio.to_thread(control.conversation.pause)
+                await asyncio.shield(worker)
             raise
         finally:
             _EXECUTORS.pop(instance_id, None)

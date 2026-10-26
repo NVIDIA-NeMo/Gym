@@ -150,10 +150,24 @@ async def test_concurrent_dispatch_uses_per_row_model_capture_urls(tmp_path, mon
         HarborRunRequest.model_validate({"task_name": "example", "responses_create_params": {"input": []}, **identity})
         for identity in identities
     ]
+    bodies[0].responses_create_params.temperature = 0
+    bodies[0].responses_create_params.top_p = 1
+    bodies[0].responses_create_params.max_output_tokens = 1024
     assert await asyncio.gather(*(agent.run(body) for body in bodies)) == bodies
     assert len(submitted) == 4
     assert len({job["job_name"] for job in submitted}) == 4
     assert agent.config.job.model_dump(mode="json") == template
+    assert submitted[0]["agents"][0]["kwargs"]["responses_create_params"] == {
+        "temperature": 0,
+        "top_p": 1,
+        "max_output_tokens": 1024,
+    }
+    for job in submitted[1:]:
+        kwargs = job["agents"][0]["kwargs"]
+        assert kwargs["responses_create_params"] == {}
+        assert kwargs["temperature"] == 1.0
+        assert kwargs["top_p"] == 0.95
+        assert kwargs["model_info"]["max_output_tokens"] == 32768
 
     model_app = FastAPI()
 
