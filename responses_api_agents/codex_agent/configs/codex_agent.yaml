@@ -30,4 +30,3 @@ codex_agent:
       features:  # config.toml [features]; null leaves a feature at the CLI default
         multi_agent: false
         code_mode: false
-      ephemeral: true  # pass --ephemeral: no session state, so no goal tools

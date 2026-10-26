@@ -360,10 +360,9 @@ def test_codex_provider_retries_and_idle_timeout_reach_sandbox_config(setup) -> 
 
 def test_codex_cli_default_features_and_session_state_reach_the_sandbox_launch(setup) -> None:
     # A passthrough model server can relay every tool shape, so a sandbox launch can match a plain
-    # `codex exec`: no [features] overrides and no --ephemeral (Codex's goal tools need session state).
+    # `codex exec`: no [features] overrides and, as in every sandbox session, no --ephemeral.
     agent, sandbox = setup
     agent.config.features = {"multi_agent": None, "code_mode": None}
-    agent.config.ephemeral = False
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix multiply"})

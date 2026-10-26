@@ -638,13 +638,10 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # applies its own default; that is how a launch with no Gym config (such as Harbor's) runs. Unlike
     # extra_config, this also applies to sandbox sessions.
     features: dict[str, Optional[bool]] = Field(default_factory=lambda: {"multi_agent": False, "code_mode": False})
-    # Pass `--ephemeral`, so Codex keeps no session state. Codex then omits the tools that need it,
-    # its goal tools (create_goal, get_goal, update_goal); false offers them, as launches without
-    # the flag do.
-    ephemeral: bool = True
-    # Sandbox sessions without --ephemeral: copy Codex's session rollouts (CODEX_HOME/sessions, with per-call token
-    # counts and timestamps) into <sandbox_logs_dir>/sessions after Codex stops, before the session directory is
-    # removed. Point it at a directory the resources server collects, such as /logs/agent for Harbor-format tasks.
+    # Sandbox sessions, which run without --ephemeral: copy Codex's session rollouts (CODEX_HOME/sessions, with
+    # per-call token counts and timestamps) into <sandbox_logs_dir>/sessions after Codex stops, before the session
+    # directory is removed. Point it at a directory the resources server collects, such as /logs/agent for
+    # Harbor-format tasks.
     sandbox_logs_dir: Optional[str] = None
     # Per-call timeout Codex applies to Gym MCP tools (`tool_timeout_sec`); None leaves the CLI default.
     mcp_tool_timeout_seconds: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
@@ -983,8 +980,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         await state.upload_text("home/.codex/config.toml", toml_dumps(config))
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = self._build_command("-", state.session.workdir)
-        if "--ephemeral" in command:
-            command.remove("--ephemeral")
+        command.remove("--ephemeral")
         command[0:1] = [
             f"{state.runtime}/node/bin/node",
             f"{state.runtime}/codex/node_modules/@openai/codex/bin/codex.js",
@@ -1469,18 +1465,17 @@ class CodexAgent(SimpleResponsesAPIAgent):
     def _build_command(self, instruction: str, cwd: str) -> list[str]:
         """Construct the ``codex exec`` argv.
 
-        ``--json`` emits machine-readable JSONL events; ``--ephemeral`` (unless ``ephemeral`` is
-        false) skips session persistence, and `_run_codex` drops it when it needs temporary native
-        evidence for a correlated rollout. ``--skip-git-repo-check`` allows running in the
-        per-rollout scratch dir. Sandboxing and approvals are pinned in the generated config.toml
-        (``approval_policy = "never"``), not argv. The ``--`` separator keeps prompts from being
-        parsed as flags or subcommands.
+        ``--json`` emits machine-readable JSONL events; ``--ephemeral`` skips session persistence
+        unless `_run_codex` needs temporary native evidence for a correlated rollout.
+        ``--skip-git-repo-check`` allows running in the per-rollout scratch dir. Sandboxing and
+        approvals are pinned in the generated config.toml (``approval_policy = "never"``), not argv.
+        The ``--`` separator keeps prompts from being parsed as flags or subcommands.
         """
         return [
             "codex",
             "exec",
             "--json",
-            *(["--ephemeral"] if self.config.ephemeral else []),
+            "--ephemeral",
             "--skip-git-repo-check",
             "--cd",
             cwd,
@@ -1542,7 +1537,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             }
 
             command = self._build_command(instruction, cwd)
-            if rollout_id is not None and "--ephemeral" in command:
+            if rollout_id is not None:
                 command.remove("--ephemeral")
             proc = await asyncio.create_subprocess_exec(
                 *command,
