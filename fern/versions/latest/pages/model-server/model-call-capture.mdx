@@ -81,7 +81,7 @@ the external staged tokens, not the SSE text.
 The staging ledger's wire models (`nemo_gym/token_id_capture/staging/records.py`) forbid unknown
 fields, so the model server that stages a call and the framework that rebuilds the rollout from
 the staged rows must run the same Gym version. A framework whose Gym predates a column the model
-server writes, such as `capture_key` or `finish_reason`, rejects every manifest row as
+server writes, such as `source_capture_key` or `finish_reason`, rejects every manifest row as
 `invalid_manifest_row` and masks the rollout.
 
 ### Source-history continuity and context compaction
@@ -97,6 +97,11 @@ message history, including any compaction. It does not send tokens, segment IDs,
 Source-history candidates carry an explicit source-match proof. Deploy compatible Gym and RL worker
 revisions together: a missing proof is an error, not permission to assume an exact match.
 Direct roots retain replay evidence and framework safety checks so later calls can continue them.
+
+Staging admissions, snapshots, commit coordinates, manifests and receipts identify the current capture
+attempt with `capture_key`. A carried-over `CallRecord.source_capture_key` identifies the earlier
+attempt that staged that call; when absent, the receipt's own capture key applies. Logical rollout IDs,
+staging-key strings and binary digest encoding are unchanged by these field names.
 
 The staging wire schema is version 3. Gym and every external-staging worker must upgrade together,
 including deployments using ordinary capture with fingerprint parent resolution. Version 2 admissions,
@@ -155,7 +160,7 @@ the new attempt without inheriting the previous attempt's closed-admission state
 
 Independent calls may overlap. Each registers an intent before inference. Failed or pending capture
 does not block later calls; the manifest retains those outcomes for the trainer. After the harness returns, the
-framework calls the bearer-protected `POST /training-token-capture/control/rollouts/{rollout_id}/close`
+framework calls the bearer-protected `POST /training-token-capture/control/rollouts/{capture_key}/close-admission`
 then drains already-admitted calls through the manifest endpoint. Closure refuses new generation but
 allows admitted calls to finish. Missing acknowledgements remain pending; failure is not permission
 to delete data that a worker may still be writing. NeMo RL masks an incomplete attempt.
@@ -169,7 +174,7 @@ retries for generation requests; a retry cannot reopen closed admission or repai
 Framework-owned capture forwards recognized context-length refusals as HTTP 400, even when
 `propagate_context_overflow_errors` is false. The harness decides whether to compact and retry.
 To keep that retry usable, the worker must acknowledge the refused call before generation or
-staging using the internal `x-nemo-gym-capture-refused` response header. A ledger implementing
+staging using the internal `x-ng-capture-refused` response header. A ledger implementing
 `refuse_call` settles that intent and retains its audit row, excluding it from the training
 manifest. This header is between the worker and Gym; harnesses neither send nor receive it.
 An error without a matching acknowledgement still leaves capture incomplete.

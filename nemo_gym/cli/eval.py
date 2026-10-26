@@ -695,6 +695,13 @@ def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_key
     from nemo_gym.rollout_health import format_health_report, run_health_checks, write_provisional_summary
 
     if _terminated and landed_keys is not None:
+        from nemo_gym.path_utils import aggregation_sources_path_for
+
+        if aggregation_sources_path_for(output_fpath).is_file():
+            # A run drops the shard list with the first row it writes, so this run added none: the summary the
+            # aggregation wrote from its shards still holds, and the run accounting alone would replace it wrongly.
+            print("Shard-backed health was not recomputed after stopping; run `gym eval health-check` to check it.")
+            return
         try:
             summary_path = write_provisional_summary(
                 output_fpath,
@@ -708,8 +715,14 @@ def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_key
             print(f"Provisional quality summary (run accounting only): {summary_path}")
         return
     try:
+        from nemo_gym.rollout_health import _aggregated_shards
+
+        # An output `gym eval aggregate` merged shards into is checked from those shards, as the collector and a
+        # recheck check it: its own rows have none of their failures or inventories.
+        shards = _aggregated_shards(output_fpath.parent, rollout_name=output_fpath.name)
         health_result = run_health_checks(
-            output_fpath,
+            shards if shards is not None else output_fpath,
+            output_dir=output_fpath.parent,
             workers=config.health_check_workers,
             ignored_checks=config.health_check_ignored_checks,
             limits=config.run_health_limits,

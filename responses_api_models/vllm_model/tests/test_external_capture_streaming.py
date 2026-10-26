@@ -311,7 +311,7 @@ async def test_external_capture_routes(make_harness, dialect, stream, evaluation
         manifest = client.get(url, headers={"Authorization": "Bearer test-control-token"}).json()
     record = manifest["records"][0]
     receipt = RolloutReceipt(
-        rollout_id="r1",
+        capture_key="r1",
         manifest=[record],
         terminal_model_call_id=record["model_call_id"],
         terminal_selection="declared",
@@ -388,7 +388,7 @@ async def test_synthetic_completion_leaves_call_uncommitted(
         assert manifest.failures[0].model_call_id != record.model_call_id
         assert selection.terminal_model_call_id == record.model_call_id
         receipt = RolloutReceipt(
-            rollout_id="r1",
+            capture_key="r1",
             manifest=manifest.records,
             terminal_model_call_id=selection.terminal_model_call_id,
             terminal_selection="heuristic",
@@ -580,7 +580,7 @@ async def test_two_call_continuation_from_served_sse(make_harness, dialect, cont
     assert child.response_id == second["id"]
     assert h.finalize.await_count == 2
     receipt = RolloutReceipt(
-        rollout_id="r1",
+        capture_key="r1",
         manifest=manifest.records,
         terminal_model_call_id=child.model_call_id,
         terminal_selection="declared",

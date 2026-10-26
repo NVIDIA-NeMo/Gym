@@ -10,7 +10,7 @@
     "schema_version": 3,
     "digest_version": 2,
     "extras_digest_version": 1,
-    "rollout_id": "rollout-1",
+    "capture_key": "rollout-1",
     "model_call_id": "call-1",
     "parent_call_id": "parent-1",
     "mode": "token_in",

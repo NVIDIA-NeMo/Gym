@@ -734,7 +734,7 @@ def import_model_records(
     if records and ledger is None:
         raise ControlError("checkpoint holds capture-ledger rows but this model server has no capture ledger")
     targets = [
-        (record, next_attempt(record.episode_id).capture_key, _with_capture_key(record.rows, record.episode_id))
+        (record, next_attempt(record.episode_id).capture_key, _with_source_capture_key(record.rows, record.episode_id))
         for record in records
     ]
     for record, _, _ in targets:
@@ -752,15 +752,15 @@ def import_model_records(
     return {target: record.generation_cuts[0] for record, target, _ in targets if record.generation_cuts}
 
 
-def _with_capture_key(rows: list[dict[str, Any]], episode_id: EpisodeId) -> list[dict[str, Any]]:
+def _with_source_capture_key(rows: list[dict[str, Any]], episode_id: EpisodeId) -> list[dict[str, Any]]:
     """Stamp each staged row with the capture key it was staged under.
 
     A row a restore already carried over keeps its stamp,
     so a chain of restores still names the attempt that staged the call.
     """
     return [
-        {**row, "capture_key": episode_id.capture_key}
-        if row.get("staging_key") is not None and row.get("capture_key") is None
+        {**row, "source_capture_key": episode_id.capture_key}
+        if row.get("staging_key") is not None and row.get("source_capture_key") is None
         else row
         for row in rows
         # Also reopen records exported by versions that retained this live-attempt marker.

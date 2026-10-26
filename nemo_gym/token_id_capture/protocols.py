@@ -64,7 +64,7 @@ from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
 
 
 # Internal worker acknowledgement: this call was refused before generation or staging.
-CAPTURE_REFUSAL_HEADER = "x-nemo-gym-capture-refused"
+CAPTURE_REFUSAL_HEADER = "x-ng-capture-refused"
 ParentResolutionMode = Literal["fingerprint", "source_history"]
 
 

@@ -48,7 +48,7 @@ class MemoryStagingSink:
         self.lose_ack = False
 
     def stage(self, record):
-        key = f"{record.rollout_id}/{record.model_call_id}"
+        key = f"{record.capture_key}/{record.model_call_id}"
         self.records[key] = record.model_copy(deep=True)
         if self.lose_ack:
             return StageResult(ok=False, error="write completed but acknowledgement lost")
@@ -152,7 +152,7 @@ def make_capture_harness(
                 decision.storage
                 if decision
                 else CaptureAdmission(
-                    rollout_id=admission.rollout_id, model_call_id=admission.model_call_id, mode="text"
+                    capture_key=admission.capture_key, model_call_id=admission.model_call_id, mode="text"
                 )
             )
             active = capture.begin_call(admission, prefix_token_ids=prefix if admission.mode == "token_in" else None)
@@ -835,7 +835,7 @@ def test_framework_checkpoint_restores_a_closed_attempt_and_accepts_its_next_cal
     assert_clean(restored.post("episode-a1", HISTORY + first["output"] + [{"role": "user", "content": "next"}]))
     manifest = restored.manifest("episode-a1")
     assert len(manifest.records) == 2 and not manifest.pending_call_ids and not manifest.failures
-    assert manifest.records[0].capture_key == "episode"
+    assert manifest.records[0].source_capture_key == "episode"
     candidate = restored.worker_calls[-1][0]
     assert candidate.parent_call_id == first_record.model_call_id
     assert candidate.staging_chain == [first_record.staging_key]
@@ -1220,9 +1220,10 @@ def test_capture_transport_retries_only_before_connection(monkeypatch, tmp_path,
 def test_closed_capture_refuses_dispatch_without_poisoning(monkeypatch, tmp_path):
     harness = make_capture_harness(monkeypatch, tmp_path)
     assert_clean(harness.post("attempt", [{"role": "user", "content": "task"}]))
-    path = "/training-token-capture/control/rollouts/attempt/close"
+    path = "/training-token-capture/control/rollouts/attempt/close-admission"
     assert harness.client.post(path).status_code == 401
     headers = {"Authorization": "Bearer test-control"}
+    assert harness.client.post(path.removesuffix("-admission"), headers=headers).status_code == 404
     response = harness.client.post(path, headers=headers)
     assert response.status_code == 200
     snapshot = response.json()
@@ -1261,7 +1262,7 @@ def test_http_calls_overlap_and_drain_after_close(monkeypatch, tmp_path, first):
                 calls.append(executor.submit(harness.post, "attempt", [{"role": "user", "content": f"task {index}"}]))
                 assert entered[index].wait(5), "second call failed to reach the worker concurrently"
             response = harness.client.post(
-                "/training-token-capture/control/rollouts/attempt/close",
+                "/training-token-capture/control/rollouts/attempt/close-admission",
                 headers={"Authorization": "Bearer test-control"},
             )
             assert response.status_code == 200

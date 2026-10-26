@@ -103,9 +103,9 @@ def install_rollout_control_routes(
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
-    @router.post("/rollouts/{rollout_id}/close")
-    async def close_admissions(
-        rollout_id: str,
+    @router.post("/rollouts/{capture_key}/close-admission")
+    async def close_admission(
+        capture_key: str,
         authorization: str | None = Header(default=None),
     ) -> dict:
         check_auth(authorization)
@@ -114,7 +114,7 @@ def install_rollout_control_routes(
         if close is None:
             raise HTTPException(status_code=409, detail="capture ledger cannot close admissions")
         try:
-            return await close(rollout_id)
+            return await close(capture_key)
         except RolloutRetiredError as error:
             raise HTTPException(status_code=410, detail=str(error)) from error
         except ValueError as error:
@@ -153,8 +153,8 @@ class RolloutControlClient:
                 f"rollout {rollout_id} manifest fetch failed: HTTP {response.status} {await response.text()}"
             )
         manifest = RolloutManifest.model_validate(await response.json())
-        if manifest.rollout_id != rollout_id:
-            raise ValueError(f"asked for the manifest of rollout {rollout_id} but got rollout {manifest.rollout_id}")
+        if manifest.capture_key != rollout_id:
+            raise ValueError(f"asked for the manifest of rollout {rollout_id} but got rollout {manifest.capture_key}")
         return manifest
 
     async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemoval:

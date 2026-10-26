@@ -135,7 +135,7 @@ def _commit(
     staging_chain: tuple[str, ...] | None = None,
 ) -> CaptureLedgerCommit:
     return CaptureLedgerCommit(
-        rollout_id=rollout_id,
+        capture_key=rollout_id,
         record=record,
         staging_chain=staging_chain if staging_chain is not None else (record.staging_key,),
         request_items=request_items,
@@ -227,7 +227,7 @@ def test_stores_implement_capture_ledger(store):
 async def test_ledger_row_round_trips_token_free_manifest(store):
     await _record_call_1(store)
     manifest = RolloutManifest.model_validate(await store.manifest("r1"))
-    assert manifest.rollout_id == "r1"
+    assert manifest.capture_key == "r1"
     assert manifest.failures == []
     (record,) = manifest.records
     # The manifest row is exactly the committed ``CallRecord``.
@@ -927,7 +927,7 @@ async def test_checkpoint_restores_delivered_calls_without_dead_attempt_intents(
     target = EpisodeId(rollout_id="r1", attempt=1).capture_key
     manifest = RolloutManifest.model_validate(await restored.manifest(target))
     assert [record.model_call_id for record in manifest.records] == ["c1"]
-    assert manifest.records[0].capture_key == "r1"
+    assert manifest.records[0].source_capture_key == "r1"
     assert manifest.pending_call_ids == []
     # Export must not erase the live attempt's drain/completeness witness.
     live = RolloutManifest.model_validate(await store.manifest("r1"))

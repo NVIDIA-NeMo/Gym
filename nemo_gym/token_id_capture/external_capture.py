@@ -148,7 +148,7 @@ class _BaseExternalCaptureHandler(ABC):
                     raise ValueError("Missing predecessor render evidence")
                 if previous.render_digest != admission.request_replay.render_digest:
                     admission = CaptureAdmission(
-                        rollout_id=admission.rollout_id,
+                        capture_key=admission.capture_key,
                         model_call_id=admission.model_call_id,
                         mode="text",
                         request_replay=admission.request_replay,
@@ -271,9 +271,9 @@ class _BaseExternalCaptureHandler(ABC):
             )
             return
         coords = CommitCoords.model_validate(coords_payload)
-        if coords.rollout_id != context.rollout_id or coords.model_call_id != context.model_call_id:
+        if coords.capture_key != context.rollout_id or coords.model_call_id != context.model_call_id:
             raise ValueError(
-                f"coordinates for {coords.rollout_id}/{coords.model_call_id} do not match the "
+                f"coordinates for {coords.capture_key}/{coords.model_call_id} do not match the "
                 f"active capture context {context.rollout_id}/{context.model_call_id}"
             )
         if coords.disposition == "capture_failed":
@@ -358,7 +358,7 @@ class _BaseExternalCaptureHandler(ABC):
             ),
         )
         commit = CaptureLedgerCommit(
-            rollout_id=context.rollout_id,
+            capture_key=context.rollout_id,
             record=record,
             # Framework capture reconstructs ancestry from CallRecord parents.
             # Only ordinary capture uses this separately persisted lookup chain.
@@ -371,7 +371,7 @@ class _BaseExternalCaptureHandler(ABC):
             return
         await ledger.record(commit)
         mark_external_staging_committed(
-            rollout_id=coords.rollout_id,
+            rollout_id=coords.capture_key,
             model_call_id=coords.model_call_id,
         )
 

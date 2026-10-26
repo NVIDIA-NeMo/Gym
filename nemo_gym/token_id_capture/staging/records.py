@@ -83,11 +83,11 @@ class OutputValidationItem(TypedDict, total=False):
 _BUILD_STAGING_DIGEST = object()
 
 
-def staging_key(rollout_id: str, model_call_id: str) -> str:
+def staging_key(capture_key: str, model_call_id: str) -> str:
     """Return the default deterministic key used by the NeMo RL backend."""
-    if not rollout_id or not model_call_id:
-        raise ValueError("rollout_id and model_call_id must be non-empty")
-    return f"{rollout_id}/{model_call_id}"
+    if not capture_key or not model_call_id:
+        raise ValueError("capture_key and model_call_id must be non-empty")
+    return f"{capture_key}/{model_call_id}"
 
 
 # --- reason-code vocabulary ------------------------------------------------
@@ -201,7 +201,7 @@ class CaptureAdmission(_WireModel):
     It passes that list to ``CaptureAdapter.enter_prefix`` and to ``RolloutTokenCapture.begin_call``.
     """
 
-    rollout_id: Identifier
+    capture_key: Identifier
     model_call_id: Identifier
     parent_call_id: Identifier | None = None
     prev_len: NonNegativeInt = 0
@@ -256,7 +256,7 @@ class StagedCallBaseSnapshot(_DigestWireModel):
     A consumer that loads extras must verify them separately with ``compute_extras_digest``.
     """
 
-    rollout_id: Identifier
+    capture_key: Identifier
     model_call_id: Identifier
     parent_call_id: Identifier | None = None
     mode: CaptureMode
@@ -274,7 +274,7 @@ class StagedCallBaseSnapshot(_DigestWireModel):
 
     @property
     def staging_key(self) -> str:
-        return staging_key(self.rollout_id, self.model_call_id)
+        return staging_key(self.capture_key, self.model_call_id)
 
     @model_validator(mode="after")
     def _validate_base_integrity(self, info: ValidationInfo) -> Self:
@@ -301,7 +301,7 @@ class StagedCallBaseSnapshot(_DigestWireModel):
             schema_version=self.schema_version,
             digest_version=self.digest_version,
             extras_digest_version=self.extras_digest_version,
-            rollout_id=self.rollout_id,
+            capture_key=self.capture_key,
             model_call_id=self.model_call_id,
             parent_call_id=self.parent_call_id,
             mode=self.mode,
@@ -333,7 +333,7 @@ class StagedCallRecord(StagedCallBaseSnapshot):
     def from_components(
         cls,
         *,
-        rollout_id: str,
+        capture_key: str,
         model_call_id: str,
         parent_call_id: str | None,
         mode: CaptureMode,
@@ -368,7 +368,7 @@ class StagedCallRecord(StagedCallBaseSnapshot):
                 raise ValueError(f"{name} values must be Python floats")
         return cls.model_validate(
             {
-                "rollout_id": rollout_id,
+                "capture_key": capture_key,
                 "model_call_id": model_call_id,
                 "parent_call_id": parent_call_id,
                 "mode": mode,
@@ -420,7 +420,7 @@ class StageResult(_WireModel):
 class CommitCoords(_DigestWireModel):
     """Metadata returned after an inference worker stages one call."""
 
-    rollout_id: Identifier
+    capture_key: Identifier
     model_call_id: Identifier
     parent_call_id: Identifier | None = None
     prev_len: NonNegativeInt
@@ -502,15 +502,15 @@ class CallRecord(_DigestWireModel):
     # The capture key this call was staged under, when it is not the receipt's own.
     # A checkpoint restore continues an episode under its next attempt,
     # and the calls made before the checkpoint stay staged under the earlier attempt's key.
-    # ``None`` means the receipt's own rollout staged the call.
-    capture_key: Identifier | None = None
+    # ``None`` means the receipt's own capture attempt staged the call.
+    source_capture_key: Identifier | None = None
     # Why the served response stopped, in the Chat Completions vocabulary (``stop``, ``length``,
     # ``tool_calls``, ``content_filter``), read from the served payload when the row is committed;
     # ``None`` when the payload stated none or the row predates the column. The rebuild reports the
     # terminal row's value so a framework can mark a ``length`` or ``content_filter`` ending incomplete.
     # Like every column of this wire model, it binds the model server and the framework to one Gym
     # version: the manifest route serializes it on every row, and a framework whose Gym predates the
-    # column rejects each row (``extra="forbid"``) as ``invalid_manifest_row``, as with ``capture_key``.
+    # column rejects each row (``extra="forbid"``) as ``invalid_manifest_row``, as with ``source_capture_key``.
     finish_reason: StrictStr | None = None
 
     @model_validator(mode="after")
@@ -535,7 +535,7 @@ class CaptureLedgerCommit(_WireModel):
     and are not part of the manifest.
     """
 
-    rollout_id: Identifier
+    capture_key: Identifier
     record: CallRecord
     staging_chain: tuple[Identifier, ...] = ()
     request_items: list[dict]
@@ -552,7 +552,7 @@ class ManifestFailure(_WireModel):
 class RolloutManifest(_WireModel):
     """The token-free ledger read returned by the manifest control route."""
 
-    rollout_id: Identifier
+    capture_key: Identifier
     records: list[CallRecord] = Field(default_factory=list)
     failures: list[ManifestFailure] = Field(default_factory=list)
     attempted_call_ids: list[Identifier] = Field(default_factory=list)
@@ -574,7 +574,7 @@ class RolloutRemoval(_WireModel):
 class RolloutReceipt(_DigestWireModel):
     """Token-free immutable manifest the framework assembles at rollout end."""
 
-    rollout_id: Identifier
+    capture_key: Identifier
     reward: float | None = None
     terminal_model_call_id: Identifier | None = None
     manifest: list[CallRecord] = Field(default_factory=list)
