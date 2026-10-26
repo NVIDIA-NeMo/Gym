@@ -380,6 +380,9 @@ class RolloutRecords:
             for record, payload in _indexed_records(
                 path, end_offset=outcome_limits[path] if outcome_limits is not None else None
             ):
+                if payload.get("_ng_omitted_rollout") and payload.get("_ng_dispatch_drained"):
+                    # record_omitted_rollouts evidence for a row the dispatch budget never started: no execution.
+                    continue
                 if import_legacy and RUN_ID_KEY not in payload:
                     identity = logical_rollout_id(payload)
                     payload = dict(payload)

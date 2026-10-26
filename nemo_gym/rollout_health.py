@@ -509,8 +509,15 @@ def _rollout_accounting(
     work and intentional omissions have their own categories. Final failures include
     exhausted budgets as well as terminal outcomes. A stopped collector supplies its
     in-memory coverage so this path never reloads large rollout records on SIGTERM.
+    In a legacy sidecar, a ``record_omitted_rollouts`` row records no result: an interrupted attempt is the
+    rollout's latest execution and leaves it missing, and a row never started is skipped.
     """
-    from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, is_terminal_failure
+    from nemo_gym.rollout_collection import (
+        NG_FAILURE_CLASS_KEY,
+        is_omitted_rollout_row,
+        is_terminal_failure,
+        is_unstarted_rollout_row,
+    )
 
     expected = missing = not_started = omitted = final = not_final = 0
     by_class: Counter[str] = Counter()
@@ -536,7 +543,10 @@ def _rollout_accounting(
         if failures_path_for(path).is_file():
             any_sidecar = True
             for row in _jsonl_rows(failures_path_for(path)):
+                if is_unstarted_rollout_row(row):
+                    continue
                 failed[(row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))] = row
+        failed = {key: row for key, row in failed.items() if not is_omitted_rollout_row(row)}
         landed_here = {key[1:] for key in landed if key[0] == source_index}
         for key in landed_here:
             failed.pop(key, None)

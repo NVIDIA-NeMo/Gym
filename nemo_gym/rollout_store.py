@@ -399,6 +399,18 @@ class RolloutStore:
             }
         )
 
+    def record_unstarted(self, row: dict) -> None:
+        """Save ``record_omitted_rollouts`` evidence for a row the dispatch budget never started.
+
+        It is not an outcome: the history skips it on load, and resume still runs the rollout.
+        """
+        self._require_open()
+        raw = orjson.dumps(row) + b"\n"
+        write_started = perf_counter()
+        self._failures_file.write(raw)
+        self._failures_file.flush()
+        _record_output_write(write_started, raw)
+
     def pending(
         self,
         max_attempts: int | None = None,

@@ -117,6 +117,8 @@ plus, for **every numeric field** (`reward`, token usage, and any numeric field 
 A task that fails in *every* repeat never appears in any repeat, so `missing_count` stays `0` for it.
 The recovery collector saves reported failures, including `kill_shaped` failures (such as an interrupted worker),
 in `<output>_failures.jsonl`. A process death before an outcome is saved remains unknown in run coverage.
+A row the dispatch budget never started leaves no row; with `+record_omitted_rollouts=true` it leaves a sidecar row
+marked `_ng_omitted_rollout: true`, which records that it never ran and is not counted as a failure.
 
 To check real coverage, use the numbers that *are* measured against the materialized inputs: `expected_num_rollouts` and `missing_num_rollouts` in `group_level_metrics`, and the completion summary `gym eval profile` prints at the end of a run.
 </Warning>

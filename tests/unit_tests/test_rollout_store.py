@@ -349,6 +349,36 @@ def test_legacy_conflicting_attempts_and_failure_in_main_remain_readable(prepare
     assert snapshot(output) == before
 
 
+def test_legacy_omitted_rollout_rows_keep_the_latest_execution(prepared_run):
+    """Rows record_omitted_rollouts wrote before the run had a manifest.
+
+    Task 0 failed in the judge and its retry was interrupted: the interruption is the latest execution and spends
+    no retry. Task 1 failed in the judge and its retry was never started: that row is skipped, so the failure stands.
+    """
+    output, prepare = prepared_run
+    rows, _ = prepare()
+    materialized_path_for(output).write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    output.write_bytes(b"")
+    omitted = {"_ng_no_persist": True, "_ng_omitted_rollout": True}
+    sidecar = [
+        rows[0] | {"_ng_failure_class": "judge_failed"},
+        rows[0] | omitted | {"_ng_failure_class": "kill_shaped"},
+        rows[1] | {"_ng_failure_class": "judge_failed"},
+        rows[1] | omitted | {"_ng_failure_class": "cancelled", "_ng_dispatch_drained": True},
+    ]
+    failures_path_for(output).write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in sidecar))
+
+    store = RolloutStore.read(output)
+
+    assert [(row["_ng_task_index"], row["_ng_failure_class"]) for row in store.failures()] == [
+        (0, "kill_shaped"),
+        (1, "judge_failed"),
+    ]
+    assert [store.attempt_count(row) for row in rows] == [1, 1]
+    coverage = store.coverage()
+    assert (coverage["attempts"], coverage["counted_failures"]) == (3, 2)
+
+
 def test_atomic_metadata_preserves_sharing_permissions(tmp_path):
     ordinary = tmp_path / "ordinary.json"
     ordinary.write_text("{}")
