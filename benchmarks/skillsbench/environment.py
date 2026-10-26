@@ -31,6 +31,13 @@ class SkillsBenchSandboxEnvironment(NemoGymSandboxEnvironment):
 
     async def start(self, force_build: bool) -> None:
         await super().start(force_build)
+        try:
+            await self._stage_skills()
+        except BaseException:
+            await self.stop(delete=True)
+            raise
+
+    async def _stage_skills(self) -> None:
         if self._skill_mode == "no-skill":
             # Published task images are shared by both conditions. Some task
             # Dockerfiles bake skills into agent paths, so remove those copies.
@@ -43,26 +50,20 @@ class SkillsBenchSandboxEnvironment(NemoGymSandboxEnvironment):
                 timeout_sec=300,
             )
             if result.return_code != 0:
-                await self.stop(delete=True)
                 raise RuntimeError(f"Failed to remove preinstalled skills: {result.stderr or result.stdout}")
             return
 
         skills_dir = self.environment_dir / "skills"
         if not skills_dir.is_dir():
-            await self.stop(delete=True)
             raise FileNotFoundError(f"SkillsBench skills directory is missing: {skills_dir}")
 
-        try:
-            await self.upload_dir(skills_dir, "/root/.agents/skills")
-            result = await self.exec(
-                "for location in /root/.codex/skills /root/.claude/skills "
-                "/root/.gemini/skills /root/.opencode/skills; do "
-                'mkdir -p "$location" && cp -a /root/.agents/skills/. "$location/" || exit; '
-                "done",
-                timeout_sec=300,
-            )
-            if result.return_code != 0:
-                raise RuntimeError(f"Failed to install SkillsBench skills: {result.stderr or result.stdout}")
-        except Exception:
-            await self.stop(delete=True)
-            raise
+        await self.upload_dir(skills_dir, "/root/.agents/skills")
+        result = await self.exec(
+            "for location in /root/.codex/skills /root/.claude/skills "
+            "/root/.gemini/skills /root/.opencode/skills; do "
+            'mkdir -p "$location" && cp -a /root/.agents/skills/. "$location/" || exit; '
+            "done",
+            timeout_sec=300,
+        )
+        if result.return_code != 0:
+            raise RuntimeError(f"Failed to install SkillsBench skills: {result.stderr or result.stdout}")

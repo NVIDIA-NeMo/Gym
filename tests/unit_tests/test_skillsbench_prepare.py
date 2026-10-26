@@ -30,7 +30,8 @@ sandbox: {network_mode: no-network, build_timeout_sec: 60, os: linux, cpus: 1, m
 Solve the task without changing this prompt.
 """
     )
-    (source / "environment" / "Dockerfile").write_text("FROM ubuntu:24.04\n")
+    dockerfile = "FROM ubuntu:24.04\nCOPY skills/ /root/.agents/skills/\nRUN echo keep-task-dependencies\n"
+    (source / "environment" / "Dockerfile").write_text(dockerfile)
     (source / "environment" / "skills" / "example" / "SKILL.md").write_text("# Example\n")
     (source / "verifier" / "test.sh").write_text("python /verifier/test_outputs.py\n")
     (source / "verifier" / "test_outputs.py").write_text("print('ok')\n")
@@ -53,7 +54,8 @@ Solve the task without changing this prompt.
 
     no_skill = tmp_path / "no-skill"
     _adapt_task(source, no_skill, "no-skill")
-    assert "COPY skills/" not in (no_skill / "environment" / "Dockerfile").read_text()
+    # Preserve task setup; no-skill removes baked-in skills at agent setup.
+    assert (no_skill / "environment" / "Dockerfile").read_text() == dockerfile
 
     # The image-pinned official revision stores the same resource settings
     # under `environment`, while newer task packages use `sandbox`.

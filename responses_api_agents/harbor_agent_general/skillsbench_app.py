@@ -5,11 +5,13 @@
 import json
 from pathlib import Path
 
+from harbor.models.job.config import JobConfig
+
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import get_first_server_config_dict
-from responses_api_agents.harbor_agent_general.app import HarborAgent, HarborAgentConfig
+from responses_api_agents.harbor_agent_general.app import HarborAgent, HarborAgentConfig, HarborRunRequest
 
 
 class SkillsBenchHarborAgentConfig(HarborAgentConfig):
@@ -39,6 +41,13 @@ class SkillsBenchHarborAgent(HarborAgent):
         capture_dir = global_config.get("model_call_capture_dir")
         if capture_dir and Path(capture_dir).is_absolute():
             self.config.job.jobs_dir = Path(capture_dir).parent / "harbor-jobs"
+
+    def _configure_job_for_run(self, job_config: JobConfig, body: HarborRunRequest) -> None:
+        root = self.config.job.agents[0].kwargs["api_base"].removesuffix("/v1")
+        identity = body.model_dump(by_alias=True)
+        # This internal field is deliberately excluded from request serialization.
+        identity["_ng_rollout_id"] = body.capture_rollout_id
+        job_config.agents[0].kwargs["api_base"] = self.base_url_for_run(root, identity) + "/v1"
 
 
 if __name__ == "__main__":

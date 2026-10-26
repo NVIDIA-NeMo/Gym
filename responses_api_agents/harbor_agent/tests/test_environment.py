@@ -155,6 +155,37 @@ class TestValidation:
         assert env.can_disable_internet is True
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type,exception", [("timeout", TimeoutError), ("transport", RuntimeError)])
+async def test_exec_runtime_failure_is_not_a_process_exit(tmp_path, error_type, exception):
+    env = _make_environment(tmp_path)
+    await env.start(force_build=False)
+    try:
+        _provider().queue_exec_result(
+            SandboxExecResult(return_code=125, error_type=error_type, stdout=None, stderr="deadline")
+        )
+        with pytest.raises(exception, match="deadline"):
+            await env.exec("sleep 2; touch /tmp/answer", timeout_sec=1)
+    finally:
+        await env.stop(delete=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("return_code", [124, 125])
+async def test_exec_preserves_actual_process_exit_codes(tmp_path, return_code):
+    env = _make_environment(tmp_path)
+    await env.start(force_build=False)
+    try:
+        _provider().queue_exec_result(
+            SandboxExecResult(return_code=return_code, error_type=None, stdout=None, stderr=None)
+        )
+        result = await env.exec(f"exit {return_code}")
+        assert result.return_code == return_code
+        assert _provider().closed_handles == []
+    finally:
+        await env.stop(delete=True)
+
+
 class TestStartStop:
     @pytest.mark.asyncio
     async def test_start_builds_spec_and_creates_log_dirs(self, tmp_path):

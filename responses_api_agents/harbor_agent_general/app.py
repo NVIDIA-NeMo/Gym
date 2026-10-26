@@ -53,6 +53,11 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
+from nemo_gym.server_utils import (
+    GlobalAIOHTTPAsyncClientConfig,
+    is_global_aiohttp_client_setup,
+    set_global_aiohttp_client,
+)
 from nemo_gym.telemetry.setup import init_telemetry
 
 
@@ -62,6 +67,20 @@ NUM_SAMPLES_IN_PARALLEL_KEY_NAME = "num_samples_in_parallel"
 GYM_ROOT = Path(__file__).resolve().parents[2]
 
 _RAY_WORKER_EVENT_LOOP: asyncio.AbstractEventLoop | None = None
+_RAY_WORKER_HTTP_CONFIG: GlobalAIOHTTPAsyncClientConfig | None = None
+
+
+async def _run_worker_job(job_config_dict: dict, task_name: str, http_config: dict) -> str:
+    global _RAY_WORKER_HTTP_CONFIG
+    cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(http_config)
+    if not is_global_aiohttp_client_setup():
+        # Construct the shared client on the persistent, running worker loop.
+        # Never fall back to parsing the driver's Hydra CLI inside a Ray worker.
+        set_global_aiohttp_client(cfg)
+        _RAY_WORKER_HTTP_CONFIG = cfg
+    elif _RAY_WORKER_HTTP_CONFIG != cfg:
+        raise RuntimeError("Harbor worker HTTP settings changed; use a fresh worker")
+    return await HarborAgent.run_job(job_config_dict, task_name)
 
 
 def resolve_harbor_path(path: Path, *, from_gym_root: bool) -> Path:
@@ -84,7 +103,7 @@ def temporary_worker_env(values: dict[str, str]) -> Iterator[None]:
 
 
 @ray.remote(scheduling_strategy="SPREAD", runtime_env={"py_executable": sys.executable})
-def harbor_job_worker(job_config_dict: dict, task_name: str, worker_env: dict[str, str]) -> str:
+def harbor_job_worker(job_config_dict: dict, task_name: str, worker_env: dict[str, str], http_config: dict) -> str:
     global _RAY_WORKER_EVENT_LOOP
     logging.disable(logging.DEBUG)
     with temporary_worker_env(worker_env):
@@ -95,7 +114,7 @@ def harbor_job_worker(job_config_dict: dict, task_name: str, worker_env: dict[st
             _RAY_WORKER_EVENT_LOOP = asyncio.new_event_loop()
             asyncio.set_event_loop(_RAY_WORKER_EVENT_LOOP)
         try:
-            return _RAY_WORKER_EVENT_LOOP.run_until_complete(HarborAgent.run_job(job_config_dict, task_name))
+            return _RAY_WORKER_EVENT_LOOP.run_until_complete(_run_worker_job(job_config_dict, task_name, http_config))
         finally:
             if handle is not None:
                 # The supervisor can stop Ray as soon as the final task returns.
@@ -220,9 +239,15 @@ class HarborAgent(SimpleResponsesAPIAgent):
     config: HarborAgentConfig
 
     _sem: asyncio.Semaphore = PrivateAttr()
+    _worker_http_config: GlobalAIOHTTPAsyncClientConfig = PrivateAttr()
 
     def model_post_init(self, context) -> None:
-        self._sem = asyncio.Semaphore(get_global_config_dict().get(NUM_SAMPLES_IN_PARALLEL_KEY_NAME) or 1)
+        global_config = get_global_config_dict()
+        self._sem = asyncio.Semaphore(global_config.get(NUM_SAMPLES_IN_PARALLEL_KEY_NAME) or 1)
+        self._worker_http_config = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config)
+
+    def _configure_job_for_run(self, job_config: JobConfig, body: HarborRunRequest) -> None:
+        """Customize a request's copied job without modifying the shared template."""
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         ## Harbor owns the full run() lifecycle.
@@ -256,6 +281,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     ## Stable names allow resume unless fresh jobs are configured.
                     job_name=f"t{body.task_index}-r{body.rollout_index}",
                 )
+                self._configure_job_for_run(job_config, body)
 
                 worker_env = {
                     key: value
@@ -267,6 +293,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     job_config.model_dump(mode="json"),
                     body.task_name,
                     worker_env,
+                    self._worker_http_config.model_dump(mode="json"),
                 )
                 try:
                     trial_dir = Path(await job_ref)

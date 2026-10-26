@@ -1,15 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 from omegaconf import OmegaConf
 
+from nemo_gym.base_responses_api_model import CaptureStore, ModelCallCaptureConfig, install_model_call_capture
 from nemo_gym.server_utils import entrypoint_ray_enabled
-from responses_api_agents.harbor_agent_general import skillsbench_app
+from responses_api_agents.harbor_agent_general import app, skillsbench_app
 from responses_api_agents.harbor_agent_general.app import HarborRunRequest, temporary_worker_env
 from responses_api_agents.harbor_agent_general.skillsbench_app import (
     SkillsBenchHarborAgent,
@@ -90,3 +93,85 @@ def test_flat_context_limit_override_reaches_native_agent_list():
     config = _config(opensandbox=True, max_input_tokens=65536)
     job = config.build_job_config("example-task", "t0-r0")
     assert job.agents[0].kwargs["model_info"]["max_input_tokens"] == 65536
+
+
+def test_opensandbox_profile_inherits_shared_aiohttp_transport(monkeypatch):
+    monkeypatch.setenv("OPENSANDBOX_API_KEY", "synthetic-key")
+    merged = OmegaConf.merge(
+        OmegaConf.load(ROOT / "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml"),
+        OmegaConf.load(ROOT / "benchmarks/skillsbench/harbor.yaml"),
+        OmegaConf.load(ROOT / "benchmarks/skillsbench/harbor_opensandbox.yaml"),
+    )
+    assert merged.sandbox.opensandbox.connection.transport_backend == "aiohttp"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_concurrent_dispatch_uses_per_row_model_capture_urls(tmp_path, monkeypatch, enabled):
+    from urllib.parse import urlsplit
+
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    global_config = {
+        "num_samples_in_parallel": 4,
+        "observability_enabled": enabled,
+        "global_aiohttp_connector_limit_per_host": 17,
+        "policy_model": {"responses_api_models": {"vllm_model": {"host": "127.0.0.2", "port": 9010}}},
+    }
+    monkeypatch.setattr(skillsbench_app, "get_global_config_dict", lambda: global_config)
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: global_config)
+    agent = SkillsBenchHarborAgent.model_construct(
+        config=_config(False), server_client=SimpleNamespace(global_config_dict=global_config)
+    )
+    template = agent.config.job.model_dump(mode="json")
+    submitted = []
+
+    async def finish():
+        await asyncio.sleep(0)
+        return str(tmp_path)
+
+    def remote(job, name, env, http_config):
+        submitted.append(job)
+        assert http_config["global_aiohttp_connector_limit_per_host"] == 17
+        return asyncio.create_task(finish())
+
+    monkeypatch.setattr(
+        app, "harbor_job_worker", SimpleNamespace(options=Mock(return_value=SimpleNamespace(remote=remote)))
+    )
+    monkeypatch.setattr(SkillsBenchHarborAgent, "success_response", lambda self, body, trial_dir: body)
+    identities = [
+        {"_ng_task_index": 3, "_ng_rollout_index": 0},
+        {"_ng_task_index": 4, "_ng_rollout_index": 1},
+        {"_ng_task_index": 3, "_ng_rollout_index": 0, "_ng_attempt_index": 2},
+        {"_ng_task_index": 3, "_ng_rollout_index": 0, "_ng_rollout_id": "explicit"},
+    ]
+    bodies = [
+        HarborRunRequest.model_validate({"task_name": "example", "responses_create_params": {"input": []}, **identity})
+        for identity in identities
+    ]
+    assert await asyncio.gather(*(agent.run(body) for body in bodies)) == bodies
+    assert len(submitted) == 4
+    assert len({job["job_name"] for job in submitted}) == 4
+    assert agent.config.job.model_dump(mode="json") == template
+
+    model_app = FastAPI()
+
+    @model_app.post("/v1/chat/completions")
+    async def completions():
+        return {"id": "completion", "choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+    install_model_call_capture(
+        model_app,
+        ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=tmp_path),
+        model_server_name="policy_model",
+    )
+    with TestClient(model_app) as client:
+        for job, capture_key in zip(submitted, ["3-0", "4-1", "3-0-a2", "explicit"], strict=True):
+            url = job["agents"][0]["kwargs"]["api_base"]
+            suffix = f"/ng-rollout/{capture_key}/v1" if enabled else "/v1"
+            assert url == "http://127.0.0.2:9010" + suffix
+            response = client.post(urlsplit(url).path + "/chat/completions", json={"messages": []})
+            assert response.status_code == 200
+            records = CaptureStore(tmp_path).read(capture_key)
+            assert len(records) == (1 if enabled else 0)

@@ -311,6 +311,14 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
             timeout_s=timeout_s,
             user=user if user is not None else getattr(self, "default_user", None),
         )
+        # Runtime failures do not prove that the remote process exited. Harbor
+        # ExecResult cannot represent that distinction, so preserve it by raising.
+        if result.error_type == "timeout":
+            raise TimeoutError(result.stderr or "Sandbox command timed out")
+        if result.error_type is not None:
+            raise RuntimeError(
+                f"Sandbox exec failed ({result.error_type}): {result.stderr or result.stdout or '<no output>'}"
+            )
         return ExecResult(
             stdout=result.stdout,
             stderr=result.stderr,

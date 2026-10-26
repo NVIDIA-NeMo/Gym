@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -36,6 +37,7 @@ class TestSkillsBenchSkillModes:
         await env.start(force_build=False)
         assert any(path.endswith(".tar.gz") for path in _provider().uploads)
         assert "cp -a /root/.agents/skills/." in _provider().exec_calls[-1]["command"]
+        assert _provider().closed_handles == []
         await env.stop(delete=True)
 
     @pytest.mark.asyncio
@@ -46,6 +48,32 @@ class TestSkillsBenchSkillModes:
         env.upload_dir = AsyncMock(side_effect=RuntimeError("upload failed"))
         with pytest.raises(RuntimeError, match="upload failed"):
             await env.start(force_build=False)
+        assert _provider().closed_handles == ["sbx-123"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("skill_mode,operation", [("no-skill", "exec"), ("with-skill", "upload_dir")])
+    @pytest.mark.parametrize("exception", [RuntimeError, asyncio.CancelledError])
+    async def test_setup_failure_and_cancellation_close_sandbox(self, tmp_path, skill_mode, operation, exception):
+        (tmp_path / "task" / "environment" / "skills").mkdir(parents=True)
+        env = _make_environment(tmp_path, environment_class=SkillsBenchSandboxEnvironment, skill_mode=skill_mode)
+        setattr(env, operation, AsyncMock(side_effect=exception("setup interrupted")))
+        with pytest.raises(exception, match="setup interrupted"):
+            await env.start(force_build=False)
+        assert _provider().closed_handles == ["sbx-123"]
+        assert env._sandbox is None
+
+    @pytest.mark.asyncio
+    async def test_setup_cleanup_failure_retains_sandbox_for_retry(self, tmp_path, monkeypatch):
+        from responses_api_agents.harbor_agent.tests.test_environment import FakeProvider
+
+        env = _make_environment(tmp_path, environment_class=SkillsBenchSandboxEnvironment, skill_mode="no-skill")
+        env.exec = AsyncMock(side_effect=RuntimeError("setup failed"))
+        with monkeypatch.context() as patcher:
+            patcher.setattr(FakeProvider, "close", AsyncMock(side_effect=RuntimeError("stop failed")))
+            with pytest.raises(RuntimeError, match="stop failed"):
+                await env.start(force_build=False)
+        assert env._sandbox is not None
+        await env.stop(delete=True)
         assert _provider().closed_handles == ["sbx-123"]
 
 

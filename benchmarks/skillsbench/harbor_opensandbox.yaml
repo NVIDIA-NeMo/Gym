@@ -5,10 +5,6 @@ config_paths:
 - benchmarks/skillsbench/harbor.yaml
 - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 uv_cache_dir: /tmp/skillsbench-uv-${oc.env:SLURM_JOB_ID,local}
-sandbox:
-  opensandbox:
-    connection:
-      transport_backend: httpx
 skillsbench_harbor_agent:
   responses_api_agents:
     harbor_agent_general:

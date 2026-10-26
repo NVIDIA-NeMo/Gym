@@ -239,9 +239,20 @@ class SkillsBenchOpenHands(BaseAgent):
         return __version__
 
     async def setup(self, environment: BaseEnvironment) -> None:
-        # OpenHands runs on the driver. The SkillsBench environment has already
-        # installed the task skills in the OpenSandbox image where tools execute.
-        return None
+        # Docker tasks can bake skills into their images too. Enforce the
+        # condition at the agent boundary, independent of the Harbor provider.
+        if self.skill_mode != "no-skill":
+            return
+        result = await environment.exec(
+            "rm -rf /root/.agents/skills /root/.codex/skills "
+            "/root/.claude/skills /root/.gemini/skills "
+            "/root/.opencode/skills /root/.opencode/skill "
+            "/root/.goose/skills /root/.factory/skills "
+            "/root/.openhands/skills",
+            timeout_sec=300,
+        )
+        if result.return_code != 0:
+            raise RuntimeError(f"Failed to remove preinstalled skills: {result.stderr or result.stdout}")
 
     @staticmethod
     async def _terminate_active_commands(environment: BaseEnvironment, control: _RunControl) -> None:

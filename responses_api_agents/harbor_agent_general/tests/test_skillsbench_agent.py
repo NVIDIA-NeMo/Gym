@@ -19,6 +19,71 @@ from benchmarks.skillsbench.openhands_agent import (
     SkillsBenchTerminalTool,
     _RunControl,
 )
+from nemo_gym.sandbox import SandboxExecResult
+from responses_api_agents.harbor_agent.tests.test_environment import _make_environment, _provider
+from responses_api_agents.harbor_agent.tests.test_environment import _reset_fake_provider as _reset_fake_provider
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", ["timeout", "transport"])
+async def test_provider_runtime_failure_deletes_sandbox_before_executor_returns(tmp_path, error_type):
+    environment = _make_environment(tmp_path)
+    await environment.start(force_build=False)
+    _provider().queue_exec_result(
+        SandboxExecResult(return_code=125, error_type=error_type, stdout=None, stderr="deadline")
+    )
+    executor = OpenSandboxTerminalExecutor(environment, asyncio.get_running_loop(), "/tmp", _RunControl())
+    action = TerminalAction(command="sleep 2; touch /tmp/answer", timeout=1)
+    if error_type == "timeout":
+        with pytest.raises(RuntimeError, match="without confirmed termination"):
+            await asyncio.to_thread(executor, action)
+    else:
+        observation = await asyncio.to_thread(executor, action)
+        assert observation.is_error
+    assert _provider().closed_handles == ["sbx-123"]
+    assert not executor.control.active_commands
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("return_code", [124, 125])
+async def test_terminal_process_exit_does_not_delete_sandbox(tmp_path, return_code):
+    environment = _make_environment(tmp_path)
+    await environment.start(force_build=False)
+    try:
+        _provider().queue_exec_result(
+            SandboxExecResult(return_code=return_code, error_type=None, stdout=None, stderr=None)
+        )
+        executor = OpenSandboxTerminalExecutor(environment, asyncio.get_running_loop(), "/tmp", _RunControl())
+        observation = await asyncio.to_thread(executor, TerminalAction(command=f"exit {return_code}"))
+        assert observation.exit_code == return_code
+        assert observation.is_error
+        assert _provider().closed_handles == []
+    finally:
+        await environment.stop(delete=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("skill_mode", ["with-skill", "no-skill"])
+async def test_setup_enforces_skill_condition_for_any_provider(skill_mode):
+    environment = SimpleNamespace(exec=AsyncMock(return_value=SimpleNamespace(return_code=0)))
+    await SkillsBenchOpenHands.setup(SimpleNamespace(skill_mode=skill_mode), environment)
+    if skill_mode == "with-skill":
+        environment.exec.assert_not_awaited()
+    else:
+        environment.exec.assert_awaited_once()
+        command = environment.exec.call_args.args[0]
+        assert command.startswith("rm -rf ")
+        assert set(command.split()[2:]) == {
+            f"/root/.{agent}/skills"
+            for agent in ("agents", "codex", "claude", "gemini", "opencode", "goose", "factory", "openhands")
+        } | {"/root/.opencode/skill"}
+
+
+@pytest.mark.asyncio
+async def test_no_skill_setup_rejects_failed_removal():
+    environment = SimpleNamespace(exec=AsyncMock(return_value=SimpleNamespace(return_code=1, stderr="denied")))
+    with pytest.raises(RuntimeError, match="denied"):
+        await SkillsBenchOpenHands.setup(SimpleNamespace(skill_mode="no-skill"), environment)
 
 
 @pytest.mark.asyncio
