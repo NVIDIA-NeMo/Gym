@@ -175,18 +175,44 @@ def _probe_converts(libreoffice_command: Sequence[str], root: Path | None) -> bo
             (err or "").strip()[-300:],
         )
         return False
-    left = [str(directory) for directory in (probe_dir, profile_dir) if directory.exists()]
+    left = [directory for directory in (probe_dir, profile_dir) if directory.exists()]
     if left:
-        LOGGER.warning(
-            "libreoffice_command %s left files that the server cannot delete in %s; "
-            "with rootful Docker, add --user %d:%d",
-            libreoffice_command,
-            ", ".join(left),
-            os.getuid(),
-            os.getgid(),
-        )
+        owner = _foreign_owner(left)
+        if owner is None:
+            # Not an ownership problem: e.g. a container still running after a timeout, or NFS `.nfs*` files.
+            LOGGER.warning(
+                "LibreOffice command %s left files that the server cannot delete in %s",
+                libreoffice_command,
+                ", ".join(map(str, left)),
+            )
+        else:
+            LOGGER.warning(
+                "LibreOffice command %s left files owned by uid %d, which the server (uid %d) cannot delete, in %s; "
+                "run it as the server's user, e.g. with Docker's --user %d:%d",
+                libreoffice_command,
+                owner,
+                os.getuid(),
+                ", ".join(map(str, left)),
+                os.getuid(),
+                os.getgid(),
+            )
         return False
     return True
+
+
+def _foreign_owner(directories: Sequence[Path]) -> int | None:
+    """Return the uid of a file under *directories* that the server's user does not own, or None."""
+    uid = os.getuid()
+    for directory in directories:
+        for dirpath, dirnames, filenames in os.walk(directory):
+            for name in (*dirnames, *filenames):
+                try:
+                    owner = os.lstat(os.path.join(dirpath, name)).st_uid
+                except OSError:
+                    continue
+                if owner != uid:
+                    return owner
+    return None
 
 
 def _command_works(libreoffice_command: Sequence[str], probe_dirs: Sequence[Path] = ()) -> bool:

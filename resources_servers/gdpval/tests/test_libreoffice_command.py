@@ -251,17 +251,27 @@ def test_ensure_rejects_missing_command(tmp_path):
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can delete files in a read-only directory")
+@pytest.mark.parametrize("owned_by_another_user", [True, False])
 def test_ensure_rejects_command_that_leaves_files_the_server_cannot_delete(
-    tmp_path, template_pdf, monkeypatch, caplog
+    tmp_path, template_pdf, monkeypatch, caplog, owned_by_another_user
 ):
     scratch = tmp_path / "tmp"
     scratch.mkdir()
     # The probe's LibreOffice profile goes to the temp directory; keep the locked one out of the real one.
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
     script, _ = _converter(tmp_path / "bin", template_pdf, locks_profile=True)
+    owner, server_uid = os.getuid(), os.getuid() + 1 if owned_by_another_user else os.getuid()
+    # The left files are the test user's; a different server uid makes them another user's, as root's are.
+    monkeypatch.setattr(setup_libreoffice.os, "getuid", lambda: server_uid)
 
     assert setup_libreoffice.ensure_libreoffice([str(script)]) is False
-    assert f"add --user {os.getuid()}:{os.getgid()}" in caplog.text
+    # --user only helps when the command runs as another user, so only that case suggests it.
+    if owned_by_another_user:
+        assert f"owned by uid {owner}, which the server (uid {server_uid}) cannot delete" in caplog.text
+        assert f"--user {server_uid}:{os.getgid()}" in caplog.text
+    else:
+        assert "left files that the server cannot delete in" in caplog.text
+        assert "--user" not in caplog.text
     for locked in scratch.glob("lo-profile-*/user"):
         locked.chmod(0o700)
 
