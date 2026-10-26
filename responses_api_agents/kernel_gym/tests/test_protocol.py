@@ -78,18 +78,63 @@ def test_setup_applies_task_timeouts_and_global_override(protocol_agent, global_
     assert (params.persistent_dir / "agent_runner.py").is_file()
 
 
-def test_explicit_model_endpoint_does_not_receive_gym_rollout_path(protocol_agent):
+@pytest.mark.parametrize("capture", [False, True])
+def test_model_relay_preserves_gym_rollout_and_capture_path(protocol_agent, monkeypatch, capture):
     agent, body = protocol_agent
-    agent.config.sandbox_model_base_url = "https://external.invalid"
+    agent.config.sandbox_model_base_url = "https://gym-relay.invalid"
     agent._model_server_url = agent.config.sandbox_model_base_url
+    monkeypatch.setattr(KernelGymAgent, "_token_id_capture_enabled", lambda self: capture)
     body.metadata["agent_timeout_sec"] = "70"
     body.metadata["verifier_timeout_sec"] = "50"
 
     params = agent._setup_params(body, "rollout-1")
 
-    assert params.model_server_url == "https://external.invalid"
+    suffix = "/training-token-capture" if capture else ""
+    assert params.model_server_url == f"https://gym-relay.invalid/ng-rollout/rollout-1{suffix}"
     assert params.kb_agent_timeout == 70
     assert params.kb_eval_timeout == 50
+
+
+@pytest.mark.parametrize(
+    "host,override,expected",
+    [
+        ("gym-model", None, "http://gym-model:6990"),
+        ("localhost", None, "http://192.0.2.10:6990"),
+        ("127.0.0.1", None, "http://192.0.2.10:6990"),
+        ("0.0.0.0", None, "http://192.0.2.10:6990"),
+        ("gym-model", "https://gym-relay.invalid/v1/", "https://gym-relay.invalid"),
+        ("gym-model", "http://localhost:9000/v1", "http://localhost:9000"),
+    ],
+)
+def test_model_url_uses_gym_server_or_relay(protocol_agent, monkeypatch, tmp_path, host, override, expected):
+    agent, _ = protocol_agent
+    model_config = {"host": host, "port": 6990, "base_url": ["http://backend.invalid:8000/v1"]}
+    agent.server_client.global_config_dict = {"policy_model": {"responses_api_models": {"model": model_config}}}
+    agent.server_client._build_server_base_url.return_value = f"http://{host}:6990"
+    agent.config = KernelGymConfig.model_validate(
+        agent.config.model_dump()
+        | {
+            "model_server": {"name": "policy_model", "type": "responses_api_models"},
+            "sandbox_provider": {"docker": {}},
+            "sandbox_model_base_url": override,
+            "results_dir": tmp_path / "results",
+        }
+    )
+    lookup = MagicMock(return_value="192.0.2.10")
+    monkeypatch.setattr("responses_api_agents.kernel_gym.app.socket.gethostbyname", lookup)
+    monkeypatch.setattr(SimpleResponsesAPIAgent, "model_post_init", lambda self, context: None)
+
+    agent.model_post_init(None)
+
+    assert agent._model_server_url == expected
+    if override:
+        agent.server_client._build_server_base_url.assert_not_called()
+    else:
+        agent.server_client._build_server_base_url.assert_called_once_with(model_config)
+    if override or host == "gym-model":
+        lookup.assert_not_called()
+    else:
+        lookup.assert_called_once()
 
 
 async def test_run_preserves_trajectory_and_request_and_redacts_configuration(protocol_agent, monkeypatch):
