@@ -86,7 +86,7 @@ def make_capture_harness(
     reasoning=False,
     model_config=None,
     decide_input=None,
-    framework_owned_context=True,
+    parent_resolution_mode="source_history",
     checkpoint=False,
 ):
     """Allow paired RL tests to inject their staging transport and prefix reader."""
@@ -97,7 +97,7 @@ def make_capture_harness(
         "token_id_capture": {
             "enabled": True,
             "external_staging": True,
-            "framework_owned_context": framework_owned_context,
+            "parent_resolution": parent_resolution_mode,
             "rebuild_response": False,
             "lineage_store": "nemo_gym.token_id_capture.lineage:FileLineageStore",
             "lineage_store_kwargs": {"root": str(tmp_path / "lineage")},
@@ -119,7 +119,7 @@ def make_capture_harness(
             name="policy",
             return_token_id_information=False,
             uses_reasoning_parser=reasoning,
-            checkpoint_policy=checkpoint,
+            checkpoint={"policy": checkpoint},
         ),
         server_client=MagicMock(spec=ServerClient, global_config_dict=config),
     )
@@ -661,7 +661,7 @@ def test_framework_rejects_unsupported_server_options_at_startup(monkeypatch, tm
         with pytest.raises(ValueError, match="truncation|prefill|continue_final_assistant_message"):
             make_capture_harness(monkeypatch, tmp_path, model_config=config)
     else:
-        make_capture_harness(monkeypatch, tmp_path, model_config=config, framework_owned_context=False)
+        make_capture_harness(monkeypatch, tmp_path, model_config=config, parent_resolution_mode="fingerprint")
 
 
 @pytest.mark.parametrize("dialect", ["responses", "chat/completions"])

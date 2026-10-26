@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
 from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox.transfer import TRANSFER_USER
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.harbor_oracle_agent import app as module
 from responses_api_agents.harbor_oracle_agent.app import OracleAgent, OracleAgentConfig
@@ -176,6 +177,17 @@ def test_oracle_reads_no_task_folder():
     assert not any(name in dir(module) for name in ("load_task", "HarborTask", "upload_dir", "Path"))
 
 
+def test_oracle_declares_task_tool_context_support(monkeypatch):
+    """`gym dataset validate` must not refuse tasks with MCP servers or skills: solve.sh reaches them by itself."""
+    agent, _, _ = make_agent(monkeypatch)
+    client = TestClient(agent.setup_webserver())
+
+    seed = client.post("/v1/agent_sessions", json=seed_body())
+    assert seed.status_code == 200, seed.text
+    # The harbor environment server reads this declaration and lets the task through to the oracle.
+    assert seed.json() == {"agent_session_id": "ag-1", "supports_task_tool_context": True}
+
+
 def test_task_without_solution_is_unvalidated_not_failed(monkeypatch):
     """The server uploaded nothing for a task without `solution/`, so the script is absent from the sandbox."""
     sandbox = FakeSandbox(solution=False)
@@ -323,6 +335,30 @@ def test_transient_disconnect_is_retried_by_base_session_lifecycle(monkeypatch):
     assert len(attempts) == 2 and sandbox.disconnected
 
 
+def test_unwritable_log_dir_is_an_oracle_failure_not_a_500(monkeypatch):
+    """An image whose user cannot make /logs/agent writable: scored as a failed oracle run, with the reason."""
+
+    class ReadOnlyLogs(FakeSandbox):
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None, **kwargs):
+            await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user, **kwargs)
+            if command.startswith("mkdir -p /logs/agent"):
+                return SandboxExecResult(stdout="", stderr="operation not permitted", return_code=1)
+            return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    sandbox = ReadOnlyLogs()
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+
+    response = client.post("/v1/responses", json=RESPONSES_BODY)
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["metadata"] == {"oracle": "failed", "oracle_error_type": "transfer"}
+    assert "operation not permitted" in payload["output"][0]["content"][0]["text"]
+    assert not any("bash /solution/solve.sh" in call["command"] for call in sandbox.execs)
+
+
 def test_provider_error_in_the_probe_is_not_scored(monkeypatch):
     """A lost sandbox answering the solve.sh probe propagates (a retryable failed episode), never `unvalidated`."""
 
@@ -338,3 +374,29 @@ def test_provider_error_in_the_probe_is_not_scored(monkeypatch):
     response = client.post("/v1/responses", json=RESPONSES_BODY)
     assert response.status_code == 500, response.text
     assert [call["command"] for call in sandbox.execs] == ["test -f /solution/solve.sh"]
+
+
+def test_provider_error_in_the_log_dir_setup_is_not_scored_either(monkeypatch):
+    """`exec_as_root` turns a provider `error_type` on the /logs/agent preparation into the same propagating
+    failure. The fake fails only that command, so the probe passes and the request is proven to reach this step."""
+
+    class Lost(FakeSandbox):
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None, **kwargs):
+            await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user, **kwargs)
+            if command.startswith("mkdir -p /logs/agent"):
+                return SandboxExecResult(stdout="", stderr="container gone", return_code=125, error_type="sandbox")
+            return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    sandbox = Lost()
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver(), raise_server_exceptions=False)
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+    response = client.post("/v1/responses", json=RESPONSES_BODY)
+    assert response.status_code == 500, response.text
+    # The probe found the solution, the log-directory preparation ran as root and was the step that failed, and
+    # nothing ran after it: no fallback to the default user (the failure is the provider's, not a refused root
+    # switch) and no solve.sh.
+    assert sandbox.execs[0]["command"] == "test -f /solution/solve.sh"
+    assert sandbox.execs[1]["command"].startswith(f"mkdir -p {module.SOLVE_LOG_DIR}")
+    assert sandbox.execs[1]["user"] == TRANSFER_USER
+    assert len(sandbox.execs) == 2

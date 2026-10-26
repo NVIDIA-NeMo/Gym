@@ -18,7 +18,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import inspect
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from threading import Lock
 from types import FrameType
 from typing import Any, Protocol
 from uuid import uuid4
@@ -47,6 +50,9 @@ from responses_api_agents.nooa_agent.resource_tools import (
     validate_agent_resource_method_bindings,
 )
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -140,17 +146,53 @@ class InProcessNOOARunner:
         server_client: GymModelClient,
         model_server_name: str,
         max_policy_calls: int | None,
+        on_progress: Callable[[NOOARunResult], None] | None = None,
     ) -> None:
         self._invocation = invocation
         self._server_client = server_client
         self._model_server_name = model_server_name
         self._max_policy_calls = max_policy_calls
+        self._on_progress = on_progress
         self._agent_class, self._invocation_adapter = validate_invocation(invocation)
         _validate_agent_llm_bindings(self._agent_class)
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
         state = RolloutLLMState(max_policy_calls=self._max_policy_calls)
-        trace = GymTraceHooks()
+        progress_lock = Lock()
+
+        def checkpoint() -> None:
+            if self._on_progress is None:
+                return
+            # NOOA's synchronous callbacks do not yield to sibling async calls.
+            # Keep projection and persistence in one critical section as well,
+            # so concurrent callbacks cannot publish older snapshots last. Publish
+            # before execution resumes: a queued write could lose this boundary
+            # if the worker is killed immediately after the callback returns.
+            with progress_lock:
+                try:
+                    episode, trajectory = trace.project(
+                        create_params=request.responses_create_params,
+                        state=state,
+                        task_id=request.task_id,
+                        rollout_id=request.rollout_id,
+                        default_model=self._model_server_name,
+                        partial=True,
+                    )
+                    self._on_progress(
+                        NOOARunResult(
+                            episode=episode,
+                            return_value=None,
+                            model_cookies=dict(request.model_cookies),
+                            resource_cookies=dict(request.resource_cookies),
+                            trajectory=trajectory,
+                        )
+                    )
+                except Exception:
+                    # Evidence persistence is best effort. NOOA swallows tool
+                    # hook errors, so report all checkpoint failures consistently.
+                    logger.exception("Failed to persist NOOA partial checkpoint")
+
+        trace = GymTraceHooks(on_progress=checkpoint)
         sampling_overrides = request.responses_create_params.model_dump(
             include={"temperature", "top_p", "max_output_tokens"}, exclude_unset=True, exclude_none=True
         )
@@ -161,6 +203,7 @@ class InProcessNOOARunner:
             state=state,
             cookies=request.model_cookies,
             on_call=trace.on_model_call,
+            on_response=checkpoint,
             sampling_overrides=sampling_overrides,
         )
         dispatcher = ResourceToolDispatcher(

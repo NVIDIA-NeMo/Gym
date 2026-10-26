@@ -897,6 +897,34 @@ def test_external_staging_requires_framework_owned_rebuild_and_active_capture():
     assert config.token_id_capture.external_staging is True
 
 
+@pytest.mark.parametrize("mode", ["fingerprint", "source_history"])
+def test_parent_resolution_modes(mode):
+    config = TokenIdCaptureConfig.model_validate(
+        _block(external_staging=True, rebuild_response=False, parent_resolution=mode)
+    )
+    assert config.token_id_capture.parent_resolution == mode
+    assert TokenIdCaptureConfig().token_id_capture.parent_resolution == "fingerprint"
+
+
+@pytest.mark.parametrize("staging,backend", [(False, "vllm_worker"), (True, "megatron_worker")])
+def test_source_history_requires_external_vllm_staging(staging, backend):
+    with pytest.raises(ValueError, match="source_history requires external vLLM staging"):
+        TokenIdCaptureConfig.model_validate(
+            _block(
+                external_staging=staging,
+                external_staging_backend=backend,
+                rebuild_response=False,
+                parent_resolution="source_history",
+            )
+        )
+
+
+@pytest.mark.parametrize("setting", [{"parent_resolution": "unsupported"}, {"framework_owned_context": True}])
+def test_invalid_or_obsolete_parent_resolution_is_rejected(setting):
+    with pytest.raises(ValidationError):
+        TokenIdCaptureConfig.model_validate(_block(**setting))
+
+
 def test_megatron_worker_backend_requires_external_staging():
     with pytest.raises(ValueError, match="requires external_staging=true"):
         TokenIdCaptureConfig.model_validate(
@@ -1369,6 +1397,19 @@ def test_model_server_can_declare_successful_non_generating_route(tmp_path):
 
     assert response.status_code == 200
     assert TokenCaptureStore(tmp_path).freeze_now("declared-roll0").incomplete is False
+
+
+def test_embeddings_route_is_non_generating(tmp_path):
+    class _EmbeddingsModel(_CapturingModel):
+        async def embeddings(self, body: dict = Body()) -> dict:
+            return {"data": [{"embedding": [0.5], "index": 0}]}
+
+    client = TestClient(_server(_both_enabled(tmp_path), model_cls=_EmbeddingsModel).setup_webserver())
+
+    response = client.post("/ng-rollout/embed-roll0/training-token-capture/v1/embeddings", json={"input": "hi"})
+
+    assert response.status_code == 200
+    assert TokenCaptureStore(tmp_path).freeze_now("embed-roll0").incomplete is False
 
 
 def test_package_is_dependency_free_leaf():

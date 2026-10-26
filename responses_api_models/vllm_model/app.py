@@ -161,6 +161,12 @@ def _mark_propagated_overflow(error: ClientResponseError) -> None:
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "run_id": "x-nemo-gym-log-run-id",
     "adapter": "x-nemo-gym-log-adapter",
+    "sampling_event_id": "x-nemo-gym-log-sampling-event-id",
+    "source_group_id": "x-nemo-gym-log-source-group-id",
+    "rollout_id": "x-nemo-gym-log-rollout-id",
+    "group_id": "x-nemo-gym-log-group-id",
+    "rollout_index": "x-nemo-gym-log-rollout-index",
+    "attempt_index": "x-nemo-gym-log-attempt-index",
     "task_id": "x-nemo-gym-log-task-id",
     "domain": "x-nemo-gym-log-domain",
     "task_attempt": "x-nemo-gym-log-task-attempt",
@@ -177,7 +183,13 @@ def _transport_log_context(request: Request) -> Dict[str, Any]:
         value = request.headers.get(header)
         if not value:
             continue
-        if field in {"task_attempt", "step", "parse_attempt"}:
+        if field in {
+            "rollout_index",
+            "attempt_index",
+            "task_attempt",
+            "step",
+            "parse_attempt",
+        }:
             try:
                 context[field] = int(value)
             except ValueError:
@@ -450,6 +462,17 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             raise ValueError("supply_prefix_token_ids is not supported with is_responses_native=true")
         return self
 
+    @model_validator(mode="after")
+    def _validate_custom_tool_strategy(self) -> "VLLMModelConfig":
+        if self.custom_tool_strategy == "function_bridge" and self.is_responses_native:
+            raise ValueError(
+                "custom_tool_strategy=function_bridge is not supported with is_responses_native=true: the "
+                "native Responses route forwards requests without the Responses-to-Chat conversion that "
+                "implements the bridge, and vLLM's native route renders function tools only, so a custom "
+                "tool would be accepted but never shown to the model."
+            )
+        return self
+
     # When True, outbound calls go to vLLM's /v1/completions endpoint instead
     # of /v1/chat/completions. The Gym /v1/responses and /v1/chat/completions
     # external endpoints continue to work; only the upstream call swaps.
@@ -519,7 +542,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         self, body: NeMoGymResponseCreateParamsNonStreaming | NeMoGymChatCompletionCreateParamsNonStreaming
     ) -> None:
         context = current_capture_context()
-        if context is None or not context.framework_owned_context:
+        if context is None or context.parent_resolution_mode != "source_history":
             return
         try:
             options = json.loads((body.metadata or {}).get("extra_body") or "{}")
@@ -541,9 +564,9 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def _propagate_context_refusal(self, error: ClientResponseError) -> bool:
         """Preserve length errors in framework mode; settle only worker-acknowledged refusals."""
         context = current_capture_context()
-        framework_owned = context is not None and context.framework_owned_context
+        source_history = context is not None and context.parent_resolution_mode == "source_history"
         if (
-            framework_owned
+            source_history
             and context.intent_registered
             and not context.external_worker_response_seen
             and (error.headers or {}).get(CAPTURE_REFUSAL_HEADER) == context.model_call_id
@@ -552,7 +575,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             if refuse is not None:
                 await refuse(context.rollout_id, context.model_call_id)
                 context.refused = True
-        if framework_owned or self.config.propagate_context_overflow_errors:
+        if source_history or self.config.propagate_context_overflow_errors:
             _mark_propagated_overflow(error)
             return True
         return False
@@ -585,7 +608,7 @@ class VLLMModel(SimpleResponsesAPIModel):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         config = token_id_capture_config(self.server_client.global_config_dict)
-        if config.token_id_capture.framework_owned_context:
+        if config.token_id_capture.parent_resolution == "source_history":
             app.post("/context/measure")(self.measure_context)
         return app
 
@@ -609,7 +632,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             token_sink=None,
             lineage_store=self._capture_lineage,
             external_staging=True,
-            framework_owned_context=True,
+            parent_resolution_mode="source_history",
         )
         token = set_token_sink(context)
         try:
@@ -641,6 +664,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         return VLLMConverter(
             return_token_id_information=self.config.return_token_id_information,
             uses_reasoning_parser=self.config.uses_reasoning_parser,
+            custom_tool_strategy=self.config.custom_tool_strategy,
         )
 
     def model_post_init(self, context):
@@ -689,7 +713,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._external_capture_handler = None
         if capture_config is not None and capture_config.token_id_capture.external_staging:
             overrides = (self.config.extra_body or {}) | (self.config.sampling_overrides or {})
-            if capture_config.token_id_capture.framework_owned_context:
+            if capture_config.token_id_capture.parent_resolution == "source_history":
                 if self.config.continue_final_assistant_message:
                     raise ValueError("Framework context requires continue_final_assistant_message=false")
                 validate_framework_context_options(overrides)
@@ -1045,12 +1069,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                 else:
                     raise NotImplementedError
 
-        # Drop a null top_logprobs on the non-capture path (caller-supplied logprobs=True).
-        # vLLM treats null as "no logprobs" but a missing field as its default (0), so forwarding null is never useful.
-        # The capture path above already set it to 0 and is unaffected.
-        if body_dict.get("top_logprobs") is None:
-            body_dict.pop("top_logprobs", None)
-
         if extra_body:
             body_dict = extra_body | body_dict
 
@@ -1062,6 +1080,22 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict = self._external_capture_handler.prepare_request(body_dict)
         else:
             body_dict = self._apply_prefix_supply(body_dict)
+
+        if body_dict.get("ng_capture") and body_dict.get("top_logprobs") and body_dict.get("logprob_token_ids"):
+            # vLLM ignores top_logprobs when specific IDs are requested. Equal
+            # counts do not guarantee those IDs are the sampler's top-k head.
+            raise HTTPException(
+                status_code=400,
+                detail="Top-k token capture does not support logprob_token_ids; omit it to collect the sampler's top-k.",
+            )
+
+        # Normalize after all request overrides and capture controls. vLLM treats
+        # null as no logprobs; zero explicitly requests the chosen token only.
+        if body_dict.get("top_logprobs") is None:
+            if body_dict.get("logprobs"):
+                body_dict["top_logprobs"] = 0
+            else:
+                body_dict.pop("top_logprobs", None)
 
         return body_dict
 
@@ -1316,7 +1350,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         execution["upstream_attempted"] = True
         context = current_capture_context()
         transport_options = (
-            {"_resend_after_disconnect": False} if context is not None and context.framework_owned_context else {}
+            {"_resend_after_disconnect": False}
+            if context is not None and context.parent_resolution_mode == "source_history"
+            else {}
         )
         try:
             chat_completion_dict = await self._call_endpoint(
@@ -1513,12 +1549,12 @@ class VLLMModel(SimpleResponsesAPIModel):
             context = current_capture_context()
             if (
                 context is not None
-                and context.framework_owned_context
+                and context.parent_resolution_mode == "source_history"
                 and not context.committed
                 # A checkpoint gate publishes this validated row before forwarding the answer.
                 and not (context.publish_on_delivery and context.deferred_commit is not None)
             ):
-                raise RuntimeError("Framework-owned context requires a committed capture before serving a response")
+                raise RuntimeError("Source-history capture requires a committed capture before serving a response")
 
     @staticmethod
     def _require_token_id_list(value: Any, field_name: str) -> List[Any]:

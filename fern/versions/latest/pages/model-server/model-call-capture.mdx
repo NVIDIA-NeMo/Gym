@@ -64,7 +64,7 @@ original request and response payloads.
 
 ### Buffered SSE with external token staging
 
-With `token_id_capture.external_staging: true` and `framework_owned_context: false`, captured requests can use `stream: true`
+With `token_id_capture.external_staging: true` and `parent_resolution: fingerprint`, captured requests can use `stream: true`
 on Chat Completions, Responses (including the compaction adapter), and Anthropic Messages.
 Gym requests a complete, non-streaming answer from the inference worker. The worker stages
 training tokens before returning commit coordinates. Gym removes internal token fields,
@@ -84,31 +84,33 @@ the staged rows must run the same Gym version. A framework whose Gym predates a 
 server writes, such as `capture_key` or `finish_reason`, rejects every manifest row as
 `invalid_manifest_row` and masks the rollout.
 
-### Framework-owned context and compaction
+### Source-history continuity and context compaction
 
 A compatible training framework can own exact-token prefix reuse and training-row reconstruction.
-Gym matches source history and effective render options, sending a root when they do not match.
+Set `token_id_capture.parent_resolution: source_history` to match source history and effective render
+options. Gym sends a root when they do not match or no unique parent can be identified. The default
+`fingerprint` mode continues to match assistant content against captured calls.
 For a candidate parent, the inference worker verifies the converted-message boundary and any
 required null/empty tool-content equivalence before restoring exact tokens. The harness sends its chosen
 message history, including any compaction. It does not send tokens, segment IDs, or a parent header.
 
-Framework candidates carry an explicit source-match proof. Deploy compatible Gym and RL worker
+Source-history candidates carry an explicit source-match proof. Deploy compatible Gym and RL worker
 revisions together: a missing proof is an error, not permission to assume an exact match.
 Direct roots retain replay evidence and framework safety checks so later calls can continue them.
 
 The staging wire schema is version 3. Gym and every external-staging worker must upgrade together,
-including deployments using ordinary capture without framework-owned context. Version 2 admissions,
+including deployments using ordinary capture with fingerprint parent resolution. Version 2 admissions,
 staged rows, receipts and checkpoints are incompatible and require a separate migration; this change
 does not provide one. Finish or retire existing attempts before upgrading, and do not resume their
 persisted data with the new schema.
 
-Framework-owned rows include output fingerprints, a bounded completion status and minimal original
+Source-history capture rows include output fingerprints, a bounded completion status and minimal original
 text for output validation. Ordinary capture keeps its existing fingerprints and finish reason without
 these additional selection/validation fields. The status is `completed`, `incomplete`, `failed` or
 `unknown`; cancellation and abort mean `failed`, while missing or unrecognized completion information
 means `unknown`. NeMo RL masks a rollout containing a selected failed or unknown completion.
 
-Framework roots record `root_reason`: `first_call` (no committed history), `no_prefix_match`,
+Source-history roots record `root_reason`: `first_call` (no committed history), `no_prefix_match`,
 `non_user_suffix` (an otherwise matching prefix followed by a non-observation item),
 `render_options_changed`, `worker_rooted` (the worker declined a source-compatible candidate),
 or `ambiguous_candidate` (several equally long prefixes match without unique identity).
@@ -126,14 +128,14 @@ token_id_capture:
   external_staging: true
   external_staging_backend: vllm_worker
   rebuild_response: false
-  framework_owned_context: true
+  parent_resolution: source_history
 ```
 
 This requires a framework worker implementing Gym's capture protocol; stock vLLM alone is insufficient.
 Keep the usual per-agent capture opt-in or `all_agents: true`. `rebuild_response: false` preserves
 ordinary rollout output for framework reconstruction instead of Gym's single-chain rebuilding.
 
-| Request | Framework-owned behavior |
+| Request | Source-history behavior |
 |---|---|
 | Responses with explicit history | Supported, including buffered SSE. |
 | Responses history item kinds | `message`, `reasoning`, `function_call`, and `function_call_output`. |
@@ -147,7 +149,7 @@ Prompt truncation and assistant prefill are unsupported in this mode. Incompatib
 are rejected at startup; unsupported options in request `metadata.extra_body` return HTTP 422 before
 capture intent is recorded, so a corrected request can reuse the attempt.
 
-The policy checkpoint gate supports framework-owned capture. It publishes the staged call's ledger
+The policy checkpoint gate supports source-history capture. It publishes the staged call's ledger
 record immediately before forwarding the first answer chunk. Restore carries captured history into
 the new attempt without inheriting the previous attempt's closed-admission state.
 

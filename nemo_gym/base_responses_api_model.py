@@ -47,7 +47,7 @@ from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, model_validator
 
 from nemo_gym._checkpoint.control import install_control_routes, install_participant
 from nemo_gym._checkpoint.model import (
@@ -76,6 +76,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.responses_converter import CustomToolStrategy
 from nemo_gym.responses_streaming import (
     NamespaceMap,
     restore_namespace_tool_calls,
@@ -115,6 +116,7 @@ from nemo_gym.token_id_capture.protocols import (
     CaptureInputError,
     CaptureLedger,
     LineageResolver,
+    ParentResolutionMode,
 )
 from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.store import make_token_store
@@ -275,6 +277,20 @@ def _orjson_dispatch_response(content: Any) -> Any:
     return Response(content=orjson.dumps(content), media_type="application/json")
 
 
+class ModelCheckpointConfig(BaseModel):
+    """A model server instance's ``checkpoint`` block."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Only the policy instance drains during a partial-rollout checkpoint.
+    # Judge and simulator instances keep serving so accepted tool and verifier calls can finish.
+    policy: bool = False
+    # Ask inference workers to stage the prefix of each in-flight call at a checkpoint,
+    # so a restored call continues it instead of regenerating.
+    # Requires external token staging on workers that implement the generation-cut endpoint.
+    generation_cuts: bool = False
+
+
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     # Exact successful routes whose responses cannot contain policy-generated content.
     token_id_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
@@ -297,13 +313,29 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "so a backend with free-form tool support keeps them."
         ),
     )
-    # Only the policy instance drains during a partial-rollout checkpoint.
-    # Judge and simulator instances keep serving so accepted tool and verifier calls can finish.
-    checkpoint_policy: bool = False
-    # Ask inference workers to stage the prefix of each in-flight call at a checkpoint,
-    # so a restored call continues it instead of regenerating.
-    # Requires external token staging on workers that implement the generation-cut endpoint.
-    checkpoint_generation_cuts: bool = False
+    custom_tool_strategy: CustomToolStrategy = Field(
+        default="passthrough",
+        description=(
+            "How a Responses ``custom`` (free-form) tool reaches a backend whose chat schema admits "
+            "function tools only. ``passthrough`` sends the converted request unchanged and the backend "
+            "decides (``drop_custom_tools`` remains the kill switch). ``function_bridge`` lowers each "
+            "custom tool to a function tool with one required plain-string parameter, replays "
+            "``custom_tool_call``/``custom_tool_call_output`` history in the lowered form, lifts a "
+            "returned call whose name the request declared as custom back into a ``custom_tool_call`` "
+            "item, and hoists custom entries from a streaming harness's ``additional_tools`` carrier "
+            "instead of dropping them. The Responses-to-Chat conversion implements it, so the setting "
+            "takes effect on the servers that convert: ``vllm_model`` and its subclasses (the compaction "
+            "and GenRM servers included), ``inference_provider``, and ``azure_openai_model``. A native "
+            "Responses path never runs the conversion, so the setting has no effect there; ``vllm_model`` "
+            "rejects ``function_bridge`` together with ``is_responses_native``, whose route renders "
+            "function tools only. The bridged payload's wire form depends on the backend's tool parser: "
+            "an XML-style parser (``qwen3_coder``, ``nemotron_v3``) carries it as raw text, while a "
+            "JSON-format parser (``hermes``, ``llama3_json``, ``mistral``) requires the model to "
+            "JSON-escape it inside the arguments object."
+        ),
+    )
+    # This instance's part in partial-rollout checkpoints, which the global ``checkpoint`` block turns on.
+    checkpoint: ModelCheckpointConfig = Field(default_factory=ModelCheckpointConfig)
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -367,7 +399,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             assistant_message_header=self.server_client.assistant_message_header(self.config.name),
             global_config_dict=self.server_client.global_config_dict,
             num_workers=self.config.num_workers,
+            # Embedding vectors never contain policy-generated text, so an embeddings call under a
+            # rollout's token-capture prefix must not mark that rollout incomplete.
             non_generating_requests=self.non_generating_model_routes
+            | {("POST", "/v1/embeddings")}
             | frozenset(
                 (request.method, request.path) for request in self.config.token_id_capture_non_generating_requests
             ),
@@ -392,6 +427,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.messages", self.messages, model_attributes)
         )
 
+        # OpenAI-compatible embeddings. Servers backed by an embeddings-capable provider
+        # (e.g. openai_model, inference_provider) override embeddings(); the base default
+        # returns 501 so a policy-only server advertises the route but rejects the call.
+        app.post("/v1/embeddings")(self.embeddings)
+
         self.setup_policy_checkpoint(app, capture_ledger)
         return app
 
@@ -401,20 +441,20 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         if settings is not None and capture_ledger is not None:
             # Every model server sharing the run's capture ledger checks, so one outside the gate refuses to start.
             reject_ungated_ledger_writers(global_config_dict)
-        if settings is None or not self.config.checkpoint_policy:
+        if settings is None or not self.config.checkpoint.policy:
             return
         capture_settings = token_id_capture_config(global_config_dict)
         if capture_settings is not None and capture_settings.enabled and capture_ledger is None:
             raise ValueError(
-                "checkpoint_policy with token_id_capture requires external_staging: only the token-free "
+                "checkpoint.policy with token_id_capture requires external_staging: only the token-free "
                 "capture ledger is checkpointed, and the training framework owns the staged tokens"
             )
         if capture_ledger is not None and not isinstance(capture_ledger, CheckpointableLedger):
-            raise ValueError(f"checkpoint_policy requires a checkpointable capture ledger, got {type(capture_ledger)}")
+            raise ValueError(f"checkpoint.policy requires a checkpointable capture ledger, got {type(capture_ledger)}")
         cut_requester = None
-        if self.config.checkpoint_generation_cuts:
+        if self.config.checkpoint.generation_cuts:
             if capture_ledger is None:
-                raise ValueError("checkpoint_generation_cuts requires token_id_capture with external_staging")
+                raise ValueError("checkpoint.generation_cuts requires token_id_capture with external_staging")
             cut_requester = generation_cut_requester(
                 capture_settings.token_id_capture.resolve_control_auth_token(),
                 control_root=self.generation_cut_control_root,
@@ -486,6 +526,20 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
 
+    def _sanitize_streaming_responses_body(self, body: dict) -> tuple[dict, NamespaceMap]:
+        """Apply this server's tool policy while mapping a streaming body to the strict shape.
+
+        Every ``/v1/responses`` dispatch that accepts the streaming wire dialect sanitizes
+        through here, so the config's ``drop_custom_tools``, ``drop_hosted_tools`` and
+        ``custom_tool_strategy`` settings reach the sanitizer on each of them.
+        """
+        return sanitize_streaming_responses_body(
+            body,
+            drop_custom_tools=self.config.drop_custom_tools,
+            drop_hosted_tools=self.config.drop_hosted_tools,
+            hoist_carrier_custom_tools=self.config.custom_tool_strategy == "function_bridge",
+        )
+
     async def responses_dispatch(self, request: Request, body: dict = Body()):
         """Default ``/v1/responses`` entrypoint shared by every Gym model server.
 
@@ -501,13 +555,13 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         ``response.failed`` events; bad-request validation still fails eagerly.
         """
         context = current_capture_context()
-        if context is not None and context.framework_owned_context:
+        if context is not None and context.parent_resolution_mode == "source_history":
             # ``stream: true`` is allowed: the streaming branch below makes exactly one
             # non-streaming ``responses()`` call and re-emits the completed response as
             # synthesized SSE, so the engine-bound request stays non-streaming (external
             # capture refuses a streamed backend request) and ``_stream_served_response``
             # finalizes the capture before the stream is committed. SSE-only harnesses
-            # such as the Codex CLI thereby run under framework-owned context. Server-held
+            # such as the Codex CLI thereby run under source-history capture. Server-held
             # history is still refused: it hides part of the context from capture.
             if body.get("previous_response_id") or body.get("conversation"):
                 raise HTTPException(status_code=422, detail="Framework context requires explicit history")
@@ -518,11 +572,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             await self._finalize_served_response(response)
             return dispatched
 
-        cleaned, ns_map = sanitize_streaming_responses_body(
-            body,
-            drop_custom_tools=self.config.drop_custom_tools,
-            drop_hosted_tools=self.config.drop_hosted_tools,
-        )
+        cleaned, ns_map = self._sanitize_streaming_responses_body(body)
         try:
             params = validate_streaming_responses_params(cleaned)
         except ValidationError as exc:
@@ -573,7 +623,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         malformed ``stream`` with the same 422 as before.
         """
         context = current_capture_context()
-        if context is not None and context.framework_owned_context and body.get("n") not in (None, 1):
+        if (
+            context is not None
+            and context.parent_resolution_mode == "source_history"
+            and body.get("n") not in (None, 1)
+        ):
             raise HTTPException(status_code=422, detail="Framework context requires one Chat completion")
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
@@ -696,6 +750,18 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             request_messages=request_messages,
         )
         return completion
+
+    async def embeddings(self, body: dict = Body()) -> dict:
+        """OpenAI-compatible ``POST /v1/embeddings`` default: 501 unless a server overrides it.
+
+        Servers backed by an embeddings-capable provider (e.g. ``openai_model``,
+        ``inference_provider``) override this to pass ``body`` through to the provider and
+        return the provider's JSON unchanged.
+        """
+        raise HTTPException(
+            status_code=501,
+            detail="This model server does not support the embeddings endpoint.",
+        )
 
     async def messages(self, request: Request, body: dict = Body()):
         """Default Anthropic Messages <-> Responses mapping shared by every Gym model server.
@@ -1340,7 +1406,7 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         or context.capture_admission is None
         or context.committed
         or context.refused
-        or (context.framework_owned_context and not context.intent_registered)
+        or (context.parent_resolution_mode == "source_history" and not context.intent_registered)
         # A checkpoint gate owns a deferred row: it publishes it when the response starts,
         # and a call whose response never starts made no answer to record, so it is not poisoned.
         or context.deferred_commit is not None
@@ -1390,7 +1456,7 @@ class _CaptureMiddleware:
         lineage_store: LineageResolver | None = None,
         delta_records: bool = False,
         external_staging: bool = False,
-        framework_owned_context: bool = False,
+        parent_resolution_mode: ParentResolutionMode = "fingerprint",
         token_capture_enabled: bool = False,
         assistant_message_header: bytes | None = None,
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
@@ -1410,7 +1476,7 @@ class _CaptureMiddleware:
         # A framework inference worker owns record staging; the lineage store
         # doubles as the per-rollout capture ledger.
         self._external_staging = external_staging
-        self._framework_owned_context = framework_owned_context
+        self._parent_resolution_mode = parent_resolution_mode
         self._capture_ledger: CaptureLedger | None = (
             lineage_store if external_staging and isinstance(lineage_store, CaptureLedger) else None
         )
@@ -1457,12 +1523,12 @@ class _CaptureMiddleware:
         capture_wanted = token_capture_requested and (token_sink is not None or self._token_capture_enabled)
         if (
             capture_wanted
-            and self._framework_owned_context
+            and self._parent_resolution_mode == "source_history"
             and dialect is not None
             and dialect not in ("responses", "chat")
         ):
             await Response(
-                content='{"detail":"Framework-owned context currently requires Responses or Chat"}',
+                content='{"detail":"Source-history capture currently requires Responses or Chat"}',
                 status_code=422,
                 media_type="application/json",
             )(scope, receive, send)
@@ -1550,7 +1616,7 @@ class _CaptureMiddleware:
                 lineage_store=self._capture_ledger if self._external_staging else self._lineage_store,
                 delta_records=self._delta_records,
                 external_staging=self._external_staging,
-                framework_owned_context=self._framework_owned_context,
+                parent_resolution_mode=self._parent_resolution_mode,
                 admitted_at=time.time(),
             )
             sink_token = set_token_sink(capture_context)
@@ -1856,8 +1922,8 @@ def install_model_call_capture(
         lineage_store=lineage_store,
         delta_records=(capture_settings.token_id_capture.delta_records if capture_settings is not None else False),
         external_staging=external_staging,
-        framework_owned_context=(
-            capture_settings.token_id_capture.framework_owned_context if capture_settings is not None else False
+        parent_resolution_mode=(
+            capture_settings.token_id_capture.parent_resolution if capture_settings is not None else "fingerprint"
         ),
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
         non_generating_requests=non_generating_requests,

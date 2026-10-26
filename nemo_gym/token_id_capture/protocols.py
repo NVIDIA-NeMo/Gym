@@ -43,7 +43,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, TypedDict, runtime_checkable
+from typing import Literal, Protocol, TypedDict, runtime_checkable
 
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
 from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
@@ -51,6 +51,7 @@ from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
 
 # Internal worker acknowledgement: this call was refused before generation or staging.
 CAPTURE_REFUSAL_HEADER = "x-nemo-gym-capture-refused"
+ParentResolutionMode = Literal["fingerprint", "source_history"]
 
 
 class RolloutRemovalPayload(TypedDict):

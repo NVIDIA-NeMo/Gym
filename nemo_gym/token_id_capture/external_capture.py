@@ -48,7 +48,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 def validate_framework_context_options(request_payload: dict[str, Any]) -> None:
-    """Reject prompt transformations unsupported by framework-owned context capture."""
+    """Reject prompt transformations unsupported by source-history capture."""
     if request_payload.get("truncate_prompt_tokens") is not None or request_payload.get("continue_final_message"):
         raise ValueError("Framework context requires explicit history without truncation or assistant prefill")
 
@@ -97,7 +97,12 @@ def _strip_capture_transport_fields(payload: dict[str, Any]) -> None:
         choice.pop("token_ids", None)
         message = choice.get("message")
         if isinstance(message, dict):
-            for field_name in (*TOKEN_FIELDS, *_MEGATRON_TRANSPORT_FIELDS):
+            for field_name in (
+                *TOKEN_FIELDS,
+                *_MEGATRON_TRANSPORT_FIELDS,
+                "sampler_topk_token_ids",
+                "sampler_topk_logprobs",
+            ):
                 message.pop(field_name, None)
 
 
@@ -124,7 +129,7 @@ class _BaseExternalCaptureHandler(ABC):
         admission = context.capture_admission
         if admission is None:
             return request_payload
-        if context.framework_owned_context:
+        if context.parent_resolution_mode == "source_history":
             validate_framework_context_options(request_payload)
             if admission.request_replay is None:
                 raise ValueError("Framework admission is missing source request evidence")
@@ -294,7 +299,7 @@ class _BaseExternalCaptureHandler(ABC):
             str(coords.staging_key)
         ]
         response_items, _ = strip_token_fields(response_to_output_items(served_payload))
-        evidence_items = completion_items(served_payload) if context.framework_owned_context else []
+        evidence_items = completion_items(served_payload) if context.parent_resolution_mode == "source_history" else []
         # Content-witness keys, hashed while the response is still
         # server-side: this call's own output, and request + output (the
         # cumulative reading). Unfingerprintable content abstains (None)
@@ -330,10 +335,12 @@ class _BaseExternalCaptureHandler(ABC):
                     OutputItemEvidence(id=item.get("id"), fingerprint=output_item_fingerprint(item))
                     for item in evidence_items
                 ]
-                if context.framework_owned_context
+                if context.parent_resolution_mode == "source_history"
                 else None
             ),
-            response_status=completion_metadata(served_payload)[0] if context.framework_owned_context else None,
+            response_status=completion_metadata(served_payload)[0]
+            if context.parent_resolution_mode == "source_history"
+            else None,
             finish_reason=response_finish_reason(served_payload),
             last_output_item=output_validation_item(evidence_items[-1]) if evidence_items else None,
             output_fingerprint=output_fingerprint,
@@ -346,7 +353,7 @@ class _BaseExternalCaptureHandler(ABC):
                         render_digest=admission.request_replay.render_digest,
                     )
                 )
-                if context.framework_owned_context and admission.request_replay is not None
+                if context.parent_resolution_mode == "source_history" and admission.request_replay is not None
                 else None
             ),
         )
@@ -355,7 +362,7 @@ class _BaseExternalCaptureHandler(ABC):
             record=record,
             # Framework capture reconstructs ancestry from CallRecord parents.
             # Only ordinary capture uses this separately persisted lookup chain.
-            staging_chain=() if context.framework_owned_context else tuple(child_staging_chain),
+            staging_chain=() if context.parent_resolution_mode == "source_history" else tuple(child_staging_chain),
             request_items=list(context.request_items or []),
             response_items=response_items,
         )
@@ -396,7 +403,11 @@ async def publish_deferred_commit(context: CaptureContext) -> None:
 
 
 class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):
-    """Commit lineage after a vLLM worker durably stages the token delta."""
+    """Commit lineage after a vLLM worker durably stages the token delta.
+
+    The vLLM model server normalizes missing/null ``top_logprobs`` to zero
+    after all request overrides. This handler preserves explicit counts.
+    """
 
     _BACKEND_LABEL = "vLLM"
 
@@ -408,7 +419,6 @@ class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):
         request_payload[NG_CAPTURE_FIELD] = admission.model_dump(mode="json")
         request_payload.update(
             logprobs=True,
-            top_logprobs=0,
             return_tokens_as_token_ids=True,
         )
         if admission.mode == "token_in":
