@@ -487,7 +487,7 @@ dropped with the attempt watermark its restore installed, so the rollouts that s
 re-form the group under the same attempt.
 
 A finished group that a member with an open session may still need is kept past `cohort_result_ttl_s` and
-does not count toward `max_terminal_cohorts`, so pruning cannot evict an outcome a later checkpoint must export or
+beyond `max_terminal_cohorts`, so pruning cannot evict an outcome a later checkpoint must export or
 a replay must return. It becomes an ordinary tombstone once those members close their sessions or are retired.
 
 Only groups with an explicit `_ng_group_id` are exported. A member that is started over from its input while

@@ -959,24 +959,21 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     def _prune_terminal_cohorts(self) -> None:
         """Bound process-local cohort tombstones and attempt watermarks.
 
-        A finished cohort an open member session may still need is kept whatever its age, and does not count
-        toward ``max_terminal_cohorts``.
+        A finished cohort an open member session may still need is never dropped: it outlives
+        ``cohort_result_ttl_s``, and the count pass skips it. Only eviction candidates are checked for open
+        sessions, so the cost follows what is evicted or kept rather than everything retained.
         """
         now = time.monotonic()
-        needed = {
-            key
-            for key, cohort in self._verify_cohorts.items()
-            if cohort.terminal_at is not None and self._needed_by_open_session(cohort)
-        }
-        terminal = [
-            (key, cohort)
-            for key, cohort in self._verify_cohorts.items()
-            if cohort.terminal_at is not None and key not in needed
-        ]
+        # Once checked, a needed cohort stays needed for the rest of this pass.
+        needed: set[str] = set()
         terminal_ttl_s = self.config.cohort_result_ttl_s
         if terminal_ttl_s is not None:
-            for key, cohort in terminal:
-                if now - cohort.terminal_at >= terminal_ttl_s:
+            for key, cohort in list(self._verify_cohorts.items()):
+                if cohort.terminal_at is None or now - cohort.terminal_at < terminal_ttl_s:
+                    continue
+                if self._needed_by_open_session(cohort):
+                    needed.add(key)
+                else:
                     self._drop_cohort(key)
 
         terminal = sorted(
@@ -987,15 +984,17 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             ),
             key=lambda item: item[1].terminal_at or 0.0,
         )
-        for key, _ in terminal[: -self.config.max_terminal_cohorts]:
+        excess = len(terminal) - self.config.max_terminal_cohorts
+        for key, cohort in terminal:
+            if excess <= 0:
+                break
+            if self._needed_by_open_session(cohort):
+                continue
             self._drop_cohort(key)
+            excess -= 1
 
         # A kept cohort keeps its group's watermark, so the group still refuses older attempts.
-        active_group_ids = {
-            cohort.group_id
-            for key, cohort in self._verify_cohorts.items()
-            if cohort.group_id is not None and (cohort.terminal_at is None or key in needed)
-        }
+        active_group_ids = {cohort.group_id for cohort in self._verify_cohorts.values() if cohort.group_id is not None}
         if terminal_ttl_s is not None:
             for group_id, watermark in list(self._latest_group_attempts.items()):
                 if group_id not in active_group_ids and now - watermark.updated_at >= terminal_ttl_s:
