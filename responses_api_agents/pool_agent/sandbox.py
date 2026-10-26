@@ -70,22 +70,25 @@ class PoolSession(AgentSessionState):
         self.failure_artifact_path = path
         LOG.warning("Pool failure artifacts saved to %s", path)
 
-    async def install(self, *, version: str, timeout: float) -> None:
+    async def install(self, *, version: str, accept_eula: bool, timeout: float) -> None:
         """Retain installation when a seed caller disconnects; close joins it before releasing the sandbox."""
         if self.installation_task is None:
-            self.installation_task = asyncio.create_task(self._install(version=version, timeout=timeout))
+            self.installation_task = asyncio.create_task(
+                self._install(version=version, accept_eula=accept_eula, timeout=timeout)
+            )
         await asyncio.shield(self.installation_task)
 
-    async def _install(self, *, version: str, timeout: float) -> None:
+    async def _install(self, *, version: str, accept_eula: bool, timeout: float) -> None:
         directory = self.session.session_dir
         sandbox = self.session.sandbox
         prepared = await sandbox.exec(f"mkdir -p -- {quote(directory)}", cwd="/", timeout_s=timeout)
         if prepared.return_code != 0 or prepared.error_type:
             raise RuntimeError("Cannot create Pool session directory")
-        for filename in ("install_pool.sh", "sandbox_runner.py"):
+        for filename in ("install_pool.sh", "install_pool.py", "sandbox_runner.py"):
             await sandbox.upload(Path(__file__).with_name(filename), f"{directory}/{filename}")
         result = await sandbox.exec(
-            f"sh {quote(directory + '/install_pool.sh')} {quote(directory)} {quote(version)}",
+            f"sh {quote(directory + '/install_pool.sh')} {quote(directory)} {quote(version)} "
+            f"{str(accept_eula).lower()}",
             cwd="/",
             timeout_s=timeout,
         )

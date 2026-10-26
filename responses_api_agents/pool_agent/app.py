@@ -52,6 +52,7 @@ class PoolAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     model: str
     pool_version: str = Field(default="v1.0.16", pattern=r"^v\d+\.\d+\.\d+$")
+    accept_pool_eula: bool = False
     context_window: int = Field(default=32768, gt=0)
     setup_timeout: float = Field(default=900, gt=0, allow_inf_nan=False)
     timeout: float = Field(default=900, gt=0, allow_inf_nan=False)
@@ -146,6 +147,8 @@ class PoolAgent(SimpleResponsesAPIAgent):
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> PoolSession:
         if self._shutting_down:
             raise HTTPException(503, "Pool server is shutting down")
+        if not self.config.accept_pool_eula:
+            raise HTTPException(422, "Set accept_pool_eula=true to accept https://poolside.ai/eula before using Pool")
         task = asyncio.current_task()
         assert task is not None
         self._seed_tasks.add(task)
@@ -216,7 +219,11 @@ class PoolAgent(SimpleResponsesAPIAgent):
                     result = await sandbox.exec(f"mkdir -p -- {quote(workdir)}", cwd="/", timeout_s=30)
                     if result.return_code != 0 or result.error_type:
                         raise RuntimeError("Cannot prepare Pool task workdir")
-                await state.install(version=self.config.pool_version, timeout=self.config.setup_timeout)
+                await state.install(
+                    version=self.config.pool_version,
+                    accept_eula=self.config.accept_pool_eula,
+                    timeout=self.config.setup_timeout,
+                )
                 if self._shutting_down:
                     raise HTTPException(503, "Pool server shut down during session setup")
             except BaseException as error:

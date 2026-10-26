@@ -76,6 +76,7 @@ class LocalSandbox:
     async def exec(self, command, *, cwd=None, timeout_s=30):
         argv = shlex.split(command)
         if len(argv) > 1 and argv[1].endswith("/install_pool.sh"):
+            assert argv[4] == "true"
             binary = Path(argv[2]) / "bin" / "pool"
             binary.parent.mkdir(parents=True, exist_ok=True)
             binary.write_text(f"#!{sys.executable}\n" + FAKE_POOL)
@@ -141,7 +142,7 @@ async def execute(state, timeout=10):
 async def test_real_stage_run_collect_close(tmp_path, ending):
     mode = "term" if ending in ("timeout", "close") else ending
     state, sandbox = session(tmp_path, mode)
-    await state.install(version="v1.0.16", timeout=10)
+    await state.install(version="v1.0.16", accept_eula=True, timeout=10)
     task = asyncio.create_task(execute(state, timeout=2 if ending in ("timeout", "stubborn") else 20))
     try:
         if ending == "close":
@@ -197,7 +198,7 @@ async def test_install_rejects_symlink_workdir_overlap(tmp_path, overlap):
     link.symlink_to(target, target_is_directory=True)
     state.session.workdir = str(link)
     with pytest.raises(RuntimeError, match="disjoint"):
-        await state.install(version="v1.0.16", timeout=10)
+        await state.install(version="v1.0.16", accept_eula=True, timeout=10)
     assert link.is_dir()
 
 
@@ -206,7 +207,7 @@ async def test_install_rejects_symlink_workdir_overlap(tmp_path, overlap):
 @pytest.mark.parametrize("confirmed", [False, "true", 1])
 async def test_bad_termination_evidence_never_collects_before_confirmation(tmp_path, confirmed):
     state, sandbox = session(tmp_path)
-    await state.install(version="v1.0.16", timeout=10)
+    await state.install(version="v1.0.16", accept_eula=True, timeout=10)
     download = sandbox.download
     corrupt = True
 
@@ -268,7 +269,7 @@ async def test_activation_uses_proxy_evidence_when_cli_has_no_model_output(tmp_p
     state, sandbox = session(tmp_path, mode)
     server = agent(timeout=3, failure_artifacts_dir=tmp_path / "failures")
     try:
-        await state.install(version="v1.0.16", timeout=10)
+        await state.install(version="v1.0.16", accept_eula=True, timeout=10)
         with patch.object(
             PoolAgent,
             "model_endpoint",
@@ -306,7 +307,7 @@ def test_runner_executes_fake_cli_without_changing_host_environment(tmp_path, mo
     from responses_api_agents.pool_agent import sandbox_runner
 
     state, _ = session(tmp_path)
-    asyncio.run(state.install(version="v1.0.16", timeout=10))
+    asyncio.run(state.install(version="v1.0.16", accept_eula=True, timeout=10))
     asyncio.run(
         state.stage(
             prompt="task input",

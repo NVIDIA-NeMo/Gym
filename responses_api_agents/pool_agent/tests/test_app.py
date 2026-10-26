@@ -27,6 +27,7 @@ APP = "responses_api_agents.pool_agent.app"
 
 def agent(**kwargs) -> PoolAgent:
     kwargs.setdefault("failure_artifacts_dir", None)
+    kwargs.setdefault("accept_pool_eula", True)
     return PoolAgent(
         config=PoolAgentConfig(
             host="localhost",
@@ -299,11 +300,12 @@ async def test_owned_seed_merges_metadata_and_sets_ttl():
         patch(APP + ".resolve_provider_metadata", return_value={"x": "default", "y": "default"}),
         patch(APP + ".create_provider", return_value=provider),
         patch(APP + ".AsyncSandbox", return_value=sandbox),
-        patch.object(PoolSession, "install", new_callable=AsyncMock),
+        patch.object(PoolSession, "install", new_callable=AsyncMock) as install,
     ):
         session = await agent(
             sandbox_provider="sandbox", sandbox_config={"image": "test", "metadata": {"x": "custom"}}
         )._seed_agent_session_state(seed(borrowed=False))
+    install.assert_awaited_once_with(version="v1.0.16", accept_eula=True, timeout=900)
     spec = sandbox.start.call_args.args[0]
     assert spec.metadata == {"x": "custom", "y": "default", "agent_session_id": "session-1"}
     assert spec.ttl_s > 1800
@@ -543,7 +545,7 @@ async def test_cancelled_installer_waiter_does_not_release_or_duplicate_installa
         patch.object(PoolSession, "_install", side_effect=install) as installer,
         patch.object(SandboxSession, "close", new_callable=AsyncMock) as close,
     ):
-        waiter = asyncio.create_task(session.install(version="v1.0.16", timeout=1))
+        waiter = asyncio.create_task(session.install(version="v1.0.16", accept_eula=True, timeout=1))
         await asyncio.wait_for(started.wait(), timeout=1)
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -552,7 +554,7 @@ async def test_cancelled_installer_waiter_does_not_release_or_duplicate_installa
             await session.close(timeout=0.01)
         close.assert_not_awaited()
         assert not session.installation_task.done()
-        retry = asyncio.create_task(session.install(version="v1.0.16", timeout=1))
+        retry = asyncio.create_task(session.install(version="v1.0.16", accept_eula=True, timeout=1))
         release.set()
         await asyncio.wait_for(retry, timeout=1)
         await session.close(timeout=1)
@@ -921,3 +923,21 @@ async def test_optional_runtime_schema_does_not_discard_trajectory(runtime):
     assert artifacts.runner_hostname is None and artifacts.runner_pid is None
     assert artifacts.trajectory == complete() and artifacts.exit_code == 0
     assert artifacts.completed_model_calls == 1
+
+
+@pytest.mark.parametrize("borrowed", [True, False])
+async def test_eula_opt_in_is_required_before_any_sandbox_work(borrowed):
+    server = agent(accept_pool_eula=False, sandbox_provider="sandbox")
+    defaults = PoolAgentConfig.model_validate(server.config.model_dump(exclude={"accept_pool_eula"}))
+    assert defaults.accept_pool_eula is False
+    with (
+        patch(APP + ".get_global_config_dict") as config,
+        patch(APP + ".create_provider") as provider,
+        patch.object(PoolSession, "install") as install,
+        pytest.raises(HTTPException, match="https://poolside.ai/eula") as error,
+    ):
+        await server.seed_agent_session(Request({"type": "http", "session": {}}), seed(borrowed=borrowed))
+    assert error.value.status_code == 422
+    config.assert_not_called()
+    provider.assert_not_called()
+    install.assert_not_called()

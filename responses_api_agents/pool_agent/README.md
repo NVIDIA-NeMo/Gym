@@ -33,6 +33,17 @@ swebench_pro_resources_server:
       allowed_agents: [pool_agent]
 ```
 
+After reviewing [Poolside’s EULA](https://poolside.ai/eula), explicitly opt in by
+adding this to `run.yaml`. Without it, session setup returns an error before any
+sandbox allocation or connection:
+
+```yaml
+pool_agent:
+  responses_api_agents:
+    pool_agent:
+      accept_pool_eula: true
+```
+
 Supply a `policy_model` Gym Model Server, `policy_model_name`, and the `sandbox`
 provider configuration in `model-provider.yaml`. The task sandbox must be able to
 reach the Model Server. Set Pool's `context_window` to the served model's context
@@ -63,16 +74,18 @@ and prepared input. Check its allowed agents and tool requirements before runnin
 
 ## Runtime and sandbox setup
 
-Session setup installs missing Python, Bash, curl, and tar through `apt-get` or
+Session setup installs missing Python, Bash, and curl through `apt-get` or
 `apk`; installing prerequisites requires root. Images without these package
 managers must already contain the prerequisites. The standalone runner requires
 Python 3.8 or later. Pool is installed inside the sandbox, not on the agent-server
 host.
 
-Setup downloads the pinned release from `downloads.poolside.ai` using Poolside's
-installer, including its checksum verification, and verifies the reported version.
-The installation accepts Poolside's EULA. Network access to that download host is
-required.
+Setup downloads the release archive directly from `downloads.poolside.ai` and
+verifies it against a SHA-256 committed in the adapter before extracting or running
+the binary. Verification uses Python and cannot be skipped. The binary’s reported
+version is also checked. Task sandboxes require Linux on x86_64 or ARM64. Changing
+`pool_version` requires adding reviewed archive checksums. Network access to the
+download host is required.
 
 Resources can supply a direct `SandboxAccess` and an absolute task workdir. Without
 that access, configure `sandbox_provider` and `sandbox_config`, including an image,
@@ -94,7 +107,8 @@ message content, tool schemas, and upstream HTTP errors.
 
 | Setting | Default | Purpose |
 |---|---:|---|
-| `pool_version` | `v1.0.16` | Exact CLI release to install. |
+| `pool_version` | `v1.0.16` | CLI release with archive checksums pinned in the adapter. |
+| `accept_pool_eula` | `false` | Explicit acceptance of [Poolside’s EULA](https://poolside.ai/eula), required before session setup. |
 | `context_window` | `32768` | Model context size used to configure Pool's compaction thresholds. |
 | `setup_timeout` | `900` | Timeout in seconds for individual setup operations. |
 | `timeout` | `900` | Agent execution budget in seconds, capped by the session's task budget. |

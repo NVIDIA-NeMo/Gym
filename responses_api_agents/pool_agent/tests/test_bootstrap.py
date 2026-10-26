@@ -2,11 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Run the POSIX installer with isolated commands; never install packages or access the network."""
 
+import hashlib
+import io
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
+from shlex import quote
 
 import pytest
 
@@ -38,25 +42,30 @@ def test_bootstrap_without_bash(tmp_path, manager, missing, failure):
         + ("exit 100\n" if failure == "package_install" else "")
         + (f"/bin/ln -sf {sys.executable} {bindir / 'python3'}\n" if "python3" in missing else ""),
     )
+    archive = tmp_path / "release.tar.gz"
+    from responses_api_agents.pool_agent import install_pool
+
+    binary = b"#!/bin/sh\necho 1.0.16\n"
+    with tarfile.open(archive, "w:gz") as release:
+        for target in install_pool.RELEASE_SHA256["v1.0.16"]:
+            member = tarfile.TarInfo(f"pool-{target}")
+            member.size = len(binary)
+            release.addfile(member, io.BytesIO(binary))
     executable(
         "curl",
         ("exit 22\n" if failure == "download" else "")
-        + """while [ "$1" != "-o" ]; do shift; done
-shift
-cat > "$1" <<'INSTALL'
-#!/bin/sh
-cat > "$POOL_INSTALL_DIR/pool" <<'BINARY'
-#!/bin/sh
-echo 1.0.16
-BINARY
-chmod +x "$POOL_INSTALL_DIR/pool"
-INSTALL
-""",
+        + 'while [ "$1" != "-o" ]; do shift; done\nshift\n'
+        + f'/bin/cp {quote(str(archive))} "$1"\n',
     )
     root = tmp_path / "session with spaces"
+    root.mkdir()
+    installer = Path(install_pool.__file__).read_text()
+    for checksum in install_pool.RELEASE_SHA256["v1.0.16"].values():
+        installer = installer.replace(checksum, hashlib.sha256(archive.read_bytes()).hexdigest())
+    (root / "install_pool.py").write_text(installer)
     script = Path(__file__).parents[1] / "install_pool.sh"
     result = subprocess.run(
-        ["/bin/sh", str(script), str(root), "v1.0.16"],
+        ["/bin/sh", str(script), str(root), "v1.0.16", "true"],
         env=os.environ | {"PATH": str(bindir), "TEST_ROOT": str(tmp_path)},
         capture_output=True,
         text=True,
@@ -68,7 +77,7 @@ INSTALL
     elif missing and failure == "package_install":
         expected = 100
     elif failure == "download":
-        expected = 22
+        expected = 1
     else:
         expected = 0
     assert result.returncode == expected, result.stderr
@@ -108,7 +117,7 @@ def test_old_python_fails_before_downloading_pool(tmp_path):
     python.chmod(0o755)
     root = tmp_path / "session"
     result = subprocess.run(
-        ["/bin/sh", str(Path(__file__).parents[1] / "install_pool.sh"), str(root), "v1.0.16"],
+        ["/bin/sh", str(Path(__file__).parents[1] / "install_pool.sh"), str(root), "v1.0.16", "true"],
         env=os.environ | {"PATH": str(bindir)},
         capture_output=True,
         text=True,
@@ -118,3 +127,14 @@ def test_old_python_fails_before_downloading_pool(tmp_path):
     assert result.returncode != 0
     assert "Pool requires Python >=3.8" in result.stderr
     assert not root.exists()
+
+
+@pytest.mark.parametrize("acceptance", [None, "false"])
+def test_shell_installer_requires_explicit_eula_before_bootstrap(tmp_path, acceptance):
+    command = ["/bin/sh", str(Path(__file__).parents[1] / "install_pool.sh"), str(tmp_path / "session"), "v1.0.16"]
+    if acceptance is not None:
+        command.append(acceptance)
+    result = subprocess.run(command, env={"PATH": str(tmp_path)}, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 1
+    assert "https://poolside.ai/eula" in result.stderr
+    assert not (tmp_path / "session").exists()
