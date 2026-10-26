@@ -15,7 +15,7 @@ description: >
 
 The Gym page [Add or Update a Harness](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx) is the contract and command reference. When it and this skill disagree, the page wins. This skill adds the order of work, the decisions to make before writing code, and the checks a harness must pass before it merges (Step 7). Read the linked sections; do not work from this summary alone.
 
-Words used below follow the page's [Terminology](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#terminology): the *harness* is the agent runtime, the *adapter* is the Agent Server that wraps it.
+Words used below follow the page's [Terminology](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#terminology): the *harness* is the agent runtime, the *adapter* is the Agent Server that wraps it. A *pairing* is one harness run on one benchmark: the adapter is the agent, the benchmark's Resources Server prepares and verifies the tasks, and a `single_agent_turn` Environment Server connects the two for each episode.
 
 ## Step 0: Scope before code
 
@@ -65,9 +65,9 @@ Check that each new test fails when you revert the behavior it covers. Run the a
 gym env test +entrypoint=responses_api_agents/<adapter_name>
 ```
 
-## Step 3: Compose a pairing
+## Step 3: Pair the harness with a benchmark
 
-Follow [Configure an experiment](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#configure-an-experiment) (separate model, benchmark, agent, and run configs) and the paired benchmark's README.
+Wire the adapter to the benchmark you named in Step 0 so that the benchmark's tasks run through the harness. Follow [Configure an experiment](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#configure-an-experiment) (separate model, benchmark, agent, and run configs) and the paired benchmark's README.
 
 - New pairings use typed tasksets: the benchmark's dataset declares `taskset`, `environment_server_routes` maps it to a `single_agent_turn` instance, and that instance's `agent_server` selects the harness.
 - Existing flat-row configs migrate to `single_agent_turn_legacy`. Name both `resources_server` and `agent_server` in its block.
@@ -88,13 +88,20 @@ A config that resolves and validates can still fail when its servers start. Read
 
 Read [Harness Conformance](../../../fern/versions/latest/pages/observability/harness-conformance.mdx) and the [Observability](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#observability) section.
 
-- **The probes apply** to a harness that offers the model a shell tool through function calling: the scripted replies call the shell tool listed in the request's `tools`. Register the harness as the [runner guide](../../../scripts/harness_conformance/README.md) describes: an entry in `registry.HARNESSES`, its runtime install in `ci.install_runtime`, and its episode configuration. The registry key is the adapter's directory name without `_agent`. The provider drives only the shell-tool names and argument shapes that `provider.Probe._tool` accepts, and the probes give the adapter its own local sandbox rather than a borrowed one. If the harness's shell tool differs, extend `provider.Probe._tool` (and `_finish` for a finish tool) as the guide says. Run on Linux with a new output directory:
+- **The probes apply** to a harness that offers the model a shell tool through function calling: the scripted replies call the shell tool listed in the request's `tools`. Register the harness as the [runner guide](../../../scripts/harness_conformance/README.md) describes: an entry in `registry.HARNESSES`, its runtime install in `ci.install_runtime`, and its episode configuration. The registry key is the adapter's directory name without `_agent`. The probes give the adapter its own local sandbox rather than a borrowed one. Run on Linux with a new output directory:
 
   ```bash
   python scripts/run_harness_conformance.py --harness <registry-key> --output <new-dir>
   ```
 
-  Fix each failing check in the adapter, not in the checker, then rerun the failed scenarios and the full suite. [Read individual results](../../../fern/versions/latest/pages/observability/harness-conformance.mdx#read-individual-results) explains each output file.
+  Sort each failure by where it comes from, and change only that side:
+
+  - **The harness or adapter failed** (exit code 1: a scenario or evidence check is `not_fulfilled`, and the saved output really breaks the scenario's prescribed behavior or the [Rollout Evidence](../../../fern/versions/latest/pages/observability/rollout-evidence.mdx) contract). This is the usual case. Fix the adapter or the harness settings. Never edit a check, a scenario's expectations, or the scripted replies to make a harness pass. If no adapter change can make the harness meet a check (for example, its runtime never retries a 429), leave the failure visible, report it in the PR as a known limit, and do not claim a capability level that needs it.
+  - **The probes cannot drive the harness** (a `probe_protocol_error` under `violations` in the scenario's `witness.json`, such as "harness did not advertise a supported shell tool"). The scripted provider accepts only some shell-tool names and argument shapes. In the same PR, extend `provider.Probe._tool`, and `_finish` for a finish tool, to recognize the harness's tool. Change only how the tool is recognized, not what the scenarios expect.
+  - **The run did not complete** (exit code 2: execution, dependency, input, or checker errors). Fix the setup: the runtime install, the episode configuration, or the Linux host. If the runner or checker crashes on valid output, treat it as the next case.
+  - **The conformance code is wrong**: a check fails output that the scenario and the Rollout Evidence contract allow, or the runner or checker crashes on it. Show the exact check, the saved output, and the contract text that allows it. Fix the conformance code in a separate PR with a regression test (`python -m pytest scripts/harness_conformance/tests tests/unit_tests/harness_capabilities -q`), and never change it to suit one harness. Until it merges, the harness PR reports the failure and links that PR.
+
+  CI reruns the probes for every registered harness when anything under `scripts/harness_conformance/` changes, so check that the other harnesses still pass after a provider change. Rerun the failed scenarios, then the full suite. The runner guide's [Results](../../../scripts/harness_conformance/README.md#results) section explains each output file, and [Read individual results](../../../fern/versions/latest/pages/observability/harness-conformance.mdx#read-individual-results) explains the check kinds.
 - **The probes do not apply** to a harness without a function-calling shell tool, including one that runs commands it reads from the model's text. Say so in the PR; Steps 2 and 5 carry the evidence.
 
 ## Step 5: Real pairing runs
