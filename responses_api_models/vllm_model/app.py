@@ -28,6 +28,7 @@ from typing import Any, Awaitable, ClassVar, Dict, List, Literal, Optional, Unio
 from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
+from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym._checkpoint.model import note_generation_backend, note_generation_request
@@ -61,6 +62,7 @@ from nemo_gym.responses_converter import (
 from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import SESSION_ID_KEY, _redacted_url, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
+    capture_engine_refusal,
     current_capture_context,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
@@ -160,8 +162,8 @@ def _length_refusal_category(
     return "context_length_exceeded"
 
 
-def _mark_propagated_overflow(error: ClientResponseError) -> None:
-    """Mark a length refusal the server propagates, with the envelope code chosen for it.
+def _mark_propagated_overflow(error: ClientResponseError) -> str | None:
+    """Mark a length refusal the server propagates, and return the envelope code chosen for it.
 
     A body that names the context window gets OpenAI's ``context_length_exceeded``, which tells
     an OpenAI-compatible harness to compact its history and retry. A body that only names the
@@ -170,11 +172,9 @@ def _mark_propagated_overflow(error: ClientResponseError) -> None:
     so the ``None`` code marks the error all the same.
     """
     message = error.response_content.decode(errors="replace")
-    setattr(
-        error,
-        PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
-        CONTEXT_LENGTH_EXCEEDED_ERROR_CODE if _names_context_window(message) else None,
-    )
+    code = CONTEXT_LENGTH_EXCEEDED_ERROR_CODE if _names_context_window(message) else None
+    setattr(error, PROPAGATED_REFUSAL_CODE_ATTRIBUTE, code)
+    return code
 
 
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
@@ -711,13 +711,18 @@ class VLLMModel(SimpleResponsesAPIModel):
         # Chat Completion Create Params -> Chat Completion
         chat_completion_response = await self.chat_completions(request, chat_completion_create_params)
 
-        return self._converter.chat_completion_to_response(
+        response = self._converter.chat_completion_to_response(
             responses_create_params=body,
             chat_completion=chat_completion_response,
             # Keep the backend envelope id only for captured requests. Terminal
             # attribution matches it to the ledger row.
             preserve_envelope_id=self._preserve_envelope_id(),
         )
+
+        execution = getattr(request.state, "nemo_gym_model_execution", {})
+        if isinstance(execution, dict) and execution.get("local_response_reason") == "context_length_exceeded":
+            response.metadata = {**(response.metadata or {}), "nemo_gym_context_window_exceeded": "true"}
+        return response
 
     def _apply_sampling_overrides(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Force ``config.sampling_overrides`` onto an outbound body, in place.
@@ -1294,9 +1299,21 @@ class VLLMModel(SimpleResponsesAPIModel):
                 category = _length_refusal_category(e, body_dict)
                 execution["error_category"] = category
                 if self.config.propagate_context_overflow_errors:
-                    _mark_propagated_overflow(e)
+                    # The refused call generated nothing and gets no token record; the refusal
+                    # record resolves the capture intent registered before dispatch.
+                    await capture_engine_refusal(_mark_propagated_overflow(e))
                     raise
                 res = self._create_empty_chat_completion()
+                # The backend rejected this request before model execution. Preserve
+                # known zero usage instead of making multi-call totals unknown.
+                # Input usage counts processed tokens, not the rejected prompt length.
+                res.usage = CompletionUsage(
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    total_tokens=0,
+                    prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
+                    completion_tokens_details=CompletionTokensDetails(reasoning_tokens=0),
+                )
                 res.choices[0].finish_reason = "length"
                 execution.update(response_source="local", local_response_reason=category)
                 return res
@@ -1643,9 +1660,21 @@ class VLLMModel(SimpleResponsesAPIModel):
                 category = _length_refusal_category(e, completion_body, completions_api=True)
                 execution["error_category"] = category
                 if self.config.propagate_context_overflow_errors:
-                    _mark_propagated_overflow(e)
+                    # The refused call generated nothing and gets no token record; the refusal
+                    # record resolves the capture intent registered before dispatch.
+                    await capture_engine_refusal(_mark_propagated_overflow(e))
                     raise
                 res = self._create_empty_chat_completion()
+                # The backend rejected this request before model execution. Preserve
+                # known zero usage instead of making multi-call totals unknown.
+                # Input usage counts processed tokens, not the rejected prompt length.
+                res.usage = CompletionUsage(
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    total_tokens=0,
+                    prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
+                    completion_tokens_details=CompletionTokensDetails(reasoning_tokens=0),
+                )
                 res.choices[0].finish_reason = "length"
                 execution.update(response_source="local", local_response_reason=category)
                 return res
