@@ -177,6 +177,22 @@ When metrics export is active at client construction, Gym uses `QueueTimedTCPCon
 connection attempts and measure queue waits. Otherwise, Gym uses aiohttp's `TCPConnector` directly
 without collecting these metrics.
 
+### Listen Backlog
+
+`uvicorn_backlog` sets how many new connections the kernel queues for each Gym server before the server accepts them.
+It applies to the head server, every agent, model, environment, and resources server, and the private sockets that
+the workers of a multi-worker server use to forward requests to each other. The default is 16384:
+
+```yaml
+uvicorn_backlog: 16384
+```
+
+When the queue is full, the kernel drops new connection attempts, and each client waits on TCP retransmission backoff
+(1, 3, 7, 15, and 31 seconds) before its request reaches the server. Size the backlog for the largest burst of new
+connections a server receives, which can approach the callers' `global_aiohttp_connector_limit_per_host`.
+
+The kernel caps the backlog at `net.core.somaxconn`, so raise that setting on hosts with a lower value.
+
 ### Reverse Proxy Headers
 
 Gym disables Uvicorn proxy-header processing by default. Direct Gym traffic does not pass through a reverse proxy, so
