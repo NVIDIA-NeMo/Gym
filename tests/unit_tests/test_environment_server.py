@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from typing import Any
+import re
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import anyio
@@ -89,6 +90,24 @@ def _environment_server(**config_overrides: Any) -> _EnvironmentServer:
     config_values.update(config_overrides)
     config = BaseEnvironmentServerConfig(**config_values)
     return _EnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+@pytest.mark.parametrize(
+    "declarations, error",
+    [
+        ({"checkpoint_mode": "stateless"}, "checkpoint_mode='stateless'"),
+        ({"checkpoint_mode": "exportd"}, "checkpoint_mode='exportd'"),
+    ],
+)
+def test_an_environment_server_with_an_unknown_checkpoint_declaration_fails_at_startup(
+    declarations: dict[str, Any], error: str
+) -> None:
+    annotations = {name: ClassVar[Any] for name in declarations}
+    server_type = type("Declared", (_EnvironmentServer,), {**declarations, "__annotations__": annotations})
+    config = _environment_server().config
+
+    with pytest.raises(ValueError, match=re.escape(error)):
+        server_type(config=config, server_client=MagicMock(spec=ServerClient)).setup_webserver()
 
 
 def test_environment_server_binds_concrete_schema_and_rejects_invalid_input() -> None:
@@ -421,7 +440,7 @@ async def test_the_episodes_of_a_protocol_without_boundaries_are_restarts(record
     started, release = asyncio.Event(), asyncio.Event()
 
     class _Blocking(_EnvironmentServer):
-        checkpoint_boundaries = records_boundaries
+        checkpoint_mode = "exported" if records_boundaries else "restart_only"
 
         async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
             started.set()
@@ -451,7 +470,7 @@ async def test_a_refused_duplicate_run_leaves_the_live_episode_tracked() -> None
     started, release = asyncio.Event(), asyncio.Event()
 
     class _Blocking(_EnvironmentServer):
-        checkpoint_boundaries = True
+        checkpoint_mode = "exported"
 
         async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
             started.set()
@@ -478,7 +497,7 @@ async def test_an_episode_is_untracked_even_if_its_cleanup_is_cancelled() -> Non
     from nemo_gym._checkpoint.environment import EnvironmentParticipant
 
     class _CancelledCleanup(_EnvironmentServer):
-        checkpoint_boundaries = True
+        checkpoint_mode = "exported"
 
         async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
             async def cancelled() -> None:
