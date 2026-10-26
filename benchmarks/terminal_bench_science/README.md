@@ -342,41 +342,20 @@ resources_servers/terminal_bench_4/.venv/bin/python -m benchmarks.terminal_bench
   --task-names mri-harmonization eeg-erp-recovery
 ```
 
-To reproduce the leaderboard's Codex setup (catalog model, `--effort max`) against an OpenAI
-Responses endpoint, Codex's requests must reach it unchanged: for a catalog model,
-Codex 0.155.1 sends its tools as code-mode `additional_tools` items and newer efforts such as
-`max`; Gym's typed Responses path keeps only the function tools among those items and rejects
-the effort. Use `openai_model` with
-`responses_stream_passthrough: true`, then confirm `reasoning.effort` in the captured model
-calls (`++observability_enabled=true ++model_call_capture_dir=/abs/dir`):
-
-```yaml
-# run config, with --model-type openai_model --model <served name> --model-url <endpoint>
-policy_model:
-  responses_api_models:
-    openai_model:
-      responses_stream_passthrough: true
-      # Codex's own timers govern each call, as when it calls the endpoint directly.
-      upstream_request_timeout_seconds: null
-tbsci_codex_model: gpt-6-astra
-tbsci_reasoning_effort: max
-tbsci_model_server_forwards_reasoning_effort: true
-```
-
 ### Codex with DeepSeek V4.1 Flash
 
 `codex_deepseek_flash.yaml` is the run config for the leaderboard's DeepSeek V4.1 Flash / Codex /
 effort max row with a self-hosted model: Codex `0.154.0` with no model catalog, effort `max` and
-the full 8-hour budget. Sampling and output limits belong to the endpoint; Codex sends none.
-With it, 70 tasks with three trials each (`++num_repeats=3`) scored 31/210 (14.8%), against the
-leaderboard row's 33/210 (15.7%).
+the full 8-hour budget. Sampling and output limits belong to the chat-completions server; Codex
+sends none.
 
-It expects an OpenAI Responses endpoint that serves the model as `deepseek-flash`, in front of a
-chat-completions server for the model (vLLM with DeepSeek's tokenizer, tool and reasoning
-parsers). Gym's `vllm_model` can be that endpoint with these settings (#PR6 and #4880):
+Gym's `vllm_model` is the policy model server (#PR6, with #4880's custom-tool bridge). Codex sends
+its Responses requests to it, and it turns them into chat completions for a server that serves the
+model as `deepseek-flash` (vLLM with DeepSeek's tokenizer, tool and reasoning parsers). The run
+config sets:
 
 ```yaml
-# vllm_model in front of the chat-completions server
+# vllm_model, the policy model server
 custom_tool_strategy: function_bridge      # Codex's freeform apply_patch as a function tool
 drop_custom_tools: false                   # dropping would run before the bridge
 drop_hosted_tools: true                    # tools the chat server cannot run
@@ -386,20 +365,27 @@ inline_tool_output_images: true            # view_image output, for a vision mod
 stream_keepalive_s: 15                     # under Codex's 300-second stream idle timeout
 ```
 
-Pass the endpoint and its key as overrides: `--model-url` is the endpoint's `/v1` base URL,
-and the key comes from `POLICY_API_KEY` (or the variable named by `++tbsci_model_api_key_env`).
-Load the file with `--config` and no `--model-type`:
+Each call reaches the server with `X-Request-Id: <rollout id>-<8 hex>`, so a router in front of
+several replicas can keep a rollout's calls together.
+
+Earlier runs put an `openai_model` relay in front of a separate `vllm_model` with these settings.
+On a local test rig the two setups send the chat-completions server the same requests, field for
+field apart from per-call ids. That earlier setup scored 31/210 (14.8%) over 70 tasks with three
+trials each (`++num_repeats=3`), against the leaderboard row's 33/210 (15.7%).
+
+Pass the server and its key as overrides: `--model-url` is the server's `/v1` base URL, and the
+key comes from `POLICY_API_KEY` (or the variable named by `++tbsci_model_api_key_env`). Load the
+file with `--config` and no `--model-type`:
 
 ```sh
-export POLICY_API_KEY=...  # any string if the endpoint has no auth
+export POLICY_API_KEY=...  # any string if the server has no auth
 gym eval run --config benchmarks/terminal_bench_science/codex_deepseek_flash.yaml \
-  --split benchmark --model-url http://ENDPOINT_HOST:PORT/v1 \
+  --split benchmark --model-url http://SERVER_HOST:PORT/v1 \
   --output results/tbsci-deepseek/rollouts.jsonl --concurrency 8 ++default_host=GYM_HOST_IP
 ```
 
-Codex's requests then match those of a plain `codex exec` launch with the same `config.toml`
-model settings, as Harbor 0.24 starts it: `openai_model` relays them unchanged with no time
-limit of its own, the agent leaves Codex's feature defaults alone
+Codex's requests match those of a plain `codex exec` launch with the same `config.toml` model
+settings, as Harbor 0.24 starts it: the agent leaves Codex's feature defaults alone
 (`features: {multi_agent: null, code_mode: null}`, so the multi-agent tools stay), and sandbox
 sessions run Codex without `--ephemeral`, which keeps its goal tools. Gym's own `config.toml`
 keys (provider name, update checks, analytics, history) do not change the requests.

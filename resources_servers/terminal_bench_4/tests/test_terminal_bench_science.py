@@ -822,11 +822,23 @@ def test_codex_profile_composes_borrowing_resources_codex_and_the_environment_se
     assert (agent.verify_after_agent_error, agent.raise_oom_score_adj) == (True, True)
 
 
+# The README's vllm_model settings for Codex in front of a chat-completions server.
+CODEX_VLLM_MODEL_OPTIONS = {
+    "custom_tool_strategy": "function_bridge",
+    "drop_custom_tools": False,
+    "drop_hosted_tools": True,
+    "forward_unvalidated_reasoning_effort": True,
+    "drop_unrepresentable_request_fields": True,
+    "inline_tool_output_images": True,
+    "stream_keepalive_s": 15,
+}
+
+
 def test_codex_deepseek_flash_config_matches_the_reference_codex_launch(monkeypatch):
     run_config = OmegaConf.load(BENCHMARK_DIR / "codex_deepseek_flash.yaml")
     assert list(run_config.config_paths) == [
         "benchmarks/terminal_bench_science/codex.yaml",
-        "responses_api_models/openai_model/configs/openai_model.yaml",
+        "responses_api_models/vllm_model/configs/vllm_model.yaml",
     ]
     # A run config's own values win over the files it loads.
     config = OmegaConf.merge(OmegaConf.load(BENCHMARK_DIR / "codex.yaml"), run_config)
@@ -845,13 +857,12 @@ def test_codex_deepseek_flash_config_matches_the_reference_codex_launch(monkeypa
     assert resolved["inherit_sandbox_environment"] is True
     # Codex's own feature defaults, as a plain `codex exec` launch has them.
     assert agent["features"] == {"multi_agent": None, "code_mode": None}
-    # Codex's requests reach the endpoint as sent; the endpoint's 4xx reach Codex.
-    model = config.policy_model.responses_api_models.openai_model
-    assert model.responses_stream_passthrough is True
-    assert list(model.propagate_upstream_http_status_codes) == [400, 404, 413, 422]
-    # Gym adds no time limit of its own to a relayed call (openai_model's default is 30 minutes).
+    # vllm_model is the policy model server and turns Codex's requests into chat completions.
     loaded = _load_run_config(BENCHMARK_DIR / "codex_deepseek_flash.yaml")
-    assert loaded.policy_model.responses_api_models.openai_model.upstream_request_timeout_seconds is None
+    assert list(loaded.policy_model.responses_api_models) == ["vllm_model"]
+    model = OmegaConf.to_container(loaded.policy_model.responses_api_models.vllm_model)
+    assert (model["base_url"], model["model"]) == ("${policy_base_url}", "${policy_model_name}")
+    assert {key: model[key] for key in CODEX_VLLM_MODEL_OPTIONS} == CODEX_VLLM_MODEL_OPTIONS
     assert config.policy_model_name == "deepseek-flash"
     # The key comes from the environment variable the run names, POLICY_API_KEY by default.
     monkeypatch.setenv("POLICY_API_KEY", "default-variable")

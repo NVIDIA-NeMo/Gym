@@ -1,36 +1,41 @@
 # Terminal-Bench-Science v0.1 with Codex and a self-hosted DeepSeek V4.1 Flash, set up as the run that
 # reproduces the leaderboard's DeepSeek V4.1 Flash / Codex / effort max row: Codex 0.154.0 with no
-# model catalog, effort max, the full 8-hour agent budget, and an OpenAI Responses endpoint serving
-# the model as `deepseek-flash` in front of a chat-completions server (for example Gym's vllm_model
-# with its Codex options). Sampling and output limits belong to the endpoint; Codex sends none.
+# model catalog, effort max and the full 8-hour agent budget. Gym's vllm_model is the policy model
+# server: it turns Codex's Responses requests into chat completions for a chat-completions server
+# that serves the model as `deepseek-flash` (vLLM with DeepSeek's tokenizer, tool and reasoning
+# parsers). Sampling and output limits belong to that server; Codex sends none.
 # Load this file as a run config, without --model-type:
 #
-#   export POLICY_API_KEY=...  # the endpoint's key (any string if it has no auth)
+#   export POLICY_API_KEY=...  # the server's key (any string if it has no auth)
 #   gym eval run --config benchmarks/terminal_bench_science/codex_deepseek_flash.yaml \
-#     --split benchmark --model-url http://ENDPOINT_HOST:PORT/v1 --output OUT/rollouts.jsonl \
+#     --split benchmark --model-url http://SERVER_HOST:PORT/v1 --output OUT/rollouts.jsonl \
 #     --concurrency 8 ++default_host=GYM_HOST_IP
 #
-# --model-url is the endpoint's base URL, including /v1. ++tbsci_model_api_key_env=NAME reads the
-# key from another variable. See README.md, "Codex with DeepSeek V4.1 Flash".
+# --model-url is the chat-completions server's base URL, including /v1. ++tbsci_model_api_key_env=NAME
+# reads the key from another variable. See README.md, "Codex with DeepSeek V4.1 Flash".
 config_paths:
   - benchmarks/terminal_bench_science/codex.yaml
-  - responses_api_models/openai_model/configs/openai_model.yaml
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
 
-# The endpoint's served name (--model overrides it). Codex itself sees tbsci_codex_model.
+# The server's served name (--model overrides it). Codex itself sees tbsci_codex_model.
 policy_model_name: deepseek-flash
 policy_api_key: ${oc.env:${oc.select:tbsci_model_api_key_env,POLICY_API_KEY}}
 policy_model:
   responses_api_models:
-    openai_model:
-      # Relay Codex's requests as sent (effort max, multi-agent tools, include and reasoning
-      # fields), replacing only `model` with the served name.
-      responses_stream_passthrough: true
-      # Let Codex see the endpoint's 4xx (e.g. context length exceeded), not a generic 500.
-      propagate_upstream_http_status_codes: [400, 404, 413, 422]
-      # No time limit of Gym's own on a relayed call: Codex's stream idle timeout and retries govern
-      # it, as when Codex calls the endpoint directly, and a max-effort answer can take longer than
-      # the default 30 minutes.
-      upstream_request_timeout_seconds: null
+    vllm_model:
+      # Codex's freeform apply_patch as a function tool; dropping custom tools would run before the bridge.
+      custom_tool_strategy: function_bridge
+      drop_custom_tools: false
+      # Tools the chat server cannot run.
+      drop_hosted_tools: true
+      # Effort max, which the pinned OpenAI SDK does not list.
+      forward_unvalidated_reasoning_effort: true
+      # Codex's `include` and `reasoning.context: all_turns`.
+      drop_unrepresentable_request_fields: true
+      # view_image output, for a vision model.
+      inline_tool_output_images: true
+      # Under Codex's 300-second stream idle timeout while a long answer is generated.
+      stream_keepalive_s: 15
 
 # No model catalog: Codex runs `deepseek-flash` on its fallback model metadata.
 tbsci_codex_model: deepseek-flash
