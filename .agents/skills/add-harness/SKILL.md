@@ -23,10 +23,10 @@ Words used below follow the page's [Terminology](../../../fern/versions/latest/p
 2. **Pick the path.** Use [Choose a Path](../../../fern/versions/latest/pages/agent-server/index.mdx#choose-a-path). This skill covers an adapter that runs one agent turn per episode through `single_agent_turn`. An agent that runs its own multi-turn episode, simulated users, or several verify calls needs its own Environment Server instead.
 3. **Pick the execution model** and read [Select an execution mode](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#select-an-execution-mode).
    - *Sandboxed harness*: the harness runs inside the benchmark's task sandbox, supervised by `SandboxSession`. Models: `pi_agent` and `codex_agent` (CLIs), `hermes_agent` (a Python harness started through a shim).
-   - *In-process harness*: an SDK or framework that runs inside the Agent Server with its own tools. Models: `simple_agent` for the session hooks, `langchain_deepagents_agent` for a framework adapter that inherits them.
+   - *In-process harness*: an SDK or framework that runs inside the Agent Server with its own tools. Model: `simple_agent` for the seed hook and the session check at the top of `responses()`. Its close returns no bundle when model-call capture is off, so take the close fallback (a bundle with an `observation_capture_failed` gap) from `hermes_agent`. Do not copy `langchain_deepagents_agent`: it inherits the hooks, but its `responses()` does not check the session yet.
    - Host execution is optional. If the adapter offers it, keep it working and test it separately.
 4. **Pick the capability level.** Use [Choose the capabilities you need](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#choose-the-capabilities-you-need): Evaluation, Observability, Environment tools and task sandboxes, Training. The level decides which later checks apply. Write it down; it goes in the adapter README.
-5. **Name the first pairing.** Choose a benchmark whose Resources Server supports the session contract, and read its README (for example `benchmarks/terminal_bench_2_1/README.md`) for its run config and the harnesses it lists. Check that the harness's real behavior fits the tasks: a harness that only edits files cannot solve tasks that need commands run. A benchmark lists the agents it accepts in `allowed_agents`, and a new harness is not listed yet. During development, pass `--allow-unsupported-pairing` to `gym eval run`. Add the agent to `allowed_agents` in the same PR only after Step 5 passes, and ask the benchmark's owner to review that line. Do not edit the benchmark's data, prompts, or verifier to fit the harness.
+5. **Name the first pairing.** Choose a benchmark whose Resources Server supports the session contract, and read its README (for example `benchmarks/terminal_bench_2_1/README.md`) for its run config and the harnesses it lists. Check that the harness's real behavior fits the tasks: a harness that only edits files cannot solve tasks that need commands run. If the benchmark's Resources Server config declares `allowed_agents`, a new harness is not in it yet; a server that declares none accepts any harness. During development, pass `--allow-unsupported-pairing` to the command that starts the servers (Step 5). Add the agent to a declared `allowed_agents` in the same PR only after Step 5 passes, and ask the benchmark's owner to review that line. Do not edit the benchmark's data, prompts, or verifier to fit the harness.
 6. **Ask the user for what you cannot invent:** the pinned harness version and its runtime requirements, a model endpoint and its credentials (kept in `env.yaml`, never in committed config), a sandbox provider for sandboxed runs, and approval for downloads such as task images or benchmark data.
 
 ## Step 1: Build the adapter
@@ -88,7 +88,7 @@ A config that resolves and validates can still fail when its servers start. Read
 
 Read [Harness Conformance](../../../fern/versions/latest/pages/observability/harness-conformance.mdx) and the [Observability](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#observability) section.
 
-- **The probes apply** to a harness that offers the model a shell tool through function calling: the scripted replies call the shell tool listed in the request's `tools`. Register the harness under a short key as the [runner guide](../../../scripts/harness_conformance/README.md) describes: an entry in `registry.HARNESSES`, its runtime install in `ci.install_runtime`, and its episode configuration. Run on Linux with a new output directory:
+- **The probes apply** to a harness that offers the model a shell tool through function calling: the scripted replies call the shell tool listed in the request's `tools`. Register the harness as the [runner guide](../../../scripts/harness_conformance/README.md) describes: an entry in `registry.HARNESSES`, its runtime install in `ci.install_runtime`, and its episode configuration. The registry key is the adapter's directory name without `_agent`. The provider drives only the shell-tool names and argument shapes that `provider.Probe._tool` accepts, and the probes give the adapter its own local sandbox rather than a borrowed one. If the harness's shell tool differs, extend `provider.Probe._tool` (and `_finish` for a finish tool) as the guide says. Run on Linux with a new output directory:
 
   ```bash
   python scripts/run_harness_conformance.py --harness <registry-key> --output <new-dir>
@@ -112,14 +112,14 @@ python scripts/inspect_harness_conformance.py \
 ```
 
 - `--input` needs `--no-serve`. With a taskset config you can instead let `gym eval run` serve and pass `--split`, as [Configure an experiment](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#configure-an-experiment) shows; the benchmark README shows how its rows are prepared.
-- Add `--allow-unsupported-pairing` to `gym eval run` while the harness is not yet in the benchmark's `allowed_agents`.
+- While the harness is not yet in a declared `allowed_agents`, start the servers with `gym env start --config <run.yaml> --allow-unsupported-pairing`. With `--no-serve`, `gym eval run` checks the pairing against the running servers' configuration, so the flag has no effect there; it works on `gym eval run` only when that command serves.
 - Inspector flags: drop `--require-sandbox` for an in-process harness, and pass `--no-tools` when the pair dispatches no tools.
 
 Read the rollouts, not the exit code:
 
 - Reward, response, and failures sidecar for each task.
 - The agent closed before verification, and the sandbox owner cleaned up.
-- [Rollout health](../../../fern/versions/latest/pages/evaluation/rollout-health.mdx) counts: `unhealthy` is a finding; `unobserved` means missing evidence, which is expected only at the Evaluation level.
+- [Rollout health](../../../fern/versions/latest/pages/evaluation/rollout-health.mdx) counts: `unhealthy` is a finding; `unobserved` means a check lacked the evidence it reads. At the Evaluation level the turn checks are unobserved by design. At any level, name what each unobserved check was missing, for example a response without `usage` leaves the token-count check unobserved.
 
 Then show a second compatible pairing through configuration changes alone. For an upgrade, compare before and after with the same model, tasks, prompts, sampling, limits, image, verifier, and concurrency.
 
@@ -134,13 +134,13 @@ A harness merges only when it passes these checks. Put the evidence in the PR.
 | Check | What it asks | How to check |
 |---|---|---|
 | Unit tests | Session contract, refusals, close, retries, termination. | `gym env test +entrypoint=responses_api_agents/<adapter_name>` |
-| Conformance | Every applicable P0 check passes, or the PR explains why the probes do not apply. | `scripts/run_harness_conformance.py` report |
+| Conformance | From the Observability level up, every applicable P0 check passes, or the PR explains why the probes do not apply. | `scripts/run_harness_conformance.py` report |
 | Real pairing | Each claimed pairing produces rewards on a real model and tasks; the agent closes before verification; cleanup runs. | `rollouts.jsonl`, failures sidecar, server logs |
-| Health | Very few `unhealthy` rollouts; every `unobserved` count is explained by the capability level. | `quality_summary.json`, `gym eval health-check` |
-| Evidence | The saved rollouts pass the evidence check at the claimed capability level. | `scripts/inspect_harness_conformance.py` |
+| Health | Very few `unhealthy` rollouts; every `unobserved` count is explained by the capability level or a named missing input. | `quality_summary.json`, `gym eval health-check` |
+| Evidence | From the Observability level up, the saved rollouts pass the evidence check. At the Evaluation level they fail it by design: record the result and the gaps the close bundle declares. | `scripts/inspect_harness_conformance.py` |
 | Composition | A second pairing works through configuration alone. | Its run folder |
-| Pairing declared | The harness is in each paired benchmark's `allowed_agents`, reviewed by the benchmark's owner. | Benchmark config diff |
-| Catalog | The adapter README states the harness version, capability level, supported pairings, and limits. The [Sandboxed harnesses](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#sandboxed-harnesses) and [Tools](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#tools) tables, and each paired benchmark's README harness table, list the harness. | Docs diff |
+| Pairing declared | Where a paired benchmark's Resources Server declares `allowed_agents`, the harness is in it, reviewed by the benchmark's owner. | Resources Server config diff |
+| Catalog | The adapter README states the harness version, capability level, supported pairings, and limits. The [Tools](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#tools) table lists the harness; so do the [Sandboxed harnesses](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#sandboxed-harnesses) table for a sandboxed harness and each paired benchmark's README harness table, where one exists. | Docs diff |
 
 The [capability matrix](../../../fern/versions/latest/pages/reference/trajectory-capabilities.mdx) is published by CI from registered harnesses. A local `python -m scripts.harness_conformance.table` run is a preview only; do not commit its output.
 
