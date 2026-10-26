@@ -660,7 +660,8 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     # Sandbox sessions: return a failed run (nonzero or signalled exit, a terminal error, no terminal
     # assistant result) as a gradable `failed` response, as Harbor grades after any agent exit, when
     # the supervisor confirmed cleanup, the terminal error is not a transient model-endpoint failure,
-    # and the sandbox still runs and answers a command. Anything else stays an execution error.
+    # and the sandbox still runs and answers a command. A model error Pi reported itself keeps its
+    # classified cause for the outcome policy instead. Anything else stays an execution error.
     verify_after_agent_error: bool = False
 
     @field_validator("sandbox_env", mode="before")
@@ -1189,8 +1190,16 @@ class PiAgent(SimpleResponsesAPIAgent):
         if cleanup["timed_out"] and not stop_reasons and cleanup["error"] is None:
             execution_error = None
         error = execution_error or terminal_error
+        terminal = next((event for _, event in reversed(events) if event.get("type") == "agent_end"), {})
+        assistant = next((m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {})
+        reported_error = (
+            bool(error)
+            and not execution_error
+            and _reported_model_error(assistant, cleanup, will_retry=terminal.get("willRetry") is True)
+        )
         graded_error = None
-        if error and self.config.verify_after_agent_error:
+        # A failure Pi reported from the model endpoint is classified below, not graded here.
+        if error and not reported_error and self.config.verify_after_agent_error:
             graded_error = await self._gradable_agent_error(state, error, cleanup=cleanup)
             if graded_error is not None:
                 error = None
@@ -1267,11 +1276,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 )
             )
         if error:
-            terminal = next((event for _, event in reversed(events) if event.get("type") == "agent_end"), {})
-            assistant = next((m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {})
-            if not execution_error and _reported_model_error(
-                assistant, cleanup, will_retry=terminal.get("willRetry") is True
-            ):
+            if reported_error:
                 # Classify a failed compaction call, not the overflow it was recovering from.
                 return self.report_outcome(response, compaction_failure or assistant)
             raise RuntimeError(f"Pi agent failed: {error}")

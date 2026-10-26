@@ -160,7 +160,9 @@ uses all of them). Local calls ignore them.
   no terminal assistant result) as a gradable `failed` response (`incomplete` at the deadline; the error
   is in `metadata.graded_agent_error`), as Harbor grades after any agent exit, when cleanup is confirmed,
   the run's output was captured, its last error is not a transient model-endpoint failure (a retryable
-  API error, 429 or 5xx, or a lost connection) and the sandbox still runs and answers a command. Anything
+  API error, 429 or 5xx, or a lost connection) and the sandbox still runs and answers a command. A model
+  error OpenCode reported itself (an API error or context overflow on a completed turn) is not graded here:
+  it keeps its classified cause (`ng_agent_outcome`) for the Environment Server's outcome policy. Anything
   else stays an execution error and the episode is retried.
 
 ## Configuration compatibility

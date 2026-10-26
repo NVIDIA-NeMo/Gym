@@ -280,7 +280,8 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Sandbox sessions: return a failed run (a nonzero exit, an error on the last assistant turn, no
     # terminal assistant result) as a gradable `failed` response, as Harbor grades after any agent exit,
     # when the supervisor confirmed cleanup, the run's output was captured, its last error is not a
-    # transient model-endpoint failure, and the sandbox still runs and answers a command. Anything else
+    # transient model-endpoint failure, and the sandbox still runs and answers a command. A model error
+    # OpenCode reported itself keeps its classified cause for the outcome policy instead. Anything else
     # stays an execution error.
     verify_after_agent_error: bool = False
 

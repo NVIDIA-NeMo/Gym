@@ -2598,10 +2598,10 @@ def failed_events(error_message: str | None) -> str:
     [
         # Pi killed mid-turn (e.g. the OOM killer or an agent's pkill) while its sandbox still runs.
         ("killed", 200, "failed"),
-        # A deterministic provider rejection is graded; retrying would fail the same way.
-        ("bad_request", 200, "failed"),
-        # A transient endpoint failure Pi reported after its own retries: never graded here; the response carries
-        # its classified cause for the Environment Server's outcome policy, which retries the episode.
+        # Model errors Pi reported itself are never graded here; the response carries the classified cause for the
+        # Environment Server's outcome policy, which grades a provider rejection (retrying would fail the same way)
+        # and retries a transient endpoint failure.
+        ("bad_request", 200, '{"failure_kind":"model_request_error","status_code":400}'),
         ("endpoint", 200, '{"failure_kind":"model_transport_error"}'),
         ("endpoint_status", 200, '{"failure_kind":"model_request_error","status_code":502}'),
         # A lost sandbox: retried, never graded.
@@ -2651,7 +2651,7 @@ async def test_failed_run_is_graded_only_while_its_sandbox_runs(setup, case, sta
         if expected is not None:
             assert record["status"] == ("failed" if expected.startswith("{") else expected)
     probed = [call.args[0] for call in sandbox.exec.await_args_list if call.args[0] == "true"]
-    assert len(probed) == int(case in ("killed", "bad_request"))
+    assert len(probed) == int(case == "killed")
 
 
 @pytest.mark.parametrize(

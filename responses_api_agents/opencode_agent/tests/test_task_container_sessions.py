@@ -263,6 +263,9 @@ FETCH = {"name": "UnknownError", "data": {"message": "TypeError: fetch failed"}}
         ("rejected", 200, "failed"),
         # The budget ran out before the first model turn ended: graded as a timeout.
         ("timeout", 200, "incomplete"),
+        # A model error OpenCode reported itself (exit 1, a completed APIError turn): never graded here; the
+        # response carries the classified cause for the Environment Server's outcome policy.
+        ("reported", 200, '{"failure_kind":"model_request_error","status_code":400}'),
         # Transient endpoint failures after OpenCode's own retries, a lost sandbox, an unreadable run or
         # the setting off: retried, never graded.
         ("endpoint", 502, None),
@@ -287,6 +290,11 @@ def test_failed_run_is_graded_only_while_its_sandbox_runs(setup, tmp_path, case,
     elif case == "unreadable":
         sandbox.events = json.dumps({"messages": "not a list"})
         sandbox.result["return_code"] = 1
+    elif case == "reported":
+        export = json.loads(failed_export(sandbox, API_ERROR))
+        export["messages"][-1]["info"].pop("finish")
+        sandbox.events = json.dumps(export)
+        sandbox.result["return_code"] = 1
     else:
         error = {"rejected": API_ERROR, "endpoint": RETRYABLE, "reset": RESET, "fetch": FETCH}[case]
         sandbox.events = failed_export(sandbox, error)
@@ -294,7 +302,13 @@ def test_failed_run_is_graded_only_while_its_sandbox_runs(setup, tmp_path, case,
         capture_observations(sandbox, tmp_path)
     response, _, closed = run_session(agent, sandbox)
     assert response.status_code == status_code, response.text
-    if expected is not None:
+    if case == "reported":
+        body = response.json()
+        assert body["status"] == "failed"
+        assert body["error"]["message"].startswith("HTTP 400: ")
+        assert "graded_agent_error" not in body["metadata"]
+        assert body["metadata"]["ng_agent_outcome"] == expected
+    elif expected is not None:
         body = response.json()
         assert (body["status"], body["error"]) == (expected, None)
         assert "graded_agent_error" in body["metadata"]
