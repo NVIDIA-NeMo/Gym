@@ -422,8 +422,9 @@ class PlanBenchmarkConfig(PrepareBenchmarkConfig):
     Prepare one benchmark and write its plan: every task once, with a stable id and a digest of its input.
 
     The plan file's format is versioned and printed by `--schema`.
-    Benchmarks whose rows have no `task_id`/`problem_id`/`instance_id`, and benchmarks with a prompt template,
-    are refused.
+    Benchmarks whose rows have no `task_id`/`problem_id`/`instance_id` are refused.
+    A task's digest covers its prepared row. A prompt template (`prompt_config`) is applied when a run starts,
+    so it is not part of the digest.
 
     Examples:
 
@@ -473,11 +474,6 @@ def plan_benchmark() -> None:
             f"{[benchmark.name for benchmark in benchmarks]}."
         )
     benchmark = benchmarks[0]
-    if benchmark.dataset.prompt_config is not None:
-        raise ConfigError(
-            f"Benchmark {benchmark.name!r} declares a prompt template ({benchmark.dataset.prompt_config}); "
-            "plans do not support prompt templates yet."
-        )
 
     _prepare_datasets([benchmark], plan_config)
     rows = [json.loads(line) for line in benchmark.dataset.jsonl_fpath.read_text().splitlines() if line.strip()]

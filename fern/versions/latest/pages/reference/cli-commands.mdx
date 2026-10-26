@@ -776,9 +776,9 @@ gym eval prepare --benchmark aime24
 
 ### `gym eval plan`
 
-Prepare one benchmark and write its plan: every task once, sorted by task id, with a digest of the exact input a run receives. The plan stores ids and digests, not the inputs themselves. The format is versioned (`"schema": "nemo-gym.eval-plan.v1"`), only changes additively within a version, and is printed as JSON Schema by `--schema`.
+Prepare one benchmark and write its plan: every task once, sorted by task id, with a digest of its prepared row. The plan stores ids and digests, not the inputs themselves. The format is versioned (`"schema": "nemo-gym.eval-plan.v1"`), only changes additively within a version, and is printed as JSON Schema by `--schema`.
 
-Each task's id comes from its row's `task_id`, `problem_id` or `instance_id`, and its taskset is the dataset's declared `taskset` (the benchmark name when none is declared). Unlike `gym eval run`, there is no fallback to the row's position, so benchmarks without such a field are refused. Benchmarks with a prompt template (`prompt_config`) are not supported yet.
+Each task's id comes from its row's `task_id`, `problem_id` or `instance_id`, and its taskset is the dataset's declared `taskset` (the benchmark name when none is declared). Unlike `gym eval run`, there is no fallback to the row's position, so benchmarks without such a field are refused. The digest covers the row as the benchmark's prepare script writes it. A prompt template (`prompt_config`) is applied when a run starts, so editing the template does not change the digest.
 
 | Option | Description |
 | --- | --- |
