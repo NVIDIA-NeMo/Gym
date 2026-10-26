@@ -166,10 +166,9 @@ finish. For example, set `openclaw_agent.responses_api_agents.openclaw_agent.mod
 to `1200` for a 20-minute model-call limit. Increase the separate `timeout` and EnvironmentServer episode
 deadline when a task needs more total time; increasing those alone does not raise the model-idle limit.
 
-The installer supports Linux glibc on x86_64/aarch64 and musl on x86_64, with Python 3.8 or later for the
-supervisor. Session setup installs missing Python and Bash with apt-get or apk
-when running as root; otherwise preinstall Python 3.8+ and Bash. Existing tools
-are preserved. Node 22.19.0 and OpenClaw are installed under
+The installer supports Linux glibc on x86_64/aarch64 and musl on x86_64. The task image needs no Python:
+the supervisor and harness runner are Bash scripts. Session setup installs a missing Bash with apt-get or apk
+when running as root; otherwise preinstall Bash. Existing tools are preserved. Node 22.19.0 and OpenClaw are installed under
 `/tmp/nemo-gym-openclaw-node-22.19.0-<version>`. Node archives are checked against upstream SHA-256
 sums; the installed package version is verified before caching and when reusing a cached runtime.
 A version-scoped `flock` serializes runtime installation and cache validation across session setup
