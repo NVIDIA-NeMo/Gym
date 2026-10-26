@@ -158,36 +158,34 @@ def test_streaming_events_are_dropped_and_logs_go_to_the_given_paths(tmp_path):
         {"type": "message_start", "message": {"role": "assistant"}},
         {"type": "message_update", "message": {"role": "assistant", "content": "partial"}},
         {"type": "tool_execution_update", "toolCallId": "t", "partialResult": "out"},
+        # outcome.mjs writes its record to stdout from Pi's message_end handler, ahead of Pi's own line.
+        {"type": "ng_pi_outcome", "context_overflow": False},
         {"type": "message_end", "message": {"role": "assistant", "stopReason": "stop"}},
     ]
     code = (
         "import json,sys; "
         f"[print(json.dumps(line), flush=True) for line in {lines!r}]; "
-        "print('not json'); sys.stderr.write('pi stderr\\n'); "
-        "open(sys.argv[1], 'a').write(json.dumps({'type': 'ng_pi_outcome', 'context_overflow': True}) + '\\nbad\\n')"
+        "print('not json'); sys.stderr.write('pi stderr\\n')"
     )
     logs = tmp_path / "logs"
     logs.mkdir()
-    outcome = tmp_path / "outcome.jsonl"
     return_code = sandbox_runner.run(
         {
             "directory": str(tmp_path),
-            "command": [sys.executable, "-c", code, str(outcome)],
+            "command": [sys.executable, "-c", code],
             "cwd": str(tmp_path),
             "env": {},
             "prompt": "task input",
             "transcript": str(logs / "pi.txt"),
             "stderr": str(logs / "pi_stderr.txt"),
-            "outcome_log": str(outcome),
         }
     )
     assert return_code == 0
     recorded = [json.loads(line)[1]["type"] for line in (tmp_path / "events.jsonl").read_text().splitlines()]
-    # The outcome extension's records follow Pi's own events.
-    assert recorded == ["message_start", "message_end", "ng_pi_outcome"]
+    assert recorded == ["message_start", "ng_pi_outcome", "message_end"]
     transcript = (logs / "pi.txt").read_text().splitlines()
-    assert [json.loads(line)["type"] for line in transcript[:2]] == ["message_start", "message_end"]
-    assert transcript[2:] == ["not json"]
+    assert [json.loads(line)["type"] for line in transcript[:3]] == ["message_start", "ng_pi_outcome", "message_end"]
+    assert transcript[3:] == ["not json"]
     assert (logs / "pi_stderr.txt").read_text() == "pi stderr\n"
     assert not (tmp_path / "stderr.log").exists()
 

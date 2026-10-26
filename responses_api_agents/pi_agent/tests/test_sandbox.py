@@ -2520,7 +2520,6 @@ def test_direct_endpoint_session_runs_pi_as_a_task_container_harness(setup):
         assert (env["PI_OFFLINE"], env["GIT_PAGER"]) == ("1", "cat")
         assert env["NEMO_GYM_PI_PROMPT_CACHE_KEY"] == "pi-" + directory.rsplit("/", 1)[1]
         assert env["NEMO_GYM_PI_REQUEST_LOG"] == "/logs/agent/pi-requests.jsonl"
-        assert env["NEMO_GYM_PI_OUTCOME_LOG"] == payload["outcome_log"] == f"{directory}/outcome.jsonl"
         assert "gateway-key" not in json.dumps(payload)
         assert (payload["transcript"], payload["stderr"]) == ("/logs/agent/pi.txt", "/logs/agent/pi_stderr.txt")
         assert payload["raise_oom_score_adj"] is True

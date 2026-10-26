@@ -112,20 +112,7 @@ def run(params: dict) -> int:
                         break
             if pending:
                 capture(pending)
-            return_code = process.wait()
-            # Adapter records the outcome extension wrote while Pi ran (see outcome.mjs). They follow
-            # Pi's own events, so the last one describes the terminal assistant message.
-            outcome = Path(params["outcome_log"]) if params.get("outcome_log") else None
-            if outcome is not None and outcome.exists():
-                for line in outcome.read_bytes().split(b"\n"):
-                    try:
-                        event = json.loads(line.decode(errors="replace"))
-                    except (ValueError, RecursionError):
-                        continue
-                    if isinstance(event, dict) and event.get("type") == "ng_pi_outcome":
-                        events.write(json.dumps([time(), event]) + "\n")
-                events.flush()
-            return return_code
+            return process.wait()
         finally:
             # An I/O/capture error must not leave the CLI changing the task.
             # Only stop our direct CLI; task services belong to the sandbox owner.

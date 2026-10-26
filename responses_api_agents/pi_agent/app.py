@@ -972,8 +972,6 @@ class PiAgent(SimpleResponsesAPIAgent):
             "PI_SKIP_VERSION_CHECK": "1",
             "PI_TELEMETRY": "0",
             "NEMO_GYM_PI_BASH_TIMEOUT": str(self.config.sandbox_bash_timeout_seconds),
-            # Pi sends extension console output to stderr in JSON mode; outcome.mjs writes here instead.
-            "NEMO_GYM_PI_OUTCOME_LOG": f"{directory}/outcome.jsonl",
         }
         if "gym_mcp.mjs" in extensions:
             env["NEMO_GYM_PI_MCP_CONFIG"] = f"{directory}/mcp-servers.json"
@@ -990,7 +988,6 @@ class PiAgent(SimpleResponsesAPIAgent):
             "cwd": state.session.workdir,
             "env": env,
             "raise_oom_score_adj": self.config.raise_oom_score_adj,
-            "outcome_log": env["NEMO_GYM_PI_OUTCOME_LOG"],
             "transcript": f"{logs}/pi.txt" if logs else None,
             "stderr": f"{logs}/pi_stderr.txt" if logs else None,
         }

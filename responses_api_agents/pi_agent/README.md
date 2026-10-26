@@ -256,9 +256,7 @@ uses all of them):
   error and the episode is retried.
 
 Sandbox sessions drop Pi's streaming events (`message_update`, `tool_execution_update`), which repeat the
-whole partial message or tool output on every delta, before they reach the event log. In JSON mode Pi
-routes extension console output to stderr, so the outcome extension writes its records to a session file
-that the runner appends to the event log.
+whole partial message or tool output on every delta, before they reach the event log.
 
 ## Results and limits
 
