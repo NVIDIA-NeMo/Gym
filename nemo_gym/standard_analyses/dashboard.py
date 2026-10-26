@@ -14,9 +14,6 @@ def chart_specifications():
     def table(title, name, preset, **fields):
         return {"title": title, "table": name, "preset": preset, "fields": fields}
 
-    def bars(title, *metrics):
-        return {"title": title, "metrics": list(metrics)}
-
     return {
         "long_calls": [
             table(
@@ -56,46 +53,14 @@ def chart_specifications():
                 lineVal="lineVal",
             ),
         ],
-        "compaction_impact": [
-            table(
-                "Mean reasoning tokens per call: before vs after compaction",
-                "compaction_impact/detail",
-                "scatter",
-                x="mean_reasoning_before",
-                y="mean_reasoning_after",
-            ),
-        ],
         "pass_at_k": [
             table(
-                "Estimated pass@k by task",
+                "Aggregate pass@k (%)",
                 "pass_at_k/detail",
                 "line",
                 x="k",
-                y="pass_at_k",
-                stroke="task_id",
-            ),
-        ],
-        "runtime_tails": [
-            table(
-                "Median rollout wall time by task (seconds)",
-                "runtime_tails/detail",
-                "bar",
-                label="task_id",
-                value="median_wall_s",
-            ),
-        ],
-        "time_distribution": [
-            bars(
-                "Summed model and tool seconds (may overlap)",
-                "time_distribution/model_s",
-                "time_distribution/tool_s",
-            ),
-            table(
-                "Per-rollout model vs tool seconds",
-                "time_distribution/detail",
-                "scatter",
-                x="model_s",
-                y="tool_s",
+                y="pass_at_k_percent",
+                stroke="score",
             ),
         ],
     }
@@ -115,7 +80,7 @@ def build_chart(spec, *, namespace: str = "efficiency"):
         chart_fields=spec["fields"],
         chart_strings={
             "title": spec["title"],
-            **({"xname": "capture call index"} if spec["preset"] == "lineseries" else {}),
+            **({"xname": "trajectory call index"} if spec["preset"] == "lineseries" else {}),
         },
     )
     panel.chart_name = f"wandb/{spec['preset']}/v0"
@@ -135,8 +100,6 @@ def panel_specifications():
                 "repeat_excess/all_scored_excess_fraction",
             ),
             ("Observed excess / successful repeats", "repeat_excess/successful_excess_fraction"),
-            ("pass@1", "pass_at_k/pass_at_1"),
-            ("pass@4", "pass_at_k/pass_at_4"),
         ],
         "detail_tables": [f"efficiency/{fn.__name__}/detail" for fn in ANALYSES],
         "availability_table": "efficiency/availability",

@@ -777,6 +777,15 @@ ONLY_TASKS = Flag(
 )
 
 
+def _eval_analysis_workspace(args: argparse.Namespace, overrides: list[str]) -> None:
+    if overrides:
+        args._parser.error("analysis-workspace does not accept Hydra overrides")
+    from nemo_gym.standard_analyses.dashboard import build_workspace
+
+    workspace = build_workspace(args.entity, args.project, namespace=args.namespace)
+    print(workspace.save().url)
+
+
 def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
     expected_overrides = ["+verbose=true"] if args.verbose else []
     if args.json:
@@ -1350,6 +1359,19 @@ COMMANDS = {
                 "health-max-final-failure-fraction",
                 "health_check_max_final_failure_fraction",
                 "Run health limit for final (not retried) failures, as a share of expected rollouts (default: no limit).",
+            ),
+        ),
+    ),
+    "eval analysis-workspace": Command(
+        target=_eval_analysis_workspace,
+        summary="Create a W&B saved workspace for standard evaluation analyses.",
+        flags=(
+            Flag(register=lambda p: p.add_argument("--entity", required=True, help="W&B user or team.")),
+            Flag(register=lambda p: p.add_argument("--project", required=True, help="W&B project.")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--namespace", default="efficiency", help="Namespace from the analysis manifest."
+                )
             ),
         ),
     ),

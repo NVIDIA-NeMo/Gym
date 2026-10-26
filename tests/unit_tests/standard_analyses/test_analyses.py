@@ -3,13 +3,16 @@
 
 import json
 import math
-from dataclasses import replace
 
 import pytest
 
-from nemo_gym.standard_analyses import Call, Compaction, Options, Rollout, Tool, analyze
+from nemo_gym.standard_analyses import Call, Options, Rollout, analyze
 from nemo_gym.standard_analyses.models import Table
 from tests.unit_tests.standard_analyses.fixtures import demo_records
+
+
+def replace(record, **changes):
+    return type(record).model_validate({**record.model_dump(), **changes})
 
 
 def rollout(repeat=0, *, task="a", success=True, seconds=10, tokens=100, **kwargs):
@@ -23,7 +26,7 @@ def rollout(repeat=0, *, task="a", success=True, seconds=10, tokens=100, **kwarg
         config_id="policy-v1",
         success=success,
         capture_complete=True,
-        calls=(Call("c", 0, tokens, 20, duration_s=seconds),),
+        calls=(Call(id="c", index=0, output_tokens=tokens, reasoning_tokens=20, duration_s=seconds),),
         **kwargs,
     )
 
@@ -36,10 +39,10 @@ def test_brian_thresholds_use_call_time_and_output_including_reasoning_once():
     r = replace(
         rollout(),
         calls=(
-            Call("a", 0, 1000, 500, duration_s=1),
-            Call("b", 1, 2000, 1000, duration_s=3),
-            Call("c", 2, 10000, 3000, duration_s=6),
-            Call("d", 3, 12000, 11000, duration_s=10),
+            Call(id="a", index=0, output_tokens=1000, reasoning_tokens=500, duration_s=1),
+            Call(id="b", index=1, output_tokens=2000, reasoning_tokens=1000, duration_s=3),
+            Call(id="c", index=2, output_tokens=10000, reasoning_tokens=3000, duration_s=6),
+            Call(id="d", index=3, output_tokens=12000, reasoning_tokens=11000, duration_s=10),
         ),
     )
     a = result("long_calls", [r])
@@ -52,7 +55,7 @@ def test_brian_thresholds_use_call_time_and_output_including_reasoning_once():
 
 
 def test_missing_reasoning_is_unknown_and_does_not_become_zero():
-    r = replace(rollout(), calls=(Call("a", 0, 2000, None, duration_s=3),))
+    r = replace(rollout(), calls=(Call(id="a", index=0, output_tokens=2000, reasoning_tokens=None, duration_s=3),))
     a = result("long_calls", [r])
     assert a.metrics["output_gt_1000_call_fraction"] == 1
     assert a.metrics["reasoning_gt_1000_call_fraction"] is None
@@ -61,14 +64,16 @@ def test_missing_reasoning_is_unknown_and_does_not_become_zero():
 
 
 def test_reasoning_only_measurements_remain_available_with_output_unknown():
-    r = replace(rollout(), calls=(Call("a", 0, reasoning_tokens=2000, duration_s=3),))
+    r = replace(rollout(), calls=(Call(id="a", index=0, reasoning_tokens=2000, duration_s=3),))
     a = result("long_calls", [r])
     assert a.status == "partial"
     assert a.metrics["reasoning_gt_1000_call_fraction"] == 1
     assert a.metrics["output_gt_1000_call_fraction"] is None
 
 
-@pytest.mark.parametrize("kwargs", [{"max_rows": 1.5}, {"max_rows": True}, {"thresholds": (True,)}, {"pass_k": (0,)}])
+@pytest.mark.parametrize(
+    "kwargs", [{"max_rows": 1.5}, {"max_rows": True}, {"thresholds": (True,)}, {"thresholds": ()}]
+)
 def test_invalid_options_rejected(kwargs):
     with pytest.raises(ValueError):
         Options(**kwargs)
@@ -78,9 +83,9 @@ def test_time_share_denominator_needs_both_token_and_time_measurements():
     r = replace(
         rollout(),
         calls=(
-            Call("a", 0, 2000, duration_s=3),
-            Call("b", 1, None, duration_s=100),
-            Call("c", 2, 1, duration_s=1),
+            Call(id="a", index=0, output_tokens=2000, duration_s=3),
+            Call(id="b", index=1, output_tokens=None, duration_s=100),
+            Call(id="c", index=2, output_tokens=1, duration_s=1),
         ),
     )
     assert result("long_calls", [r]).metrics["output_gt_1000_time_fraction"] == 0.75
@@ -150,63 +155,12 @@ def test_incompatible_cohorts_never_compare(field, value):
 
 
 def test_cumulative_tokens_propagate_missing_measurements():
-    r = replace(rollout(), calls=(Call("a", 0, 3), Call("b", 1), Call("c", 2, 4)))
+    r = replace(
+        rollout(),
+        calls=(Call(id="a", index=0, output_tokens=3), Call(id="b", index=1), Call(id="c", index=2, output_tokens=4)),
+    )
     rows = result("token_accumulation", [r]).tables["detail"].rows
-    assert [r[8] for r in rows] == [3, None, None]
-
-
-def test_pass_at_k_estimator_and_task_specific_coverage():
-    rows = [rollout(i, success=i == 0) for i in range(4)] + [rollout(task="b")]
-    a = result("pass_at_k", rows)
-    assert a.metrics["pass_at_1"] == 0.625
-    assert a.metrics["pass_at_2"] == 0.5
-    assert a.metrics["pass_at_4"] == 1
-    assert a.metrics["pass_at_8"] is None
-    assert a.metrics["tasks_at_1"] == 2
-    assert a.metrics["tasks_at_2"] == 1
-
-
-def test_runtime_requires_real_wall_time_and_uses_one_median_per_task():
-    assert result("runtime_tails", [rollout()]).status == "unavailable"
-    rows = [rollout(0, wall_s=1), rollout(1, wall_s=3), rollout(task="b", wall_s=100)]
-    a = result("runtime_tails", rows)
-    assert a.metrics["task_wall_s_p90"] == pytest.approx(90.2)
-    assert a.tables["detail"].rows[0][0] == "b"
-    assert a.tables["detail"].rows[0][4] is True
-
-
-def test_parallel_call_time_is_not_agent_wall_time():
-    r = replace(
-        rollout(),
-        wall_s=10,
-        calls=(Call("a", 0, duration_s=10, started_at=0),),
-        tools=(Tool("t", duration_s=10, started_at=0),),
-    )
-    row = result("time_distribution", [r]).tables["detail"].rows[0]
-    assert row[2:7] == [10, 10, 0.5, 10, 10]
-
-
-def test_compaction_comparison_respects_invocation_and_adjacent_boundaries():
-    calls = tuple(
-        Call(str(i), i, 100, reasoning_tokens=v, invocation_id="main") for i, v in enumerate((10, 10, 20, 20, 40, 40))
-    )
-    r = replace(rollout(), calls=calls, compactions=(Compaction("main", "2"), Compaction("main", "4")))
-    a = result("compaction_impact", [r])
-    assert [row[8] for row in a.tables["detail"].rows] == [2, 2]
-    assert result("compaction_impact", [replace(r, compactions=(Compaction("other", "2"),))]).status == "unavailable"
-
-
-def test_model_tool_environment_errors_are_separate_observations():
-    r = replace(
-        rollout(),
-        calls=(Call("a", 0, duration_s=301, status="upstream_error"),),
-        tools=(Tool("t", status="timeout"),),
-        environment_status="oom",
-    )
-    a = result("system_flags", [r])
-    assert a.metrics["error_count"] == 3
-    assert a.metrics["slow_call_count"] == 1
-    assert {row[2] for row in a.tables["detail"].rows} == {"model", "tool", "environment"}
+    assert [r[7] for r in rows] == [3, None, None]
 
 
 def test_display_truncation_never_changes_aggregate_metrics():
@@ -228,14 +182,14 @@ def test_fixed_registry_supports_disable_and_rejects_unknown_names():
 @pytest.mark.parametrize("value", [-1, math.nan, math.inf, True])
 def test_invalid_measurements_rejected(value):
     with pytest.raises(ValueError):
-        Call("a", 0, duration_s=value)
+        Call(id="a", index=0, duration_s=value)
 
 
 def test_duplicate_calls_invalid_reasoning_and_table_width_rejected():
     with pytest.raises(ValueError, match="duplicate"):
-        replace(rollout(), calls=(Call("same", 0), Call("same", 1)))
+        replace(rollout(), calls=(Call(id="same", index=0), Call(id="same", index=1)))
     with pytest.raises(ValueError, match="exceed"):
-        Call("a", 0, 1, 2)
+        Call(id="a", index=0, output_tokens=1, reasoning_tokens=2)
     with pytest.raises(ValueError, match="width"):
         Table.build(["a"], [[1, 2]], 1)
 
@@ -246,3 +200,44 @@ def test_result_json_has_no_nan_and_is_order_independent():
     b = analyze(list(reversed(rows))).to_dict()
     assert a == b
     json.dumps(a, allow_nan=False)
+
+
+def test_pass_at_k_uses_aggregate_percentages_without_recomputing_outcomes():
+    metrics = {
+        "pass@1/accuracy": 25.0,
+        "pass@3/accuracy": 75.0,
+        "pass@1/continuous": 37.5,
+        "pass@1[avg-of-3]/accuracy": 25.0,
+    }
+    a = result("pass_at_k", [rollout(success=True)], aggregate_metrics=metrics)
+    assert a.status == "available"
+    assert a.tables["detail"].rows == [[1, "accuracy", 25.0], [3, "accuracy", 75.0], [1, "continuous", 37.5]]
+    assert a.metrics == {}
+    assert result("pass_at_k", [rollout()]).status == "unavailable"
+
+
+def test_unrelated_gaps_and_health_exclusions_do_not_mark_complete_evidence_partial():
+    rows = [
+        rollout(0, gaps=("compaction_summary_unavailable", "resolution_unavailable")),
+        rollout(1, seconds=20),
+        rollout(2, health="quarantined"),
+    ]
+    report = analyze(rows)
+    assert all(a.status == "available" for a in report.results if a.name != "pass_at_k")
+    assert all(a.coverage["rollouts_excluded_health"] == 1 for a in report.results)
+
+
+def test_effort_outliers_report_partial_when_one_dimension_is_missing():
+    a = result("effort_outliers", [rollout(seconds=None)])
+    assert a.status == "partial"
+    assert a.tables["detail"].rows[0][3:5] == [100, None]
+
+
+def test_removed_analyses_are_not_registered():
+    assert {a.name for a in analyze([rollout()]).results} == {
+        "long_calls",
+        "repeat_excess",
+        "effort_outliers",
+        "token_accumulation",
+        "pass_at_k",
+    }

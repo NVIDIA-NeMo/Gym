@@ -75,7 +75,7 @@ from nemo_gym.global_config import (
     resolve_dataset_agent,
     taskset_environment_server_name,
 )
-from nemo_gym.health.types import QUALITY_SUMMARY_FILENAME, ROLLOUT_VERDICTS_FILENAME
+from nemo_gym.health.types import QUALITY_SUMMARY_FILENAME, ROLLOUT_VERDICTS_FILENAME, HealthCheckResult
 from nemo_gym.orchestration.jobs import installed_gym_commit
 from nemo_gym.package_info import __version__
 
@@ -612,8 +612,12 @@ def e2e_rollout_collection():  # pragma: no cover
     health_check_enabled = (
         not rollout_collection_config.disable_aggregation and not rollout_collection_config.disable_health_check
     )
-    # This E2E entry point prints health only after its server-shutdown phase.
-    # The no-serve entry point calls the collection helper directly.
+    # CLI entrypoints finalize health and analyses once, including after collection errors.
+    # Defer the helper hooks so analyses use the final health verdicts.
+    analyses_enabled = (
+        rollout_collection_config.standard_analyses and not rollout_collection_config.disable_aggregation
+    )
+    rollout_collection_config.standard_analyses = False
     rollout_collection_config.disable_health_check = True
 
     print(
@@ -644,11 +648,16 @@ def e2e_rollout_collection():  # pragma: no cover
         # Before the server shutdown, so a run Slurm stops writes its summary within KillWait.
         # A failed or interrupted run reports health too, so its failed and missing rollouts are counted.
         try:
+            health_result = None
             if health_check_enabled:
                 # A custom driver keeps no landed keys, so its stopped run gets the full check.
-                _health_check_collected_rollouts(
+                health_result = _health_check_collected_rollouts(
                     output_fpath, rollout_collection_config, None if driver_path else rch._landed_keys
                 )
+            if analyses_enabled and not _terminated and output_fpath.exists():
+                from nemo_gym.standard_analyses.integration import analyze_collection
+
+                asyncio.run(analyze_collection(output_fpath, health_result=health_result))
         finally:
             rh.shutdown()
     _exit_if_terminated()
@@ -683,7 +692,9 @@ def _remove_health_reports(output_fpath: Path) -> None:
         (output_fpath.parent / report).unlink(missing_ok=True)
 
 
-def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_keys: set | None = None) -> None:
+def _health_check_collected_rollouts(
+    output_fpath: Path, config: Any, landed_keys: set | None = None
+) -> HealthCheckResult | None:
     """Write the quality summary for whatever a run collected; a run that never started collection has none.
 
     After SIGTERM, Slurm kills the job once KillWait (120 s on some clusters) is over, and the full check can take
@@ -718,6 +729,7 @@ def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_key
         logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
     else:
         print(format_health_report(health_result))
+        return health_result
 
 
 @exit_cleanly_on_config_error
@@ -734,6 +746,8 @@ def collect_rollouts():  # pragma: no cover
     config = RolloutCollectionConfig.model_validate(global_config_dict)
     rch = RolloutCollectionHelper()
     health_check_enabled = not config.disable_aggregation and not config.disable_health_check
+    analyses_enabled = config.standard_analyses and not config.disable_aggregation
+    config.standard_analyses = False
     config.disable_health_check = True  # Run once below, also when collection fails.
 
     # A standalone driver starts no supervisor, so it sets up its own telemetry for the `gym.job` span and driver metrics.
@@ -750,8 +764,14 @@ def collect_rollouts():  # pragma: no cover
         try:
             shutdown_telemetry()
         finally:
-            if health_check_enabled:
-                _health_check_collected_rollouts(Path(config.output_jsonl_fpath), config, rch._landed_keys)
+            output = Path(config.output_jsonl_fpath)
+            health_result = (
+                _health_check_collected_rollouts(output, config, rch._landed_keys) if health_check_enabled else None
+            )
+            if analyses_enabled and not _terminated and output.exists():
+                from nemo_gym.standard_analyses.integration import analyze_collection
+
+                asyncio.run(analyze_collection(output, health_result=health_result))
     _exit_if_terminated()
 
 

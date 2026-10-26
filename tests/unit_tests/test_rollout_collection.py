@@ -4847,6 +4847,13 @@ class TestRolloutCollection:
                 return None
 
         health_result = object()
+        analysis_calls = []
+
+        async def analyze_after_health(output, **kwargs):
+            run_health_checks.assert_called_once()
+            analysis_calls.append((output, kwargs))
+
+        monkeypatch.setattr("nemo_gym.standard_analyses.integration.analyze_collection", analyze_after_health)
         run_health_checks = MagicMock(return_value=health_result)
         format_health_report = MagicMock(return_value="health checks passed")
         monkeypatch.setattr(nemo_gym.rollout_health, "run_health_checks", run_health_checks)
@@ -4870,6 +4877,7 @@ class TestRolloutCollection:
             limits=RunHealthLimits(),
         )
         format_health_report.assert_called_once_with(health_result)
+        assert analysis_calls == [(output_fpath, {"health_result": health_result})]
 
     async def test_run_from_config_non_retaining_reads_artifacts_off_the_event_loop(
         self,
@@ -6368,6 +6376,8 @@ class TestRolloutCollection:
         monkeypatch.setattr(
             nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
         )
+        exported = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_metrics", exported)
         helper = RolloutCollectionHelper()
 
         rows = [{AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
@@ -6377,6 +6387,9 @@ class TestRolloutCollection:
 
         written = json.loads(metrics_fpath.read_text())
         assert written[0]["perf_summary"] == {"mean_num_turns": 3.0, "total_latency_mean_ms": 1000.0}
+
+        assert exported.call_args.args[0]["perf_summary/my_agent/total_latency_mean_ms"] == 1000.0
+        assert exported.call_args.args[0]["perf_summary/my_agent/mean_num_turns"] == 3.0
 
     async def test_call_aggregate_metrics_omits_perf_summary_when_absent(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

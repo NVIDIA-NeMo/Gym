@@ -7,14 +7,12 @@ from __future__ import annotations
 
 from .models import Options, Report, Rollout
 from .quality import (
-    compaction_impact,
     effort_outliers,
     long_calls,
     pass_at_k,
     repeat_excess,
     token_accumulation,
 )
-from .systems import runtime_tails, time_distribution
 
 
 ANALYSES = (
@@ -22,15 +20,16 @@ ANALYSES = (
     repeat_excess,
     effort_outliers,
     token_accumulation,
-    compaction_impact,
     pass_at_k,
-    runtime_tails,
-    time_distribution,
 )
 
 
 def analyze(
-    rollouts: list[Rollout], options: Options | None = None, *, disabled: tuple[str, ...] | list[str] = ()
+    rollouts: list[Rollout],
+    options: Options | None = None,
+    *,
+    disabled: tuple[str, ...] | list[str] = (),
+    aggregate_metrics: dict[str, float | int] | None = None,
 ) -> Report:
     """Analyze one run/benchmark/agent/model/config cohort. No network or SDK imports."""
     options = options or Options()
@@ -49,9 +48,13 @@ def analyze(
         raise ValueError("At least one rollout is required")
     if len({r.cohort for r in ordered}) != 1:
         raise ValueError("Analyze one run/benchmark/agent/model/config cohort at a time")
-    for r in ordered:
-        tool_indices = [(t.invocation_id, t.index) for t in r.tools if t.index is not None]
-        if len(tool_indices) != len(set(tool_indices)):
-            raise ValueError("Tool indices must be unique within an invocation")
     cohort = dict(zip(("run_id", "benchmark", "agent", "model", "config_id"), ordered[0].cohort))
-    return Report([fn(ordered, options) for fn in ANALYSES if fn.__name__ not in disabled], cohort, options)
+    return Report(
+        results=[
+            fn(ordered, options, metrics=aggregate_metrics) if fn is pass_at_k else fn(ordered, options)
+            for fn in ANALYSES
+            if fn.__name__ not in disabled
+        ],
+        cohort=cohort,
+        options=options,
+    )

@@ -5,16 +5,17 @@
 
 from __future__ import annotations
 
-import math
+import re
 from collections import defaultdict
 
 from .common import finish, mean, quantile, ratio
-from .models import AnalysisResult, Options, Rollout
+from .models import AnalysisResult, Options, Rollout, Table
 
 
 def long_calls(rollouts: list[Rollout], options: Options) -> AnalysisResult:
     calls = [c for r in rollouts if r.eligible for c in r.calls]
     rows, metrics = [], {}
+    charts = {name: [] for name in ("call", "time", "token")}
     for kind, field in (("output", "output_tokens"), ("reasoning", "reasoning_tokens")):
         measured = [c for c in calls if getattr(c, field) is not None]
         timed = [c for c in measured if c.duration_s is not None]
@@ -24,6 +25,9 @@ def long_calls(rollouts: list[Rollout], options: Options) -> AnalysisResult:
             count_fraction = ratio(len(long), len(measured))
             time_fraction = ratio(sum(c.duration_s for c in long_timed), sum(c.duration_s for c in timed))
             token_fraction = ratio(sum(getattr(c, field) for c in long), sum(getattr(c, field) for c in measured))
+            for label, value in (("call", count_fraction), ("time", time_fraction), ("token", token_fraction)):
+                if value is not None:
+                    charts[label].append([f"{kind} >{threshold}", value])
             rows.append(
                 [
                     kind,
@@ -44,7 +48,7 @@ def long_calls(rollouts: list[Rollout], options: Options) -> AnalysisResult:
             ):
                 metrics[f"{kind}_gt_{threshold}_{key}"] = value
     measured = sum(c.output_tokens is not None for c in calls)
-    return finish(
+    result = finish(
         "long_calls",
         "Long-output and long-reasoning shares of captured calls, time and tokens",
         rollouts,
@@ -66,7 +70,8 @@ def long_calls(rollouts: list[Rollout], options: Options) -> AnalysisResult:
         extra_coverage={
             "observations_missing": sum(
                 c.output_tokens is None or c.reasoning_tokens is None or c.duration_s is None for c in calls
-            ),
+            )
+            + sum(r.eligible and r.capture_complete is not True for r in rollouts),
             "calls_missing_output": len(calls) - measured,
             "calls_missing_reasoning": sum(c.reasoning_tokens is None for c in calls),
             "calls_missing_time": sum(c.duration_s is None for c in calls),
@@ -78,9 +83,17 @@ def long_calls(rollouts: list[Rollout], options: Options) -> AnalysisResult:
         ],
     )
 
+    result.tables.update(
+        {
+            f"{name}_share_table": Table.build(["threshold", "fraction"], values, options.max_rows)
+            for name, values in charts.items()
+        }
+    )
+    return result
+
 
 def token_accumulation(rollouts: list[Rollout], options: Options) -> AnalysisResult:
-    rows = []
+    rows, chart_rows = [], []
     measured = missing = 0
     for r in rollouts:
         if r.eligible:
@@ -94,13 +107,14 @@ def token_accumulation(rollouts: list[Rollout], options: Options) -> AnalysisRes
                 )
                 measured += c.output_tokens is not None
                 missing += c.output_tokens is None or c.reasoning_tokens is None
+                if output is not None:
+                    chart_rows.append([c.index, f"{r.task_id} / repeat {r.repeat}", output])
                 rows.append(
                     [
                         r.task_id,
                         r.repeat,
                         c.index,
                         c.id,
-                        c.invocation_id,
                         c.output_tokens,
                         c.reasoning_tokens,
                         c.input_tokens,
@@ -109,7 +123,7 @@ def token_accumulation(rollouts: list[Rollout], options: Options) -> AnalysisRes
                         r.success,
                     ]
                 )
-    return finish(
+    result = finish(
         "token_accumulation",
         "Per-call output and reasoning accumulation within each rollout",
         rollouts,
@@ -119,7 +133,6 @@ def token_accumulation(rollouts: list[Rollout], options: Options) -> AnalysisRes
             "repeat",
             "call_index",
             "call_id",
-            "invocation_id",
             "output_tokens",
             "reasoning_tokens",
             "input_tokens",
@@ -130,23 +143,31 @@ def token_accumulation(rollouts: list[Rollout], options: Options) -> AnalysisRes
         metrics={"calls_measured": measured},
         used=measured,
         options=options,
-        extra_coverage={"observations_missing": missing},
+        extra_coverage={
+            "observations_missing": missing + sum(r.eligible and r.capture_complete is not True for r in rollouts)
+        },
         notes=[
-            "Call index is capture order, not a semantic main-agent step or a causal order for parallel calls.",
+            "Call index is canonical trajectory order, not a semantic agent step or causal order for parallel calls.",
             "A missing token measurement makes subsequent cumulative totals unknown.",
         ],
     )
+
+    series = sorted({row[1] for row in chart_rows})[:24]
+    result.tables["chart_table"] = Table.build(
+        ["step", "lineKey", "lineVal"], [row for row in chart_rows if row[1] in series], options.max_rows
+    )
+    return result
 
 
 def repeat_excess(rollouts: list[Rollout], options: Options) -> AnalysisResult:
     tasks = defaultdict(list)
     eligible = [r for r in rollouts if r.complete_time and r.success is not None]
     for r in eligible:
-        tasks[r.task_id].append(r)
-    rows, metrics = [], {}
+        tasks[(r.task_id, str(r.stage))].append(r)
+    rows, chart_rows, metrics = [], [], {}
     for scope in ("all_scored", "successful"):
         observed, excess, extra_calls, compared_tasks = [], [], [], set()
-        for task, samples in sorted(tasks.items()):
+        for (task, stage), samples in sorted(tasks.items()):
             successes = [r for r in samples if r.success]
             if len(samples) >= 2 and successes and (scope == "all_scored" or len(successes) >= 2):
                 baseline = min(successes, key=lambda r: (r.model_s, r.repeat))
@@ -157,7 +178,9 @@ def repeat_excess(rollouts: list[Rollout], options: Options) -> AnalysisResult:
                     excess.append(delta)
                     extra = max(len(r.calls) - len(baseline.calls), 0)
                     extra_calls.append(extra)
-                    compared_tasks.add(task)
+                    compared_tasks.add((task, stage))
+                    if scope == "all_scored":
+                        chart_rows.append([f"{task} / repeat {r.repeat}", delta])
                     rows.append(
                         [
                             scope,
@@ -181,7 +204,7 @@ def repeat_excess(rollouts: list[Rollout], options: Options) -> AnalysisResult:
                 f"{scope}_mean_extra_calls": mean(extra_calls),
             }
         )
-    return finish(
+    result = finish(
         "repeat_excess",
         "Observed excess model-call effort versus the fastest successful repeat",
         rollouts,
@@ -203,7 +226,7 @@ def repeat_excess(rollouts: list[Rollout], options: Options) -> AnalysisResult:
         reason="Need two complete scored repeats of one task, including at least one success",
         extra_coverage={
             "rollouts_usable": len(eligible),
-            "observations_missing": len(rollouts) - len(eligible),
+            "observations_missing": sum(r.eligible for r in rollouts) - len(eligible),
         },
         notes=[
             "Same run, benchmark, agent, model and configuration. Baseline ties use repeat index.",
@@ -212,6 +235,11 @@ def repeat_excess(rollouts: list[Rollout], options: Options) -> AnalysisResult:
             "Requires declared complete capture; unknown completeness is excluded. Unknown health is reported separately.",
         ],
     )
+
+    result.tables["chart_table"] = Table.build(
+        ["task_repeat", "excess_model_s"], chart_rows, min(100, options.max_rows)
+    )
+    return result
 
 
 def effort_outliers(rollouts: list[Rollout], options: Options) -> AnalysisResult:
@@ -256,7 +284,7 @@ def effort_outliers(rollouts: list[Rollout], options: Options) -> AnalysisResult
         metrics={"output_tokens_p90": token_p90, "model_s_p90": model_p90},
         used=used,
         options=options,
-        extra_coverage={"observations_missing": len(eligible) - used},
+        extra_coverage={"observations_missing": sum(t is None or s is None for _, t, s in values)},
         notes=[
             "P90 is an inclusive linear quantile over complete eligible rollouts in this cohort.",
             "An outlier label identifies unusual effort, not unnecessary effort.",
@@ -264,109 +292,29 @@ def effort_outliers(rollouts: list[Rollout], options: Options) -> AnalysisResult
     )
 
 
-def pass_at_k(rollouts: list[Rollout], options: Options) -> AnalysisResult:
-    tasks = defaultdict(list)
-    for r in rollouts:
-        if r.eligible and r.success is not None:
-            tasks[r.task_id].append(r.success)
-    rows, metrics = [], {}
-    for k in options.pass_k:
-        estimates = []
-        for task, outcomes in sorted(tasks.items()):
-            n, c = len(outcomes), sum(outcomes)
-            if n >= k:
-                estimate = 1 - math.comb(n - c, k) / math.comb(n, k) if n - c >= k else 1.0
-                estimates.append(estimate)
-                rows.append([task, k, n, c, estimate, c / n])
-        metrics[f"pass_at_{k}"] = mean(estimates)
-        metrics[f"tasks_at_{k}"] = len(estimates)
+def pass_at_k(
+    rollouts: list[Rollout], options: Options, *, metrics: dict[str, float | int] | None = None
+) -> AnalysisResult:
+    """Display the environment's authoritative aggregate pass@k; never rescore rollouts."""
+    rows = []
+    for key, value in (metrics or {}).items():
+        match = re.fullmatch(r"pass@(\d+)/(.+)", key)
+        if match and isinstance(value, (float, int)):
+            rows.append([int(match[1]), match[2], value])
+    rows.sort(key=lambda row: (row[1], row[0]))
     return finish(
         "pass_at_k",
-        "Task difficulty and pass@k headroom from scored repeats",
+        "Pass@k percentages from Gym aggregate metrics",
         rollouts,
         rows=rows,
-        columns=["task_id", "k", "scored_repeats", "successes", "pass_at_k", "empirical_pass_rate"],
-        metrics=metrics,
+        columns=["k", "score", "pass_at_k_percent"],
+        metrics={},
         used=len(rows),
         options=options,
-        extra_coverage={"observations_missing": sum(r.eligible and r.success is None for r in rollouts)},
-        reason="Need scored binary outcomes; k requires at least k eligible repeats per task",
+        reason="No aggregate pass@k metrics with an unambiguous cohort binding",
         notes=[
-            "Unbiased estimator 1-C(n-c,k)/C(n,k), averaged equally over tasks eligible at each k.",
-            "Assumes exchangeable samples of the same policy/configuration. Adaptive retries violate that assumption.",
-            "Task cohorts can differ across k; compare tasks_at_k alongside the estimates.",
-        ],
-    )
-
-
-def compaction_impact(rollouts: list[Rollout], options: Options) -> AnalysisResult:
-    rows = []
-    missing = 0
-    for r in rollouts:
-        if r.eligible:
-            by_id = {c.id: c for c in r.calls}
-            boundaries = defaultdict(list)
-            for event in r.compactions:
-                call = by_id.get(event.after_call_id)
-                if call and call.invocation_id == event.invocation_id:
-                    boundaries[event.invocation_id].append(call.index)
-                else:
-                    missing += 1
-            for invocation, indices in sorted(boundaries.items()):
-                indices = sorted(set(indices))
-                calls = sorted((c for c in r.calls if c.invocation_id == invocation), key=lambda c: c.index)
-                missing += sum(c.reasoning_tokens is None for c in calls)
-                for i, boundary in enumerate(indices):
-                    low = indices[i - 1] if i else -1
-                    high = indices[i + 1] if i + 1 < len(indices) else math.inf
-                    before = [
-                        c.reasoning_tokens
-                        for c in calls
-                        if low <= c.index < boundary and c.reasoning_tokens is not None
-                    ]
-                    after = [
-                        c.reasoning_tokens
-                        for c in calls
-                        if boundary <= c.index < high and c.reasoning_tokens is not None
-                    ]
-                    missing += int(not before or not after)
-                    rows.append(
-                        [
-                            r.task_id,
-                            r.repeat,
-                            invocation,
-                            boundary,
-                            len(before),
-                            len(after),
-                            mean(before),
-                            mean(after),
-                            ratio(mean(after), mean(before)) if before and after else None,
-                        ]
-                    )
-    used = sum(row[4] > 0 and row[5] > 0 for row in rows)
-    return finish(
-        "compaction_impact",
-        "Reasoning before and after explicitly joined compaction boundaries",
-        rollouts,
-        rows=rows,
-        columns=[
-            "task_id",
-            "repeat",
-            "invocation_id",
-            "after_call_index",
-            "calls_before",
-            "calls_after",
-            "mean_reasoning_before",
-            "mean_reasoning_after",
-            "after_before_ratio",
-        ],
-        metrics={"comparable_boundaries": used},
-        used=used,
-        options=options,
-        extra_coverage={"observations_missing": missing},
-        reason="Need explicit compaction boundaries, invocation ownership and reasoning token measurements",
-        notes=[
-            "Comparison windows stop at adjacent compactions in the same invocation.",
-            "Observed association; context, task phase and sample selection can confound the comparison.",
+            "Uses the environment's aggregate results and its masking, failure and missing-rollout policy.",
+            "Percentages (0–100). Health exclusions apply to effort diagnostics, not these benchmark scores.",
+            "Original scalar metrics remain under the environment's existing exporter keys.",
         ],
     )

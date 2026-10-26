@@ -48,11 +48,7 @@ def finish(
     }
     coverage.update(extra_coverage or {})
     status = "available" if used else "unavailable"
-    if used and (
-        coverage["rollouts_excluded_health"]
-        or any(r.gaps or (r.calls and r.capture_complete is not True) for r in rollouts if r.eligible)
-        or coverage.get("observations_missing", 0)
-    ):
+    if used and coverage.get("observations_missing", 0):
         status = "partial"
     return AnalysisResult(
         name=name,

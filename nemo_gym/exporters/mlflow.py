@@ -19,7 +19,7 @@ import re
 from itertools import batched
 from os import environ
 from time import gmtime, strftime, time
-from typing import Any, ClassVar, Iterator, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Iterator, Optional
 
 import orjson
 from mlflow import MlflowClient
@@ -35,6 +35,10 @@ from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.config_types import MLFlowConfig
 from nemo_gym.exporters.base import BaseExporter
+
+
+if TYPE_CHECKING:
+    from nemo_gym.standard_analyses.models import Report
 
 
 logger = logging.getLogger(__name__)
@@ -233,3 +237,15 @@ class MLflowExporter(BaseExporter):
         # set across environments. `log_table` appends when the artifact already exists.
         rows = [orjson.dumps(rollout).decode() for rollout in rollouts]
         client.log_table(run_id, data={"Rollout": rows}, artifact_file=self.ROLLOUTS_ARTIFACT_FILE)
+
+    def _log_standard_analyses(self, report: "Report", namespace: str) -> None:
+        client, run_id = self._active()
+        self._log_metrics(report.scalars(namespace=namespace))
+        client.log_dict(run_id, report.to_dict(), f"{namespace}/results.json")
+        for result in report.results:
+            for name, table in result.tables.items():
+                client.log_table(
+                    run_id,
+                    data={column: [row[i] for row in table.rows] for i, column in enumerate(table.columns)},
+                    artifact_file=f"{namespace}/{result.name}/{name}.json",
+                )

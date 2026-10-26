@@ -780,3 +780,33 @@ class TestMLflowResumedRunConfig:
         resumed_keys = [key for batch in client.logged_param_batches[first_segment_batches:] for key in batch]
         assert resumed_keys == ["num_repeats"]
         assert client.params["num_repeats"] == "4"
+
+
+def test_standard_analyses_fan_out_with_scalar_fallback(monkeypatch, wandb_config):
+    from nemo_gym.exporters import export_standard_analyses
+    from nemo_gym.standard_analyses import analyze
+    from tests.unit_tests.standard_analyses.fixtures import demo_records
+
+    _register_recording(monkeypatch)
+    exporter = setup_exporters(wandb_config)[0]
+    report = analyze(demo_records())
+    export_standard_analyses(report, namespace="efficiency/cohorts/example")
+    assert exporter.metrics == [(report.scalars(namespace="efficiency/cohorts/example"), None)]
+    assert not exporter.rollouts
+
+
+def test_mlflow_standard_analyses_export_scalars_tables_and_metadata(monkeypatch, mlflow_config):
+    from nemo_gym.standard_analyses import analyze
+    from tests.unit_tests.standard_analyses.fixtures import demo_records
+
+    exporter, client = _open_mlflow_exporter(monkeypatch, mlflow_config)
+    report = analyze(demo_records())
+    exporter.export_standard_analyses(report)
+    logged = {m.key: m.value for c in client.log_batch.call_args_list for m in c.kwargs.get("metrics", [])}
+    assert logged == report.scalars()
+    assert client.log_dict.call_args.args[1:] == (report.to_dict(), "efficiency/results.json")
+    tables = {c.kwargs["artifact_file"]: c.kwargs["data"] for c in client.log_table.call_args_list}
+    assert "efficiency/token_accumulation/chart_table.json" in tables
+    table = tables["efficiency/repeat_excess/chart_table.json"]
+    assert len(table["task_repeat"]) == 12
+    assert table["excess_model_s"][0] == 0

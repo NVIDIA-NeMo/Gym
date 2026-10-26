@@ -86,7 +86,8 @@ class BaseExporter(ABC):
         self._guard("standard analyses", self._log_standard_analyses, report, namespace)
 
     def _log_standard_analyses(self, report: "Report", namespace: str) -> None:
-        """Optional backend hook; existing backends remain compatible."""
+        """Scalar fallback for backends without analysis tables."""
+        self._log_metrics(report.scalars(namespace=namespace))
 
     def _guard(self, what: str, fn, *args) -> None:
         try:

@@ -1,171 +1,165 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Local canonical records and Gym capture/trajectory adapters. No service access."""
+"""Read Gym's canonical trajectories and health results into compact analysis cohorts."""
 
 from __future__ import annotations
 
-import json
-from dataclasses import fields
+import hashlib
+from collections import defaultdict
 from pathlib import Path
 
-from .models import Call, Compaction, Rollout, Tool
+import orjson
+from pydantic import ValidationError
+
+from nemo_gym.global_config import (
+    RESPONSE_KEY_NAME,
+    RESPONSES_CREATE_PARAMS_KEY_NAME,
+    REWARD_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+    TASK_SOURCE_KEY_NAME,
+    rollout_agent_label,
+    rollout_run_key,
+)
+from nemo_gym.health.types import HealthCheckResult, RolloutDigest
+from nemo_gym.rollout_observability import NG_TRAJECTORY_KEY, TrajectoryRecord
+
+from .models import Call, Rollout
 
 
-def _strict(cls, row):
-    unknown = set(row) - {f.name for f in fields(cls)}
-    if unknown:
-        raise ValueError(f"Unknown {cls.__name__} fields: {sorted(unknown)}")
-    return cls(**row)
+def _digest(value: object) -> str:
+    return hashlib.sha256(orjson.dumps(value, option=orjson.OPT_SORT_KEYS)).hexdigest()[:12]
 
 
-def from_dict(row: dict) -> Rollout:
-    row = dict(row)
-    for name, cls in (("calls", Call), ("tools", Tool), ("compactions", Compaction)):
-        row[name] = tuple(_strict(cls, x) for x in row.get(name, []))
-    row["gaps"] = tuple(row.get("gaps", []))
-    return _strict(Rollout, row)
+def from_gym(row: dict, *, run_id: str, health: RolloutDigest | None = None) -> tuple[Rollout, str | None, set[str]]:
+    """Project one persisted trajectory; payloads and harness join details stay out of reports.
 
-
-def _seconds(ms):
-    return ms / 1000 if ms is not None else None
-
-
-def from_gym(row: dict, *, run_id: str, benchmark: str, config_id: str) -> Rollout:
-    """One materialized evaluator rollout. Capture beats transcript copies."""
-    trajectory = row.get("ng_trajectory") or {}
-    capture = row.get("ng_model_call_capture")
-    bundle = row.get("ng_agent_observations") or {}
-    records = bundle.get("records", [])
-    gaps = [g.get("code", "unknown") for g in bundle.get("gaps", [])]
-    invocation_by_call = {}
-    for invocation in records + trajectory.get("invocations", []):
-        if invocation.get("kind") == "agent_invocation" or "conversation" in invocation:
-            for ref in invocation.get("model_calls", []):
-                cid = ref.get("model_call_id")
-                if cid:
-                    existing = invocation_by_call.get(cid)
-                    if existing is not None and existing != invocation["invocation_id"]:
-                        raise ValueError(f"Ambiguous invocation ownership for call {cid}")
-                    invocation_by_call[cid] = invocation["invocation_id"]
-    raw_calls = capture.get("calls", []) if capture is not None else trajectory.get("model_calls", [])
+    The returned model evidence is resolved across the collection by ``read_records``.
+    Invalid trajectory evidence leaves this rollout's measurements unavailable.
+    """
+    raw_trajectory = row.get(NG_TRAJECTORY_KEY)
+    trajectory = None
+    gaps = []
+    if raw_trajectory is not None:
+        try:
+            trajectory = TrajectoryRecord.model_validate(raw_trajectory)
+        except ValidationError:
+            gaps.append("trajectory_invalid")
     calls = []
-    for index, raw in enumerate(raw_calls):
-        if not raw.get("is_copied_context", False):
-            usage = raw.get("token_stats") or {}
-            meta = raw.get("response_metadata") or {}
-            cid = raw.get("model_call_id") or f"call:{index}"
-            status = raw.get("error_category") or meta.get("error_category")
-            if status is None:
-                code = raw.get("status_code", meta.get("status_code"))
-                status = (
-                    "error"
-                    if code is not None and code >= 400
-                    else (raw.get("finish_reason") or meta.get("finish_reason") or "unknown")
+    models = set()
+    if trajectory is not None:
+        gaps.extend(g.code for g in trajectory.gaps)
+        for index, call in enumerate(trajectory.model_calls):
+            if call.response_metadata.model:
+                models.add(call.response_metadata.model)
+            try:
+                calls.append(
+                    Call(
+                        id=call.model_call_id or f"call:{index}",
+                        index=index,
+                        output_tokens=call.token_stats.completion_tokens,
+                        reasoning_tokens=call.token_stats.reasoning_tokens,
+                        input_tokens=call.token_stats.prompt_tokens,
+                        duration_s=call.duration_ms / 1000 if call.duration_ms is not None else None,
+                    )
                 )
-            calls.append(
-                Call(
-                    id=cid,
-                    index=raw.get("call_index", index),
-                    output_tokens=raw.get("tokens_out", usage.get("completion_tokens")),
-                    reasoning_tokens=raw.get("tokens_reasoning", usage.get("reasoning_tokens")),
-                    input_tokens=raw.get("tokens_in", usage.get("prompt_tokens")),
-                    duration_s=_seconds(raw.get("latency_total_ms", raw.get("duration_ms"))),
-                    started_at=raw.get("started_at"),
-                    invocation_id=raw.get("client_session_id") or invocation_by_call.get(cid),
-                    status=status,
-                )
-            )
-    if capture is not None:
-        capture_gaps = [g.get("code", "unknown") for g in capture.get("gaps", [])]
-        gaps.extend(capture_gaps)
-        complete = bool(calls) and not any(g.startswith("model_call_capture_") for g in capture_gaps)
-    else:
-        # A trajectory may contain only the joined calls, so absence of gaps is
-        # insufficient to assert full model-call capture coverage.
-        complete = None
-        gaps.append("capture_completeness_unobserved")
-    tools = []
-    raw_tools = [r for r in records if r.get("kind") == "tool_call"]
-    if not raw_tools:
-        raw_tools = trajectory.get("tool_calls", [])
-    for raw in raw_tools:
-        tools.append(
-            Tool(
-                id=raw["tool_call_id"],
-                index=raw.get("index"),
-                name=raw.get("tool_name") or "unknown",
-                duration_s=_seconds(raw.get("duration_ms")),
-                started_at=raw.get("started_at"),
-                invocation_id=raw.get("invocation_id"),
-                status=raw.get("status", "unknown"),
-                action=raw.get("action"),
-                target=raw.get("target"),
-                content_hash=raw.get("content_hash"),
+            except ValidationError:
+                # Preserve the call in denominators, with invalid measurements unavailable.
+                gaps.append("model_call_measurements_invalid")
+                calls.append(Call(id=call.model_call_id or f"call:{index}", index=index))
+    capture = row.get("ng_model_call_capture")
+    complete = None
+    if isinstance(capture, dict):
+        gaps.extend(g.get("code", "unknown") for g in capture.get("gaps", []))
+        captured_ids = {c.get("model_call_id") for c in capture.get("calls", [])}
+        complete = (
+            bool(calls)
+            and captured_ids == {c.id for c in calls}
+            and not any(
+                g.startswith("model_call_capture_") or g in ("trajectory_invalid", "model_call_measurements_invalid")
+                for g in gaps
             )
         )
-    compactions = []
-    for raw in records:
-        if raw.get("kind") == "context_compaction" and raw.get("outcome") == "completed":
-            ref = raw.get("after_model_call") or {}
-            if ref.get("model_call_id"):
-                compactions.append(Compaction(raw["invocation_id"], ref["model_call_id"]))
-            else:
-                gaps.append("compaction_boundary_unjoined")
-    environments = [r.get("outcome", "unknown") for r in records if r.get("kind") == "sandbox"]
-    env_status = next((s for s in environments if s not in ("completed", "unknown")), "unknown")
-    if environments and all(s == "completed" for s in environments):
-        env_status = "completed"
-    reward = row.get("reward")
-    success = bool(reward) if reward in (0, 1) else None
-    if reward is not None and reward not in (0, 1):
-        gaps.append("nonbinary_reward_requires_success_policy")
-    task = row.get("_ng_task_index", row.get("task_id", row.get("task_index", trajectory.get("task_id"))))
-    repeat = row.get("_ng_rollout_index", row.get("rollout_index", row.get("repeat")))
+    task = row.get(TASK_INDEX_KEY_NAME)
+    repeat = row.get(ROLLOUT_INDEX_KEY_NAME)
     if task is None or repeat is None:
-        raise ValueError("Gym input requires task_id/task_index and rollout_index/repeat")
-    agent_ref = row.get("agent_ref")
-    agent = agent_ref.get("name") if isinstance(agent_ref, dict) else agent_ref
-    models = {r.get("model") or (r.get("response_metadata") or {}).get("model") for r in raw_calls}
-    models.discard(None)
-    if len(models) > 1:
-        raise ValueError("Mixed-model Gym capture requires explicit canonical cohort normalization")
-    model = next(iter(models), row.get("model"))
-    if not model:
-        raise ValueError("Gym input must identify its model")
-    return Rollout(
-        run_id=run_id,
-        task_id=str(task),
-        repeat=repeat,
-        agent=agent,
-        model=model,
-        benchmark=benchmark,
-        config_id=config_id,
-        success=success,
-        health="quarantined" if row.get("mask_sample") else row.get("health_verdict") or "unknown",
-        capture_complete=complete,
-        wall_s=row.get("wall_s", _seconds((row.get("ng_perf") or {}).get("total_latency_ms"))),
-        calls=tuple(calls),
-        tools=tuple(tools),
-        compactions=tuple(compactions),
-        environment_status=env_status,
-        gaps=tuple(sorted(set(gaps))),
+        raise ValueError("Gym analyses require materialized task and rollout indices")
+    if health is not None and (str(health.task_index), str(health.rollout_index), health.stage_index) != (
+        str(task),
+        str(repeat),
+        row.get("stage_index"),
+    ):
+        raise ValueError("Health result does not match the analyzed rollout")
+    verdict = health.verdict if health is not None else "unobserved"
+    task_id = row.get("task_id")
+    taskset = task_id.get("taskset") if isinstance(task_id, dict) else None
+    benchmark = str(taskset or row.get(TASK_SOURCE_KEY_NAME) or rollout_run_key(row) or "collection")
+    sampling = {
+        k: v
+        for k, v in (row.get(RESPONSES_CREATE_PARAMS_KEY_NAME) or {}).items()
+        if k not in ("input", "metadata", "instructions", "tools")
+    }
+    primary_model = row.get("model") or (row.get(RESPONSE_KEY_NAME) or {}).get("model") or sampling.get("model")
+    reward = row.get(REWARD_KEY_NAME)
+    return (
+        Rollout(
+            run_id=run_id,
+            task_id=str(task),
+            repeat=repeat,
+            stage=row.get("stage_index"),
+            agent=rollout_agent_label(row) or "unknown",
+            model=primary_model or "unknown",
+            benchmark=benchmark,
+            config_id=_digest({"sampling": sampling, "environment": rollout_run_key(row)}),
+            run_key=rollout_run_key(row),
+            success=bool(reward) if reward in (0, 1) else None,
+            health="quarantined" if row.get("mask_sample") else ("unknown" if verdict == "unobserved" else verdict),
+            capture_complete=complete,
+            calls=tuple(calls),
+            gaps=tuple(sorted(set(gaps))),
+        ),
+        primary_model,
+        models,
     )
 
 
-def read_records(paths: list[Path], *, format="canonical", **gym_context) -> list[Rollout]:
-    if format not in ("canonical", "gym"):
-        raise ValueError("format must be canonical or gym")
-    records = []
+def read_records(
+    paths: list[Path], *, run_id: str, health_result: HealthCheckResult | None = None
+) -> dict[tuple[str, ...], list[Rollout]]:
+    """Read Gym JSONL once and resolve cohorts consistently, including call-less rollouts.
+
+    Health digests use the same file and row order as ``run_health_checks``. Passing
+    the result directly avoids stale sidecars and collisions across shard identities.
+    """
+    contexts = defaultdict(list)
+    digests = iter(health_result.rollouts) if health_result is not None else None
     for path in paths:
-        with path.open() as stream:
-            if path.suffix == ".jsonl":
-                rows = (json.loads(line) for line in stream if line.strip())
-            else:
-                data = json.load(stream)
-                if not isinstance(data, list):
-                    raise ValueError("JSON input must be an array of rollout records")
-                rows = data
-            for row in rows:
-                records.append(from_dict(row) if format == "canonical" else from_gym(row, **gym_context))
-    return records
+        with path.open("rb") as stream:
+            for line in stream:
+                if not line.strip():
+                    continue
+                health = next(digests, None) if digests is not None else None
+                if digests is not None and health is None:
+                    raise ValueError("Health result has fewer rows than the analyzed collection")
+                record, primary, models = from_gym(orjson.loads(line), run_id=run_id, health=health)
+                contexts[(record.benchmark, record.agent, record.config_id, record.run_key)].append(
+                    (record, primary, models)
+                )
+    if digests is not None and next(digests, None) is not None:
+        raise ValueError("Health result has more rows than the analyzed collection")
+    groups = defaultdict(list)
+    for entries in contexts.values():
+        primary_models = {primary for _, primary, _ in entries if primary}
+        observed_models = set().union(*(models for _, _, models in entries))
+        if len(primary_models) == 1:
+            fallback = next(iter(primary_models))
+        elif primary_models:
+            fallback = "unknown"
+        else:
+            # A multi-model policy is one configuration, including auxiliary calls.
+            fallback = ", ".join(sorted(observed_models)) or "unknown"
+        for record, primary, _ in entries:
+            record = record.model_copy(update={"model": primary or fallback})
+            groups[record.cohort].append(record)
+    return dict(groups)

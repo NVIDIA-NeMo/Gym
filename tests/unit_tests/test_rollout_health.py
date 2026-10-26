@@ -2576,3 +2576,45 @@ class TestFailureGroupsAreNamedByRetry:
 
         _, overrides = _dispatch_for(monkeypatch, ["eval", command, "--health-max-not-final-failure-fraction", "0.05"])
         assert overrides == ["+health_check_max_not_final_failure_fraction=0.05"]
+
+
+@pytest.mark.parametrize("health_enabled", [True, False])
+def test_cli_defers_analyses_until_after_health(tmp_path, monkeypatch, health_enabled):
+    from unittest.mock import Mock
+
+    output = tmp_path / "rollouts.jsonl"
+    events = []
+    health = Mock()
+
+    async def collection(self, config):
+        assert config.standard_analyses is False
+        assert config.disable_health_check is True
+        output.write_text("{}\n")
+        events.append("collection")
+
+    def check(path, config, landed_keys):
+        assert path == output
+        events.append("health")
+        return health
+
+    async def analyses(path, *, health_result):
+        assert path == output
+        assert health_result is (health if health_enabled else None)
+        events.append("analyses")
+
+    monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", collection)
+    monkeypatch.setattr(cli_eval, "_health_check_collected_rollouts", check)
+    monkeypatch.setattr(cli_eval, "_terminated", False)
+    monkeypatch.setattr("nemo_gym.standard_analyses.integration.analyze_collection", analyses)
+    monkeypatch.setattr(
+        cli_eval,
+        "get_global_config_dict",
+        lambda: {
+            "input_jsonl_fpath": str(tmp_path / "input.jsonl"),
+            "output_jsonl_fpath": str(output),
+            "disable_health_check": not health_enabled,
+        },
+    )
+    monkeypatch.setattr("nemo_gym.telemetry.setup.init_telemetry", lambda **kwargs: None)
+    cli_eval.collect_rollouts()
+    assert events == (["collection", "health", "analyses"] if health_enabled else ["collection", "analyses"])

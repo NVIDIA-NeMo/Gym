@@ -1,133 +1,73 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Backend-neutral inputs and results; unknown measurements remain null."""
+"""Compact projections of Gym evidence and backend-independent analysis results."""
 
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-def measurement(value: float | None, name: str, *, integer: bool = False) -> None:
-    if value is not None and (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value < 0
-        or (integer and int(value) != value)
-    ):
-        raise ValueError(f"{name} must be a finite nonnegative {'integer' if integer else 'number'}")
+Count = Annotated[int, Field(ge=0, strict=True)]
+Measurement = Annotated[float, Field(ge=0, allow_inf_nan=False, strict=True)]
+Identity = Annotated[str, Field(min_length=1)]
+Cell = str | int | float | bool | None
 
 
-@dataclass(frozen=True)
-class Call:
-    id: str
-    index: int
-    output_tokens: int | None = None  # Includes reasoning tokens once.
-    reasoning_tokens: int | None = None
-    input_tokens: int | None = None
-    duration_s: float | None = None
-    started_at: float | None = None
-    invocation_id: str | None = None
-    status: str = "unknown"
-
-    def __post_init__(self):
-        if not isinstance(self.id, str) or not self.id:
-            raise ValueError("Call id is required")
-        if self.index is None:
-            raise ValueError("Call index is required")
-        measurement(self.index, "call index", integer=True)
-        for name in ("output_tokens", "reasoning_tokens", "input_tokens"):
-            measurement(getattr(self, name), name, integer=True)
-        measurement(self.duration_s, "duration_s")
-        measurement(self.started_at, "started_at")
-        if (
-            self.output_tokens is not None
-            and self.reasoning_tokens is not None
-            and self.reasoning_tokens > self.output_tokens
-        ):
-            raise ValueError("reasoning_tokens cannot exceed output_tokens")
+class AnalysisModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-@dataclass(frozen=True)
-class Tool:
-    id: str
-    index: int | None = None
-    name: str = "unknown"
-    duration_s: float | None = None
-    started_at: float | None = None
-    invocation_id: str | None = None
-    status: str = "unknown"
-    action: str | None = None  # read, write, explore, implement, verify
-    target: str | None = None
-    content_hash: str | None = None  # Observed state, never inferred from command text.
+class Call(AnalysisModel):
+    id: Identity
+    index: Count
+    output_tokens: Count | None = None  # Includes reasoning tokens once.
+    reasoning_tokens: Count | None = None
+    input_tokens: Count | None = None
+    duration_s: Measurement | None = None
 
-    def __post_init__(self):
-        if not isinstance(self.id, str) or not self.id:
-            raise ValueError("Tool id is required")
-        measurement(self.index, "tool index", integer=True)
-        measurement(self.duration_s, "tool duration_s")
-        measurement(self.started_at, "tool started_at")
+    @model_validator(mode="after")
+    def validate_tokens(self) -> Call:
+        if self.output_tokens is not None and self.reasoning_tokens is not None:
+            if self.reasoning_tokens > self.output_tokens:
+                raise ValueError("reasoning_tokens cannot exceed output_tokens")
+        return self
 
 
-@dataclass(frozen=True)
-class Compaction:
-    invocation_id: str
-    after_call_id: str  # First model call AFTER compaction.
-
-    def __post_init__(self):
-        if not self.invocation_id or not self.after_call_id:
-            raise ValueError("Compaction requires invocation and first post-compaction call identity")
-
-
-@dataclass(frozen=True)
-class Rollout:
-    run_id: str
-    task_id: str
-    repeat: int
-    agent: str
-    model: str
-    benchmark: str
-    config_id: str  # Cohort identity: sampling/evaluation parameters, not a secret-bearing config.
-    success: bool | None = None
-    health: str = "unknown"
-    capture_complete: bool | None = None
-    wall_s: float | None = None
+class Rollout(AnalysisModel):
+    run_id: Identity
+    task_id: Identity
+    repeat: Count
+    stage: int | str | None = None
+    agent: Identity
+    model: Identity
+    benchmark: Identity
+    config_id: Identity
+    run_key: str | None = None
+    success: Annotated[bool, Field(strict=True)] | None = None
+    health: Literal["healthy", "unhealthy", "quarantined", "unknown"] = "unknown"
+    capture_complete: Annotated[bool, Field(strict=True)] | None = None
     calls: tuple[Call, ...] = ()
-    tools: tuple[Tool, ...] = ()
-    compactions: tuple[Compaction, ...] = ()
-    environment_status: str = "unknown"
     gaps: tuple[str, ...] = ()
 
-    def __post_init__(self):
-        for name in ("run_id", "task_id", "agent", "model", "benchmark", "config_id"):
-            if not isinstance(getattr(self, name), str) or not getattr(self, name):
-                raise ValueError(f"{name} is required")
-        measurement(self.repeat, "repeat", integer=True)
-        measurement(self.wall_s, "wall_s")
-        if self.success is not None and not isinstance(self.success, bool):
-            raise ValueError("success must be true, false, or null; nonbinary rewards need a policy")
-        if self.capture_complete is not None and not isinstance(self.capture_complete, bool):
-            raise ValueError("capture_complete must be true, false, or null")
-        if self.health not in ("healthy", "unhealthy", "quarantined", "unknown"):
-            raise ValueError("invalid health")
-        for name in ("calls", "tools"):
-            ids = [item.id for item in getattr(self, name)]
-            if len(ids) != len(set(ids)):
-                raise ValueError(f"duplicate {name} identity in rollout {self.task_id}/{self.repeat}")
-        indices = [c.index for c in self.calls]
-        if len(indices) != len(set(indices)):
+    @model_validator(mode="after")
+    def validate_calls(self) -> Rollout:
+        if len({c.id for c in self.calls}) != len(self.calls):
+            raise ValueError("duplicate call identity")
+        if len({c.index for c in self.calls}) != len(self.calls):
             raise ValueError("call indices must be unique within a rollout")
+        return self
 
     @property
-    def cohort(self) -> tuple:
+    def cohort(self) -> tuple[str, ...]:
         return self.run_id, self.benchmark, self.agent, self.model, self.config_id
 
     @property
     def key(self) -> tuple:
-        return (*self.cohort, self.task_id, self.repeat)
+        return (*self.cohort, self.task_id, self.repeat, str(self.stage))
 
     @property
     def eligible(self) -> bool:
@@ -149,62 +89,49 @@ class Rollout:
         return math.fsum(c.duration_s for c in self.calls)
 
 
-@dataclass(frozen=True)
-class Options:
-    thresholds: tuple[int, ...] = (1000, 10000)
-    pass_k: tuple[int, ...] = (1, 2, 4, 8)
-    max_rows: int = 2000
-
-    def __post_init__(self):
-        if type(self.max_rows) is not int or self.max_rows < 1:
-            raise ValueError("max_rows must be positive")
-        if not self.thresholds or any(type(t) is not int or t < 0 for t in self.thresholds):
-            raise ValueError("thresholds must be nonnegative integers")
-        if not self.pass_k or any(type(k) is not int or k < 1 for k in self.pass_k):
-            raise ValueError("pass_k must contain positive integers")
+class Options(AnalysisModel):
+    thresholds: Annotated[tuple[Count, ...], Field(min_length=1)] = (1000, 10000)
+    max_rows: Annotated[int, Field(gt=0, strict=True)] = 2000
 
 
-@dataclass
-class Table:
+class Table(AnalysisModel):
     columns: list[str]
-    rows: list[list[Any]]
-    total_rows: int
+    rows: list[list[Cell]]
+    total_rows: Count
     truncated: bool
 
     @classmethod
-    def build(cls, columns: list[str], rows: list[list[Any]], limit: int):
+    def build(cls, columns: list[str], rows: list[list[Cell]], limit: int) -> Table:
         if any(len(row) != len(columns) for row in rows):
             raise ValueError("Table row width does not match columns")
-        return cls(columns, rows[:limit], len(rows), len(rows) > limit)
+        return cls(columns=columns, rows=rows[:limit], total_rows=len(rows), truncated=len(rows) > limit)
 
 
-@dataclass
-class AnalysisResult:
+class AnalysisResult(AnalysisModel):
     name: str
     description: str
-    status: str = "unavailable"
+    status: Literal["available", "partial", "unavailable"] = "unavailable"
     reason: str | None = None
-    metrics: dict[str, float | int | None] = field(default_factory=dict)
-    coverage: dict[str, int] = field(default_factory=dict)
-    tables: dict[str, Table] = field(default_factory=dict)
-    notes: list[str] = field(default_factory=list)
+    metrics: dict[str, float | int | None] = Field(default_factory=dict)
+    coverage: dict[str, int] = Field(default_factory=dict)
+    tables: dict[str, Table] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)
 
 
-@dataclass
-class Report:
+class Report(AnalysisModel):
     results: list[AnalysisResult]
     cohort: dict[str, str]
     options: Options
     schema_version: str = "1.0"
-    analysis_version: str = "0.1.0"
+    analysis_version: str = "0.2.0"
 
-    def to_dict(self):
-        return asdict(self)
+    def to_dict(self) -> dict:
+        return self.model_dump(mode="json")
 
-    def scalars(self) -> dict[str, int | float]:
+    def scalars(self, *, namespace: str = "efficiency") -> dict[str, int | float]:
         result = {}
         for analysis in self.results:
-            prefix = f"efficiency/{analysis.name}"
+            prefix = f"{namespace}/{analysis.name}"
             result[f"{prefix}/available"] = int(analysis.status != "unavailable")
             result[f"{prefix}/complete"] = int(analysis.status == "available")
             for key, value in {**analysis.metrics, **analysis.coverage}.items():

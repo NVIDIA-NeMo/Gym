@@ -1,29 +1,26 @@
 # Standard evaluation analyses
 
-Gym computes these reports after rollout collection and logs their derived metrics, tables and charts to the configured W&B run. JSON reports also live beside the output JSONL in `<stem>_analyses/`. They work with `+upload_rollouts=false`. Set `+standard_analyses=false` to opt out. Shards with `disable_aggregation=true` defer analysis; analyze their canonical combined output after collection.
+Gym writes long-call, repeat-excess, effort-outlier and token-accumulation diagnostics after collection and health checks. Reports live beside the output JSONL in `<stem>_analyses/` and export to configured W&B and MLflow runs, including with `+upload_rollouts=false`. Set `+standard_analyses=false` to opt out.
 
-These analyses need observability enabled to capture model-call and tool measurements. Set the following in the shared configuration used by both the servers and collector:
+Enable observability in the shared configuration used by both the servers and collector:
 
 ```yaml
 observability_enabled: true
 model_call_capture_dir: /path/shared/by/gym/processes/model-calls
 ```
 
-Analysis coverage reflects the evidence captured by the selected model and agent adapters.
+Automatic diagnostics run only when canonical trajectories contain model calls. Shards collected with `disable_aggregation=true` defer analysis to `gym eval aggregate`, which also supports `merge_shards=false`.
 
-Install `nemo-gym[wandb]` to export to W&B. Configure `wandb_project`, `wandb_name`, `wandb_api_key` and, optionally, `wandb_entity` through the normal Gym config. The API key determines the publishing account; `wandb_entity` selects the destination team.
+Install `nemo-gym[wandb]` and configure the normal `wandb_project`, `wandb_name`, `wandb_api_key` and optional `wandb_entity` settings. Create the project workspace once:
 
-Create the project workspace once, then select one run for detail or multiple runs for comparison:
-
-```python
-from nemo_gym.standard_analyses.dashboard import build_workspace
-
-workspace = build_workspace("YOUR_TEAM", "YOUR_PROJECT")
-print(workspace.save().url)
+```bash
+gym eval analysis-workspace --entity YOUR_TEAM --project YOUR_PROJECT
 ```
 
-The template includes charts and detail tables for long calls, excess effort across repeats, effort outliers, token accumulation, compaction, pass@k, runtime tails and model/tool time. The workspace reads logged results; computation happens in Gym. Unknown measurements remain unavailable, with coverage and interpretation notes in the exported tables.
+Select one run for details or several runs for comparison. For collections with several benchmark/agent/model/configuration cohorts, the manifest lists each report's namespace; supply `--namespace efficiency/cohorts/HASH` when creating its workspace. Comparisons stay within a cohort. A rollout without calls inherits the collection's unambiguous policy identity; auxiliary model calls remain part of that policy's effort.
 
-Each benchmark/agent/model cohort has its own report. For a collection containing several cohorts, the manifest supplies a distinct `namespace`; pass `namespace=...` to `build_workspace` for that cohort. No comparisons cross cohort boundaries. Charts based on detail rows inherit their row limits; aggregate counts use all eligible records.
+Unhealthy and masked rollouts are excluded from effort diagnostics. Unobserved health remains explicitly unknown. Availability reflects the evidence each analysis requires; unrelated observation gaps and health exclusions do not downgrade complete measurements. Repeat excess requires complete capture and a successful baseline, and describes observed differences rather than recoverable time.
 
-Add an analysis through a Gym PR: implement a function returning `AnalysisResult`, register it in `suite.py`, add chart specifications in `dashboard.py`, and add numerical, missing-data and export-binding tests under `tests/unit_tests/standard_analyses/`. Keep transcript contents, credentials and file contents out of exported results. Repeat excess is an observed comparison, compaction comparisons are descriptive rather than causal.
+The pass@k chart reads the environment's existing aggregate metrics, preserving percentages, continuous scores and configured failure/missing-rollout accounting. It does not rescore health-filtered rows or publish a second set of scalar scores. It is unavailable when the environment supplies no pass@k values or its aggregates span several analysis cohorts. Existing `perf_summary` values also export under `perf_summary/<environment label>/`.
+
+Chart tables are explicit report data, with row counts and truncation flags. Aggregate metrics use all eligible records. Add analyses through a Gym PR: implement an `AnalysisResult` function, register it in `suite.py`, define its charts in `dashboard.py`, and add numerical, coverage and export-binding tests. Keep transcript contents and credentials out of reports.
