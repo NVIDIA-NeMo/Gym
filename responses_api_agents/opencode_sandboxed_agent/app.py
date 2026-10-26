@@ -499,6 +499,16 @@ def parse_opencode_observations(
     )
 
 
+# OpenCode's `attachment.image` limits (config schema packages/core/src/v1/config/attachment.ts at v1.17.11):
+# an image within all three is forwarded unchanged. 2**31 - 1 is the largest value its PositiveInt accepts
+# without a JSON precision caveat and is far above any image a chat-completions request can carry.
+OPENCODE_IMAGE_LIMITS_UNRESTRICTED = {
+    "max_width": 2**31 - 1,
+    "max_height": 2**31 - 1,
+    "max_base64_bytes": 2**31 - 1,
+}
+
+
 class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
@@ -762,6 +772,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 "input": ["text", "image"],
                 "output": ["text"],
             }
+            # OpenCode v1.17.11 image/image.ts downscales any image over 2000 px on a side or 5 MiB of
+            # base64 and re-encodes it (PNG, else JPEG at quality 80..40) when its bundled photon resizer
+            # loads. Lifting the limits makes `normalize` return the part untouched, so the model receives
+            # the caller's bytes as a direct image_url input would carry them. `auto_resize: false` is not
+            # the knob for that: it turns the resize into a SizeError that fails the turn.
+            config["attachment"] = {"image": dict(OPENCODE_IMAGE_LIMITS_UNRESTRICTED)}
 
         def merge(base, override):
             for key, value in override.items():

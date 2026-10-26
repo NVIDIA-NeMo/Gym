@@ -97,8 +97,13 @@ OpenCode's Read tool turns it into an `image_url` part of the first model call; 
 `detail` field is not transmitted. For such a turn the generated OpenCode config also
 declares the model's `modalities.input` as text and image, without which OpenCode
 replaces every image with an "ERROR: Cannot read ... (this model does not support
-image input)" text; a text-only turn leaves the declaration, and the launch command,
-exactly as before. Remote image URLs and other formats fail the row
+image input)" text, and lifts OpenCode's `attachment.image` limits (2000 px on a side,
+5 MiB of base64), below which OpenCode otherwise downscales and re-encodes the image
+(PNG, else JPEG at quality 80 down to 40) whenever its bundled resizer loads; the model
+therefore receives the caller's bytes. Set `opencode_config.attachment.image.max_width`,
+`max_height` or `max_base64_bytes` to restore a limit (`auto_resize: false` is not that
+knob: it fails the turn on an oversized image instead). A text-only turn leaves the
+declaration, the limits, and the launch command exactly as before. Remote image URLs and other formats fail the row
 before anything runs, since the sandbox has no internet and OpenCode cannot show them.
 `opencode_attachment_count` on each row records how many images were attached. Pi also
 combines supplied system/developer messages with its native prompt.

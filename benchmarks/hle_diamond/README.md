@@ -506,12 +506,31 @@ exit 0, about 14 min wall, 5/5 rows scored with reward 1.0, `opencode_attachment
 `opencode_failed` 0 on every row, no adapter or model error, 2/5 rows made real tool calls (21 and
 62, bash with a few `read`/`glob`), all requests carried `reasoning_effort: high`, and the first
 model call of every row carried one `image_url` part whose data URI equals the dataset's byte for
-byte (no `detail` key) after the two synthetic Read-tool text parts. A first attempt of the same
+byte (no `detail` key) after the two synthetic Read-tool text parts. None of the five is among the
+26 image rows larger than 2000 px, so that run says nothing about OpenCode's resizer; the one-row
+smokes below do. A first attempt of the same
 smoke, before the adapter declared the model's image modality, scored 0/5: OpenCode had replaced
 each image with its "this model does not support image input" text and the model answered "unable
 to determine" (Sandboxed agents (with tools) > Image questions through OpenCode). Label as for
 every run through this recipe: "local Docker; egress not restricted; comparison infrastructure
 only"; 5 rows say nothing about the full-set score.
+
+**Run on 2026-10-26 for `hle_diamond/opencode_full`, one image row larger than 2000 px, twice**,
+with this recipe plus a third composed file (`network: host`, dataset pointed at the single row
+`66f1b940f8bb4425f74e4299`, a 14950x2780 PNG of 743,849 bytes), `--model-type openai_model` with
+GPT-6 Astra, judge o3-mini, `++default_host=<host IP>`, `--limit 1 --concurrency 1`, each with a
+model-call capture:
+
+- Control, OpenCode's default image limits restored through
+  `++...opencode_config.attachment.image.max_width=2000 ...max_height=2000 ...max_base64_bytes=5242880`:
+  every captured `image_url` carried a 2000x372 PNG of 105,698 bytes, not the dataset's bytes, which
+  shows the resizer loads and runs in the science image.
+- As committed (limits lifted by the adapter): NOT YET CAPTURED. The adapter's unit test asserts the
+  lifted keys in the generated config; the capture smoke of this row with the lifted limits, whose
+  `image_url` must equal the dataset's data URI byte for byte, is the open acceptance step.
+
+Both are labelled as every run through this recipe ("local Docker; egress not restricted; comparison
+infrastructure only") and say nothing about the score.
 
 ```bash
 # The presets always compose nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml, whose
@@ -693,7 +712,9 @@ support a **comparison, not a reproduction**, of that column:
 - Rows: 728/1000 text rows on `opencode`, `opencode_search`, `pi` and `pi_search`; all 1000 on
   `opencode_full` and `opencode_search_full`, whose image rows go through OpenCode's file-attachment
   path rather than as a direct `image_url` input (see Image questions through OpenCode below). The
-  Pi adapter accepts text parts only.
+  adapter lifts OpenCode's image limits so that all 272 images, the 26 larger than 2000 px on a side
+  included, reach the model as the dataset's bytes, as upstream sends them. The Pi adapter accepts
+  text parts only.
 - Reasoning effort: requested through the harness's own knob; transmitted by OpenCode, not by Pi
   (see Prompting > Reasoning effort).
 
@@ -762,8 +783,18 @@ at tag `v1.17.11` (`packages/opencode/src/cli/cmd/run.ts`, `session/prompt.ts`, 
   turn carries images and never otherwise, so a text-only run's config is unchanged.
 - The `@ai-sdk/openai-compatible` provider sends the image as an `image_url` part with only the URL;
   the dataset's `detail: high` is not transmitted, which matches upstream's request.
-- OpenCode normalises images larger than 2000 px on a side or 5 MB of base64 (downscaled) when its
-  bundled resizer loads, and sends them unchanged when it does not; upstream sends the original bytes.
+- OpenCode's `image/image.ts` downscales any image larger than 2000 px on a side or 5 MiB of base64
+  with its bundled photon resizer and re-encodes it (PNG first, else JPEG at quality 80 down to 40);
+  `auto_resize: false` fails the turn on such an image instead of sending it, and only a resizer that
+  fails to load leaves it untouched. The resizer is active in `gym-opencode-science:local`: with
+  OpenCode's default limits, the one-row control smoke below sent the 14950x2780 PNG of
+  `66f1b940f8bb4425f74e4299` (743,849 bytes) as a 2000x372 PNG of 105,698 bytes. 26 of the 272 image
+  rows (12 PNG, 14 JPEG; sides from 2042 to 14950 px; none over 5 MiB of base64, none with a declared
+  type that differs from its bytes) exceed that threshold. The adapter therefore sets
+  `attachment.image.max_width`, `max_height` and `max_base64_bytes` to 2^31 - 1 in the generated
+  config whenever the turn carries images, so every image reaches the model as the dataset's bytes,
+  which is what upstream's `run_model_predictions.py` sends; override those keys through
+  `opencode_config` to restore a limit.
 - Formats: PNG (186 rows), JPEG (81), WebP (4) and GIF (1) are all sniffable. Any other media type, a
   remote `image_url` (the sandbox has no internet) or a `file_id` input fails the row before anything
   runs, with the reason in the error.

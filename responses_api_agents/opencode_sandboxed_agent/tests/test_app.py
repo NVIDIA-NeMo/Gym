@@ -638,7 +638,8 @@ class TestOpenCodeSandboxedAgent:
         self, monkeypatch: MonkeyPatch
     ) -> None:
         """OpenCode forwards an attached image only if the model declares image input (otherwise it substitutes
-        an ERROR text); a text-only turn keeps the model declaration exactly as before."""
+        an ERROR text) and, unless its `attachment.image` limits are lifted, downscales and re-encodes any image
+        over 2000 px or 5 MiB of base64; a text-only turn keeps the config exactly as before."""
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {}
         server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
@@ -649,13 +650,17 @@ class TestOpenCodeSandboxedAgent:
         request = MagicMock()
         request.json = AsyncMock(return_value={"responses_create_params": {"input": "solve"}})
 
-        plain = (await server._create_opencode_config(request))["provider"]["nemo_gym"]["models"]["dummy_model"]
-        vision = (await server._create_opencode_config(request, image_input=True))["provider"]["nemo_gym"]["models"][
-            "dummy_model"
-        ]
+        plain = await server._create_opencode_config(request)
+        vision = await server._create_opencode_config(request, image_input=True)
 
-        assert "modalities" not in plain
-        assert vision == plain | {"modalities": {"input": ["text", "image"], "output": ["text"]}}
+        plain_model = plain["provider"]["nemo_gym"]["models"]["dummy_model"]
+        assert "modalities" not in plain_model
+        assert "attachment" not in plain
+        assert vision["provider"]["nemo_gym"]["models"]["dummy_model"] == plain_model | {
+            "modalities": {"input": ["text", "image"], "output": ["text"]}
+        }
+        assert vision["attachment"] == {"image": app_module.OPENCODE_IMAGE_LIMITS_UNRESTRICTED}
+        assert set(vision["attachment"]["image"]) == {"max_width", "max_height", "max_base64_bytes"}
 
     @mark.parametrize(
         ("image_part", "message"),
