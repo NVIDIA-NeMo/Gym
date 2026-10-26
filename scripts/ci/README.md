@@ -33,7 +33,7 @@ different filesystems.
 The Gym container image (`docker/Dockerfile`, `release` target) seeds its `UV_CACHE_DIR` with the
 root lock, so `lint.sh` and `core_unit_tests.sh` run without a package index; in the container,
 `setup_dev.sh` syncs the driver environment with `--offline`. Every server module also installs its
-own unlocked `requirements.txt` or `pyproject.toml`, which the root lock does not cover. Built with
+own `pyproject.toml` and committed `uv.lock`, which the root lock does not cover. Built with
 `--build-arg NEMO_GYM_SEED_SERVER_ENVS=1`, the image also seeds every server's environment through
 `ng_test_all +setup_only=true`, installed exactly as `server_tests.sh` installs it, so the server
 suite runs offline too when the provider sets `UV_OFFLINE=1` for the nested installs. A server

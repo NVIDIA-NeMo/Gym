@@ -16,7 +16,7 @@ from pathlib import Path
 ENVIRONMENT_DIR = Path(__file__).parent
 DATA_DIR = ENVIRONMENT_DIR / "data"
 TASKS_FPATH = DATA_DIR / "nemo_user_sim.jsonl"
-PREPARE_REQUIREMENTS_FPATH = ENVIRONMENT_DIR / "requirements.txt"
+PREPARE_PROJECT_FPATH = ENVIRONMENT_DIR / "pyproject.toml"
 USERSIM_REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"  # pragma: allowlist secret
 NEMOTRON_PERSONAS_VERSION = "0.0.2"
 NEMOTRON_PERSONAS_SHA256 = (
@@ -250,11 +250,9 @@ def prepare(
         command = [
             executable,
             "run",
-            "--no-config",
-            "--no-project",
-            "--isolated",
-            "--with-requirements",
-            str(PREPARE_REQUIREMENTS_FPATH),
+            "--locked",
+            "--project",
+            str(ENVIRONMENT_DIR),
             "python",
             "-c",
             _MATERIALIZE_SCRIPT,
@@ -274,6 +272,8 @@ def prepare(
                 errors="replace",
                 env={
                     **os.environ,
+                    # Never sync this preparation-only project into an enclosing Gym/trainer venv.
+                    "UV_PROJECT_ENVIRONMENT": str(Path(working_dir) / ".venv"),
                     "DATA_DESIGNER_MANAGED_ASSETS_PATH": str(managed_assets_path),
                     "USERSIM_CODE_SHA": USERSIM_REVISION,
                     "USERSIM_NEMOTRON_PERSONAS_VERSION": NEMOTRON_PERSONAS_VERSION,

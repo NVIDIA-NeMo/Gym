@@ -32,11 +32,12 @@ Use a [development checkout](/main/contribute/development-setup), activate its e
 ```bash
 gym search "task description"
 gym env init --environment my_eval --profile custom-gym-verifier
+uv lock --project resources_servers/my_eval
 gym env validate my_eval
 gym env test my_eval
 ```
 
-The scaffold creates `environments/my_eval/` (manifest, Gym config, README, and sample data) and `resources_servers/my_eval/` (resources server skeleton, configs, tests, and requirements). Implement `verify()` and replace the sample data before running `validate`.
+The scaffold creates `environments/my_eval/` (manifest, Gym config, README, and sample data) and `resources_servers/my_eval/` (resources server skeleton, configs, tests, and `pyproject.toml`). Implement `verify()` and replace the sample data before running `validate`.
 
 To try a model, [configure its endpoint](/main/model-server), then run the server and collect one episode in two terminals:
 
@@ -124,6 +125,21 @@ Fill in the scaffolded component:
 
 ### 4. Testing
 
+After editing dependencies in `resources_servers/my_eval/pyproject.toml`, generate
+and commit the lock before testing or publishing:
+
+```bash
+uv lock --project resources_servers/my_eval
+gym env test my_eval
+```
+
+Commit both `pyproject.toml` and `uv.lock` for repository-managed components;
+CI enforces this contract. Setup prefers `uv sync --locked` and does not retry a
+failed or stale lock with an unlocked install. Existing external components may
+continue using `requirements.txt` or an unlocked project. If inherited parent
+plugins or compatible version pins differ from a successful locked install,
+setup resolves compatibility without modifying the committed lock.
+
 Write and run tests for your resources server:
 
 - At least one test per server is required for PR approval
@@ -206,7 +222,8 @@ Your resources server must include these files:
 | `configs/*.yaml` | Configuration with valid `domain` field |
 | `tests/test_app.py` | At least one unit test |
 | Example data | At least one representative input at a path referenced by the workload config |
-| `requirements.txt` | Python dependencies |
+| `pyproject.toml` | Python dependencies and resolver policy |
+| `uv.lock` | Exact resolved dependencies (generate and commit before setup) |
 | `README.md` | Documentation with licensing information |
 
 Optional rollout evidence may be saved in `data/example_rollouts.jsonl`.
@@ -219,7 +236,7 @@ A standalone resources server contributes a reusable scoring, tool, or state com
 gym env init --resources-server my_server
 ```
 
-The scaffold creates `resources_servers/my_server/` with `app.py`, `configs/`, `tests/`, `data/`, `requirements.txt`, and `README.md`, along with a Gym config that wires the component to `simple_agent` and `legacy_agent` so you can start the server and run rollouts immediately. Implement `verify()`, write tests, then run `gym env test --resources-server my_server`. The `gym env validate` and `gym env publish` commands do not apply — there is no manifest to validate or publish. Run smoke rollouts as described in step 6 above and submit the PR; the PR itself is the publication step.
+The scaffold creates `resources_servers/my_server/` with `app.py`, `configs/`, `tests/`, `data/`, `pyproject.toml`, and `README.md`, along with a Gym config that wires the component to `simple_agent` and `legacy_agent` so you can start the server and run rollouts immediately. Implement `verify()`, declare dependencies in `pyproject.toml`, run `uv lock` in `resources_servers/my_server/` and commit its `uv.lock`, write tests, then run `gym env test --resources-server my_server`. The `gym env validate` and `gym env publish` commands do not apply — there is no manifest to validate or publish. Run smoke rollouts as described in step 6 above and submit the PR; the PR itself is the publication step.
 
 Required files and implementation patterns are the same as for the resources server in the manifest-backed path; see [Required Files](#required-files) and [Recommended Technical Design](#recommended-technical-design).
 

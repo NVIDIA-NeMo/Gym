@@ -23,9 +23,9 @@ from packaging.version import Version
 
 
 ROOT = Path(__file__).resolve().parents[3]
-OSWORLD_AGENT_REQUIREMENTS = ROOT / "responses_api_agents/osworld_agent/requirements.txt"
+OSWORLD_AGENT_REQUIREMENTS = ROOT / "responses_api_agents/osworld_agent/pyproject.toml"
 OSWORLD_AGENT_UV_CONFIG = ROOT / "responses_api_agents/osworld_agent/uv.toml"
-OSWORLD_AGENT_PUBLIC_OVERRIDES = ROOT / "responses_api_agents/osworld_agent/overrides.txt"
+OSWORLD_AGENT_PUBLIC_OVERRIDES = ROOT / "responses_api_agents/osworld_agent/pyproject.toml"
 OSWORLD_RESOURCES_PROJECT = ROOT / "resources_servers/osworld/pyproject.toml"
 OSWORLD_RESOURCES_PYTHON = ROOT / "resources_servers/osworld/.python-version"
 OSWORLD_AGENT_README = ROOT / "responses_api_agents/osworld_agent/README.md"
@@ -52,18 +52,33 @@ def test_osworld_agent_uv_config_mirrors_project_resolver_policy() -> None:
         server_config = tomllib.load(f)
     project_config = _uv_config()
 
-    assert server_config["constraint-dependencies"] == project_config["constraint-dependencies"]
+    public_project = tomllib.loads(OSWORLD_AGENT_REQUIREMENTS.read_text())
+    assert server_config["constraint-dependencies"] == public_project["tool"]["uv"]["constraint-dependencies"]
+    assert set(project_config["constraint-dependencies"]) <= set(server_config["constraint-dependencies"])
+    with (OSWORLD_AGENT_REQUIREMENTS.parent / "uv.lock").open("rb") as f:
+        packages = tomllib.load(f)["package"]
+    with (ROOT / "uv.lock").open("rb") as f:
+        parent_packages = tomllib.load(f)["package"]
+    ray_version = next(package["version"] for package in parent_packages if package["name"] == "ray")
+    assert f"ray=={ray_version}" in server_config["constraint-dependencies"]
+    assert next(package["version"] for package in packages if package["name"] == "ray") == ray_version
     project_overrides = set(project_config["override-dependencies"])
     server_overrides = set(server_config["override-dependencies"])
     assert project_overrides <= server_overrides
     assert server_overrides - project_overrides == {
         "grpcio-status==1.71.2",
         "protobuf==5.29.6",
+        *(set(public_project["tool"]["uv"]["override-dependencies"]) - project_overrides),
     }
     project_exclusions = set(project_config["exclude-dependencies"])
     server_exclusions = set(server_config["exclude-dependencies"])
     assert project_exclusions <= server_exclusions
-    assert server_exclusions - project_exclusions == OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES
+    assert server_exclusions == (
+        set(public_project["tool"]["uv"]["exclude-dependencies"]) | OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES
+    )
+    # OSWorld's ag2 dependency also advertises an optional AGP client, which is
+    # excluded from this runtime alongside unsupported cloud VM providers.
+    assert server_exclusions - project_exclusions == OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES | {"agp-client"}
     required_version = SpecifierSet(server_config["required-version"])
     assert Version("0.11.24") not in required_version
     assert Version("0.11.25") in required_version
@@ -136,7 +151,7 @@ def test_osworld_agent_dependency_overrides() -> None:
     requirements = OSWORLD_AGENT_REQUIREMENTS.read_text(encoding="utf-8")
     with OSWORLD_AGENT_UV_CONFIG.open("rb") as config_file:
         agent_overrides = tomllib.load(config_file)["override-dependencies"]
-    public_overrides = OSWORLD_AGENT_PUBLIC_OVERRIDES.read_text(encoding="utf-8")
+    public_overrides = tomllib.loads(OSWORLD_AGENT_PUBLIC_OVERRIDES.read_text())["tool"]["uv"]["override-dependencies"]
 
     assert "grpcio-status==1.71.2" in agent_overrides
     assert "protobuf==5.29.6" in agent_overrides
@@ -183,3 +198,18 @@ def test_nemo_rl_servers_use_a_compatible_python_range() -> None:
         supported = SpecifierSet(python_policy.read_text(encoding="utf-8").strip())
         assert Version(python_floor) in supported
         assert Version("3.14") not in supported
+
+
+def test_opt_in_runtime_lock_preserves_overlapping_agent_requirements() -> None:
+    agent = tomllib.loads(OSWORLD_AGENT_REQUIREMENTS.read_text())
+    runtime = tomllib.loads((OSWORLD_AGENT_REQUIREMENTS.parent / "runtime/uv.lock").read_text())
+    versions = {package["name"]: package["version"] for package in runtime["package"] if "version" in package}
+    overlapping = set()
+    for value in agent["project"]["dependencies"]:
+        requirement = Requirement(value)
+        name = requirement.name.lower().replace("_", "-")
+        if name not in versions or requirement.marker and not requirement.marker.evaluate():
+            continue
+        overlapping.add(name)
+        assert Version(versions[name]) in requirement.specifier, f"runtime lock violates {value}: {versions[name]}"
+    assert {"pillow", "numpy"} <= overlapping

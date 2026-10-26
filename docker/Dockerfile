@@ -207,7 +207,7 @@ LABEL com.nvidia.build.ref="${NVIDIA_BUILD_REF}"
 # files, and the later chown pass only covers directories, so `gym --help`
 # fails with PermissionError on nemo_gym/__init__.py once USER is switched.
 COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
-    --exclude=pyproject.toml --exclude=uv.lock . /opt/nemo-gym
+    --exclude=/pyproject.toml --exclude=/uv.lock . /opt/nemo-gym
 
 # Install the nemo-gym project itself along with the vllm and telemetry extras. The
 # worktree was created for the runtime UID in the base stage, so restore build ownership
@@ -230,12 +230,12 @@ RUN uv venv /opt/nemo-gym/cache/seed-venv && \
 # Optional: seed the same cache with every server module's venv so that
 # scripts/ci/server_tests.sh can run offline too. Pass
 # --build-arg NEMO_GYM_SEED_SERVER_ENVS=1 for an image that runs the server
-# suite without a package index. Each server installs its own unlocked
-# requirements.txt or pyproject.toml (including git sources) outside the root
+# suite without a package index. Each server syncs its own committed
+# pyproject.toml and uv.lock (including Git sources) outside the root
 # lock, so the seed above does not cover them, and together they are large
 # (about 25 GB more cache for all 212 servers in October 2026), hence opt-in.
 # `ng_test_all +setup_only=true` installs each venv exactly as the server suite
-# does (same discovery, requirements, and head-server pins), outside the source
+# does (same discovery, component locks, and head-server checks), outside the source
 # tree, and deletes it; only the downloaded and built distributions stay.
 ARG NEMO_GYM_SEED_SERVER_ENVS=""
 RUN <<"EOF" bash -exu

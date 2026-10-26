@@ -234,7 +234,7 @@ Install dependencies:
 uv venv && source .venv/bin/activate
 uv sync --extra dev
 cd resources_servers/cvdp 
-uv pip install -r requirements.txt
+uv sync --locked
 pre-commit install
 ```
 

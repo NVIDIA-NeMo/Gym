@@ -25,7 +25,6 @@ from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple
 import orjson
 from omegaconf import DictConfig
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
-from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.atif_json import strict_json_loads
@@ -55,6 +54,7 @@ from nemo_gym.global_config import (
     rollout_run_labels,
 )
 from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
+from nemo_gym.progress_utils import tqdm
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,

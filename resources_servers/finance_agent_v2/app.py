@@ -45,7 +45,7 @@ from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional, Seq
 import yaml
 from fastapi import Body, FastAPI
 
-# Upstream Vals finance-agent-v2 tool classes (installed via requirements.txt).
+# Upstream Vals finance-agent-v2 tool classes (installed from pyproject.toml and uv.lock).
 from finance_agent.tools import (
     MAX_END_DATE,
     Calculator,

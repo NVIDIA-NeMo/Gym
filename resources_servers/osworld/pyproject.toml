@@ -40,24 +40,61 @@ where = ["../.."]
 include = ["resources_servers.osworld*"]
 
 [tool.uv.sources]
+nemo-lens = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "4d045c03186b90afdc815db46b671f6a21bc7e98" }
 nemo-gym = { path = "../..", editable = true }
 
 [tool.uv]
+constraint-dependencies = [
+    "grpcio>=1.81.0rc1",
+    "msgpack>=1.2.1",
+]
 # The pinned OSWorld metadata predates CPython 3.13 wheels for this family.
 # These are role-local compatibility ranges, not requirements for the agent,
 # model, or trainer environments. The experiment record captures the exact
 # versions selected by uv for a particular platform.
 override-dependencies = [
+    "spacy>=3.8.13",
+    "wcwidth; sys_platform == 'never'",
+    "pynvvideocodec; sys_platform == 'never'",
+    "torchcodec; sys_platform == 'never'",
+    "torchaudio; sys_platform == 'never'",
+    "pycountry; sys_platform == 'never'",
+    "gprof2dot; sys_platform == 'never'",
+    "pathspec; sys_platform == 'never'",
     "opencv-python-headless~=4.10.0.84",
     "Pillow>=12,<13",
     "matplotlib>=3.10,<3.11",
     "torch>=2.11,<2.12",
-    # OSWorld's EasyOCR dependency asks for an unconstrained torchvision. The
-    # resources-server control path does not use OCR; keep the codec-bearing
-    # optional wheel out of this default environment.
     "torchvision; sys_platform == 'never'",
 ]
-exclude-dependencies = ["opencv-python", "opencv-contrib-python", "agp-client"]
+exclude-dependencies = [
+    "fasttext-wheel",
+    "alembic",
+    "blinker",
+    "cryptography",
+    "flask",
+    "flask-cors",
+    "graphene",
+    "graphql-core",
+    "graphql-relay",
+    "gunicorn",
+    "huey",
+    "prettytable",
+    "skops",
+    "sqlalchemy",
+    "werkzeug",
+    "waitress",
+    "diskcache",
+    "opencv-python",
+    "opencv-contrib-python",
+    "agp-client",
+]
 
 [tool.uv.pip]
 torch-backend = "cpu"
+
+[project.optional-dependencies]
+telemetry = ["nemo-gym[telemetry]"]
+
+[tool.uv.workspace]
+members = []

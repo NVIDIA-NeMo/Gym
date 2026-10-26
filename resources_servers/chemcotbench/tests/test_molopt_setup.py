@@ -66,7 +66,7 @@ def test_broken_managed_venv_is_recreated(monkeypatch, tmp_path):
     result = ensure_molopt_runtime(cache_dir=str(tmp_path))
     assert result == (python, tmp_path)
     assert python.exists() and not python.is_symlink()
-    assert commands[1][1:3] == ["pip", "install"]
+    assert commands[1][1:3] == ["sync", "--locked"]
     assert commands[2][0] == str(python)
     assert (tmp_path / "ready.json").exists()
 

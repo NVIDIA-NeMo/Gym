@@ -205,7 +205,7 @@ environment runs without its SDK installed.
 - [x] `site/` — bundled offline test site (deterministic tasks/CI)
 - [x] `generate_data.py` + `data/example.jsonl` (offline) + `data/example_remote.jsonl` (live web)
 - [x] `tests/` — backend contract (both backends) + selection/session bookkeeping
-- [x] `requirements.txt`, `README.md`
+- [x] `pyproject.toml`, `uv.lock`, `README.md`
 - [x] `data/example_rollouts.jsonl` — 5 rollouts collected against a Responses-API endpoint (reward 1.0 on the offline site; reward wiring exercised end-to-end)
 - [ ] GRPO training-signal run (train via NeMo-RL's `examples/nemo_gym/run_grpo_nemo_gym.py`)
 

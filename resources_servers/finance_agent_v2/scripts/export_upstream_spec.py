@@ -12,7 +12,7 @@ So the schemas are still derived from the upstream `Tool` classes, just here at 
 time instead of there at prepare time. `tests/test_upstream_spec.py` re-runs this
 builder against the installed package and fails if the committed file has drifted.
 
-The upstream commit is read from the `finance-agent` pin in requirements.txt, so
+The upstream commit is read from the `finance-agent` dependency in pyproject.toml, so
 bumping that pin requires re-running this; prepare.py refuses to run when its
 `_UPSTREAM_SHA` and the snapshot disagree.
 
@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any, Dict
 
@@ -39,10 +40,12 @@ from finance_agent.tools import (
     SubmitFinalResult,
     TavilyWebSearch,
 )
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
-REQUIREMENTS_FPATH = SERVER_DIR / "requirements.txt"
+PROJECT_FPATH = SERVER_DIR / "pyproject.toml"
 SPEC_FPATH = SERVER_DIR.parent.parent / "benchmarks" / "finance_agent_v2" / "upstream_spec.json"
 
 # Maps upstream tool name -> upstream Tool class (mirrors get_agent.available_tools).
@@ -62,14 +65,18 @@ SUBMIT_TOOL = "submit_final_result"
 
 
 def _upstream_sha() -> str:
-    """Read the pinned upstream commit from the ``finance-agent`` requirement."""
-    text = REQUIREMENTS_FPATH.read_text(encoding="utf-8")
-    shas = re.findall(r"finance-agent-v2\.git@([0-9a-f]{40})", text)
-    if len(shas) != 1:
-        raise ValueError(
-            f"expected exactly one pinned finance-agent-v2 requirement in {REQUIREMENTS_FPATH}, got {shas}"
-        )
-    return shas[0]
+    """Read the exact upstream commit from the canonical project dependency."""
+    project = tomllib.loads(PROJECT_FPATH.read_text(encoding="utf-8"))
+    requirements = [Requirement(value) for value in project["project"]["dependencies"]]
+    upstream = [requirement for requirement in requirements if canonicalize_name(requirement.name) == "finance-agent"]
+    if len(upstream) != 1:
+        raise ValueError(f"expected exactly one finance-agent dependency in {PROJECT_FPATH}, got {len(upstream)}")
+    match = re.fullmatch(
+        r"git\+https://github\.com/vals-ai/finance-agent-v2\.git@([0-9a-f]{40})", upstream[0].url or ""
+    )
+    if match is None:
+        raise ValueError(f"expected an exact finance-agent-v2 Git commit in {PROJECT_FPATH}, got {upstream[0]}")
+    return match.group(1)
 
 
 def _tool_schema(tool_cls) -> Dict[str, Any]:

@@ -59,21 +59,16 @@ def test_prompt_contract_uses_existing_plural_metadata() -> None:
 
 
 def test_no_git_dependency_or_hash_pin() -> None:
-    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
-    assert "git+" not in requirements
-    assert "917c3d" not in requirements
+    import tomllib
+
+    metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = metadata["project"]["dependencies"]
+    assert not any("git+" in requirement or "917c3d" in requirement for requirement in dependencies)
 
 
 def test_requirements_do_not_pin_nemo_gym() -> None:
-    # nemo-gym is not on PyPI; it must come from an editable source-checkout
-    # reference (-e nemo-gym @ ../../, the upstream convention, resolved at
-    # runtime placement), never from a PyPI-style version pin.
-    # requirements-dev.txt is optional (dev tooling comes from the
-    # nemo-gym[dev] extra); check it only where present.
-    for path in ("requirements.txt", "requirements-dev.txt"):
-        if not (ROOT / path).exists():
-            continue
-        lines = (ROOT / path).read_text(encoding="utf-8").splitlines()
-        for line in lines:
-            spec = line.split("#", 1)[0].strip()
-            assert not spec.lower().startswith("nemo-gym"), f"{path} must not pin nemo-gym"
+    import tomllib
+
+    metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "nemo-gym[dev]" in metadata["project"]["dependencies"]
+    assert metadata["tool"]["uv"]["sources"]["nemo-gym"] == {"path": "../..", "editable": True}

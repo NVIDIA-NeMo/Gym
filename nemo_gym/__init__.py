@@ -96,7 +96,7 @@ def _resolve_under_cwd_or_install(
     ``benchmarks/<name>/config.yaml`` or ``resources_servers/<env>/data/example.jsonl`` resolves by name
     from any cwd or plugin root. ``validator`` overrides the default ``Path.exists`` check — pass it when a
     candidate is valid only if specific markers are present (e.g. a server dir must ship
-    ``requirements.txt`` or ``pyproject.toml``). If nothing matches, the path under the highest-priority
+    ``pyproject.toml`` and ``uv.lock``). If nothing matches, the path under the highest-priority
     root is returned so error messages point at the user's own location.
 
     Use this for read paths only — never for write targets (e.g. metrics written next to a dataset), which

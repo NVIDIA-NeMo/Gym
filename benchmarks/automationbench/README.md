@@ -48,11 +48,12 @@ omitted and the agent logs a warning.
 
 ## Install
 
-The env package is not on PyPI, install it into the agent's venv for data prep.
-Running environment will create its own venv.
+The preparation package is not on PyPI. Its committed project lock pins the
+upstream source. `gym eval prepare` syncs this project into an isolated
+preparation environment; it does not install into the agent or parent venv.
 
 ```bash
-uv pip install -e benchmarks/automationbench
+uv sync --locked --project benchmarks/automationbench
 ```
 
 This pulls `automation-bench` from the upstream repo. Note upstream declares
@@ -61,7 +62,7 @@ This pulls `automation-bench` from the upstream repo. Note upstream declares
 ## Data
 
 ```bash
-python benchmarks/automationbench/prepare.py
+uv run --locked --project benchmarks/automationbench python benchmarks/automationbench/prepare.py
 ```
 
 Pulls the public taskset from the installed `automation-bench` package (600 tasks: 6 domains x 100).

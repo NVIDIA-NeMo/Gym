@@ -25,6 +25,24 @@ To work on servers that use Ray, or run the Ray-dependent unit tests, add `--ext
 
 Cloning over HTTPS needs no GitHub credentials. If you have an SSH key registered with GitHub, `git clone git@github.com:NVIDIA-NeMo/Gym.git` also works.
 
+## Optional component dependencies
+
+Each component is an independent project with a committed `pyproject.toml` and
+`uv.lock`. Setup uses `uv sync --locked`; it never resolves missing or stale locks.
+Select optional extras per component in the environment configuration (paths are
+`<server_type>/<component>`):
+
+```yaml
+component_extras:
+  resources_servers/interactive_browser: [lexmount]
+  responses_api_agents/haystack_agent: [example-tools]
+```
+
+Only the named component receives these extras. Unselected extras are removed by
+normal sync; use the same selection when manually running `uv sync --locked`.
+Parent OpenAI/Ray/telemetry constraints are verified after sync. If they conflict
+with a lock, update and commit the lock rather than using an unlocked fallback.
+
 ## Development Commands
 
 **Run NeMo Gym Tests**:

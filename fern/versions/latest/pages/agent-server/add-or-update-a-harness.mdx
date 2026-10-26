@@ -47,7 +47,7 @@ An adapter can stop at any level below. Each level adds work and enables a speci
 
 An adapter supplies the knowledge that is specific to the harness or framework:
 
-1. **Install or load the agent.** For example, a framework adapter lists the framework in its `requirements.txt`, while Pi and Codex install a pinned runtime into the task sandbox at seed.
+1. **Install or load the agent.** For example, a framework adapter lists the framework in its `pyproject.toml`, while Pi and Codex install a pinned runtime into the task sandbox at seed.
 2. **Configure and invoke it.** Build the harness configuration from the adapter configuration and the request, then call the SDK or start the CLI. For example, Hermes writes a `config.yaml`, and Pi and Codex start a `sandbox_runner.py` shim.
 3. **Map the harness's inputs, results, and traces to Gym.** Convert the request into the harness's input, the harness's output into a `NeMoGymResponse`, and its model and tool activity into an `AgentObservationBundle`.
 4. **Map Gym connections into the harness's own configuration.** Set the rollout-prefixed Model Server URL as the harness's model base URL, add tool grants to its tool configuration, and run it in `SandboxAccess.workdir`. For example, Hermes adds each MCP grant to the `mcp_servers` section of its configuration.
@@ -279,7 +279,7 @@ Adapter configurations extend `BaseResponsesAPIAgentConfig`. Adapters that imple
 | `model_server` | The Gym Model Server reference, for example `{type: responses_api_models, name: policy_model}`. The sandbox must be able to reach it. |
 | `model` | The model name that the harness sends. |
 | `num_workers` | Must be `1` for agent sessions. |
-| Version pin | The exact harness version, for example `pi_version: 0.80.2` or `codex_version: 0.144.4`. Pi, Codex, and OpenClaw reject a missing or inexact version. OpenCode defaults `opencode_version` to its pinned release and rejects an inexact value. Hermes has no version field; it pins `hermes-agent` in its `requirements.txt`. |
+| Version pin | The exact harness version, for example `pi_version: 0.80.2` or `codex_version: 0.144.4`. Pi, Codex, and OpenClaw reject a missing or inexact version. OpenCode defaults `opencode_version` to its pinned release and rejects an inexact value. Hermes has no version field; it pins `hermes-agent` in its `pyproject.toml`. |
 | `sandbox_provider`, `sandbox_config` | Used only for agent-owned sessions: a named provider block and the `SandboxSpec` fields. Leave `sandbox_provider` as `null` when the Resources Server supplies the sandbox. |
 | Timeouts | Installation, execution, and per-phase close budgets, such as `sandbox_install_timeout_seconds` and `session_close_timeout_seconds`. Names differ by adapter; check its configuration class. |
 | `session_close_retry_window_seconds` | How long a successful close response is replayed. Cover the caller's retry horizon. |
@@ -325,7 +325,7 @@ Organize a new adapter under `responses_api_agents/<harness>/`. The adapter's `s
 | `sandbox.py` | A harness-specific session state class that composes `SandboxSession`. It installs the runtime at seed, stages input in `stage_activation()`, collects artifacts, and holds harness-specific state and diagnostics. |
 | `sandbox_runner.py` | Reads the staged input, invokes the harness SDK or CLI, writes the harness's output and optional process diagnostics, and keeps partial output where the harness supports it. Handles `SIGTERM` by stopping the harness and writing that partial output before it exits, because the supervisor sends `SIGTERM` at the deadline and on close. |
 | `install_<harness>_runtime.sh` or an existing harness-specific installer | Installs the pinned harness and its private dependencies, then checks that they run. Keep installation out of the activation path. |
-| `requirements.txt` | The adapter's isolated environment: `-e nemo-gym[dev,sandbox] @ ../../` plus packages that run on the Agent Server, such as a framework or SDK. Without the `sandbox` extra, an SDK-backed provider such as OpenSandbox cannot import its SDK, and the first sandbox session fails. |
+| `pyproject.toml` and `uv.lock` | The adapter's isolated environment: `nemo-gym[dev,sandbox]` plus packages that run on the Agent Server, such as a framework or SDK. Without the `sandbox` extra, an SDK-backed provider such as OpenSandbox cannot import its SDK, and the first sandbox session fails. |
 | `tests/` | Host dispatch, session setup, request semantics, output parsing, installation, and lifecycle regressions. |
 
 The shared modules have separate responsibilities. All of them run on the Agent Server, except `process_supervisor.py`, which is uploaded into the sandbox. Provider APIs and general file transfer stay in `nemo_gym/sandbox/`.
