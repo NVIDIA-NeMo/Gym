@@ -95,7 +95,8 @@ default). Seeded Resources Server sessions expire after `session_ttl_seconds`
 
 The Environment Server registers cleanup before every seed request and closes
 participant and Resources Server sessions on every outcome. Closing is
-idempotent, and a short-lived tombstone prevents a delayed seed from recreating
-closed state. A verify for an unknown or closed Resources Server session returns
-a masked sample with `failure_kind` `session_lost`, and one whose seed outlived
+idempotent, and a fence that expires after the close retry window prevents a
+delayed seed from recreating closed state. A verify for an unknown or closed
+Resources Server session returns a masked sample with `failure_kind`
+`session_lost`, and one whose seed outlived
 `session_ttl_seconds` a masked sample with `session_expired`.

@@ -480,7 +480,7 @@ class ResourcesParticipant(CheckpointParticipant):
             for session_id in self._retired_sessions.pop(rollout_id, ()):
                 self._retired_session_rollouts.pop(session_id, None)
                 if self.on_session_freed is not None and session_id not in self._sessions:
-                    # Its refusal ends here, and so does its routing claim, one close window later.
+                    # Its refusal ends here, and so does its routing claim, one close retry window later.
                     self.on_session_freed(session_id)
 
     def request_started(self, session_id: Optional[str], *, counted: bool) -> None:
