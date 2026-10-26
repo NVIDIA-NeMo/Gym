@@ -222,8 +222,8 @@ def _masking_step_metrics(agent_name: str, scored: Counter, dropped: Counter) ->
 #   - Rows that ``dispatch_budget_s`` never started go nowhere either. Gym
 #     marks them ``cancelled`` with ``_ng_dispatch_drained``: no rollout
 #     ran, so there is nothing to capture, tokenize or average.
-#   - ``record_omitted_rollouts`` writes a sidecar row for both, still marked
-#     ``_ng_no_persist``. Every sidecar reader skips such a row, so it is
+#   - ``record_omitted_rollouts`` writes a sidecar row for both, marked
+#     ``_ng_omitted_rollout``. No reader counts such a row, so it is
 #     evidence only: not scored, not an attempt, and resume still runs it.
 #   - On resume, ``_load_from_cache`` reads BOTH files: main jsonl tells
 #     it what's permanently done, sidecar tells it how many attempts each
@@ -237,6 +237,21 @@ NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 # Set only by Gym, on the result it builds for a row the dispatch budget never started.
 NG_DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
+# Set only on the failures-sidecar row ``record_omitted_rollouts`` writes for a rollout that produced no result.
+# Readers key on it, not on ``_ng_no_persist``, which other sidecar rows (ATIF reverification) carry and count.
+NG_OMITTED_ROLLOUT_KEY = "_ng_omitted_rollout"
+
+
+def is_omitted_rollout_row(row: Mapping[str, Any]) -> bool:
+    """Whether a failures-sidecar row is a ``record_omitted_rollouts`` record of a rollout that produced no result."""
+    return bool(row.get(NG_OMITTED_ROLLOUT_KEY))
+
+
+def is_unstarted_rollout_row(row: Mapping[str, Any]) -> bool:
+    """Whether a sidecar row records a rollout the dispatch budget never started: no execution, so no history."""
+    return is_omitted_rollout_row(row) and bool(row.get(NG_DISPATCH_DRAINED_KEY))
+
+
 NG_TERMINAL_KEY = "_ng_failure_terminal"
 # The attempt cap the collecting process ran with, stamped on each sidecar row: offline aggregation reads it
 # instead of its own environment. The `_ng_failure_` prefix keeps it out of the metrics of a counted row.
@@ -1873,7 +1888,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         description=(
             "Write a failures-sidecar row for each rollout that produced no result: an attempt the agent "
             "reports as kill_shaped and a row dispatch_budget_s never started. The row carries "
-            "_ng_no_persist, the result's failure class and a reason in _ng_failure_message. It is evidence "
+            "_ng_no_persist, _ng_omitted_rollout, the result's failure class and a reason in _ng_failure_message. It is evidence "
             "only: it is not scored, not counted as an attempt or a failure, and resume_from_cache still runs "
             "the rollout. Off by default, which writes nothing for these rollouts, until readers of the "
             "sidecar outside Gym treat such rows as not run rather than as failed."
@@ -2205,9 +2220,11 @@ def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
 
 
 def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], Dict[str, Any]]:
-    """The last attempt recorded for each rollout across the failures sidecars.
+    """The last failed attempt recorded for each rollout across the failures sidecars.
 
-    A row marked ``_ng_no_persist`` records a rollout that produced no result, not an attempt, so it is skipped.
+    An interrupted attempt that ``record_omitted_rollouts`` recorded is the rollout's latest execution but no
+    failure: it hides any older failure, so the rollout is left out here and is missing. A row the dispatch budget
+    never started is no execution and is skipped.
     """
     latest_by_key: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
     for fpath in failures_fpaths:
@@ -2219,10 +2236,10 @@ def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], D
                 if not line:
                     continue
                 row = loads_jsonl_line(line, fpath, line_no)
-                if row.get(NG_NO_PERSIST_KEY):
+                if is_unstarted_rollout_row(row):
                     continue
                 latest_by_key[(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))] = row
-    return latest_by_key
+    return {key: row for key, row in latest_by_key.items() if not is_omitted_rollout_row(row)}
 
 
 def _failure_rows_counted_as_zero(
@@ -2433,11 +2450,12 @@ def _failure_export_metrics(
     more than once, and ``retries/at_cap`` the rollouts with no row that used all their attempts. Each rollout
     is held to the cap its collection recorded on its last attempt (``_ng_failure_max_attempts``), or the
     current cap for a row written before the cap was recorded. ``retries/max_attempts`` is that cap, and is
-    left out when the rollouts were collected with different caps. A row marked ``_ng_no_persist`` is no attempt
-    and is skipped.
+    left out when the rollouts were collected with different caps. A ``record_omitted_rollouts`` row is no failed
+    attempt; an interrupted one is still the rollout's latest execution, so an older failure's class is not counted.
     """
     attempts: Counter = Counter()
     latest: Dict[Any, Dict[str, Any]] = {}
+    latest_failure: Dict[Any, Dict[str, Any]] = {}
     # Every class the sidecars name starts at 0: a reopened tracking run keeps a class's last value until it is sent.
     failed: Counter = Counter()
     for fpath in failures_fpaths:
@@ -2449,14 +2467,21 @@ def _failure_export_metrics(
                 if not line:
                     continue
                 row = loads_jsonl_line(line, fpath, line_no)
-                if row.get(NG_NO_PERSIST_KEY):
+                if is_unstarted_rollout_row(row):
+                    continue
+                latest[identity(row)] = row
+                if is_omitted_rollout_row(row):
                     continue
                 failed.setdefault(row.get(NG_FAILURE_CLASS_KEY) or "unknown", 0)
                 attempts[identity(row)] += 1
-                latest[identity(row)] = row
+                latest_failure[identity(row)] = row
     current_cap = get_max_rollout_attempts()
-    caps = {key: row.get(NG_FAILURE_MAX_ATTEMPTS_KEY) or current_cap for key, row in latest.items()}
-    failed.update(row.get(NG_FAILURE_CLASS_KEY) or "unknown" for key, row in latest.items() if key not in landed)
+    caps = {key: row.get(NG_FAILURE_MAX_ATTEMPTS_KEY) or current_cap for key, row in latest_failure.items()}
+    failed.update(
+        row.get(NG_FAILURE_CLASS_KEY) or "unknown"
+        for key, row in latest.items()
+        if key not in landed and not is_omitted_rollout_row(row)
+    )
     recorded_caps = set(caps.values()) or {current_cap}
     return {
         "retries/attempts": sum(attempts.values()),
@@ -3151,7 +3176,7 @@ class RolloutCollectionHelper(BaseModel):
                         continue
                     fr = orjson.loads(line)
                     # A rollout that produced no result used no attempt; resume runs it again.
-                    if fr.get(NG_NO_PERSIST_KEY):
+                    if is_omitted_rollout_row(fr):
                         continue
                     if TASK_INDEX_KEY_NAME not in fr or ROLLOUT_INDEX_KEY_NAME not in fr:
                         continue
@@ -3663,7 +3688,7 @@ class RolloutCollectionHelper(BaseModel):
                 if no_persist:
                     # kill_shaped, or drained by the dispatch budget: no result, so nothing in the
                     # jsonl. Set-difference on resume naturally re-dispatches; per-task timeout
-                    # bounds wallclock. The sidecar row, when asked for, is skipped by every reader.
+                    # bounds wallclock. The sidecar row, when asked for, is counted by no reader.
                     if config.record_omitted_rollouts:
                         write_started = perf_counter()
                         omitted_bytes = orjson.dumps(omitted_rollout_record(result))

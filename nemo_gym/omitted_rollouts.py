@@ -17,9 +17,10 @@
 An attempt the agent reports as ``kill_shaped`` and a row ``dispatch_budget_s`` never started both
 carry ``_ng_no_persist``: there is no result to score or count as an attempt. By default rollout
 collection writes nothing for them, so their absence is the only evidence. With
-``record_omitted_rollouts`` it writes the row built here to the failures sidecar instead. The row
-keeps ``_ng_no_persist``, and every reader of the sidecar skips a row that carries it, so the row
-stays out of scoring and the resume attempt count and resume still runs the rollout.
+``record_omitted_rollouts`` it writes the row built here to the failures sidecar instead, marked
+``_ng_omitted_rollout``. No reader counts that row as a failure or an attempt, so scoring and the
+resume attempt count are unchanged and resume still runs the rollout. When readers pick a rollout's
+latest attempt, an interrupted one counts and hides older failures; one never started is skipped.
 """
 
 from typing import Any, Dict, Mapping
@@ -39,7 +40,7 @@ def omitted_rollout_record(result: Mapping[str, Any]) -> Dict[str, Any]:
     ``_ng_failure_message`` keeps the reason the result gave, else says that no result was produced.
     """
     # Lazy: rollout_collection imports this module.
-    from nemo_gym.rollout_collection import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY
+    from nemo_gym.rollout_collection import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_OMITTED_ROLLOUT_KEY
 
     record = dict(result)
     failure_class = record.get(NG_FAILURE_CLASS_KEY) or (
@@ -47,5 +48,6 @@ def omitted_rollout_record(result: Mapping[str, Any]) -> Dict[str, Any]:
     )
     reason = record.get(_FAILURE_MESSAGE_KEY) or record.get("error_message") or record.get("error")
     record[NG_FAILURE_CLASS_KEY] = failure_class
+    record[NG_OMITTED_ROLLOUT_KEY] = True
     record[_FAILURE_MESSAGE_KEY] = str(reason) if reason else f"{failure_class}: the rollout produced no result"
     return record

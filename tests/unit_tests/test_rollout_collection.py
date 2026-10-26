@@ -78,6 +78,7 @@ from nemo_gym.rollout_collection import (
     NG_FAILURE_JUDGE_ERROR_KEY,
     NG_FAILURE_MAX_ATTEMPTS_KEY,
     NG_NO_PERSIST_KEY,
+    NG_OMITTED_ROLLOUT_KEY,
     NG_PERF_KEY,
     NG_TERMINAL_KEY,
     NG_TRAJECTORY_KEY,
@@ -10996,6 +10997,7 @@ class TestOmittedRolloutRecords:
         assert output_fpath.read_bytes() == b""
         (row,) = [orjson.loads(line) for line in _failures_path_for(output_fpath).read_bytes().splitlines()]
         assert row[NG_NO_PERSIST_KEY] is True
+        assert row[NG_OMITTED_ROLLOUT_KEY] is True
         assert row[NG_FAILURE_CLASS_KEY] == expected_class
         assert row["_ng_failure_message"] == expected_message
         assert (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME], row[AGENT_REF_KEY_NAME]) == (
@@ -11013,7 +11015,7 @@ class TestOmittedRolloutRecords:
 
 
 class TestSidecarReadersSkipOmittedRows:
-    """Every reader of the sidecar treats a row marked _ng_no_persist as no result, never as a failed attempt.
+    """Every reader of the sidecar treats a record_omitted_rollouts row as no result, never as a failed attempt.
 
     The sidecar holds one real failure (task 0) and rows for two rollouts that produced no result: a killed
     one (task 1) and one the budget never started (task 2), the latter repeated and stamped terminal so that a
@@ -11028,10 +11030,16 @@ class TestSidecarReadersSkipOmittedRows:
             b"".join(orjson.dumps(failing_row(task)) + b"\n" for task in range(3))
         )
         failure = {**failing_row(0), NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS}
-        killed = {**failing_row(1), NG_NO_PERSIST_KEY: True, NG_FAILURE_CLASS_KEY: KILL_SHAPED}
+        killed = {
+            **failing_row(1),
+            NG_NO_PERSIST_KEY: True,
+            NG_OMITTED_ROLLOUT_KEY: True,
+            NG_FAILURE_CLASS_KEY: KILL_SHAPED,
+        }
         never_started = {
             **failing_row(2),
             NG_NO_PERSIST_KEY: True,
+            NG_OMITTED_ROLLOUT_KEY: True,
             NG_DISPATCH_DRAINED_KEY: True,
             NG_FAILURE_CLASS_KEY: CANCELLED,
             NG_TERMINAL_KEY: True,
@@ -11091,3 +11099,68 @@ class TestSidecarReadersSkipOmittedRows:
             (1, None),
             (2, None),
         ]
+
+
+class TestOmittedRowsAndTheLatestAttempt:
+    """Review of #5081: readers pick a rollout's latest execution before setting record_omitted_rollouts rows aside.
+
+    Task 0 failed in the judge and was then interrupted on retry: the interrupted attempt is its latest execution,
+    so the old judge failure must not count again and the rollout is missing. Task 1 failed in the judge and its
+    retry was never started: that row is no execution, so the judge failure still stands. Task 2 is a row ATIF
+    reverification writes today (`_ng_no_persist`, `kill_shaped`, no omission marker), which keeps being counted.
+    """
+
+    @staticmethod
+    def _output(tmp_path: Path) -> Path:
+        output_fpath = tmp_path / "rollouts.jsonl"
+        output_fpath.write_bytes(b"")
+        materialized_path_for(output_fpath).write_bytes(
+            b"".join(orjson.dumps(failing_row(task)) + b"\n" for task in range(3))
+        )
+        judge_failed = lambda task: {**failing_row(task), NG_FAILURE_CLASS_KEY: "judge_failed"}
+        omitted = {NG_NO_PERSIST_KEY: True, NG_OMITTED_ROLLOUT_KEY: True}
+        rows = [
+            judge_failed(0),
+            {**failing_row(0), **omitted, NG_FAILURE_CLASS_KEY: KILL_SHAPED},
+            judge_failed(1),
+            {**failing_row(1), **omitted, NG_DISPATCH_DRAINED_KEY: True, NG_FAILURE_CLASS_KEY: CANCELLED},
+            {**failing_row(2), NG_NO_PERSIST_KEY: True, NG_FAILURE_CLASS_KEY: KILL_SHAPED},
+        ]
+        _failures_path_for(output_fpath).write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+        return output_fpath
+
+    def test_scoring(self, tmp_path: Path) -> None:
+        output_fpath = self._output(tmp_path)
+        sidecar = [_failures_path_for(output_fpath)]
+
+        counted = _failure_rows_counted_as_zero(sidecar, ["judge_failed", KILL_SHAPED], set())
+        missing = _missing_rollout_rows_counted_as_zero([materialized_path_for(output_fpath)], sidecar, set())
+
+        assert [row[TASK_INDEX_KEY_NAME] for row in counted] == [1, 2]
+        assert [row[TASK_INDEX_KEY_NAME] for row in missing] == [0]
+
+    def test_exporter_metrics(self, tmp_path: Path) -> None:
+        identity = lambda row: (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+
+        metrics = _failure_export_metrics([_failures_path_for(self._output(tmp_path))], identity, set())
+
+        assert metrics["retries/attempts"] == 3
+        assert {k: v for k, v in metrics.items() if k.startswith("coverage/failed/")} == {
+            "coverage/failed/judge_failed": 1,
+            f"coverage/failed/{KILL_SHAPED}": 1,
+        }
+
+    def test_run_health(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_health import _rollout_accounting
+
+        accounting = _rollout_accounting(
+            set(), [self._output(tmp_path)], limits=RunHealthLimits(), limits_source="config", duplicated=0
+        )
+
+        assert accounting["failed"]["by_class"] == {"judge_failed": 1, KILL_SHAPED: 1}
+        assert (accounting["expected"], accounting["missing"]) == (3, 1)
+
+    def test_rollout_compare(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_compare.rows import load_rollouts
+
+        assert [row[TASK_INDEX_KEY_NAME] for row in load_rollouts(self._output(tmp_path))] == [1, 2]

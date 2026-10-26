@@ -33,7 +33,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.rollout_collection import NG_DISPATCH_DRAINED_KEY, NG_TERMINAL_KEY
+from nemo_gym.rollout_collection import NG_DISPATCH_DRAINED_KEY, NG_OMITTED_ROLLOUT_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_reverification import (
     _RECOVERY_TWO_SOURCES_WARNING,
     ATIF_PROVENANCE_KEY,
@@ -3075,9 +3075,15 @@ class TestRunFromConfigJudgeFailedOnly:
     async def test_rows_for_rollouts_with_no_result_are_not_recovered(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, omitted: dict
     ) -> None:
-        """A `_ng_no_persist` sidecar row has no response to judge, so recovery neither re-verifies it nor
+        """A `record_omitted_rollouts` sidecar row has no response to judge, so recovery neither re-verifies it nor
         refuses the run because of its stage."""
-        omitted_row = {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, NG_NO_PERSIST_KEY: True, **omitted}
+        omitted_row = {
+            TASK_INDEX_KEY_NAME: 1,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            NG_NO_PERSIST_KEY: True,
+            NG_OMITTED_ROLLOUT_KEY: True,
+            **omitted,
+        }
         self._setup_fixture(
             tmp_path,
             materialized=[self._mat(t) for t in range(3)],
