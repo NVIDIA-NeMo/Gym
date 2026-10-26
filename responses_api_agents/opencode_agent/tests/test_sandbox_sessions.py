@@ -159,7 +159,8 @@ class Sandbox:
         """Stand in for the SQLite export (see test_snapshot.py): the staged export, the copied database."""
         self.snapshots.append({"harness_session_id": harness_session_id, "previous_message_ids": previous_message_ids})
         (directory / "export.json").write_text(self.files[f"{self.directory}/export.json"])
-        (directory / "observations.db").write_bytes(database.read_bytes())
+        if database.stat().st_size:  # an empty database stands for a failed observation copy
+            (directory / "observations.db").write_bytes(database.read_bytes())
 
     async def create(self, **kwargs):
         runner_params = next(arg for arg in shlex.split(kwargs["command"]) if arg.endswith("/params.sh"))

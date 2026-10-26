@@ -215,3 +215,11 @@ def test_snapshot_of_a_copied_store_keeps_root_output_and_child_usage(tmp_path, 
     assert [info["tokens"]["input"] for info in export["usage_messages"]] == [1, 2]
     with sqlite3.connect(local / "observations.db") as copy:
         assert copy.execute("select count(*) from session").fetchone()[0] == 2
+
+
+def test_failed_observation_copy_keeps_the_export(tmp_path):
+    con = session_store(tmp_path / "opencode.db")
+    (tmp_path / "observations.db").mkdir()  # SQLite cannot open the destination
+    snapshot(tmp_path / "opencode.db", tmp_path, harness_session_id=None, previous_message_ids=[])
+    con.close()
+    assert json.loads((tmp_path / "export.json").read_text())["session_id"] == "root"

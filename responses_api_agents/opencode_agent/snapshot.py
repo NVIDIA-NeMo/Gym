@@ -3,9 +3,13 @@
 """Export an OpenCode session database copied out of the sandbox after the CLI stopped."""
 
 import json
+import logging
 import sqlite3
 from collections.abc import Collection
 from pathlib import Path
+
+
+LOG = logging.getLogger(__name__)
 
 
 def snapshot(
@@ -14,8 +18,6 @@ def snapshot(
     """Export root messages and retain the full session tree for observations."""
     previous_ids = set(previous_message_ids)
     with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as source:
-        with sqlite3.connect(directory / "observations.db") as destination:
-            source.backup(destination)
         source.row_factory = sqlite3.Row
         sessions = source.execute(
             "select id from session where parent_id is null order by time_created, id"
@@ -53,3 +55,9 @@ def snapshot(
                 }
             )
         )
+        # A missing observation store costs only observation evidence, not the export.
+        try:
+            with sqlite3.connect(directory / "observations.db") as destination:
+                source.backup(destination)
+        except sqlite3.Error:
+            LOG.exception("Failed to copy OpenCode observations")

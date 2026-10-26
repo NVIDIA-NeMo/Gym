@@ -295,8 +295,8 @@ class OpenCodeSandboxSession(AgentSessionState):
             if self.stderr:
                 raise RuntimeError(format_error_message(str(error), stderr=self.stderr)) from error
             raise
-        export_text = (directory / "export.json").read_text()
         if self.is_continuation:
+            export_text = await self._read_export(directory)
             export = json.loads(export_text)
             harness_session_id = export.get("session_id")
             if not isinstance(harness_session_id, str) or not harness_session_id:
@@ -313,9 +313,12 @@ class OpenCodeSandboxSession(AgentSessionState):
             trajectory = TrajectoryRecord(
                 task_id=self.request.task_id.task_id, rollout_id=self.request.episode_id.capture_key
             )
+            database = directory / "observations.db"
+            if not database.is_file():
+                raise FileNotFoundError(f"OpenCode observations were not captured: {database}")
             observations = await asyncio.to_thread(
                 parse_opencode_observations,
-                directory / "observations.db",
+                database,
                 self.request.episode_id.capture_key,
                 trajectory,
                 require_terminal_finish=True,
@@ -357,7 +360,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             # Preserve the single-turn evidence/error order. The response layer
             # parses this raw export and translates malformed content to 502.
             await self._check_task_environment()
-            return export_text
+            return await self._read_export(directory)
         try:
             await self._check_task_environment()
         except Exception as error:
@@ -379,6 +382,17 @@ class OpenCodeSandboxSession(AgentSessionState):
             ) from error
         return export_text
 
+    async def _read_export(self, directory: Path) -> str:
+        try:
+            return (directory / "export.json").read_text()
+        except OSError as error:
+            logs = await self.session.read_output_log()
+            raise RuntimeError(
+                format_sandbox_error(
+                    "OpenCode sandbox runner returned no valid result", output=logs, stderr=self.stderr
+                )
+            ) from error
+
     async def _check_task_environment(self) -> None:
         try:
             if await self.read_text("task-environment.ready") != "ready\n":
@@ -393,22 +407,31 @@ class OpenCodeSandboxSession(AgentSessionState):
         if self.session.cleanup is None or not self.session.cleanup["cleanup_confirmed"]:
             raise RuntimeError("OpenCode transcript capture requires confirmed cleanup")
         database = f"{self.persistent_directory}/data/opencode"
+        deadline = asyncio.get_running_loop().time() + timeout
         try:
-            async with asyncio.timeout(timeout):
+            async with asyncio.timeout_at(deadline):
                 # A stopped CLI may leave its write-ahead log behind; it holds the latest messages.
                 listed = await self.session.sandbox.exec(
-                    f"cd {quote(database)} && for name in opencode.db opencode.db-wal opencode.db-shm; "
-                    'do [ ! -e "$name" ] || echo "$name"; done',
+                    "for name in opencode.db opencode.db-wal opencode.db-shm; "
+                    f'do [ ! -e {quote(database)}/"$name" ] || echo "$name"; done',
                     cwd=self.session.workdir,
                     timeout_s=timeout,
                 )
-                if listed.return_code != 0 or listed.error_type:
-                    raise RuntimeError(listed.stderr)
-                names = (listed.stdout or "").split()
-                if "opencode.db" not in names:
-                    raise RuntimeError("OpenCode session database is missing")
+            if listed.return_code != 0 or listed.error_type:
+                raise RuntimeError(listed.stderr)
+        except Exception as error:
+            raise RuntimeError(f"OpenCode transcript capture failed: {error}") from error
+        names = (listed.stdout or "").split()
+        if "opencode.db" not in names:
+            return  # No export: collection reports the missing result with the CLI logs.
+        try:
+            async with asyncio.timeout_at(deadline):
                 for name in names:
                     await self.session.sandbox.download(f"{database}/{name}", directory / name)
+        except Exception:
+            LOG.warning("OpenCode session database unavailable", exc_info=True)
+            return
+        try:
             await asyncio.to_thread(
                 snapshot,
                 directory / "opencode.db",

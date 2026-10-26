@@ -281,9 +281,10 @@ async def test_close_recovery_preserves_cancelled_activation(setup, tmp_path, mo
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
+@pytest.mark.parametrize("artifact_failure", ["copy", "parse"])
 @pytest.mark.parametrize("prior_success", [False, True])
 async def test_close_without_recovered_root_preserves_activation(
-    setup, tmp_path, monkeypatch, cancelled, prior_success
+    setup, tmp_path, monkeypatch, cancelled, artifact_failure, prior_success
 ):
     agent, sandbox = setup
     install_artifact_runner(sandbox, tmp_path)
@@ -309,7 +310,8 @@ async def test_close_without_recovered_root_preserves_activation(
 
     async def broken_observations(source, destination):
         if source.endswith("/opencode.db"):
-            Path(destination).write_bytes(b"not a SQLite database")
+            # The export survives; only the observation store is unusable.
+            Path(destination).write_bytes(b"" if artifact_failure == "copy" else b"not a SQLite database")
         else:
             await download(source, destination)
 
