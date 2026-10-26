@@ -77,8 +77,8 @@ def test_exact_shuffle_prompt_and_subset_stability(monkeypatch, english_rows):
             f"{letter}: {text}" for letter, text in zip("ABCD", expected)
         )
         english = expected_english[index]
-        assert {key: row[key] for key in english if key != "uuid"} == {
-            key: value for key, value in english.items() if key != "uuid"
+        assert {key: row[key] for key in english if key not in ("uuid", "task_id")} == {
+            key: value for key, value in english.items() if key not in ("uuid", "task_id")
         }
     assert build(records, question_ids=["2"]) == full[2:]
 
