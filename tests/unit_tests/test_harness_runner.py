@@ -88,7 +88,7 @@ def test_events_mode_forwards_term_and_ignores_a_detached_stdout_holder(tmp_path
     # A detached tool keeps stdout open; the runner must still finish when the CLI does.
     script = (
         "setsid sleep 30 & echo $! > holder.pid; "
-        "trap 'echo \"{\\\"type\\\": \\\"stopped\\\"}\"; exit 0' TERM; echo '{\"type\": \"ready\"}'; "
+        'trap \'echo "{\\"type\\": \\"stopped\\"}"; exit 0\' TERM; echo \'{"type": "ready"}\'; '
         "while :; do sleep 0.05; done"
     )
     params = _params(tmp_path, command=["bash", "-c", script], events=str(tmp_path / "events.jsonl"))

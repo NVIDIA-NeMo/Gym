@@ -455,7 +455,8 @@ class TestSanity:
                 Path(local_path).write_text(
                     json.dumps(
                         {
-                            "cleanup_confirmed": commands is None or any("touch" in cmd and "stop.request" in cmd for cmd in commands),
+                            "cleanup_confirmed": commands is None
+                            or any("touch" in cmd and "stop.request" in cmd for cmd in commands),
                             "error": None,
                         }
                     ),
