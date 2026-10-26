@@ -222,5 +222,8 @@ def test_record_child_span_joins_a_parent_that_has_already_ended(recorder):
     health = next(s for s in exporter.get_finished_spans() if s.name == "gym.rollout.health")
     assert health.context.trace_id == parent.trace_id
     assert health.parent.span_id == parent.span_id
-    assert health.attributes["verdict"] == "healthy"
+    if LENS_INSTALLED:
+        assert health.attributes["verdict"] == "healthy"
+    else:
+        assert not health.attributes
     assert not trace_current_span().get_span_context().is_valid
