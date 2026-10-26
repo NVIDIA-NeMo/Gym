@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 import anyio
 from fastapi import Request
 from pydantic import ValidationError
-from pytest import MonkeyPatch, fixture, mark, raises
+from pytest import MonkeyPatch, fixture, mark, raises, skip
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
@@ -1346,3 +1346,143 @@ def test_assistant_message_plugin_hooks() -> None:
         check=True,
         timeout=30,
     )
+
+
+PROMPT_PLAIN = "Run `python3 -c \"print(1)\"`, then\n-- report $HOME and 'quotes' — naïve 日本語 ✓."
+PROMPT_PADDED = "\n\n  -- starts with blanks and dashes, ends with them \t\n\n"
+
+
+@mark.parametrize("staging_dir_writable", [True, False], ids=["deletable", "undeletable"])
+@mark.parametrize("opencode_exit_code", [0, 3])
+@mark.parametrize("prompt", [PROMPT_PLAIN, PROMPT_PADDED], ids=["plain", "padded"])
+@mark.parametrize("verbatim_prompt", [False, True])
+async def test_prompt_delivery_to_opencode(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    verbatim_prompt: bool,
+    prompt: str,
+    opencode_exit_code: int,
+    staging_dir_writable: bool,
+) -> None:
+    """Run the generated launch command against a stand-in `opencode` that records what it receives."""
+    if not verbatim_prompt and not staging_dir_writable:
+        skip("only the verbatim prompt is staged in a file")
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.preinstalled_opencode = True
+    config.opencode_version = "test"
+    config.artifacts_dir = str(tmp_path / "artifacts")
+    config.verbatim_prompt = verbatim_prompt
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    uploads: Dict[str, bytes] = {}
+    upload_modes: Dict[str, int] = {}
+
+    async def upload(source: Any, target: str) -> None:
+        uploads[target] = Path(source).read_bytes()
+        upload_modes[target] = Path(source).stat().st_mode & 0o777
+
+    sandbox = MagicMock(
+        upload=AsyncMock(side_effect=upload),
+        download=AsyncMock(),
+        exec=AsyncMock(
+            side_effect=[
+                SimpleNamespace(stdout="Shell: sh\nOpenCode run finished", stderr="", return_code=0, error_type=None),
+                RuntimeError("no session to export"),
+            ]
+        ),
+    )
+    monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
+    monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
+
+    previous_umask = os.umask(0o077)
+    try:
+        await server.responses(
+            request=MagicMock(session={SESSION_ID_KEY: "s"}, cookies={"sandbox_id": ""}, state=SimpleNamespace()),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": prompt}]),
+        )
+    finally:
+        os.umask(previous_umask)
+
+    command = sandbox.exec.await_args_list[0].kwargs["command"]
+    prompt_paths = [path for path in uploads if path.startswith("/tmp/nemo-gym-prompt-")]
+    home = tmp_path / "home"
+    bin_dir = home / ".opencode/bin"
+    bin_dir.mkdir(parents=True)
+    received = tmp_path / "received.json"
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+    local_prompt = staging_dir / "prompt.txt"
+    opencode = bin_dir / "opencode"
+    opencode.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "if sys.argv[1:] == ['--version']:\n    print('test'); sys.exit(0)\n"
+        f"stdin = sys.stdin.read() if {verbatim_prompt} else None\n"
+        f"prompt_file_exists = os.path.exists({str(local_prompt)!r})\n"
+        f"open({str(received)!r}, 'w').write(json.dumps({{'argv': sys.argv[1:], 'stdin': stdin, "
+        "'prompt_file_exists': prompt_file_exists}))\n"
+        f"sys.exit({opencode_exit_code})\n"
+    )
+    opencode.chmod(0o755)
+    local_command = command.replace("/tmp/nemo-gym-mcp-setup-error", shlex.quote(str(tmp_path / "mcp-error")))
+    if verbatim_prompt:
+        [prompt_path] = prompt_paths
+        # A non-root sandbox user must be able to read the upload even when the host umask is restrictive.
+        assert upload_modes[prompt_path] == 0o644
+        assert uploads[prompt_path] == prompt.encode("utf-8")
+        local_prompt.write_bytes(uploads[prompt_path])
+        if not staging_dir_writable:
+            # Like a root-owned upload in a sticky /tmp: the file cannot be unlinked, which must not abort the run.
+            staging_dir.chmod(0o555)
+        local_command = local_command.replace(prompt_path, shlex.quote(str(local_prompt)))
+    else:
+        assert prompt_paths == []
+    try:
+        completed = subprocess.run(
+            ["sh", "-c", local_command],
+            env={"HOME": str(home), "PATH": f"{bin_dir}{os.pathsep}{os.defpath}"},
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    finally:
+        staging_dir.chmod(0o755)
+    assert completed.returncode == opencode_exit_code, completed.stderr
+    if verbatim_prompt and (staging_dir_writable or os.geteuid() == 0):
+        # The staged prompt is deleted once opened, on success and on failure alike.
+        assert not local_prompt.exists()
+    elif verbatim_prompt:
+        assert local_prompt.exists()
+
+    argv = json.loads(received.read_text())
+    if verbatim_prompt and (staging_dir_writable or os.geteuid() == 0):
+        # ...and before OpenCode starts, so the model can never read it.
+        assert argv["prompt_file_exists"] is False
+    argv.pop("prompt_file_exists")
+    if verbatim_prompt:
+        # No message argument: `opencode run` uses stdin verbatim instead of re-quoting arguments.
+        assert argv == {"argv": ["run", "--title", "NG dummy title", "--thinking"], "stdin": prompt}
+        assert prompt not in command
+    else:
+        # Unchanged default: the prompt is the final argument, which `opencode run` wraps in quotes.
+        assert argv == {"argv": ["run", "--title", "NG dummy title", "--thinking", "--", prompt], "stdin": None}
+
+
+async def test_blank_prompt_is_rejected_before_launch_when_verbatim(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.preinstalled_opencode = True
+    config.opencode_version = "test"
+    config.artifacts_dir = str(tmp_path / "artifacts")
+    config.verbatim_prompt = True
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = MagicMock(upload=AsyncMock(), download=AsyncMock(), exec=AsyncMock(), stop=AsyncMock())
+    monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
+
+    with raises(ValueError, match="blank prompt"):
+        await server.responses(
+            request=MagicMock(session={SESSION_ID_KEY: "s"}, cookies={"sandbox_id": ""}, state=SimpleNamespace()),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": " \n\t "}]),
+        )
+
+    sandbox.upload.assert_not_awaited()
+    sandbox.exec.assert_not_awaited()
