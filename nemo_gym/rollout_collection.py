@@ -1160,6 +1160,10 @@ class SharedRolloutCollectionConfig(
             "When unset, no driver-side task admission limit is applied."
         ),
     )
+    standard_analyses: bool = Field(
+        default=True,
+        description="Compute local standard analysis reports and export derived results after collection.",
+    )
     retain_results_in_memory: bool = Field(
         default=True,
         description=(
@@ -4055,6 +4059,7 @@ Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
+        health_result = None
         if not config.disable_aggregation and not config.disable_health_check:
             from nemo_gym.rollout_health import _aggregated_shards, format_health_report, run_health_checks
 
@@ -4078,6 +4083,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 )
             else:
                 print(format_health_report(health_result))
+
+        if config.standard_analyses and not config.disable_aggregation:
+            from nemo_gym.standard_analyses.integration import analyze_collection
+
+            await analyze_collection(output_fpath, health_result=health_result)
 
         config.check_completion(expected=expected_rollouts, results=persisted_results)
         return results
@@ -4248,6 +4258,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 {
                     f"key_metrics/{agent_name}/{k}": v
                     for k, v in agent_entry["key_metrics"].items()
+                    if isinstance(v, primitive_types)
+                }
+            )
+
+            metrics_to_log.update(
+                {
+                    f"perf_summary/{agent_name}/{k}": v
+                    for k, v in (agent_entry.get("perf_summary") or {}).items()
                     if isinstance(v, primitive_types)
                 }
             )
@@ -4786,6 +4804,10 @@ class RolloutAggregationConfig(RunHealthConfig, BaseNeMoGymCLIConfig):
     ```
     """
 
+    standard_analyses: bool = Field(
+        default=True,
+        description="Compute standard analyses after aggregation and health checks when call evidence is available.",
+    )
     input_glob: str = Field(
         description=(
             "Glob pattern or comma-separated list of glob patterns matching the rollout shards "
@@ -5111,6 +5133,7 @@ class RolloutAggregationHelper(BaseModel):
 Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
+        health_result = None
         if not config.disable_health_check:
             from nemo_gym.rollout_health import format_health_report, run_health_checks
 
@@ -5130,6 +5153,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 )
             else:
                 print(format_health_report(health_result))
+
+        if config.standard_analyses:
+            from nemo_gym.standard_analyses.integration import analyze_collection
+
+            await analyze_collection(
+                output_fpath, paths=[Path(path) for path in input_paths], health_result=health_result
+            )
 
         return aggregate_metrics_fpath
 

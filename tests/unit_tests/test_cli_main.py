@@ -2088,3 +2088,33 @@ def test_eval_run_task_selection_flags_need_a_target(monkeypatch, capsys, serve,
         main()
     assert exc.value.code == 2
     assert "--only-tasks and --exclude-tasks apply to a task TARGET" in capsys.readouterr().err
+
+
+def test_analysis_workspace_cli_uses_requested_project_and_namespace(monkeypatch, capsys):
+    from unittest.mock import Mock
+
+    from nemo_gym.standard_analyses import dashboard
+
+    workspace = Mock()
+    workspace.save.return_value.url = "https://wandb.ai/team/project/workspace"
+    build = Mock(return_value=workspace)
+    monkeypatch.setattr(dashboard, "build_workspace", build)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gym",
+            "eval",
+            "analysis-workspace",
+            "--entity",
+            "team",
+            "--project",
+            "project",
+            "--namespace",
+            "efficiency/cohorts/example",
+        ],
+    )
+    main()
+    build.assert_called_once_with("team", "project", namespace="efficiency/cohorts/example")
+    workspace.save.assert_called_once_with()
+    assert "https://wandb.ai/team/project/workspace" in capsys.readouterr().out

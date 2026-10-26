@@ -25,12 +25,16 @@ model from `config_types` rather than asking the exporter class whether it is av
 import atexit
 import logging
 from importlib import import_module
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from omegaconf import DictConfig
 
 from nemo_gym.config_types import ExporterConfig, MLFlowConfig, WANDBConfig
 from nemo_gym.exporters.base import BaseExporter
+
+
+if TYPE_CHECKING:
+    from nemo_gym.standard_analyses.models import Report
 
 
 logger = logging.getLogger(__name__)
@@ -119,3 +123,9 @@ def export_metrics(metrics: dict[str, Any], step: Optional[int] = None) -> None:
 def export_rollouts(rollouts: list[dict[str, Any]]) -> None:
     for exporter in _EXPORTERS:
         exporter.export_rollouts(rollouts)
+
+
+def export_standard_analyses(report: "Report", *, namespace: str = "efficiency") -> None:
+    """Publish derived reports through the same guarded fan-out as other run metadata."""
+    for exporter in _EXPORTERS:
+        exporter.export_standard_analyses(report, namespace=namespace)
