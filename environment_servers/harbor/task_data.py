@@ -16,9 +16,12 @@
 
 A Harbor task folder owns the task (instruction, image, tests, timeouts). The row the loader
 materializes carries the instruction as the user message in ``responses_create_params`` and, as
-its only task-owned field, the content digest of the folder it came from. The server resolves the
-task as ``<taskset folder>/<task_id>`` and refuses a row whose folder changed since
-materialization (409), so a run never grades edited tests against stale rows.
+its task-owned fields, the content digest of the folder it came from and the digest of the dataset
+it belongs to. The server resolves the task as ``<taskset folder>/<task_id>`` and refuses a row
+whose folder changed since materialization (409), so a run never grades edited tests against
+stale rows. The dataset digest is provenance: rollout collection copies the ``_ng_*`` keys of a
+materialized row's ``task_data`` onto the record it writes, so every ``rollouts.jsonl`` row names the
+task folder (``_ng_digest``) and the dataset (``_ng_dataset_digest``) it ran.
 """
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -33,4 +36,11 @@ class TaskData(BaseModel):
         alias="_ng_digest",
         description="Content hash of the task folder when the row was materialized.",
         json_schema_extra={"consumed_by": ["verify", "provenance"]},
+    )
+    # The wire key is ``_ng_dataset_digest`` (nemo_gym.tasks.harbor.digest.DATASET_DIGEST_KEY).
+    ng_dataset_digest: str | None = Field(
+        default=None,
+        alias="_ng_dataset_digest",
+        description="Digest of the dataset the task belongs to (manifest.toml [dataset].digest) at materialization.",
+        json_schema_extra={"consumed_by": ["provenance"]},
     )

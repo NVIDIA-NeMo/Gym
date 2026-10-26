@@ -36,6 +36,20 @@ An intent with no matching entry at freeze must mask the rollout.
 That closes the window where the final call's entry is lost without a trace.
 ``begin_call`` runs before generation, so the caller may fail the model call at zero compute cost.
 
+A sink may additionally implement
+``record_engine_refusal(rollout_id, *, model_call_id, code, parent_call_id=None, parent_resolution=None)``.
+It is an optional extension beside ``begin_call`` and likewise not part of ``TokenSink``.
+``record_engine_refusal`` durably records that the engine refused the call before it generated anything,
+together with the request-time lineage decision (the recorded call the refused request continued
+and that decision's status), which the builder reads to place the refusal on one branch.
+Such a call can never produce an entry, so the refusal resolves its pre-dispatch intent
+instead of leaving it dangling, and the frozen snapshot reports it in ``engine_refusals``.
+After the rollout is frozen it must either fail with ``TokenCaptureFrozenError`` or leave the
+frozen snapshot unchanged, its version and its ``engine_refusals`` included: a late refusal
+cannot change the sample that was already delivered, so it must not stale the retirement of the
+consumed snapshot. After the rollout is retired it must fail with ``TokenCaptureRetiredError``,
+like every other write.
+
 ``nemo_gym.token_id_capture.conformance`` checks an external implementation against these contracts.
 """
 
@@ -45,7 +59,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol, TypedDict, runtime_checkable
 
-from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
+from nemo_gym.token_id_capture.records import EngineRefusalRecord, ParentResolutionStatus, TokenEntry
 from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
 
 
@@ -95,13 +109,18 @@ class TokenCaptureRetiredError(TokenCaptureFrozenError):
 
 @dataclass(frozen=True)
 class TokenCaptureSnapshot:
-    """An immutable view of one rollout's frozen capture records."""
+    """An immutable view of one rollout's frozen capture records.
+
+    ``engine_refusals`` holds the calls the engine refused, in the order they were recorded; a sink
+    without the ``record_engine_refusal`` extension leaves it empty.
+    """
 
     rollout_id: str
     entries: tuple[TokenEntry, ...]
     incomplete: bool
     snapshot_id: str
     version: int
+    engine_refusals: tuple[EngineRefusalRecord, ...] = ()
 
 
 @dataclass(frozen=True)
