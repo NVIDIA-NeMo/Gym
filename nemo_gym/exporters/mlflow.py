@@ -12,11 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
+import json
 import logging
 import re
 from itertools import batched
 from os import environ
-from time import time
+from time import gmtime, strftime, time
 from typing import Any, ClassVar, Iterator, Optional
 
 import orjson
@@ -114,14 +116,18 @@ class MLflowExporter(BaseExporter):
     name: ClassVar[str] = "mlflow"
 
     CONFIG_ARTIFACT_FILE: ClassVar[str] = "global_config.json"
+    # Where a reopened run records each later segment's config; the first segment's stays in CONFIG_ARTIFACT_FILE.
+    SEGMENT_CONFIG_ARTIFACT_DIR: ClassVar[str] = "config"
     # Can't write .jsonl: `log_table` accepts only .json/.parquet, and writes one table document.
     ROLLOUTS_ARTIFACT_FILE: ClassVar[str] = "rollouts.json"
+    RESUME_COUNT_TAG: ClassVar[str] = "gym_resume_count"
 
     def __init__(self, global_config_dict: DictConfig) -> None:
         super().__init__(global_config_dict)
         self.config = MLFlowConfig.model_validate(global_config_dict)
         self.client: Optional[MlflowClient] = None
         self.run_id: Optional[str] = None
+        self.reopened: bool = False
 
     def setup(self) -> None:
         # The MLflow SDK reads the bearer token from the environment, not from client kwargs.
@@ -138,6 +144,10 @@ class MLflowExporter(BaseExporter):
         self.run_id = self._recorded_run_id()
         if self.run_id is not None:
             self.client.update_run(self.run_id, status="RUNNING")
+            # Counts the times this run was reopened, so a reader knows its metrics span several jobs.
+            resumes = int(self.client.get_run(self.run_id).data.tags.get(self.RESUME_COUNT_TAG, 0))
+            self.client.set_tag(self.run_id, self.RESUME_COUNT_TAG, str(resumes + 1))
+            self.reopened = True
             return
         self.run_id = self.client.create_run(
             experiment_id, run_name=self.config.mlflow_run_name, tags=tags or None
@@ -149,6 +159,7 @@ class MLflowExporter(BaseExporter):
             self.client.set_terminated(self.run_id, status="FINISHED")
         self.client = None
         self.run_id = None
+        self.reopened = False
 
     def _experiment_id(self, name: str) -> str:
         experiment = self.client.get_experiment_by_name(name)
@@ -169,15 +180,28 @@ class MLflowExporter(BaseExporter):
         client, run_id = self._active()
         container = OmegaConf.to_container(config_dict)
 
-        # Log the whole config first: params are lossy (flat, truncated, length-capped), so the
-        # artifact is the record of what actually ran.
-        client.log_dict(run_id, container, self.CONFIG_ARTIFACT_FILE)
-
         params = [
             Param(name, str(value)[:MAX_PARAM_VAL_LENGTH])
             for key, value in _flatten_config(container)
             if (name := _sanitize_key(key)) is not None
         ]
+
+        if self.reopened:
+            # A later segment's config differs (e.g. the policy server's host and port), and MLflow refuses to
+            # change a logged param. So the first segment's params and config artifact stay as they are, only new
+            # keys become params, and the full config goes to a file of its own. Its name needs no read of the
+            # run's artifacts: the start time orders segments, and the content digest keeps two segments that
+            # start in the same second from overwriting each other.
+            logged = client.get_run(run_id).data.params
+            params = [param for param in params if param.key not in logged]
+            digest = hashlib.sha256(json.dumps(container, sort_keys=True, default=str).encode()).hexdigest()[:12]
+            started = strftime("%Y%m%dT%H%M%SZ", gmtime())
+            client.log_dict(run_id, container, f"{self.SEGMENT_CONFIG_ARTIFACT_DIR}/segment_{started}_{digest}.json")
+        else:
+            # Log the whole config first: params are lossy (flat, truncated, length-capped), so the
+            # artifact is the record of what actually ran.
+            client.log_dict(run_id, container, self.CONFIG_ARTIFACT_FILE)
+
         for batch in batched(params, MAX_PARAMS_TAGS_PER_BATCH):
             client.log_batch(run_id, params=batch)
 

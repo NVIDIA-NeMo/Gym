@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -26,6 +27,56 @@ QUALITY_SUMMARY_FILENAME = "quality_summary.json"
 ROLLOUT_VERDICTS_FILENAME = "rollout_verdicts.jsonl"
 
 Verdict = Literal["healthy", "unhealthy", "unobserved"]
+# Where each limit a summary was judged by came from: the run's config, the run's own earlier summary, or an
+# explicit override when it was rechecked.
+LimitsSource = Literal["config", "persisted", "override"]
+
+
+class RunHealthLimits(BaseModel):
+    """The run-level failure limits, as a share of expected rollouts; ``None`` is no limit, the default."""
+
+    model_config = ConfigDict(frozen=True)
+
+    max_not_final_failure_fraction: float | None = Field(default=None, ge=0, le=1)
+    max_final_failure_fraction: float | None = Field(default=None, ge=0, le=1)
+
+    def summary(self, source: LimitsSource | Mapping[str, LimitsSource]) -> dict[str, Any]:
+        """The limits as written to ``quality_summary.json``, so the verdict can be reproduced.
+
+        ``source`` maps each limit to where it came from; a single source applies to every limit.
+        """
+        sources = {name: source if isinstance(source, str) else source[name] for name in type(self).model_fields}
+        return {**self.model_dump(), "source": sources}
+
+
+class RunHealthConfig(BaseModel):
+    """The health-check settings every command that judges a run shares: one place for names and defaults."""
+
+    health_check_max_not_final_failure_fraction: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description=(
+            "Run health is unhealthy when not final (retryable) failures reach this share of expected rollouts. "
+            "Unset by default: no limit."
+        ),
+    )
+    health_check_max_final_failure_fraction: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description=(
+            "Run health is unhealthy when final (not retried) failures reach this share of expected rollouts. "
+            "Unset by default: no limit."
+        ),
+    )
+
+    @property
+    def run_health_limits(self) -> RunHealthLimits:
+        return RunHealthLimits(
+            max_not_final_failure_fraction=self.health_check_max_not_final_failure_fraction,
+            max_final_failure_fraction=self.health_check_max_final_failure_fraction,
+        )
 
 
 class CheckScope(str, Enum):
@@ -42,6 +93,7 @@ class CheckSubject(str, Enum):
     MODEL_CALL = "model_call"
     TRAJECTORY_CAPTURE = "trajectory_capture"
     TASK = "task"
+    RUN = "run"
 
 
 class CheckInput(str, Enum):
@@ -64,6 +116,9 @@ class CheckInput(str, Enum):
     REPEAT_VERDICTS = "repeat_verdicts"
     # Runner-derived RolloutDigest objects grouped by task for task-level reduction.
     REPEAT_DIGESTS = "repeat_digests"
+    # The run accounting: the _materialized_inputs.jsonl inventory, the _failures.jsonl sidecar and the identities
+    # of the saved records, which a stopped run still holds in memory.
+    RUN_ACCOUNTING = "run_accounting"
 
 
 CALL_BINDING_INPUTS = frozenset({CheckInput.BOUND_CALLS, CheckInput.OWNED_MODEL_CALLS})

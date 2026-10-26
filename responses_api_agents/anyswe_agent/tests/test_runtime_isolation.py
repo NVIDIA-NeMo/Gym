@@ -86,3 +86,52 @@ class TestRuntimeIsolation:
         assert runner == [
             "HOME=/sandbox/home TMPDIR=/sandbox/tmp /agent_deps_mount/bin/python -I /trajectories_mount/agent_runner.py"
         ]
+
+    def test_runtime_fetch_uses_the_configured_timeout(self, tmp_path: Path) -> None:
+        fetch_timeouts: list[int] = []
+
+        class _FakeSandbox:
+            def __init__(self, provider, spec) -> None:
+                pass
+
+            async def start(self) -> None:
+                pass
+
+            async def stop(self) -> None:
+                pass
+
+            async def exec(self, command: str, **kwargs):
+                if "anyswe_agent_deps.tar.gz" in command and "curl" in command:
+                    fetch_timeouts.append(kwargs["timeout_s"])
+                return SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+
+            async def download(self, remote: str, local: Path) -> None:
+                pass
+
+        params = AnySweInstanceConfig(
+            **(_config().model_dump() | {"agent_runtime_fetch_timeout_s": 1800}),
+            run_session_id="s",
+            base_results_dir=tmp_path,
+            model_server_url="http://policy:8000",
+            resolved_sandbox_provider={"opensandbox": {}},
+            sandbox_default_metadata={},
+            agent_deps_url="https://example.test/runtime.tar.gz",
+            problem_info={"instance_id": "astropy__astropy-12907"},
+            body={"input": "fix it", "model": "policy"},
+            persistent_dir=tmp_path,
+            metrics_fpath=tmp_path / "metrics.json",
+            container="swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest",
+        )
+        params.metrics_fpath.write_text("{}")
+        (tmp_path / "instruction.txt").write_text("fix it")
+        (tmp_path / "agent_runner.py").write_text("")
+
+        agent = AnySweAgent.__new__(AnySweAgent)
+        object.__setattr__(
+            agent, "__dict__", {"config": params, "server_client": SimpleNamespace(global_config_dict={})}
+        )
+
+        with patch("responses_api_agents.anyswe_agent.app.AsyncSandbox", _FakeSandbox):
+            asyncio.run(agent._run_agent_in_sandbox(params))
+
+        assert fetch_timeouts == [1800]

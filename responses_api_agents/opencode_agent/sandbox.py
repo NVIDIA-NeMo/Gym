@@ -25,7 +25,7 @@ from responses_api_agents.opencode_agent.observability import scope_opencode_act
 LOG = logging.getLogger(__name__)
 
 
-def format_sandbox_error(message: str, *, output: str = "", stderr: str = "") -> str:
+def format_error_message(message: str, *, output: str = "", stderr: str = "") -> str:
     """Bound the combined error to 16k characters, preserving context and log tails."""
     parts = [message]
     if output:
@@ -69,6 +69,8 @@ class OpenCodeSandboxSession(AgentSessionState):
 
     session: SandboxSession[str]
     runtime: str
+    sandbox_id: str | None = None
+    python_executable: str = "python3"
     model_ref: ModelServerRef | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
@@ -233,9 +235,9 @@ class OpenCodeSandboxSession(AgentSessionState):
             )
         await self.upload_json("input.json", payload)
         return SandboxCommand(
-            python="python3",
+            python=self.python_executable,
             argv=[
-                "python3",
+                self.python_executable,
                 "-I",
                 f"{self.persistent_directory}/sandbox_runner.py",
                 f"{self.session.session_dir}/input.json",
@@ -253,7 +255,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             await self.snapshot(timeout)
         except Exception as error:
             if self.stderr:
-                raise RuntimeError(format_sandbox_error(str(error), stderr=self.stderr)) from error
+                raise RuntimeError(format_error_message(str(error), stderr=self.stderr)) from error
             raise
         if self.is_continuation:
             export_text = await self._read_export()
@@ -338,7 +340,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             ):
                 return export_text
             raise RuntimeError(
-                format_sandbox_error("OpenCode task environment initialization was not confirmed", stderr=self.stderr)
+                format_error_message("OpenCode task environment initialization was not confirmed", stderr=self.stderr)
             ) from error
         return export_text
 
@@ -348,7 +350,7 @@ class OpenCodeSandboxSession(AgentSessionState):
         except Exception as error:
             logs = await self.session.read_output_log()
             raise RuntimeError(
-                format_sandbox_error(
+                format_error_message(
                     "OpenCode sandbox runner returned no valid result", output=logs, stderr=self.stderr
                 )
             ) from error
@@ -359,7 +361,7 @@ class OpenCodeSandboxSession(AgentSessionState):
                 raise ValueError("Invalid task environment initialization receipt")
         except Exception as error:
             raise RuntimeError(
-                format_sandbox_error("OpenCode task environment initialization was not confirmed", stderr=self.stderr)
+                format_error_message("OpenCode task environment initialization was not confirmed", stderr=self.stderr)
             ) from error
 
     async def snapshot(self, timeout: float) -> None:
@@ -367,7 +369,7 @@ class OpenCodeSandboxSession(AgentSessionState):
         if self.session.cleanup is None or not self.session.cleanup["cleanup_confirmed"]:
             raise RuntimeError("OpenCode transcript capture requires confirmed cleanup")
         captured = await self.session.sandbox.exec(
-            f"python3 -I {quote(self.persistent_directory + '/sandbox_runner.py')} "
+            f"{quote(self.python_executable)} -I {quote(self.persistent_directory + '/sandbox_runner.py')} "
             f"--snapshot {quote(self.session.session_dir)} {quote(self.persistent_directory)}",
             cwd=self.session.workdir,
             timeout_s=timeout,

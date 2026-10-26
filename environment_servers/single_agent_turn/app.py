@@ -3,19 +3,22 @@
 
 """Resources-backed single-agent environment server."""
 
-from typing import Any, Literal
+from enum import StrEnum
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import Body
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator
 
-from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepMode, seed_restarts, seed_verify_mode
+from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType, seed_restarts, seed_verify_step_type
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
     HandledEpisodeError,
+    dependency_failure,
+    is_retryable_dependency_status,
 )
 from nemo_gym.base_resources_server import (
     ResourcesCloseSessionRequest,
@@ -35,6 +38,12 @@ from nemo_gym.config_types import (
     AggregateMetrics,
     AggregateMetricsRequest,
     ResourcesServerRef,
+)
+from nemo_gym.failure_kinds import (
+    AGENT_INVALID_OUTPUT,
+    AGENT_LIMIT,
+    FAILURE_KINDS,
+    MODEL_TRANSPORT_ERROR,
 )
 from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
@@ -75,13 +84,65 @@ class SessionHandles(BaseModel):
     agent_session_id: str
     agent_cookies: dict[str, str] = Field(default_factory=dict)
     # Whether a checkpoint may replay the resources server's /verify, as its seed reply reported.
-    resources_verify: StepMode = "wait"
+    resources_verify_step_type: StepType = "wait"
 
     @classmethod
     def new(cls) -> "SessionHandles":
         return cls(
             resources_session_id=f"resources-session-{uuid4().hex}", agent_session_id=f"agent-session-{uuid4().hex}"
         )
+
+
+class OutcomeAction(StrEnum):
+    """Mutually exclusive grading or episode-failure action."""
+
+    VERIFY = "verify"
+    RETRY = "retry"
+    FAIL = "fail"
+
+
+class AgentOutcomePolicyConfig(BaseModel):
+    """Route classified failed responses; HTTP status rules take precedence over failure-kind rules.
+
+    Supplied entries override matching defaults; omitted entries keep their defaults.
+    Unmatched failures use default_action.
+    Retry means an ungraded episode failure eligible for the collector's bounded retries.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    by_failure_kind: dict[str, OutcomeAction] = Field(
+        default_factory=lambda: {
+            AGENT_INVALID_OUTPUT: OutcomeAction.VERIFY,
+            AGENT_LIMIT: OutcomeAction.VERIFY,
+            MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY,
+            "unknown": OutcomeAction.RETRY,
+        }
+    )
+    by_status_code: dict[Annotated[int, Field(ge=400, le=599)], OutcomeAction] = Field(
+        default_factory=lambda: {
+            **dict.fromkeys((400, 413, 422), OutcomeAction.VERIFY),
+            **dict.fromkeys(filter(is_retryable_dependency_status, range(400, 600)), OutcomeAction.RETRY),
+        }
+    )
+    default_action: OutcomeAction = OutcomeAction.FAIL
+
+    @field_validator("by_failure_kind", "by_status_code")
+    @classmethod
+    def merge_default_rules(
+        cls, value: dict[str | int, OutcomeAction], info: ValidationInfo
+    ) -> dict[str | int, OutcomeAction]:
+        """Merge validated overrides so JSON status keys are normalized before replacing defaults."""
+        return cls.model_fields[info.field_name].get_default(call_default_factory=True) | value
+
+    @field_validator("by_failure_kind")
+    @classmethod
+    def require_registered_kinds(cls, value: dict[str, OutcomeAction]) -> dict[str, OutcomeAction]:
+        """Reject misspelled failure names at configuration load, before starting an evaluation."""
+        invalid = value.keys() - FAILURE_KINDS - {"unknown"}
+        if invalid:
+            raise ValueError(f"Unregistered failure kinds: {sorted(invalid)}")
+        return value
 
 
 class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
@@ -91,6 +152,7 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
 
     resources_server: ResourcesServerRef
     agent_server: AgentServerRef
+    agent_outcome_policy: AgentOutcomePolicyConfig = Field(default_factory=AgentOutcomePolicyConfig)
     resources_tool_transports: list[Literal["direct_http", "mcp"]] = Field(default_factory=list)
 
 
@@ -99,7 +161,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
     config: SingleAgentTurnEnvironmentServerConfig
     request_model = SingleAgentTurnRequest
-    checkpoint_boundaries = True
+    checkpoint_mode = "exported"
     response_model = SingleAgentTurnResponse
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
@@ -208,10 +270,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     await agent_cleanup.close()
                     close = closed_agent[-1]
                 except Exception as error:
-                    raise self._failure(
+                    raise dependency_failure(
+                        error,
+                        failure_model=SingleAgentTurnFailure,
                         stage="cleanup",
-                        failure_reason=str(error),
-                        terminal=not _is_retryable_dependency_error(error),
                         partial_response=agent_response,
                     ) from error
             observations = close.agent_observations
@@ -225,6 +287,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             return trajectory.model_dump(mode="json") if trajectory else None
 
         if stage == "verify":
+            action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
+            if action != OutcomeAction.VERIFY:
+                raise self._failure(
+                    stage="agent",
+                    failure_reason=agent_response.error.message if agent_response.error else "Agent reported failure",
+                    terminal=action == OutcomeAction.FAIL,
+                    partial_response=agent_response,
+                    agent_observations=observations,
+                )
             await self.checkpoint_boundary(
                 request,
                 lambda: {
@@ -235,7 +306,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     "trajectory": dumped_trajectory(),
                 },
             )
-            async with self.checkpoint_step(request, handles.resources_verify):
+            async with self.checkpoint_step(request, handles.resources_verify_step_type):
                 verification = await self._verify(request, handles, agent_response, observations, trajectory)
             stage = "return"
 
@@ -280,7 +351,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
             await raise_for_status(seed_http_response)
             handles.resources_cookies = _cookies(seed_http_response)
-            handles.resources_verify = seed_verify_mode(seed_http_response.headers)
+            handles.resources_verify_step_type = seed_verify_step_type(seed_http_response.headers)
             if seed_restarts(seed_http_response.headers):
                 await self.checkpoint_restart(request)
             if not handles.resources_cookies:
@@ -289,10 +360,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             if seed.resources_session_id != handles.resources_session_id:
                 raise ValueError("Resources seed returned a different resources_session_id")
         except Exception as error:
-            raise self._failure(
+            raise dependency_failure(
+                error,
+                failure_model=SingleAgentTurnFailure,
                 stage="seed",
-                failure_reason=str(error),
-                terminal=not _is_retryable_dependency_error(error),
             ) from error
         return seed
 
@@ -369,10 +440,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             if seed_restarts(agent_create_http_response.headers):
                 await self.checkpoint_restart(request)
         except Exception as error:
-            raise self._failure(
+            raise dependency_failure(
+                error,
+                failure_model=SingleAgentTurnFailure,
                 stage="agent",
-                failure_reason=str(error),
-                terminal=not _is_retryable_dependency_error(error),
             ) from error
 
     async def _invoke_agent(self, request: SingleAgentTurnRequest, handles: "SessionHandles") -> NeMoGymResponse:
@@ -392,10 +463,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 handles.agent_cookies = response_cookies
             return NeMoGymResponse.model_validate(await get_response_json(agent_http_response))
         except Exception as error:
-            raise self._failure(
+            raise dependency_failure(
+                error,
+                failure_model=SingleAgentTurnFailure,
                 stage="agent",
-                failure_reason=str(error),
-                terminal=not _is_retryable_dependency_error(error),
             ) from error
 
     async def _close_agent(
@@ -462,10 +533,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             await raise_for_status(verify_http_response)
             return SingleAgentTurnResult.model_validate(await get_response_json(verify_http_response))
         except Exception as error:
-            raise self._failure(
+            raise dependency_failure(
+                error,
+                failure_model=SingleAgentTurnFailure,
                 stage="verification",
-                failure_reason=str(error),
-                terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
                 agent_observations=observations,
                 trajectory=trajectory,
@@ -507,15 +578,30 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         )
 
 
+def agent_outcome_policy(
+    response: NeMoGymResponse, *, config: AgentOutcomePolicyConfig | None = None
+) -> OutcomeAction:
+    """Apply configured grading/retry rules to a classified failed response.
+
+    Unclassified legacy responses retain their existing grading behavior; malformed
+    metadata is an ungraded, nonretryable failure regardless of configuration.
+    """
+    raw = (response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY)
+    if response.status != "failed" or raw is None:
+        return OutcomeAction.VERIFY
+    try:
+        outcome = AgentOutcome.model_validate_json(raw)
+    except ValidationError:
+        # Keep malformed classification in the partial response for diagnosis, not scoring.
+        return OutcomeAction.FAIL
+    config = config or AgentOutcomePolicyConfig()
+    return config.by_status_code.get(
+        outcome.status_code, config.by_failure_kind.get(outcome.failure_kind, config.default_action)
+    )
+
+
 def _cookies(response: Any) -> dict[str, str]:
     return {str(name): str(morsel.value) for name, morsel in response.cookies.items()}
-
-
-def _is_retryable_dependency_error(error: Exception) -> bool:
-    if isinstance(error, ClientResponseError):
-        return error.status in {408, 425, 429} or error.status >= 500
-    # A dropped connection mid-body raises ClientPayloadError, which is transient like a refused connection.
-    return isinstance(error, (ClientConnectionError, ClientPayloadError, TimeoutError))
 
 
 if __name__ == "__main__":
