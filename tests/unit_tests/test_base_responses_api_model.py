@@ -69,6 +69,30 @@ class TestBaseResponsesAPIModel:
         model = TestSimpleResponsesAPIModel(config=config, server_client=server_client)
         model.setup_webserver()
 
+    def test_embeddings_default_not_implemented(self) -> None:
+        # A policy-only server exposes /v1/embeddings but the base default rejects it with 501,
+        # since it has no embeddings backend to pass the request through to.
+        config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="")
+
+        class TestSimpleResponsesAPIModel(SimpleResponsesAPIModel):
+            async def chat_completions(
+                self, request: NeMoGymResponseCreateParamsNonStreaming
+            ) -> NeMoGymChatCompletion:
+                raise NotImplementedError
+
+            async def responses(self, request: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+                raise NotImplementedError
+
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        model = TestSimpleResponsesAPIModel(config=config, server_client=server_client)
+        client = TestClient(model.setup_webserver())
+
+        response = client.post("/v1/embeddings", json={"input": "hello", "model": "text-embedding-3-small"})
+
+        assert response.status_code == 501
+        assert "does not support the embeddings endpoint" in response.json()["detail"]
+
 
 @pytest.mark.parametrize(
     ("name", "module"),
@@ -673,30 +697,6 @@ def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
     r2 = client.post("/v1/responses", json={"input": "hi"})
     assert r2.status_code == 200
     assert read_model_call_records(CaptureStore(tmp_path), "rollout") == []
-
-
-def test_rollout_id_header_correlates_capture_for_a_fixed_base_url(tmp_path):
-    """A client that cannot change its base URL names the rollout in a header instead of the prefix."""
-    app = FastAPI()
-
-    @app.post("/v1/responses")
-    async def _responses(body: dict = Body()) -> dict:
-        return {"output": [], "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4}}
-
-    _install_capture(app, tmp_path)
-    client = TestClient(app)
-
-    r = client.post("/v1/responses", json={"input": "hi"}, headers={"x-ng-rollout-id": "task7-roll2"})
-    assert r.status_code == 200
-    calls = read_model_call_records(CaptureStore(tmp_path), "task7-roll2")
-    assert len(calls) == 1 and calls[0].tokens_total == 4
-
-    conflicting = client.post(
-        "/ng-rollout/task7-roll2/v1/responses", json={"input": "hi"}, headers={"x-ng-rollout-id": "task8-roll0"}
-    )
-    assert conflicting.status_code == 400
-    assert len(read_model_call_records(CaptureStore(tmp_path), "task7-roll2")) == 1
-    assert read_model_call_records(CaptureStore(tmp_path), "task8-roll0") == []
 
 
 def test_per_rollout_prefix_strips_for_non_observed_paths_too(tmp_path):

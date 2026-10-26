@@ -46,7 +46,7 @@ import orjson
 from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, model_validator
 
 from nemo_gym._checkpoint.control import install_control_routes, install_participant
@@ -85,11 +85,7 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import (
-    resolve_request_rollout_id,
-    rollout_context,
-    scope_with_routed_path,
-)
+from nemo_gym.rollout_correlation import rollout_context, scope_with_routed_path
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
@@ -390,7 +386,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             assistant_message_header=self.server_client.assistant_message_header(self.config.name),
             global_config_dict=self.server_client.global_config_dict,
             num_workers=self.config.num_workers,
+            # Embedding vectors never contain policy-generated text, so an embeddings call under a
+            # rollout's token-capture prefix must not mark that rollout incomplete.
             non_generating_requests=self.non_generating_model_routes
+            | {("POST", "/v1/embeddings")}
             | frozenset(
                 (request.method, request.path) for request in self.config.token_id_capture_non_generating_requests
             ),
@@ -414,6 +413,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         app.post("/v1/messages")(
             traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.messages", self.messages, model_attributes)
         )
+
+        # OpenAI-compatible embeddings. Servers backed by an embeddings-capable provider
+        # (e.g. openai_model, inference_provider) override embeddings(); the base default
+        # returns 501 so a policy-only server advertises the route but rejects the call.
+        app.post("/v1/embeddings")(self.embeddings)
 
         self.setup_policy_checkpoint(app, capture_ledger)
         return app
@@ -709,6 +713,18 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             request_messages=request_messages,
         )
         return completion
+
+    async def embeddings(self, body: dict = Body()) -> dict:
+        """OpenAI-compatible ``POST /v1/embeddings`` default: 501 unless a server overrides it.
+
+        Servers backed by an embeddings-capable provider (e.g. ``openai_model``,
+        ``inference_provider``) override this to pass ``body`` through to the provider and
+        return the provider's JSON unchanged.
+        """
+        raise HTTPException(
+            status_code=501,
+            detail="This model server does not support the embeddings endpoint.",
+        )
 
     async def messages(self, request: Request, body: dict = Body()):
         """Default Anthropic Messages <-> Responses mapping shared by every Gym model server.
@@ -1431,23 +1447,16 @@ class _CaptureMiddleware:
             return
 
         path = scope.get("path", "")
-        request_rollout_id: Optional[str] = None
+        rollout_from_path: Optional[str] = None
         token_capture_requested = False
         capture_prefix = ""
         prefix_match = _ROLLOUT_PATH_RE.match(path)
         if prefix_match:
-            request_rollout_id = prefix_match.group("rollout_id")
+            rollout_from_path = prefix_match.group("rollout_id")
             token_capture_requested = prefix_match.group("token_capture") is not None
             capture_prefix = path[: prefix_match.start("rest")]
             path = prefix_match.group("rest")
             scope = scope_with_routed_path(scope, path)
-        try:
-            request_rollout_id = resolve_request_rollout_id(
-                path_rollout_id=request_rollout_id, headers=scope.get("headers") or []
-            )
-        except ValueError as error:
-            await JSONResponse({"detail": str(error)}, status_code=400)(scope, receive, send)
-            return
 
         method = str(scope.get("method") or "").upper()
         dialect = _OBSERVED_PATHS.get(path)
@@ -1458,8 +1467,7 @@ class _CaptureMiddleware:
 
         # Forward when no active store needs this correlated endpoint.
         # The prefix is already stripped.
-        # A call that names no rollout (no prefix, no header) is forwarded rather than mixed with unrelated
-        # calls under a shared key.
+        # An unprefixed call is forwarded rather than mixed with unrelated calls under a shared key.
         # Prefer the configured sink.
         # Then use the installed sink.
         # Finally use the file store.
@@ -1478,15 +1486,15 @@ class _CaptureMiddleware:
                     return
                 marked_incomplete = True
                 try:
-                    await token_sink.mark_incomplete(request_rollout_id, "")
+                    await token_sink.mark_incomplete(rollout_from_path, "")
                     logger.warning(
-                        f"Marked rollout {request_rollout_id} incomplete because unclassified model request "
+                        f"Marked rollout {rollout_from_path} incomplete because unclassified model request "
                         f"{method} {path} {reason}. Declare the exact request on the model server only if its "
                         "response cannot contain policy-generated content."
                     )
                 except Exception:
                     logger.warning(
-                        f"Could not mark rollout {request_rollout_id} incomplete for unobserved path {path}.",
+                        f"Could not mark rollout {rollout_from_path} incomplete for unobserved path {path}.",
                         exc_info=True,
                     )
 
@@ -1518,15 +1526,15 @@ class _CaptureMiddleware:
             if not known_non_generating and not response_started:
                 await _mark_unobserved_incomplete("completed without starting a response")
             return
-        if (self._store is None and not capture_wanted) or request_rollout_id is None or dialect is None:
+        if (self._store is None and not capture_wanted) or rollout_from_path is None or dialect is None:
             # Publish the id to this handler's current_rollout_id() even on the plain
             # forward path -- this is the common case for a model server with capture
             # disabled, and the id is already known here from the prefix above.
-            with rollout_context(request_rollout_id):
+            with rollout_context(rollout_from_path):
                 await self._app(scope, receive, send)
             return
 
-        rollout_id = request_rollout_id
+        rollout_id = rollout_from_path
         model_call_id = uuid4().hex
         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
         client_assistant_message_id = (

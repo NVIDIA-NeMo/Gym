@@ -25,6 +25,7 @@ import time
 import warnings
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from functools import partial
 from importlib import import_module
@@ -34,7 +35,7 @@ from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, ClassVar, List, Literal, NamedTuple, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, ClassVar, List, Literal, NamedTuple, Optional, Protocol, TextIO, Tuple, Type, Union, Unpack
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -2211,6 +2212,79 @@ def apply_rollout_prefix(
     if not prefix:
         return base_url
     return base_url.rstrip("/") + prefix
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _url_root(url: str) -> tuple[str, Optional[str], Optional[int], list[str]]:
+    """Scheme, lowercased host, effective port and path segments, as HTTP clients normalize them."""
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    return scheme, parts.hostname, parts.port or _DEFAULT_PORTS.get(scheme), [s for s in parts.path.split("/") if s]
+
+
+def with_rollout_prefix(url: str, base_urls: Sequence[str]) -> str:
+    """Insert ``/ng-rollout/<current rollout>`` after the matching base URL, for clients with a fixed base URL.
+
+    A long-lived client (for example one a resources server calls from ``verify()``) keeps one base URL; this
+    rewrites each request URL instead, so the call reaches the Gym model server exactly like a prefixed one.
+    Only URLs under one of ``base_urls`` are changed, compared by scheme, host (case-insensitive), effective port
+    and whole path segments. A URL whose path below the base already carries a rollout prefix is left as it is.
+    Without a current rollout the URL is unchanged, and the model server forwards the call without capture.
+
+    The current rollout is a ``ContextVar``: a synchronous client run through ``asyncio.to_thread`` or
+    ``contextvars.copy_context().run`` sees it, one run through ``loop.run_in_executor`` or a thread pool does not.
+    """
+    if isinstance(base_urls, str):
+        raise TypeError("base_urls must be a sequence of base URLs, not a single string")
+    scheme, host, port, segments = _url_root(url)
+    for base_url in base_urls:
+        base_scheme, base_host, base_port, base_segments = _url_root(base_url)
+        if (scheme, host, port) != (base_scheme, base_host, base_port) or segments[
+            : len(base_segments)
+        ] != base_segments:
+            continue
+        rest = "/" + "/".join(segments[len(base_segments) :])
+        if _ROLLOUT_PREFIX_RE.match(rest):
+            return url
+        rollout_id = current_rollout_id()
+        if not rollout_id:
+            logger.debug(f"No current rollout, so {url} is sent without a rollout prefix and is not captured")
+            return url
+        parts = urlsplit(url)
+        base_path = "".join(f"/{segment}" for segment in base_segments)
+        return urlunsplit(
+            parts._replace(path=base_path + rollout_path_prefix(rollout_id) + parts.path[len(base_path) :])
+        )
+    return url
+
+
+class RewritableRequest(Protocol):
+    """The part of an ``httpx.Request`` the rollout-prefix hooks use: a URL whose type parses a string."""
+
+    url: object
+
+
+def rollout_prefix_hook(base_urls: Sequence[str]) -> Callable[[RewritableRequest], None]:
+    """An ``httpx.Client`` request event hook that applies :func:`with_rollout_prefix` to every request."""
+    if isinstance(base_urls, str):
+        raise TypeError("base_urls must be a sequence of base URLs, not a single string")
+
+    def hook(request: RewritableRequest) -> None:
+        request.url = type(request.url)(with_rollout_prefix(str(request.url), base_urls))
+
+    return hook
+
+
+def async_rollout_prefix_hook(base_urls: Sequence[str]) -> Callable[[RewritableRequest], Awaitable[None]]:
+    """An ``httpx.AsyncClient`` request event hook that applies :func:`with_rollout_prefix` to every request."""
+    hook = rollout_prefix_hook(base_urls)
+
+    async def async_hook(request: RewritableRequest) -> None:
+        hook(request)
+
+    return async_hook
 
 
 def setup_server_client(head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:  # pragma: no cover
