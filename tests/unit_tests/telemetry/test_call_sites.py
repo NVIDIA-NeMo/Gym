@@ -47,6 +47,17 @@ def recorded_spans(monkeypatch):
     set_enabled_span_groups(frozenset())
 
 
+@pytest.fixture
+def rollout_attributes_registered():
+    """What Gym's telemetry setup does: hand the sandbox API the rollout-id provider."""
+    from nemo_gym.sandbox.observability import set_span_attribute_provider
+    from nemo_gym.telemetry.setup import rollout_span_attributes
+
+    set_span_attribute_provider(rollout_span_attributes)
+    yield
+    set_span_attribute_provider(None)
+
+
 # --------------------------------------------------------------------------- #
 # Sandbox
 # --------------------------------------------------------------------------- #
@@ -119,6 +130,80 @@ async def test_sandbox_stop_emits_a_span_for_the_release(recorded_spans, started
     stop_span = next(span for span in recorded_spans() if span.name == "gym.sandbox.stop")
     assert stop_span.attributes["nemo.gym.sandbox.provider"] == "stub"
     assert stop_span.attributes["nemo.gym.sandbox.id"] == "handle-1"
+
+
+async def test_sandbox_spans_carry_the_rollout_id_inside_a_rollout(
+    recorded_spans, started_sandbox, rollout_attributes_registered
+):
+    """The same correlation key the endpoint spans carry, so a rollout's sandbox time is filterable
+    by attribute and not only through the parent chain. The sandbox API learns it through the
+    provider Gym's telemetry setup registers, not by importing rollout correlation."""
+    from nemo_gym.rollout_correlation import rollout_context
+
+    with rollout_context("7-0"):
+        sandbox = await started_sandbox().start()
+        await sandbox.exec("echo hi")
+        await sandbox.stop()
+
+    by_name = {span.name: span for span in recorded_spans()}
+    for name in ("gym.sandbox.start", "gym.sandbox.exec", "gym.sandbox.stop"):
+        assert by_name[name].attributes["nemo.gym.rollout.id"] == "7-0", name
+
+
+async def test_sandbox_spans_have_no_rollout_id_outside_a_rollout(
+    recorded_spans, started_sandbox, rollout_attributes_registered
+):
+    sandbox = await started_sandbox().start()
+    await sandbox.exec("echo hi")
+    await sandbox.stop()
+    names = set()
+    for span in recorded_spans():
+        if span.name.startswith("gym.sandbox."):
+            names.add(span.name)
+            assert "nemo.gym.rollout.id" not in span.attributes
+    assert names == {"gym.sandbox.start", "gym.sandbox.exec", "gym.sandbox.stop"}
+
+
+class _FailingProvider(_StubProvider):
+    """A provider whose create or exec raises, so the span ends in error before any result exists."""
+
+    def __init__(self, fail: str):
+        super().__init__()
+        self._fail = fail
+
+    async def create(self, spec):
+        if self._fail == "create":
+            raise RuntimeError("boom")
+        return await super().create(spec)
+
+    async def exec(self, handle, command, **kwargs):
+        if self._fail == "exec":
+            raise RuntimeError("boom")
+        return await super().exec(handle, command, **kwargs)
+
+
+@pytest.mark.parametrize("fail", ["create", "exec"])
+async def test_sandbox_spans_keep_the_rollout_id_when_the_provider_fails(
+    recorded_spans, fail, rollout_attributes_registered
+):
+    """Correlation is attached before the awaited work, so a failed start or exec is still filterable."""
+    from opentelemetry.trace import StatusCode
+
+    from nemo_gym.rollout_correlation import rollout_context
+    from nemo_gym.sandbox.api import AsyncSandbox
+    from nemo_gym.sandbox.providers.base import SandboxSpec
+
+    sandbox = AsyncSandbox(_FailingProvider(fail), SandboxSpec(image="ubuntu"))
+    with rollout_context("7-0"), pytest.raises(RuntimeError, match="boom"):
+        if fail == "create":
+            await sandbox.start()
+        else:
+            await (await sandbox.start()).exec("echo hi")
+
+    name = "gym.sandbox.start" if fail == "create" else "gym.sandbox.exec"
+    span = next(s for s in recorded_spans() if s.name == name)
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.attributes["nemo.gym.rollout.id"] == "7-0"
 
 
 async def test_sandbox_span_never_records_the_command(recorded_spans, started_sandbox):
@@ -405,3 +490,393 @@ def test_lens_imports_are_function_local_outside_the_fallback_resolver():
             if targets and path.name not in allowed_at_module_scope:
                 offenders.append((path.name, targets))
     assert not offenders, f"module-scope nemo.lens imports outside the resolvers: {offenders}"
+
+
+async def test_sandbox_spans_have_no_extra_attributes_without_a_provider(recorded_spans, started_sandbox):
+    """The sandbox package on its own knows nothing about rollouts."""
+    from nemo_gym.rollout_correlation import rollout_context
+
+    with rollout_context("7-0"):
+        sandbox = await started_sandbox().start()
+        await sandbox.exec("echo hi")
+    for span in recorded_spans():
+        if span.name.startswith("gym.sandbox."):
+            assert "nemo.gym.rollout.id" not in span.attributes
+
+
+async def test_explicit_span_attributes_win_over_the_provider(
+    recorded_spans, started_sandbox, rollout_attributes_registered
+):
+    from nemo_gym.rollout_correlation import rollout_context
+
+    with rollout_context("7-0"):
+        sandbox = await started_sandbox().start(span_attributes={"nemo.gym.rollout.id": "explicit", "extra": "x"})
+        await sandbox.exec("echo hi", span_attributes={"nemo.gym.rollout.id": "explicit-exec"})
+
+    by_name = {span.name: span for span in recorded_spans()}
+    assert by_name["gym.sandbox.start"].attributes["nemo.gym.rollout.id"] == "explicit"
+    assert by_name["gym.sandbox.start"].attributes["extra"] == "x"
+    assert by_name["gym.sandbox.exec"].attributes["nemo.gym.rollout.id"] == "explicit-exec"
+
+
+# --------------------------------------------------------------------------- #
+# Driver dispatch
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        ({"_ng_task_index": 3, "_ng_rollout_index": 0}, "3-0"),
+        ({"_ng_task_index": 3, "_ng_rollout_index": 0, "_ng_attempt_index": 2}, "3-0-a2"),
+        ({"_ng_rollout_id": "custom", "_ng_attempt_index": 2}, "custom-a2"),
+        ({"task_id": {"taskset": "t"}, "_ng_task_index": 5, "_ng_rollout_index": 1}, "5-1"),
+    ],
+)
+def test_dispatch_span_takes_its_identity_from_the_collector_row(recorded_spans, row, expected):
+    """A materialized episode body carries the identity only as `episode_id`; the span reads the row."""
+    from nemo_gym.rollout_collection import _dispatch_span
+
+    with _dispatch_span(row, "alpha", server_name="alpha_environment_server"):
+        pass
+
+    (span,) = [s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]
+    assert span.attributes["nemo.gym.rollout.id"] == expected
+    assert span.attributes["nemo.gym.rollout.dispatch.name"] == "alpha"
+    assert span.attributes["nemo.gym.http.destination.server.name"] == "alpha_environment_server"
+
+
+def test_dispatch_span_omits_the_id_for_a_row_without_identity(recorded_spans):
+    from nemo_gym.rollout_collection import _dispatch_span
+
+    with _dispatch_span({"input": "x"}, "agent", server_name="agent_environment_server"):
+        pass
+
+    (span,) = [s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]
+    assert "nemo.gym.rollout.id" not in span.attributes
+
+
+def test_dispatch_span_survives_a_malformed_attempt_index(recorded_spans):
+    """`int()` on a list raises TypeError; telemetry must not abort the rollout for it."""
+    from nemo_gym.rollout_collection import _dispatch_span
+
+    with _dispatch_span(
+        {"_ng_task_index": 1, "_ng_rollout_index": 0, "_ng_attempt_index": [1]}, "agent", server_name="s"
+    ):
+        pass
+
+    (span,) = [s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]
+    assert "nemo.gym.rollout.id" not in span.attributes
+
+
+@pytest.mark.parametrize(
+    ("row", "task_id"),
+    [
+        ({"task_id": "terminal-bench/foodstuff", "task_name": "other"}, "terminal-bench/foodstuff"),
+        ({"task_id": {"taskset": "swe_pro", "task_id": "instance"}}, "instance"),
+        ({"instance_id": "django__django-1"}, "django__django-1"),
+        ({"problem_id": 17}, "17"),
+        ({"task_name": "terminal-bench/background-server"}, "terminal-bench/background-server"),
+        ({"task_id": {"taskset": "swe_pro"}}, None),
+        ({"input": "x"}, None),
+    ],
+)
+def test_dispatch_span_names_the_task_and_the_repeat(recorded_spans, row, task_id):
+    from nemo_gym.rollout_collection import _dispatch_span
+
+    with _dispatch_span({**row, "_ng_task_index": 4, "_ng_rollout_index": 2}, "alpha", server_name="s") as context:
+        pass
+
+    (span,) = [s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]
+    assert context == span.context
+    assert span.attributes.get("nemo.gym.task.id") == task_id
+    assert span.attributes["nemo.gym.rollout.repeat"] == 2
+
+
+def test_dispatch_span_omits_a_repeat_that_is_not_an_index(recorded_spans):
+    from nemo_gym.rollout_collection import _dispatch_span
+
+    with _dispatch_span({"_ng_rollout_index": True}, "alpha", server_name="s"):
+        pass
+
+    (span,) = [s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]
+    assert "nemo.gym.rollout.repeat" not in span.attributes
+
+
+# --------------------------------------------------------------------------- #
+# Driver wiring: run_from_config end to end against a fake /run
+# --------------------------------------------------------------------------- #
+
+
+def _write_rollout_input(tmp_path, n: int):
+    import json as _json
+
+    from nemo_gym.global_config import AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME
+
+    path = tmp_path / "input.jsonl"
+    path.write_text(
+        "".join(
+            _json.dumps(
+                {
+                    AGENT_REF_KEY_NAME: {"name": "alpha"},
+                    TASK_SOURCE_KEY_NAME: "alpha",
+                    "responses_create_params": {"input": []},
+                    "source_index": i,
+                }
+            )
+            + "\n"
+            for i in range(n)
+        )
+    )
+    return path
+
+
+def _collection_config(tmp_path, input_path):
+    from nemo_gym.rollout_collection import RolloutCollectionConfig
+
+    return RolloutCollectionConfig(
+        input_jsonl_fpath=str(input_path),
+        output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+        num_samples_in_parallel=1,
+        disable_aggregation=True,
+        disable_health_check=True,
+    )
+
+
+def _install_recording_post(monkeypatch):
+    """A fake `/run` that records the current span and the `traceparent` the client would inject."""
+    from unittest.mock import AsyncMock
+
+    from opentelemetry import trace as otel_trace
+
+    from nemo_gym.telemetry.contrib import inject_trace_context
+    from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
+
+    sent = []
+
+    async def post(server_name, url_path, json):
+        headers: dict = {}
+        inject_trace_context(headers)
+        sent.append(
+            {"span": otel_trace.get_current_span().get_span_context(), "traceparent": headers.get("traceparent")}
+        )
+        return FakeResponse(200, {"response": {}})
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha",))
+    return sent
+
+
+@pytest.fixture
+def driver_telemetry(monkeypatch):
+    """The driver as a standalone eval run sees it: empty global config, trace exporter active."""
+    import nemo_gym.rollout_collection as rollout_collection
+
+    monkeypatch.setattr(rollout_collection, "get_global_config_dict", lambda *a, **k: {})
+    monkeypatch.setattr(rollout_collection, "is_trace_exporter_active", lambda: True)
+    return rollout_collection
+
+
+async def test_standalone_run_gives_each_rollout_its_own_trace_linked_to_the_job(
+    tmp_path, monkeypatch, recorded_spans, driver_telemetry
+):
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    sent = _install_recording_post(monkeypatch)
+    await RolloutCollectionHelper().run_from_config(_collection_config(tmp_path, _write_rollout_input(tmp_path, 3)))
+
+    spans = recorded_spans()
+    (job,) = [s for s in spans if s.name == "gym.job"]
+    dispatches = [s for s in spans if s.name == "gym.rollout.dispatch"]
+    assert len(dispatches) == 3
+    assert job.parent is None
+    trace_ids = {d.context.trace_id for d in dispatches}
+    assert len(trace_ids) == 3 and job.context.trace_id not in trace_ids
+    for dispatch in dispatches:
+        assert dispatch.parent is None
+        (link,) = dispatch.links
+        assert (link.context.trace_id, link.context.span_id) == (job.context.trace_id, job.context.span_id)
+        assert dispatch.attributes["nemo.gym.rollout.dispatch.name"] == "alpha"
+        assert dispatch.attributes["nemo.gym.http.destination.server.name"] == "alpha_environment_server"
+    # Each /run is sent under its rollout's dispatch span, so the agent joins that trace.
+    by_span_id = {d.context.span_id: d for d in dispatches}
+    assert len(sent) == 3
+    for request in sent:
+        dispatch = by_span_id[request["span"].span_id]
+        assert request["traceparent"].split("-")[1] == f"{dispatch.context.trace_id:032x}"
+    assert driver_telemetry._OWNED_JOB_SPAN_CONTEXT.get() is None
+
+
+async def test_embedded_run_keeps_nesting_under_the_callers_span(
+    tmp_path, monkeypatch, recorded_spans, driver_telemetry
+):
+    from opentelemetry import trace as otel_trace
+
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    sent = _install_recording_post(monkeypatch)
+    tracer = otel_trace.get_tracer("embedder")
+    with tracer.start_as_current_span("embedder.step") as step:
+        await RolloutCollectionHelper().run_from_config(
+            _collection_config(tmp_path, _write_rollout_input(tmp_path, 2))
+        )
+
+    spans = recorded_spans()
+    (job,) = [s for s in spans if s.name == "gym.job"]
+    assert job.parent.span_id == step.get_span_context().span_id
+    dispatches = [s for s in spans if s.name == "gym.rollout.dispatch"]
+    assert len(dispatches) == 2
+    for dispatch in dispatches:
+        assert dispatch.context.trace_id == step.get_span_context().trace_id
+        assert dispatch.parent.span_id == job.context.span_id
+        assert dispatch.links == ()
+    for request in sent:
+        assert request["traceparent"].split("-")[1] == f"{step.get_span_context().trace_id:032x}"
+    assert driver_telemetry._OWNED_JOB_SPAN_CONTEXT.get() is None
+
+
+async def test_dispatch_span_is_skipped_while_traces_are_off(tmp_path, monkeypatch, recorded_spans, driver_telemetry):
+    """Metrics-only processes keep span groups enabled; the dispatch must not start a span for them."""
+    import nemo_gym.rollout_collection as rollout_collection
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    monkeypatch.setattr(rollout_collection, "is_trace_exporter_active", lambda: False)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("_dispatch_span must not run while traces are off")
+
+    monkeypatch.setattr(rollout_collection, "_dispatch_span", boom)
+    sent = _install_recording_post(monkeypatch)
+    await RolloutCollectionHelper().run_from_config(_collection_config(tmp_path, _write_rollout_input(tmp_path, 2)))
+    assert len(sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_materialized_dispatch_takes_its_id_from_the_row_not_the_episode_body(
+    monkeypatch, recorded_spans, driver_telemetry
+):
+    """The posted episode body carries the identity only as `episode_id`; the dispatch span still gets the id.
+
+    Pins the call site, not the helper: `_dispatch_span` must receive the collector row, because
+    `maybe_rollout_id_from_run_body` cannot read an id out of the posted body of a materialized row.
+    """
+    import json as _json
+    from unittest.mock import AsyncMock
+
+    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from tests.unit_tests import test_rollout_collection as collection_tests
+
+    post = AsyncMock(return_value=collection_tests.FakeResponse(200, {"reward": 1.0}))
+    client = collection_tests.install_fake_server_client(monkeypatch, post)
+    client.global_config_dict = collection_tests.TestEnvironmentServerRouting._mixed_batch_config()
+    row = collection_tests.TestEnvironmentServerRouting._materialized_row()
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath="input.jsonl",
+        output_jsonl_fpath="output.jsonl",
+        environment_server_routes={"swe_pro": "environment"},
+        num_repeats=1,
+    )
+    rows = RolloutCollectionHelper._preprocess_raw_rows([(0, _json.dumps(row), row)], config)
+
+    for future in RolloutCollectionHelper().run_examples(rows):
+        await future
+
+    (dispatch,) = [s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]
+    assert dispatch.attributes["nemo.gym.rollout.id"] == "0-0"
+    assert "episode_id" in post.call_args.kwargs["json"]
+
+
+# --------------------------------------------------------------------------- #
+# Rollout health span
+# --------------------------------------------------------------------------- #
+
+
+async def test_each_traced_rollout_gets_a_health_span_under_its_dispatch(
+    tmp_path, monkeypatch, recorded_spans, driver_telemetry
+):
+    """The dispatch span has ended by the time health is evaluated; the health span still joins it."""
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    monkeypatch.setattr(driver_telemetry, "is_metrics_exporter_active", lambda: False)
+    _install_recording_post(monkeypatch)
+    await RolloutCollectionHelper().run_from_config(_collection_config(tmp_path, _write_rollout_input(tmp_path, 2)))
+
+    spans = recorded_spans()
+    dispatches = {s.context.span_id: s for s in spans if s.name == "gym.rollout.dispatch"}
+    healths = [s for s in spans if s.name == "gym.rollout.health"]
+    assert len(dispatches) == len(healths) == 2
+    for health in healths:
+        dispatch = dispatches[health.parent.span_id]
+        assert health.context.trace_id == dispatch.context.trace_id
+        assert health.attributes["nemo.gym.rollout.id"] == dispatch.attributes["nemo.gym.rollout.id"]
+        assert health.attributes["nemo.gym.health.verdict"] in {"healthy", "unhealthy", "unobserved"}
+
+
+async def test_no_health_span_while_traces_are_off(tmp_path, monkeypatch, recorded_spans, driver_telemetry):
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    monkeypatch.setattr(driver_telemetry, "is_trace_exporter_active", lambda: False)
+    _install_recording_post(monkeypatch)
+    await RolloutCollectionHelper().run_from_config(_collection_config(tmp_path, _write_rollout_input(tmp_path, 2)))
+
+    assert [s for s in recorded_spans() if s.name == "gym.rollout.health"] == []
+
+
+def _stub_health_digest(monkeypatch, verdict, checks):
+    from types import SimpleNamespace
+
+    import nemo_gym.rollout_health as rollout_health
+
+    digest = SimpleNamespace(verdict=verdict, findings=[SimpleNamespace(check=check) for check in checks])
+    monkeypatch.setattr(rollout_health, "evaluate_record", lambda result, ignored: digest)
+
+
+def test_health_span_carries_the_verdict_and_the_distinct_flagged_checks(recorded_spans, monkeypatch):
+    from opentelemetry import trace as otel_trace
+
+    from nemo_gym.rollout_collection import _record_rollout_health
+
+    _stub_health_digest(monkeypatch, "unhealthy", ["truncated", "empty_answer", "truncated"])
+    with otel_trace.get_tracer("test").start_as_current_span("gym.rollout.dispatch") as dispatch:
+        parent = dispatch.get_span_context()
+
+    _record_rollout_health({"_ng_task_index": 1, "_ng_rollout_index": 0}, "scored", frozenset(), parent)
+
+    (health,) = [s for s in recorded_spans() if s.name == "gym.rollout.health"]
+    assert health.parent.span_id == parent.span_id
+    assert health.attributes["nemo.gym.health.verdict"] == "unhealthy"
+    assert tuple(health.attributes["nemo.gym.health.checks"]) == ("empty_answer", "truncated")
+    assert health.attributes["nemo.gym.rollout.id"] == "1-0"
+
+
+def test_a_healthy_rollout_has_no_checks_attribute(recorded_spans, monkeypatch):
+    from opentelemetry import trace as otel_trace
+
+    from nemo_gym.rollout_collection import _record_rollout_health
+
+    _stub_health_digest(monkeypatch, "healthy", [])
+    with otel_trace.get_tracer("test").start_as_current_span("gym.rollout.dispatch") as dispatch:
+        parent = dispatch.get_span_context()
+
+    _record_rollout_health({}, "scored", frozenset(), parent)
+
+    (health,) = [s for s in recorded_spans() if s.name == "gym.rollout.health"]
+    assert health.attributes["nemo.gym.health.verdict"] == "healthy"
+    assert "nemo.gym.health.checks" not in health.attributes
+    assert "nemo.gym.rollout.id" not in health.attributes
+
+
+def test_health_metrics_are_recorded_without_a_span(recorded_spans, monkeypatch):
+    import nemo_gym.rollout_collection as rollout_collection
+
+    recorded = []
+    _stub_health_digest(monkeypatch, "unhealthy", ["truncated"])
+    monkeypatch.setattr(
+        rollout_collection,
+        "record_rollout_health",
+        lambda verdict, *, outcome, flagged_checks: recorded.append((verdict, outcome, list(flagged_checks))),
+    )
+
+    rollout_collection._record_rollout_health({}, "failed", frozenset())
+
+    assert recorded == [("unhealthy", "failed", ["truncated"])]
+    assert [s for s in recorded_spans() if s.name == "gym.rollout.health"] == []

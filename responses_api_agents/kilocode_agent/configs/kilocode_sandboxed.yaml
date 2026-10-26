@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Kilo borrows SandboxAccess from the Environment Server. The run configuration
+# binds the independent benchmark and agent; this config selects only the harness and model.
+kilocode_agent:
+  responses_api_agents:
+    kilocode_agent:
+      entrypoint: app.py
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      num_workers: 1
+      concurrency: 8
+      kilo_version: 7.4.15
+      # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
+      sandbox_provider: null
+      sandbox_config: {}
+      setup_timeout: 900
+      # Per-episode budget in seconds; also Kilo's model-stream watchdog. Raise it for
+      # long-horizon benchmarks (the SWE-bench Pro run used 21600).
+      timeout: 900
+      session_close_timeout_seconds: 60
+      # Set both to the served model (e.g. 262144 / 32768 for Nemotron 3.5 Super); a too-small
+      # context window makes Kilo compact or stop early.
+      context_window: 32768
+      max_output_tokens: 8192
+      reasoning_field: reasoning_content
+      kilo_config:
+        # Evaluation rollouts do not need an auxiliary model call to name the session.
+        agent:
+          title:
+            disable: true
+        # The interactive suggestion tool waits for user input that headless runs cannot give.
+        tools:
+          suggest: false
+        permission:
+          bash: allow
+          edit: allow
+          webfetch: allow

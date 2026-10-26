@@ -17,13 +17,18 @@ Stirrup runs only in agent sessions, seeded by an environment server with these 
 The activation (`/ng-rollout/<id>/v1/responses`) runs `sandbox_runner.py` in the sandbox under Gym's process
 supervisor. The runner builds Stirrup's messages from `responses_create_params.input` and gives the model:
 
-- `code_exec`, which runs each command in a fresh shell in the working directory (`cd <workdir> && ( timeout -k 10
-  300 bash -c ... )`), so files persist and shell state does not;
+- `code_exec` (unless the config sets `code_exec: false`), which runs each command in a fresh shell in the working
+  directory (`cd <workdir> && ( timeout -k 10 300 bash -c ... )`), so files persist and shell state does not;
 - the request's `tools`, each posted to `{base_url}/{name}` with the session cookies. A 400 or 422 answer goes back to
   the model; any other error fails the episode. The tools named in `finish_tool_names` end the episode.
 
 The model server is reached directly from the sandbox, so its address must be reachable from there. The trajectory
 comes back as the response's output items; verification belongs to the resources server.
+
+If the model server rejects a request as invalid (HTTP 400, 413 or 422, such as a context overflow), the episode ends
+there. The response carries the turns completed so far, with `status: failed`, an `error` and
+`metadata.stop_reason: model_error`, and the resources server verifies it. Any other model server error fails the
+episode.
 
 ## Configuration
 
@@ -36,6 +41,7 @@ comes back as the response's output items; verification belongs to the resources
 | `concurrency` | `32` | Maximum concurrent episodes. |
 | `temperature` | `0.6` | Sampling temperature when the request sets none. |
 | `finish_tool_names` | `null` | Request tools that end the episode when they succeed; `null` uses Stirrup's own finish tool. |
+| `code_exec` | `true` | Whether the model gets the `code_exec` shell tool. Off when the request's tools are the only tools the task allows (EnterpriseOps-Gym). |
 | `sandbox_install_timeout_seconds` | `900` | Bound on installing the runtime in the sandbox. |
 | `sandbox_runner_timeout_seconds` | `12600` | Bound on one episode. At the limit the response carries the turns completed so far, with `status: incomplete` and `metadata.stop_reason: wall_time`. |
 | `session_close_timeout_seconds` | `30` | Bound on each cleanup phase at close. |

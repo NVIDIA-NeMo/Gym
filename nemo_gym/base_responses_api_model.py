@@ -47,7 +47,7 @@ from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, model_validator
 
 from nemo_gym._checkpoint.control import install_control_routes, install_participant
 from nemo_gym._checkpoint.model import (
@@ -76,6 +76,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.responses_converter import CustomToolStrategy
 from nemo_gym.responses_streaming import (
     NamespaceMap,
     restore_namespace_tool_calls,
@@ -266,6 +267,20 @@ def _orjson_dispatch_response(content: Any) -> Any:
     return Response(content=orjson.dumps(content), media_type="application/json")
 
 
+class ModelCheckpointConfig(BaseModel):
+    """A model server instance's ``checkpoint`` block."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Only the policy instance drains during a partial-rollout checkpoint.
+    # Judge and simulator instances keep serving so accepted tool and verifier calls can finish.
+    policy: bool = False
+    # Ask inference workers to stage the prefix of each in-flight call at a checkpoint,
+    # so a restored call continues it instead of regenerating.
+    # Requires external token staging on workers that implement the generation-cut endpoint.
+    generation_cuts: bool = False
+
+
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     # Exact successful routes whose responses cannot contain policy-generated content.
     token_id_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
@@ -288,13 +303,29 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "so a backend with free-form tool support keeps them."
         ),
     )
-    # Only the policy instance drains during a partial-rollout checkpoint.
-    # Judge and simulator instances keep serving so accepted tool and verifier calls can finish.
-    checkpoint_policy: bool = False
-    # Ask inference workers to stage the prefix of each in-flight call at a checkpoint,
-    # so a restored call continues it instead of regenerating.
-    # Requires external token staging on workers that implement the generation-cut endpoint.
-    checkpoint_generation_cuts: bool = False
+    custom_tool_strategy: CustomToolStrategy = Field(
+        default="passthrough",
+        description=(
+            "How a Responses ``custom`` (free-form) tool reaches a backend whose chat schema admits "
+            "function tools only. ``passthrough`` sends the converted request unchanged and the backend "
+            "decides (``drop_custom_tools`` remains the kill switch). ``function_bridge`` lowers each "
+            "custom tool to a function tool with one required plain-string parameter, replays "
+            "``custom_tool_call``/``custom_tool_call_output`` history in the lowered form, lifts a "
+            "returned call whose name the request declared as custom back into a ``custom_tool_call`` "
+            "item, and hoists custom entries from a streaming harness's ``additional_tools`` carrier "
+            "instead of dropping them. The Responses-to-Chat conversion implements it, so the setting "
+            "takes effect on the servers that convert: ``vllm_model`` and its subclasses (the compaction "
+            "and GenRM servers included), ``inference_provider``, and ``azure_openai_model``. A native "
+            "Responses path never runs the conversion, so the setting has no effect there; ``vllm_model`` "
+            "rejects ``function_bridge`` together with ``is_responses_native``, whose route renders "
+            "function tools only. The bridged payload's wire form depends on the backend's tool parser: "
+            "an XML-style parser (``qwen3_coder``, ``nemotron_v3``) carries it as raw text, while a "
+            "JSON-format parser (``hermes``, ``llama3_json``, ``mistral``) requires the model to "
+            "JSON-escape it inside the arguments object."
+        ),
+    )
+    # This instance's part in partial-rollout checkpoints, which the global ``checkpoint`` block turns on.
+    checkpoint: ModelCheckpointConfig = Field(default_factory=ModelCheckpointConfig)
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -386,20 +417,20 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         if settings is not None and capture_ledger is not None:
             # Every model server sharing the run's capture ledger checks, so one outside the gate refuses to start.
             reject_ungated_ledger_writers(global_config_dict)
-        if settings is None or not self.config.checkpoint_policy:
+        if settings is None or not self.config.checkpoint.policy:
             return
         capture_settings = token_id_capture_config(global_config_dict)
         if capture_settings is not None and capture_settings.enabled and capture_ledger is None:
             raise ValueError(
-                "checkpoint_policy with token_id_capture requires external_staging: only the token-free "
+                "checkpoint.policy with token_id_capture requires external_staging: only the token-free "
                 "capture ledger is checkpointed, and the training framework owns the staged tokens"
             )
         if capture_ledger is not None and not isinstance(capture_ledger, CheckpointableLedger):
-            raise ValueError(f"checkpoint_policy requires a checkpointable capture ledger, got {type(capture_ledger)}")
+            raise ValueError(f"checkpoint.policy requires a checkpointable capture ledger, got {type(capture_ledger)}")
         cut_requester = None
-        if self.config.checkpoint_generation_cuts:
+        if self.config.checkpoint.generation_cuts:
             if capture_ledger is None:
-                raise ValueError("checkpoint_generation_cuts requires token_id_capture with external_staging")
+                raise ValueError("checkpoint.generation_cuts requires token_id_capture with external_staging")
             cut_requester = generation_cut_requester(
                 capture_settings.token_id_capture.resolve_control_auth_token(),
                 control_root=self.generation_cut_control_root,
@@ -471,6 +502,20 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
 
+    def _sanitize_streaming_responses_body(self, body: dict) -> tuple[dict, NamespaceMap]:
+        """Apply this server's tool policy while mapping a streaming body to the strict shape.
+
+        Every ``/v1/responses`` dispatch that accepts the streaming wire dialect sanitizes
+        through here, so the config's ``drop_custom_tools``, ``drop_hosted_tools`` and
+        ``custom_tool_strategy`` settings reach the sanitizer on each of them.
+        """
+        return sanitize_streaming_responses_body(
+            body,
+            drop_custom_tools=self.config.drop_custom_tools,
+            drop_hosted_tools=self.config.drop_hosted_tools,
+            hoist_carrier_custom_tools=self.config.custom_tool_strategy == "function_bridge",
+        )
+
     async def responses_dispatch(self, request: Request, body: dict = Body()):
         """Default ``/v1/responses`` entrypoint shared by every Gym model server.
 
@@ -492,11 +537,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             await self._finalize_served_response(response)
             return dispatched
 
-        cleaned, ns_map = sanitize_streaming_responses_body(
-            body,
-            drop_custom_tools=self.config.drop_custom_tools,
-            drop_hosted_tools=self.config.drop_hosted_tools,
-        )
+        cleaned, ns_map = self._sanitize_streaming_responses_body(body)
         try:
             params = validate_streaming_responses_params(cleaned)
         except ValidationError as exc:

@@ -137,6 +137,7 @@ class HarnessAgentConfig(BaseResponsesAPIAgentConfig):
     agent_kwargs: dict[str, Any] = Field(default_factory=dict)
 
     sandbox_provider: str | dict[str, Any]
+    # Only for sandboxes that cannot reach the model server's host:port: a relay or tunnel URL that forwards to it.
     sandbox_model_base_url: str | None = None
     sandbox_image: str = "python:3.12-slim"
     sandbox_spec: dict[str, Any] = Field(default_factory=dict)
@@ -146,6 +147,9 @@ class HarnessAgentConfig(BaseResponsesAPIAgentConfig):
 
     eval_timeout: int = 1800
     rollout_timeout: int = 2400
+    # Zero the reward of a run that made no tool call, so a direct answer that skips the harness earns nothing.
+    # The verifier's own score stays in harness_pre_gate_reward.
+    require_tool_call: bool = False
 
 
 class HarnessAgentRunRequest(BaseRunRequest):
@@ -213,10 +217,11 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         return tar_path
 
     def _sandbox_model_url(self, request: Request) -> str:
+        # Default to the Gym model server, so its request handling and capture apply to in-box calls.
         base = self.config.sandbox_model_base_url
         if not base:
             cfg = get_first_server_config_dict(self.server_client.global_config_dict, self.config.model_server.name)
-            base = cfg.get("base_url") or self.server_client._build_server_base_url(cfg)
+            base = self.server_client._build_server_base_url(cfg)
         if isinstance(base, (list, ListConfig)):
             base = base[0]
         base = re.sub(r"/v1/?$", "", str(base))
@@ -287,7 +292,15 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                     cookies=cookies,
                 )
                 await raise_for_status(verify_resp)
-                return HarnessAgentVerifyResponse.model_validate(await get_response_json(verify_resp))
+                verify_json = await get_response_json(verify_resp)
+                if self.config.require_tool_call:
+                    verify_json["harness_pre_gate_reward"] = verify_json.get("reward")
+                    if not any(
+                        isinstance(item, dict) and item.get("type") in ("function_call", "custom_tool_call")
+                        for item in agent_resp_json.get("output") or []
+                    ):
+                        verify_json["reward"] = 0.0
+                return HarnessAgentVerifyResponse.model_validate(verify_json)
             except BaseException:
                 await self._close_run_sandbox(run_context)
                 raise

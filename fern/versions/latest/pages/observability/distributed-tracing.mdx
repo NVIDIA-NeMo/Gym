@@ -51,10 +51,13 @@ of its own SERVER span.
 The result is a continuous parent chain across processes:
 
 ```
-gym.rollout                    agent server        (span A, root)
-└─ HTTP POST                   agent server        (span B, parent = A)
-   └─ POST /v1/responses       model server        (span C, parent = B)
-      └─ gym.model.responses   model server        (span D, parent = C)
+gym.rollout.dispatch           driver              (span R, root; span link → gym.job)
+└─ HTTP POST                   driver              (parent = R)
+   └─ POST /run                agent server        (parent = the driver's client span)
+      └─ gym.rollout           agent server        (span A)
+         └─ HTTP POST          agent server        (span B, parent = A)
+            └─ POST /v1/responses       model server   (span C, parent = B)
+               └─ gym.model.responses   model server   (span D, parent = C)
 ```
 
 Span C lives in a different operating system process from span B and knows nothing about
@@ -77,6 +80,61 @@ jq -r 'select(.attributes."nemo.gym.rollout.id") | .attributes."nemo.gym.rollout
 # From a rollout ID, find its captured model calls
 ls <capture_dir>/<rollout_id>.capture.jsonl
 ```
+
+### Per-Rollout Facts on Spans
+
+The rollout ID (`<task index>-<repeat index>`, such as `45-0`) names neither the task nor the outcome.
+These span attributes do, so a trace backend can show both without reading `rollouts.jsonl`:
+
+| Span | Attribute | Value |
+| --- | --- | --- |
+| `gym.rollout.dispatch` | `nemo.gym.task.id` | The task's own ID (`task_id`, `problem_id` or `instance_id`, else `task_name`). Omitted when the row has none. |
+| `gym.rollout.dispatch` | `nemo.gym.rollout.repeat` | The repeat index. |
+| `gym.verify` | `nemo.gym.rollout.reward` | The reward `/verify` returned. Omitted for a masked sample and for a result without a numeric reward. |
+| `gym.rollout.health` | `nemo.gym.health.verdict` | `healthy`, `unhealthy` or `unobserved`, as in `rollout_verdicts.jsonl`. |
+| `gym.rollout.health` | `nemo.gym.health.checks` | The distinct checks that flagged the rollout, sorted. Omitted when none did. |
+
+`gym.rollout.health` is a child of the rollout's dispatch span and carries `nemo.gym.rollout.id`. It is
+emitted when the dispatch was traced, whether or not metrics export is on.
+
+### Engine Request Ids
+
+Inside a rollout, every call a Gym model server makes to its inference backend carries
+`X-Request-Id: <rollout id>-<8 hex chars>`. vLLM uses that header as its request id and records it
+as `gen_ai.request.id` on its request span and in its request log, so an engine span or log line
+can be matched to a rollout directly, without walking the trace. A caller's own `X-Request-Id`
+header is kept. In a submitted job with `vllm_traces: true`, the job's collector also copies the rollout
+id into `nemo.gym.rollout.id` on the engine span, so it groups per rollout like every other Gym span
+(see [Collector for Submitted Jobs](/main/observability/eval-submit-collector)).
+
+### Trace Context in the Model URL
+
+Some agents hand the model URL to a client they do not instrument: a harness running inside a
+sandbox, or a third-party client library in the agent's own process. That client sends no
+`traceparent` header, so the model server's SERVER span would start a new trace and the engine
+spans under it would never join the rollout.
+
+For those clients `apply_rollout_prefix`, and so the agent's `base_url_for_run` and
+`resolve_model_base_url`, name the agent's current span in the URL itself, right after the rollout
+prefix:
+
+```text
+http://<model-server>/ng-rollout/{rollout_id}/ng-trace/{traceparent}/v1
+```
+
+Every Gym server strips `/ng-trace/{traceparent}` before routing, whether or not telemetry is on,
+and uses it as the inbound `traceparent` when the request carries none. A header the client did
+send wins. The segment is only added while this process exports traces, so URLs in a run without
+tracing are unchanged. Gym's own clients send the header and use `url_path_for_run`, which never
+adds it. A harness that parses the model URL should treat `/ng-trace/<traceparent>` as optional and
+leave it in place.
+
+The span named is the one current when the URL is built. A harness configured once per session
+therefore parents all of its model calls to the span that seeded the session, not to the activation
+that made each call; still one tree per rollout, just coarser than an instrumented client gives. A
+URL that is built once and reused across rollouts, such as the base URL of a cached client, must be
+built with `trace_context=False`, or every later rollout's calls would be parented to the first
+rollout's span.
 
 ## Span Kinds
 
@@ -125,18 +183,37 @@ The `traceparent` header is not arriving. Check, in order:
    telemetry does not extract the header. Confirm that the environment reached it —
    `NEMO_GYM_OTEL_ENABLED` must be set in the server process, not only in your shell.
 
+### A Request Nests Under the Previous One on the Same Connection
+
+Seen as a server span whose parent is the previous request's server span, in another rollout's
+trace, with the caller's client span left without a child. uvicorn starts a pipelined request's
+task from inside the previous request's task, so it inherits that request's context, and the
+instrumentor then skips `traceparent` extraction. Gym's servers wrap every request in
+`RequestContextIsolationMiddleware`, installed outside the instrumentor by `run_webserver`, which
+resets the OpenTelemetry context before the instrumentor runs (and clears the rollout id as a
+guard). An app served without `run_webserver` needs `install_request_context_isolation(app)` after
+instrumenting to be safe from this.
+
 ### Traces Are Missing Their Last Spans
 
 Spans export in batches. A process that exits before its batch flushes drops whatever was
 pending. NeMo Gym flushes on normal shutdown, but a `SIGKILL` cannot be caught. Prefer
 `Ctrl-C`, which sends `SIGINT` and lets each server shut down cleanly.
 
-### Traces Are Enormous
+### One Trace Per Rollout, Linked to the Job
 
-The `default` preset includes `job`, which wraps a whole rollout-collection run, so every
-rollout in the run nests inside one trace. For long runs, use `per_rollout` instead. It
-omits `job`, so each rollout becomes its own bounded root trace. See
-[Span Groups](/main/observability/span-groups).
+The eval driver's `gym.job` span wraps a whole rollout-collection run, but rollouts are not
+its children. Each dispatch opens `gym.rollout.dispatch` as the root of a new trace with a
+span link to `gym.job`, and the agent's `gym.rollout` span and everything below it join that
+trace. A run therefore produces one small job trace and one bounded trace per rollout, all
+carrying the same `run_id`, instead of one trace that grows with the run and stays open until
+the job ends. This holds for a standalone `gym eval run`; an embedder that runs the driver inside
+its own trace keeps parent/child nesting, and nemo-lens's `ENABLE_SINGLE_TRACEID` gives every root
+the job's trace id, which makes the run one trace again.
+
+Sampling is decided per trace, so each rollout trace makes its own decision and the job trace
+makes another. Under a ratio sampler a kept rollout trace can link to a `gym.job` span that was
+not sampled and is absent from the backend.
 
 ### Startup Traces
 

@@ -49,6 +49,7 @@ def _payload(model_url: str, resources_url: str, workdir: Path) -> dict:
         "instructions": None,
         "tools": _TOOLS,
         "finish_tool_names": ["finish", "abandon_task_finish"],
+        "code_exec": True,
         "tool_access": {"base_url": resources_url, "cookies": {"session": "seeded"}, "headers": {}},
         "workdir": str(workdir),
         "max_turns": 10,
@@ -186,6 +187,24 @@ def _run_main(tmp_path: Path, payload: dict) -> dict:
     return json.loads(output_path.read_text())
 
 
+def test_task_tool_calls_retry_the_connection_before_the_request_is_sent(tmp_path, resources, monkeypatch):
+    transports = []
+    real_transport = httpx.AsyncHTTPTransport
+
+    def recording_transport(**kwargs):
+        transports.append(kwargs)
+        return real_transport(**kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", recording_transport)
+    model = _ModelServer([_call("finish", json.dumps({"reason": "done", "paths": []}))])
+    try:
+        asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, Observer()))
+    finally:
+        model.close()
+
+    assert transports == [{"retries": 3}]
+
+
 def test_a_failed_run_still_reports_what_it_observed(tmp_path, resources):
     model = _ModelServer(
         [_call("code_exec", json.dumps({"cmd": "true"})), _call("fetch_web_page", json.dumps({"url": "x"}))]
@@ -203,17 +222,35 @@ def test_a_failed_run_still_reports_what_it_observed(tmp_path, resources):
     assert [t["tool_name"] for t in observations["tool_calls"]] == ["code_exec"]
 
 
-def test_a_finish_tool_missing_from_the_request_tools_fails_the_run(tmp_path, resources):
-    model = _ModelServer([])
-    payload = {**_payload(model.base_url, resources.base_url, tmp_path), "finish_tool_names": ["finish", "nope"]}
+@pytest.mark.parametrize("status", [400, 413, 422])
+def test_a_request_the_model_server_rejects_ends_the_run_as_failed_with_the_turns_so_far(tmp_path, resources, status):
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "true"})), status])
     try:
-        output = _run_main(tmp_path, payload)
+        output = asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, Observer()))
     finally:
         model.close()
 
-    assert "Finish tools ['nope'] are not among the request's tools" in output["error"]
+    assert output["stop_reason"] == "model_error"
+    assert str(status) in output["model_error"]
+    observations = output["observations"]
+    assert observations["status"] == "failed"
+    assert observations["model_response_ids"] == ["chatcmpl-1"]
+    assert [t["tool_name"] for t in observations["tool_calls"]] == ["code_exec"]
+    assert [item["type"] for item in output["output_items"]] == ["function_call", "function_call_output"]
+    assert [u["total_tokens"] for u in output["usages"]] == [15]
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_a_model_server_error_that_is_not_a_rejected_request_still_fails_the_run(tmp_path, resources, status):
+    model = _ModelServer([status])
+    try:
+        output = _run_main(tmp_path, _payload(model.base_url, resources.base_url, tmp_path))
+    finally:
+        model.close()
+
+    assert str(status) in output["error"]
     assert output["observations"]["status"] == "failed"
-    assert model.requests == []
+    assert "model_error" not in output
 
 
 def test_a_timed_out_command_is_a_timeout_observation_and_the_model_sees_the_failure(tmp_path, resources, monkeypatch):
@@ -285,6 +322,23 @@ def test_the_model_sees_the_certified_tool_definitions(tmp_path, resources):
     }
     assert [t for t in tools if t["function"]["name"] != "code_exec"] == [
         certified[name] for name in ("finish", "abandon_task_finish", "web_search", "fetch_web_page")
+    ]
+
+
+def test_without_code_exec_the_model_sees_only_the_request_tools(tmp_path, resources):
+    model = _ModelServer([_call("finish", json.dumps({"reason": "done"}))])
+    payload = {**_payload(model.base_url, resources.base_url, tmp_path), "code_exec": False}
+    try:
+        output = asyncio.run(run(payload, tmp_path, Observer()))
+    finally:
+        model.close()
+
+    assert output["observations"]["status"] == "completed"
+    assert [t["function"]["name"] for t in model.requests[0]["tools"]] == [
+        "finish",
+        "abandon_task_finish",
+        "web_search",
+        "fetch_web_page",
     ]
 
 

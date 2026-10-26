@@ -27,20 +27,21 @@ import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict, deque
 from collections.abc import Iterable, Mapping
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import timedelta
 from difflib import get_close_matches
 from itertools import repeat
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import aiohttp
 import orjson
 from aiohttp import ClientError
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
@@ -58,7 +59,7 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
+from nemo_gym.failure_kinds import AGENT_TIMEOUT, CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
@@ -81,6 +82,7 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
+from nemo_gym.health.types import RunHealthConfig
 from nemo_gym.observability.model_calls import (
     await_model_call_capture_quiescence,
     clear_model_call_captures_for_rollouts,
@@ -88,11 +90,17 @@ from nemo_gym.observability.model_calls import (
     model_call_capture_dirs_from_config,
     observability_enabled_from_config,
 )
-from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, materialized_path_for
+from nemo_gym.path_utils import (
+    aggregate_metrics_path_for,
+    failures_path_for,
+    materialized_path_for,
+    resubmit_offset_path_for,
+)
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
+    NG_TRAJECTORY_KEY,
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
@@ -105,21 +113,31 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
+from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 from nemo_gym.telemetry.gym_metrics import (
+    DISPATCH_NAME_ATTRIBUTE,
+    HEALTH_CHECKS_ATTRIBUTE,
+    HEALTH_VERDICT_ATTRIBUTE,
+    HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE,
     UNREGISTERED_FAILURE_KIND,
     record_rollout_completed,
     record_rollout_health,
     record_rollout_reward,
 )
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
-from nemo_gym.telemetry.setup import is_metrics_exporter_active
+from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+
+
+if TYPE_CHECKING:
+    from opentelemetry.trace import SpanContext
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
 from nemo_gym.server_utils import (
     ServerClient,
     get_response_json,
+    is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
     request,
 )
@@ -216,6 +234,9 @@ NG_NO_PERSIST_KEY = "_ng_no_persist"
 # Set only by Gym, on the result it builds for a row the dispatch budget never started.
 NG_DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
+# The attempt cap the collecting process ran with, stamped on each sidecar row: offline aggregation reads it
+# instead of its own environment. The `_ng_failure_` prefix keeps it out of the metrics of a counted row.
+NG_FAILURE_MAX_ATTEMPTS_KEY = "_ng_failure_max_attempts"
 NG_FAILURE_JUDGE_ERROR_KEY = "_ng_failure_judge_error"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
@@ -231,7 +252,6 @@ _NO_RESULT_FAILURE_CLASSES = frozenset(
         ENVIRONMENT_SERVER_FAILURE_CLASS,
     }
 )
-NG_TRAJECTORY_KEY = "ng_trajectory"
 NG_PERF_KEY = "ng_perf"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
@@ -367,8 +387,13 @@ def _is_episode_response(result: Any) -> bool:
 
 
 def _is_collector_key(key: str) -> bool:
-    """Keys rollout collection writes itself; an Environment Server result must not use them."""
-    return key.startswith("_ng_") or key in (NG_TRAJECTORY_KEY, "ng_model_call_capture", NG_PERF_KEY)
+    """Keys rollout collection writes itself; an Environment Server result must not use them.
+
+    ``ng_trajectory`` is not one of them: it is the producer's slot, where an Environment Server forwards
+    the harness's own turns from its session close (as an agent's ``/run`` result does), and the collector
+    replaces it with the canonical projection built from those turns.
+    """
+    return key.startswith("_ng_") or key in ("ng_model_call_capture", NG_PERF_KEY)
 
 
 def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
@@ -402,6 +427,9 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             record["_ng_failure_partial_response"] = failure["partial_response"]
         if failure.get("agent_observations") is not None:
             record[NG_AGENT_OBSERVATIONS_KEY] = failure["agent_observations"]
+        if failure.get("trajectory") is not None:
+            # The harness's own turns before the failure, in the producer's slot the projection reads first.
+            record[NG_TRAJECTORY_KEY] = failure["trajectory"]
         return record
     result = response.get("result")
     if not isinstance(result, Mapping):
@@ -437,6 +465,7 @@ class _CompletedRollout:
     rollout_latency_ms: Optional[float]
     environment_server: Optional[str] = None
     environment_server_type: Optional[str] = None
+    dispatch_span_context: Optional["SpanContext"] = None
 
 
 def _round_robin_by_agent(examples: List[Dict]) -> List[Dict]:
@@ -487,6 +516,12 @@ def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
 
 
 def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
+    identity = row.get("trajectory_identity")
+    if isinstance(identity, dict):
+        task_id = identity.get("task_id")
+        rollout_id = identity.get("rollout_id")
+        if isinstance(task_id, str) and task_id and isinstance(rollout_id, str) and rollout_id:
+            return task_id, rollout_id
     task_id = next(
         (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
         str(row[TASK_INDEX_KEY_NAME]),
@@ -638,7 +673,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                     (invocation.invocation_id, item.call_id): item.output
                     for invocation in invocations
                     for item in invocation.conversation
-                    if getattr(item, "type", None) == "function_call_output"
+                    if getattr(item, "type", None) in {"function_call_output", "custom_tool_call_output"}
                 }
                 positions = {(tool.invocation_id, tool.tool_call_id): index for index, tool in enumerate(tools)}
                 for observed in observed_tools:
@@ -1012,13 +1047,40 @@ def get_max_rollout_attempts() -> int:
 _get_max_rollout_attempts = get_max_rollout_attempts  # Backwards-compatible alias
 
 
+def load_resubmit_offset(output_fpath: str | Path) -> int:
+    """Failures-sidecar lines before this index predate the last `gym eval resubmit` and do not count to the cap."""
+    offset_fpath = resubmit_offset_path_for(Path(output_fpath))
+    return int(offset_fpath.read_text()) if offset_fpath.exists() else 0
+
+
+def record_resubmit_offset(output_fpath: str | Path) -> int:
+    """Start a fresh attempt budget: failures already in the sidecar stop counting to the cap.
+
+    Written atomically, so a run never reads a partial offset. The sidecar itself is not changed.
+    """
+    output_fpath = Path(output_fpath)
+    failures_fpath = failures_path_for(output_fpath)
+    offset = 0
+    if failures_fpath.exists():
+        with failures_fpath.open("rb") as f:
+            offset = sum(1 for _ in f)
+    offset_fpath = resubmit_offset_path_for(output_fpath)
+    offset_fpath.parent.mkdir(parents=True, exist_ok=True)
+    partial = offset_fpath.with_name(offset_fpath.name + ".tmp")
+    partial.write_text(f"{offset}\n")
+    partial.replace(offset_fpath)
+    return offset
+
+
 def _normalize_health_check_ignored_checks(value) -> List[str]:
     from nemo_gym.rollout_health import normalize_ignored_checks
 
     return list(normalize_ignored_checks(value))
 
 
-class SharedRolloutCollectionConfig(RemovedRolloutOptionsMixin, UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
+class SharedRolloutCollectionConfig(
+    RemovedRolloutOptionsMixin, UploadRolloutsConfigMixin, RunHealthConfig, BaseNeMoGymCLIConfig
+):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     batch_manifest_fpath: Optional[str] = Field(
         default=None,
@@ -1299,7 +1361,7 @@ class RunTimingReport:
 
     def record_result(self, result: Mapping[str, Any], seconds: float) -> None:
         self._durations.append(seconds)
-        if result.get("timed_out") or result.get(NG_FAILURE_CLASS_KEY) == "timeout_exceeded":
+        if result.get("timed_out") or result.get(NG_FAILURE_CLASS_KEY) in ("timeout_exceeded", AGENT_TIMEOUT):
             self._timed_out += 1
 
     def table(self) -> str:
@@ -1700,6 +1762,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=False,
         description="If the same command is run multiple times, check the materialized inputs and current outputs and remove the inputs that have already been run",
     )
+    resubmit: bool = Field(
+        default=False,
+        description=(
+            "Set by a job queued with `gym eval resubmit`: resume from cache whatever resume_from_cache says, "
+            "and give every failed rollout that is not final a fresh attempt budget."
+        ),
+    )
     prompt_config: Optional[str] = Field(
         default=None,
         description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
@@ -1715,6 +1784,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         # default to 1 if num_repeats is None
         # for backwards compatibility
         return 1 if v is None else v
+
+    @model_validator(mode="after")
+    def _resubmit_resumes(self) -> "RolloutCollectionConfig":
+        # A resubmit continues its run: a fresh start would delete the rollouts it was queued to finish.
+        if self.resubmit:
+            self.resume_from_cache = True
+        return self
 
     @model_validator(mode="after")
     def _fold_agent_name_into_agent_map(self) -> "RolloutCollectionConfig":
@@ -1871,7 +1947,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         le=1,
         description=(
             "Share of rollouts ended by a per-rollout wall-clock limit (result field `timed_out`, or "
-            "failure class `timeout_exceeded`) above which the timing summary warns."
+            "failure class `timeout_exceeded` or `agent_timeout`) above which the timing summary warns."
         ),
     )
     retry_terminal_timeouts: bool = Field(
@@ -1891,6 +1967,7 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
+        ROLLOUT_ID_KEY_NAME: row.get(ROLLOUT_ID_KEY_NAME),
         "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
         "environment_server": row.get(NG_ENVIRONMENT_SERVER_KEY),
         "taskset": _materialized_taskset(row),
@@ -1903,6 +1980,74 @@ _RUN_FAILURE_ERRORS = (ClientError, orjson.JSONDecodeError, TimeoutError)
 # Statuses something in front of the environment server answers with; it returns 500 itself.
 _SERVER_DID_NOT_RUN_STATUSES = frozenset({429, 502, 503, 504})
 _MAX_FAILURE_BODY_CHARS = 2000
+
+
+#: ``SpanContext`` of the ``gym.job`` span the driver opened as a standalone trace root, for the
+#: duration of that run. None under an embedder's trace or when the ``job`` group is off. With
+#: traces off it holds the *invalid* context of a non-recording span rather than None;
+#: ``linked_root_span`` checks validity, so that case nests like the others.
+_OWNED_JOB_SPAN_CONTEXT: ContextVar[Optional["SpanContext"]] = ContextVar(
+    "nemo_gym_owned_job_span_context", default=None
+)
+
+
+def _current_span_is_valid() -> bool:
+    try:
+        from opentelemetry import trace as otel_trace
+    except ImportError:
+        return False
+    return otel_trace.get_current_span().get_span_context().is_valid
+
+
+TASK_ID_ATTRIBUTE = "nemo.gym.task.id"
+ROLLOUT_REPEAT_ATTRIBUTE = "nemo.gym.rollout.repeat"
+
+
+def _span_task_id(row: Mapping[str, Any]) -> Optional[str]:
+    identity = row.get("task_id")
+    if isinstance(identity, Mapping):
+        return identity.get("task_id")
+    return next((str(row[key]) for key in (*TASK_ID_FIELDS, "task_name") if row.get(key) is not None), None)
+
+
+@contextmanager
+def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: str) -> Iterator["SpanContext"]:
+    """One rollout's dispatch as the root of its own trace, linked to the run's `job` span.
+
+    The `/run` call made inside carries this span as `traceparent`, so the agent's
+    `gym.rollout` span and everything below it join the new trace instead of nesting under
+    `gym.job`. The link, not a parent edge, ties the trace back to the job; both carry the
+    run id as a resource attribute. The identity comes from the collector *row*, not from
+    the posted body: a materialized episode body carries it only as `episode_id`.
+    `dispatch_name` is the value the rollout counters record under the same key, so spans
+    and metrics join on it; `server_name` is the server the call goes to, which differs for
+    a row routed by agent. Only a job the driver opened as its own root is split; under an
+    embedder's trace the dispatch keeps nesting (see `linked_root_span`). Gate on the
+    `rollout` group and the trace exporter before calling.
+
+    Yields the span's context, which the driver keeps to attach `gym.rollout.health` later.
+    """
+    from nemo_gym.telemetry.spans import linked_root_span
+
+    attributes: Dict[str, Any] = {
+        DISPATCH_NAME_ATTRIBUTE: dispatch_name,
+        HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE: server_name,
+    }
+    try:
+        rollout_id = maybe_rollout_id_from_run_body(row)
+    except (TypeError, ValueError):
+        # Telemetry never decides whether a rollout runs; a malformed row just gets no id.
+        rollout_id = None
+    if rollout_id:
+        attributes[ROLLOUT_ID_ATTRIBUTE] = rollout_id
+    task_id = _span_task_id(row)
+    if task_id is not None:
+        attributes[TASK_ID_ATTRIBUTE] = task_id
+    repeat = row.get(ROLLOUT_INDEX_KEY_NAME)
+    if isinstance(repeat, int) and not isinstance(repeat, bool):
+        attributes[ROLLOUT_REPEAT_ATTRIBUTE] = repeat
+    with linked_root_span("gym.rollout.dispatch", split_from=_OWNED_JOB_SPAN_CONTEXT.get(), **attributes) as span:
+        yield span.get_span_context()
 
 
 def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name: str) -> None:
@@ -1943,18 +2088,36 @@ def _metric_failure_kind(failure_kind: Any) -> Optional[str]:
     return UNREGISTERED_FAILURE_KIND
 
 
-def _record_rollout_health(result: Dict[str, Any], outcome: str, ignored_checks: frozenset[str]) -> None:
+def _record_rollout_health(
+    result: Dict[str, Any],
+    outcome: str,
+    ignored_checks: frozenset[str],
+    dispatch_span_context: Optional["SpanContext"] = None,
+) -> None:
     """Evaluate the trajectory health checks on a finished rollout and count the verdict and flagged checks.
 
-    Gated on telemetry only, not on the post-run report switch. Never raises: telemetry must not fail a rollout.
+    With a `dispatch_span_context`, the verdict and the flagged checks also go on a `gym.rollout.health` span
+    under that dispatch span. Gated on telemetry only, not on the post-run report switch. Never raises:
+    telemetry must not fail a rollout.
     """
     from nemo_gym.rollout_health import evaluate_record
 
     try:
         digest = evaluate_record(result, ignored_checks)
-        record_rollout_health(digest.verdict, outcome=outcome, flagged_checks=(f.check for f in digest.findings))
+        checks = sorted({finding.check for finding in digest.findings})
+        record_rollout_health(digest.verdict, outcome=outcome, flagged_checks=checks)
+        if dispatch_span_context is not None:
+            from nemo_gym.telemetry.spans import record_child_span
+
+            attributes = {HEALTH_VERDICT_ATTRIBUTE: digest.verdict}
+            if checks:
+                attributes[HEALTH_CHECKS_ATTRIBUTE] = checks
+            rollout_id = maybe_rollout_id_from_run_body(result)
+            if rollout_id:
+                attributes[ROLLOUT_ID_ATTRIBUTE] = rollout_id
+            record_child_span("gym.rollout.health", dispatch_span_context, **attributes)
     except Exception:
-        logger.debug("Could not record rollout health metrics.", exc_info=True)
+        logger.debug("Could not record rollout health telemetry.", exc_info=True)
 
 
 def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dict[str, Any]:
@@ -2235,6 +2398,50 @@ async def _read_jsonl(path: Path) -> List[Dict]:
                 await asyncio.sleep(0)
                 yielded_at = time.monotonic()
     return rows
+
+
+def _failure_export_metrics(
+    failures_fpaths: List[Path], identity: Callable[[Mapping[str, Any]], Any], landed: set
+) -> Dict[str, int]:
+    """Failure and retry counts for exporters, read from the failures sidecars.
+
+    The sidecars hold every failed attempt of the run, across resumes, so these are run totals rather
+    than one job's. ``identity`` keys a sidecar row the way ``landed`` keys the rollouts that have a row.
+    ``coverage/failed/<class>`` counts the rollouts with no row, by the class of their last attempt.
+    ``retries/attempts`` counts failed attempts, ``retries/rollouts_retried`` the rollouts dispatched
+    more than once, and ``retries/at_cap`` the rollouts with no row that used all their attempts. Each rollout
+    is held to the cap its collection recorded on its last attempt (``_ng_failure_max_attempts``), or the
+    current cap for a row written before the cap was recorded. ``retries/max_attempts`` is that cap, and is
+    left out when the rollouts were collected with different caps.
+    """
+    attempts: Counter = Counter()
+    latest: Dict[Any, Dict[str, Any]] = {}
+    # Every class the sidecars name starts at 0: a reopened tracking run keeps a class's last value until it is sent.
+    failed: Counter = Counter()
+    for fpath in failures_fpaths:
+        if not fpath.exists():
+            continue
+        with fpath.open("rb") as f:
+            for line_no, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                row = loads_jsonl_line(line, fpath, line_no)
+                failed.setdefault(row.get(NG_FAILURE_CLASS_KEY) or "unknown", 0)
+                attempts[identity(row)] += 1
+                latest[identity(row)] = row
+    current_cap = get_max_rollout_attempts()
+    caps = {key: row.get(NG_FAILURE_MAX_ATTEMPTS_KEY) or current_cap for key, row in latest.items()}
+    failed.update(row.get(NG_FAILURE_CLASS_KEY) or "unknown" for key, row in latest.items() if key not in landed)
+    recorded_caps = set(caps.values()) or {current_cap}
+    return {
+        "retries/attempts": sum(attempts.values()),
+        # A rollout that landed after n failed attempts was dispatched n + 1 times.
+        "retries/rollouts_retried": sum(1 for key, n in attempts.items() if n + (key in landed) > 1),
+        "retries/at_cap": sum(1 for key, n in attempts.items() if key not in landed and n >= caps[key]),
+        **({"retries/max_attempts": recorded_caps.pop()} if len(recorded_caps) == 1 else {}),
+        **{f"coverage/failed/{name}": count for name, count in sorted(failed.items())},
+    }
 
 
 def _count_lines(path: Path) -> int:
@@ -2553,6 +2760,10 @@ class _BoundedCompletionIterator:
 
 
 class RolloutCollectionHelper(BaseModel):
+    # (task index, rollout index) of every record persisted to the rollouts jsonl, kept current as rows land,
+    # so a run stopped by SIGTERM can be accounted for without re-reading that file.
+    _landed_keys: set = PrivateAttr(default_factory=set)
+
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
         if config.limit:
@@ -2902,11 +3113,15 @@ class RolloutCollectionHelper(BaseModel):
         # per key + flag terminal rows so chain-hop 2 retries the right ones.
         failures_fpath = failures_path_for(Path(config.output_jsonl_fpath))
         attempts_by_key: Counter = Counter()
+        # Attempts since the last `gym eval resubmit`: a resubmit gives every non-terminal failure a fresh budget.
+        # If the sidecar is later rewritten shorter (a GDPval stage restart), the offset only gives extra attempts.
+        resubmit_offset = load_resubmit_offset(config.output_jsonl_fpath)
+        budget_used: Counter = Counter()
         terminal_keys: set = set()
         elapsed_by_key: Dict[Tuple, float] = {}
         if failures_fpath.exists():
             with failures_fpath.open("rb") as f:
-                for line in f:
+                for line_index, line in enumerate(f):
                     line = line.strip()
                     if not line:
                         continue
@@ -2915,6 +3130,8 @@ class RolloutCollectionHelper(BaseModel):
                         continue
                     k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
                     attempts_by_key[k] += 1
+                    if line_index >= resubmit_offset:
+                        budget_used[k] += 1
                     if is_terminal_failure(fr, retry_terminal_timeouts=config.retry_terminal_timeouts):
                         terminal_keys.add(k)
                     # A failed attempt still tells us how long this task runs -
@@ -2925,7 +3142,7 @@ class RolloutCollectionHelper(BaseModel):
                         elapsed_by_key[k] = max(elapsed_by_key.get(k, 0.0), observed)
 
         max_attempts = _get_max_rollout_attempts()
-        maxed_out = {k for k, n in attempts_by_key.items() if n >= max_attempts}
+        maxed_out = {k for k, n in budget_used.items() if n >= max_attempts}
         gated = successes_seen | terminal_keys | maxed_out
 
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]
@@ -2976,16 +3193,25 @@ class RolloutCollectionHelper(BaseModel):
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         """Collect rollouts for a whole config. Wrapped in the run-scoped `job` span.
 
-        This is the driver side of an evaluation run and the outermost span Gym produces,
-        so every rollout it dispatches is a descendant of it. `job` is in the `default`
-        preset but deliberately not in `per_rollout`, where each rollout is meant to be
-        its own bounded root trace.
+        This is the driver side of an evaluation run and the outermost span Gym produces.
+        Rollouts are not its descendants: each dispatch opens its own trace, linked to this
+        span (see `_dispatch_span`), so a run's traces stay bounded by one rollout each while
+        `job` keeps the run's own lifecycle. `job` is in the `default` preset and not in
+        `per_rollout`.
         """
         async with observe_event_loop("driver"):
             if not is_span_group_enabled(GymSpanGroup.JOB):
                 return await self._run_from_config(config)
-            with managed_span(GymSpanGroup.JOB, "gym.job"):
-                return await self._run_from_config(config)
+            # Decide ownership before the job span exists: a valid span here means a caller
+            # owns the trace, and rollouts keep nesting under it.
+            embedded = _current_span_is_valid()
+            with managed_span(GymSpanGroup.JOB, "gym.job") as job:
+                owned = job.get_span_context() if job is not None and not embedded else None
+                token = _OWNED_JOB_SPAN_CONTEXT.set(owned)
+                try:
+                    return await self._run_from_config(config)
+                finally:
+                    _OWNED_JOB_SPAN_CONTEXT.reset(token)
 
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
@@ -3005,12 +3231,15 @@ class RolloutCollectionHelper(BaseModel):
         # outside a git clone.
         output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
-        persisted_success_keys: set = set()
+        persisted_success_keys = self._landed_keys
+        persisted_success_keys.clear()
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
             should_clear_outputs = False
             _drop_truncated_tail(output_fpath)
             if failures_fpath.exists():
                 _drop_truncated_tail(failures_fpath)
+            if config.resubmit:
+                print(f"Resubmitted: a fresh attempt budget from failure {record_resubmit_offset(output_fpath)} on.")
             (
                 input_rows,
                 rows,
@@ -3087,6 +3316,7 @@ class RolloutCollectionHelper(BaseModel):
             # A fresh run must not inherit retry attempts or published metrics
             # from an older run that used the same output path.
             failures_fpath.unlink(missing_ok=True)
+            resubmit_offset_path_for(output_fpath).unlink(missing_ok=True)
             aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
 
         batch_completed_rows: List[Dict] = []
@@ -3120,7 +3350,7 @@ class RolloutCollectionHelper(BaseModel):
         capture_dirs = model_call_capture_dirs_from_config(global_config)
         observability_enabled = observability_enabled_from_config(global_config)
         # Live health metrics follow the metrics exporter alone: `disable_health_check` only gates the post-run
-        # report, and span groups only select traces. Without an exporter the evaluation would feed nothing.
+        # report. A traced dispatch also gets a `gym.rollout.health` span, whatever the metrics exporter does.
         health_metrics_enabled = is_metrics_exporter_active()
         health_ignored_checks = frozenset(config.health_check_ignored_checks)
         # How a finalized rollout with an incomplete capture is treated
@@ -3423,6 +3653,8 @@ class RolloutCollectionHelper(BaseModel):
                         f"class={failure_class} error={detail}"
                     )
                     write_started = perf_counter()
+                    # The cap this attempt ran under travels with it, for offline aggregation.
+                    serialized = orjson.dumps({**result, NG_FAILURE_MAX_ATTEMPTS_KEY: get_max_rollout_attempts()})
                     failures_file.write(serialized + b"\n")
                     failures_file.flush()
                     _record_rollout_outcome(result, "failed", dispatch_name)
@@ -3550,8 +3782,15 @@ class RolloutCollectionHelper(BaseModel):
                         export_metrics(step_metrics, step=int(current_pct))
 
                 # Last, so a cancellation here costs a health sample and never the bookkeeping above.
-                if health_metrics_enabled and health_outcome is not None:
-                    await asyncio.to_thread(_record_rollout_health, result, health_outcome, health_ignored_checks)
+                health_span_context = completed.dispatch_span_context
+                if health_outcome is not None and (health_metrics_enabled or health_span_context is not None):
+                    await asyncio.to_thread(
+                        _record_rollout_health,
+                        result,
+                        health_outcome,
+                        health_ignored_checks,
+                        health_span_context,
+                    )
 
             # The scans of whole artifacts after collection run in a worker thread.
             # On the event loop they would stall telemetry, other tasks, and shutdown.
@@ -3692,13 +3931,20 @@ class RolloutCollectionHelper(BaseModel):
         coverage = _coverage_report(
             expected_rollouts, scored_rollouts, failure_counts, failures_fpath, imputed=len(imputed)
         )
-        if get_exporters():  # pragma: no cover
+        if get_exporters():
+            failure_metrics = await asyncio.to_thread(
+                _failure_export_metrics,
+                [failures_fpath],
+                lambda row: (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)),
+                persisted_success_keys,
+            )
             export_metrics(
                 {
                     "coverage/expected": expected_rollouts,
                     "coverage/scored": scored_rollouts,
                     "coverage/missing": expected_rollouts - scored_rollouts,
                     **({"coverage/imputed": len(imputed)} if config.count_missing_rollouts_as_zero else {}),
+                    **failure_metrics,
                 }
             )
 
@@ -3716,6 +3962,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     output_fpath,
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
+                    limits=config.run_health_limits,
                 )
             except Exception:
                 logger.exception(
@@ -3792,7 +4039,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         async def _fetch_agent_metrics(server_name: str, agent_name: str, agent_result_list: List[Dict]) -> Dict:
             nonlocal first_error
-            # Strip heavyweight fields before sending, but preserve response.usage and response.incomplete_details if present.
+            # Strip generated content, but keep provider metrics for request-level
+            # aggregation (e.g. SPEED-Bench), along with usage and truncation status.
             stripped = []
             for r in agent_result_list:
                 entry = {
@@ -3815,6 +4063,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 incomplete_details = response.get("incomplete_details")
                 if incomplete_details is not None:
                     response_metadata["incomplete_details"] = incomplete_details
+                metrics = response.get("metrics")
+                if metrics is not None:
+                    response_metadata["metrics"] = metrics
                 if response_metadata:
                     entry["response"] = response_metadata
                 stripped.append(entry)
@@ -4236,15 +4487,27 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                             environment_server_type=server_type,
                         )
 
+                if is_global_aiohttp_client_request_debug_enabled():
+                    print(
+                        "[rollout_collection] /run dispatch "
+                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                        flush=True,
+                    )
                 started = time.monotonic()
                 started_at = time.time()
                 if run_timing is not None:
                     run_timing.record_start(started)
                 res = None
                 succeeded = False
+                dispatch_span_context = None
                 try:
                     request_body = _episode_request_body(row) if _materialized_taskset(row) else row
-                    res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
+                    if is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active():
+                        with _dispatch_span(row, self._dispatch_name(row), server_name=server_name) as span_context:
+                            dispatch_span_context = span_context
+                            res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
+                    else:
+                        res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
                     await raise_for_status(res)
                     result = await get_response_json(res)
                     if run_timing is not None and isinstance(result, Mapping):
@@ -4259,6 +4522,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         rollout_latency_ms=rollout_latency_ms,
                         environment_server=server_name,
                         environment_server_type=server_type,
+                        dispatch_span_context=dispatch_span_context,
                     )
                 except Exception as e:
                     print(
@@ -4280,6 +4544,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         rollout_latency_ms=None,
                         environment_server=server_name,
                         environment_server_type=server_type,
+                        dispatch_span_context=dispatch_span_context,
                     )
                 finally:
                     # Failed and timed-out tasks inform the adaptive margin too, but only by
@@ -4394,7 +4659,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         return setup_server_client_utils(head_server_config)
 
 
-class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
+class RolloutAggregationConfig(RunHealthConfig, BaseNeMoGymCLIConfig):
     """
     Aggregate metrics across rollout shards produced by `gym eval run --no-serve +disable_aggregation=true`.
 
@@ -4659,13 +4924,20 @@ class RolloutAggregationHelper(BaseModel):
             "the shards' _failures.jsonl sidecars",
             imputed=len(missing),
         )
-        if get_exporters():  # pragma: no cover
+        if get_exporters():
+            failure_metrics = await asyncio.to_thread(
+                _failure_export_metrics,
+                failures_fpaths,
+                lambda row: _identity_key(row, group),
+                {_identity_key(r, group) for r in results},
+            )
             export_metrics(
                 {
                     "coverage/expected": scored_rollouts + sum(dropped.values()),
                     "coverage/scored": scored_rollouts,
                     "coverage/missing": sum(dropped.values()),
                     **({"coverage/imputed": len(missing)} if config.count_missing_rollouts_as_zero else {}),
+                    **failure_metrics,
                 }
             )
 
@@ -4679,10 +4951,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             try:
                 health_result = await asyncio.to_thread(
                     run_health_checks,
-                    output_fpath if config.merge_shards else [Path(path) for path in input_paths],
+                    # The shards, not the merged file: their sidecars and inventories sit next to them.
+                    [Path(path) for path in input_paths],
                     output_dir=output_fpath.parent,
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
+                    limits=config.run_health_limits,
                 )
             except Exception:
                 logger.exception(
