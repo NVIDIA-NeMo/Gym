@@ -121,6 +121,8 @@ Read the rollouts, not the exit code:
 - The agent closed before verification, and the sandbox owner cleaned up.
 - [Rollout health](../../../fern/versions/latest/pages/evaluation/rollout-health.mdx) counts: `unhealthy` is a finding; `unobserved` means a check lacked the evidence it reads. At the Evaluation level the turn checks are unobserved by design. At any level, name what each unobserved check was missing, for example a response without `usage` leaves the token-count check unobserved.
 
+For a new harness or an upgrade that claims Terminal-Bench 2.1 support, complete the [TB 2.1 full evaluation](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#terminal-bench-21-full-evaluation) before merge. Run every task and declared repeat at a pinned benchmark revision with a real model, and link the full results in the PR. This applies at every capability level; the small smoke run above and scripted probes do not satisfy it.
+
 Then show a second compatible pairing through configuration changes alone. For an upgrade, compare before and after with the same model, tasks, prompts, sampling, limits, image, verifier, and concurrency.
 
 ## Step 6: Training (only if the capability level includes it)
@@ -136,6 +138,7 @@ A harness merges only when it passes these checks. Put the evidence in the PR.
 | Unit tests | Session contract, refusals, close, retries, termination. | `gym env test +entrypoint=responses_api_agents/<adapter_name>` |
 | Conformance | From the Observability level up, every applicable P0 check passes, or the PR explains why the probes do not apply. | `scripts/run_harness_conformance.py` report |
 | Real pairing | Each claimed pairing produces rewards on a real model and tasks; the agent closes before verification; cleanup runs. | `rollouts.jsonl`, failures sidecar, server logs |
+| TB 2.1 full evaluation | A new harness or upgrade claiming TB 2.1 support completes the [full evaluation](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#terminal-bench-21-full-evaluation), at every capability level. | Full run artifacts, per-task results, aggregate score, coverage and failure counts; before/after results for upgrades. |
 | Health | Very few `unhealthy` rollouts; every `unobserved` count is explained by the capability level or a named missing input. | `quality_summary.json`, `gym eval health-check` |
 | Evidence | From the Observability level up, the saved rollouts pass the evidence check. At the Evaluation level they fail it by design: record the result and the gaps the close bundle declares. | `scripts/inspect_harness_conformance.py` |
 | Composition | A second pairing works through configuration alone. | Its run folder |
