@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from nemo_gym.base_resources_server import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
@@ -90,6 +90,23 @@ class TestApp:
         # Confirm IFEval IDs are NOT present (disjoint namespaces)
         assert "detectable_format:title" not in instructions_registry.INSTRUCTION_DICT
         assert "length_constraints:number_words" not in instructions_registry.INSTRUCTION_DICT
+
+    def test_cached_language_checks_do_not_download(self):
+        # Exercise the real NLTK tokenizer, tagger, and corpus. A downloader call
+        # would contact the package index even when all data is already cached.
+        with patch("nltk.download", side_effect=AssertionError("unexpected NLTK download")):
+            for text, expected in [("Write a short story.", True), ("The store is open.", False)]:
+                req = self._create_request(
+                    instruction_ids=["words:start_verb"],
+                    prompt="Start with a verb.",
+                    kwargs=[{}],
+                    response_content=text,
+                )
+                self._run_verify(req, expected, float(expected), [expected])
+
+            import instructions_util
+
+            assert instructions_util.count_stopwords("the cat and the dog") == 3
 
     def test_count_numbers_positive(self):
         """count:numbers N=2 passes when response contains exactly 2 numbers."""

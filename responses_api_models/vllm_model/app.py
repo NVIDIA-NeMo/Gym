@@ -481,6 +481,17 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             raise ValueError("supply_prefix_token_ids is not supported with is_responses_native=true")
         return self
 
+    @model_validator(mode="after")
+    def _validate_custom_tool_strategy(self) -> "VLLMModelConfig":
+        if self.custom_tool_strategy == "function_bridge" and self.is_responses_native:
+            raise ValueError(
+                "custom_tool_strategy=function_bridge is not supported with is_responses_native=true: the "
+                "native Responses route forwards requests without the Responses-to-Chat conversion that "
+                "implements the bridge, and vLLM's native route renders function tools only, so a custom "
+                "tool would be accepted but never shown to the model."
+            )
+        return self
+
     # When True, outbound calls go to vLLM's /v1/completions endpoint instead
     # of /v1/chat/completions. The Gym /v1/responses and /v1/chat/completions
     # external endpoints continue to work; only the upstream call swaps.
@@ -577,6 +588,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         return VLLMConverter(
             return_token_id_information=self.config.return_token_id_information,
             uses_reasoning_parser=self.config.uses_reasoning_parser,
+            custom_tool_strategy=self.config.custom_tool_strategy,
         )
 
     def model_post_init(self, context):
@@ -972,12 +984,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                 else:
                     raise NotImplementedError
 
-        # Drop a null top_logprobs on the non-capture path (caller-supplied logprobs=True).
-        # vLLM treats null as "no logprobs" but a missing field as its default (0), so forwarding null is never useful.
-        # The capture path above already set it to 0 and is unaffected.
-        if body_dict.get("top_logprobs") is None:
-            body_dict.pop("top_logprobs", None)
-
         if extra_body:
             body_dict = extra_body | body_dict
 
@@ -989,6 +995,22 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict = self._external_capture_handler.prepare_request(body_dict)
         else:
             body_dict = self._apply_prefix_supply(body_dict)
+
+        if body_dict.get("ng_capture") and body_dict.get("top_logprobs") and body_dict.get("logprob_token_ids"):
+            # vLLM ignores top_logprobs when specific IDs are requested. Equal
+            # counts do not guarantee those IDs are the sampler's top-k head.
+            raise HTTPException(
+                status_code=400,
+                detail="Top-k token capture does not support logprob_token_ids; omit it to collect the sampler's top-k.",
+            )
+
+        # Normalize after all request overrides and capture controls. vLLM treats
+        # null as no logprobs; zero explicitly requests the chosen token only.
+        if body_dict.get("top_logprobs") is None:
+            if body_dict.get("logprobs"):
+                body_dict["top_logprobs"] = 0
+            else:
+                body_dict.pop("top_logprobs", None)
 
         return body_dict
 
