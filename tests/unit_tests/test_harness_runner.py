@@ -83,7 +83,6 @@ def test_events_keep_json_objects_with_the_time_they_were_seen(tmp_path: Path) -
     assert all(before - 1 <= seen <= time.time() for seen, _ in events)
 
 
-
 def test_events_keep_numeric_times_and_crlf_lines_without_epochrealtime(tmp_path: Path) -> None:
     # Bash < 5 has no EPOCHREALTIME and bash < 4.2 no printf strftime; both still stamp numbers.
     script = 'printf \'{"type": "a"}\\r\\n{"type": "partial"}\'; sleep 0.2'
@@ -130,6 +129,7 @@ def test_events_mode_cli_keeps_default_interrupt_handling(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr
     (event,) = [json.loads(line)[1] for line in (tmp_path / "events.jsonl").read_text().splitlines()]
     assert "default_int_handler" in event["int"]
+
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux process semantics")
 def test_events_mode_forwards_term_and_ignores_a_detached_stdout_holder(tmp_path: Path) -> None:

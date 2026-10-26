@@ -91,6 +91,8 @@ def rejected_events(*, after_work: bool = False) -> str:
     else:
         export["messages"][-1] = rejected
     return json.dumps(export)
+
+
 def read_params(text: str) -> dict:
     """Source runner PARAMS with bash, as the sandbox runner does."""
     script = 'source /dev/stdin; printf "%s\\0" "$cwd" "$stdin" "$setup" "${#command[@]}" "${command[@]}" "${env[@]}"'

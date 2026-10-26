@@ -21,7 +21,21 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     """Run the real installer with an isolated PATH and no access to the host package manager."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    tools = ("bash", "uname", "getconf", "mkdir", "cp", "tar", "gzip", "chmod", "rm", "sleep", "ln", "readlink", "rmdir")
+    tools = (
+        "bash",
+        "uname",
+        "getconf",
+        "mkdir",
+        "cp",
+        "tar",
+        "gzip",
+        "chmod",
+        "rm",
+        "sleep",
+        "ln",
+        "readlink",
+        "rmdir",
+    )
     for name in (*tools, "mktemp", "sha256sum", "mv"):
         executable = shutil.which(name)
         if executable is None:
