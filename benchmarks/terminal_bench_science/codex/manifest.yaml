@@ -25,7 +25,7 @@ datasets:
   type: benchmark
   jsonl_fpath: benchmarks/terminal_bench_science/data/benchmark_codex.jsonl
   prepare_script: benchmarks/terminal_bench_science/prepare_codex.py
-  num_repeats: 3
+  num_repeats: 1
 model_server: policy_model
 canonical_split: benchmark
 prompt_source: prepared

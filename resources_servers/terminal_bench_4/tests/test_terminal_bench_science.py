@@ -814,7 +814,7 @@ def test_codex_profile_composes_borrowing_resources_codex_and_the_environment_se
     environment = config.terminal_bench_science_codex.environment_servers.single_agent_turn_legacy
     assert resources.sandbox_provider_ref == "terminal_bench_science_sandbox"
     assert list(config.terminal_bench_science_sandbox) == ["opensandbox"]
-    assert resources.datasets[0].num_repeats == 3
+    assert resources.datasets[0].num_repeats == 1
     assert environment.resources_server.name == "terminal_bench_science_codex_resources_server"
     assert environment.agent_server.name == "terminal_bench_science_codex_agent"
     assert agent.inherit_sandbox_environment is True
@@ -843,9 +843,8 @@ def test_codex_deepseek_flash_config_matches_the_reference_codex_launch(monkeypa
     }
     assert resolved["model_server_forwards_reasoning_effort"] is True
     assert resolved["inherit_sandbox_environment"] is True
-    # Codex's own feature defaults and session state, as a plain `codex exec` launch has them.
+    # Codex's own feature defaults, as a plain `codex exec` launch has them.
     assert agent["features"] == {"multi_agent": None, "code_mode": None}
-    assert agent["ephemeral"] is False
     # Codex's requests reach the endpoint as sent; the endpoint's 4xx reach Codex.
     model = config.policy_model.responses_api_models.openai_model
     assert model.responses_stream_passthrough is True

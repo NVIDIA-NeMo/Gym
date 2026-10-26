@@ -41,9 +41,9 @@ terminal_bench_science_codex_resources_server:
           type: benchmark
           jsonl_fpath: benchmarks/terminal_bench_science/data/benchmark_codex.jsonl
           prepare_script: benchmarks/terminal_bench_science/prepare_codex.py
-          # Official protocol: three trials per task. For other counts, replace this dataset list
-          # in a run config (--num-repeats multiplies it).
-          num_repeats: 3
+          # One trial per task, as the mini-SWE profile. The leaderboard's protocol is three trials
+          # per task (210 in all): ++num_repeats=3.
+          num_repeats: 1
           license: Apache 2.0
 
 terminal_bench_science_codex_agent:
@@ -76,9 +76,9 @@ terminal_bench_science_codex_agent:
       # not the exec daemon, the OOM killer's preferred victims.
       verify_after_agent_error: ${oc.select:tbsci_verify_after_agent_error,true}
       raise_oom_score_adj: ${oc.select:tbsci_raise_oom_score_adj,true}
-      # Without --ephemeral (codex_deepseek_flash.yaml), keep Codex's session rollouts (per-call token counts and
-      # timestamps, also for a run stopped at its time limit): copied to /logs/agent/sessions, which the resources
-      # server copies into the trial directory (agent/sessions/), as Harbor keeps them under /logs/agent.
+      # Codex's session rollouts (per-call token counts and timestamps, also for a run stopped at its time limit):
+      # copied to /logs/agent/sessions, which the resources server copies into the trial directory
+      # (agent/sessions/), as Harbor keeps them under /logs/agent.
       sandbox_logs_dir: ${oc.select:tbsci_codex_sandbox_logs_dir,/logs/agent}
 
 terminal_bench_science_codex:

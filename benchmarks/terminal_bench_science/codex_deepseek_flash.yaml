@@ -46,5 +46,3 @@ terminal_bench_science_codex_agent:
       features:
         multi_agent: null
         code_mode: null
-      # No --ephemeral, so Codex offers its goal tools.
-      ephemeral: false
