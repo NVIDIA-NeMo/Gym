@@ -1707,9 +1707,9 @@ async def test_stale_cookie_cannot_recreate_session_or_close_receipt_after_full_
     close = AgentCloseSessionRequest(agent_session_id=body.agent_session_id, episode_id=body.episode_id)
     await agent.close_agent_session(request, close)
     clock[0] = 111.0
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.close_agent_session(request, close)
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.seed_agent_session(request, body)
     assert not agent._fenced_session_records
     assert all(record.state is None for record in agent._session_records.values())

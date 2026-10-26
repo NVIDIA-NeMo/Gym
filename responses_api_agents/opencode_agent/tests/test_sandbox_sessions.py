@@ -1206,9 +1206,9 @@ async def test_expired_receipt_cookie_cannot_seed_or_activate(setup, monkeypatch
     close = AgentCloseSessionRequest(**close_body(body.agent_session_id))
     await agent.close_agent_session(request, close)
     clock[0] = 111.0
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.close_agent_session(request, close)
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.seed_agent_session(request, body)
     with pytest.raises(HTTPException):
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
