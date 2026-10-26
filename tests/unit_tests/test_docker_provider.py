@@ -927,3 +927,38 @@ async def test_connect_requires_a_sandbox_id(fake_binary: str) -> None:
 
     with pytest.raises(docker_provider.DockerCreateError, match="requires a sandbox_id"):
         await provider.connect({"image": "img:1"})
+
+
+def test_service_options_and_pull_policy_become_run_flags(fake_binary: str) -> None:
+    """M28: the Docker provider applies Compose's tmpfs, ulimits, sysctls, security_opt and pull_policy."""
+    from nemo_gym.sandbox.providers import provider_service_option_fields
+
+    provider = docker_provider.DockerProvider(exec={"exec_shell": "sh"})
+    assert provider_service_option_fields("docker") == {"tmpfs", "ulimits", "sysctls", "security_opt"}
+    assert provider.service_options() == {}
+    assert provider.service_options(
+        tmpfs=("/run", "/tmp:size=64m"),
+        ulimits={"nofile": {"soft": 1024, "hard": 2048}, "nproc": 64},
+        sysctls={"net.core.somaxconn": "1024"},
+        security_opt=("seccomp=unconfined",),
+    ) == {
+        "run_args": [
+            "--tmpfs",
+            "/run",
+            "--tmpfs",
+            "/tmp:size=64m",
+            "--ulimit",
+            "nofile=1024:2048",
+            "--ulimit",
+            "nproc=64",
+            "--sysctl",
+            "net.core.somaxconn=1024",
+            "--security-opt",
+            "seccomp=unconfined",
+        ]
+    }
+    with pytest.raises(ValueError, match="soft and hard"):
+        provider.service_options(ulimits={"nofile": {"soft": 1}})
+    assert provider.pull_policy_options("always") == {"run_args": ["--pull", "always"]}
+    with pytest.raises(ValueError, match="always, missing or never"):
+        provider.pull_policy_options("Always")

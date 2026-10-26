@@ -33,7 +33,8 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.path_utils import aggregation_sources_path_for
+from nemo_gym.rollout_collection import NG_DISPATCH_DRAINED_KEY, NG_OMITTED_ROLLOUT_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_reverification import (
     _RECOVERY_TWO_SOURCES_WARNING,
     ATIF_PROVENANCE_KEY,
@@ -988,6 +989,22 @@ class TestSeedOutputWithSuccesses:
         seeded = [orjson.loads(line) for line in out.read_bytes().splitlines() if line.strip()]
         assert seeded == rows
 
+    @pytest.mark.parametrize("seeds", [True, False], ids=["seeds a row", "seeds nothing"])
+    def test_drops_the_shard_list_only_when_it_seeds(self, tmp_path: Path, seeds: bool) -> None:
+        """Seeded rows are not the merged ones an aggregation listed shards for; with none seeded, they still are."""
+        out = tmp_path / "output.jsonl"
+        out.write_bytes(orjson.dumps({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}) + b"\n")
+        src = tmp_path / "successes.jsonl"
+        tasks = (0, 1) if seeds else (0,)
+        src.write_bytes(
+            b"".join(orjson.dumps({TASK_INDEX_KEY_NAME: t, ROLLOUT_INDEX_KEY_NAME: 0}) + b"\n" for t in tasks)
+        )
+        aggregation_sources_path_for(out).write_text("{}")
+
+        _seed_output_with_successes(src, out)
+
+        assert aggregation_sources_path_for(out).exists() is not seeds
+
     def test_empty_source_creates_empty_output_and_returns_empty_set(self, tmp_path: Path) -> None:
         src = tmp_path / "successes.jsonl"
         src.write_bytes(b"")
@@ -1749,6 +1766,23 @@ class TestPrepareOutputFpaths:
             "", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False, append=False
         )
         assert not paths.output.exists()
+
+    @pytest.mark.parametrize("mode", ["overwrite", "append", "resume_from_cache"])
+    def test_drops_the_shard_list_only_with_the_output_it_deletes(self, tmp_path: Path, mode: str) -> None:
+        """A run that appends drops it when it starts writing, so one that stops before then keeps it."""
+        out = tmp_path / "out.jsonl"
+        out.write_text("merged rows\n")
+        aggregation_sources_path_for(out).write_text("{}")
+
+        _prepare_output_fpaths(
+            "",
+            str(out),
+            resume_from_cache=mode == "resume_from_cache",
+            overwrite=mode == "overwrite",
+            append=mode == "append",
+        )
+
+        assert aggregation_sources_path_for(out).exists() is (mode != "overwrite")
 
     def test_keeps_existing_files_when_resuming_regardless_of_overwrite(self, tmp_path: Path) -> None:
         out = tmp_path / "out.jsonl"
@@ -3063,6 +3097,41 @@ class TestRunFromConfigJudgeFailedOnly:
         assert (tmp_path / "recovered.jsonl").exists()
         assert not (tmp_path / "unsafe_recovered.jsonl").exists()
 
+    @pytest.mark.parametrize(
+        "omitted",
+        [
+            pytest.param({NG_FAILURE_CLASS_KEY: "kill_shaped"}, id="killed"),
+            pytest.param({NG_FAILURE_CLASS_KEY: "cancelled", NG_DISPATCH_DRAINED_KEY: True}, id="never-started"),
+            pytest.param({NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS}, id="judge-class"),
+            pytest.param({NG_FAILURE_CLASS_KEY: "kill_shaped", "stage_index": 1}, id="multi-stage"),
+        ],
+    )
+    async def test_rows_for_rollouts_with_no_result_are_not_recovered(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, omitted: dict
+    ) -> None:
+        """A `record_omitted_rollouts` sidecar row has no response to judge, so recovery neither re-verifies it nor
+        refuses the run because of its stage."""
+        omitted_row = {
+            TASK_INDEX_KEY_NAME: 1,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            NG_NO_PERSIST_KEY: True,
+            NG_OMITTED_ROLLOUT_KEY: True,
+            **omitted,
+        }
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(3)],
+            successes=[self._success(0)],
+            failures=[omitted_row, self._failure(2)],
+        )
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched)
+
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+
+        assert [p[TASK_INDEX_KEY_NAME] for p in dispatched] == [2]
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in self._read_jsonl(tmp_path / "recovered.jsonl")) == [0, 2]
+
     async def test_rejects_multistage_rows_before_writing_anything(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -3183,6 +3252,37 @@ class TestRunFromConfigJudgeFailedOnly:
         assert [r[TASK_INDEX_KEY_NAME] for r in rows].count(0) == 1
         task0 = next(r for r in rows if r[TASK_INDEX_KEY_NAME] == 0)
         assert task0["reward"] == 1.0  # the seeded success, not a fresh re-verification
+
+    @pytest.mark.parametrize("case", ["writes", "stops before writing", "nothing left"])
+    async def test_drops_the_shard_list_of_its_output_once_it_writes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str
+    ) -> None:
+        """A resume that fails before writing, or has nothing left to write, leaves the merged rows, and the shards
+        listed for them, as they were."""
+        out = tmp_path / "recovered.jsonl"
+        recovered = [{**self._success(1), "reward": 0.9}] if case == "nothing left" else []
+        self._write(out, [self._success(0), *recovered])
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(2)],
+            successes=[self._success(0)],
+            failures=[self._failure(1)],
+        )
+        if case == "stops before writing":
+            (tmp_path / "inputs.jsonl").unlink()
+        aggregation_sources_path_for(out).write_text("{}")
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched)
+
+        run = RolloutReverificationHelper().run_from_config(self._make_config(tmp_path, resume_from_cache=True))
+        if case == "stops before writing":
+            with pytest.raises(FileNotFoundError):
+                await run
+        else:
+            await run
+
+        assert len(dispatched) == (1 if case == "writes" else 0)
+        assert aggregation_sources_path_for(out).exists() is (case != "writes")
 
     async def test_resume_does_not_reseed_and_reverifies_only_still_failing(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

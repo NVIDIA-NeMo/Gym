@@ -21,7 +21,9 @@ import math
 import posixpath
 import shlex
 import tarfile
-from pathlib import Path
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
@@ -43,7 +45,9 @@ from environment_servers.harbor.session import (
     HarborSession,
     resolve_env_templates,
 )
-from nemo_gym import failure_kinds
+from nemo_gym import __version__, failure_kinds
+from nemo_gym.atif_export import encode_atif_trajectory, transcript_to_atif
+from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 from nemo_gym.sandbox.transfer import (
     SandboxProbeError,
@@ -54,8 +58,11 @@ from nemo_gym.sandbox.transfer import (
     remote_kind,
     upload_archive,
     upload_dir,
+    upload_path,
 )
+from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
 from nemo_gym.tasks.harbor import HarborTask
+from nemo_gym.tasks.harbor.digest import is_ignored
 from nemo_gym.tasks.harbor.models import HarborArtifact
 
 
@@ -199,26 +206,72 @@ def _verifier_user(task: HarborTask) -> str | int | None:
     return int(name) if name.isdigit() else name
 
 
-def _verifier_runs_task_image(task: HarborTask) -> bool:
-    """A separate verifier that Gym runs in the task's own image, which then gets that image's start.
+def _verifier_runs_task_image(task: HarborTask, separate: bool | None = None) -> bool:
+    """A separate verifier with no ``[verifier.environment]`` and no image built from ``tests/Dockerfile`` grades in
+    the task's own image: Harbor's effective verifier environment is then a copy of ``[environment]``, and the loader
+    only lets that shape through when the copy carries ``[environment].docker_image`` (Harbor's prebuilt verifier), so
+    the task has no overlay (a declared image resolves none) and the verifier needs none. A shared-mode task the server
+    verifies separately (``separate``, see ``separate_verifier_for_artifacts``) grades in the task image too, overlay
+    and all (:func:`_verifier_gets_overlay`)."""
+    return _separate_mode(task, separate) and task.config.verifier.environment is None and task.verifier_image is None
 
-    Harbor builds such a verifier from ``tests/Dockerfile`` and only ``up --wait``s it; this layer has no
-    build for it and verifies in the task image instead, so that image's entrypoint and ``HEALTHCHECK``
-    are Gym's substitute for the verifier image's own.
-    """
-    return not task.config.is_shared_verifier and task.image is not None and _verifier_image(task) == task.image
 
-
-def _verifier_image(task: HarborTask) -> str | None:
-    """The prebuilt image a separate verifier runs in: ``[verifier.environment].docker_image``, else the agent's."""
-    if task.config.is_shared_verifier:
+def _verifier_image(task: HarborTask, separate: bool | None = None) -> str | None:
+    """The image a separate verifier runs in: ``[verifier.environment].docker_image``, else the one prepare built
+    from ``tests/Dockerfile`` (``HarborTask.verifier_image`` covers both), else the agent's when the task declares no
+    ``[verifier.environment]``; ``None`` in shared mode (the task's own, unless ``separate`` says what the server
+    decided). A loaded task in separate mode always has one (the loader refuses the task otherwise); ``None`` with a
+    ``[verifier.environment]`` is an invariant the seed still checks."""
+    if not _separate_mode(task, separate):
         return None
-    environment = task.config.verifier.environment
-    if environment is not None and environment.docker_image:
-        return environment.docker_image
-    if environment is None:
+    if task.verifier_image:
+        return task.verifier_image
+    if task.config.verifier.environment is None:
         return task.image
     return None
+
+
+def _verifier_start(task: HarborTask, separate: bool | None = None) -> HarborTask | None:
+    """The separate verifier's image as the entrypoint launcher reads one, or ``None`` when nothing is to start.
+
+    Harbor ``up --wait``s the verifier's image, so its ``ENTRYPOINT`` runs and its ``HEALTHCHECK`` gates
+    ``test.sh``, as the task image's do at seed. The verifier grades in the task's own image (the task
+    itself, with its recorded start) or in the image prepare built from ``tests/Dockerfile``: the task with
+    that image's recorded configuration in place of the agent image's (``HarborTask.verifier_image_config``:
+    its entrypoint, the user and working directory it starts with, its healthcheck and the shell that runs
+    it; no overlay, and no spec user, as :meth:`HarborEnvironmentServer._sandbox_spec` creates the sandbox).
+    A declared prebuilt verifier image starts the same way when ``compose-images.json`` records it, which it
+    does when the image is the base of a task's Dockerfile, this task's own included: Harbor ``up --wait``s
+    the declared image as it is, so its own entrypoint runs as its own ``User`` in its own ``WorkingDir`` and
+    its ``HEALTHCHECK`` gates ``test.sh``, with none of the Dockerfile's ``RUN`` lines, ``USER`` or ``WORKDIR``
+    (the task's resolved start describes the agent's overlaid image, not this one). Only the start is the
+    record's; the sandbox is still created from ``[verifier.environment]``, see
+    :meth:`HarborEnvironmentServer._create_verifier_sandbox`, and its user default and overlay follow
+    :func:`_verifier_user` and :func:`_verifier_gets_overlay`. A declared image nothing is recorded for starts
+    nothing, like a prebuilt ``docker_image``. The result keeps the task's path, so ``needs_compose`` still
+    describes the agent's environment: the verifier's sandbox is a plain one whatever that says, and its
+    callers start it as one.
+    """
+    if not _separate_mode(task, separate):
+        return None
+    if _verifier_runs_task_image(task, separate):
+        return task
+    config = task.verifier_image_config
+    if config is None or task.verifier_image is None:
+        return None
+    return replace(
+        task,
+        image=task.verifier_image,
+        built_image=task.verifier_image,
+        overlay=(),
+        user=None,
+        sandbox_user=config.user,
+        entrypoint=config.entrypoint,
+        entrypoint_user=config.user,
+        entrypoint_workdir=config.workdir,
+        image_healthcheck=config.healthcheck,
+        image_shell=config.shell,
+    )
 
 
 def _verifier_key(episode_key: str) -> str:
@@ -246,9 +299,31 @@ def _stdout_tail(logs_dir: Path, limit: int = 600) -> str:
     return path.read_text(errors="replace")[-limit:]
 
 
-def _verifier_gets_overlay(task: HarborTask) -> bool:
-    """A separate verifier that runs in the task's own image needs the same Dockerfile overlay as the agent."""
-    return bool(task.overlay) and not task.config.is_shared_verifier and task.config.verifier.environment is None
+def _verifier_gets_overlay(task: HarborTask, separate: bool | None = None) -> bool:
+    """A separate verifier that runs in the task's own image needs the same Dockerfile overlay as the agent. Only a
+    shared-mode task forced into separate verification can have one: the loader admits a declared separate verifier in
+    the task image with a prebuilt ``docker_image`` only."""
+    return bool(task.overlay) and _verifier_runs_task_image(task, separate)
+
+
+def _separate_mode(task: HarborTask, separate: bool | None) -> bool:
+    """The verifier mode in effect: the task's own unless the server forced separate verification."""
+    return (not task.config.is_shared_verifier) if separate is None else separate
+
+
+# The agent transcript in ATIF v1.7, written under AGENT_LOGS_DIR before every verify; Harbor verifiers may read it.
+TRAJECTORY_FILE_NAME = "trajectory.json"
+
+
+def _restores_under(source: str, path: str) -> bool:
+    """Whether restoring an artifact collected from ``source`` writes ``path``: it is that path or an ancestor."""
+    # One leading slash on both: PurePosixPath keeps "//x" apart from "/x", as POSIX allows.
+    return PurePosixPath("/" + path.lstrip("/")).is_relative_to(PurePosixPath("/" + source.lstrip("/")))
+
+
+# Extra seconds the provider exec of a `[[verifier.collect]]` hook waits beyond the hook's own `timeout_sec`;
+# counted in the episode budget, so the task deadline cannot cut off a hook within its declared limit.
+COLLECT_HOOK_GRACE_S = 30
 
 
 class HarborVerificationMixin:
@@ -265,11 +340,15 @@ class HarborVerificationMixin:
 
     """
 
-    async def _run_verifier(self, session: HarborSession) -> dict[str, Any]:
-        """Run ``tests/test.sh`` and read the reward it wrote, in the agent's sandbox or a separate one."""
-        if session.task.config.is_shared_verifier:
-            return await self._run_shared_verifier(session) | {"verifier_mode": "shared"}
-        return await self._run_separate_verifier(session) | {"verifier_mode": "separate"}
+    async def _run_verifier(self, session: HarborSession, trajectory: bytes) -> dict[str, Any]:
+        """Run ``tests/test.sh`` and read the reward it wrote, in the agent's sandbox or a separate one.
+
+        ``trajectory`` is the exported ATIF transcript, written to ``/logs/agent/trajectory.json`` in the
+        sandbox that runs ``test.sh`` before it starts.
+        """
+        if self._separate_verifier(session.task):
+            return await self._run_separate_verifier(session, trajectory) | {"verifier_mode": "separate"}
+        return await self._run_shared_verifier(session, trajectory) | {"verifier_mode": "shared"}
 
     def _reserve_logs_dir(self) -> Path:
         """A fresh host directory for one verification's logs.
@@ -380,16 +459,19 @@ class HarborVerificationMixin:
             await self._collect_entrypoint_log(sandbox, task, logs_dir / entrypoint_log)
         return exit_record, rewards, problem
 
-    async def _run_separate_verifier(self, session: HarborSession) -> dict[str, Any]:
+    async def _run_separate_verifier(self, session: HarborSession, trajectory: bytes) -> dict[str, Any]:
         """Harbor's separate mode: collect the agent's artifacts, stop its sandbox, verify in a fresh one.
 
-        The verifier sandbox comes from ``[verifier.environment]`` (or the task image when the
-        mode is ``separate`` without one). ``/logs/artifacts`` and every ``artifacts`` entry are
-        collected as the archives the agent's sandbox packs, staged through the host (the filtered
-        host copy is the safety gate and a diagnostic) and restored from those archives into the same
-        paths, with the modes the agent left (see :func:`upload_archive`), then ``tests/`` is uploaded
-        and ``test.sh`` runs there. Collection is phased as Harbor's is: the main container's hooks and
-        artifacts, its stop, then the sidecars' hooks and artifacts, then the rest of the group is stopped.
+        The verifier sandbox comes from ``[verifier.environment]``, the image prepare built from
+        ``tests/Dockerfile``, or the task's prebuilt image (``_verifier_image``; no overlay runs there, the loader
+        admits the task-image shape only with a declared image). ``/logs/artifacts`` and every ``artifacts``
+        entry are collected as the archives the agent's sandbox packs, staged through the host (the filtered
+        host copy is the safety gate and a diagnostic) and restored from those archives into the same paths,
+        with the modes the agent left (see :func:`upload_archive`), the verifier image's recorded entrypoint
+        and ``HEALTHCHECK`` run as they do at seed (:func:`_verifier_start`), then ``tests/`` is uploaded
+        unless the image owns ``/tests/test.sh``, and ``test.sh`` runs there. Collection is phased as
+        Harbor's is: the main container's hooks and artifacts, its stop, then the sidecars' hooks and
+        artifacts, then the rest of the group is stopped.
         """
         task = session.task
         settings = task.config.verifier
@@ -432,8 +514,10 @@ class HarborVerificationMixin:
 
             verifier = await self._create_verifier_sandbox(task, episode_key=session.session_id)
             names: dict[str, str] = {}
-            if _verifier_gets_overlay(task):
-                # The verifier runs in the task's own image, so it needs the same overlay as the agent did.
+            overlaid = _verifier_gets_overlay(task, True)
+            if overlaid:
+                # A shared-mode task verified separately runs in the task's own image, so it needs the same overlay
+                # as the agent did (a declared separate verifier in the task image is a prebuilt image: no overlay).
                 names = await self._apply_overlay(verifier, task)
             if _verifier_runs_task_image(task):
                 # Its default is that image's own USER, never [agent].user, resolved by name once it exists.
@@ -442,36 +526,59 @@ class HarborVerificationMixin:
             # /logs/verifier bind mount does; /tests and the artifacts follow, as Harbor uploads them after start.
             prepare = await exec_as_root(
                 verifier,
-                f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {ARTIFACTS_DIR} && chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR}",
+                f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR} {ARTIFACTS_DIR} "
+                f"&& chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
                 timeout_s=60,
             )
             if prepare.return_code != 0:
                 raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
-            if _verifier_runs_task_image(task):
-                # Harbor builds a separate verifier from tests/Dockerfile (or runs [verifier.environment]'s
-                # docker_image) and only `up --wait`s it. This verifier runs in the task image instead, so that
-                # image's entrypoint and HEALTHCHECK stand in for the verifier image's own start; the task's
-                # [environment.healthcheck] is not run here, as Harbor does not run it in the verifier.
-                image_user = await self._image_user_name(verifier, task, names)
-                verifier_entrypoint = await self._start_entrypoint(verifier, task, image_user)
-                await self._wait_healthy(verifier, task, verifier_entrypoint, user=image_user, task_check=False)
-            # A prebuilt verifier image usually ships /tests already, with the modes its tests expect.
-            # Only upload the package's tests when the image has none, as the old server did.
+            start = _verifier_start(task, True)
+            if start is not None:
+                # Harbor only `up --wait`s the verifier's image (built from tests/Dockerfile, declared by
+                # [verifier.environment] and recorded as a Dockerfile's base, or the task's own when its effective
+                # verifier environment is a copy of [environment] with a docker_image): that image's
+                # entrypoint and HEALTHCHECK run here as its user; the task's [environment.healthcheck] is not run,
+                # as Harbor does not run it in the verifier. The verifier sandbox is a plain one whatever the agent's
+                # environment was (a Compose group included), so nothing is left to an adapter here.
+                image_user = await self._image_user_name(verifier, start, names)
+                verifier_entrypoint = await self._start_entrypoint(verifier, start, image_user)
+                await self._wait_healthy(verifier, start, verifier_entrypoint, user=image_user, task_check=False)
+            # A prebuilt verifier image usually ships /tests already, with the modes its tests expect, and one
+            # built from tests/Dockerfile owns /tests the way its file copied it (Harbor uploads nothing into it,
+            # `skip_tests_upload`). Only upload the package's tests when the image has none, as the old server did.
             if await remote_kind(verifier, f"{TESTS_DIR}/test.sh") is None:
-                await upload_dir(verifier, task.path / "tests", TESTS_DIR)
+                if task.verifier_image and task.verifier_image not in self._verifier_images_without_tests:
+                    self._verifier_images_without_tests.add(task.verifier_image)
+                    LOGGER.warning(
+                        "%s: verifier image %s has no %s/test.sh; uploading the task's tests/ into it (Harbor uploads "
+                        "nothing into a separate verifier's image, so its tests/Dockerfile usually copies the folder)",
+                        task.task_id,
+                        task.verifier_image,
+                        TESTS_DIR,
+                    )
+                await upload_dir(verifier, task.path / "tests", TESTS_DIR, ignore=is_ignored)
             for archive, kind, source in restored:
                 await self._restore_artifact(verifier, task, archive, kind, source)
                 # The staged tree stays as the diagnostic; the archive served its purpose.
                 archive.unlink(missing_ok=True)
+            # An artifact that covers /logs/agent brought the agent's tree, planted entries included, into
+            # this fresh sandbox: the transcript's destination is cleared again before it is written.
+            await self._upload_trajectory(verifier, trajectory, logs_dir, restored=[source for *_, source in restored])
             if verifier_entrypoint is not None:
                 # The last look before test.sh, in a fresh sandbox the agent never had: its exit status is trusted.
-                await self._check_entrypoint(verifier, task, verifier_entrypoint)
+                await self._check_entrypoint(verifier, start, verifier_entrypoint)
             # A sub-second task budget still gets one whole second: `timeout 0` would mean no limit.
             budget = max(1, math.ceil(settings.timeout_sec))
             await _make_test_script_executable(verifier)
+            # An overlaid verifier sandbox was created without the task workdir, as the agent's is (see
+            # `_create_verifier_sandbox`), so its default directory is the base image's own: test.sh is sent to the
+            # task's workdir, where the overlay's WORKDIR step made it, as the shared verifier's exec is and as
+            # Harbor's `compose exec` lands in the built image's WORKDIR. Every other verifier sandbox starts in
+            # the directory its spec named, or its image's own.
             result = await verifier.exec(
                 verifier_command(budget),
-                env=resolve_env_templates(settings.env),
+                cwd=task.workdir if overlaid else None,
+                env=self._verifier_env(settings),
                 timeout_s=settings.timeout_sec + self.config.verifier_grace_s,
                 user=_verifier_user(task),
             )
@@ -498,7 +605,7 @@ class HarborVerificationMixin:
             LOGGER.error(f"Dockerfile overlay failed in the verifier sandbox for {task.task_id}: {exc}")
             return self._masked(OVERLAY_FAILED_KIND, f"Dockerfile overlay failed in the verifier sandbox: {exc}")
         except HarborEntrypointError as exc:
-            # Likewise for the task image's entrypoint failing in the verifier's fresh sandbox.
+            # The rollout is complete; the verifier image's entrypoint failing in its fresh sandbox must not discard it.
             LOGGER.error(f"Image ENTRYPOINT failed in the verifier sandbox for {task.task_id}: {exc}")
             return self._masked(ENTRYPOINT_FAILED_KIND, f"Image ENTRYPOINT failed in the verifier sandbox: {exc}")
         except Exception as exc:
@@ -535,7 +642,7 @@ class HarborVerificationMixin:
             result = await sandbox.exec(
                 hook.command if main else f"sh -c {shlex.quote(hook.command)}",
                 cwd=session.workdir if main else None,
-                timeout_s=hook.timeout_sec + 30,
+                timeout_s=hook.timeout_sec + COLLECT_HOOK_GRACE_S,
                 user=hook.user,
             )
             if result.error_type == "timeout":
@@ -608,11 +715,13 @@ class HarborVerificationMixin:
                 restored.append((archive, kind, artifact.source))
         return restored
 
-    async def _run_shared_verifier(self, session: HarborSession) -> dict[str, Any]:
+    async def _run_shared_verifier(self, session: HarborSession, trajectory: bytes) -> dict[str, Any]:
         """Run ``tests/test.sh`` in the agent's sandbox and read the reward it wrote.
 
         ``[[verifier.collect]]`` hooks run first, as in Harbor: what they produce under ``/logs/artifacts``
-        is there for ``test.sh``, and for the run's logs.
+        is there for ``test.sh``, and for the run's logs. ``/logs/agent`` is left as the agent wrote it,
+        except for ``trajectory.json``: whatever the agent left at that reserved path (a link, a directory)
+        is removed and the server writes the transcript there, so verifiers that read it find it.
         """
         task = session.task
         sandbox = session.sandbox
@@ -634,7 +743,10 @@ class HarborVerificationMixin:
                     return self._masked(ENTRYPOINT_FAILED_KIND, died) | {"verifier_logs_dir": str(logs_dir.resolve())}
             await self._run_collect_hooks(session, settings.collect)
             # Replace agent-planted directory links before cleanup: find does not follow its starting
-            # symlink, while tar does. Unlink /logs first without touching its former target.
+            # symlink, while tar does. Unlink /logs first without touching its former target. The reserved
+            # trajectory.json destination goes too (`rm -rf` removes a link itself, or a planted directory),
+            # so the agent cannot plant an entry the upload would follow or fail on; the rest of /logs/agent
+            # is kept.
             roots = (str(Path(VERIFIER_LOGS_DIR).parent), TESTS_DIR, VERIFIER_LOGS_DIR, AGENT_LOGS_DIR)
             unlink_roots = [f"if test -L {shlex.quote(path)}; then rm -- {shlex.quote(path)}; fi" for path in roots]
             prepare = await exec_as_root(
@@ -643,6 +755,7 @@ class HarborVerificationMixin:
                     unlink_roots
                     + [
                         f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
+                        f"rm -rf -- {AGENT_LOGS_DIR}/{TRAJECTORY_FILE_NAME}",
                         f"find {TESTS_DIR} {VERIFIER_LOGS_DIR} -mindepth 1 -delete",
                         f"chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
                     ]
@@ -651,8 +764,9 @@ class HarborVerificationMixin:
             )
             if prepare.return_code != 0:
                 raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
-            await upload_dir(sandbox, task.path / "tests", TESTS_DIR)
+            await upload_dir(sandbox, task.path / "tests", TESTS_DIR, ignore=is_ignored)
             await _make_test_script_executable(sandbox)
+            await self._upload_trajectory(sandbox, trajectory, logs_dir)
             # One plain exec for the whole run. The provider keeps it alive for as long as
             # `timeout_s` says (OpenSandbox polls a background command, Docker streams), and
             # `timeout` inside the container is the cap that stops the tests themselves.
@@ -660,10 +774,11 @@ class HarborVerificationMixin:
             # them when the command completes, so a background launch never finishes.
             # A sub-second task budget still gets one whole second: `timeout 0` would mean no limit.
             budget = max(1, math.ceil(settings.timeout_sec))
+            # The verifier's own user, not the agent's: the sandbox's default may be [agent].user.
             result = await sandbox.exec(
                 verifier_command(budget),
                 cwd=session.workdir,
-                env=resolve_env_templates(settings.env),
+                env=self._verifier_env(settings),
                 timeout_s=settings.timeout_sec + self.config.verifier_grace_s,
                 user=_verifier_user(task),
             )
@@ -711,6 +826,7 @@ class HarborVerificationMixin:
             "verifier_return_code": result.return_code,
             "verifier_logs_dir": str(Path(logs_dir).resolve()),
             "verifier_seconds": round(asyncio.get_running_loop().time() - started, 1),
+            "verifier_network": settings.network_mode or "public",
         }
         if rewards is None and timed_out:
             # A reward written before the kill still counts; only a run that left none is the timeout.
@@ -755,3 +871,69 @@ class HarborVerificationMixin:
     @staticmethod
     def _masked(kind: str, reason: str) -> dict[str, Any]:
         return {"reward": 0.0, "mask_sample": True, "failure_kind": kind, "failure_reason": reason[:2000]}
+
+    def _separate_verifier(self, task: HarborTask) -> bool:
+        """Whether this episode verifies in a fresh sandbox: the task's mode, or forced for tasks with artifacts."""
+        return not task.config.is_shared_verifier or (
+            self.config.separate_verifier_for_artifacts and bool(task.config.artifacts)
+        )
+
+    def _verifier_env(self, settings: Any) -> dict[str, str]:
+        """The `test.sh` process environment: the task's resolved `[verifier].env`, and nothing else.
+
+        Operator secrets reach it only through the `${NAME}` templates the task writes (Harbor's
+        verifier resolves its env the same way), so a task that names none runs test.sh without any.
+        """
+        return resolve_env_templates(settings.env, self.config.secrets)
+
+    async def _upload_trajectory(
+        self, sandbox: AsyncSandbox, trajectory: bytes, logs_dir: Path, *, restored: Sequence[str] = ()
+    ) -> None:
+        """Keep a host copy of the transcript beside the verifier logs and place it where the verifier reads it.
+
+        ``restored`` names the artifact sources re-materialized in ``sandbox`` before this upload (the separate
+        verifier restores every collected artifact at its own path). When one covers the reserved destination,
+        the agent's tree came back with it, so whatever the agent planted there (a link the upload would follow,
+        a directory it would fail on) is removed first, as the shared-mode prepare does. Otherwise the sandbox is
+        fresh at that path, or it was already cleared, and the upload needs no extra round trip.
+        """
+        host = logs_dir / TRAJECTORY_FILE_NAME
+        host.write_bytes(trajectory)
+        target = f"{AGENT_LOGS_DIR}/{TRAJECTORY_FILE_NAME}"
+        if any(_restores_under(source, target) for source in restored):
+            clear = await exec_as_root(
+                sandbox,
+                f"if test -L {AGENT_LOGS_DIR}; then rm -- {AGENT_LOGS_DIR}; fi "
+                f"&& mkdir -p {AGENT_LOGS_DIR} && rm -rf -- {target}",
+                timeout_s=60,
+            )
+            if clear.return_code != 0:
+                raise RuntimeError(f"Could not clear the restored {target}: {clear.stderr or clear.stdout}")
+        await upload_path(sandbox, host, target)
+        # The host copy is created under the server's umask and the archive carries that mode, which root `tar`
+        # keeps: under umask 077 the transcript would land root-owned 0600, unreadable by a non-root `[verifier].user`
+        # (Harbor's agents write the file as themselves, so it is theirs to read). The reserved file alone is opened;
+        # the rest of /logs/agent is the agent's, with the modes it left.
+        readable = await exec_as_root(sandbox, f"chmod a+r {target}", timeout_s=60)
+        if readable.return_code != 0:
+            raise RuntimeError(f"Could not make {target} readable: {readable.stderr or readable.stdout}")
+
+    def _export_trajectory(self, request: SingleAgentTurnRequest, agent_response: NeMoGymResponse) -> bytes:
+        """The agent's transcript as ATIF v1.7 JSON, for ``/logs/agent/trajectory.json``.
+
+        Exported from the Gym transcript (the task's input and the harness's output); raises
+        :class:`AtifExportError` for anything the converter cannot represent, which masks the turn.
+        """
+        params: Any = request.task.task_input.responses_create_params
+        input_items = params.get("input") if isinstance(params, Mapping) else getattr(params, "input", None)
+        usage = agent_response.usage.model_dump(mode="json") if agent_response.usage is not None else None
+        trajectory = transcript_to_atif(
+            input_items,
+            [item.model_dump(mode="json") for item in agent_response.output],
+            session_id=request.episode_id.capture_key,
+            agent_name=self.config.agent_server.name,
+            agent_version=__version__,
+            model_name=agent_response.model,
+            usage=usage,
+        )
+        return encode_atif_trajectory(trajectory)

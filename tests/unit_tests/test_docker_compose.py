@@ -1,9 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
+import logging
+import os
 import re
 import shlex
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -60,7 +64,9 @@ async def test_rejects_unsupported_network_before_creating_anything():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("field,value", [("privileged", True), ("restart", "always"), ("devices", ["/dev/fuse"])])
+@pytest.mark.parametrize(
+    "field,value", [("privileged", True), ("pre_stop", [{"command": "x"}]), ("devices", ["/dev/fuse"])]
+)
 async def test_rejects_unsupported_semantics_before_creating(field, value):
     provider = Provider()
     group = make_compose(provider, {"services": {"app": {"image": "app", field: value}}})
@@ -667,7 +673,9 @@ async def test_health_probe_timeout_retries_then_starts_dependent(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_path):
+@pytest.mark.parametrize("declaration", [{}, None], ids=["mapping", "null"])
+async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_path, declaration):
+    # ``volumes:\n  data:`` (a null declaration, the canonical Compose spelling) provisions like ``data: {}``.
     shared = tmp_path / "shared"
     external = shared / "operator-data"
     external.mkdir(parents=True)
@@ -711,7 +719,7 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
                     ],
                 },
             },
-            "volumes": {"data": {}},
+            "volumes": {"data": declaration},
         },
         default_command=["sleep", "1"],
         volume_sources={"/operator/source": "operator-data"},
@@ -1363,7 +1371,7 @@ async def test_unresolved_startup_rejected_before_provisioning(startup):
         [],
         {"services": {"app": None}},
         {"services": {"app": {"image": "image", "environment": ["KEY=value"]}}},
-        {"services": {"app": {"image": "image", "ports": ["8000:80"]}}},
+        {"services": {"app": {"image": "image", "ports": [["8000", "80"]]}}},
         {"services": {"app": {"image": "image", "volumes": ["data:/data"]}}},
         {"services": {"app": {"image": "image", "depends_on": {"app": None}}}},
         {"services": {"app": {}}, "networks": ["default"]},
@@ -1375,7 +1383,7 @@ async def test_unresolved_yaml_shapes_fail_before_provisioning(tmp_path, documen
     path = tmp_path / "compose.yaml"
     path.write_text(yaml.safe_dump(document))
     provider = ShellProvider()
-    with pytest.raises(ValueError, match="mapping|upstream"):
+    with pytest.raises(ValueError, match="mapping|upstream|ports"):
         await AsyncSandboxCompose(provider, path).start()
     assert provider.created == []
 
@@ -1451,18 +1459,18 @@ async def test_spec_env_wins_over_compose_environment_only_where_the_caller_give
 
 @pytest.mark.asyncio
 async def test_unsupported_fields_are_refused_with_the_shared_message_before_creating():
-    """The adapter raises the first message of the pure field check prepare also runs, before it asks the provider
-    for anything; ``pull_policy`` is one of the refused keys, so the Harbor layer drops it upstream."""
+    """The adapter raises the first message of the pure key allow-list prepare also runs (the first step of the
+    one field check), before it asks the provider for anything."""
     from nemo_gym.sandbox.compose_fields import unsupported_compose_fields
 
     provider = Provider()
     document = {
         "services": {
             "main": {"image": "a"},
-            "task-server": {"image": "b", "platform": "linux/amd64", "deploy": {}, "pull_policy": "always"},
+            "task-server": {"image": "b", "platform": "linux/amd64", "logging": {}, "privileged": True},
         }
     }
-    expected = "Service 'task-server': unsupported Compose fields ['deploy', 'platform', 'pull_policy']"
+    expected = "Service 'task-server': unsupported Compose fields ['logging', 'privileged']"
     assert unsupported_compose_fields(document) == [expected]
     group = make_compose(provider, document)
     with pytest.raises(NotImplementedError, match=re.escape(expected)):
@@ -1472,3 +1480,1337 @@ async def test_unsupported_fields_are_refused_with_the_shared_message_before_cre
     with pytest.raises(NotImplementedError, match=re.escape("Unsupported Compose fields: ['x-extra']")):
         await top.start()
     assert provider.created == []
+
+
+def test_a_bodiless_named_volume_declaration_counts_as_declared():
+    """`volumes:` followed by a bare name is valid Compose and loads as None; it must not read as undeclared."""
+
+    class VolumeProvider(ConnectableShellProvider):
+        def shared_volume_metadata(self):
+            return {"placement": "shared-disk"}
+
+        def shared_volume_options(self, source, target, *, read_only=False):
+            return {"volumes": [{"source": source, "target": target, "read_only": read_only}]}
+
+    document = {
+        "services": {"app": {"image": "app", "volumes": [{"type": "volume", "source": "data", "target": "/data"}]}},
+        "volumes": {"data": None},
+    }
+    group = make_compose(VolumeProvider(), document)
+    assert group._validate()
+    missing = make_compose(VolumeProvider(), {**document, "volumes": {}})
+    with pytest.raises(ValueError, match="Undeclared Compose volume: 'data'"):
+        missing._validate()
+
+
+# --------------------------------------------------------------------------------------------------------------
+# Compose service fields (M28)
+# --------------------------------------------------------------------------------------------------------------
+
+
+class HostsProvider(ShellProvider):
+    """Records the hosts each sandbox received."""
+
+    def __init__(self):
+        super().__init__()
+        self.hosts = {}
+
+    async def set_hosts(self, handle, hosts):
+        self.hosts[handle.sandbox_id] = dict(hosts)
+
+
+@pytest.mark.asyncio
+async def test_custom_networks_scope_which_services_see_each_other_and_extra_hosts_are_added():
+    """alibaba-ctf style: `restart: always` is recorded, a custom network scopes name resolution."""
+    provider = HostsProvider()
+    async with make_compose(
+        provider,
+        {
+            "services": {
+                "main": {"image": "img", "restart": "always", "networks": ["agent_network"]},
+                "target": {
+                    "image": "img",
+                    "restart": "always",
+                    "networks": {"agent_network": {"aliases": ["challenge"]}},
+                    "extra_hosts": ["licence.example:198.51.100.7"],
+                },
+                "aside": {"image": "img"},
+            },
+            "networks": {"agent_network": {"driver": "bridge"}},
+        },
+        default_command=["sleep", ".1"],
+        poll_interval_s=0.01,
+    ) as group:
+        assert group.restart_policies == {"main": "always", "target": "always", "aside": "no"}
+        by_name = {
+            name: provider.hosts[sandbox._require_handle().sandbox_id] for name, sandbox in group.services.items()
+        }
+        main_ip, target_ip, aside_ip = (
+            "192.0.2." + group.services[n]._require_handle().sandbox_id for n in ("main", "target", "aside")
+        )
+        # main and target share agent_network: each sees the other by name and alias, neither sees aside.
+        assert by_name["main"] == {"main": main_ip, "target": target_ip, "challenge": target_ip}
+        assert by_name["target"] == {
+            "target": target_ip,
+            "challenge": target_ip,
+            "main": main_ip,
+            "licence.example": "198.51.100.7",
+        }
+        # aside is alone on the default network: only itself.
+        assert by_name["aside"] == {"aside": aside_ip}
+
+
+@pytest.mark.asyncio
+async def test_an_alias_is_ambiguous_only_where_the_service_of_that_name_is_visible():
+    """Review (M28): every network started with all service names reserved, so ``main`` aliasing ``db`` on
+    ``front`` was refused although ``db`` is on ``back`` alone. Names are reserved per network now, the way
+    ``_visible_hosts`` resolves them: the alias passes and resolves to ``main``; with both services on ``front``, or
+    with ``main`` on both networks (it would see ``db`` twice), it is still refused before anything is provisioned."""
+    provider = HostsProvider()
+    document = {
+        "services": {
+            "main": {"image": "img", "networks": {"front": {"aliases": ["db"]}}},
+            "db": {"image": "img", "networks": ["back"]},
+        },
+        "networks": {"front": {}, "back": {}},
+    }
+    async with make_compose(
+        provider, deepcopy(document), default_command=["sleep", ".1"], poll_interval_s=0.01
+    ) as group:
+        main_ip, db_ip = ("192.0.2." + group.services[n]._require_handle().sandbox_id for n in ("main", "db"))
+        by_name = {
+            name: provider.hosts[sandbox._require_handle().sandbox_id] for name, sandbox in group.services.items()
+        }
+        assert by_name == {"main": {"main": main_ip, "db": main_ip}, "db": {"db": db_ip}}
+    for service, networks in (("db", {"front": {}}), ("main", {"front": {"aliases": ["db"]}, "back": {}})):
+        provider = HostsProvider()
+        ambiguous = deepcopy(document)
+        ambiguous["services"][service]["networks"] = networks
+        group = make_compose(provider, ambiguous, default_command=["sleep", ".1"], poll_interval_s=0.01)
+        with pytest.raises(ValueError, match="Ambiguous Compose service alias: 'db'"):
+            await group.start()
+        assert not provider.created
+
+
+@pytest.mark.asyncio
+async def test_a_shared_named_network_puts_every_service_in_reach():
+    """o11y-bench style: one named network every service joins behaves like the default network."""
+    provider = HostsProvider()
+    document = {
+        "services": {name: {"image": "img", "networks": ["harbor-shared"]} for name in ("main", "grafana", "loki")},
+        "networks": {"harbor-shared": {"name": "harbor-shared"}},
+    }
+    async with make_compose(provider, document, default_command=["sleep", ".1"], poll_interval_s=0.01) as group:
+        for name, sandbox in group.services.items():
+            assert set(provider.hosts[sandbox._require_handle().sandbox_id]) == {"main", "grafana", "loki"}
+
+
+@pytest.mark.asyncio
+async def test_resolved_environment_must_name_a_peer_on_a_shared_network():
+    provider = HostsProvider()
+    group = make_compose(
+        provider,
+        {
+            "services": {
+                "app": {
+                    "image": "img",
+                    "networks": ["front"],
+                    "environment": {"DB_URL": "http://db:5432"},
+                    "x-sandbox": {"hosts": [], "resolve_environment": ["DB_URL"]},
+                },
+                "db": {"image": "img", "networks": ["back"]},
+            },
+            "networks": {"front": {}, "back": {}},
+        },
+        default_command=["sleep", ".1"],
+        poll_interval_s=0.01,
+    )
+    with pytest.raises(ValueError, match="shares no network"):
+        await group.start()
+    assert provider.closed  # whatever was created was torn down
+
+
+@pytest.mark.asyncio
+async def test_extra_hosts_need_host_injection():
+    provider = ShellProvider()
+    group = make_compose(
+        provider,
+        {"services": {"app": {"image": "img", "extra_hosts": ["db:10.0.0.1"], "x-sandbox": {"hosts": []}}}},
+    )
+    with pytest.raises(ValueError, match="extra_hosts cannot be applied without host injection"):
+        await group.start()
+    assert not provider.created
+
+
+@pytest.mark.asyncio
+async def test_deploy_resources_size_the_service_sandbox_and_gpu_sidecars_run_on_their_own_provider():
+    from nemo_gym.sandbox.providers.base import SandboxSpec
+
+    cpu_provider, gpu_provider = HostsProvider(), HostsProvider()
+    gpu_provider.name = "gpu"
+    document = {
+        "services": {
+            "main": {"image": "img", "deploy": {"resources": {"limits": {"cpus": "2", "memory": "1g"}}}},
+            "model": {
+                "image": "img",
+                "cpus": "0.5",
+                "deploy": {
+                    "resources": {
+                        "reservations": {"devices": [{"driver": "nvidia", "capabilities": ["gpu"], "count": 1}]}
+                    }
+                },
+            },
+        }
+    }
+    async with make_compose(
+        cpu_provider,
+        document,
+        default_command=["sleep", ".1"],
+        poll_interval_s=0.01,
+        service_providers={"model": gpu_provider},
+        service_specs={"model": SandboxSpec(resources={"gpu_type": "H100"}, ttl_s=30)},
+    ) as group:
+        assert group.services["main"]._provider is cpu_provider and group.services["model"]._provider is gpu_provider
+        (main_spec,) = cpu_provider.created
+        (model_spec,) = gpu_provider.created
+        assert (main_spec.resources.cpu, main_spec.resources.memory_mib, main_spec.resources.gpu) == (2.0, 1024, None)
+        # The legacy cpus key still counts when deploy says nothing about CPUs; the spec's gpu_type is kept.
+        assert (model_spec.resources.cpu, model_spec.resources.gpu, model_spec.resources.gpu_type) == (0.5, 1, "H100")
+        # Both providers resolved addresses and the sidecar on the GPU provider still sees main by name.
+        assert set(gpu_provider.hosts["1"]) == {"main", "model"}
+    assert cpu_provider.closed == ["1"] and gpu_provider.closed == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_service_providers_must_name_services_and_every_provider_must_network():
+    provider = ShellProvider()
+    group = make_compose(provider, {"services": {"app": {"image": "img"}}}, service_providers={"ghost": Provider()})
+    with pytest.raises(ValueError, match="service_providers names unknown services"):
+        await group.start()
+    group = make_compose(provider, {"services": {"app": {"image": "img"}}}, service_providers={"app": Provider()})
+    with pytest.raises(NotImplementedError, match="networking between sandboxes"):
+        await group.start()
+    assert not provider.created
+
+
+@pytest.mark.asyncio
+async def test_numeric_hook_users_reach_the_provider_as_integers_like_the_service_user():
+    """A hook's ``user: 0`` or ``user: "0"`` reaches the provider's exec as the integer 0, the form the service's own
+    decimal ``user`` takes in ``_prepare`` (OpenSandbox switches by ``uid`` for an int and by ``su <name>`` for a
+    string, and an image with a root account but none named "0" cannot run the latter). A name stays a string, and
+    a hook without ``user`` runs as the service's (review finding)."""
+
+    class UserRecordingProvider(ShellProvider):
+        def __init__(self):
+            super().__init__()
+            self.users = []
+
+        async def exec(self, handle, command, **kwargs):
+            if command == "true" or command.startswith("sh /tmp/"):
+                self.users.append((command, kwargs.get("user")))
+            return await super().exec(handle, command, **kwargs)
+
+    provider = UserRecordingProvider()
+    async with make_compose(
+        provider,
+        {
+            "services": {
+                "app": {
+                    "image": "img",
+                    "command": ["sleep", "5"],
+                    "user": "7",
+                    "post_start": [
+                        {"command": "true", "user": 0},
+                        {"command": "true", "user": "0"},
+                        {"command": "true", "user": " 1000 "},
+                        {"command": "true", "user": "root"},
+                        {"command": "true"},
+                    ],
+                }
+            }
+        },
+        poll_interval_s=0.01,
+    ) as group:
+        pass
+    assert [user for _, user in provider.users if _ == "true"] == [0, 0, 1000, "root", 7]
+    (service_user,) = [user for command, user in provider.users if command.startswith("sh /tmp/")]
+    assert service_user == 7
+    # The document the group validated carries the integer form, which a second check leaves unchanged.
+    assert [hook.get("user") for hook in group.document["services"]["app"]["post_start"]] == [0, 0, 1000, "root", None]
+
+
+@pytest.mark.asyncio
+async def test_post_start_hooks_run_in_order_after_the_service_starts_and_a_failure_fails_the_seed(tmp_path):
+    log = tmp_path / "hooks"
+    provider = ShellProvider()
+    async with make_compose(
+        provider,
+        {
+            "services": {
+                "app": {
+                    "image": "img",
+                    "command": ["sh", "-c", f"echo service >> {log}; sleep 5"],
+                    "post_start": [
+                        {"command": f"echo first >> {log}"},
+                        {"command": ["sh", "-c", f'echo "$HOOK_VAR" >> {log}'], "environment": {"HOOK_VAR": "second"}},
+                        {"command": f"pwd >> {log}", "working_dir": str(tmp_path)},
+                    ],
+                }
+            }
+        },
+        poll_interval_s=0.01,
+    ):
+        # Hooks run once the service's command has started, in order, and all three have run by the time the group is
+        # up; the service kept running. As under Compose, "started" means the service's process was launched, not
+        # that it printed anything: the group's started marker precedes the service command itself, so the hooks may
+        # all finish before "service" is written. The hooks' order is asserted on their own lines, and the service's
+        # line is waited for (bounded) before it is counted, once.
+        deadline = asyncio.get_running_loop().time() + 5
+        while "service" not in (lines := log.read_text().splitlines()):
+            assert asyncio.get_running_loop().time() < deadline, f"service never wrote its line: {lines}"
+            await asyncio.sleep(0.01)
+        assert [line for line in lines if line != "service"] == ["first", "second", str(tmp_path)]
+        assert lines.count("service") == 1
+    failing = make_compose(
+        provider,
+        {
+            "services": {
+                "app": {
+                    "image": "img",
+                    "command": ["sleep", "5"],
+                    "post_start": [{"command": "echo boom >&2; exit 3"}, {"command": f"touch {tmp_path}/never"}],
+                }
+            }
+        },
+        poll_interval_s=0.01,
+    )
+    with pytest.raises(RuntimeError, match=r"post_start hook 0 exited \(3\): boom"):
+        await failing.start()
+    assert not (tmp_path / "never").exists()
+    assert provider.closed == ["1", "2"]
+
+
+class RecordingShellProvider(ShellProvider):
+    """A ShellProvider that keeps every exec command and upload it was asked for."""
+
+    def __init__(self):
+        super().__init__()
+        self.commands = []
+        self.uploads = []
+
+    async def exec(self, handle, command, **kwargs):
+        self.commands.append(command)
+        return await super().exec(handle, command, **kwargs)
+
+    async def upload_file(self, handle, source_path, target_path):
+        self.uploads.append((str(source_path), str(target_path)))
+        await super().upload_file(handle, source_path, target_path)
+
+
+@pytest.mark.asyncio
+async def test_uploads_land_in_the_service_before_its_command_runs(tmp_path):
+    """M22: a task-folder bind mount, planned as ``x-sandbox.uploads``, is copied into the service after its
+    sandbox starts and before the service command, files and folders alike, readable by any user. The chmod is
+    never recursive and covers exactly the folders and files the upload touched, every folder ``mkdir -p``
+    created included (intermediates and the parent of a single file, which a restrictive root umask would leave
+    unreadable); a folder upload merges over what the target already holds (review findings). An empty folder tree
+    under the bound folder is recreated too, as a bind mount would carry it (review, round 14)."""
+    task = tmp_path / "task"
+    (task / "data" / "nested").mkdir(parents=True)
+    (task / "data" / "deep" / "er").mkdir(parents=True)
+    (task / "data" / "empty" / "nested").mkdir(parents=True)
+    (task / "seed.json").write_text('{"ok": true}')
+    (task / "data" / "a.txt").write_text("a")
+    (task / "data" / "nested" / "b.txt").write_text("b")
+    (task / "data" / "nested" / "b.txt").chmod(0o600)
+    (task / "data" / "deep" / "er" / "c.txt").write_text("c")
+    sandbox_root = tmp_path / "sandbox"
+    # What the image already ships under the target: kept (a merge), never chmod-ed. Both get a mode the upload's
+    # ``chmod a+rX`` would widen, set explicitly rather than left to the host umask (``mkdir`` under 027 gives 0750,
+    # under 022 the 0755 a chmod would produce anyway), so the check below proves the chmod did not reach them.
+    (sandbox_root / "data" / "image").mkdir(parents=True)
+    (sandbox_root / "data" / "image").chmod(0o750)
+    (sandbox_root / "data" / "image" / "default.conf").write_text("image")
+    (sandbox_root / "data" / "image" / "default.conf").chmod(0o600)
+    result = tmp_path / "result"
+    document = {
+        "services": {
+            "api": {
+                "image": "image",
+                "command": [
+                    "sh",
+                    "-c",
+                    f"cat {sandbox_root}/app/seed.json {sandbox_root}/data/a.txt {sandbox_root}/data/nested/b.txt "
+                    f"{sandbox_root}/data/deep/er/c.txt > {result}",
+                ],
+                "x-sandbox": {
+                    "uploads": [
+                        {"source": str(task / "seed.json"), "target": f"{sandbox_root}/app/seed.json"},
+                        {"source": str(task / "data"), "target": f"{sandbox_root}/data"},
+                    ]
+                },
+            }
+        }
+    }
+    provider = RecordingShellProvider()
+    # The sandbox's root shell creates the folders with its own umask; a restrictive one leaves them 0700.
+    umask = os.umask(0o077)
+    try:
+        async with make_compose(provider, document, poll_interval_s=0.01, upload_root=task) as group:
+            await group._wait("api", "service_completed_successfully")
+    finally:
+        os.umask(umask)
+    assert result.read_text() == '{"ok": true}abc'
+    assert (sandbox_root / "data" / "nested" / "b.txt").stat().st_mode & 0o044 == 0o044
+    for created in ("app", "data/nested", "data/deep", "data/deep/er", "data/empty", "data/empty/nested"):
+        assert (sandbox_root / created).stat().st_mode & 0o055 == 0o055, created
+    # The empty folders arrive as folders (``mkdir -p`` entries of their own); only files are uploaded.
+    assert (sandbox_root / "data" / "empty" / "nested").is_dir()
+    assert list((sandbox_root / "data" / "empty" / "nested").iterdir()) == []
+    mkdirs = [shlex.split(command)[2:] for command in provider.commands if command.startswith("mkdir -p ")]
+    assert any({f"{sandbox_root}/data/empty", f"{sandbox_root}/data/empty/nested"} <= set(args) for args in mkdirs)
+    assert sorted(target for _, target in provider.uploads if target.startswith(f"{sandbox_root}/")) == [
+        f"{sandbox_root}/app/seed.json",
+        f"{sandbox_root}/data/a.txt",
+        f"{sandbox_root}/data/deep/er/c.txt",
+        f"{sandbox_root}/data/nested/b.txt",
+    ]
+    assert (sandbox_root / "data" / "image" / "default.conf").read_text() == "image"
+    assert (sandbox_root / "data" / "image" / "default.conf").stat().st_mode & 0o044 == 0
+    assert (sandbox_root / "data" / "image").stat().st_mode & 0o777 == 0o750  # pre-existing: untouched
+    chmods = [command for command in provider.commands if command.startswith("chmod")]
+    assert not any(command.startswith("chmod -R") for command in provider.commands)
+    touched = [shlex.split(command.removesuffix(" 2>/dev/null || true"))[2:] for command in chmods]
+    assert touched == [
+        [f"{sandbox_root}/app", f"{sandbox_root}/app/seed.json"],
+        [
+            f"{sandbox_root}/data",
+            f"{sandbox_root}/data/deep",
+            f"{sandbox_root}/data/deep/er",
+            f"{sandbox_root}/data/empty",
+            f"{sandbox_root}/data/empty/nested",
+            f"{sandbox_root}/data/nested",
+            f"{sandbox_root}/data/a.txt",
+            f"{sandbox_root}/data/deep/er/c.txt",
+            f"{sandbox_root}/data/nested/b.txt",
+        ],
+    ]
+    # Nothing above the sandbox root (which existed) is ever chmod-ed, "/" least of all.
+    assert all(path.startswith(f"{sandbox_root}/") for paths in touched for path in paths)
+
+
+@pytest.mark.asyncio
+async def test_names_the_task_digest_skips_are_not_uploaded(tmp_path):
+    """Review (round 14): ``./data:/data`` passes the planner's digest check on the folder, but the upload shipped
+    every file under it, ``environment/data/payload.pyc`` included, which ``content_hash`` skips: the bytes a
+    program loads could change with no change to the task digest, the manifest check or the server's check. The
+    upload leaves out exactly the names the digest skips (Harbor's packager publishes none of them), so what the
+    service sees is what the digest covers."""
+    from nemo_gym.tasks.harbor.digest import content_hash
+
+    task = tmp_path / "task"
+    data = task / "environment" / "data"
+    (data / "__pycache__").mkdir(parents=True)
+    (data / "cache").mkdir()
+    (data / "a.txt").write_text("a")
+    (data / "payload.pyc").write_bytes(b"before")
+    (data / "__pycache__" / "x.pyc").write_bytes(b"x")
+    (data / ".DS_Store").write_bytes(b"ds")
+    (data / "notes.txt~").write_text("backup")
+    (data / "cache" / "only.pyc").write_bytes(b"c")
+    before = content_hash(task)
+    (data / "payload.pyc").write_bytes(b"after")
+    assert content_hash(task) == before
+    sandbox_root = tmp_path / "sandbox"
+    result = tmp_path / "result"
+    document = {
+        "services": {
+            "api": {
+                "image": "image",
+                "command": ["sh", "-c", f"find {sandbox_root}/data | sort > {result}"],
+                "x-sandbox": {"uploads": [{"source": str(data), "target": f"{sandbox_root}/data"}]},
+            }
+        }
+    }
+    provider = RecordingShellProvider()
+    async with make_compose(provider, document, poll_interval_s=0.01, upload_root=task) as group:
+        await group._wait("api", "service_completed_successfully")
+    uploads = [(source, target) for source, target in provider.uploads if target.startswith(f"{sandbox_root}/")]
+    assert uploads == [(str(data / "a.txt"), f"{sandbox_root}/data/a.txt")]
+    # A folder that held only a skipped file is still a folder of the task; the skipped names never arrive.
+    assert result.read_text().splitlines() == [
+        f"{sandbox_root}/data",
+        f"{sandbox_root}/data/a.txt",
+        f"{sandbox_root}/data/cache",
+    ]
+    assert not any(
+        name in command for command in provider.commands for name in ("payload.pyc", "__pycache__", ".DS_Store", "~")
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_link_inside_an_uploaded_folder_is_refused_before_it_is_read(tmp_path):
+    # Review: ``is_file()`` follows links, so a link in a bound folder would upload a host file the planner never
+    # checked. The adapter refuses the folder, naming the link, before any file of it is uploaded.
+    task = tmp_path / "task"
+    (task / "data").mkdir(parents=True)
+    (task / "data" / "ok.txt").write_text("ok")
+    secret = tmp_path / "secret"
+    secret.write_text("host secret")
+    (task / "data" / "leak").symlink_to(secret)
+    sandbox_root = tmp_path / "sandbox"
+    document = {
+        "services": {
+            "api": {
+                "image": "image",
+                "command": ["sleep", "1"],
+                "x-sandbox": {"uploads": [{"source": str(task / "data"), "target": f"{sandbox_root}/data"}]},
+            }
+        }
+    }
+    provider = RecordingShellProvider()
+    with pytest.raises(RuntimeError, match=r"contains a link: .*data/leak"):
+        await make_compose(provider, document, poll_interval_s=0.01, upload_root=task).start()
+    assert provider.uploads == []
+    assert not (sandbox_root / "data" / "leak").exists()
+    assert len(provider.closed) == len(provider.created) == 1
+
+
+@pytest.mark.asyncio
+async def test_upload_sources_must_lie_under_the_upload_root(tmp_path):
+    # Review blocker: upload sources are read in this process. A document assembled without the planner (or a
+    # root the planner never saw) cannot reach /etc/passwd or any file outside the root; no sandbox is created.
+    task = tmp_path / "task"
+    task.mkdir()
+    (task / "seed.json").write_text("{}")
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+    (task / "link.json").symlink_to(outside)
+    for source in ("/etc/passwd", str(outside), str(task / "link.json"), str(task / ".." / "outside.json")):
+        provider = Provider()
+        document = {
+            "services": {"api": {"image": "image", "x-sandbox": {"uploads": [{"source": source, "target": "/x"}]}}}
+        }
+        with pytest.raises(ValueError, match="outside the upload root"):
+            await make_compose(provider, document, upload_root=task).start()
+        assert provider.created == []
+    # Without a root, uploads are refused outright: no caller may forget to vouch for one.
+    provider = Provider()
+    document = {
+        "services": {
+            "api": {"image": "image", "x-sandbox": {"uploads": [{"source": str(task / "seed.json"), "target": "/x"}]}}
+        }
+    }
+    with pytest.raises(ValueError, match="need an upload_root"):
+        await make_compose(provider, document).start()
+    assert provider.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("tmpfs", ["/run"]),
+        ("ulimits", {"nofile": 1024}),
+        ("sysctls", {"net.core.somaxconn": "1024"}),
+        ("security_opt", ["seccomp=unconfined"]),
+    ],
+)
+async def test_service_options_need_the_provider_capability_and_the_error_names_field_and_provider(field, value):
+    provider = ShellProvider()
+    group = make_compose(provider, {"services": {"app": {"image": "img", field: value}}})
+    with pytest.raises(
+        NotImplementedError, match=f"Service 'app': {field} is not supported by the test sandbox provider"
+    ):
+        await group.start()
+    assert not provider.created
+
+    class PartialProvider(ShellProvider):
+        SERVICE_OPTION_FIELDS = frozenset({"tmpfs"})
+
+        def service_options(self, **kwargs):
+            return {"run_args": ["--tmpfs", *kwargs["tmpfs"]]}
+
+    provider = PartialProvider()
+    group = make_compose(
+        provider,
+        {"services": {"app": {"image": "img", field: value}}},
+        default_command=["sleep", ".1"],
+        poll_interval_s=0.01,
+    )
+    if field == "tmpfs":
+        async with group:
+            assert provider.created[0].provider_options == {"run_args": ["--tmpfs", "/run"]}
+    else:
+        with pytest.raises(NotImplementedError, match=f"{field} is not supported by the test sandbox provider"):
+            await group.start()
+        assert not provider.created
+
+
+@pytest.mark.asyncio
+async def test_service_options_and_pull_policy_merge_into_the_spec_provider_options():
+    from nemo_gym.sandbox.providers.base import SandboxSpec
+
+    class FullProvider(ShellProvider):
+        SERVICE_OPTION_FIELDS = frozenset({"tmpfs", "ulimits", "sysctls", "security_opt"})
+
+        def service_options(self, *, tmpfs=(), ulimits=None, sysctls=None, security_opt=()):
+            self.options = {"tmpfs": tmpfs, "ulimits": ulimits, "sysctls": sysctls, "security_opt": security_opt}
+            return {"run_args": ["--tmpfs", *tmpfs], "extensions": {"from": "options"}}
+
+        def pull_policy_options(self, policy):
+            return {"run_args": ["--pull", policy], "extensions": {"pull": policy}}
+
+    provider = FullProvider()
+    async with make_compose(
+        provider,
+        {
+            "services": {
+                "app": {
+                    "image": "img",
+                    "tmpfs": "/run",
+                    "ulimits": {"nofile": {"soft": 1, "hard": 2}},
+                    "sysctls": ["a=b"],
+                    "security_opt": ["x"],
+                    "pull_policy": "if_not_present",
+                    "platform": "linux/x86_64",
+                }
+            }
+        },
+        default_command=["sleep", ".1"],
+        poll_interval_s=0.01,
+        service_specs={
+            "app": SandboxSpec(ttl_s=30, provider_options={"run_args": ["--init"], "extensions": {"k": "v"}})
+        },
+    ) as group:
+        assert provider.options == {
+            "tmpfs": ("/run",),
+            "ulimits": {"nofile": {"soft": 1, "hard": 2}},
+            "sysctls": {"a": "b"},
+            "security_opt": ("x",),
+        }
+        assert provider.created[0].provider_options == {
+            "run_args": ["--init", "--tmpfs", "/run", "--pull", "missing"],
+            "extensions": {"k": "v", "from": "options", "pull": "missing"},
+        }
+        assert group.pull_policies == {"app": "missing"}
+
+
+@pytest.mark.asyncio
+async def test_pull_policy_is_recorded_when_the_provider_cannot_apply_it_and_platform_must_match():
+    provider = ShellProvider()
+    async with make_compose(
+        provider,
+        {"services": {"app": {"image": "img", "pull_policy": "always", "platform": "linux/amd64"}}},
+        default_command=["sleep", ".1"],
+        poll_interval_s=0.01,
+    ) as group:
+        assert group.pull_policies == {"app": "always"}
+        assert provider.created[0].provider_options == {}
+    provider = ShellProvider()
+    group = make_compose(
+        provider, {"services": {"app": {"image": "img", "platform": "linux/amd64"}}}, platform="linux/arm64"
+    )
+    with pytest.raises(ValueError, match="platform 'linux/amd64' does not match the deployment platform linux/arm64"):
+        await group.start()
+    assert not provider.created
+
+
+@pytest.mark.asyncio
+async def test_network_mode_service_shares_its_targets_networks():
+    class ForwardingProvider(HostsProvider):
+        def validate_port_forwarding(self):
+            pass
+
+        async def forward_ports(self, handle, target_address, ports, *, ready_file):
+            import asyncio
+            from pathlib import Path
+
+            Path(ready_file).touch()
+            await asyncio.sleep(3600)
+
+    provider = ForwardingProvider()
+    async with make_compose(
+        provider,
+        {
+            "services": {
+                "api": {"image": "img", "networks": ["back"], "expose": ["80"]},
+                "main": {"image": "img", "network_mode": "service:api"},
+                "web": {"image": "img", "networks": ["front"]},
+            },
+            "networks": {"back": {}, "front": {}},
+        },
+        default_command=["sleep", ".1"],
+        poll_interval_s=0.01,
+    ) as group:
+        main_hosts = provider.hosts[group.services["main"]._require_handle().sandbox_id]
+        assert set(main_hosts) == {"main", "api"}
+
+
+class RecordingProvider(Provider):
+    """Sandboxes that exist only as records and answer every exec with success; records which provider each
+    forwarding relay, host injection and shared-storage call went through."""
+
+    def __init__(self, name, subnet):
+        super().__init__()
+        self.name = name
+        self.subnet = subnet
+        self.execs = []
+        self.hosts = {}
+        self.forwarded = []
+
+    async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        import asyncio
+
+        self.execs.append((handle.sandbox_id, command, user))
+        await asyncio.sleep(0)  # a real exec suspends, which lets the forwarding relay task run
+        return SandboxExecResult("", "", 0)
+
+    async def upload_file(self, handle, source_path, target_path):
+        pass
+
+    def validate_networking(self):
+        pass
+
+    async def network_address(self, handle):
+        return f"10.{self.subnet}.0.{handle.sandbox_id}"
+
+    async def set_hosts(self, handle, hosts):
+        self.hosts[handle.sandbox_id] = dict(hosts)
+
+    def validate_port_forwarding(self):
+        pass
+
+    async def forward_ports(self, handle, target_address, ports, *, ready_file):
+        import asyncio
+
+        self.forwarded.append((handle.sandbox_id, target_address, tuple(ports)))
+        await asyncio.Event().wait()
+
+    def shared_volume_metadata(self):
+        return {"storage": self.name}
+
+    def shared_volume_options(self, source, target, *, read_only=False):
+        return {"volumes": [{"source": source, "target": target, "read_only": read_only, "storage": self.name}]}
+
+
+@pytest.mark.asyncio
+async def test_forwarding_and_volumes_of_a_service_on_its_own_provider_go_through_that_provider():
+    """A sidecar on its own provider (a GPU block): its relay runs where its sandbox is, and its named volume is
+    initialized, seeded and mounted on that provider's shared storage, never the collection provider's."""
+    cpu, gpu = RecordingProvider("cpu", 1), RecordingProvider("gpu", 2)
+    document = {
+        "services": {
+            "db": {"image": "img", "expose": [5432]},
+            "side": {
+                "image": "img",
+                "network_mode": "service:db",
+                "volumes": [{"type": "volume", "source": "data", "target": "/data"}],
+            },
+        },
+        "volumes": {"data": {}},
+    }
+    async with make_compose(
+        cpu, document, default_command=["sleep", "1"], poll_interval_s=0.01, service_providers={"side": gpu}
+    ) as group:
+        side_id = group.services["side"]._require_handle().sandbox_id
+        # The relay was started on the provider that owns the forwarder's sandbox, towards db's address on cpu.
+        assert cpu.forwarded == [] and gpu.forwarded == [(side_id, "10.1.0.1", (5432,))]
+        # Init helper, copy-up seed and the service itself were all created on gpu; cpu only ran db.
+        assert [spec.image for spec in gpu.created] == ["alpine:3.22", "img", "img"]
+        assert [spec.image for spec in cpu.created] == ["img"]
+        helper, seed, side = gpu.created
+        assert helper.metadata == {"storage": "gpu"} and seed.metadata == {"storage": "gpu"}
+        assert side.metadata["storage"] == "gpu"
+        assert seed.provider_options["volumes"] == [
+            {"source": f"{group.project}/data", "target": "/tmp/compose-volumes", "read_only": False, "storage": "gpu"}
+        ]
+        assert side.provider_options["volumes"] == [
+            {"source": f"{group.project}/data", "target": "/data", "read_only": False, "storage": "gpu"}
+        ]
+        # The directory was made through gpu's helper; cpu, which runs no volumes, got no helper at all.
+        assert any(command.startswith("mkdir -p /tmp/compose-volumes/") for _, command, _ in gpu.execs)
+        assert group._volume_helper is None and len(group._volume_helpers) == 1
+    # Cleanup went through gpu's helper; both providers' sandboxes were closed.
+    assert any("rm -rf /tmp/compose-volumes/" in command for _, command, _ in gpu.execs)
+    assert not any("compose-volumes" in command for _, command, _ in cpu.execs)
+    assert sorted(gpu.closed) == ["1", "2", "3"] and cpu.closed == ["1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy, mapped", [("always", "Always"), ("never", "Never")])
+async def test_the_volume_copy_up_seed_keeps_the_services_pull_policy(policy, mapped):
+    """Review (M28): the copy-up seed, a sandbox of the service's own spec that reads the same image, replaced the
+    spec's provider options with the copy-up mount alone, dropping the service's ``pull_policy`` (an ``extensions``
+    entry OpenSandbox reads per spec). Under a deployment default of Never an uncached ``always`` image failed at the
+    seed, before the service could pull it; under Always a ``never`` image was pulled by the seed. The seed keeps every
+    option of the service but its mounts, the service keeps them all, and the init helper keeps the deployment's."""
+    from nemo_gym.sandbox.providers.base import SandboxSpec
+
+    class PullPolicyProvider(RecordingProvider):
+        def pull_policy_options(self, policy):
+            return {"extensions": {"imagePullPolicy": {"always": "Always", "never": "Never"}[policy]}}
+
+    provider = PullPolicyProvider("cpu", 1)
+    document = {
+        "services": {
+            "app": {
+                "image": "img",
+                "pull_policy": policy,
+                "volumes": [{"type": "volume", "source": "data", "target": "/data"}],
+            }
+        },
+        "volumes": {"data": {}},
+    }
+    caller_mount = {"source": "caller", "target": "/caller"}
+    async with make_compose(
+        provider,
+        document,
+        default_command=["sleep", "1"],
+        poll_interval_s=0.01,
+        service_specs={
+            "app": SandboxSpec(ttl_s=30, provider_options={"run_args": ["--init"], "volumes": [caller_mount]})
+        },
+    ) as group:
+        helper, seed, app = provider.created
+        copy_up = {"source": f"{group.project}/data", "target": "/tmp/compose-volumes", "read_only": False}
+        data = {"source": f"{group.project}/data", "target": "/data", "read_only": False}
+        assert helper.image == "alpine:3.22" and helper.provider_options == {
+            "volumes": [{**copy_up, "source": None, "storage": "cpu"}]
+        }
+        assert seed.image == "img" and seed.provider_options == {
+            "run_args": ["--init"],
+            "extensions": {"imagePullPolicy": mapped},
+            "volumes": [{**copy_up, "storage": "cpu"}],
+        }
+        assert app.provider_options == {
+            "run_args": ["--init"],
+            "extensions": {"imagePullPolicy": mapped},
+            "volumes": [caller_mount, {**data, "storage": "cpu"}],
+        }
+        assert group.pull_policies == {"app": policy}
+
+
+@pytest.mark.asyncio
+async def test_volumes_need_shared_storage_on_the_providers_that_run_them():
+    cpu, gpu = RecordingProvider("cpu", 1), Provider()
+    gpu.name = "plain"
+    document = {
+        "services": {"side": {"image": "img", "volumes": [{"type": "volume", "source": "data", "target": "/data"}]}},
+        "volumes": {"data": {}},
+    }
+    group = make_compose(cpu, document, service_providers={"side": gpu})
+    with pytest.raises(
+        NotImplementedError, match="Service 'side': the plain sandbox provider does not support shared"
+    ):
+        await group.start()
+    assert not cpu.created and not gpu.created
+
+
+class ChainForwardingProvider(HostsProvider):
+    def validate_port_forwarding(self):
+        pass
+
+    async def forward_ports(self, handle, target_address, ports, *, ready_file):
+        import asyncio
+        from pathlib import Path
+
+        Path(ready_file).touch()
+        await asyncio.sleep(3600)
+
+
+@pytest.mark.asyncio
+async def test_chained_network_mode_resolves_to_the_end_of_the_chain_in_declaration_order():
+    """a -> service:b -> service:c, declared in that order: every link is on c's networks (M27 started this
+    layout; the first M28 membership pass looked b up before it was filled)."""
+    provider = ChainForwardingProvider()
+    async with make_compose(
+        provider,
+        {
+            "services": {
+                "a": {"image": "img", "network_mode": "service:b"},
+                "b": {"image": "img", "network_mode": "service:c", "expose": [81]},
+                "c": {"image": "img", "networks": ["back"], "expose": [80]},
+                "d": {"image": "img"},
+            },
+            "networks": {"back": {}},
+        },
+        default_command=["sleep", ".1"],
+        poll_interval_s=0.01,
+    ) as group:
+        assert group._memberships() == {"a": {"back"}, "b": {"back"}, "c": {"back"}, "d": {"default"}}
+        by_name = {
+            name: set(provider.hosts[sandbox._require_handle().sandbox_id]) for name, sandbox in group.services.items()
+        }
+        assert by_name["a"] == {"a", "b", "c"} and by_name["c"] == {"a", "b", "c"} and by_name["d"] == {"d"}
+
+
+@pytest.mark.asyncio
+async def test_a_network_mode_cycle_is_named_before_provisioning():
+    provider = ChainForwardingProvider()
+    group = make_compose(
+        provider,
+        {
+            "services": {
+                "a": {"image": "img", "network_mode": "service:b", "expose": [1]},
+                "b": {"image": "img", "network_mode": "service:c", "expose": [2]},
+                "c": {"image": "img", "network_mode": "service:b", "expose": [3]},
+            }
+        },
+    )
+    with pytest.raises(ValueError, match="Service 'a': network_mode cycle: b -> c -> b"):
+        await group.start()
+    assert not provider.created
+
+
+@pytest.mark.asyncio
+async def test_the_servers_normalized_gpu_reservation_passes_the_adapters_own_pass(tmp_path):
+    """What the environment server writes (deploy normalized once) is what the adapter reloads and normalizes again."""
+    import yaml
+
+    from nemo_gym.sandbox.compose_fields import check_compose_fields
+
+    cpu, gpu = HostsProvider(), HostsProvider()
+    document = check_compose_fields(
+        {
+            "services": {
+                "main": {"image": "img", "command": ["sleep", ".1"]},
+                "model": {
+                    "image": "img",
+                    "command": ["sleep", ".1"],
+                    "deploy": {"resources": {"reservations": {"devices": [{"capabilities": ["gpu"], "count": 1}]}}},
+                },
+            }
+        }
+    )
+    assert document["services"]["model"]["deploy"] == {"resources": {"reservations": {"gpus": 1}}}
+    path = tmp_path / "compose.yaml"
+    path.write_text(yaml.safe_dump(document, sort_keys=False))
+    async with AsyncSandboxCompose(cpu, path, service_providers={"model": gpu}, poll_interval_s=0.01) as group:
+        assert group.services["model"]._provider is gpu
+        (model_spec,) = gpu.created
+        assert model_spec.resources.gpu == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "uploads,message",
+    [
+        ("seed.json:/app/seed.json", "list of source/target mappings"),
+        ([{"source": "x"}], "list of source/target mappings"),
+        ([{"source": "/nonexistent/seed.json", "target": "/app/seed.json"}], "does not exist"),
+        ([{"source": ".", "target": "app/seed.json"}], "absolute container path"),
+        ([{"source": ".", "target": "/app/../seed.json"}], "absolute container path"),
+        ([{"source": ".", "target": "/"}], "container root"),
+        ([{"source": ".", "target": "//"}], "container root"),
+        # M22 review: a dot-spelled root passed the `strip("/")` check and the folder merged into `/`.
+        ([{"source": ".", "target": "/."}], "container root"),
+        ([{"source": ".", "target": "//./"}], "container root"),
+        ([{"source": ".", "target": "/././"}], "container root"),
+    ],
+)
+async def test_malformed_uploads_fail_before_provisioning(uploads, message):
+    provider = Provider()
+    group = make_compose(
+        provider, {"services": {"api": {"image": "image", "x-sandbox": {"uploads": uploads}}}}, upload_root="."
+    )
+    with pytest.raises(ValueError, match=message):
+        await group.start()
+    assert provider.created == []
+
+
+@pytest.mark.asyncio
+async def test_upload_folder_creation_falls_back_to_the_default_user_and_reports_failure(tmp_path):
+    """The fake denies the folder, not the host (review, round 14: the old fake matched ``/forbidden/`` against
+    ``mkdir -p /forbidden`` and never fired, so the failure branch was the runner's lack of rights on ``/``);
+    the denied folder sits under ``tmp_path``, where the runner could create it, and is proven not to exist."""
+    seed = tmp_path / "seed.json"
+    seed.write_text("{}")
+    forbidden = tmp_path / "forbidden"
+
+    class NoRootProvider(ShellProvider):
+        def __init__(self):
+            super().__init__()
+            self.users = []
+
+        async def exec(self, handle, command, *, user=None, **kwargs):
+            if command.startswith("mkdir -p "):
+                self.users.append(user)
+                if user == "root":
+                    raise RuntimeError("identity switch not permitted")
+                if str(forbidden) in shlex.split(command.removeprefix("mkdir -p ")):
+                    return SandboxExecResult("", "mkdir: permission denied", 1)
+            return await super().exec(handle, command, user=user, **kwargs)
+
+    provider = NoRootProvider()
+    target = tmp_path / "sandbox" / "app" / "seed.json"
+    document = {
+        "services": {
+            "api": {
+                "image": "image",
+                "command": ["sleep", "1"],
+                "x-sandbox": {"uploads": [{"source": str(seed), "target": str(target)}]},
+            }
+        }
+    }
+    async with make_compose(provider, document, poll_interval_s=0.01, upload_root=tmp_path):
+        assert target.read_text() == "{}"
+    assert provider.users[:2] == ["root", None]
+
+    provider = NoRootProvider()
+    document["services"]["api"]["x-sandbox"]["uploads"][0]["target"] = f"{forbidden}/seed.json"
+    with pytest.raises(RuntimeError, match=re.escape(f"cannot create '{forbidden}/seed.json' for upload")):
+        await make_compose(provider, document, poll_interval_s=0.01, upload_root=tmp_path).start()
+    assert provider.users[:2] == ["root", None] and not forbidden.exists()
+    assert len(provider.closed) == len(provider.created) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_service_on_its_own_provider_resolves_external_volumes_through_that_providers_mapping():
+    """Review (round 13): a GPU-routed sidecar's volumes are seeded and mounted through its own provider, so its
+    external volume must resolve through that provider's ``volume_sources`` (``service_volume_sources``), not
+    the collection's; the default provider never sees the name, and an ordinary volume of a service on the
+    default provider stays managed there."""
+    cpu, gpu = RecordingProvider("cpu", 1), RecordingProvider("gpu", 2)
+    document = {
+        "services": {
+            "db": {"image": "img", "volumes": [{"type": "volume", "source": "data", "target": "/data"}]},
+            "model": {"image": "img", "volumes": [{"type": "volume", "source": "models", "target": "/models"}]},
+        },
+        "volumes": {"data": {}, "models": {"external": True}},
+    }
+    # The sidecar's own provider has no mapping for it: the collection's (the CPU block's ``cpu/models``) is not
+    # a fallback, since the volume is seeded and mounted on gpu's storage.
+    group = make_compose(
+        cpu,
+        document,
+        default_command=["sleep", "1"],
+        service_providers={"model": gpu},
+        volume_sources={"models": "cpu/models"},
+        service_volume_sources={"model": {}},
+    )
+    with pytest.raises(NotImplementedError, match="External volumes require a volume_sources mapping"):
+        await group.start()
+    assert not cpu.created and not gpu.created
+    async with make_compose(
+        cpu,
+        document,
+        default_command=["sleep", "1"],
+        poll_interval_s=0.01,
+        service_providers={"model": gpu},
+        volume_sources={"models": "cpu/models"},
+        service_volume_sources={"model": {"models": "gpu/models"}},
+    ) as group:
+        helper, model = gpu.created
+        assert helper.image == "alpine:3.22"  # no copy-up seed: the volume is external, so unmanaged
+        assert model.provider_options["volumes"] == [
+            {"source": "gpu/models", "target": "/models", "read_only": False, "storage": "gpu"}
+        ]
+        assert not any("gpu/models" in command or "cpu/models" in command for _, command, _ in gpu.execs)
+        # db's ordinary volume on cpu is the group's own: made under the project and copied up.
+        assert any(
+            command.startswith(f"mkdir -p /tmp/compose-volumes/{group.project}/data") for _, command, _ in cpu.execs
+        )
+        assert all("models" not in str(spec.provider_options) for spec in cpu.created)
+    group = make_compose(cpu, document, default_command=["sleep", "1"], service_volume_sources={"ghost": {}})
+    with pytest.raises(ValueError, match="service_volume_sources names unknown services"):
+        await group.start()
+
+
+@pytest.mark.asyncio
+async def test_two_groups_with_a_narrowed_mapping_keep_an_ordinary_volume_apart(tmp_path):
+    """The reviewer's reproduction (round 13): with the deployment-wide mapping forwarded whole, two groups
+    declaring an ordinary ``pgdata`` got one shared path with no initialization. Narrowed by the planner's
+    ``document_volume_sources``, each group gets its own project directory, made and copied up."""
+    from nemo_gym.sandbox.compose_config import document_volume_sources
+
+    document = {
+        "services": {"db": {"image": "img", "volumes": [{"type": "volume", "source": "pgdata", "target": "/pg"}]}},
+        "volumes": {"pgdata": {}},
+    }
+    deployment = {"pgdata": "datasets/pgdata"}
+    assert document_volume_sources(document, deployment) == {}
+    paths = []
+    for _ in range(2):
+        provider = RecordingProvider("cpu", 1)
+        async with make_compose(
+            provider,
+            json.loads(json.dumps(document)),
+            default_command=["sleep", "1"],
+            poll_interval_s=0.01,
+            volume_sources=document_volume_sources(document, deployment),
+        ) as group:
+            helper, seed, db = provider.created
+            (mount,) = db.provider_options["volumes"]
+            assert mount["source"] == f"{group.project}/pgdata"
+            assert any(
+                command.startswith(f"mkdir -p /tmp/compose-volumes/{group.project}/pgdata")
+                for _, command, _ in provider.execs
+            )
+            paths.append(mount["source"])
+    assert len(set(paths)) == 2
+    # The control: forwarded whole, the same document would share the deployment path and skip initialization.
+    provider = RecordingProvider("cpu", 1)
+    async with make_compose(
+        provider,
+        json.loads(json.dumps(document)),
+        default_command=["sleep", "1"],
+        poll_interval_s=0.01,
+        volume_sources=deployment,
+    ):
+        (helper, db) = provider.created
+        assert db.provider_options["volumes"][0]["source"] == "datasets/pgdata"
+
+
+@pytest.mark.asyncio
+async def test_service_setup_runs_after_the_sandbox_starts_and_before_uploads_and_the_command(tmp_path):
+    """Review (round 13): an overlay Dockerfile's RUN lines ran after main's bind-mount uploads and after its
+    command, so a `RUN` writing defaults clobbered the uploaded file and `RUN mkdir /data` failed on the folder
+    the upload created. ``service_setup`` runs first: setup, then the upload, then the command, as Harbor's
+    build precedes `compose up` with the mounts."""
+    task = tmp_path / "task"
+    task.mkdir()
+    (task / "seed.csv").write_text("uploaded")
+    sandbox_root = tmp_path / "sandbox"
+    sandbox_root.mkdir()  # the image's root; /data is what the RUN line creates
+    result = tmp_path / "result"
+    order = []
+
+    async def setup(sandbox):
+        order.append("setup")
+        # What a `RUN mkdir /data && echo default > /data/seed.csv` line does: it must not see the upload yet.
+        outcome = await sandbox.exec(f"mkdir {sandbox_root}/data && echo default > {sandbox_root}/data/seed.csv")
+        assert outcome.return_code == 0, outcome.stderr
+
+    document = {
+        "services": {
+            "main": {
+                "image": "image",
+                "command": ["sh", "-c", f"cat {sandbox_root}/data/seed.csv > {result}"],
+                "x-sandbox": {
+                    "uploads": [{"source": str(task / "seed.csv"), "target": f"{sandbox_root}/data/seed.csv"}]
+                },
+            },
+            "side": {"image": "image", "command": ["sleep", "1"]},
+        }
+    }
+    provider = RecordingShellProvider()
+    original_upload = provider.upload_file
+
+    async def upload_file(handle, source_path, target_path):
+        order.append("upload")
+        await original_upload(handle, source_path, target_path)
+
+    provider.upload_file = upload_file
+    async with make_compose(
+        provider, document, poll_interval_s=0.01, upload_root=task, service_setup={"main": setup}
+    ) as group:
+        await group._wait("main", "service_completed_successfully")
+    # The upload won over the RUN line's default, and the command read the uploaded bytes.
+    assert result.read_text() == "uploaded"
+    assert order[:2] == ["setup", "upload"] and order.count("setup") == 1  # side had no setup
+    setup_index = next(
+        i for i, command in enumerate(provider.commands) if command.startswith("mkdir ") and "/data &&" in command
+    )
+    run_index = next(i for i, command in enumerate(provider.commands) if "run.sh" in command and "/main/" in command)
+    assert setup_index < run_index
+
+    # A failing setup fails the start and stops the group; its own exception type comes out.
+    class SetupFailed(RuntimeError):
+        pass
+
+    async def failing(sandbox):
+        raise SetupFailed("RUN line 1/1 exited")
+
+    provider = RecordingShellProvider()
+    document["services"]["main"]["command"] = ["sleep", "1"]
+    with pytest.raises(SetupFailed, match="RUN line 1/1"):
+        await make_compose(
+            provider, document, poll_interval_s=0.01, upload_root=task, service_setup={"main": failing}
+        ).start()
+    assert len(provider.closed) == len(provider.created) == 1
+    with pytest.raises(ValueError, match="service_setup names unknown services"):
+        await make_compose(provider, document, upload_root=task, service_setup={"ghost": setup}).start()
+
+
+@pytest.mark.asyncio
+async def test_log_paths_exist_before_the_command_hooks_and_healthcheck_and_a_foreign_target_is_linked(
+    tmp_path, caplog
+):
+    """Review (round 13): with `/logs/verifier:/logs/verifier` dropped by the planner and a healthcheck needing
+    that folder, a clean image failed startup before the server's mkdir. ``x-sandbox.logs`` makes the adapter
+    create the path first; `/logs/artifacts:/app/output` keeps its target as a link to the source, also when
+    the image ships a folder there (round 13 follow-up: `test -e ||` left that folder, and the artifacts the
+    task wrote into it never reached `/logs/artifacts`, where they are collected from)."""
+    root = tmp_path / "sandbox"
+    root.mkdir()
+    logs_dir, output = root / "logs", root / "app" / "output"
+    seen = tmp_path / "seen"
+    document = {
+        "services": {
+            "main": {
+                "image": "image",
+                "command": ["sh", "-c", f"ls -d {logs_dir}/verifier > {seen} && sleep 1"],
+                "post_start": [{"command": f"test -d {logs_dir}/verifier && test -L {output}"}],
+                "healthcheck": {
+                    "test": ["CMD-SHELL", f"test -d {logs_dir}/verifier"],
+                    "interval": "0.01s",
+                    "retries": 1,
+                },
+                "x-sandbox": {
+                    "logs": [
+                        {"source": f"{logs_dir}/verifier", "target": f"{logs_dir}/verifier"},
+                        {"source": f"{logs_dir}/artifacts", "target": str(output)},
+                    ]
+                },
+            }
+        }
+    }
+    provider = RecordingShellProvider()
+    # The validator pins sources to Harbor's tree; this fixture runs on the host, so widen it for the test alone.
+    import nemo_gym.sandbox.adapters.docker_compose as adapter
+
+    original = adapter.LOGS_TREE
+    adapter.LOGS_TREE = str(logs_dir)
+    try:
+        async with make_compose(provider, document, poll_interval_s=0.01):
+            assert seen.read_text().strip() == f"{logs_dir}/verifier"
+            assert (logs_dir / "verifier").is_dir() and (logs_dir / "verifier").stat().st_mode & 0o777 == 0o777
+            assert output.is_symlink() and output.resolve() == (logs_dir / "artifacts").resolve()
+            (output / "x.txt").write_text("via link")
+            assert (logs_dir / "artifacts" / "x.txt").read_text() == "via link"
+        mkdir_index = next(i for i, c in enumerate(provider.commands) if c.startswith(f"mkdir -p {logs_dir}/verifier"))
+        run_index = next(i for i, c in enumerate(provider.commands) if "run.sh" in c and c.startswith("sh "))
+        assert mkdir_index < run_index
+        # A folder the image ships at the target (`RUN mkdir -p /app/output`) is replaced by the link, as Harbor's
+        # bind of one host folder hides it: what the task writes there is collected. The link exists before the
+        # uploads, so a task file bound under the target lands in the source, as under Harbor's `compose cp`.
+        output.unlink()
+        output.mkdir()
+        task = tmp_path / "task"
+        task.mkdir()
+        (task / "seed.json").write_text("{}")
+        shipped = json.loads(json.dumps(document))
+        del shipped["services"]["main"]["post_start"]
+        shipped["services"]["main"]["x-sandbox"]["uploads"] = [
+            {"source": str(task / "seed.json"), "target": f"{output}/seed.json"}
+        ]
+        provider = RecordingShellProvider()
+        async with make_compose(provider, shipped, poll_interval_s=0.01, upload_root=task):
+            assert output.is_symlink() and (logs_dir / "artifacts" / "seed.json").read_text() == "{}"
+            (output / "y.txt").write_text("over the shipped folder")
+            assert (logs_dir / "artifacts" / "y.txt").read_text() == "over the shipped folder"
+        link_index = next(i for i, c in enumerate(provider.commands) if "ln -sfn" in c)
+        upload_index = next(i for i, c in enumerate(provider.commands) if c.startswith(f"mkdir -p {output}"))
+        assert link_index < upload_index
+        # A shipped folder with contents (an image that carries solved outputs) goes too, as the bind would hide
+        # it from the agent, and the adapter says so; nothing of it leaks into the collected artifacts.
+        output.unlink()
+        output.mkdir()
+        (output / "solved.txt").write_text("shipped")
+        del shipped["services"]["main"]["x-sandbox"]["uploads"]
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.sandbox.adapters.docker_compose"):
+            async with make_compose(RecordingShellProvider(), shipped, poll_interval_s=0.01):
+                assert output.is_symlink() and not (logs_dir / "artifacts" / "solved.txt").exists()
+                assert not (logs_dir / "artifacts" / "output").exists()
+        assert [r for r in caplog.records if "was not empty" in r.getMessage() and str(output) in r.getMessage()]
+        # M22 review: a target spelled with a trailing separator (`${HOST_ARTIFACTS_PATH}:/app/output/`, valid at
+        # prepare) had its parent derived as the target itself, created, removed, then named as the link, which
+        # `ln` refuses (`No such file or directory`) and startup failed; a trailing dot (`/app/output/.`, also kept
+        # as written at prepare) failed one step earlier, `rm -rf` refusing to remove `.`. The lexical form is used
+        # first: on a missing target and on a shipped folder alike, and `/logs/verifier` bound at any spelling of
+        # itself (`/logs/verifier/`, `//logs/verifier`, `/logs//verifier`, `/logs/verifier/.`, `/logs/./verifier`)
+        # stays the path itself, never a link to itself.
+        verifier_spellings = (
+            f"{logs_dir}/verifier/",
+            f"/{logs_dir}/verifier",
+            f"{logs_dir}//verifier",
+            f"{logs_dir}/verifier/.",
+            f"{logs_dir}/./verifier",
+        )
+        for spelling, verifier_target in zip(("/", "//", "/.", "/./", "/.//"), verifier_spellings, strict=True):
+            trailing = json.loads(json.dumps(document))
+            trailing["services"]["main"]["x-sandbox"]["logs"] = [
+                {"source": f"{logs_dir}/verifier", "target": verifier_target},
+                {"source": f"{logs_dir}/artifacts", "target": f"{output}{spelling}"},
+            ]
+            for shipped_folder in (False, True):
+                output.unlink()
+                if shipped_folder:
+                    output.mkdir()
+                provider = RecordingShellProvider()
+                async with make_compose(provider, trailing, poll_interval_s=0.01):
+                    assert output.is_symlink() and output.resolve() == (logs_dir / "artifacts").resolve(), spelling
+                    (output / "z.txt").write_text(f"through the {spelling} target")
+                    assert (logs_dir / "artifacts" / "z.txt").read_text() == f"through the {spelling} target"
+                    assert (logs_dir / "verifier").is_dir() and not (logs_dir / "verifier").is_symlink()
+                assert any(c.endswith(f"ln -sfn {logs_dir}/artifacts {output}") for c in provider.commands), spelling
+                assert not any("ln -sfn" in c and c.endswith("/verifier") for c in provider.commands), verifier_target
+        # A target that nests its source only once spelled out (`/logs/.` is `/logs`) used to pass the guard and
+        # reach the shell, where the lexical form was linked: `rm -rf /logs` took the whole tree and `/logs` became
+        # a link to itself. Refused before the sandbox exists, like the plainly spelled nesting below.
+    finally:
+        adapter.LOGS_TREE = original
+    for entry, message in (
+        ({"source": "/var/log", "target": "/var/log"}, "is not under /logs"),
+        ({"source": "/logs/x", "target": "rel"}, "must be an absolute path"),
+        ({"source": "/logs/x", "target": "/"}, "is the container root"),
+        ({"source": "/logs/x", "target": "/."}, "is the container root"),
+        ({"source": "/logs/x", "target": "/././"}, "is the container root"),
+        ({"source": "/logs/x", "target": "/logs"}, "nest"),
+        ({"source": "/logs", "target": "/logs/x/"}, "nest"),
+        ({"source": "/logs/x", "target": "/logs/."}, "nest"),
+        ({"source": "/logs/x", "target": "/logs/./"}, "nest"),
+        ({"source": "/logs", "target": "/./logs/x"}, "nest"),
+        ({"source": "/logs/x", "target": "//logs"}, "nest"),
+        ({"source": "/logs/x/y", "target": "/logs//x/."}, "nest"),
+        ({"source": "/logs/x"}, "requires a list of source/target mappings"),
+    ):
+        provider = Provider()
+        group = make_compose(provider, {"services": {"main": {"image": "img", "x-sandbox": {"logs": [entry]}}}})
+        with pytest.raises(ValueError, match=message):
+            await group.start()
+        assert not provider.created
+
+
+class NoStdoutShellProvider(ShellProvider):
+    """``ShellProvider`` with the OpenSandbox provider's result contract: a command that printed nothing reports
+    ``stdout=None`` (``providers/opensandbox/provider.py``: ``"\\n".join(...) or None``)."""
+
+    async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        result = await super().exec(handle, command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+        return SandboxExecResult(result.stdout or None, result.stderr or None, result.return_code)
+
+
+@pytest.mark.asyncio
+async def test_log_paths_are_prepared_when_the_provider_returns_no_stdout(tmp_path):
+    """M35 D3: a ``main`` that binds the ``/logs`` tree (the Harbor Compose template every kumo and swe-lancer task
+    restates) is prepared with ``mkdir -p ... && chmod 777 ...``, which prints nothing on success; a provider that
+    reports that as ``stdout=None`` crashed the seed with ``'NoneType' object has no attribute 'split'``."""
+    import nemo_gym.sandbox.adapters.docker_compose as adapter
+
+    logs_dir = tmp_path / "sandbox" / "logs"
+    document = {
+        "services": {
+            "main": {
+                "image": "image",
+                "command": ["sleep", "1"],
+                "x-sandbox": {"logs": [{"source": f"{logs_dir}/verifier", "target": f"{logs_dir}/verifier"}]},
+            }
+        }
+    }
+    original = adapter.LOGS_TREE
+    adapter.LOGS_TREE = str(logs_dir)
+    try:
+        async with make_compose(NoStdoutShellProvider(), document, poll_interval_s=0.01):
+            assert (logs_dir / "verifier").is_dir()
+        # A failure of that command is reported with what the provider gave, never a traceback on ``None``.
+        (logs_dir / "blocked").write_text("a file where the folder should be")
+        document["services"]["main"]["x-sandbox"]["logs"] = [
+            {"source": f"{logs_dir}/blocked", "target": f"{logs_dir}/blocked"}
+        ]
+        with pytest.raises(RuntimeError, match="cannot create .*blocked"):
+            await make_compose(NoStdoutShellProvider(), document, poll_interval_s=0.01).start()
+    finally:
+        adapter.LOGS_TREE = original
