@@ -521,8 +521,20 @@ class TestChatDispatchRoute:
         assert len(usage_chunks) == 1
         assert usage_chunks[0]["usage"]["total_tokens"] == 10
 
+    @pytest.mark.parametrize("delayed", [False, True])
     @pytest.mark.parametrize("include_usage", [False, True])
-    def test_capture_records_usage_the_client_did_not_ask_for(self, tmp_path, include_usage) -> None:
+    def test_capture_records_usage_the_client_did_not_ask_for(
+        self, tmp_path, monkeypatch, include_usage, delayed
+    ) -> None:
+        if delayed:
+            # The answer arrives after the keepalive, so it streams from inside the committed response.
+            monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+
+            async def slow(*args):
+                await asyncio.sleep(0.05)
+                return _completion(content="hello", usage=_USAGE)
+
+            monkeypatch.setattr(_EchoChatModel, "_invoke_chat_completions", slow)
         _, server = _client(_EchoChatModel)
         app = server.setup_webserver()
         install_model_call_capture(
@@ -540,6 +552,7 @@ class TestChatDispatchRoute:
             },
         )
 
+        assert resp.text.startswith(": keep-alive") is delayed
         assert any(e.get("usage") for e in _events(resp.text)) is include_usage
         [exchange] = CaptureStore(tmp_path).read("r1")
         assert exchange["response"]["usage"]["total_tokens"] == _USAGE["total_tokens"]
