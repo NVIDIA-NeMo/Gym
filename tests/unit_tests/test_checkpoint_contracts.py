@@ -215,7 +215,7 @@ async def test_restore_refuses_a_corrupt_manifest_with_a_typed_error(corruption:
             json=body("r1", checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "r"}]),
         )
 
-    assert response.status_code == 422 and response.json()["error"]["code"] == "invalid_checkpoint_state"
+    assert response.status_code == 422 and response.json()["error"]["code"] == "checkpoint_invalid_state"
     assert participant.executions == {} and participant.accepting is True
 
 
@@ -229,7 +229,7 @@ async def test_commit_into_a_directory_that_cannot_hold_state_is_a_typed_error(t
         await client.post("/ng-control/v1/checkpoint/prepare", json=body())
         response = await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(blocked)))
 
-    assert response.status_code == 422 and response.json()["error"]["code"] == "invalid_checkpoint_state"
+    assert response.status_code == 422 and response.json()["error"]["code"] == "checkpoint_invalid_state"
 
 
 def test_a_payload_nested_deeper_than_python_recurses_is_refused_not_crashing() -> None:
