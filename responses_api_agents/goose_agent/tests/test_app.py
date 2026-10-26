@@ -31,6 +31,7 @@ from responses_api_agents.goose_agent.app import (
     GooseAgentConfig,
     GooseAgentRunRequest,
     goose_archive_name,
+    goose_messages_to_output,
     max_concurrent,
 )
 
@@ -358,3 +359,16 @@ def test_archive_names_and_concurrency():
     assert max_concurrent([(0, 5), (1, 2), (6, 7)]) == 2
     assert max_concurrent([(0, 1), (1, 2)]) == 2  # Second-resolution timestamps: touching counts as overlap.
     assert max_concurrent([]) == 0
+
+
+def test_thinking_dedup_is_per_turn():
+    think = {"type": "thinking", "thinking": "plan"}
+
+    def assistant(text):
+        return {"role": "assistant", "content": [think, {"type": "text", "text": text}]}
+
+    def user(text):
+        return {"role": "user", "content": [{"type": "text", "text": text}]}
+
+    items = goose_messages_to_output([user("task"), assistant("a"), assistant("b"), user("next"), assistant("c")])
+    assert [item.type for item in items] == ["reasoning", "message", "message", "reasoning", "message"]

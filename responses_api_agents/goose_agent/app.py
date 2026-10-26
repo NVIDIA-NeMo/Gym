@@ -156,11 +156,14 @@ def goose_messages_to_output(messages: list[dict[str, Any]]) -> list[Any]:
     """Convert the root session's Goose messages into Responses output items.
 
     Goose stores one assistant message per tool call of a turn and repeats the turn's thinking in each, so
-    a thinking block equal to the previous one is dropped. User text (the task and injected turn context)
-    is input, not output.
+    a thinking block equal to the previous one of the same turn is dropped. A user message that is not a
+    tool response starts a new turn, so identical thinking there is kept. User text (the task and injected
+    turn context) is input, not output.
     """
     output, last_thinking = [], None
     for message in messages:
+        if message["role"] == "user" and not any(b.get("type") == "toolResponse" for b in message["content"]):
+            last_thinking = None
         for block in message["content"]:
             kind = block.get("type")
             if message["role"] == "assistant" and kind == "thinking" and block.get("thinking"):
