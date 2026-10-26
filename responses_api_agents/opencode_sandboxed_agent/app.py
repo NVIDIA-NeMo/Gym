@@ -14,9 +14,12 @@
 # limitations under the License.
 
 import asyncio
+import base64
+import binascii
 import json
 import sqlite3
 import sys
+import tempfile
 from asyncio import Semaphore
 from contextlib import nullcontext
 from copy import deepcopy
@@ -24,7 +27,7 @@ from pathlib import Path
 from shlex import quote
 from time import time
 from traceback import format_exc
-from typing import Any, ClassVar, Dict, List, Literal, Optional
+from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional
 from uuid import uuid4
 
 from anyio import CancelScope
@@ -92,6 +95,73 @@ from responses_api_agents.opencode_agent.runtime import (
 
 
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
+# Image parts of the user turn are uploaded here and handed to `opencode run -f`. Outside the task
+# workdir on purpose (see the export path below) and fixed because each rollout owns its sandbox.
+_REMOTE_ATTACHMENTS_DIR = "/tmp/nemo-gym-attachments"
+# The image formats OpenCode 1.17.11's Read tool recognises by magic bytes (SUPPORTED_IMAGE_MIMES in
+# packages/opencode/src/tool/read.ts). `opencode run -f` labels a local file text/plain and routes it
+# through that tool (packages/opencode/src/cli/cmd/run.ts, session/prompt.ts), which re-sniffs the
+# bytes and attaches a data: file part; any other format is read as a binary file and fails.
+_ATTACHMENT_EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
+
+
+class _ImageAttachment(NamedTuple):
+    """One decoded `input_image` part of the user turn."""
+
+    remote_path: str
+    content: bytes
+
+
+def _decode_image_part(part: Dict[str, Any], index: int) -> _ImageAttachment:
+    """Turn one `input_image` part into bytes for the sandbox, failing closed on anything OpenCode cannot show."""
+    image_url = part.get("image_url")
+    if not image_url:
+        raise ValueError(f"input_image part {index} has no image_url; file_id inputs are not supported")
+    if not image_url.startswith("data:"):
+        raise ValueError(
+            f"input_image part {index} is a remote URL; the OpenCode sandbox has no internet access, so only "
+            "data: URIs are supported (prepare the dataset with the image inlined)"
+        )
+    header, separator, payload = image_url[len("data:") :].partition(",")
+    media_type, *parameters = header.split(";")
+    if not separator or "base64" not in parameters:
+        raise ValueError(f"input_image part {index} is not a base64 data URI")
+    extension = _ATTACHMENT_EXTENSIONS.get(media_type.strip().lower())
+    if extension is None:
+        raise ValueError(
+            f"input_image part {index} has media type {media_type!r}; OpenCode attaches only "
+            + ", ".join(sorted(_ATTACHMENT_EXTENSIONS))
+        )
+    try:
+        content = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(f"input_image part {index} carries invalid base64") from exc
+    return _ImageAttachment(remote_path=f"{_REMOTE_ATTACHMENTS_DIR}/image-{index}.{extension}", content=content)
+
+
+def _parse_user_turn(input_items: Any) -> tuple[str, List[_ImageAttachment]]:
+    """The single user turn as OpenCode receives it: its text as the query, its images as attachments.
+
+    A string or single `input_text` turn is passed through unchanged. System and developer items are
+    not forwarded (OpenCode keeps its own system prompt); a dataset that needs instructions folds them
+    into the user turn, as benchmarks/hle_diamond/prompts/opencode.yaml does.
+    """
+    query = None
+    attachments: List[_ImageAttachment] = []
+    for input_item in input_items:
+        if input_item.role == "user":
+            assert not query, input_items
+            if isinstance(input_item.content, str):
+                query = input_item.content
+            elif isinstance(input_item.content, list):
+                texts = [part for part in input_item.content if part["type"] == "input_text"]
+                images = [part for part in input_item.content if part["type"] == "input_image"]
+                assert len(texts) == 1 and len(texts) + len(images) == len(input_item.content), input_items
+                query = texts[0]["text"]
+                attachments = [_decode_image_part(part, index) for index, part in enumerate(images, start=1)]
+
+    assert query, input_items
+    return query, attachments
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -526,6 +596,8 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_exit_code: Optional[int] = None
     opencode_error_type: Optional[str] = None
     opencode_failed: bool = False
+    # Images of the user turn uploaded into the sandbox and attached with `opencode run -f`.
+    opencode_attachment_count: int = 0
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -640,7 +712,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             error_type=error_type if isinstance(error_type, str) else None,
         )
 
-    async def _create_opencode_config(self, request: Request) -> Dict[str, Any]:
+    async def _create_opencode_config(self, request: Request, *, image_input: bool = False) -> Dict[str, Any]:
+        """The OpenCode config for this run; ``image_input`` declares the model vision-capable so OpenCode
+        forwards attached images instead of replacing them with "this model does not support image input"
+        (``unsupportedParts`` in OpenCode's provider/transform.ts reads ``capabilities.input.image``, which
+        provider.ts derives from the model's ``modalities.input``)."""
         base_url = (
             self.base_url_for_run(
                 base_url=sandbox_server_url(
@@ -679,6 +755,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 }
             },
         }
+        if image_input:
+            # Only when the turn carries images: with it, OpenCode would also send any image the agent's
+            # Read tool opens during the run, which a text-only model cannot take.
+            config["provider"]["nemo_gym"]["models"]["dummy_model"]["modalities"] = {
+                "input": ["text", "image"],
+                "output": ["text"],
+            }
 
         def merge(base, override):
             for key, value in override.items():
@@ -793,18 +876,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             raise ValueError("Configured tool servers require a seeded /run request")
         sandbox = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
 
-        query = None
-        # This can be modified to handle system/developer prompts too.
-        for input_item in body.input:
-            if input_item.role == "user":
-                assert not query, body.input
-                if isinstance(input_item.content, str):
-                    query = input_item.content
-                elif isinstance(input_item.content, list):
-                    assert len(input_item.content) == 1, body.input
-                    query = input_item.content[0]["text"]
-
-        assert query, body.input
+        # Fails before anything is uploaded or run, so an unsupported image fails the row explicitly.
+        query, attachments = _parse_user_turn(body.input)
+        # Empty without images, so a text-only turn produces exactly the launch command it always did.
+        opencode_attachment_str = "".join(f" -f {quote(attachment.remote_path)}" for attachment in attachments)
 
         opencode_debug_str = ""
         if self.config.debug:
@@ -835,7 +910,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             && echo "Downloaded OpenCode installer to $installer" \
             && VERSION={self.config.opencode_version} bash "$installer\""""
 
-        effective_config = await self._create_opencode_config(request)
+        effective_config = await self._create_opencode_config(request, image_input=bool(attachments))
         for name in self._runtime_plugins():
             await sandbox.upload(Path(__file__).with_name(name), f"/tmp/nemo-gym-{name}")
         build_agent = effective_config.setdefault("agent", {}).setdefault("build", {})
@@ -847,6 +922,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             # Keep the plugin outside the task repo so it cannot enter a generated patch.
             await sandbox.upload(OBSERVABILITY_PATCH, _REMOTE_ASSISTANT_MESSAGE_PLUGIN)
             apply_observability_patch(effective_config, plugin_path=Path(_REMOTE_ASSISTANT_MESSAGE_PLUGIN))
+        if attachments:
+            # Decoded on the host only for the upload; the bytes never reach the launch command or a log.
+            with tempfile.TemporaryDirectory(prefix="nemo-gym-attachments-") as staging_dir:
+                for attachment in attachments:
+                    local_path = Path(staging_dir) / Path(attachment.remote_path).name
+                    local_path.write_bytes(attachment.content)
+                    # Uploads keep the host mode and may land root-owned: world-readable so the
+                    # sandbox user can open the file.
+                    local_path.chmod(0o644)
+                    await sandbox.upload(local_path, attachment.remote_path)
         opencode_config_content = json.dumps(effective_config)
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
@@ -884,7 +969,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
         && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
-            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
+            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str}{opencode_attachment_str} -- {quote(query)} \
         && echo "OpenCode run finished"
         """
 
@@ -1091,6 +1176,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_run_stderr": result_stderr,
             "opencode_export_found": opencode_export_found,
             "opencode_finished": opencode_finished,
+            "opencode_attachment_count": len(attachments),
         }
         if collect_observations:
             run_result["_ng_agent_observations"] = observations
