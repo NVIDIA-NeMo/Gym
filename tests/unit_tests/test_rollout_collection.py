@@ -12162,7 +12162,9 @@ class TestOmittedRolloutRecords:
     @pytest.mark.parametrize(
         ("budget", "expected_message"),
         [
-            pytest.param({"dispatch_budget_s": 0.0}, "not dispatched: dispatch budget exhausted", id="budget exhausted"),
+            pytest.param(
+                {"dispatch_budget_s": 0.0}, "not dispatched: dispatch budget exhausted", id="budget exhausted"
+            ),
             pytest.param(
                 {"dispatch_budget_s": 3600.0, "drain_margin_s": 7200.0},
                 "not dispatched: 3600s left in dispatch budget, below the 7200s drain margin",
