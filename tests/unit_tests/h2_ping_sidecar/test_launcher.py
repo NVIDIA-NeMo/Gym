@@ -382,6 +382,24 @@ class TestBinaryCacheKey:
         monkeypatch.setenv(launcher.PREBUILT_BINARY_ENV_NAME, "~/bin/h2-ping-sidecar")
         assert launcher.prebuilt_binary_path() == prebuilt
 
+    def test_env_var_naming_an_unknown_user_is_reported_and_falls_back_to_the_cache(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        real_expanduser = launcher.Path.expanduser
+
+        def expanduser(path):
+            if str(path).startswith("~no-such-user"):
+                raise RuntimeError("Could not determine home directory.")
+            return real_expanduser(path)
+
+        monkeypatch.setenv(launcher.PREBUILT_BINARY_ENV_NAME, "~no-such-user/h2-ping-sidecar")
+        monkeypatch.setattr(launcher.Path, "expanduser", expanduser)
+        assert launcher.prebuilt_binary_path() is None
+        assert "~no-such-user/h2-ping-sidecar is not an executable file" in capsys.readouterr().out
+        with patch.object(launcher.shutil, "which", return_value=None):
+            path = launcher.default_binary_path(OmegaConf.create({"cache_dir": str(tmp_path / "cache")}))
+        assert path.is_relative_to((tmp_path / "cache").resolve())
+
     def test_the_container_image_matches_the_prebuilt_contract(self, monkeypatch):
         monkeypatch.undo()  # the autouse fixture's stand-in path; this test compares the real constants
         dockerfile = Path(__file__).resolve().parents[3] / "docker" / "Dockerfile"

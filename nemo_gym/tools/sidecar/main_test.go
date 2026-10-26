@@ -32,13 +32,50 @@ import (
 	"time"
 )
 
+// buildSidecar compiles the sidecar the tests run as a child process. Under `go test -race` the
+// child is built with the race detector too: the proxy's request and rotation paths run in it, not
+// in the test binary.
+func buildSidecar(t *testing.T) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "h2-ping-sidecar-test")
+	args := []string{"build", "-buildvcs=false", "-o", bin}
+	if raceEnabled {
+		args = append(args, "-race")
+	}
+	if out, err := exec.Command("go", append(args, ".")...).CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+	return bin
+}
+
+// hasRaceReport reports whether a child's output holds a race detector report.
+func hasRaceReport(childOutput string) bool {
+	return strings.Contains(childOutput, "WARNING: DATA RACE")
+}
+
+// failOnRace fails the test when a child's output holds a race detector report. It is checked on the
+// output rather than the exit status because a child that is killed in cleanup never reports one.
+func failOnRace(t *testing.T, childOutput string) {
+	t.Helper()
+	if hasRaceReport(childOutput) {
+		t.Errorf("race detector report from the sidecar process:\n%s", childOutput)
+	}
+}
+
+// A changed report banner would silently turn failOnRace into a no-op, so pin what it matches.
+func TestHasRaceReport(t *testing.T) {
+	if !hasRaceReport("==================\nWARNING: DATA RACE\nWrite at 0x00c000012345 by goroutine 7:\n") {
+		t.Fatal("race report not detected")
+	}
+	if hasRaceReport("listening on 127.0.0.1:1234\n") {
+		t.Fatal("ordinary log output taken for a race report")
+	}
+}
+
 // Builds the sidecar and runs it against a local fake HTTP/2 origin. It never
 // sends traffic or credentials anywhere else.
 func TestSidecarForwardsOverHTTP2AndDrains(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "h2-ping-sidecar-test")
-	if out, err := exec.Command("go", "build", "-buildvcs=false", "-o", bin, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %v\n%s", err, out)
-	}
+	bin := buildSidecar(t)
 
 	started, release := make(chan struct{}), make(chan struct{})
 	origin := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -146,6 +183,7 @@ func TestSidecarForwardsOverHTTP2AndDrains(t *testing.T) {
 	}
 	select {
 	case err := <-done:
+		failOnRace(t, logs.String())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -160,10 +198,7 @@ func TestSidecarForwardsOverHTTP2AndDrains(t *testing.T) {
 // startSidecar builds the sidecar, runs it against upstream and waits until it is ready.
 func startSidecar(t *testing.T, upstream string, extraArgs ...string) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "h2-ping-sidecar-test")
-	if out, err := exec.Command("go", "build", "-buildvcs=false", "-o", bin, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %v\n%s", err, out)
-	}
+	bin := buildSidecar(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -178,7 +213,11 @@ func startSidecar(t *testing.T, upstream string, extraArgs ...string) string {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait() // also waits for the output copy, so logs is complete
+		failOnRace(t, logs.String())
+	})
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, err := os.Stat(ready); err == nil {
@@ -326,10 +365,7 @@ func TestSidecarRotationLetsInFlightRequestsFinish(t *testing.T) {
 // When the port is already taken the sidecar must exit without writing the
 // ready file, or the launcher would route traffic to whatever holds the port.
 func TestSidecarWritesNoReadyFileWhenThePortIsTaken(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "h2-ping-sidecar-test")
-	if out, err := exec.Command("go", "build", "-buildvcs=false", "-o", bin, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %v\n%s", err, out)
-	}
+	bin := buildSidecar(t)
 	taken, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -338,6 +374,7 @@ func TestSidecarWritesNoReadyFileWhenThePortIsTaken(t *testing.T) {
 	ready := filepath.Join(t.TempDir(), "ready")
 	cmd := exec.Command(bin, "-listen", taken.Addr().String(), "-upstream", "https://127.0.0.1:1", "-ready-file", ready)
 	out, err := cmd.CombinedOutput()
+	failOnRace(t, string(out))
 	if err == nil {
 		t.Fatalf("started on a port that was already in use:\n%s", out)
 	}

@@ -129,11 +129,16 @@ def prebuilt_binary_path() -> Optional[Path]:
 
     The path is the one ``NEMO_GYM_H2_PING_SIDECAR_BINARY`` names (an empty value counts as unset), else
     ``/opt/nemo-gym/bin/h2-ping-sidecar``, and it must be an executable file. A path that was set
-    explicitly but is not one is reported and then ignored, so Gym goes on to the cache and the build.
+    explicitly but is not one (or cannot be expanded, such as ``~unknown-user``) is reported and then ignored, so Gym goes on to the cache and the build.
     """
     configured = os.environ.get(PREBUILT_BINARY_ENV_NAME)
-    path = Path(configured).expanduser() if configured else PREBUILT_BINARY_DEFAULT_PATH
-    if path.is_file() and os.access(path, os.X_OK):
+    path = PREBUILT_BINARY_DEFAULT_PATH
+    if configured:
+        try:
+            path = Path(configured).expanduser()
+        except RuntimeError:  # ``~user`` for a user that does not exist: treated as not executable
+            path = None
+    if path is not None and path.is_file() and os.access(path, os.X_OK):
         return path
     if configured:
         print(f"h2-ping-sidecar: {PREBUILT_BINARY_ENV_NAME}={configured} is not an executable file, ignoring it")
