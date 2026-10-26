@@ -455,7 +455,7 @@ class TestSanity:
                 Path(local_path).write_text(
                     json.dumps(
                         {
-                            "cleanup_confirmed": commands is None or any("kill -TERM" in cmd for cmd in commands),
+                            "cleanup_confirmed": commands is None or any("touch" in cmd and "stop.request" in cmd for cmd in commands),
                             "error": None,
                         }
                     ),
@@ -577,7 +577,7 @@ class TestSanity:
         with pytest.raises(TimeoutError, match="exceeded its execution deadline"):
             await hermes.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="fix bug"))
 
-        stop = [command for command in sandbox.commands if "stop.request" in command and "kill -TERM" in command]
+        stop = [command for command in sandbox.commands if "touch" in command and "stop.request" in command]
         assert len(stop) == 1
 
     @staticmethod
@@ -722,7 +722,7 @@ class TestSanity:
             timeout=5,
         )
 
-        stop = [command for command in sandbox.commands if "stop.request" in command and "kill -TERM" in command]
+        stop = [command for command in sandbox.commands if "touch" in command and "stop.request" in command]
         assert len(stop) == 1
         assert hermes._session_records["session"].state is None
         with pytest.raises(asyncio.CancelledError):
