@@ -91,13 +91,12 @@ def test_routes_cover_the_release_and_name_its_environments():
     assert config[swe["agent_server"]["name"]]["_inherit_from"] == "opencode_agent"
 
 
-def test_every_agent_calls_the_policy_copy_that_pins_the_benchmarks_sampling():
+def test_every_agent_calls_the_policy_copy_that_only_removes_the_output_cap():
     config = yaml.safe_load((prepare_module.BENCHMARK_DIR / "config.yaml").read_text())
-    pinned = config["partner_if_policy_model"]
-    assert pinned["_copy"] == "policy_model"
-    assert pinned["responses_api_models"]["vllm_model"]["sampling_overrides"] == {
-        "temperature": 1.0,
-        "top_p": 1.0,
+    policy = config["partner_if_policy_model"]
+    assert policy["_copy"] == "policy_model"
+    # The run's sampling comes from the copied policy server; the benchmark adds only the null caps.
+    assert policy["responses_api_models"]["vllm_model"]["sampling_overrides"] == {
         "max_tokens": None,
         "max_completion_tokens": None,
     }

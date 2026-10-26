@@ -62,11 +62,12 @@ task checks whether the model follows its instructions, graded against versioned
     host's name does not resolve to an address the sandboxes can reach, also set `+default_host=<address>`.
   - Scale-SWE's own tests then run as a diagnostic, in up to two more sandboxes of the same image: an
     inconclusive result is retried once. Their verdict is kept in `task_outcome` and never changes the reward.
-- **Sampling:** the benchmark fixes the policy's sampling for every task: temperature 1.0, top_p 1.0 and no
-  output cap. `config.yaml` pins it on `partner_if_policy_model`, a copy of the run's `vllm_model` policy
-  server that every agent calls.
-  - No output cap means the pin sends a null cap, which also replaces the per-call cap OpenCode sends. On a vLLM
-    endpoint each reply may then use the rest of the model's context window.
+- **Sampling:** each run sets its policy's sampling, such as temperature and top_p, on the policy model server
+  (`policy_model.responses_api_models.vllm_model.sampling_overrides`). The benchmark only removes the output
+  cap: `config.yaml` sets null caps on `partner_if_policy_model`, a copy of the run's `vllm_model` policy
+  server that every agent calls and that keeps the run's sampling.
+  - No output cap means a null cap, which also replaces the per-call cap OpenCode sends. On a vLLM endpoint each
+    reply may then use the rest of the model's context window.
   - An endpoint that applies a small default when the cap is null (some hosted OpenAI-compatible APIs default to
     4096) would cut replies short. Give it an explicit cap the size of the context window:
     `++partner_if_policy_model.responses_api_models.vllm_model.sampling_overrides.max_tokens=<window>`.
@@ -74,8 +75,8 @@ task checks whether the model follows its instructions, graded against versioned
     effort can take more than 6 minutes. Some hosted gateways stop a request at 360 s unless its body sets
     `timeout`. The reference runs set `extra_body.timeout: 3600` on the policy and judge model servers.
   - Runs set no request parameters, such as `--temperature`, `--top-p`, `--max-output-tokens` or a reasoning
-    effort: `opencode_agent` refuses them, so every SWE task would fail. Set model settings such as reasoning
-    effort on the policy model server instead.
+    effort: `opencode_agent` refuses them, so every SWE task would fail. Set sampling and model settings such as
+    reasoning effort on the policy model server instead.
 - **Prompts:** the rows are prepared, so no template applies. Rows set no `temperature`, `top_p` or
   `max_output_tokens`; some set `tool_choice`.
 
@@ -92,9 +93,10 @@ task checks whether the model follows its instructions, graded against versioned
     with equal weight.
   - Also `if_partial`, the passed fraction of IF items.
   - `coverage/*` counts masked rollouts.
-- **Reference score:** 56.00 on `pass@1[avg-of-3]/all_if_pass`, tolerance ±7.1 points (95%), on dataset 2.1.4.
-  - Policy: GLM 5.3 (`nvidia/zai-org/glm-5.3`), with its settings on the model server: temperature 1.0 and
-    top_p 1.0 (the benchmark's pin), maximum reasoning effort, 262,144 output tokens, 16 rollouts in parallel.
+- **Reference score:** 56.00 on `pass@1[avg-of-3]/all_if_pass`, tolerance ±7.1 points (95%), on dataset 2.1.4,
+  measured while the benchmark fixed top_p at 1.0; it is being re-measured with the sampling below.
+  - Policy: GLM 5.3 (`nvidia/zai-org/glm-5.3`) at its standard sampling, set on the model server: temperature
+    1.0 and top_p 0.95, maximum reasoning effort, 262,144 output tokens, 16 rollouts in parallel.
   - Judge: the default GPT-6 Sol (`azure/openai/gpt-6-sol`).
   - The tolerance is t(0.975, 6) × the pooled `std_dev_across_runs` (3.53) × √(2/3). Two more runs with the same
     judge scored 56.00 and 53.33.
@@ -137,7 +139,7 @@ task checks whether the model follows its instructions, graded against versioned
    gym eval prepare --benchmark partner_if
    ```
 3. Add the judge endpoint and a sandbox provider config, and run the benchmark. The policy server must be
-   `vllm_model`, whose `sampling_overrides` carry the benchmark's sampling:
+   `vllm_model`: its `sampling_overrides` carry the run's sampling, and the benchmark's copy adds the null caps:
 
    ```bash
    gym eval run --benchmark partner_if --model-type vllm_model \

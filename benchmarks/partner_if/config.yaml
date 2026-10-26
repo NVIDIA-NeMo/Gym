@@ -8,16 +8,16 @@ config_paths:
   # opencode_agent's command deny-list, which partner_if_swe_agent inherits.
   - responses_api_agents/opencode_agent/configs/permissions/default.yaml
 
-# The benchmark fixes the policy's sampling for every task: temperature 1.0, top_p 1.0 and no output cap. The null
-# caps, which also replace the per-call cap OpenCode sends, leave each reply the rest of a vLLM endpoint's context
-# window; an endpoint with a smaller default needs an explicit cap here (see README.md). It pins them on this copy
-# of the run's policy model, which every agent here calls. Runs set no sampling of their own: opencode_agent refuses
-# request-level sampling, so a run that sets it fails the SWE tasks.
+# A run sets its policy's sampling on the policy model server (policy_model's sampling_overrides); this copy of it,
+# which every agent here calls, keeps that sampling and only removes the output cap. The null caps, which also
+# replace the per-call cap OpenCode sends, leave each reply the rest of a vLLM endpoint's context window; an
+# endpoint with a smaller default needs an explicit cap here (see README.md). Runs set no request-level sampling:
+# opencode_agent refuses it, so a run that sets it fails the SWE tasks.
 partner_if_policy_model:
   _copy: policy_model
   responses_api_models:
     vllm_model:
-      sampling_overrides: {temperature: 1.0, top_p: 1.0, max_tokens: null, max_completion_tokens: null}
+      sampling_overrides: {max_tokens: null, max_completion_tokens: null}
 
 # The judge settings are part of the measurement contract.
 partner_if:
