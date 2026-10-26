@@ -626,23 +626,29 @@ class NeMoGymResponseReasoningItemForTraining(NeMoGymResponseReasoningItem, Toke
     pass
 
 
+class NeMoGymResponseCustomToolCallForTraining(NeMoGymResponseCustomToolCall, TokenIDLogProbMixin):
+    pass
+
+
 RESPONSES_TO_TRAIN = {
     NeMoGymEasyInputMessage: NeMoGymEasyInputMessageForTraining,
     NeMoGymMessage: NeMoGymMessageForTraining,
     NeMoGymResponseOutputMessage: NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseFunctionToolCall: NeMoGymResponseFunctionToolCallForTraining,
     NeMoGymResponseReasoningItem: NeMoGymResponseReasoningItemForTraining,
+    NeMoGymResponseCustomToolCall: NeMoGymResponseCustomToolCallForTraining,
 }
 
 # The hosted-tool and client-executed call types have no variant here:
 #   web_search_call, file_search_call, code_interpreter_call, image_generation_call,
-#   mcp_call, computer_call, custom_tool_call, local_shell_call.
+#   mcp_call, computer_call, local_shell_call.
 #
 # training_variant_of() is reached only from ResponsesConverter.postprocess_assistant_message_dict,
 # which passes response_output[-1].
 # That list is local to the function.
-# It holds only NeMoGymResponseReasoningItem, NeMoGymResponseOutputMessage
-# or NeMoGymResponseFunctionToolCall, all registered above.
+# It holds only NeMoGymResponseReasoningItem, NeMoGymResponseOutputMessage,
+# NeMoGymResponseFunctionToolCall or NeMoGymResponseCustomToolCall (the
+# function bridge's lift), all registered above.
 #
 # Each variant is also a member of the response item unions.
 # Complete token metadata selects that variant.
@@ -681,7 +687,9 @@ _ITEM_STATUSES = frozenset({"in_progress", "completed", "incomplete"})
 _OUTPUT_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
 _TRAINING_TAG_SUFFIX = "__training"
 # Tags whose models have a ForTraining variant registered in RESPONSES_TO_TRAIN.
-_TRAINABLE_ITEM_TAGS = frozenset({"easy_message", "input_message", "output_message", "function_call", "reasoning"})
+_TRAINABLE_ITEM_TAGS = frozenset(
+    {"easy_message", "input_message", "output_message", "function_call", "custom_tool_call", "reasoning"}
+)
 
 # Exact member class -> union tag, populated from the annotated unions defined below.
 _RESPONSE_INPUT_ITEM_TAG_BY_CLASS: Dict[type, str] = {}
@@ -846,6 +854,7 @@ NeMoGymResponseInputItem = Annotated[
         Annotated[NeMoGymMessageForTraining, Tag("input_message__training")],
         Annotated[NeMoGymResponseOutputMessageForTraining, Tag("output_message__training")],
         Annotated[NeMoGymResponseFunctionToolCallForTraining, Tag("function_call__training")],
+        Annotated[NeMoGymResponseCustomToolCallForTraining, Tag("custom_tool_call__training")],
         Annotated[NeMoGymResponseReasoningItemForTraining, Tag("reasoning__training")],
     ],
     Discriminator(_discriminate_response_input_item),
@@ -1084,6 +1093,7 @@ NeMoGymResponseOutputItem = Annotated[
         Annotated[NeMoGymMessageForTraining, Tag("input_message__training")],
         Annotated[NeMoGymResponseOutputMessageForTraining, Tag("output_message__training")],
         Annotated[NeMoGymResponseFunctionToolCallForTraining, Tag("function_call__training")],
+        Annotated[NeMoGymResponseCustomToolCallForTraining, Tag("custom_tool_call__training")],
         Annotated[NeMoGymResponseReasoningItemForTraining, Tag("reasoning__training")],
     ],
     Discriminator(_discriminate_response_output_item),
@@ -1863,6 +1873,17 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         base_url = self.base_url.removesuffix("/v1")
         request_kwargs = dict(
             url=f"{base_url}/tokenize",
+            json=kwargs,
+        )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await get_response_json(response)
+
+    async def create_embeddings(self, **kwargs):
+        """POST ``{base_url}/embeddings`` with ``kwargs`` as the JSON body and return the parsed response dict."""
+        request_kwargs = dict(
+            url=f"{self.base_url}/embeddings",
             json=kwargs,
         )
         response = await self._request(method="POST", **request_kwargs)

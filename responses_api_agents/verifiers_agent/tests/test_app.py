@@ -18,6 +18,7 @@ import logging
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from openai import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, AsyncOpenAI, Timeout
 
@@ -154,6 +155,91 @@ class TestApp:
         assert output[2]["content"][0]["text"] == "answer"
         assert output[2]["prompt_token_ids"] == [3]
 
+    def test_eval_rollout_without_token_ids_is_not_reported_as_empty(self, caplog) -> None:
+        """Eval mode (`return_token_id_information: false`) returns no token ids, but the trajectory is complete."""
+        tool_call = {"id": "call_1", "name": "python", "arguments": json.dumps({"expr": "2+2"})}
+        completion = [
+            {"role": "assistant", "content": "", "tool_calls": [json.dumps(tool_call)]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "4"},
+            {"role": "assistant", "content": "answer"},
+        ]
+        rollout_output = {
+            "completion": completion,
+            "trajectory": [
+                {"completion": [{"role": "assistant", "content": "", "tool_calls": [tool_call]}]},
+                {"completion": [{"role": "assistant", "content": "answer"}]},
+            ],
+        }
+
+        with caplog.at_level(logging.DEBUG, logger=agent_app_logger.name):
+            output = self._agent()._convert_trajectory_to_output(rollout_output)
+
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert "token ids were likely not requested" in caplog.text
+        assert [item["type"] for item in output] == ["function_call", "function_call_output", "message", "message"]
+        assert output[-1]["id"] == "msg_empty"
+        assert output[-1]["generation_token_ids"] == [0]
+
+    @pytest.mark.parametrize(
+        ("completion", "expect_warning"),
+        [
+            # Stopped by max_turns right after a tool call: only function_call items, no assistant message.
+            (
+                [
+                    {"role": "assistant", "content": "", "tool_calls": [json.dumps({"id": "c1", "name": "f"})]},
+                    {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+                ],
+                False,
+            ),
+            # Only non-assistant messages: a user or tool message must not count as an assistant turn.
+            ([{"role": "user", "content": "q"}, {"role": "tool", "tool_call_id": "c1", "content": "ok"}], True),
+        ],
+    )
+    def test_each_kind_of_assistant_turn_decides_the_warning(self, caplog, completion, expect_warning) -> None:
+        with caplog.at_level(logging.WARNING, logger=agent_app_logger.name):
+            self._agent()._convert_trajectory_to_output({"completion": completion, "trajectory": []})
+
+        assert ("Returning empty trajectory" in caplog.text) is expect_warning
+
+    def test_rollout_without_completion_items_still_warns_empty_trajectory(self, caplog) -> None:
+        rollout_output = {"completion": [], "trajectory": [], "error": {"error": "sandbox quota exceeded"}}
+
+        with caplog.at_level(logging.WARNING, logger=agent_app_logger.name):
+            output = self._agent()._convert_trajectory_to_output(rollout_output)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "Returning empty trajectory" in warnings[0].getMessage()
+        assert "sandbox quota exceeded" in warnings[0].getMessage()
+        assert [item["id"] for item in output] == ["msg_empty"]
+
+    def test_rollout_error_after_assistant_turns_is_still_logged(self, caplog) -> None:
+        rollout_output = {
+            "completion": [{"role": "assistant", "content": "partial answer"}],
+            "trajectory": [{"completion": [{"role": "assistant", "content": "partial answer"}]}],
+            "error": {"error": "ToolError", "error_chain_repr": "ToolError('sandbox died')"},
+        }
+
+        with caplog.at_level(logging.WARNING, logger=agent_app_logger.name):
+            output = self._agent()._convert_trajectory_to_output(rollout_output)
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "ToolError" in warnings[0]
+        assert "Returning empty trajectory" not in warnings[0]
+        assert output[-1]["id"] == "msg_empty"
+
+    @staticmethod
+    def _agent() -> VerifiersAgent:
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name=""),
+        )
+        return VerifiersAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
 
 class TestPolicyClient:
     """The policy client decides which vLLM engine serves a rollout.
@@ -205,7 +291,7 @@ class TestPolicyClient:
     def test_rollout_prefixed_client_inherits_deadlines_and_retries(self) -> None:
         agent = self._agent(client_timeout_s=3600, client_connect_timeout_s=60, client_max_retries=0)
 
-        def fake_resolve(model_server_name: str, rollout_id: str | None = None) -> str:
+        def fake_resolve(model_server_name: str, rollout_id: str | None = None, *, trace_context: bool = True) -> str:
             prefix = f"/ng-rollout/{rollout_id}" if rollout_id else ""
             return f"http://policy{prefix}/v1"
 
@@ -230,7 +316,7 @@ class TestPolicyClient:
     def test_client_base_url_carries_the_rollout_capture_prefix(self) -> None:
         agent = self._agent()
 
-        def fake_resolve(model_server_name: str, rollout_id: str | None = None) -> str:
+        def fake_resolve(model_server_name: str, rollout_id: str | None = None, *, trace_context: bool = True) -> str:
             prefix = f"/ng-rollout/{rollout_id}" if rollout_id else ""
             return f"http://policy{prefix}/v1"
 
@@ -318,7 +404,7 @@ class TestPrefixedResponsesRoute:
         return VerifiersAgent(config=config, server_client=server_client)
 
     @staticmethod
-    def _resolve(model_server_name: str, rollout_id: str | None = None) -> str:
+    def _resolve(model_server_name: str, rollout_id: str | None = None, *, trace_context: bool = True) -> str:
         return "http://policy%s/v1" % (f"/ng-rollout/{rollout_id}" if rollout_id else "")
 
     def _base_url_seen_by(self, agent: VerifiersAgent, url: str) -> str:
@@ -578,3 +664,46 @@ class TestExportStateColumns:
             _, body = self._run(export_state_columns=["assertion_result"])
         assert "exported_state" not in body["response"]
         assert "['assertion_result'] not on the verifiers State" in caplog.text
+
+
+class TestSharedClientTraceContext:
+    """The cached policy client is shared across rollouts, so its base URL must not name a span.
+
+    Per-run copies may: they live for one rollout. See Gym #4836.
+    """
+
+    SEGMENT = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+
+    def _agent(self, *, observability: bool) -> VerifiersAgent:
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            vf_env_id="stub_env",
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {
+            OBSERVABILITY_ENABLED_KEY_NAME: observability,
+            "policy_model": {"responses_api_models": {"vllm_model": {"host": "policy", "port": 8000}}},
+        }
+        server_client._build_server_base_url = lambda cfg: "http://policy:8000"
+        return VerifiersAgent(config=config, server_client=server_client)
+
+    def test_cached_client_has_no_trace_context_while_per_run_copies_do(self, monkeypatch) -> None:
+        from nemo_gym import server_utils
+
+        # Stand in for an exporting tracer with a current span at every call.
+        monkeypatch.setattr(server_utils, "trace_context_path_segment", lambda: self.SEGMENT)
+
+        agent = self._agent(observability=False)
+        shared = agent._get_client({"_ng_task_index": 0, "_ng_rollout_index": 0})
+        assert str(shared.client.base_url).rstrip("/") == "http://policy:8000/v1"
+        assert agent._get_client({"_ng_task_index": 1, "_ng_rollout_index": 0}) is shared
+
+        agent = self._agent(observability=True)
+        per_run = agent._get_client({"_ng_task_index": 2, "_ng_rollout_index": 0})
+        assert str(per_run.client.base_url).rstrip("/") == f"http://policy:8000/ng-rollout/2-0{self.SEGMENT}/v1"
+        cached = agent.client_cache["policy_model"]
+        assert str(cached.client.base_url).rstrip("/") == "http://policy:8000/v1"
