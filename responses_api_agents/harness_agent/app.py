@@ -19,7 +19,7 @@ import shlex
 import socket
 import subprocess
 import tempfile
-from asyncio import Semaphore
+from asyncio import Semaphore, timeout
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Mapping
@@ -50,6 +50,7 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 LOG = logging.getLogger(__name__)
+CLOSE_SESSION_TIMEOUT_S = 30.0
 _RUN_CONTEXT: ContextVar[dict[str, Any]] = ContextVar("harness_agent_run_context", default={})
 
 
@@ -315,16 +316,18 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         if not isinstance(session_id, str) or not session_id:
             return
         try:
-            episode_id = EpisodeId.from_capture_key(self.rollout_id_from_run(body) or "harness-run")
-            resp = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/close_session",
-                json=ResourcesCloseSessionRequest(resources_session_id=session_id, episode_id=episode_id).model_dump(
-                    mode="json"
-                ),
-                cookies=cookies,
-            )
-            await raise_for_status(resp)
+            # The server client retries without a deadline, so bound the close or a dead server hides the run's error.
+            async with timeout(CLOSE_SESSION_TIMEOUT_S):
+                episode_id = EpisodeId.from_capture_key(self.rollout_id_from_run(body) or "harness-run")
+                resp = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/close_session",
+                    json=ResourcesCloseSessionRequest(
+                        resources_session_id=session_id, episode_id=episode_id
+                    ).model_dump(mode="json"),
+                    cookies=cookies,
+                )
+                await raise_for_status(resp)
         except Exception:
             LOG.warning("could not close the resources session of a failed run", exc_info=True)
 

@@ -364,6 +364,30 @@ async def test_failed_run_closes_the_session_the_seed_names(named):
         assert closes == []
 
 
+async def test_a_close_that_never_answers_does_not_hide_the_run_error():
+    agent = _make_agent()
+    seed_resp = MagicMock(cookies={"session": "s"})
+
+    async def post(**kwargs):
+        if kwargs["url_path"] == "/close_session":
+            await asyncio.Event().wait()
+        return seed_resp
+
+    agent.server_client.post = AsyncMock(side_effect=post)
+    agent._provider.connect = AsyncMock(return_value=MagicMock(provider_name="opensandbox"))
+    agent._provider.close = AsyncMock()
+    seed = {"sandbox_handle": "box-1", "resources_session_id": "sess-1"}
+    body = HarnessAgentRunRequest(responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+    with (
+        patch("responses_api_agents.harness_agent.app.CLOSE_SESSION_TIMEOUT_S", 0.05),
+        patch.object(HarnessAgent, "responses", new=AsyncMock(side_effect=RuntimeError("agent failed"))),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch("responses_api_agents.harness_agent.app.get_response_json", new=AsyncMock(return_value=seed)),
+        pytest.raises(RuntimeError, match="agent failed"),
+    ):
+        await asyncio.wait_for(agent.run(MagicMock(cookies={}), body), timeout=5)
+
+
 async def test_response_serialization_failure_closes_resource_sandbox():
     agent = _make_agent()
     agent.server_client.post = AsyncMock(return_value=MagicMock(cookies={}))
