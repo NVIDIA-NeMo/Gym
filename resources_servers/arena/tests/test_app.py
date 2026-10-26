@@ -1651,3 +1651,46 @@ class TestArenaResourcesServer:
             }
         )
         assert key == {"response_tokens/mean": approx(10.0), "reasoning_tokens/mean": approx(2.0)}
+
+
+class TestJudgeHttpError:
+    """A judge reply with an HTTP error status fails as that HTTP error, before its body is parsed."""
+
+    config = TestArenaResourcesServer.config
+    server = TestArenaResourcesServer.server
+    _make_verify_request = TestArenaResourcesServer._make_verify_request
+
+    async def test_a_judge_500_is_a_judge_failure_with_its_status_and_body_not_a_parse_error(
+        self, server: ArenaResourcesServer
+    ):
+        import aiohttp
+        from aiohttp import web
+        from aiohttp.test_utils import TestServer
+
+        from nemo_gym.base_resources_server import judge_failsafe
+
+        body = "Error code: 429 - rate limit exceeded"
+        hits = []
+
+        async def judge(_request):
+            hits.append(1)
+            return web.Response(status=500, text=body)
+
+        app = web.Application()
+        app.router.add_post("/v1/responses", judge)
+        request = self._make_verify_request("Paris is the capital.")
+        request.category = "lmarena_v3"
+        async with TestServer(app) as judge_server, aiohttp.ClientSession() as session:
+
+            async def post(*, server_name, url_path, json, **kwargs):
+                return await session.post(judge_server.make_url(url_path), json=json.model_dump(mode="json"))
+
+            server.server_client.post = post
+            row = json.loads((await judge_failsafe(server.verify)(body=request)).body)
+
+        assert row["_ng_failure_class"] == "judge_failed" and row["mask_sample"] is True
+        error = row["_ng_failure_judge_error"]
+        # The judge's real status and body are kept; the 429 in the body text classifies nothing.
+        assert "ClientResponseError" in error and "500" in error and "ValidationError" not in error
+        assert row["response"] == request.response.model_dump(mode="json")  # the saved answer is kept
+        assert len(hits) == 2  # one call per ordering, no extra request

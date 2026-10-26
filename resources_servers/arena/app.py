@@ -35,7 +35,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import get_response_json
+from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.arena.arena import (
     _extract_thinking_content,
     _extract_verdict,
@@ -364,6 +364,8 @@ class ArenaResourcesServer(SimpleResourcesServer):
                     json=responses_create_params,
                     timeout=ClientTimeout(total=config.judge_timeout_secs),
                 )
+                # An HTTP error is the judge failure it is (its status and body kept), not a parse error of its body.
+                await raise_for_status(response)
                 return NeMoGymResponse.model_validate(await get_response_json(response))
 
             # A judge outage is not a lost game: let judge_failsafe return an unresolved judge failure
