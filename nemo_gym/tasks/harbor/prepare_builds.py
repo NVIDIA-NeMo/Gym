@@ -18,7 +18,7 @@ import yaml
 from nemo_gym.sandbox.compose_fields import DEFAULT_PLATFORM, unsupported_compose_fields
 from nemo_gym.tasks.harbor.build_options import BUILDS_KEY, BuildOptions
 from nemo_gym.tasks.harbor.build_plan import DOCKERFILE_NAME, BuildError, BuildPlanEntry, plan_builds
-from nemo_gym.tasks.harbor.build_records import build_inputs_mismatch, recorded_image_mismatch
+from nemo_gym.tasks.harbor.build_records import build_inputs_mismatch, record_forced_tasks, recorded_image_mismatch
 from nemo_gym.tasks.harbor.build_tools import ImageBuilder
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.image_build import build_images
@@ -129,7 +129,10 @@ def _build_dockerfiles(folder: Path, build: BuildOptions, *, select) -> dict[str
     while True:
         conflicts = {}  # task id -> BuildConflict, filled by plan_builds
         services = plan_builds(
-            folder, select=lambda name: name not in refused and (select is None or select(name)), conflicts=conflicts
+            folder,
+            select=lambda name: name not in refused and (select is None or select(name)),
+            conflicts=conflicts,
+            force=build.force,
         )
         found = {task_id: str(error) for task_id, error in refused_before_build(services).items()}
         # A conflict with a task refused this round is not a refusal: without that task the plan may hold this one.
@@ -200,6 +203,12 @@ def _build_dockerfiles(folder: Path, build: BuildOptions, *, select) -> dict[str
         # Nothing to build, so no build tool is needed: a host with every image recorded prepares without one.
         for entry in plan:
             print(f"Built image recorded for {', '.join(entry.tasks[:3])}: {reusable[entry.digest]}")
+        # A task planned over its declared image under ``builds.force`` is recorded as forced here as build_images'
+        # reuse path records it, or the loader would keep the declared image on every repeat preparation. Per
+        # service, not per deduplicated context: a sidecar entry carries no forced names, the main entry does.
+        for entry in services:
+            if entry.forced_tasks:
+                record_forced_tasks(parent, entry.digest, entry.forced_tasks)
         return refused
     names = ", ".join(task for entry in needs_build for task in entry.tasks[:3])
     try:
@@ -219,7 +228,11 @@ def _build_dockerfiles(folder: Path, build: BuildOptions, *, select) -> dict[str
             continue
         try:
             results += build_images(
-                folder, builder=builder, select=lambda name: name in tasks, contexts={entry.digest}
+                folder,
+                builder=builder,
+                select=lambda name: name in tasks,
+                contexts={entry.digest},
+                force=build.force,
             )
         except BuildError as exc:
             reason = f"Could not build the Dockerfile image(s) for task(s) {', '.join(entry.tasks[:3])}: {exc}"

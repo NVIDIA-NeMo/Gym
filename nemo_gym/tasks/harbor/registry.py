@@ -151,6 +151,49 @@ def parse_image_ref(reference: str) -> ImageRef:
     return ImageRef(registry=registry, repository=repository, tag=tag or None, digest=digest or None)
 
 
+def image_prefix_key(prefix: str) -> str:
+    """An ``images.auth`` prefix as :class:`RegistryClient` keys credentials: ``registry/repository-prefix``, the
+    registry read the way Docker reads a reference (:func:`parse_image_ref`: the first component is a host when it
+    has a dot, a colon or is ``localhost``, else the prefix names a Docker Hub repository, and ``docker.io`` is Hub's
+    registry), the rest kept as written. ``registry.example.com:5005/`` is ``registry.example.com:5005/``,
+    ``docker.io/org/`` is ``registry-1.docker.io/org/``, ``org/`` is ``registry-1.docker.io/org/`` and a bare host
+    is that host's whole registry. Raises :class:`ImageConfigError` for text that is not an image prefix."""
+    first, _, rest = prefix.partition("/")
+    registry = parse_image_ref(prefix.rstrip("/") + "/x").registry
+    path = rest if ("." in first or ":" in first or first == "localhost") else prefix
+    return f"{registry}/{path}"
+
+
+def credentials_for_image_prefixes(auth: Any, where: str = "images.auth") -> dict[str, tuple[str, str]]:
+    """:class:`RegistryClient` credentials from a sandbox provider's image-prefix auth map.
+
+    OpenSandbox's ``images.auth`` maps an image prefix (``registry.example.com:5005/``, ``docker.io/org/``)
+    to ``{username, password}``, longest matching prefix first at pull. Each prefix keeps its own entry, keyed as
+    :func:`image_prefix_key` spells it, so the client selects a reference's credentials the way the provider does:
+    two repositories of one registry with different credentials are each read with their own. ``auth`` that is
+    not a mapping of such entries raises :class:`ValueError` naming ``where``.
+    """
+    if auth is None:
+        return {}
+    if not isinstance(auth, dict):
+        raise ValueError(f"`{where}` must map an image prefix to {{username, password}}")
+    credentials: dict[str, tuple[str, str]] = {}
+    for prefix in sorted(auth, key=lambda value: (len(str(value)), str(value))):
+        entry = auth[prefix]
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("username"), str)
+            or not isinstance(entry.get("password"), str)
+        ):
+            raise ValueError(f"`{where}.{prefix}` must hold a `username` and a `password` string")
+        try:
+            key = image_prefix_key(str(prefix))
+        except ImageConfigError as exc:
+            raise ValueError(f"`{where}.{prefix}` is not an image prefix: {exc}") from exc
+        credentials[key] = (entry["username"], entry["password"])
+    return credentials
+
+
 class _RedirectHandler(urllib.request.HTTPRedirectHandler):
     """Follow a registry redirect without carrying the registry's token to another host.
 
@@ -172,8 +215,11 @@ class _RedirectHandler(urllib.request.HTTPRedirectHandler):
 class RegistryClient:
     """Read manifests and configuration blobs over the OCI distribution API with the standard library.
 
-    ``credentials`` maps a registry host to ``(username, password)`` for private repositories;
-    public ones use the anonymous token the registry hands out. ``platform`` is the ``(os, architecture)`` or
+    ``credentials`` maps a registry host, or an image prefix as :func:`image_prefix_key` spells it
+    (``registry/repository-prefix``, what :func:`credentials_for_image_prefixes` returns), to ``(username,
+    password)`` for private repositories: a reference takes the longest matching entry's, a bare host being that
+    whole registry, as the sandbox provider selects an ``images.auth`` entry at pull; public ones use the anonymous
+    token the registry hands out. ``platform`` is the ``(os, architecture)`` or
     ``(os, architecture, variant)`` an image reference is resolved for (linux/amd64 by default), kept normalised
     (:func:`normalize_platform_parts`): the manifest an index names for it, matched as ``docker --platform``
     matches one, and the only one a single-platform reference may be.
@@ -277,8 +323,9 @@ class RegistryClient:
         query = {key: params[key] for key in ("service", "scope") if key in params}
         query.setdefault("scope", f"repository:{ref.repository}:pull")
         headers = {}
-        if ref.registry in self.credentials:
-            username, password = self.credentials[ref.registry]
+        credentials = self._credentials_for(ref)
+        if credentials is not None:
+            username, password = credentials
             headers["Authorization"] = "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode()
         try:
             body, _ = self._open(f"{realm}?{urllib.parse.urlencode(query)}", headers)
@@ -289,6 +336,16 @@ class RegistryClient:
         if not token:
             raise ImageConfigError(f"{ref.pinned_repository}: token response carried no token")
         return token
+
+    def _credentials_for(self, ref: ImageRef) -> tuple[str, str] | None:
+        """The credentials of the longest entry that covers ``ref`` (``registry/repository``): a bare host key is
+        the whole registry, a prefix key matches as the provider matches ``images.auth``; ``None`` when no entry
+        covers the reference, which is then read anonymously."""
+        name = f"{ref.registry}/{ref.repository}"
+        matching = [key for key in self.credentials if name.startswith(key if "/" in key else key + "/")]
+        if not matching:
+            return None
+        return self.credentials[max(matching, key=len)]
 
     def _open(self, url: str, headers: dict[str, str]) -> tuple[bytes, dict[str, str]]:
         """One GET; connection-level failures (not HTTP errors) are retried with a short backoff."""

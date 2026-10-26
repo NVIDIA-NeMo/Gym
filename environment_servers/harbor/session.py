@@ -18,7 +18,8 @@ import logging
 import os
 import re
 import shlex
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from fastapi import HTTPException
@@ -32,6 +33,7 @@ from nemo_gym.sandbox.transfer import exec_as_root, upload_dir
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.cli import ORACLE_AGENT
 from nemo_gym.tasks.harbor.digest import is_ignored
+from nemo_gym.tasks.harbor.task import HarborTurn
 
 
 LOGGER = logging.getLogger(__name__)
@@ -69,6 +71,29 @@ class HarborSession:
     # Environment the harness runs its commands with, handed over in its sandbox access: the host-resolved
     # ``[solution].env`` when the harness is the oracle, nothing otherwise.
     agent_env: dict[str, str] = field(default_factory=dict)
+    # The user the harness runs as, handed over in its sandbox access: the sandbox's default as the seed installed
+    # it from the task's own ``HarborTask.user`` (``HarborUsersMixin._set_default_user``), then as a turn of a
+    # multi-step task installed the step's ``[steps.agent].user`` (``HarborEnvironmentServer._apply_turn_user``).
+    # Kept as installed: a uid is the name it resolved to, or the integer when it has no passwd entry
+    # (OpenSandbox's native ``uid=`` exec path; the string would be taken for an account name). ``None`` is the
+    # image's default.
+    agent_user: str | int | None = None
+    # That user as the task or the step wrote it (``HarborTask.user``, then the step's), which the next turn's own
+    # is compared with to decide whether to switch (``_prepare_turn``); the installed form may spell it differently.
+    requested_user: str | None = None
+    # The image's uid-to-name table as the seed looked it up (``HarborUsersMixin._user_name``), reused when a
+    # later turn installs a numeric user.
+    user_names: dict[str, str] = field(default_factory=dict)
+    # The sandbox's default exec user as the seed installed it (``None`` is the image's own): what a turn of a
+    # multi-step task puts back around its verifier (``HarborSessionMixin._as_seed_default_user``), the way
+    # Harbor's ``with_default_user`` around the agent phase is undone before the shared verifier runs.
+    seed_default_user: str | int | None = None
+    # ``uid:gid`` of the working directory as the seed left it, read before the first per-turn user switch and
+    # restored when a later turn switches back to the image's default user (``_apply_turn_user``).
+    workdir_owner: str | None = None
+    # The harness is the Harbor oracle: the reference solution is placed at /solution for it, once at seed for a
+    # single-turn task and before each turn of a multi-step task (``_seed_solution``, ``_place_turn_solution``).
+    solution_for_oracle: bool = False
 
     def service(self, name: str | None) -> AsyncSandbox:
         """The sandbox of a Compose service; ``None`` or ``"main"`` is the agent's own."""
@@ -165,15 +190,7 @@ class HarborSessionMixin:
             if result.return_code != 0 or not (result.stdout or "").strip():
                 raise RuntimeError(f"Could not resolve the image working directory: {result.stderr or result.stdout}")
             workdir = (result.stdout or "").strip().splitlines()[-1]
-        if workdir != "/":
-            # Only a directory the task or image named below the root is created and, with a user
-            # override, handed over; an image whose WORKDIR is `/` must keep root's ownership of it.
-            commands = [f"mkdir -p {shlex.quote(workdir)}"]
-            if not _is_root(task.user):
-                commands.append(f"chown {shlex.quote(task.user)} {shlex.quote(workdir)}")
-            result = await exec_as_root(sandbox, " && ".join(commands), timeout_s=60)
-            if result.return_code != 0:
-                raise RuntimeError(f"Could not prepare {workdir}: {result.stderr or result.stdout}")
+        await self._own_workdir(sandbox, workdir, task.user, create=True)
         environment_dir = task.path / "environment"
         if (
             task.config.environment.docker_image
@@ -198,6 +215,69 @@ class HarborSessionMixin:
                 f"{task.task_id}: could not create /logs folders in the agent sandbox: {logs.stderr or logs.stdout}"
             )
         return workdir
+
+    @staticmethod
+    async def _own_workdir(sandbox: AsyncSandbox, workdir: str, user: str | None, *, create: bool = False) -> None:
+        """Hand the working directory to ``user`` (``chown``, as root), creating it first with ``create``.
+
+        Only a directory the task or image named below the root is created and, with a user override, handed
+        over; an image whose WORKDIR is `/` must keep root's ownership of it, and root itself needs no chown. A
+        multi-step task runs this again for a turn whose ``[steps.agent].user`` differs from the task's, so the
+        step's user owns the directory it works in, as a build's ``WORKDIR`` under that ``USER`` would.
+        """
+        if workdir == "/":
+            return
+        commands = [f"mkdir -p {shlex.quote(workdir)}"] if create else []
+        if not _is_root(user):
+            commands.append(f"chown {shlex.quote(str(user))} {shlex.quote(workdir)}")
+        if not commands:
+            return
+        result = await exec_as_root(sandbox, " && ".join(commands), timeout_s=60)
+        if result.return_code != 0:
+            raise RuntimeError(f"Could not prepare {workdir}: {result.stderr or result.stdout}")
+
+    @staticmethod
+    async def _workdir_owner(session: HarborSession) -> str:
+        """The ``uid:gid`` that owns the session's working directory now, read as root (``/`` is left alone)."""
+        if session.workdir == "/":
+            return "0:0"
+        result = await exec_as_root(session.sandbox, f"stat -c %u:%g {shlex.quote(session.workdir)}", timeout_s=60)
+        owner = (result.stdout or "").strip().splitlines()[-1:] if result.return_code == 0 else []
+        if not owner:
+            raise RuntimeError(f"Could not read the owner of {session.workdir}: {result.stderr or result.stdout}")
+        return owner[0]
+
+    @staticmethod
+    async def _restore_workdir_owner(session: HarborSession) -> None:
+        """Give the working directory back to the owner the seed left (:meth:`_workdir_owner`), as root."""
+        if session.workdir == "/" or session.workdir_owner is None:
+            return
+        command = f"chown {shlex.quote(session.workdir_owner)} {shlex.quote(session.workdir)}"
+        result = await exec_as_root(session.sandbox, command, timeout_s=60)
+        if result.return_code != 0:
+            raise RuntimeError(f"Could not restore the owner of {session.workdir}: {result.stderr or result.stdout}")
+
+    @staticmethod
+    @contextmanager
+    def _as_seed_default_user(session: HarborSession) -> Iterator[None]:
+        """The sandbox's default exec user put back to the seed's for the block, and the turn's own after.
+
+        A multi-step task's verifier (its collect hooks and ``test.sh``) runs as its own user, never the step's
+        ``[steps.agent].user``: the explicit user :func:`verifier._verifier_user` names, or, where that is the
+        sandbox's own default (a root image with no ``[agent].user``), the default the seed installed, not the
+        one the turn switched to. Harbor's ``with_default_user`` around the agent phase ends before its shared
+        verifier runs under the verifier's own; this is that restore and re-apply.
+        """
+        sandbox = session.sandbox
+        turn_user = sandbox.default_user
+        if turn_user == session.seed_default_user:
+            yield
+            return
+        sandbox.set_default_user(session.seed_default_user)
+        try:
+            yield
+        finally:
+            sandbox.set_default_user(turn_user)
 
     async def _write_task_context(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
         """Leave the task's in-sandbox tool declarations where a harness can read them.
@@ -245,7 +325,10 @@ class HarborSessionMixin:
         snapshot's ``solution/`` at ``/solution`` as root, readable by the task user, and the session carries
         the host-resolved ``[solution].env`` for the harness's commands (Harbor 0.22.0 ``agents/oracle.py``
         uploads the folder and resolves ``solution.env`` the same way). Any other harness never sees the
-        solution. A task without ``solution/`` uploads nothing; the oracle then reports it unvalidated.
+        solution. A task without ``solution/`` uploads nothing; the oracle then reports it unvalidated. A
+        multi-step task's solutions are per step: the seed only marks the session, and
+        :meth:`_place_turn_solution` puts each turn's own folder there before the turn, as Harbor's oracle
+        resolves the step's ``steps/<name>/solution/`` (falling back to the task's) on every step.
         """
         implementation = self._agent_implementation()
         if implementation is None:
@@ -261,7 +344,28 @@ class HarborSessionMixin:
             return
         task = session.task
         session.agent_env = resolve_env_templates(task.config.solution.env)
+        session.solution_for_oracle = True
+        if task.turns:
+            return
         solution = task.path / "solution"
+        if solution.is_dir():
+            await upload_dir(session.sandbox, solution, SOLUTION_DIR, make_readable=True, ignore=is_ignored)
+
+    async def _place_turn_solution(self, session: HarborSession, turn: HarborTurn) -> None:
+        """Put the turn's reference solution at ``/solution`` for the oracle, replacing the previous turn's.
+
+        ``/solution`` is emptied first (as root), so a step without any solution leaves the oracle nothing to
+        run (it reports the turn unvalidated, where Harbor's oracle fails the step) instead of the previous
+        step's script; then the step's own ``steps/<name>/solution/``, or the task's ``solution/`` when the step
+        has none (:meth:`HarborTask.turn_solution_dir`), is uploaded as the seed uploads a single-turn task's.
+        Nothing happens for any other harness.
+        """
+        if not session.solution_for_oracle:
+            return
+        reset = await exec_as_root(session.sandbox, f"rm -rf -- {SOLUTION_DIR}", timeout_s=60)
+        if reset.return_code != 0:
+            raise RuntimeError(f"Could not empty {SOLUTION_DIR}: {reset.stderr or reset.stdout}")
+        solution = session.task.turn_solution_dir(turn)
         if solution.is_dir():
             await upload_dir(session.sandbox, solution, SOLUTION_DIR, make_readable=True, ignore=is_ignored)
 
@@ -272,6 +376,6 @@ class HarborSessionMixin:
                 descriptor=await session.sandbox.serialize(),
             ),
             workdir=session.workdir,
-            user=session.task.user,
+            user=session.agent_user,
             env=session.agent_env,
         )

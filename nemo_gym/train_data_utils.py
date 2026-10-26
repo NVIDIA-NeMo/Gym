@@ -376,6 +376,41 @@ def postprocess_other_metrics(metrics: DatasetMetrics, other_metrics: Dict[str, 
             setattr(metrics, k, StringMetrics(unique_count=len(v), total_count=sum(v.values())))
 
 
+# Catalog declarations a dataset entry may carry about itself (`domain`, `verified`, `allowed_agents`): what a
+# trainer and the catalog read, never a property of the rows, so they stay out of the metrics sidecar beside the
+# rows. A Harbor dataset writes them into its generated entry from its `dataset.toml`, and flipping `verified`
+# after baselining, widening `allowed_agents` or changing `domain` between two runs must not conflict with the
+# sidecar the first run wrote.
+_CATALOG_DATASET_FIELDS = frozenset({"domain", "verified", "allowed_agents"})
+
+
+def _sidecar_excluded_dataset_fields(
+    dataset: DatasetConfig | BenchmarkDatasetConfig, *, preparation: bool = True
+) -> set[str]:
+    """The entry fields left out of the metrics sidecar's record of ``dataset``.
+
+    Agent and taskset select routing, not source data, so taskset and flat declarations of one file share its
+    sidecar. Preparation (``prepare_script``, ``prepare_dependencies``) controls how a local source file is
+    produced and is not a property of the rows, and defaults must not churn existing sidecars. The catalog
+    declarations (``_CATALOG_DATASET_FIELDS``) are left out for the same reason.
+
+    ``preparation`` False keeps the preparation fields: the per-split sidecar (``<split>_metrics.json`` in the
+    output folder, :meth:`TrainDataProcessor.collate_samples`) has always recorded them, and
+    :meth:`TrainDataProcessor._validate_aggregate_metrics` requires every key of an existing sidecar, so leaving
+    them out there would reject every prepared dataset whose sidecar names them.
+    """
+    excluded = {"agent", "taskset", *_CATALOG_DATASET_FIELDS}
+    if preparation and isinstance(dataset, DatasetConfig):
+        excluded.update({"prepare_script", "prepare_dependencies"})
+    return excluded
+
+
+def _own_task_source(row: Mapping[str, Any]) -> bool:
+    """Whether ``row`` already carries a non-empty ``task_source`` of its own."""
+    task_source = row.get(TASK_SOURCE_KEY_NAME)
+    return isinstance(task_source, str) and bool(task_source.strip())
+
+
 def _materialized_task_parts(sample: Mapping[str, Any]) -> tuple[TaskId, Mapping[str, Any]] | None:
     if not is_materialized_task_row(sample):
         return None
@@ -934,15 +969,8 @@ class TrainDataProcessor(BaseModel):
                 aggregate_metrics = state.metrics.aggregate()
 
                 aggregate_metrics_dict = aggregate_metrics.model_dump_for_output()
-                # Agent and taskset select routing, not source data. Exclude both so taskset
-                # and flat declarations of the same file can share its metrics sidecar.
-                excluded_dataset_fields = {"agent", "taskset"}
-                if isinstance(d, DatasetConfig):
-                    # Preparation controls how a local source file is produced; they are not
-                    # properties of the rows and defaults must not churn existing sidecars.
-                    excluded_dataset_fields.update({"prepare_script", "prepare_dependencies"})
                 aggregate_metrics_dict = (
-                    d.model_dump(mode="json", exclude=excluded_dataset_fields) | aggregate_metrics_dict
+                    d.model_dump(mode="json", exclude=_sidecar_excluded_dataset_fields(d)) | aggregate_metrics_dict
                 )
 
                 data_fpath = Path(d.jsonl_fpath)
@@ -1168,7 +1196,11 @@ This could be due to a change in how metrics are calculated, leading to outdated
 
                         if row.pop(AGENT_REF_KEY, None) is not None:
                             legacy_agent_ref_rows += 1
-                        row[TASK_SOURCE_KEY_NAME] = c.name
+                        # A materialized task row routes by its taskset and names its dataset itself: its
+                        # task_source is the dataset folder's name, written at preparation (Harbor rows), and it
+                        # never resolves to an instance. Every other row is stamped with the declaring instance.
+                        if not (is_materialized_task_row(row) and _own_task_source(row)):
+                            row[TASK_SOURCE_KEY_NAME] = c.name
                         if row_index % d.num_repeats == 0:
                             source_task_index += 1
                         # Validate flat rows before conversion, which would hide misplaced fields.
@@ -1230,9 +1262,11 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 None,
             )
             if d is not None:
-                # Routing choices do not change source metrics.
+                # Routing choices and catalog declarations do not change source metrics. The preparation fields
+                # stay: this sidecar has always recorded them, and an existing one is validated key by key.
                 aggregate_metrics_dict = (
-                    d.model_dump(mode="json", exclude={"agent", "taskset"}) | aggregate_metrics_dict
+                    d.model_dump(mode="json", exclude=_sidecar_excluded_dataset_fields(d, preparation=False))
+                    | aggregate_metrics_dict
                 )
 
             parent = Path(config.output_dirpath)
