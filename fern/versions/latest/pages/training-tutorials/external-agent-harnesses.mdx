@@ -79,6 +79,8 @@ token_id_capture:
 
 `mask_incomplete_when_attributed` (default `true`) decides what happens when a model call registered its capture intent but never committed a record, which is what a harness killed at its timeout leaves behind. By default such an incomplete capture always sets `mask_sample: true`. Set it to `false` to keep the rollout when terminal attribution delivered the verifier-scored chain whole: a call with no record cannot sit inside a delivered chain, so the uncaptured call lies outside the scored trajectory. Without a delivered attribution the rollout is still masked.
 
+A call the engine refuses because the prompt does not fit the context window is not a lost call. When the vLLM model server propagates the refusal (`propagate_context_overflow_errors: true`), it records the refusal in place of a token record, so the rollout is not incomplete and the harness can compact its history and continue. The record names the call the refused request continued (its request-time lineage, resolved before dispatch like a served call's). A context-window refusal of the request that continued the delivered terminal call marks the rebuilt response `incomplete` with reason `max_output_tokens`; a refusal on another branch of the rollout, one the harness recovered from, or one that named only an output-token parameter (no `code`) does not. `_ng_token_capture.engine_refusals` lists every refused call either way. Under worker custody (`external_staging: true`) the refusal is a capture-ledger failure row that carries the call id and the reason `engine_refused_request` only. A framework that assembles receipts from the ledger must treat the reasons in `nemo_gym.token_id_capture.UNSERVED_CALL_FAILURE_REASONS` as off-chain rather than as poisoning (NeMo RL's receipt builder does, through NVIDIA-NeMo/RL#4749); a rollout rebuilt from staged records is then not masked for the refusal but reports no truncation verdict either. NVIDIA-NeMo/Gym#4647 tracks carrying the code and the lineage on that row.
+
 ### 3. Opt in the external agent
 
 Enable capture on each external harness that returns no token ids:
@@ -147,7 +149,7 @@ For example, a harness that calls a chat-completions endpoint for rollout `3-0` 
 
 The built-in external agents, such as Claude Code, add this prefix when `token_id_capture` is enabled for them and they call a Gym model server. A custom harness must add it to every model call. Without the `training-token-capture` segment, the call is not recorded for training, and Gym masks the rollout because it finds no captured calls.
 
-Agents based on `SimpleResponsesAPIAgent` can build the prefixed URL with `base_url_for_run(base_url, body)` or `url_path_for_run(url_path, body)`. Both helpers read the rollout id from the run request and add the training segment when the agent has opted into capture. [Model-Call Capture](/main/model-server/model-call-capture#if-you-build-a-custom-agent) describes the same URL prefix for evaluation capture, along with the other routing helpers.
+Agents based on `SimpleResponsesAPIAgent` can build the prefixed URL with `base_url_for_run(base_url, body)` or `url_path_for_run(url_path, body)`. While the agent exports traces, `base_url_for_run` also appends `/ng-trace/<traceparent>` after the prefix so the model server can parent the harness's calls to the run's span; the model server strips it, and a harness that inspects the URL should keep it (see [Distributed Tracing](/main/observability/distributed-tracing#trace-context-in-the-model-url)). The built-in agents known to rewrite the model URL, `harness_agent` (replaces a loopback host) and `vibench_agent` (replaces the host and keeps the path), keep every path segment; the OpenHands capture overlay only appends to the base URL. Both helpers read the rollout id from the run request and add the training segment when the agent has opted into capture. [Model-Call Capture](/main/model-server/model-call-capture#if-you-build-a-custom-agent) describes the same URL prefix for evaluation capture, along with the other routing helpers.
 
 ## Run a first rollout with Claude Code
 
@@ -250,6 +252,7 @@ Gym adds capture metrics under `_ng_token_capture` on each rebuilt rollout.
 | `quarantined_calls` | `0` | Gym found conflicting candidates and refused to choose between them. |
 | `empty_generation_calls` | `0` | A model call produced no trainable generated tokens. |
 | `unresolved_parent_calls` | `0` | A continuation could not be linked to exactly one verified earlier call. |
+| `engine_refusals` | Absent | The engine refused the listed calls (`model_call_id`, `code`, `created_at`, `parent_call_id`, `parent_resolution`): the prompt no longer fit the context window (`code` `context_length_exceeded`), or an output-token parameter was rejected (no `code`). A context-window refusal whose request continued the delivered terminal call also marks the rebuilt response `incomplete` with reason `max_output_tokens`, which a served `length` stop reports without this field. |
 | `mask_sample` | Absent or `false` | The rollout is incomplete or ambiguous and must not contribute to the loss. |
 
 Terminal attribution is how Gym finds the captured call that produced the response the verifier scored. When attribution succeeds, `terminal_attribution.chain` is `delivered`, and Gym trains on that call's chain even if the harness also made side calls. When Gym cannot identify the final call, `terminal_attribution.chain` is empty and `terminal_attribution.method` is `none`. This is not an error by itself. Gym then keeps the rollout only if the capture contains exactly one chain with no unresolved calls, so `chains` greater than 1 masks an unattributed rollout.
@@ -384,6 +387,8 @@ asyncio.run(main())
 ```
 
 For a multi-process deployment, run the check against the real shared backend rather than a local stand-in.
+
+A sink that implements `begin_call` but not the optional `record_engine_refusal` extension passes with a `ConformanceWarning` named `engine_refusal_resolution` in place of that check. Such a sink cannot resolve the capture intent of a call the engine refuses, so a rollout that runs into the context window freezes incomplete and is masked by default (see `mask_incomplete_when_attributed` above).
 
 ### Provide unique rollout ids
 

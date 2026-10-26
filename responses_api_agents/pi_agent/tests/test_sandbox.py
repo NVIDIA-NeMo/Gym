@@ -1751,11 +1751,40 @@ def _finishing_model(requests, replies):
     return handle
 
 
+def _long_turn_then_overflow(requests, summary_status=200):
+    """A streaming chat model whose first reply reasons for 100 KB and calls `bash`.
+
+    Every later request fails with a context-length 400, except Pi's compaction requests, which carry no tools: they
+    get a summary, or `summary_status` with no body.
+    """
+
+    def handle(body):
+        requests.append(body)
+        if "tools" not in body:
+            if summary_status != 200:
+                return summary_status, "application/json", b""
+            delta, finish = {"role": "assistant", "content": "Summary."}, "stop"
+        elif len(requests) > 1:
+            error = {"error": {"message": "This model's maximum context length is 262144 tokens."}}
+            return 400, "application/json", json.dumps(error).encode()
+        else:
+            call = {"index": 0, "id": "call-1", "type": "function"}
+            call["function"] = {"name": "bash", "arguments": json.dumps({"command": "true"})}
+            delta = {"role": "assistant", "reasoning_content": "r" * 100_000, "tool_calls": [call]}
+            finish = "tool_calls"
+        chunk = {"id": "chat-1", "object": "chat.completion.chunk", "created": 0, "model": body.get("model")}
+        chunk["choices"] = [{"index": 0, "delta": delta, "finish_reason": finish}]
+        return 200, "text/event-stream", f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n".encode()
+
+    return handle
+
+
 @asynccontextmanager
-async def _pinned_pi_activation(setup, tmp_path, monkeypatch, *, grants, replies):
+async def _pinned_pi_activation(setup, tmp_path, monkeypatch, *, grants, replies=(), model=None):
     """One activation of the pinned Pi through the real runner and supervisor, with local MCP and model servers.
 
     `grants(up, down)` builds the episode's grants from a working MCP URL and one that refuses connections.
+    The model server runs the handler `model(run.requests)` if given, or else `_finishing_model` with `replies`.
     Yields the activation to await; close runs on exit, and its response is left on the yielded namespace.
     """
     agent, sandbox = setup
@@ -1775,11 +1804,11 @@ async def _pinned_pi_activation(setup, tmp_path, monkeypatch, *, grants, replies
     with (
         socket.socket() as refused,
         _http_server(_finish_tool_server(run.calls)) as up,
-        _http_server(_finishing_model(run.requests, replies)) as model,
+        _http_server(model(run.requests) if model else _finishing_model(run.requests, replies)) as model_url,
     ):
         refused.bind(("127.0.0.1", 0))  # Bound but not listening, so connections to it are refused.
         run.down = f"http://127.0.0.1:{refused.getsockname()[1]}"
-        agent.server_client._build_server_base_url.return_value = model
+        agent.server_client._build_server_base_url.return_value = model_url
         body = seed_with_tools(*grants(f"{up}/mcp", f"{run.down}/mcp"))
         body.sandbox_access.workdir = str(workdir)
         request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "pi-smoke-a2"}})
@@ -1851,6 +1880,32 @@ async def test_pinned_pi_stops_before_inference_when_a_required_grant_is_down(se
     assert ("mcp_setup_failed", cause) in [(gap.code, gap.detail) for gap in run.close.agent_observations.gaps]
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
+@pytest.mark.parametrize(
+    ("summary_status", "requests_with_tools"), [(200, [True, True, False, True]), (503, [True, True, False])]
+)
+async def test_pinned_pi_reports_a_context_overflow_after_a_long_turn(
+    setup, tmp_path, monkeypatch, summary_status, requests_with_tools
+):
+    # Pi is still writing the long turn's lines when the 400 arrives, so outcome.mjs's event must not
+    # split one of them or be lost. Gym grades the final 400 as a model limit only when that event reaches it.
+    # With compaction on, Pi first compacts and retries; a failed compaction call is reported as the run's failure.
+    model = functools.partial(_long_turn_then_overflow, summary_status=summary_status)
+    async with _pinned_pi_activation(setup, tmp_path, monkeypatch, grants=lambda up, down: [], model=model) as run:
+        response = await run.activation
+    # Pi's compaction request is the one without tools; Pi retries the overflowed call only after it worked.
+    assert ["tools" in request for request in run.requests] == requests_with_tools
+    # The long turn ran and reached Gym whole; without it the pipe never fills.
+    assert [item.type for item in response.output] == ["reasoning", "function_call", "function_call_output"]
+    if summary_status == 200:
+        assert (response.status, response.error) == ("incomplete", None)
+    else:
+        assert response.status == "failed"
+        assert re.match(r"Context overflow recovery failed: .*\b503\b", response.error.message)
+        # Not the overflow's 400, which the default policy would grade.
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
+
+
 @pytest.mark.parametrize("field", ["timeout", "sandbox_install_timeout_seconds", "session_close_timeout_seconds"])
 @pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
 def test_pi_rejects_invalid_execution_deadlines(field, value):
@@ -1858,27 +1913,85 @@ def test_pi_rejects_invalid_execution_deadlines(field, value):
         PiAgentConfig(name="pi", host="localhost", port=1, entrypoint="app.py", **{field: value})
 
 
-@pytest.mark.parametrize("context_overflow", [False, True])
-async def test_provider_failure_is_reported_but_context_limit_preserves_patch(setup, context_overflow):
+_COMPACTION_CALL_FAILED = "Context overflow recovery failed: Summarization failed: 503 status code (no body)"
+
+
+@pytest.mark.parametrize(
+    ("context_overflow", "compaction", "error"),
+    [
+        (False, [], "model error"),
+        (True, [], None),
+        # Pi 0.80.2's events after the overflow: it compacted, its retry overflowed again, and it gave up.
+        (
+            True,
+            [
+                {"type": "compaction_start", "reason": "overflow"},
+                {"type": "compaction_end", "reason": "overflow", "result": {"summary": "Summary"}, "willRetry": True},
+                {
+                    "type": "compaction_end",
+                    "reason": "overflow",
+                    "errorMessage": "Context overflow recovery failed after one compact-and-retry attempt.",
+                },
+            ],
+            None,
+        ),
+        # Its compaction call failed, so the overflowed call was never retried.
+        (
+            True,
+            [
+                {"type": "compaction_start", "reason": "overflow"},
+                {"type": "compaction_end", "reason": "overflow", "errorMessage": _COMPACTION_CALL_FAILED},
+            ],
+            _COMPACTION_CALL_FAILED,
+        ),
+        # Pi also compacts after a no-body 400, which Gym does not count as an overflow.
+        (
+            False,
+            [
+                {"type": "compaction_start", "reason": "overflow"},
+                {"type": "compaction_end", "reason": "overflow", "errorMessage": _COMPACTION_CALL_FAILED},
+            ],
+            _COMPACTION_CALL_FAILED,
+        ),
+        # A threshold compaction that fails after a non-overflow error must not replace that error.
+        (
+            False,
+            [
+                {"type": "compaction_start", "reason": "threshold"},
+                {
+                    "type": "compaction_end",
+                    "reason": "threshold",
+                    "errorMessage": "Auto-compaction failed: Summarization failed: 503 status code (no body)",
+                },
+            ],
+            "model error",
+        ),
+    ],
+)
+async def test_provider_failure_is_reported_but_context_limit_preserves_patch(
+    setup, context_overflow, compaction, error
+):
     agent, sandbox = setup
     recorded = [json.loads(line)[1] for line in events(stop_reason="error").splitlines()]
     recorded.insert(-2, {"type": "ng_pi_outcome", "context_overflow": context_overflow})
-    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(recorded))
-    request, session_id, task = await activate(agent, sandbox)
     if context_overflow:
-        response = await task
+        # Pi's overflow error on the agent_end that Gym classifies. The default policy grades this 400.
+        recorded[-1]["messages"][0]["errorMessage"] = "400 This model's maximum context length is 262144 tokens."
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate([*recorded, *compaction]))
+    request, session_id, task = await activate(agent, sandbox)
+    response = await task
+    if error is None:
         assert response.status == "incomplete"
         assert response.error is None
         assert response.output[-1].content[0].text == "Fixed"
     else:
-        response = await task
-        assert response.status == "failed"
+        assert (response.status, response.error.message) == ("failed", error)
         assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
         # Replay the report without running the harness again; the environment owns policy.
         assert await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")) == response
     close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert len(close.agent_observations.records[0].model_calls) == 2
-    assert close.agent_observations.records[0].status == ("incomplete" if context_overflow else "failed")
+    assert close.agent_observations.records[0].status == ("failed" if error else "incomplete")
     sandbox.launch.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
 

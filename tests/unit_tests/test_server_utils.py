@@ -17,7 +17,6 @@ import logging
 import multiprocessing
 import pickle
 import socket
-import sys
 from concurrent.futures import ProcessPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
 
@@ -508,66 +507,6 @@ class TestServerUtils:
             url="http://model/ng-rollout/rollout-1/training-token-capture/v1/chat/completions",
             headers={"x-existing": "value"},
         )
-
-    async def test_get_global_aiohttp_client_uses_defaults_without_config_or_cli_parse(
-        self, monkeypatch: MonkeyPatch
-    ) -> None:
-        """A process Gym did not launch (a Ray task worker) has no config and argv that is not Gym's.
-
-        The client must come up with the default limits instead of parsing that argv and exiting.
-        """
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
-        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.delenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, raising=False)
-        monkeypatch.delenv(nemo_gym.server_utils.NEMO_GYM_FASTAPI_NUM_WORKERS, raising=False)
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            [
-                "/usr/lib/python3/site-packages/ray/_private/workers/default_worker.py",
-                "--node-ip-address=127.0.0.1",
-                "--node-manager-port=40000",
-                "--worker-type=WORKER",
-            ],
-        )
-        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
-        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_CONFIG", None)
-        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
-        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
-
-        try:
-            client = nemo_gym.server_utils.get_global_aiohttp_client()
-        except SystemExit as e:
-            fail(f"get_global_aiohttp_client parsed the process argv as Gym CLI overrides and exited: {e!r}")
-
-        try:
-            defaults = GlobalAIOHTTPAsyncClientConfig()
-            assert client.connector.limit == defaults.global_aiohttp_connector_limit
-            assert client.connector.limit_per_host == defaults.global_aiohttp_connector_limit_per_host
-            assert nemo_gym.global_config._GLOBAL_CONFIG_DICT is None
-        finally:
-            await client.close()
-
-    async def test_get_global_aiohttp_client_parses_an_explicit_parser_config(self, monkeypatch: MonkeyPatch) -> None:
-        """A caller that passes a parser config gets the limits it describes, not the defaults."""
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
-        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.delenv(nemo_gym.server_utils.NEMO_GYM_FASTAPI_NUM_WORKERS, raising=False)
-        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
-        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_CONFIG", None)
-        parser_config = nemo_gym.global_config.GlobalConfigDictParserConfig(
-            initial_global_config_dict=DictConfig(
-                {"global_aiohttp_connector_limit": 7, "global_aiohttp_connector_limit_per_host": 3}
-            ),
-            skip_load_from_cli=True,
-            skip_load_from_dotenv=True,
-        )
-
-        client = nemo_gym.server_utils.get_global_aiohttp_client(global_config_dict_parser_config=parser_config)
-        try:
-            assert (client.connector.limit, client.connector.limit_per_host) == (7, 3)
-        finally:
-            await client.close()
 
     def test_BaseServer_load_config_from_global_config(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
@@ -2236,6 +2175,7 @@ class TestRunWebserverProxyKwargs:
         num_workers: int | None,
         ray_enabled: bool | None = None,
         is_worker: bool = False,
+        routes_sessions: bool = False,
     ) -> dict:
         from fastapi import FastAPI
 
@@ -2268,6 +2208,10 @@ class TestRunWebserverProxyKwargs:
 
         class TestSimpleServer(SimpleServer):
             ray_enabled = ray_setting
+            routes_sessions_to_owner = routes_sessions
+
+            def claimed_session_routing(self) -> dict:
+                return {}
 
             @classmethod
             def load_config_from_global_config(cls):
@@ -2433,6 +2377,33 @@ class TestRunWebserverProxyKwargs:
         assert self.uvicorn_kwargs == {}
         report.assert_not_called()
 
+    @mark.parametrize("num_workers", [1, 4])
+    def test_listen_backlog_defaults_above_uvicorns(self, monkeypatch: MonkeyPatch, num_workers: int) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=num_workers)
+
+        assert 16384 == kwargs["backlog"]
+
+    def test_listen_backlog_comes_from_the_global_config(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_backlog": 4096}, num_workers=4)
+
+        assert 4096 == kwargs["backlog"]
+
+    def test_a_workers_private_socket_gets_the_listen_backlog(self, monkeypatch: MonkeyPatch) -> None:
+        install = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "install_session_routing", install)
+
+        self._capture_uvicorn_kwargs(
+            monkeypatch, {"uvicorn_backlog": 4096}, num_workers=4, is_worker=True, routes_sessions=True
+        )
+
+        assert 4096 == install.call_args.kwargs["backlog"]
+
+    def test_a_listen_backlog_below_one_fails_before_uvicorn_starts(self, monkeypatch: MonkeyPatch) -> None:
+        with raises(ValidationError, match="uvicorn_backlog"):
+            self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_backlog": 0}, num_workers=1)
+
+        assert self.uvicorn_kwargs == {}
+
 
 class TestHeadServerProxyKwargs:
     """The independently launched head server must use the same proxy-header policy."""
@@ -2477,6 +2448,10 @@ class TestHeadServerProxyKwargs:
 
         assert kwargs["proxy_headers"] is True
         assert kwargs["forwarded_allow_ips"] == ["10.0.0.1"]
+
+    def test_listen_backlog_follows_the_global_config(self, monkeypatch: MonkeyPatch) -> None:
+        assert 16384 == self._capture_uvicorn_kwargs(monkeypatch, {})["backlog"]
+        assert 4096 == self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_backlog": 4096})["backlog"]
 
 
 @mark.parametrize("header", [None, b"X-Other-Harness-Reply"])

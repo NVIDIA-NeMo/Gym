@@ -18,22 +18,21 @@ import os
 import re
 import subprocess
 import tempfile
-from dataclasses import replace
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from nemo_gym.tasks.harbor.build_compose import (
+    build_section,
     compose_build_env,
-    main_build_settings,
     task_compose_file,
     validate_task_compose,
-    write_compose_file,
+    write_compose_files,
 )
 from nemo_gym.tasks.harbor.build_plan import (
     BUILD_TOOLS,
     DEFAULT_PLATFORM,
     HARBOR_COMPOSE_FILE,
-    MAIN_SERVICE,
     BuildError,
     BuildPlanEntry,
     BuildResult,
@@ -41,10 +40,16 @@ from nemo_gym.tasks.harbor.build_plan import (
     default_storage_root,
     detect_tool,
 )
-from nemo_gym.tasks.harbor.build_records import build_inputs_digest, platform_key
+from nemo_gym.tasks.harbor.build_records import build_inputs_digest, platform_key, settle_with_document
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION, dockerfile_has_heredoc
 from nemo_gym.tasks.harbor.harbor_compat import sanitize_docker_image_name
-from nemo_gym.tasks.harbor.registry import RECORDED_CONFIG_KEYS
+from nemo_gym.tasks.harbor.records import MAIN_SERVICE
+from nemo_gym.tasks.harbor.registry import RECORDED_CONFIG_KEYS, ImageConfigError, platform_pair
+from nemo_gym.tasks.harbor.verifier_env import (
+    verifier_compose_main_overrides,
+    verifier_compose_refusal,
+    verifier_compose_sidecars,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -88,19 +93,20 @@ def _run_default(argv: list[str], env: dict[str, str] | None = None) -> subproce
 
 
 class ImageBuilder:
-    """Build one context into a named image with docker, buildah or podman, and push it when asked.
+    """Build the services of one context into named images with docker, buildah or podman, and push them when asked.
 
-    The image is named as Harbor names it, ``hb__<hash>`` (see :meth:`tag_for`). ``repository`` is
-    the registry path the name goes under (``registry/path/hb__<hash>``) and the image is pushed
-    there. Without a repository the image stays local under that name in the Docker daemon, the
-    only local store a sandbox provider starts images from, so buildah and podman need a
-    repository. ``push`` defaults to whether a repository was named. ``platform`` (``linux/amd64``
-    by default, the platform sandboxes run) is passed to the tool, and an image that comes out for
-    another platform is refused before it is pushed or recorded. ``run`` is the command seam.
+    ``main``'s image is named as Harbor names it, ``hb__<hash>``, a sidecar's ``hb__<hash>-<service>`` (see
+    :meth:`tag_for`). ``repository`` is the registry path the names go under (``registry/path/hb__<hash>``) and
+    the images are pushed there. Without a repository an image stays local under its name in the Docker daemon,
+    the only local store a sandbox provider starts images from, so buildah and podman need a repository. ``push``
+    defaults to whether a repository was named. ``platform`` (``linux/amd64`` by default, the platform sandboxes
+    run) is passed to the tool, and an image that comes out for another platform is refused before it is pushed
+    or recorded; a platform the records could not tell from the baseline (an amd64 micro-architecture level above
+    it, see ``platform_pair``) is refused before anything is built. ``run`` is the command seam.
 
-    docker builds the way Harbor's Docker environment does: ``docker compose build`` over Harbor's
-    build Compose file and the task's own (:meth:`compose_build_argv`), never ``docker build``. buildah
-    and podman build the Dockerfile directly (:meth:`build_argv`).
+    docker builds the way Harbor's Docker environment does: one ``docker compose build`` over Harbor's build
+    Compose file, the task's own and Gym's images override (:meth:`compose_build_argv`), never ``docker build``.
+    buildah and podman build each service's Dockerfile directly (:meth:`build_argv`).
     """
 
     def __init__(
@@ -131,6 +137,13 @@ class ImageBuilder:
         if self.push and not self.repository:
             raise BuildError("Pushing a built image needs builds.repository")
         self.platform = platform or DEFAULT_PLATFORM
+        # builds.platform's check (BuildOptions.from_config), repeated for a BuildOptions made in code: every build
+        # passes through here, and an image built for linux/amd64/v3 would be pushed and recorded under os/arch
+        # alone, for a later linux/amd64 run to reuse.
+        try:
+            platform_pair(self.platform)
+        except ImageConfigError as exc:
+            raise BuildError(f"builds.platform: {exc}") from exc
         self.storage_root = Path(storage_root) if storage_root is not None else default_storage_root()
         self._run = run or _run_default
         self._compose_checked = False
@@ -153,13 +166,26 @@ class ImageBuilder:
         ]
 
     def tag_for(self, entry: BuildPlanEntry) -> str:
-        """The image's name, ``hb__<hash>``, under the repository when there is one.
+        """The image's name under the repository when there is one: ``hb__<hash>`` for ``main``,
+        ``hb__<hash>-<service>`` for a sidecar.
 
         The hash is the entry's digest, Harbor's environment id of the context, and ``hb__<hash>`` is the
         value Harbor exports as ``MAIN_IMAGE_NAME`` for it (the name a task Compose file that sets
-        ``image: ${MAIN_IMAGE_NAME}`` builds under; Harbor's own template leaves the tag to Compose).
+        ``image: ${MAIN_IMAGE_NAME}`` builds under; Harbor's own template leaves the tag to Compose). A sidecar
+        takes Compose's default form for a service without ``image:``, ``<project>-<service>``, under the project
+        name Gym passes to ``docker compose build`` (``hb__<hash>``; Harbor's is the session id, so its sidecar tags
+        change per run and are never published). The separate verifier's image takes the sidecar form too,
+        ``hb__<hash>-verifier`` with Harbor's hash of ``tests/``: the hash is the one Harbor exports as
+        ``MAIN_IMAGE_NAME`` for its verifier environment, and the suffix names the role where Harbor's own tag is the
+        per-session ``<session>-main``. One flat name per image, sanitised like Harbor's, stays within the
+        one repository path ``builds.repository`` promises; a slash would open a path per hash.
         """
-        name = sanitize_docker_image_name(f"hb__{entry.digest}")
+        return self.tag_name(entry.digest, entry.service)
+
+    def tag_name(self, digest: str, service: str = MAIN_SERVICE) -> str:
+        """:meth:`tag_for` by digest and service."""
+        name = f"hb__{digest}" if service == MAIN_SERVICE else f"hb__{digest}-{service}"
+        name = sanitize_docker_image_name(name)
         return f"{self.repository}/{name}" if self.repository else name
 
     def build_argv(self, entry: BuildPlanEntry, tag: str) -> list[str]:
@@ -167,9 +193,9 @@ class ImageBuilder:
 
         ``--format docker`` builds the image format BuildKit builds, so ``SHELL`` applies to the ``RUN`` steps and
         ``HEALTHCHECK`` and ``ONBUILD`` reach the image (the tools' default OCI format has none of the three).
-        ``main``'s ``build`` section of the task's Compose file, which ``docker compose build`` would merge over
-        Harbor's template, is applied the same way: its context and Dockerfile, ``--build-arg`` per arg and
-        ``--target`` (:func:`main_build_settings`).
+        The service's ``build`` section of the task's Compose file, which ``docker compose build`` would apply (over
+        Harbor's template for ``main``), is applied the same way: its context and Dockerfile, ``--build-arg`` per arg
+        and ``--target`` (:func:`service_build_settings`).
         """
         platform = ["--platform", self.platform] if self.platform else []
         options = [*platform]
@@ -183,7 +209,13 @@ class ImageBuilder:
             return ["buildah", *storage, "bud", "--format", IMAGE_FORMAT, "--isolation", "chroot", *options, *tail]
         return [self.tool, "build", "--format", IMAGE_FORMAT, *options, *tail]
 
-    def compose_build_argv(self, entry: BuildPlanEntry, compose_file: Path) -> list[str]:
+    def compose_build_argv(
+        self,
+        entry: BuildPlanEntry,
+        compose_file: Path,
+        images_file: Path | None = None,
+        services: tuple[str, ...] = (),
+    ) -> list[str]:
         """Harbor's ``docker compose build`` line for the context (``_run_docker_compose_command``,
         https://github.com/harbor-framework/harbor/blob/v0.22.0/src/harbor/environments/docker/docker.py#L606).
 
@@ -191,7 +223,10 @@ class ImageBuilder:
         ``<project>-<service>``; ``main`` is named explicitly, see :func:`harbor_compose_document`); the
         project directory is the context, so relative paths in the task's Compose file resolve as Harbor
         resolves them; the files are Harbor's build template, then the task's ``docker-compose.yaml`` when
-        it has one, in Harbor's order.
+        it has one, in Harbor's order, then Gym's images override (:func:`images_compose_document`), last so its
+        names win. ``services`` names the services to build; Harbor passes none, and so does a full build, so every
+        service with a ``build`` section is built. A partial build (some services of the context recorded, or
+        ``main`` not planned) names the ones it builds.
         """
         argv = [
             "docker",
@@ -206,7 +241,9 @@ class ImageBuilder:
         task_compose = task_compose_file(entry.context)
         if task_compose is not None:
             argv += ["-f", str(task_compose)]
-        return [*argv, "build"]
+        if images_file is not None:
+            argv += ["-f", str(images_file)]
+        return [*argv, "build", *services]
 
     def push_argv(self, tag: str, digest_file: Path) -> list[str]:
         if self.tool == "buildah":
@@ -284,50 +321,158 @@ class ImageBuilder:
         return completed
 
     def build(self, entry: BuildPlanEntry) -> BuildResult:
-        """Build, push when configured, inspect, and return the result to record. Raises :class:`BuildError`.
+        """:meth:`build_many` for one service, returning its result."""
+        (result,) = list(self.build_many([entry]))
+        return result
 
-        The task's Compose file is read here, not at planning: its ``main.build`` settings fill the entry
-        (:func:`main_build_settings`) once the file is checked, so a file that does not interpolate, escapes
-        ``environment/`` or carries a refused key fails this context's build and the caller leaves its tasks out,
-        the way it leaves out a task whose build command fails.
+    def build_many(self, entries: list[BuildPlanEntry], *, partial: bool = False) -> Iterator[BuildResult]:
+        """Build the services ``entries`` of one context, push when configured, inspect, and yield each result to
+        record as soon as it is done, in order. Raises :class:`BuildError`; what was yielded before stays built.
+
+        The task's Compose file is read here, not at planning: it is checked once for the context
+        (:func:`validate_task_compose`) and each entry's service's ``build`` section fills it
+        (:func:`service_build_settings`), so a file that does not interpolate, escapes ``environment/`` or carries a
+        refused key fails this context's build and the caller leaves its tasks out, the way it leaves out a task
+        whose build command fails. The build's environment is Harbor's (:func:`compose_build_env`) with
+        ``MAIN_IMAGE_NAME`` the ``main`` tag, whether or not ``main`` is among the entries, as Harbor always exports
+        it.
+
+        docker runs one ``docker compose build`` for the context, Harbor's build step, and then inspects and pushes
+        each image; ``partial`` says ``entries`` are not every service the context builds (the others are
+        recorded), so the build names them rather than building the whole project. buildah and podman run one build
+        per service (:meth:`build_argv`); on that path ``dockerfile_inline`` and ``additional_contexts`` (even
+        ``service:`` references, which need ``--build-context`` and a build order) are refused naming the service,
+        before the context's first build, since the checked file already says so, and ``no_cache`` and ``pull`` are
+        ignored, as the direct tools have no Compose to honour them.
         """
-        tag = self.tag_for(entry)
-        tasks = ", ".join(entry.tasks[:5])
-        what = f"Building {tag} for task(s) {tasks}"
+        if not entries:
+            return
+        first = entries[0]
+        tasks = ", ".join(first.tasks[:5])
+        if first.verifier:
+            # A tests/docker-compose.yaml the loader refuses as written (a top-level key other than services that
+            # Harbor's compose up applies to the verifier project, a file that is not read as a services mapping) is
+            # refused here too, before any command: validate_task_compose below refuses include and invalid YAML but
+            # reads nothing of networks or volumes, so the verifier would be built, pushed and recorded for a task
+            # the loader then refuses.
+            refusal = verifier_compose_refusal(first.context.parent)
+            if refusal:
+                raise BuildError(f"task(s) {tasks}: {refusal}")
+            # Harbor builds and starts every service of tests/docker-compose.yaml as the verifier's Compose project;
+            # the server starts one verifier sandbox, so the loader refuses such a task. Refused here too, before
+            # any command, so the docker backend builds no sidecar that nothing records or runs.
+            sidecars = verifier_compose_sidecars(first.context.parent)
+            if sidecars:
+                raise BuildError(
+                    f"{first.context / HARBOR_COMPOSE_FILE} of task(s) {tasks} declares service(s) "
+                    f"{', '.join(sidecars)} beside main; Harbor starts them as the separate verifier's Compose "
+                    "project and this server starts a single verifier sandbox"
+                )
+            # A runtime setting on main (environment, env_file, volumes...) reaches Harbor's verifier container and
+            # never this server's verifier sandbox: refused like a sidecar, before an image nothing will run is built.
+            # A verifier entry is always a build (a prebuilt verifier plans none), so main's image is read, pinned to
+            # MAIN_IMAGE_NAME by validate_task_compose below.
+            overrides = verifier_compose_main_overrides(first.context.parent, prebuilt=False)
+            if overrides:
+                raise BuildError(
+                    f"{first.context / HARBOR_COMPOSE_FILE} of task(s) {tasks} sets {', '.join(overrides)} on main; "
+                    "Harbor applies the file to the separate verifier's container and this server starts that "
+                    "verifier from task.toml's environment and the verifier image alone"
+                )
+        main_tag = self.tag_name(first.digest)
         if self.tool == "docker":
             self._ensure_compose_plugin()
-        env = compose_build_env(entry, tag, self.platform)
+        env = compose_build_env(first, main_tag, self.platform)
         # Checked as docker compose will read it: interpolated against the build's own environment. On every tool:
         # a context the loader refuses is never built and pushed under the hb__ name.
-        document = validate_task_compose(entry.context, env, tasks=entry.tasks)
-        entry = replace(entry, **main_build_settings(entry, document, env))
-        dockerfile = entry.dockerfile_path
-        if not entry.dockerfile_inline and not dockerfile.is_file():
-            raise BuildError(f"{entry.build_dir} has no {entry.dockerfile}")
+        document = validate_task_compose(
+            first.context,
+            env,
+            tasks=first.tasks,
+            builds_main=any(entry.compose_service == MAIN_SERVICE for entry in entries),
+        )
+        # Settled as build_inputs_mismatch settles an entry it checks: the section's settings and the inputs digests
+        # of the services the entry builds from, so the digest recorded below is the one a later run compares.
+        settled = [settle_with_document(entry, document, env) for entry in entries]
+        # Image names are lower-case (sanitize_docker_image_name, as Harbor sanitises its), so two services that
+        # differ by case only (`Db` and `db`, both valid Compose names) would build under one tag, the second build
+        # silently replacing the first on either tool path and both records naming one image. Refused before any
+        # command, naming both services; Harbor itself never lower-cases a sidecar's tag, so docker rejects the upper-
+        # case one there.
+        tagged: dict[str, str] = {}
+        for entry in settled:
+            tag = self.tag_for(entry)
+            if tag in tagged:
+                raise BuildError(
+                    f"{first.context / HARBOR_COMPOSE_FILE} of task(s) {tasks} declares services {tagged[tag]!r} and "
+                    f"{entry.service!r}, which both build as image {tag}; image names are lower-case, so rename one"
+                )
+            tagged[tag] = entry.service
+        for entry in settled:
+            if not entry.dockerfile_inline and not entry.dockerfile_path.is_file():
+                where = "" if entry.compose_service == MAIN_SERVICE else f" for services.{entry.service}.build"
+                raise BuildError(f"{entry.build_dir} has no {entry.dockerfile}{where}")
+            if self.tool != "docker":
+                # Knowable from the checked document: refused before this context builds or pushes anything.
+                self._refuse_on_direct_path(entry, document, tasks)
         if self.tool == "buildah":
             self.storage_root.mkdir(parents=True, exist_ok=True)
         if self.tool == "docker":
-            LOGGER.info("%s: docker compose build of service %s", what, MAIN_SERVICE)
+            # By Compose service: the verifier entry is Harbor's `main` of the tests/ context, tagged with Gym's name
+            # for it through the images override, which is passed last and wins over the template's hb__<hash>.
+            images = {entry.compose_service: self.tag_for(entry) for entry in settled}
+            # Harbor builds the whole project; a build of some of its services names them.
+            services = () if not partial and MAIN_SERVICE in images else tuple(images)
+            what = f"Building {', '.join(images.values())} for task(s) {tasks}"
+            LOGGER.info("%s: docker compose build of service(s) %s", what, ", ".join(images))
             with tempfile.TemporaryDirectory(prefix="nemo-gym-compose-") as tmp:
-                compose_file = write_compose_file(Path(tmp), entry.context, tag)
-                self._check(self.compose_build_argv(entry, compose_file), what, env=env)
-        else:
-            if entry.dockerfile_inline:
-                raise BuildError(
-                    f"{entry.context / HARBOR_COMPOSE_FILE}: services.{MAIN_SERVICE}.build.dockerfile_inline is not "
-                    f"supported by the direct {self.tool} build of task(s) {tasks}; docker compose build reads it, so "
-                    "build with builds.tool: docker, or move the Dockerfile text into environment/Dockerfile"
-                )
-            if dockerfile_has_heredoc(dockerfile.read_text()):
-                self._ensure_heredoc_support(dockerfile)
+                build_file, images_file = write_compose_files(Path(tmp), first.context, main_tag, images)
+                self._check(self.compose_build_argv(first, build_file, images_file, services), what, env=env)
+            for entry in settled:
+                yield self._finish(entry, images[entry.compose_service])
+            return
+        for entry in settled:
+            tag = self.tag_for(entry)
+            what = f"Building {tag} for task(s) {tasks}"
+            if dockerfile_has_heredoc(entry.dockerfile_path.read_text()):
+                self._ensure_heredoc_support(entry.dockerfile_path)
             self._check(self.build_argv(entry, tag), what, env=self.tool_env())
+            yield self._finish(entry, tag)
+
+    def _refuse_on_direct_path(self, entry: BuildPlanEntry, document: dict[str, Any] | None, tasks: str) -> None:
+        """The build section keys only ``docker compose build`` can honour, refused or ignored by buildah and podman."""
+        path = entry.context / HARBOR_COMPOSE_FILE
+        service = entry.compose_service
+        if entry.dockerfile_inline:
+            raise BuildError(
+                f"{path}: services.{service}.build.dockerfile_inline is not supported by the direct "
+                f"{self.tool} build of task(s) {tasks}; docker compose build reads it, so build with "
+                "builds.tool: docker, or move the Dockerfile text into a file under environment/"
+            )
+        section = build_section(document, service) or {}
+        if section.get("additional_contexts"):
+            raise BuildError(
+                f"{path}: services.{service}.build.additional_contexts is not supported by the direct "
+                f"{self.tool} build of task(s) {tasks} (it needs --build-context and a build order); build with "
+                "builds.tool: docker"
+            )
+        for key in ("no_cache", "pull"):
+            if key in section:
+                LOGGER.debug(
+                    "%s: services.%s.build.%s is ignored by the direct %s build", path, service, key, self.tool
+                )
+
+    def _finish(self, entry: BuildPlanEntry, tag: str) -> BuildResult:
+        """Inspect the built ``tag``, refuse another platform, push when configured, and return the result."""
+        tasks = ", ".join(entry.tasks[:5])
         record = self.inspect(tag)
         built_platform = f"{record.get('os')}/{record.get('architecture')}"
         if platform_key(built_platform) != platform_key(self.platform):
+            service = "" if entry.is_main else f" (service {entry.service})"
             raise BuildError(
-                f"Building {tag} for task(s) {tasks}: the image came out as {built_platform}, not {self.platform}. "
-                "Build on a host of that platform, or one with qemu/binfmt emulation; builds.platform "
-                "overrides the target."
+                f"Building {tag} for task(s) {tasks}{service}: the image came out as {built_platform}, not "
+                f"{self.platform}. Build on a host of that platform, or one with qemu/binfmt emulation; "
+                "builds.platform overrides the target."
             )
         image = tag
         if self.push:
@@ -346,6 +491,7 @@ class ImageBuilder:
             tool=self.tool,
             pushed=self.push,
             record=record,
+            service=entry.service,
         )
 
     def _ensure_compose_plugin(self) -> None:

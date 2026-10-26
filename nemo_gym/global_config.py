@@ -492,8 +492,6 @@ class GlobalConfigDictParser(BaseModel):
 
             return parser
 
-        hydra_main_module.get_args_parser = new_get_args_parser
-
         # This function is just to get the config object out of the hydra main call.
         # Need a closure. We simply use an outer ref of a list
         config_list = []
@@ -502,7 +500,14 @@ class GlobalConfigDictParser(BaseModel):
         def inner_hydra_wrapper(cfg: DictConfig) -> DictConfig:
             config_list.append(cfg)
 
-        inner_hydra_wrapper()
+        # Patched for this call only and restored after it: hydra reads the parser at call time, and a patch left
+        # behind would wrap the previous call's wrapper, one level per `gym` command parsed in a process, until a
+        # long test session (hundreds of `main()` calls) hits the recursion limit inside the nested wrappers.
+        hydra_main_module.get_args_parser = new_get_args_parser
+        try:
+            inner_hydra_wrapper()
+        finally:
+            hydra_main_module.get_args_parser = original_get_args_parser
 
         # Hydra installs a console log handler on stdout; move it to stderr so command stdout stays machine-readable
         # (e.g. `gym ... --json`). Diagnostics belong on stderr; only the requested data goes to stdout.

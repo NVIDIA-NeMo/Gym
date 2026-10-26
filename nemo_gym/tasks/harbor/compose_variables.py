@@ -403,7 +403,7 @@ def compose_variables(task: HarborTask, *, unset: set[str] | None = None) -> dic
     if context.is_dir():
         # Not the runtime project name (Harbor: the trial session id; Gym: the adapter's compose-<uuid>). A stable
         # per-task value, so files like o11y-bench's `o11y-stack-${COMPOSE_PROJECT_NAME}` alias and URL agree.
-        infra["COMPOSE_PROJECT_NAME"] = f"hb__{context_digest(context)}"
+        infra["COMPOSE_PROJECT_NAME"] = f"hb__{task.context_id or context_digest(context)}"
     if environment.docker_image:
         infra["PREBUILT_IMAGE_NAME"] = environment.docker_image
     if environment.cpus:

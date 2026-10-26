@@ -136,7 +136,7 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
-def _sandbox_prepare_command(workdir: str, directory: str, runtime: str) -> str:
+def _sandbox_prepare_command(workdir: str, directory: str, runtime: str, *, python: str = "python3") -> str:
     # Bootstrap with POSIX sh; the runtime installer itself requires Bash.
     bootstrap = """set -eu
 set --
@@ -163,7 +163,8 @@ fi
         "for root in roots), 'OpenCode runtime/session storage overlaps the task workdir'"
     )
     return (
-        bootstrap + f"python3 -I -c {quote(validate_paths)} {quote(workdir)} "
+        bootstrap.replace("command -v python3", "command -v " + quote(python))
+        + f"{quote(python)} -I -c {quote(validate_paths)} {quote(workdir)} "
         f"{quote(str(PurePosixPath(directory).parent))} {quote(runtime)} && mkdir -p {quote(directory)}"
     )
 
@@ -192,6 +193,15 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     context_window: int = 262144
     max_output_tokens: int = 131072
     opencode_version: str = OPENCODE_VERSION
+
+    # Optional verified, preinstalled runtime for sandboxes without download egress.
+    sandbox_python_executable: str = "python3"
+    sandbox_path_prefix: list[str] = Field(default_factory=list)
+    sandbox_executable_path: str | None = None
+    sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    # The native model ID affects OpenCode's model-family prompts and tools.
+    # Preserve the existing alias unless a benchmark explicitly qualifies another ID.
+    sandbox_model_id: str = "dummy_model"
 
     # Used only when Resources does not supply a borrowed sandbox.
     sandbox_provider: str | None = None
@@ -720,6 +730,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 sandbox=sandbox, session_dir=directory, workdir=workdir, harness="OpenCode", owns_sandbox=owns_sandbox
             ),
             runtime=runtime,
+            python_executable=self.config.sandbox_python_executable,
             model_ref=self.config.model_server,
         )
         prepared_directory = False
@@ -733,7 +744,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
             state.sandbox_id = sandbox.sandbox_id
-            command = _sandbox_prepare_command(workdir, directory, runtime)
+            command = _sandbox_prepare_command(
+                workdir, directory, runtime, python=self.config.sandbox_python_executable
+            )
             result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
             prepared_directory = True
@@ -745,6 +758,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     f"{directory}/{installer}",
                     runtime,
                     self.config.opencode_version,
+                    self.config.sandbox_executable_path or "",
+                    self.config.sandbox_executable_sha256 or "",
+                    self.config.sandbox_python_executable,
+                    ":".join(self.config.sandbox_path_prefix),
                 )
             )
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
@@ -1074,8 +1091,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         previous_session_id = state.harness_session_id
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
         config = {
-            "model": "nemo_gym/dummy_model",
-            "small_model": "nemo_gym/dummy_model",
+            "model": "nemo_gym/" + self.config.sandbox_model_id,
+            "small_model": "nemo_gym/" + self.config.sandbox_model_id,
             "enabled_providers": ["nemo_gym"],
             "autoupdate": False,
             "share": "disabled",
@@ -1088,7 +1105,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         "timeout": False,
                     },  # pragma: allowlist secret
                     "models": {
-                        "dummy_model": {
+                        self.config.sandbox_model_id: {
+                            **(
+                                {"reasoning": self.config.thinking}
+                                if self.config.sandbox_model_id != "dummy_model"
+                                else {}
+                            ),
                             "interleaved": {"field": "reasoning_content"},
                             "limit": {
                                 "context": self.config.context_window,
@@ -1114,6 +1136,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             command.extend(["--session", state.harness_session_id])
         payload = {
             "instructions": system,
+            "path_prefix": self.config.sandbox_path_prefix,
             "directory": state.session.session_dir,
             "cwd": state.session.workdir,
             "command": command,
