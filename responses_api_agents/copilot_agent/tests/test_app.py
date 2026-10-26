@@ -367,11 +367,13 @@ def test_omitted_provider_usage_stays_unknown(setup):
 def test_reported_provider_error_is_a_classified_failed_response(setup):
     agent, sandbox = setup
     sandbox.events = copilot_events(error={"errorType": "query", "message": "400 rejected", "statusCode": 400})
+    sandbox.otel = otel(chat_span("rejected", usage=None, status=2))
     sandbox.result["return_code"] = 1
     result, closed = run_session(agent)
     assert result.status_code == 200, result.text
     body = result.json()
     assert body["status"] == "failed" and body["error"]["message"] == "400 rejected"
+    assert body["usage"]["total_tokens"] == 0
     outcome = json.loads(body["metadata"][AGENT_OUTCOME_METADATA_KEY])
     assert outcome == {"failure_kind": "model_request_error", "status_code": 400}
     assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
@@ -503,8 +505,8 @@ def test_interrupted_activation_keeps_observations(setup):
     assert state.observations.records[0].status == "incomplete"
 
 
-@pytest.mark.parametrize("spans", ["", "not-json", otel(), otel(chat_span("failed", usage=None, status=2))])
-def test_absent_successful_spans_do_not_invent_zero_usage(spans):
+@pytest.mark.parametrize("spans", ["", "not-json", otel()])
+def test_absent_chat_spans_do_not_invent_zero_usage(spans):
     assert parse_copilot_usage(spans) is None
 
 
@@ -522,3 +524,10 @@ def test_closed_session_rejects_activation_and_close_replays(setup):
     assert "resources_cookies" not in first.json() or first.json()["resources_cookies"] is None
     assert first.json()["agent_observations"]["gaps"]
     sandbox.launch.assert_not_awaited()
+
+
+def test_rejected_calls_have_zero_completed_response_tokens():
+    usage = parse_copilot_usage(otel(chat_span("failed", usage=None, status=2)))
+    assert usage is not None
+    assert (usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.reasoning_tokens) == (0, 0, 0, 0)
+    assert usage.response_ids == []

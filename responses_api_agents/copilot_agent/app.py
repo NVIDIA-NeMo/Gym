@@ -257,13 +257,14 @@ def parse_copilot_usage(otel: Optional[str]) -> Optional[CopilotUsage]:
     """Sum usage over successful chat spans; a missing count stays unknown instead of becoming zero.
 
     Copilot's own usage file reports zero when the provider omits usage, so it is not used for counts.
-    Returns ``None`` when no span file was written.
+    Returns ``None`` when no chat spans were observed. Rejected calls contribute zero
+    completed-response tokens; missing usage on a successful call remains unknown.
     """
     if otel is None:
         return None
     totals: dict[str, Optional[int]] = {"input": 0, "output": 0, "cached": 0, "reasoning": 0}
     response_ids: list[str] = []
-    successful_calls = 0
+    observed_calls = 0
     for line in otel.split("\n"):
         if not line.strip():
             continue
@@ -276,10 +277,10 @@ def parse_copilot_usage(otel: Optional[str]) -> Optional[CopilotUsage]:
         attributes = record.get("attributes") if isinstance(record.get("attributes"), dict) else {}
         if attributes.get("gen_ai.operation.name") != "chat":
             continue
+        observed_calls += 1
         status = record.get("status") if isinstance(record.get("status"), dict) else {}
         if status.get("code") == 2:
             continue  # A failed attempt returned no tokens to count.
-        successful_calls += 1
         response_id = attributes.get("gen_ai.response.id")
         if isinstance(response_id, str) and response_id:
             response_ids.append(response_id)
@@ -294,7 +295,7 @@ def parse_copilot_usage(otel: Optional[str]) -> Optional[CopilotUsage]:
                 totals[key] += value
             else:
                 totals[key] = None
-    if not successful_calls:
+    if not observed_calls:
         return None
     return CopilotUsage(
         input_tokens=totals["input"],
