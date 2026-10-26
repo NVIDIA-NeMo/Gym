@@ -24,7 +24,12 @@ aggregate``), and retryable on resume.
 
 Boundary: a failed *call* (transport/timeout/auth/HTTP) → JudgeError → sidecar; a
 *received-but-unparseable* response is a legitimate wrong answer (let the parser
-score it, don't raise). Empty output is a per-benchmark call, so servers differ.
+score it, don't raise), unless the benchmark explicitly treats an invalid judge
+verdict as an unusable grade. FrontierScience Research uses that exception for
+missing/invalid final numeric rubric verdicts: retry through the judge-failure
+sidecar rather than assign zero points to the model answer. Completion checks
+must still reject a partial evaluation. Empty output is a per-benchmark call,
+so servers differ.
 
 Wrap the call, not the scoring around it: ``reraise_judge_errors`` relabels every
 exception it sees, so covering a whole ``verify()`` would misfile ordinary bugs
@@ -41,15 +46,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from nemo_gym.failure_kinds import (
-    JUDGE_CREDENTIALS_REJECTED,
     JUDGE_FAILED,
-    JUDGE_RATE_LIMITED,
-    JUDGE_SERVER_ERROR,
-    JUDGE_TIMEOUT,
-    JUDGE_UNREACHABLE,
 )
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
-from nemo_gym.typed_exceptions import TypedException, failure_path_fields, innermost_http_status
+from nemo_gym.typed_exceptions import NgFailureEvent, ResServerFailure, boundary_failure, row_fields
 
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
@@ -73,61 +73,26 @@ class JudgeError(Exception):
 # what the client observed as its failure_kind; any other JudgeError stays a ``judge_failed``.
 
 
-class _TypedJudgeError(JudgeError, TypedException):
+class _TypedJudgeError(JudgeError, ResServerFailure):
     pass
 
 
-class JudgeCredentialsRejected(_TypedJudgeError):
-    """The judge endpoint answered HTTP 401 or 403."""
+class JudgeCallFailed(_TypedJudgeError):
+    """A judge call failed. The judge boundary's own kind is ``judge_failed``; what was observed (an HTTP 429 or
+    401, a refused connection, a timeout) stays on the explicit cause, with its own type and status."""
 
-    failure_kind = JUDGE_CREDENTIALS_REJECTED
-
-
-class JudgeRateLimited(_TypedJudgeError):
-    """The judge endpoint answered HTTP 429."""
-
-    failure_kind = JUDGE_RATE_LIMITED
-
-
-class JudgeServerError(_TypedJudgeError):
-    """The judge endpoint answered HTTP 5xx."""
-
-    failure_kind = JUDGE_SERVER_ERROR
-
-
-class JudgeUnreachable(_TypedJudgeError):
-    """The connection to the judge endpoint was never established (``ClientConnectorError``)."""
-
-    failure_kind = JUDGE_UNREACHABLE
-
-
-class JudgeTimeout(_TypedJudgeError):
-    """The judge call ran past its timeout (``TimeoutError``)."""
-
-    failure_kind = JUDGE_TIMEOUT
+    failure_kind = JUDGE_FAILED
 
 
 def _judge_error(error: Exception) -> JudgeError:
-    """The JudgeError for a failed judge call: typed when its exception type or status decides.
+    """The JudgeError for a failed judge call; the caller raises it ``from error``.
 
-    The status is the innermost one on the call's failure path: a model server that answers 500 for a
-    failed provider call sends the provider's status in its failure header, and that is the observed
-    fact about the judge endpoint.
+    A call that failed over HTTP, could not connect or timed out is a typed ``judge_failed``. The kind is not
+    derived from the error's status: a policy that needs the status reads it on the cause.
     """
     message = f"{type(error).__name__}: {error}"
-    fields = {"message": message, "operation": "judge.request", "stage": "verification"}
-    if isinstance(error, ClientResponseError):
-        status = innermost_http_status(error) or error.status
-        if status in (401, 403):
-            return JudgeCredentialsRejected(**fields)
-        if status == 429:
-            return JudgeRateLimited(**fields)
-        if status >= 500:
-            return JudgeServerError(**fields)
-    elif isinstance(error, ClientConnectorError):
-        return JudgeUnreachable(**fields)
-    elif isinstance(error, TimeoutError):
-        return JudgeTimeout(**fields)
+    if isinstance(error, (ClientResponseError, ClientConnectorError, TimeoutError)):
+        return JudgeCallFailed(message=message, operation="judge.request", stage="verification")
     return JudgeError(message)
 
 
@@ -190,7 +155,7 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
                 "reward": 0.0,
                 "mask_sample": True,
                 # What the client observed, where it could tell; the routing class below stays judge_failed.
-                "failure_kind": (e.failure_kind if isinstance(e, TypedException) and e.failure_kind else JUDGE_FAILED),
+                "failure_kind": (e.failure_kind if isinstance(e, NgFailureEvent) and e.failure_kind else JUDGE_FAILED),
                 "failure_reason": error,
                 # Keep older NeMo RL consumers working during top-level field migration.
                 "instance_config": {
@@ -200,8 +165,8 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
                 "_ng_failure_class": "judge_failed",
                 "_ng_failure_judge_error": error,
             }
-            # The failed call's hops.
-            data |= failure_path_fields(e)
+            # The failed call's event metadata.
+            data |= row_fields(boundary_failure(e, server="judge"))
             return JSONResponse(content=jsonable_encoder(data))
 
     return wrapper

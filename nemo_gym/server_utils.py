@@ -118,7 +118,16 @@ from nemo_gym.telemetry.observer import observe_app_event_loop, request_counts
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
-from nemo_gym.typed_exceptions import FAILURE_EVENT_HEADER, safe_failure_header
+from nemo_gym.typed_exceptions import (
+    FAILURE_EVENT_HEADER,
+    decode_header,
+    encode_events_header,
+    encode_header,
+    observe_relayed_events,
+    observing_failures,
+    remote_failure,
+    safe_failure_header,
+)
 
 
 try:
@@ -670,6 +679,8 @@ async def _traced_request(
 
         if span is not None:
             safe_set_span_attributes(span, {"http.response.status_code": response.status})
+        # A Gym server's reply may forward failures it recovered from; they join this request's observations.
+        observe_relayed_events(getattr(response, "headers", None))
         return response
 
 
@@ -849,6 +860,11 @@ Response content: {content}""")
             e.history = ()
             e.headers = CIMultiDict(e.headers) if e.headers is not None else None
             e.args = (e.request_info, e.history)
+            # A Gym server's own failure, rebuilt from its header, is the explicit cause of this HTTP error, so the
+            # caller's failure chain reaches the remote failure with its id, kind and reason.
+            remote = remote_failure(e.headers)
+            if remote is not None:
+                raise e from remote
             raise e
 
 
@@ -1784,43 +1800,51 @@ class SimpleServer(BaseServer):
     def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
         @app.middleware("http")
         async def exception_handling_middleware(request: Request, call_next):
-            try:
-                return await call_next(request)
-            except ClientResponseError as e:
-                assert hasattr(e, "response_content"), (
-                    "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"
-                )
+            with observing_failures() as observed:
+                response = await SimpleServer._handle_with_failure_headers(self, request, call_next)
+                # Recovered and relayed failures travel with the reply, whatever its outcome.
+                response.headers.update(encode_events_header(observed))
+                return response
 
-                response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
-                print(_format_upstream_error_log(self.get_session_middleware_key(), e), flush=True)
+    async def _handle_with_failure_headers(self, request: Request, call_next):  # pragma: no cover
+        try:
+            return await call_next(request)
+        except ClientResponseError as e:
+            assert hasattr(e, "response_content"), (
+                "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"
+            )
 
-                # The inner server's own event is the more specific one; pass it on unchanged.
-                inner = (e.headers or {}).get(FAILURE_EVENT_HEADER)
-                # Only a legal (ASCII) header is passed on; anything else is replaced by this server's own.
-                relay = isinstance(inner, str) and inner and inner.isascii()
-                headers = {FAILURE_EVENT_HEADER: inner} if relay else safe_failure_header(e, server=self.config.name)
-                return JSONResponse(content=response_content, status_code=500, headers=headers)
-            except CancelledError as e:
-                return JSONResponse(
-                    content="Request was cancelled",
-                    status_code=500,
-                    headers=safe_failure_header(e, server=self.config.name),
-                )
-            except Exception as e:
-                print(
-                    f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
+            response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
+            print(_format_upstream_error_log(self.get_session_middleware_key(), e), flush=True)
+
+            # Relay only a validated, bounded event; invalid upstream metadata cannot spoil the reply.
+            inner = decode_header(e.headers)
+            relay = encode_header(inner) if inner is not None else None
+            headers = (
+                {FAILURE_EVENT_HEADER: relay} if relay is not None else safe_failure_header(e, server=self.config.name)
+            )
+            return JSONResponse(content=response_content, status_code=500, headers=headers)
+        except CancelledError as e:
+            return JSONResponse(
+                content="Request was cancelled",
+                status_code=500,
+                headers=safe_failure_header(e, server=self.config.name),
+            )
+        except Exception as e:
+            print(
+                f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
 Formatted exception: {format_exc()}
 repr(e): {repr(e)}"""
-                )
-                return JSONResponse(
-                    content=repr(e), status_code=500, headers=safe_failure_header(e, server=self.config.name)
-                )
-            except:
-                print_exc()
-                print(
-                    f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
-                )
-                return JSONResponse(content="An unknown error occurred", status_code=500)
+            )
+            return JSONResponse(
+                content=repr(e), status_code=500, headers=safe_failure_header(e, server=self.config.name)
+            )
+        except:
+            print_exc()
+            print(
+                f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
+            )
+            return JSONResponse(content="An unknown error occurred", status_code=500)
 
     def setup_cancellation_middleware(self, app: FastAPI) -> None:
         app.add_middleware(ClientDisconnectCancellationMiddleware)

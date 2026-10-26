@@ -13,7 +13,9 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+import nemo_gym.tasks.harbor.build_options as build_options
 import nemo_gym.tasks.harbor.hub as hub_module
+import nemo_gym.tasks.harbor.manifest as manifest_module
 import nemo_gym.tasks.harbor.prepare_builds as prepare_builds
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTaskConfig, content_hash, discover_tasks, load_task
 from nemo_gym.tasks.harbor.cli import (
@@ -727,12 +729,31 @@ class TestDiscovery:
     def test_single_task_folder(self, tmp_path):
         assert [t.task_id for t in discover_tasks(write_task(tmp_path / "solo"))] == ["solo"]
 
-    def test_folder_of_task_folders_one_level(self, tmp_path):
+    def test_folder_of_task_folders_is_searched_recursively(self, tmp_path):
         write_task(tmp_path / "ds" / "b")
         write_task(tmp_path / "ds" / "a")
         write_task(tmp_path / "ds" / "nested" / "deep")
+        write_task(tmp_path / "ds" / ".hidden" / "never")
         (tmp_path / "ds" / "README.md").write_text("dataset readme")
-        assert [t.task_id for t in discover_tasks(tmp_path / "ds")] == ["a", "b"]
+        tasks = discover_tasks(tmp_path / "ds")
+        assert [t.task_id for t in tasks] == ["a", "b", "deep"]
+        # A nested task reads the dataset's own files from the root, not from its parent folder.
+        (tmp_path / "ds" / "dataset.toml").write_text("[gym.defaults]\ntimeout_multiplier = 2.0\n")
+        deep = discover_tasks(tmp_path / "ds")[2]
+        assert deep.path == (tmp_path / "ds" / "nested" / "deep").resolve()
+        assert deep.config.agent.timeout_sec == 240.0
+
+    def test_duplicate_task_ids_across_folders_are_rejected(self, tmp_path):
+        from nemo_gym.tasks.harbor.build_plan import plan_builds
+        from nemo_gym.tasks.harbor.image_configs import dockerfile_base_images
+        from nemo_gym.tasks.harbor.task import iter_task_folders
+
+        write_task(tmp_path / "ds" / "a")
+        write_task(tmp_path / "ds" / "nested" / "a")
+        # The folder walk itself rejects them, so every scan keyed by task name fails before doing work.
+        for scan in (discover_tasks, iter_task_folders, plan_builds, dockerfile_base_images):
+            with pytest.raises(HarborTaskError, match="Duplicate Harbor task ID 'a'"):
+                scan(tmp_path / "ds")
 
     def test_empty_folder_is_an_error(self, tmp_path):
         (tmp_path / "empty").mkdir()
@@ -1118,7 +1139,11 @@ class TestSeparateVerifierFields:
         assert HarborTaskConfig.model_validate({"verifier": {"timeout_sec": 30}}).is_shared_verifier
 
     def test_separate_mode_without_artifacts_loads_with_a_warning(self, tmp_path, caplog):
-        separate = HELLO_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+        # A prebuilt image: Harbor's effective verifier environment (a copy of [environment]) carries it, so the task
+        # loads without a tests/Dockerfile; without either, the loader refuses it as Harbor does.
+        separate = HELLO_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n').replace(
+            "[environment]\n", '[environment]\ndocker_image = "org/hello:1"\n'
+        )
         with caplog.at_level("WARNING", logger="nemo_gym.tasks.harbor.task"):
             task = load_task(write_task(tmp_path / "t", toml=separate))
         assert not task.config.is_shared_verifier
@@ -1250,6 +1275,27 @@ class TestCli:
         # A second prepare finds everything recorded and asks the registry for nothing.
         prepare_target(str(folder), output_root=tmp_path / "out")
         assert FakeRegistryClient.resolved == ["ubuntu:24.04", "debian:bookworm-slim"]
+
+    def test_prepare_rejects_duplicate_task_ids_before_registry_or_build_work(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "v1" / "x")
+        write_task(folder / "v2" / "x", dockerfile=TB21_DEBIAN_DOCKERFILE)
+        with pytest.raises(HarborTaskError, match="Duplicate Harbor task ID 'x'"):
+            prepare_target(str(folder), output_root=tmp_path / "out")
+        assert FakeRegistryClient.resolved == []
+        assert not (folder / IMAGE_CONFIGS_FILE).exists()
+
+    def test_prepare_records_compose_images_at_the_dataset_root_for_nested_tasks(self, tmp_path):
+        folder = tmp_path / "ds"
+        web = write_task(folder / "00-services" / "web")
+        (web / "environment" / "docker-compose.yaml").write_text("services:\n  api:\n    image: redis:7-alpine\n")
+        write_task(folder / "zeta")
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out")
+        assert [task.task_id for task in prepared.tasks] == ["web", "zeta"]
+        # Where the loader and the environment server read it from: the dataset root, not the group folder.
+        recorded = json.loads((folder / "compose-images.json").read_text())
+        assert "redis:7-alpine" in recorded
+        assert not (folder / "00-services" / "compose-images.json").exists()
 
     def test_prepare_fails_clearly_when_a_base_image_cannot_be_fetched(self, tmp_path):
         from nemo_gym.tasks.harbor.registry import ImageConfigError
@@ -1866,6 +1912,83 @@ def test_interrupted_fetch_preserves_pins_when_head_moves(tmp_path, registry_rep
     assert (folder / "b" / "instruction.md").read_text() == "new contents"
 
 
+@pytest.mark.parametrize("name", ["a", "renamed"])
+def test_a_staging_directory_an_interrupted_fetch_left_behind_is_not_a_task(
+    tmp_path, registry_repo, monkeypatch, name
+):
+    """The process died after the pin was published but before the staging directory was cleaned up. The
+    retry reuses the task, and discovery, which walks the dataset folder recursively, must not take the
+    leftover clone for a second copy of the task (the same ID) or for an extra task (another name)."""
+    from nemo_gym.tasks.harbor.task import iter_task_folders
+
+    dataset = registry_dataset(registry_repo, name=name)
+    real_tempfile = hub_module.tempfile
+
+    class LeakedStaging:
+        """A TemporaryDirectory whose process never reached the cleanup."""
+
+        def __init__(self, *, prefix, dir):
+            self.name = real_tempfile.mkdtemp(prefix=prefix, dir=dir)
+
+        def __enter__(self):
+            return self.name
+
+        def __exit__(self, *exc):
+            return None
+
+    publish = hub_module._write_manifest
+
+    def publish_then_die(*args, **kwargs):
+        publish(*args, **kwargs)
+        raise RuntimeError("killed after publishing the pin")
+
+    class StagingTempfile:
+        """`tempfile` as the fetch sees it: everything real, except the staging directory, which leaks."""
+
+        TemporaryDirectory = LeakedStaging
+
+        def __getattr__(self, name):
+            return getattr(real_tempfile, name)
+
+    monkeypatch.setattr(hub_module, "tempfile", StagingTempfile())
+    monkeypatch.setattr(hub_module, "_write_manifest", publish_then_die)
+    with pytest.raises(RuntimeError, match="killed"):
+        fetch_dataset(dataset, tmp_path / "datasets")
+    monkeypatch.undo()
+
+    folder = tmp_path / "datasets" / dataset.folder_name
+    (leftover,) = [path for path in folder.iterdir() if path.is_dir() and path.name != name]
+    assert leftover.name.startswith(".nemo-gym-harbor-")
+    assert (leftover / "repo" / "tasks" / "a" / "task.toml").is_file()
+    manifest = (folder / "manifest.toml").read_text()
+
+    assert fetch_dataset(dataset, tmp_path / "datasets") == folder
+
+    # The published task was reused as it is, and the leftover is neither a duplicate nor an extra task.
+    assert (folder / "manifest.toml").read_text() == manifest and leftover.is_dir()
+    assert iter_task_folders(folder) == [folder / name]
+    assert [task.task_id for task in discover_tasks(folder)] == [name]
+
+
+def test_a_legacy_unhidden_staging_directory_is_refused_as_a_duplicate_task(tmp_path):
+    """Review (round 14): a `main` build from before this change staged the fetch's clone under an unhidden
+    `nemo-gym-harbor-*` name, which first-level discovery never saw. The recursive search does see such a leftover,
+    and refuses it loudly (the clone holds the task that was being staged, so its ID is a duplicate) rather than
+    running a second copy. The name is not special-cased (a user folder may start that way); the README says to
+    delete those directories once."""
+    from nemo_gym.tasks.harbor.task import iter_task_folders
+
+    dataset = tmp_path / "datasets" / "ds"
+    write_task(dataset / "a")
+    write_task(dataset / "nemo-gym-harbor-k3x9q" / "repo" / "tasks" / "a")
+    with pytest.raises(HarborTaskError, match=r"Duplicate Harbor task ID 'a'") as excinfo:
+        iter_task_folders(dataset)
+    assert "nemo-gym-harbor-k3x9q" in str(excinfo.value)
+    # Prepare discovers through the same walk, so nothing runs or scores with the leftover in place.
+    with pytest.raises(HarborTaskError, match=r"Duplicate Harbor task ID 'a'"):
+        discover_tasks(dataset)
+
+
 def test_existing_unpinned_task_is_never_relabeled(tmp_path, registry_repo):
     existing = write_task(tmp_path / "datasets" / "ds-1.0" / "a")
     (existing / "instruction.md").write_text("local contents")
@@ -2056,20 +2179,20 @@ def test_manifest_publication_failure_keeps_previous_pins(tmp_path, registry_rep
         "",
         tuple(RegistryTask(name, registry_repo.as_uri(), "HEAD", f"tasks/{name}") for name in ("a", "b")),
     )
-    original = Path.replace
+    original = manifest_module.os.replace
 
     def fail_publication(path, target):
         if Path(target) == folder / "manifest.toml":
             raise OSError("interrupted manifest publication")
         return original(path, target)
 
-    monkeypatch.setattr(Path, "replace", fail_publication)
+    monkeypatch.setattr(manifest_module.os, "replace", fail_publication)
     with pytest.raises(OSError, match="interrupted manifest"):
         fetch_dataset(dataset, tmp_path / "datasets")
     assert (folder / "manifest.toml").read_bytes() == before
     assert (folder / "b" / "task.toml").is_file()
     assert not list(folder.glob(".manifest-*"))
-    monkeypatch.setattr(Path, "replace", original)
+    monkeypatch.setattr(manifest_module.os, "replace", original)
     (registry_repo / "tasks" / "b" / "instruction.md").write_text("new contents")
     commit_repo(registry_repo)
     with pytest.raises(HubError, match="no trustworthy source pin"):
@@ -2159,6 +2282,31 @@ class TestDatasetConfig:
         message = str(excinfo.value)
         assert str(folder / "dataset.toml") in message
         assert '[gym.tasks."hello".environment].env must be a table of strings' in message
+
+    @pytest.mark.parametrize(
+        "text",
+        ['[gym.tasks."bad".verifier]\nenv = 1\n', '[gym.tasks."bad".verifier]\nenv = { A = 3 }\n'],
+    )
+    def test_a_malformed_verifier_env_override_skips_the_task_by_name_instead_of_aborting_the_dataset(
+        self, tmp_path, text
+    ):
+        """`env = 1` under the verifier table used to reach `dict(1)` in the merge, a TypeError that neither
+        `load_task` nor the base-image scan catches: one malformed override aborted the whole dataset's preparation.
+        It is refused like the environment table's `env`, so the task is skipped with its table named."""
+        from nemo_gym.tasks.harbor.image_configs import dockerfile_base_images
+
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        write_task(folder / "bad")
+        (folder / "dataset.toml").write_text(text)
+        with pytest.raises(HarborTaskError) as excinfo:
+            load_task(folder / "bad")
+        assert '[gym.tasks."bad".verifier].env must be a table of strings' in str(excinfo.value)
+        skipped: dict[str, HarborTaskError] = {}
+        assert [t.task_id for t in discover_tasks(folder, skipped=skipped)] == ["a"]
+        assert list(skipped) == ["bad"] and "must be a table of strings" in str(skipped["bad"])
+        # The base-image scan skips the task too, instead of aborting the scan of the dataset.
+        assert dockerfile_base_images(folder) == {"ubuntu:24.04": ["a"]}
 
     def test_defaults_scale_timeouts_and_resources(self, tmp_path):
         folder = tmp_path / "ds"
@@ -2398,6 +2546,32 @@ def test_expected_harbor_cli_errors_are_concise(tmp_path, monkeypatch, capsys, t
     assert exc.value.code == 2
     error = capsys.readouterr().err
     assert message in error and "Traceback" not in error
+
+
+@pytest.mark.usefixtures("fake_registry")
+@pytest.mark.parametrize("command", [["eval", "run"], ["dataset", "validate"]])
+def test_a_compose_volume_problem_in_a_task_folder_exits_cleanly(tmp_path, monkeypatch, capsys, command):
+    # Review: the planner's ImageConfigError (not a HarborTaskError) reached the user as a traceback at prepare.
+    import sys
+
+    from nemo_gym.cli.main import main
+
+    folder = tmp_path / "ds"
+    write_task(folder / "aw")
+    (folder / "aw" / "environment" / "docker-compose.yaml").write_text(
+        "services:\n  api:\n    image: nginx:1.27\n    volumes: [./missing.json:/app/seed.json]\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NEMO_GYM_DATASETS_DIR", str(tmp_path / "datasets"))
+    flags = ["--agent", "hermes_agent"] if command[0] == "eval" else []
+    monkeypatch.setattr(sys, "argv", ["gym", *command, str(folder), *flags])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 2
+    error = capsys.readouterr().err
+    assert "aw: environment/docker-compose.yaml: service 'api' binds './missing.json'" in error
+    assert "which the task folder does not contain" in error
+    assert "Traceback" not in error
 
 
 @pytest.mark.parametrize(
@@ -2667,3 +2841,288 @@ def test_eval_run_resume_reports_a_config_error_cleanly(tmp_path, monkeypatch, c
     assert exc.value.code == 1 and len(dispatched) == 1
     out = capsys.readouterr().out
     assert "Error:" in out and "policy_model_name" in out and "Provide it via a CLI override" in out
+
+
+class TestDatasetTaskAdditions:
+    """`[gym.tasks."<id>"]` gains `verifier` overrides and `artifacts` additions, applied like `environment`."""
+
+    def test_verifier_fields_override_and_env_merges(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "a", toml=HELLO_TOML + '\n[verifier.env]\nMODE = "fast"\nKEEP = "1"\n')
+        (folder / "dataset.toml").write_text(
+            '[gym.tasks."a".verifier]\ntimeout_sec = 900.0\nuser = "root"\n'
+            '[gym.tasks."a".verifier.env]\nMODE = "strict"\nJUDGE = "${JUDGE_KEY}"\n'
+        )
+        verifier = load_task(folder / "a").config.verifier
+        assert verifier.timeout_sec == 900.0 and verifier.user == "root"
+        assert verifier.env == {"MODE": "strict", "KEEP": "1", "JUDGE": "${JUDGE_KEY}"}
+        # The task's own file is untouched and the digest, which covers it, is unchanged by dataset.toml.
+        assert "900" not in (folder / "a" / "task.toml").read_text()
+
+    def test_verifier_environment_override_merges_env_like_the_agents(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(
+            folder / "a",
+            toml=HELLO_TOML + '\n[verifier.environment]\ndocker_image = "org/verifier:1"\nenv = { A = "1" }\n',
+        )
+        (folder / "dataset.toml").write_text('[gym.tasks."a".verifier.environment]\ncpus = 4\nenv = { B = "2" }\n')
+        environment = load_task(folder / "a").config.verifier.environment
+        assert environment.docker_image == "org/verifier:1" and environment.cpus == 4
+        assert environment.env == {"A": "1", "B": "2"}
+
+    def test_artifacts_are_added_after_the_tasks_own(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "a", toml=HELLO_TOML.replace("[task]\n", 'artifacts = ["/app/out.txt"]\n\n[task]\n', 1))
+        (folder / "dataset.toml").write_text(
+            '[gym.tasks."a"]\nartifacts = ["/var/log/app", { source = "/data/db", service = "db" }]\n'
+        )
+        artifacts = load_task(folder / "a").config.artifacts
+        assert [(a.source, a.service) for a in artifacts] == [
+            ("/app/out.txt", None),
+            ("/var/log/app", None),
+            ("/data/db", "db"),
+        ]
+        # Timeout multipliers still apply on top of the per-task verifier override.
+        (folder / "dataset.toml").write_text(
+            '[gym.defaults]\ntimeout_multiplier = 2.0\n[gym.tasks."a".verifier]\ntimeout_sec = 100.0\n'
+        )
+        assert load_task(folder / "a").config.verifier.timeout_sec == 200.0
+
+    @pytest.mark.parametrize(
+        ("table", "message"),
+        [
+            ('[gym.tasks."a".verifier]\ntimeout = 5\n', r"verifier\] has unknown keys: timeout"),
+            ('[gym.tasks."a".verifier]\ntimeout_sec = -1\n', r"verifier\]:"),
+            ('[gym.tasks."a"]\nartifacts = ["../escape"]\n', r"artifacts\]:"),
+        ],
+    )
+    def test_bad_additions_are_named(self, tmp_path, table, message):
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        (folder / "dataset.toml").write_text(table)
+        with pytest.raises(HarborTaskError, match=message):
+            load_task(folder / "a")
+
+
+def test_taskset_mapping_records_the_relative_path_of_nested_tasks(tmp_path):
+    from nemo_gym.tasks.harbor.materialize import taskset_mapping
+
+    folder = tmp_path / "ds"
+    write_task(folder / "a")
+    write_task(folder / "group" / "sub" / "deep")
+    tasks = discover_tasks(folder)
+    mapping = taskset_mapping(tasks, folder)
+    assert mapping["folder"] == str(folder.resolve())
+    assert set(mapping["tasks"]) == {"a", "deep"}
+    # Only tasks below the first level need a path; the server resolves the others as <folder>/<task_id>.
+    assert mapping["paths"] == {"deep": "group/sub/deep"}
+    assert Path(mapping["folder"]) / mapping["paths"]["deep"] == tasks[1].path
+    # Prepare writes the same mapping into the run config.
+    config = run_config(
+        taskset="ds",
+        folder=folder,
+        tasks=tasks,
+        rows_path=tmp_path / "out" / "tasks.jsonl",
+        agent_instance_name="hermes_agent",
+        agent_impl="hermes_agent",
+    )
+    assert config["harbor_ds_environment"]["environment_servers"]["harbor"]["tasksets"]["ds"]["paths"] == {
+        "deep": "group/sub/deep"
+    }
+
+
+def test_validation_summary_reports_verify_time_and_network_per_task(tmp_path):
+    from nemo_gym.tasks.harbor.validation_report import summarize_validation
+
+    rollouts = tmp_path / "rollouts.jsonl"
+    rows = [
+        {
+            "_ng_task_id": {"taskset": "ds", "task_id": "timed"},
+            "response": {"metadata": {"oracle": "solved"}},
+            "reward": 1.0,
+            "verifier_seconds": 12.345,
+            "verifier_network": "public",
+        },
+        {
+            "_ng_task_id": {"taskset": "ds", "task_id": "masked"},
+            "response": {"metadata": {"oracle": "solved"}},
+            "reward": 0.0,
+            "mask_sample": True,
+            "failure_kind": "provider_unavailable",
+            "verifier_seconds": 3,
+            "verifier_network": "no-network",
+        },
+    ]
+    rollouts.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    lines = summarize_validation(rollouts, []).text.splitlines()
+    assert lines[0] == "task_id\tstatus\treward\tverify_s\tnetwork"
+    assert "timed\toracle solved\t1.0\t12.3\tpublic" in lines
+    assert "masked\tmasked (provider_unavailable)\t-\t3.0\tno-network" in lines
+
+
+class TestComposeVolumeSourcesAtPrepare:
+    """M22: ``volume_sources`` reaches prepare from the ``sandbox:`` block the command names."""
+
+    @pytest.fixture
+    def sources(self, tmp_path, monkeypatch):
+        import nemo_gym.tasks.harbor.cli as harbor_cli
+
+        dotenv = tmp_path / "env.yaml"
+        dotenv.write_text("some_key: 1\n")
+        monkeypatch.setattr(build_options, "_resolve_under_cwd_or_install", lambda rel: tmp_path / rel)
+        provider = tmp_path / "provider.yaml"
+        # Credentials interpolate from the environment, as the real provider files do; reading volume_sources
+        # must not need them.
+        provider.write_text(
+            "sandbox:\n  opensandbox:\n    connection:\n      api_key: ${oc.env:M22_UNSET_KEY}\n"
+            "  volume_sources:\n    pgdata: datasets/pgdata\n"
+        )
+        monkeypatch.setattr(harbor_cli, "resolve_sandbox_config", lambda name: provider)
+        monkeypatch.delenv("M22_UNSET_KEY", raising=False)
+        return dotenv, provider
+
+    def test_volume_sources_come_from_the_sandbox_file_and_overrides(self, tmp_path, sources):
+        from nemo_gym.tasks.harbor.cli import volume_sources_from_overrides
+
+        assert volume_sources_from_overrides([], None) is None
+        assert volume_sources_from_overrides([], "opensandbox") == {"pgdata": "datasets/pgdata"}
+        tokens = [
+            "++sandbox.volume_sources.pgdata=overridden/pg",
+            "++sandbox.volume_sources.models=m",
+            "+agent_name=a",
+        ]
+        assert volume_sources_from_overrides(tokens, "opensandbox") == {"pgdata": "overridden/pg", "models": "m"}
+        # A --config file sits above the provider file and below the ++ overrides; a host path is a plain key.
+        config = tmp_path / "run.yaml"
+        config.write_text("sandbox:\n  volume_sources:\n    pgdata: elsewhere/pg\n    /var/lib/models: models\n")
+        assert volume_sources_from_overrides([f'+config_paths=["{config}"]'], "opensandbox") == {
+            "pgdata": "elsewhere/pg",
+            "/var/lib/models": "models",
+        }
+        with pytest.raises(ValueError, match="volume_sources.*must be a mapping"):
+            volume_sources_from_overrides(["++sandbox.volume_sources=[pgdata]"], None)
+
+    def test_shared_storage_is_read_from_the_blocks_provider(self, tmp_path, sources):
+        """M35 D6: prepare answers whether the block's provider has shared storage from the one setting the server's
+        provider requires (``shared_storage.host_path``), without resolving the block's credentials; unknown (no
+        block, or none naming one provider) stays ``None`` and the seed decides."""
+        from nemo_gym.tasks.harbor.cli import (
+            GPU_SANDBOX_PROVIDER_KEY,
+            gpu_shared_storage_from_overrides,
+            shared_storage_from_overrides,
+        )
+
+        assert shared_storage_from_overrides([], None) is None
+        assert shared_storage_from_overrides([], "opensandbox") is False
+        assert (
+            shared_storage_from_overrides(
+                ["++sandbox.opensandbox.shared_storage.host_path=/mnt/shared"], "opensandbox"
+            )
+            is True
+        )
+        config = tmp_path / "run.yaml"
+        config.write_text("sandbox:\n  opensandbox:\n    shared_storage:\n      host_path: /mnt/efs/data/shared\n")
+        assert shared_storage_from_overrides([f'+config_paths=["{config}"]'], "opensandbox") is True
+        assert (
+            shared_storage_from_overrides(["++sandbox.opensandbox.shared_storage.host_path="], "opensandbox") is False
+        )
+        gpu_block = f"++{GPU_SANDBOX_PROVIDER_KEY}=sandbox_gpu"
+        assert gpu_shared_storage_from_overrides([], "opensandbox") is None
+        assert gpu_shared_storage_from_overrides([gpu_block], "opensandbox") is None
+        assert (
+            gpu_shared_storage_from_overrides([gpu_block, "++sandbox_gpu.opensandbox.connection.api_key=k"], None)
+            is False
+        )
+        assert (
+            gpu_shared_storage_from_overrides(
+                [gpu_block, "++sandbox_gpu.opensandbox.shared_storage.host_path=/mnt/gpu"], None
+            )
+            is True
+        )
+
+    def test_gpu_volume_sources_come_from_the_gpu_sandbox_provider_block(self, tmp_path, sources):
+        # Review: GPU-declaring tasks are seeded from the server's `gpu_sandbox_provider` block, so prepare reads
+        # that block's volume_sources too: None without a GPU block, {} for a GPU block without the key.
+        from nemo_gym.tasks.harbor.cli import GPU_SANDBOX_PROVIDER_KEY, gpu_volume_sources_from_overrides
+
+        gpu_block = f"++{GPU_SANDBOX_PROVIDER_KEY}=sandbox_gpu"
+        assert GPU_SANDBOX_PROVIDER_KEY == "harbor_environment_server.environment_servers.harbor.gpu_sandbox_provider"
+        assert gpu_volume_sources_from_overrides([], "opensandbox") is None
+        assert gpu_volume_sources_from_overrides([gpu_block], "opensandbox") == {}
+        assert gpu_volume_sources_from_overrides([gpu_block, "++sandbox_gpu.volume_sources.pgdata=gpu/pg"], None) == {
+            "pgdata": "gpu/pg"
+        }
+        # The sandbox block's mapping does not leak into the GPU block's.
+        assert gpu_volume_sources_from_overrides([gpu_block, "++sandbox.volume_sources.pgdata=pg"], None) == {}
+        config = tmp_path / "run.yaml"
+        config.write_text(
+            "harbor_environment_server:\n  environment_servers:\n    harbor:\n      gpu_sandbox_provider: sandbox_gpu\n"
+            "sandbox_gpu:\n  volume_sources:\n    models: gpu/models\n"
+        )
+        assert gpu_volume_sources_from_overrides([f'+config_paths=["{config}"]'], None) == {"models": "gpu/models"}
+        with pytest.raises(ValueError, match="must name a top-level sandbox block"):
+            gpu_volume_sources_from_overrides([f"++{GPU_SANDBOX_PROVIDER_KEY}=[a]"], None)
+
+    def test_run_and_validate_hand_volume_sources_to_prepare(self, tmp_path, monkeypatch, sources):
+        import argparse
+
+        import nemo_gym.tasks.harbor.cli as harbor_cli
+
+        seen = []
+
+        def fake_prepare(target, **kwargs):
+            seen.append((kwargs["volume_sources"], kwargs["gpu_volume_sources"]))
+            raise harbor_cli.HubError("stop here")
+
+        def fail(message):
+            raise SystemExit(message)
+
+        monkeypatch.setattr(harbor_cli, "prepare_target", fake_prepare)
+        # The rows file is scoped to the agent, so the stub has to name one.
+        monkeypatch.setattr(
+            harbor_cli, "resolve_agent", lambda name: harbor_cli.AgentSelection(Path("a.yaml"), name, name)
+        )
+        args = argparse.Namespace(
+            target=str(tmp_path), agent="a", sandbox="opensandbox", _parser=argparse.Namespace(error=fail)
+        )
+        with pytest.raises(SystemExit, match="stop here"):
+            harbor_cli.run_target(args, [])
+        with pytest.raises(SystemExit, match="stop here"):
+            harbor_cli.validate_target(
+                args,
+                [
+                    "++sandbox.volume_sources.pgdata=pg",
+                    f"++{harbor_cli.GPU_SANDBOX_PROVIDER_KEY}=sandbox_gpu",
+                    "++sandbox_gpu.volume_sources.pgdata=gpu/pg",
+                ],
+            )
+        assert seen == [({"pgdata": "datasets/pgdata"}, None), ({"pgdata": "pg"}, {"pgdata": "gpu/pg"})]
+
+    def test_prepare_fails_naming_an_unmapped_external_volume(self, tmp_path, fake_registry):
+        folder = tmp_path / "ds"
+        write_task(folder / "pg")
+        (folder / "pg" / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  db:\n    image: postgres:16\n    volumes: [pgdata:/var/lib/postgresql/data]\n"
+            "volumes:\n  pgdata: {external: true}\n"
+        )
+        # The volume the group cannot run leaves its task out with the reason, as a Compose file that does not
+        # resolve does; with no other task, prepare ends naming it.
+        with pytest.raises(ValueError, match="external volume 'pgdata' needs a `volume_sources` entry"):
+            prepare_target(str(folder), output_root=tmp_path / "out")
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", volume_sources={"pgdata": "pg"})
+        assert [task.task_id for task in prepared.tasks] == ["pg"]
+
+    def test_gpu_tasks_prepare_against_the_gpu_block(self, tmp_path, fake_registry):
+        # Review: with a GPU block configured, a GPU-declaring task passes or fails prepare in step with the
+        # block the server seeds it from, whichever of the two carries the mapping.
+        folder = tmp_path / "ds"
+        write_task(folder / "pg", toml=HELLO_TOML.replace("gpus = 0", "gpus = 1"))
+        (folder / "pg" / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  db:\n    image: postgres:16\n    volumes: [pgdata:/var/lib/postgresql/data]\n"
+            "volumes:\n  pgdata: {external: true}\n"
+        )
+        mapped = {"pgdata": "pg"}
+        with pytest.raises(ValueError, match="external volume 'pgdata' needs a `volume_sources` entry"):
+            prepare_target(str(folder), output_root=tmp_path / "out", volume_sources=mapped, gpu_volume_sources={})
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", gpu_volume_sources=mapped)
+        assert [task.task_id for task in prepared.tasks] == ["pg"]

@@ -1,88 +1,32 @@
 ---
-title: "Rollout Failures"
-description: "Typed failures, their kinds, and the hops they record on EpisodeFailure.failure_path."
-position: 4
+title: Failure observations
+description: Typed boundary failures and bounded event maps without changing outcome policy.
 ---
 
-# Rollout Failures
+Gym records observed failures using `NgFailureEvent` and its model, harness, agent,
+resources-server, environment-server and collection boundary subclasses. Existing
+handlers, outcome policy, retry budgets and native scoring remain in control.
 
-Gym raises a typed exception where it observes a failed call: the judge client on an HTTP error, a sandbox provider
-that refuses a create. The exception keeps the type that the call site raised before, so every existing handler
-catches it as before. It records facts only, never a label of who is at fault.
+Each failure gets one stable event ID. `failure_events` maps IDs to observations;
+`failure_id` identifies the current failure and `cause_id` links explicit causes.
+Foreign exception names and integer HTTP statuses are data, never dynamically
+imported classes. Implicit Python context does not become a causal relationship.
+Kinds belong to their boundary; a nested provider status does not reclassify a judge failure.
 
-A failure is described by `EpisodeFailure` (`nemo_gym/episode_types.py`) and saved in the versioned `RolloutFailure`
-record (`nemo_gym/rollout_outcomes.py`). Their fields `failure_reason`, `terminal`, `failure_kind` and `stage` are
-unchanged. This page adds one optional field, `failure_path`. None of this decides a retry, a mask or a score.
+Shared HTTP helpers forward observations on error and successful responses, so
+an attempt recovered by an existing retry remains observable. The collector saves
+the same metadata beside its existing result/failure records. Old records with no
+event metadata retain their existing meaning; the saved-record version stays 1.
 
-## Typed failures and their kinds
+Transport bounds may shorten reasons or omit events. Explicit `reason_truncated`
+and `cause_truncated` markers distinguish compatible projections from conflicting
+facts. Counts of omitted observations are diagnostic lower bounds, not a new metric.
+Compatible copies retain the richer observation. Contradictory copies of an ID
+are excluded and named in bounded conflict metadata; affected cause references are
+marked truncated. At most 16 conflicting IDs are forwarded; overflow is reported as
+omitted observations, so downstream exclusion is guaranteed only for retained IDs.
+This diagnostic-loss behavior does not change the task outcome.
 
-`TypedException` (`nemo_gym/typed_exceptions.py`) is the base. A class sets `failure_kind` to a name registered in
-`nemo_gym/failure_kinds.py`; a name that is neither registered nor namespaced is refused when the class is defined.
-
-| Class | Raised in, on | `failure_kind` |
-|---|---|---|
-| `JudgeCredentialsRejected` | `nemo_gym/judge.py`, HTTP 401 or 403 | `judge_credentials_rejected` |
-| `JudgeRateLimited` | same, HTTP 429 | `judge_rate_limited` |
-| `JudgeServerError` | same, HTTP 5xx | `judge_server_error` |
-| `JudgeUnreachable` | same, `ClientConnectorError` | `judge_unreachable` |
-| `JudgeTimeout` | same, `TimeoutError` | `judge_timeout` |
-| any other `JudgeError` | same | `judge_failed` |
-| `SandboxCreateError` and every provider's create error | `nemo_gym/sandbox/providers/` | `provider_unavailable` |
-| `SandboxUnavailableError`, `SandboxProbeError` | `nemo_gym/sandbox/transfer.py` | `provider_unavailable` |
-| `SandboxCredentialsRejected` | `environment_servers/harbor/app.py`, seed, provider HTTP 401 or 403 | `provider_credentials_rejected` |
-| `SandboxTransferError` | `nemo_gym/sandbox/transfer.py` | none |
-| `SandboxPtyError` | `nemo_gym/sandbox/api.py` and providers | none |
-
-The judge classes are also `JudgeError`; the judge client types by the endpoint's status, or by the innermost status
-when a model server relays the provider's. `judge_failsafe` writes the class's kind as `failure_kind`, and keeps the
-routing class `_ng_failure_class` at `judge_failed`. The sandbox classes keep their types, constructors and messages.
-Harbor chains `SandboxCredentialsRejected` between the provider's error and the `HTTPException` it raises, so the
-raised type and the reply are unchanged.
-
-## `failure_path`
-
-`failure_path` lists the hops from the rollout to the innermost failure, outermost first. Each hop holds
-`exception_type`, and `operation` and `http_status` where observed. It is taken from the exception chain by type,
-never from message text. A hop is a `FailureHop` (`nemo_gym/episode_types.py`), a strict model like
-`EpisodeFailure`: unknown fields are refused, and unset fields are left out when it is saved.
-
-When a hop is a failed reply from another Gym server that sent its own path, that path continues this one. For
-example, a model server that answers 500 for a provider's 401 sends the 401 on its path, and the judge client
-types the failure by that innermost status.
-
-A `RolloutFailure` record whose failure has a `failure_path` must say `schema_version` 2. Version 1 records load
-unchanged.
-
-## The failure event in existing fields
-
-The design discussion sketched an `NgFailureEvent`. Gym already has the record, so the event is `EpisodeFailure` on
-the wire and `RolloutFailure` when saved; no parallel class is added.
-
-| `NgFailureEvent` field | Existing field |
-|---|---|
-| `phase` | `EpisodeFailure.stage` |
-| `reason` (a registered kind or unknown) | `EpisodeFailure.failure_kind`; unset means unknown |
-| HTTP details | `RolloutFailure.http_status` (the outermost status) and `FailureHop.http_status` on every hop |
-| `event_id` | not added: `RolloutFailure.episode_id` (rollout id and attempt) and `run_id` already name the one failure of an attempt |
-| `metadata` | not added: free-form metadata would be unbounded; `failure_reason`, `FailureHop.operation` and a protocol's own diagnostic fields (for example `SingleAgentTurnFailure.partial_response`) carry it |
-
-## How the failure travels
-
-1. A server's exception middleware answers 500 with the same body as before and adds the failure as
-   `EpisodeFailure` JSON in the `X-NG-Failure-Event` header. A header from an inner server passes on unchanged.
-2. `BaseEnvironmentServer` fills `failure_path` on the `EpisodeFailure` it returns, and `failure_kind` from a typed
-   failure when the producer set none. A producer's own kind wins.
-3. `judge_failsafe` adds the kind and the path of the failed call to its row.
-4. Rollout collection saves the path as `_ng_failure_path` and the kind as `_ng_failure_kind`, as it saves `stage` as
-   `_ng_failure_stage`. The routing class `_ng_failure_class` is unchanged. The prefix keeps both out of the metric
-   copy of a counted failure row. For a failed `/run`, `run_examples` yields the same result as before.
-
-If the header cannot be built, or is larger than 8 KiB, the reply goes out without it. An invalid header is ignored.
-
-## Add a typed failure
-
-1. Subclass `TypedException`, or `PositionalException` for an existing exception type with a positional constructor.
-2. Add the type the call site already raises as a base, so the same handlers still run.
-3. Set `failure_kind` to a registered kind; register one only for a fact the raise site observes.
-4. Raise it where Gym observes the failed call, chained with `raise ... from err`.
-5. Add a test from the raise site to the saved row.
+`observe_failure` records an attempt before retrying. Request-local observation
+capture and shared response helpers forward the resulting bounded map. This is
+not a new history store, retry engine or policy definition.

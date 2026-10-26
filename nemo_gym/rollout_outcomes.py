@@ -28,8 +28,6 @@ class RolloutFailure(BaseModel):
 
     ``schema_version`` identifies the entire saved record, including nested
     contracts. Missing versions are treated as version 1 for pre-version records.
-    Version 2 adds ``failure.failure_path``; a record that carries it must say 2, and
-    version 1 records load unchanged.
     Changes that older readers cannot parse (including added fields) require a
     version bump. Readers reject unsupported versions and unknown fields; callers
     must report an incompatible record or explicitly migrate it, never silently
@@ -38,7 +36,7 @@ class RolloutFailure(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1, 2] = 1
+    schema_version: Literal[1] = 1
     episode_id: EpisodeId
     run_id: str = Field(min_length=1)
     source: Literal["environment", "collector"]
@@ -52,6 +50,4 @@ class RolloutFailure(BaseModel):
         """Require established delivery for failures reported by the environment."""
         if self.source == "environment" and self.delivery != "delivered":
             raise ValueError("An environment-reported failure requires delivery='delivered'")
-        if self.failure.failure_path is not None and self.schema_version < 2:
-            raise ValueError("A failure with failure_path requires schema_version=2")
         return self

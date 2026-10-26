@@ -75,6 +75,7 @@ from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.token_id_capture import (
     CaptureContext,
     InMemoryLineageStore,
+    ParentResolutionStatus,
     TokenCaptureStore,
     reset_token_sink,
     resolve_parent,
@@ -984,6 +985,12 @@ class TestApp:
             assert response.status_code == 200
             if responses_api:
                 assert response.json()["incomplete_details"] == {"reason": "max_output_tokens"}
+                assert response.json()["usage"]["input_tokens"] == 0
+                assert response.json()["usage"]["output_tokens"] == 0
+                assert response.json()["usage"]["total_tokens"] == 0
+                assert response.json()["usage"]["input_tokens_details"]["cached_tokens"] == 0
+                assert response.json()["usage"]["output_tokens_details"]["reasoning_tokens"] == 0
+                assert response.json()["metadata"]["nemo_gym_context_window_exceeded"] == "true"
             else:
                 assert '"finish_reason": "length"' in response.text
 
@@ -1059,6 +1066,166 @@ class TestApp:
                 "code": "context_length_exceeded",
             }
         }
+
+    @staticmethod
+    def _engine_window_refusal() -> ClientResponseError:
+        """vLLM's refusal of a request whose output budget does not fit beside its prompt.
+
+        The body names ``max_tokens`` and the context window, so the envelope carries
+        ``context_length_exceeded``.
+        """
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = (
+            b"{\"error\":{\"message\":\"'max_tokens' or 'max_completion_tokens' is too large: 4000. This model's "
+            b"maximum context length is 4096 tokens and your request has 1000 input tokens (4000 > 4096 - 1000). "
+            b'Please reduce the length of the input prompt or the number of requested output tokens.",'
+            b'"type":"BadRequestError","param":null,"code":400}}'
+        )
+        return error
+
+    def _post_captured(self, server: VLLMModel, store: TokenCaptureStore, path: str, body: dict):
+        """Send one captured request through the real dispatch, which registers the call intent."""
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        token = set_token_sink(CaptureContext(rollout_id="r0", model_call_id="mc-1", token_sink=store))
+        try:
+            return TestClient(app).post(path, json=body)
+        finally:
+            reset_token_sink(token)
+
+    def _post_captured_chat_completion(self, server: VLLMModel, store: TokenCaptureStore, *, stream: bool = False):
+        body: dict = {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]}
+        if stream:
+            body["stream"] = True
+        return self._post_captured(server, store, "/v1/chat/completions", body)
+
+    @mark.parametrize(
+        "route",
+        [
+            "chat-completions",
+            "completions",
+            "chat-stream-before-headers",
+            "chat-stream-after-keepalive",
+            "responses",
+            "responses-stream",
+        ],
+    )
+    def test_a_captured_rollout_records_the_propagated_refusal_and_freezes_complete(
+        self, monkeypatch: MonkeyPatch, tmp_path, route: str
+    ) -> None:
+        # The dispatch registers the call's capture intent before the engine is called. The refused
+        # call generates nothing, so no token record resolves that intent; the refusal record does,
+        # and it tells a consumer the rollout ended at the context window rather than at the
+        # harness's own stopping point. Codex and OpenCode stream by default, so the record must
+        # also be written on the streaming paths: before the headers are committed the refusal is
+        # the same HTTP 400, and after the chat keepalive it is an SSE error event on a 200 that
+        # carries the same envelope, recorded from inside the dispatch task.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(
+            monkeypatch, propagate_context_overflow_errors=True, use_completions_api=route == "completions"
+        )
+        refusal = self._engine_window_refusal()
+        if route == "chat-stream-after-keepalive":
+            monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+
+            async def slow_refusal(**_kwargs):
+                await asyncio.sleep(0.05)
+                raise refusal
+
+            engine_call = AsyncMock(side_effect=slow_refusal)
+        else:
+            engine_call = AsyncMock(side_effect=refusal)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = engine_call
+        mock_client.create_completion = engine_call
+        server._clients = [mock_client]
+
+        if route.startswith("responses"):
+            body = {
+                "model": "dummy_model",
+                "input": [{"role": "user", "content": "hi"}],
+                "stream": route == "responses-stream",
+            }
+            response = self._post_captured(server, store, "/v1/responses", body)
+        else:
+            response = self._post_captured_chat_completion(server, store, stream=route.startswith("chat-stream"))
+
+        if route == "chat-stream-after-keepalive":
+            assert response.status_code == 200
+            assert response.text.startswith(": keep-alive")
+            error_lines = [line for line in response.text.splitlines() if line.startswith("data: ")]
+            assert json.loads(error_lines[-1][len("data: ") :])["error"]["code"] == "context_length_exceeded"
+        else:
+            assert response.status_code == 400
+            assert response.json()["error"]["code"] == "context_length_exceeded"
+        snapshot = store.freeze_now("r0")
+        assert snapshot.entries == ()
+        assert snapshot.incomplete is False
+        (record,) = snapshot.engine_refusals
+        assert (record.model_call_id, record.code) == ("mc-1", "context_length_exceeded")
+        assert record.created_at > 0
+        # The dispatch resolved the request's lineage before the engine was called; a request with
+        # no model-authored history is a root, and the record carries that decision.
+        assert (record.parent_call_id, record.parent_resolution) == (None, ParentResolutionStatus.ROOT)
+
+    def test_a_max_tokens_only_400_is_a_refusal_without_a_code(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        # A 400 that names only the output-token parameter is still a request the engine refused
+        # before generating, so it resolves the capture intent like any refusal. Its record carries
+        # no code because the envelope carried none: compaction is not the remedy.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = (
+            b'{"error":{"message":"max_tokens must be at least 1, got 0.","type":"BadRequestError",'
+            b'"param":null,"code":400}}'
+        )
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+
+        response = self._post_captured_chat_completion(server, store)
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] is None
+        snapshot = store.freeze_now("r0")
+        assert snapshot.incomplete is False
+        assert [(record.model_call_id, record.code) for record in snapshot.engine_refusals] == [("mc-1", None)]
+
+    def test_the_absorbed_overflow_records_no_refusal(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        # Without propagate_context_overflow_errors the caller sees an exhausted generation, not a
+        # refusal, so nothing is recorded as refused.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=False)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=self._engine_window_refusal())
+        server._clients = [mock_client]
+
+        response = self._post_captured_chat_completion(server, store)
+
+        assert response.status_code == 200
+        assert store.freeze_now("r0").engine_refusals == ()
+
+    def test_an_uncaptured_request_is_still_refused_and_records_nothing(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        # A request outside a captured rollout has no rollout to record against.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=self._engine_window_refusal())
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 400
+        assert list(store.root.iterdir()) == []
 
     @mark.parametrize("use_completions_api", [False, True])
     def test_an_engine_error_the_server_does_not_handle_is_logged_with_its_body(
@@ -5024,6 +5191,102 @@ def _make_completions_backend_model(
     )
 
 
+_WINDOW_32768 = json.dumps(
+    {
+        "message": "This model's maximum context length is 32768 tokens. However, you requested 40010 tokens "
+        "(10 in the messages, 40000 in the completion). Please reduce the length of the messages or completion."
+    }
+)
+
+
+@mark.parametrize("propagate", [False, True], ids=["finish-reason-length", "propagate-error"])
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+@mark.parametrize(
+    ("budget", "error_content", "categories"),
+    [
+        (
+            {"max_tokens": 256, "max_completion_tokens": 40000},
+            _WINDOW_32768,
+            ("invalid_output_token_parameter", "context_length_exceeded"),
+        ),
+        (
+            {"max_tokens": 40000, "max_completion_tokens": 256},
+            _WINDOW_32768,
+            ("context_length_exceeded", "invalid_output_token_parameter"),
+        ),
+        ({"max_completion_tokens": 40000}, _WINDOW_32768, ("invalid_output_token_parameter",) * 2),
+        (
+            {"max_completion_tokens": 40000},
+            '{"message": "max_completion_tokens=40000 cannot be greater than max_model_len=32768."}',
+            ("invalid_output_token_parameter",) * 2,
+        ),
+        (
+            {"max_tokens": 40000},
+            json.dumps(
+                {
+                    "message": "max_tokens=40000 cannot be greater than max_model_len=max_total_tokens=32768. "
+                    "Please request fewer output tokens. (parameter=max_tokens, value=40000)"
+                }
+            ),
+            ("invalid_output_token_parameter",) * 2,
+        ),
+        ({"max_tokens": 32768}, _WINDOW_32768, ("context_length_exceeded",) * 2),
+        ({}, _WINDOW_32768, ("context_length_exceeded",) * 2),
+        (
+            {"max_tokens": 40000},
+            '{"message": "max_tokens must be at least 1, got -6677."}',
+            ("context_length_exceeded",) * 2,
+        ),
+    ],
+    ids=[
+        "chat-budget-over-window",
+        "completions-budget-over-window",
+        "alias-only-over-window",
+        "max-model-len",
+        "vllm-0.27-max-total-tokens",
+        "budget-equal-to-window",
+        "no-budget",
+        "no-window-named",
+    ],
+)
+async def test_a_budget_larger_than_the_named_window_is_an_invalid_parameter(
+    monkeypatch: MonkeyPatch,
+    propagate: bool,
+    use_completions_api: bool,
+    budget: dict,
+    error_content: str,
+    categories: tuple[str, str],
+) -> None:
+    """No prompt fits a budget larger than the whole window the engine names, so the budget is at fault. The budget
+    is the one the engine received: chat reads max_completion_tokens first, and completions passes max_tokens."""
+    monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value={}))
+    model = _make_completions_backend_model() if use_completions_api else TestApp()._setup_server(monkeypatch)
+    model.config.propagate_context_overflow_errors = propagate
+    error = ClientResponseError(MagicMock(), (), status=400, message="backend request failed")
+    error.response_content = error_content.encode()
+    client = MagicMock(spec=NeMoGymAsyncOpenAI)
+    client.create_chat_completion = AsyncMock(side_effect=error)
+    client.create_completion = AsyncMock(side_effect=error)
+    model._clients = [client]
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "invalid-budget-test"}
+    request.headers = {}
+    body = NeMoGymChatCompletionCreateParamsNonStreaming(
+        messages=[NeMoGymChatCompletionUserMessageParam(role="user", content="hello")], **budget
+    )
+
+    if propagate:
+        with raises(ClientResponseError):
+            await model.chat_completions(request, body)
+    else:
+        assert (await model.chat_completions(request, body)).choices[0].finish_reason == "length"
+
+    category = categories[use_completions_api]
+    execution = request.state.nemo_gym_model_execution
+    assert execution["error_category"] == category
+    assert execution["local_response_reason"] == (None if propagate else category)
+
+
 @mark.parametrize("propagate", [False, True], ids=["finish-reason-length", "propagate-error"])
 @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
 @mark.parametrize(
@@ -5111,6 +5374,12 @@ async def test_backend_context_overflow_handling(
         assert result.choices[0].message.role == "assistant"
         assert result.choices[0].message.content is None
         assert result.choices[0].message.tool_calls is None
+        assert result.usage is not None
+        assert result.usage.prompt_tokens == 0
+        assert result.usage.completion_tokens == 0
+        assert result.usage.total_tokens == 0
+        assert result.usage.prompt_tokens_details.cached_tokens == 0
+        assert result.usage.completion_tokens_details.reasoning_tokens == 0
     else:
         with raises(ClientResponseError) as exc_info:
             await model.chat_completions(request, body)

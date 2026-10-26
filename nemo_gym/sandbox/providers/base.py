@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
-from nemo_gym.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, PROVIDER_UNAVAILABLE
-from nemo_gym.typed_exceptions import PositionalException, TypedException
+from nemo_gym.failure_kinds import PROVIDER_CREDENTIALS_REJECTED
+from nemo_gym.typed_exceptions import NgFailureEvent, PositionalException
 
 
 # How long a provider may spend finding and deleting the sandbox a timed-out create left behind (one list
@@ -264,14 +264,14 @@ class SandboxPtySpec:
 class SandboxPtyError(PositionalException, RuntimeError):
     """Raised when a PTY session fails outside normal process exit.
 
-    Typed: its failure path records the session's end; no kind is set, since both the provider and the
+    Typed: its event records the session's end; no kind is set, since both the provider and the
     model's own ``exit`` end a session this way.
     """
 
     operation_name = "sandbox.pty"
 
 
-class SandboxCredentialsRejected(TypedException):
+class SandboxCredentialsRejected(NgFailureEvent):
     """The sandbox provider answered HTTP 401 or 403: it refused the sandbox credentials.
 
     A caller that observes the status chains this between the provider's error and the error it raises,
@@ -284,10 +284,10 @@ class SandboxCredentialsRejected(TypedException):
 class SandboxCreateError(PositionalException, RuntimeError):
     """Raised when a provider cannot create a sandbox.
 
-    Typed as a ``provider_unavailable``; every provider's create error subclasses it.
+    Typed, with no kind: a create also fails on an invalid spec or a failed setup command, which are not the
+    provider being unavailable. A subclass raised only where availability is observed may set a kind.
     """
 
-    failure_kind = PROVIDER_UNAVAILABLE
     operation_name = "sandbox.create"
 
 
@@ -410,6 +410,43 @@ class SupportsSandboxSharedStorage(Protocol):
     def shared_volume_options(self, source: str | None, target: str, *, read_only: bool = False) -> dict[str, Any]: ...
 
     def shared_volume_metadata(self) -> dict[str, str]: ...
+
+
+# The per-service container settings a Compose file may declare behind ``SupportsSandboxServiceOptions``.
+COMPOSE_SERVICE_OPTION_FIELDS = frozenset({"tmpfs", "ulimits", "sysctls", "security_opt"})
+
+
+@runtime_checkable
+class SupportsSandboxServiceOptions(Protocol):
+    """Optional container settings a Compose service declares: ``tmpfs``, ``ulimits``, ``sysctls``, ``security_opt``.
+
+    ``SERVICE_OPTION_FIELDS`` names the subset the provider can apply; it is a class attribute so prepare
+    can check a task against a provider by name, without instantiating it. ``service_options`` returns
+    the ``provider_options`` that apply the given values at create time (an empty mapping when none are
+    given) and raises ``ValueError`` for a value it cannot express.
+    """
+
+    SERVICE_OPTION_FIELDS: frozenset[str]
+
+    def service_options(
+        self,
+        *,
+        tmpfs: tuple[str, ...] = (),
+        ulimits: Mapping[str, Any] | None = None,
+        sysctls: Mapping[str, str] | None = None,
+        security_opt: tuple[str, ...] = (),
+    ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class SupportsSandboxPullPolicy(Protocol):
+    """Optional per-sandbox image pull policy: ``always``, ``missing`` or ``never`` (Compose's ``pull_policy``).
+
+    ``pull_policy_options`` returns the ``provider_options`` that apply it at create time. A provider
+    without this capability leaves the pull behaviour to the deployment's default.
+    """
+
+    def pull_policy_options(self, policy: str) -> dict[str, Any]: ...
 
 
 @runtime_checkable

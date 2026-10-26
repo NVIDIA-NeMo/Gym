@@ -16,11 +16,13 @@ import asyncio
 import bisect
 import functools
 import glob as glob_module
+import hashlib
 import json
 import logging
 import math
 import os
 import re
+import secrets
 import signal
 import time
 import warnings
@@ -57,7 +59,7 @@ from nemo_gym.config_types import (
     RemovedRolloutOptionsMixin,
     UploadRolloutsConfigMixin,
 )
-from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
+from nemo_gym.episode_types import EpisodeId, FailureEventRecord, is_materialized_task_row, validate_failure_event_map
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.failure_kinds import AGENT_TIMEOUT, CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
 from nemo_gym.global_config import (
@@ -92,6 +94,7 @@ from nemo_gym.observability.model_calls import (
 )
 from nemo_gym.path_utils import (
     aggregate_metrics_path_for,
+    aggregation_sources_path_for,
     failures_path_for,
     materialized_path_for,
     resubmit_offset_path_for,
@@ -127,7 +130,21 @@ from nemo_gym.telemetry.gym_metrics import (
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.typed_exceptions import PATH_ROW_KEY, decode_header, row_fields
+from nemo_gym.typed_exceptions import (
+    CONFLICTED_ROW_KEY,
+    DROPPED_ROW_KEY,
+    EVENTS_ROW_KEY,
+    MAX_CONFLICTED_IDS,
+    bounded_failure_events,
+    conflicting_failure_ids,
+    decode_conflicted_header,
+    decode_dropped_header,
+    decode_events_header,
+    decode_header,
+    events_row_value,
+    merge_failure_events,
+    row_fields,
+)
 
 
 if TYPE_CHECKING:
@@ -246,6 +263,13 @@ NG_ENVIRONMENT_SERVER_KEY = ENVIRONMENT_SERVER_STAMP_KEY_NAME
 # Implementation name under `environment_servers:`, so readers know which result type a record holds.
 NG_RESULT_TYPE_KEY = "_ng_result_type"
 NG_TASK_ID_KEY = "_ng_task_id"
+# Provenance stamps preparation writes into a materialized row's task_data (the same strings as
+# nemo_gym.tasks.harbor.digest's DIGEST_KEY and DATASET_DIGEST_KEY, which this module does not import).
+# The collector copies only these from a row onto its record: task_data is dataset-controlled, and any
+# other `_ng_*` key there (`_ng_no_persist`, `_ng_failure_class`, ...) would steer the collector.
+NG_DIGEST_KEY = "_ng_digest"
+NG_DATASET_DIGEST_KEY = "_ng_dataset_digest"
+PROVENANCE_KEYS = (NG_DIGEST_KEY, NG_DATASET_DIGEST_KEY)
 _NO_RESULT_FAILURE_CLASSES = frozenset(
     {
         AGENT_REQUEST_FAILED_FAILURE_CLASS,
@@ -397,6 +421,24 @@ def _is_collector_key(key: str) -> bool:
     return key.startswith("_ng_") or key in ("ng_model_call_capture", NG_PERF_KEY)
 
 
+def _task_data_provenance(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """The :data:`PROVENANCE_KEYS` of a materialized row's ``task_data``: provenance stamps for the record.
+
+    Preparation writes them (a Harbor row carries the task folder digest as ``_ng_digest`` and the
+    dataset digest as ``_ng_dataset_digest``) so that every results row names the inputs it ran, without
+    the materialized-inputs sidecar. An Environment Server never returns them (``_ng_*`` is the
+    collector's namespace), so the collector copies them from the row onto the record. Only the
+    allowlisted keys are copied: ``task_data`` comes from the dataset, and the collector reads other
+    ``_ng_*`` keys (``_ng_no_persist``, ``_ng_failure_class``, ``_ng_result_type``, ...) that a success
+    record does not carry, so a dataset could otherwise drop, reroute or relabel its own results.
+    """
+    task_input = row.get("task_input")
+    task_data = task_input.get("task_data") if isinstance(task_input, Mapping) else None
+    if not isinstance(task_data, Mapping):
+        return {}
+    return {key: task_data[key] for key in PROVENANCE_KEYS if key in task_data}
+
+
 def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     """Turn a ``BaseEpisodeResponse`` into the rollout record the collector stores.
 
@@ -408,6 +450,9 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     Every Environment Server type is scored the same way: through the result's top-level ``reward``,
     with optional top-level ``reward_components``. A reward nested elsewhere in the result is stored as
     data, and a result without a top-level ``reward`` is unscored.
+
+    A failure's ``failure_kind`` is kept under that name, next to the ``_ng_failure_*`` diagnostics: it is
+    the key ``_record_rollout_outcome`` reads for the metric label and ``_counted_failure_row`` drops.
     """
     task_id = response.get("task_id")
     failure = response.get("failure")
@@ -424,11 +469,16 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
         }
         if failure.get("stage") is not None:
             record["_ng_failure_stage"] = failure["stage"]
-        # The reason the failure names, kept apart from the routing class above, which it does not change.
+        # Keep the diagnostic kind separate from the routing class above.
         if failure.get("failure_kind") is not None:
+            record["failure_kind"] = failure["failure_kind"]
             record["_ng_failure_kind"] = failure["failure_kind"]
-        if failure.get("failure_path") is not None:
-            record[PATH_ROW_KEY] = failure["failure_path"]
+        if failure.get("failure_events") is not None:
+            record[EVENTS_ROW_KEY] = failure["failure_events"]
+        if failure.get("failure_id") is not None:
+            record["_ng_failure_id"] = failure["failure_id"]
+        if failure.get("failure_events_dropped") is not None:
+            record[DROPPED_ROW_KEY] = failure["failure_events_dropped"]
         if failure.get("partial_response") is not None:
             record["_ng_failure_partial_response"] = failure["partial_response"]
         if failure.get("agent_observations") is not None:
@@ -447,9 +497,9 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             NG_FAILURE_CLASS_KEY: JUDGE_FAILED,
             NG_FAILURE_JUDGE_ERROR_KEY: result.get(NG_FAILURE_JUDGE_ERROR_KEY),
         }
-        # judge_failsafe also puts the failed call's hops on the row.
-        if PATH_ROW_KEY in result:
-            judge_failure[PATH_ROW_KEY] = result[PATH_ROW_KEY]
+        for key in (EVENTS_ROW_KEY, DROPPED_ROW_KEY, CONFLICTED_ROW_KEY, "_ng_failure_id"):
+            if key in result:
+                judge_failure[key] = result[key]
         # drop the judge failure keys from the result so it doesn't raise in _is_collector_key
         # we don't want to modify the check itself because we want it to raise for other values
         # of `NG_FAILURE_CLASS_KEY` field
@@ -475,9 +525,72 @@ class _CompletedRollout:
     environment_server: Optional[str] = None
     environment_server_type: Optional[str] = None
     dispatch_span_context: Optional["SpanContext"] = None
-    # The failure path in the failed reply's X-NG-Failure-Event header, as a failure-row key. Only the
-    # writer adds it, so run_examples yields the same result as before.
-    failure_path: Optional[Dict[str, Any]] = None
+    # Row keys from the reply's diagnostic headers: the current failure and the observations any
+    # reply forwards. Only the writer adds them, so run_examples yields the same result as before.
+    failure_observations: Optional[Dict[str, Any]] = None
+
+
+def _events_row_fields(headers: Any) -> Dict[str, Any]:
+    """The failure events a successful reply forwarded, as a row key; they do not change its outcome."""
+    events = decode_events_header(headers)
+    fields: Dict[str, Any] = {EVENTS_ROW_KEY: events_row_value(events)} if events else {}
+    dropped = decode_dropped_header(headers)
+    if dropped:
+        fields[DROPPED_ROW_KEY] = dropped
+    conflicted = decode_conflicted_header(headers)
+    if conflicted:
+        fields[CONFLICTED_ROW_KEY] = sorted(conflicted)
+    return fields
+
+
+def _merge_observation_fields(body: Dict[str, Any], headers: Dict[str, Any]) -> Dict[str, Any]:
+    """Union diagnostics without letting duplicate transport copies replace the outcome."""
+    result = body
+    try:
+        maps = [
+            dict(
+                validate_failure_event_map(
+                    {
+                        key: FailureEventRecord.model_validate(value)
+                        for key, value in source.get(EVENTS_ROW_KEY, {}).items()
+                    }
+                )
+            )
+            for source in (body, headers)
+        ]
+        existing_conflicts = set(body.get(CONFLICTED_ROW_KEY, [])) | set(headers.get(CONFLICTED_ROW_KEY, []))
+        new_conflicts = conflicting_failure_ids(*maps) - existing_conflicts
+        conflicts = existing_conflicts | new_conflicts
+        merged = merge_failure_events(*maps)
+        merged = merge_failure_events({key: value for key, value in merged.items() if key not in conflicts})
+        own = body.get("_ng_failure_id", headers.get("_ng_failure_id"))
+        merged, dropped_here = bounded_failure_events(merged, keep=own, max_bytes=None)
+        # The channels can report the same loss. Without identities this is a lower bound.
+        dropped = max(body.get(DROPPED_ROW_KEY, 0), headers.get(DROPPED_ROW_KEY, 0))
+        dropped += len(new_conflicts) + dropped_here + max(0, len(conflicts) - MAX_CONFLICTED_IDS)
+        if merged or EVENTS_ROW_KEY in body or EVENTS_ROW_KEY in headers:
+            result[EVENTS_ROW_KEY] = events_row_value(merged)
+        if dropped:
+            result[DROPPED_ROW_KEY] = dropped
+        if conflicts:
+            result[CONFLICTED_ROW_KEY] = sorted(conflicts)[:MAX_CONFLICTED_IDS]
+        if own in merged:
+            result["_ng_failure_id"] = own
+        else:
+            result.pop("_ng_failure_id", None)
+    except (ValueError, TypeError, AttributeError):
+        # Malformed diagnostics cannot replace or prevent persistence of the outcome.
+        logger.warning("Ignoring invalid forwarded failure observations")
+    return result
+
+
+def _failure_row_fields(headers: Any) -> Dict[str, Any]:
+    """Forward an error's own event and recovered observations without duplicate loss counts."""
+    failure = decode_header(headers)
+    fields = row_fields(failure)
+    if failure is not None and failure.failure_events_dropped:
+        fields[DROPPED_ROW_KEY] = failure.failure_events_dropped
+    return _merge_observation_fields(fields, _events_row_fields(headers))
 
 
 def _round_robin_by_agent(examples: List[Dict]) -> List[Dict]:
@@ -3325,11 +3438,12 @@ class RolloutCollectionHelper(BaseModel):
             if observer is not None:
                 observer.materialize.record((perf_counter() - materialize_started) * 1000.0)
             output_fpath.unlink(missing_ok=True)
-            # A fresh run must not inherit retry attempts or published metrics
+            # A fresh run must not inherit retry attempts, published metrics or a shard list
             # from an older run that used the same output path.
             failures_fpath.unlink(missing_ok=True)
             resubmit_offset_path_for(output_fpath).unlink(missing_ok=True)
             aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
+            aggregation_sources_path_for(output_fpath).unlink(missing_ok=True)
 
         batch_completed_rows: List[Dict] = []
         batch_failure_rows: List[Dict] = []
@@ -3457,6 +3571,7 @@ class RolloutCollectionHelper(BaseModel):
         if len(dispatched_per_agent) > 1:
             print(f"Dispatching rollouts round-robin across {len(dispatched_per_agent)} agents")
         completed_count = 0
+        sources_dropped = False
         persisted_count = len(persisted_success_keys)
         collection_succeeded = False
         latency_tracker = DispatchLatencyTracker()
@@ -3537,9 +3652,13 @@ class RolloutCollectionHelper(BaseModel):
             for future in completion_iterator:
                 completed = await future
                 row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
-                if _materialized_taskset(row) is not None and _is_episode_response(result):
-                    # The row went out as an episode request, so the reply is a BaseEpisodeResponse.
-                    result = _episode_record(result)
+                if _materialized_taskset(row) is not None:
+                    if _is_episode_response(result):
+                        # The row went out as an episode request, so the reply is a BaseEpisodeResponse.
+                        result = _episode_record(result)
+                    # Result or failure, the record names the inputs it ran (task and dataset digests).
+                    for key, value in _task_data_provenance(row).items():
+                        result.setdefault(key, value)
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -3561,7 +3680,7 @@ class RolloutCollectionHelper(BaseModel):
                     result[NG_ENVIRONMENT_SERVER_KEY] = completed.environment_server
                 if completed.environment_server_type is not None:
                     result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
-                result.update(completed.failure_path or {})
+                result = _merge_observation_fields(result, completed.failure_observations or {})
 
                 # Set below for a rollout whose trajectory is health-evaluated once the bookkeeping is done.
                 health_outcome: Optional[str] = None
@@ -3646,6 +3765,11 @@ class RolloutCollectionHelper(BaseModel):
                     upload_spool.write(orjson.dumps(_rollout_for_export(result)) + b"\n")
 
                 dispatch_name = self._dispatch_name(row)
+                if not no_persist and not sources_dropped:
+                    # The rows this run adds are not the merged ones an aggregation's shard list names. The list goes with the
+                    # first row the run writes, so a run that writes none leaves it as it was.
+                    aggregation_sources_path_for(output_fpath).unlink(missing_ok=True)
+                    sources_dropped = True
                 if no_persist:
                     # kill_shaped, or drained by the dispatch budget: written to neither
                     # the jsonl nor the sidecar. Set-difference on resume naturally
@@ -3967,12 +4091,18 @@ Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         if not config.disable_aggregation and not config.disable_health_check:
-            from nemo_gym.rollout_health import format_health_report, run_health_checks
+            from nemo_gym.rollout_health import _aggregated_shards, format_health_report, run_health_checks
 
             try:
+                # A run that wrote no row leaves an aggregated output to its shards: those are checked, as the
+                # aggregation and a recheck check them. Resolving them hashes every listed file, so off the loop.
+                shards = await asyncio.to_thread(
+                    _aggregated_shards, output_fpath.parent, rollout_name=output_fpath.name
+                )
                 health_result = await asyncio.to_thread(
                     run_health_checks,
-                    output_fpath,
+                    shards if shards is not None else output_fpath,
+                    output_dir=output_fpath.parent,
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
                     limits=config.run_health_limits,
@@ -4536,6 +4666,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server=server_name,
                         environment_server_type=server_type,
                         dispatch_span_context=dispatch_span_context,
+                        failure_observations=_events_row_fields(getattr(res, "headers", None)),
                     )
                 except Exception as e:
                     print(
@@ -4558,8 +4689,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server=server_name,
                         environment_server_type=server_type,
                         dispatch_span_context=dispatch_span_context,
-                        failure_path=row_fields(
-                            decode_header(getattr(e, "headers", None) or getattr(res, "headers", None))
+                        failure_observations=_failure_row_fields(
+                            getattr(e, "headers", None) or getattr(res, "headers", None)
                         ),
                     )
                 finally:
@@ -4725,7 +4856,12 @@ class RolloutAggregationConfig(RunHealthConfig, BaseNeMoGymCLIConfig):
     )
     merge_shards: bool = Field(
         default=True,
-        description="Concatenate the matched shard JSONLs into output_jsonl_fpath alongside the metrics file.",
+        description=(
+            "Concatenate the matched shard JSONLs into output_jsonl_fpath alongside the metrics file, and list "
+            "them in '<stem>_sources.json', which `gym eval health-check` reads for a merged 'rollouts.jsonl'. "
+            "output_jsonl_fpath may be a shard only when it is the only one, reached through its own directory (not a "
+            "file link from elsewhere), and then nothing is listed."
+        ),
     )
     count_failure_classes_as_zero: List[str] = Field(
         default_factory=list,
@@ -4777,6 +4913,11 @@ def loads_jsonl_line(raw, fpath, line_no: int):
         raise ConfigError(f"Malformed JSON in '{fpath}' at line {line_no}: {e}") from e
 
 
+def _sidecar_location(fpath: Path) -> Path:
+    """Where a rollouts file's sidecars are found: its directory resolved, its own name kept."""
+    return fpath.parent.resolve() / fpath.name
+
+
 def _expand_input_glob(input_glob: str) -> List[str]:
     """Expand a glob-or-comma-separated-globs string into a sorted, deduplicated list of paths.
 
@@ -4800,28 +4941,48 @@ class RolloutAggregationHelper(BaseModel):
         input_paths = _expand_input_glob(config.input_glob)
         if not input_paths:
             raise ConfigPathNotFoundError(f"No shards matched input_glob={config.input_glob!r}")
+        output_fpath = Path(config.output_jsonl_fpath)
+        merged_file = output_fpath.resolve()
+        aliases = [Path(path) for path in input_paths if Path(path).resolve() == merged_file]
+        in_place = bool(aliases)
+        # A file's sidecars sit beside the name it is reached by, so only a shard reached through the output's own
+        # directory is merged onto itself; a file link from elsewhere would leave its sidecars behind.
+        if (
+            config.merge_shards
+            and in_place
+            and (len(input_paths) > 1 or _sidecar_location(aliases[0]) != _sidecar_location(output_fpath))
+        ):
+            raise ConfigError(
+                f"output_jsonl_fpath={config.output_jsonl_fpath!r} is one of the shards input_glob matched, or a "
+                "link to one whose sidecars lie elsewhere, and merging would replace it. Merge into another path, "
+                "or set merge_shards=false."
+            )
         print(f"Aggregating {len(input_paths)} shard(s):")
         for p in input_paths:
             print(f"  - {p}")
 
         results: List[Dict] = []
         shard_keys: Dict[str, set] = {}
+        # Each shard's size and SHA-256 as read, for the merged file's shard list to name.
+        shard_digests: Dict[str, Tuple[int, str]] = {}
         for shard_path in input_paths:
             keys = shard_keys[shard_path] = set()
+            digest = hashlib.sha256()
             with open(shard_path, "rb") as f:
                 for line_no, line in enumerate(f, 1):
+                    digest.update(line)
                     line = line.strip()
                     if not line:
                         continue
                     result = loads_jsonl_line(line, shard_path, line_no)
                     keys.add((result.get(TASK_INDEX_KEY_NAME), result.get(ROLLOUT_INDEX_KEY_NAME)))
                     results.append(result)
+                shard_digests[shard_path] = (f.tell(), digest.hexdigest())
         print(f"Loaded {len(results)} rollout record(s) from {len(input_paths)} shard(s)")
 
         # Sort for deterministic aggregation ordering (matches run_from_config's post-collection sort)
         results.sort(key=lambda r: (r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)))
 
-        output_fpath = Path(config.output_jsonl_fpath)
         output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
         failures_fpaths = [failures_path_for(Path(path)) for path in input_paths]
@@ -4850,10 +5011,38 @@ class RolloutAggregationHelper(BaseModel):
             batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True)
 
         if config.merge_shards:
+            from nemo_gym.rollout_health import write_aggregation_sources
+
             print(f"Merging shards into {output_fpath}")
-            with output_fpath.open("wb") as out:
-                for r in results:
-                    out.write(orjson.dumps(r) + b"\n")
+            # The merged rows have none of the shards' failures or inventories, so a recheck of this directory reads
+            # the shards. Their list names what was read from them and the merged contents, and is written before
+            # those take their place. A symlinked output keeps its link, and the merged rows replace its target.
+            merged_fpath = output_fpath.resolve()
+            # Replacing a merged file keeps its mode, as writing through it did.
+            prior_mode = merged_fpath.stat().st_mode & 0o7777 if merged_fpath.exists() else None
+            # Created anew under a name no one can guess, and owner-only while it takes an existing output's rows,
+            # so it never grants more than that output does. A new output keeps the default creation mode.
+            merging_fpath = merged_fpath.with_name(f".{merged_fpath.name}.{secrets.token_hex(8)}.merging")
+            fd = os.open(
+                merging_fpath, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600 if prior_mode is not None else 0o666
+            )
+            try:
+                with os.fdopen(fd, "wb") as out:
+                    for r in results:
+                        out.write(orjson.dumps(r) + b"\n")
+                if prior_mode is not None:
+                    os.chmod(merging_fpath, prior_mode)
+                # A run merged onto itself keeps its own sidecars beside it: a recheck of it alone is this check.
+                if not in_place:
+                    write_aggregation_sources(
+                        output_fpath, [(Path(path), *shard_digests[path]) for path in input_paths], merging_fpath
+                    )
+                os.replace(merging_fpath, merged_fpath)
+                if in_place:
+                    # A run merged onto itself is checked alone, so a list an earlier aggregation into it left goes.
+                    aggregation_sources_path_for(output_fpath).unlink(missing_ok=True)
+            finally:
+                merging_fpath.unlink(missing_ok=True)
 
         # `_call_aggregate_metrics` groups by the `_ng_environment_server` stamp, falling back to
         # AGENT_REF_KEY_NAME; result rows carry both from the run that produced them.

@@ -28,7 +28,7 @@ from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, Epis
 from nemo_gym.failure_kinds import FailureStage
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SimpleServer, format_exception_with_response_body
-from nemo_gym.typed_exceptions import with_failure_path
+from nemo_gym.typed_exceptions import attach_failure_events
 
 
 LOGGER = logging.getLogger(__name__)
@@ -183,7 +183,7 @@ def dependency_failure(
     failure_reason = format_exception_with_response_body(error)
     if name_error_type:
         failure_reason = f"{type(error).__name__}: {failure_reason}"
-    return HandledEpisodeError(
+    handled = HandledEpisodeError(
         failure_model(
             stage=stage,
             failure_reason=failure_reason[:2000],
@@ -191,6 +191,9 @@ def dependency_failure(
             **fields,
         )
     )
+    # The dependency's error is this failure's explicit cause, whether or not the caller writes ``from``.
+    handled.__cause__ = error
+    return handled
 
 
 class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeResponseT]):
@@ -246,7 +249,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             except TimeoutError as error:
                 return self.failure_response(
                     request,
-                    self._with_failure_path(
+                    self._attach_failure_events(
                         EpisodeFailure(
                             failure_reason="Episode admission timed out",
                             terminal=False,
@@ -288,7 +291,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                     if deadline.expired():
                         response = self.failure_response(
                             request,
-                            self._with_failure_path(
+                            self._attach_failure_events(
                                 EpisodeFailure(
                                     failure_reason="Episode timed out",
                                     terminal=False,
@@ -302,7 +305,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                     # A checkpoint refused this episode before it started; the caller retries it later.
                     raise
                 except HandledEpisodeError as error:
-                    response = self.failure_response(request, self._with_failure_path(error.failure, error))
+                    response = self.failure_response(request, self._attach_failure_events(error.failure, error))
                 except asyncio.CancelledError as error:
                     cancelled = error
                 except Exception as error:
@@ -400,16 +403,16 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             return nullcontext()
         return self._checkpoint.step(request.episode_id, step_type)
 
-    def _with_failure_path(self, failure: EpisodeFailure, error: BaseException) -> EpisodeFailure:
+    def _attach_failure_events(self, failure: EpisodeFailure, error: BaseException) -> EpisodeFailure:
         """Fill the failure's path (and its kind from a typed failure) from the exception chain."""
-        return with_failure_path(failure, error)
+        return attach_failure_events(failure, error)
 
     def _unhandled_failure_response(self, request: EpisodeRequestT, error: Exception) -> EpisodeResponseT:
         LOGGER.exception(f"Unhandled environment server error: episode_id={request.episode_id}")
         failure_reason = f"Unhandled environment server error: {type(error).__name__}: {error}"
         return self.failure_response(
             request,
-            self._with_failure_path(
+            self._attach_failure_events(
                 EpisodeFailure(
                     failure_reason=failure_reason[:2000],
                     terminal=True,

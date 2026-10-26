@@ -76,20 +76,69 @@ def is_materialized_task_row(row: Mapping[str, object]) -> bool:
     return isinstance(row.get("task_id"), Mapping) and "task_input" in row
 
 
-class FailureHop(BaseModel):
-    """One hop of ``EpisodeFailure.failure_path``: an exception in the chain, by type, never by text."""
+# A cause chain deeper than this is cut; the last kept record says ``cause_truncated``.
+MAX_FAILURE_CAUSE_DEPTH = 8
+# The most failure events one reply or row carries.
+MAX_FAILURE_EVENTS = 64
+
+
+class FailureEventRecord(BaseModel):
+    """One failure observation, an entry of a ``failure_events`` map keyed by its ``event_id``.
+
+    ``event_id`` is assigned once where the failure is raised and kept through forwarding and retries, so a
+    reader counts each failure once. ``cause_id`` names the explicit cause (``raise ... from``) by its id in the
+    same map. ``type`` is the boundary class (``ModelFailure``, ``ResServerFailure``, ...) or ``untyped``;
+    ``exception_type`` is the raised class when it differs. Kinds and reasons are each boundary's own. Request
+    bodies, outputs, conversations and tool results are never part of a record: ``operation_id`` and
+    ``attempt_id`` reference the records that hold them.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    exception_type: str
-    http_status: int | None = None
-    operation: str | None = None
+    event_id: str = Field(min_length=1, max_length=128)
+    type: str = Field(min_length=1, max_length=256)
+    exception_type: str | None = Field(default=None, max_length=256)
+    failure_reason: str = Field(max_length=2000)
+    reason_truncated: bool | None = None
+    failure_kind: str | None = None
+    operation: str | None = Field(default=None, max_length=256)
+    operation_id: str | None = Field(default=None, max_length=128)
+    attempt_id: str | None = Field(default=None, max_length=128)
+    stage: FailureStage | None = None
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    cause_id: str | None = Field(default=None, max_length=128)
+    cause_truncated: bool | None = None
 
-    # A return annotation would replace the public JSON Schema with that type.
+    @field_validator("failure_kind")
+    @classmethod
+    def _validate_failure_kind(cls, value: str | None) -> str | None:
+        return validate_failure_kind(value)
+
     @model_serializer(mode="wrap")
-    def _serialize_hop(self, handler: SerializerFunctionWrapHandler):
-        # Omit what was not observed, as EpisodeFailure omits its unset fields.
+    def _serialize_event(self, handler: SerializerFunctionWrapHandler):
         return {key: value for key, value in handler(self).items() if value is not None}
+
+
+def validate_failure_event_map(events: Mapping[str, FailureEventRecord]) -> Mapping[str, FailureEventRecord]:
+    """Check that ``events`` is keyed by event id and its causes resolve in it, acyclic and bounded."""
+    if len(events) > MAX_FAILURE_EVENTS:
+        raise ValueError(f"more than {MAX_FAILURE_EVENTS} failure events")
+    for key, record in events.items():
+        if key != record.event_id:
+            raise ValueError(f"failure event {record.event_id!r} is keyed as {key!r}")
+    for record in events.values():
+        seen, current, depth = {record.event_id}, record, 0
+        while current.cause_id is not None:
+            depth += 1
+            if depth > MAX_FAILURE_CAUSE_DEPTH:
+                raise ValueError(f"cause chain deeper than {MAX_FAILURE_CAUSE_DEPTH}")
+            if current.cause_id in seen:
+                raise ValueError(f"cause chain repeats event {current.cause_id!r}")
+            if current.cause_id not in events:
+                raise ValueError(f"cause {current.cause_id!r} is not in the failure events")
+            seen.add(current.cause_id)
+            current = events[current.cause_id]
+    return events
 
 
 class EpisodeFailure(BaseModel):
@@ -106,14 +155,30 @@ class EpisodeFailure(BaseModel):
     terminal: bool = Field(description="Whether rollout collection must not attempt this episode again.")
     failure_kind: str | None = None
     stage: FailureStage | None = None
-    # The hops from the rollout to the innermost failure, outermost first
     # (``nemo_gym.typed_exceptions``). Taken from the exception chain by type, never from text.
-    failure_path: list[FailureHop] | None = None
+    # This failure's own entry in ``failure_events``.
+    failure_id: str | None = Field(default=None, max_length=128)
+    # Failure observations this reply forwards, keyed by event id: earlier failures a retry recovered from and
+    # this failure with its explicit causes. Diagnostic only.
+    failure_events: dict[str, FailureEventRecord] | None = None
+    # How many observations were left out to keep the reply within its bounds.
+    failure_events_dropped: int | None = Field(default=None, ge=1)
 
     @field_validator("failure_kind")
     @classmethod
     def _validate_failure_kind(cls, value: str | None) -> str | None:
         return validate_failure_kind(value)
+
+    @field_validator("failure_events")
+    @classmethod
+    def _validate_failure_events(cls, value: dict[str, FailureEventRecord] | None):
+        return None if value is None else validate_failure_event_map(value)
+
+    @model_validator(mode="after")
+    def _failure_id_is_an_event(self) -> Self:
+        if self.failure_id is not None and self.failure_id not in (self.failure_events or {}):
+            raise ValueError(f"failure_id {self.failure_id!r} is not in failure_events")
+        return self
 
     # A return annotation would replace the public JSON Schema with that type.
     @model_serializer(mode="wrap")
@@ -121,7 +186,7 @@ class EpisodeFailure(BaseModel):
         # Omit metadata when the producer cannot classify the failure.
         # Protocol subclasses still serialize their own diagnostic fields.
         result = handler(self)
-        for key in ("failure_kind", "stage", "failure_path"):
+        for key in ("failure_kind", "stage", "failure_id", "failure_events", "failure_events_dropped"):
             if result.get(key) is None:
                 result.pop(key, None)
         return result

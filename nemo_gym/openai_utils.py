@@ -193,6 +193,7 @@ from pydantic import (
 )
 from typing_extensions import TypedDict
 
+from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import (
     MAX_NUM_TRIES,
@@ -203,6 +204,7 @@ from nemo_gym.server_utils import (
     raise_for_status,
     request,
 )
+from nemo_gym.typed_exceptions import ModelFailure, observe_failure, reply_forwards_failure
 
 
 class ChatCompletionModeration(TypedDict, total=False):
@@ -1775,6 +1777,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         max_num_tries = self.max_num_tries or self.max_http_attempts
         tries = 0
         waited = 0.0
+        # One logical model call; each HTTP attempt of it is observed under its own attempt id.
+        operation_id = uuid.uuid4().hex
         while tries < max_num_tries:
             if self._permanent_trip is not None:
                 self._raise_permanent_error()
@@ -1790,6 +1794,19 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             if response.status not in RETRY_ERROR_CODES:
                 return response
 
+            # Observed before this loop or a caller's own retry policy decides, so a later success still forwards
+            # the failed attempt. A Gym server's reply already forwards its own record; it is not recorded twice.
+            if not reply_forwards_failure(getattr(response, "headers", None)):
+                observe_failure(
+                    ModelFailure(
+                        MODEL_REQUEST_ERROR,
+                        f"HTTP {response.status} from the model server",
+                        operation="model_request",
+                        http_status=response.status,
+                        operation_id=operation_id,
+                        attempt_id=f"{operation_id}-{tries}",
+                    )
+                )
             content = await response.content.read()
             if response.status == 429 and _error_body_is_permanent_quota(content):
                 self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
@@ -1873,6 +1890,17 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         base_url = self.base_url.removesuffix("/v1")
         request_kwargs = dict(
             url=f"{base_url}/tokenize",
+            json=kwargs,
+        )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await get_response_json(response)
+
+    async def create_embeddings(self, **kwargs):
+        """POST ``{base_url}/embeddings`` with ``kwargs`` as the JSON body and return the parsed response dict."""
+        request_kwargs = dict(
+            url=f"{self.base_url}/embeddings",
             json=kwargs,
         )
         response = await self._request(method="POST", **request_kwargs)

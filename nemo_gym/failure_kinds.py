@@ -84,14 +84,8 @@ MODEL_TRANSPORT_ERROR = "model_transport_error"
 MODEL_CONTEXT_LIMIT = "model_context_limit"
 
 # --- verifier and judge --------------------------------------------------------------- #
-# ``judge_failed`` is produced today by judge_failsafe and by reverification. The judge client
-# names what it observed where it can: the endpoint's HTTP status, a connection never made, a timeout.
+# ``judge_failed`` is produced today by judge_failsafe and by reverification.
 JUDGE_FAILED = "judge_failed"
-JUDGE_CREDENTIALS_REJECTED = "judge_credentials_rejected"
-JUDGE_RATE_LIMITED = "judge_rate_limited"
-JUDGE_SERVER_ERROR = "judge_server_error"
-JUDGE_UNREACHABLE = "judge_unreachable"
-JUDGE_TIMEOUT = "judge_timeout"
 JUDGE_UNPARSEABLE = "judge_unparseable"
 VERIFIER_ERROR = "verifier_error"
 
@@ -135,11 +129,6 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         MODEL_TRANSPORT_ERROR,
         MODEL_CONTEXT_LIMIT,
         JUDGE_FAILED,
-        JUDGE_CREDENTIALS_REJECTED,
-        JUDGE_RATE_LIMITED,
-        JUDGE_SERVER_ERROR,
-        JUDGE_UNREACHABLE,
-        JUDGE_TIMEOUT,
         JUDGE_UNPARSEABLE,
         VERIFIER_ERROR,
         PROVIDER_UNAVAILABLE,

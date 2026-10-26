@@ -18,7 +18,30 @@ from nemo_gym.judge import JudgeError, call_judge, judge_failsafe, reraise_judge
 from nemo_gym.sandbox.providers.base import SandboxCreateError, SandboxCreateVerificationError, SandboxPtyError
 from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxCreatePendingError
 from nemo_gym.sandbox.transfer import SandboxTransferError, SandboxUnavailableError, exec_as_root, upload_dir
-from nemo_gym.typed_exceptions import FAILURE_EVENT_HEADER, TypedException, failure_path
+from nemo_gym.typed_exceptions import (
+    FAILURE_EVENT_HEADER,
+    ModelFailure,
+    NgFailureEvent,
+    boundary_failure,
+    encode_header,
+    failure_event_map,
+    http_status,
+)
+
+
+def _event_facts(error):
+    return [
+        {
+            key: value
+            for key, value in {
+                "exception_type": event.exception_type or event.type,
+                "operation": event.operation,
+                "http_status": event.http_status,
+            }.items()
+            if value is not None
+        }
+        for event in failure_event_map(error).values()
+    ]
 
 
 class _Verdict(BaseModel):
@@ -59,60 +82,48 @@ class _JudgeEndpoint:
         return await self._session.post(self.url + url_path, json=json)
 
 
-@pytest.mark.parametrize(
-    "status, expected",
-    [(401, judge.JudgeCredentialsRejected), (403, judge.JudgeCredentialsRejected), (429, judge.JudgeRateLimited)]
-    + [(code, judge.JudgeServerError) for code in (500, 502, 503)],
-)
-async def test_judge_http_status_raises_its_typed_judge_error(status: int, expected: type) -> None:
+@pytest.mark.parametrize("status", [401, 403, 429, 500, 502, 503])
+async def test_a_failed_judge_call_is_judge_failed_and_keeps_the_observed_status_on_its_cause(status: int) -> None:
     async with _JudgeEndpoint(status) as endpoint:
         with pytest.raises(JudgeError) as info:
             await call_judge(endpoint, server_name="judge", url_path="/v1/responses", json={}, response_model=_Verdict)
     failure = info.value
-    # One kind per failure: the class names what the client observed, and the status is on the path.
-    assert type(failure) is expected and failure.failure_kind == expected.failure_kind
-    assert failure.failure_kind != "judge_failed" and failure.stage == "verification"
-    assert failure_path(failure) == [
-        {"operation": "judge.request", "exception_type": f"nemo_gym.judge.{expected.__name__}"},
+    # The judge boundary's own kind; the status is the explicit cause's, not a second classification.
+    assert type(failure) is judge.JudgeCallFailed and failure.failure_kind == "judge_failed"
+    assert failure.stage == "verification" and failure.__cause__.status == status
+    assert _event_facts(failure) == [
+        {"operation": "judge.request", "exception_type": "nemo_gym.judge.JudgeCallFailed"},
         {"exception_type": "aiohttp.client_exceptions.ClientResponseError", "http_status": status},
     ]
     assert str(failure).startswith(f"ClientResponseError: {status}, message=")
 
 
-async def test_judge_status_without_a_class_stays_a_plain_judge_error() -> None:
-    async with _JudgeEndpoint(400) as endpoint:
-        with pytest.raises(JudgeError) as info:
-            await call_judge(endpoint, server_name="judge", url_path="/v1/responses", json={}, response_model=_Verdict)
-    assert type(info.value) is JudgeError and not isinstance(info.value, TypedException)
-    assert failure_path(info.value)[-1]["http_status"] == 400  # the status is still observed on the path
-
-
-async def test_unreachable_judge_raises_judge_unreachable() -> None:
+async def test_unreachable_judge_is_judge_failed_with_the_connector_error_as_its_cause() -> None:
     async with aiohttp.ClientSession() as session:
 
         async def refused() -> None:
             # Port 9 (discard) is closed on test hosts: the connection is refused before any reply.
             await session.post("http://127.0.0.1:9/v1/responses", json={})
 
-        with pytest.raises(judge.JudgeUnreachable) as info:
+        with pytest.raises(judge.JudgeCallFailed) as info:
             await reraise_judge_errors(refused())
-    assert info.value.failure_kind == "judge_unreachable"
-    assert failure_path(info.value)[1]["exception_type"].endswith("ClientConnectorError")
+    assert info.value.failure_kind == "judge_failed"
+    assert _event_facts(info.value)[1]["exception_type"].endswith("ClientConnectorError")
 
 
-async def test_a_judge_call_past_its_timeout_raises_judge_timeout() -> None:
+async def test_a_judge_call_past_its_timeout_is_judge_failed_with_the_timeout_as_its_cause() -> None:
     async def slow() -> None:
         await asyncio.wait_for(asyncio.sleep(10), timeout=0.01)
 
-    with pytest.raises(judge.JudgeTimeout) as info:
+    with pytest.raises(judge.JudgeCallFailed) as info:
         await reraise_judge_errors(slow())
-    assert isinstance(info.value, JudgeError) and info.value.failure_kind == "judge_timeout"
-    assert failure_path(info.value)[1]["exception_type"] == "TimeoutError"
+    assert isinstance(info.value, JudgeError) and info.value.failure_kind == "judge_failed"
+    assert _event_facts(info.value)[1]["exception_type"] == "TimeoutError"
 
 
 @pytest.mark.parametrize("status", [401, 429, 503])
 async def test_judge_failsafe_output_is_unchanged_by_the_typed_error(status: int) -> None:
-    """Every ``except JudgeError`` still runs with the same text; the row gains its path and its kind."""
+    """Every ``except JudgeError`` still runs with the same text; the row gains event metadata and its kind."""
     async with _JudgeEndpoint(status) as endpoint:
         try:
             await call_judge(endpoint, server_name="judge", url_path="/v1/responses", json={}, response_model=_Verdict)
@@ -129,13 +140,14 @@ async def test_judge_failsafe_output_is_unchanged_by_the_typed_error(status: int
         json.loads((await judge_failsafe(fn)(body=_Req(response={"id": "r"}))).body)
         for fn in (raise_typed, raise_plain)
     ]
-    typed_path, plain_path = typed_row.pop("_ng_failure_path"), plain_row.pop("_ng_failure_path")
+    typed_events = typed_row.pop("_ng_failure_events")
+    typed_row.pop("_ng_failure_id")
     # The kind is what the client observed; the routing class, reward and mask are the plain row's.
     assert (
         typed_row.pop("failure_kind") == type(typed).failure_kind and plain_row.pop("failure_kind") == "judge_failed"
     )
     assert typed_row == plain_row and typed_row["_ng_failure_class"] == "judge_failed"
-    assert typed_path[-1]["http_status"] == status and plain_path == [{"exception_type": "nemo_gym.judge.JudgeError"}]
+    assert any(event.get("http_status") == status for event in typed_events.values())
 
 
 @pytest.mark.parametrize(
@@ -164,14 +176,15 @@ async def test_judge_errors_without_a_deciding_type_or_status_stay_plain(error: 
     ],
 )
 def test_sandbox_create_errors_are_typed_and_keep_their_handlers(error: SandboxCreateError) -> None:
-    for handler in (SandboxCreateError, RuntimeError, TypedException):
+    for handler in (SandboxCreateError, RuntimeError, NgFailureEvent):
         with pytest.raises(handler):
             raise error
     assert not isinstance(error, TimeoutError)
-    assert error.args == (str(error),) and error.failure_kind == "provider_unavailable"
-    assert failure_path(error)[0]["operation"] == "sandbox.create"
+    # A create also fails on an invalid spec or a setup command: no kind is claimed for every create error.
+    assert error.args == (str(error),) and error.failure_kind is None
+    assert _event_facts(error)[0]["operation"] == "sandbox.create"
     copy = pickle.loads(pickle.dumps(error))
-    assert type(copy) is type(error) and copy.args == error.args and failure_path(copy) == failure_path(error)
+    assert type(copy) is type(error) and copy.args == error.args and _event_facts(copy) == _event_facts(error)
     if isinstance(error, OpenSandboxCreatePendingError):
         assert copy.fail_fast is True
 
@@ -191,7 +204,7 @@ async def test_sandbox_that_cannot_run_a_command_raises_a_provider_unavailable()
     with pytest.raises(SandboxUnavailableError) as info:
         await exec_as_root(sandbox, "true", timeout_s=1)
     assert info.value.failure_kind == "provider_unavailable"
-    assert failure_path(info.value)[0]["operation"] == "sandbox.exec"
+    assert _event_facts(info.value)[0]["operation"] == "sandbox.exec"
 
 
 async def test_failed_transfer_has_no_kind_whatever_its_output(tmp_path: Path) -> None:
@@ -202,7 +215,7 @@ async def test_failed_transfer_has_no_kind_whatever_its_output(tmp_path: Path) -
     with pytest.raises(SandboxTransferError) as info:
         await upload_dir(sandbox, tmp_path, "/target")
     assert info.value.failure_kind is None
-    assert failure_path(info.value)[0] == {
+    assert _event_facts(info.value)[0] == {
         "operation": "sandbox.transfer",
         "exception_type": "nemo_gym.sandbox.transfer.SandboxTransferError",
     }
@@ -210,7 +223,7 @@ async def test_failed_transfer_has_no_kind_whatever_its_output(tmp_path: Path) -
 
 def test_pty_session_end_has_no_kind() -> None:
     error = SandboxPtyError("PTY session ended before the command finished")  # what `exit` in the shell produces
-    assert error.failure_kind is None and failure_path(error)[0]["operation"] == "sandbox.pty"
+    assert error.failure_kind is None and _event_facts(error)[0]["operation"] == "sandbox.pty"
     with pytest.raises(RuntimeError):
         raise error
 
@@ -224,16 +237,8 @@ class _ModelServerEndpoint(_JudgeEndpoint):
 
     async def __aenter__(self) -> "_ModelServerEndpoint":
         # What a model server's middleware sends for a failed provider call: EpisodeFailure JSON.
-        header = json.dumps(
-            {
-                "failure_reason": "Unhandled ClientResponseError in judge_model",
-                "terminal": False,
-                "failure_path": [
-                    {"exception_type": "ClientResponseError", "http_status": self.upstream_status},
-                    {"exception_type": "ExceptionGroup"},
-                ],
-            }
-        )
+        original = ModelFailure("model_request_error", "provider refused", http_status=self.upstream_status)
+        header = encode_header(boundary_failure(original, server="model"))
 
         async def handle(_: web.Request) -> web.Response:
             return web.json_response("inner error", status=500, headers={FAILURE_EVENT_HEADER: header})
@@ -249,30 +254,25 @@ class _ModelServerEndpoint(_JudgeEndpoint):
         return self
 
 
-@pytest.mark.parametrize(
-    "upstream, expected",
-    [(401, judge.JudgeCredentialsRejected), (429, judge.JudgeRateLimited), (502, judge.JudgeServerError)],
-)
-async def test_judge_types_by_the_providers_status_behind_a_model_server_500(upstream, expected) -> None:
+@pytest.mark.parametrize("upstream", [401, 429, 502])
+async def test_a_judge_behind_a_model_server_500_keeps_the_providers_status_on_the_cause_not_in_its_kind(
+    upstream,
+) -> None:
     async with _ModelServerEndpoint(upstream) as endpoint:
         with pytest.raises(JudgeError) as info:
             await call_judge(endpoint, server_name="judge", url_path="/v1/responses", json={}, response_model=_Verdict)
-    assert type(info.value) is expected and info.value.failure_kind == expected.failure_kind
-    assert failure_path(info.value)[1:] == [
-        {"exception_type": "aiohttp.client_exceptions.ClientResponseError", "http_status": 500},
-        {"exception_type": "ClientResponseError", "http_status": upstream},
-        {"exception_type": "ExceptionGroup"},
-    ]
+    assert type(info.value) is judge.JudgeCallFailed and info.value.failure_kind == "judge_failed"
+    events = failure_event_map(info.value)
+    assert any(event.http_status == upstream for event in events.values())
 
 
-def test_the_path_takes_an_sdk_errors_integer_status_code() -> None:
+def test_status_reads_an_sdk_errors_integer_status_code() -> None:
     class SandboxApiException(Exception):
         status_code = 401
 
-    hop = failure_path(SandboxApiException("refused"))[0]
-    assert hop["http_status"] == 401 and hop["exception_type"].endswith("SandboxApiException")
+    assert http_status(SandboxApiException("refused")) == 401
 
     class Weird(Exception):
         status = "401"  # not an int: decides nothing
 
-    assert "http_status" not in failure_path(Weird())[0]
+    assert http_status(Weird()) is None
