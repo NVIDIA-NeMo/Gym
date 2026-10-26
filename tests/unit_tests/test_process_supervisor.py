@@ -665,3 +665,44 @@ assert 'Cannot identify pre-stop adopted children' in receipt['error'], receipt
         timeout=5,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
+@pytest.mark.parametrize("requested", ["before_launch", "while_running"])
+def test_expire_request_ends_the_harness_as_a_timeout(tmp_path: Path, requested: str) -> None:
+    expire = tmp_path / "expire.request"
+    started = tmp_path / "started"
+    if requested == "before_launch":
+        expire.touch()
+    harness = f"import pathlib, time; pathlib.Path({str(started)!r}).touch(); time.sleep(60)"
+    supervisor = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            str(SUPERVISOR),
+            "--timeout",
+            "60",
+            "--cleanup-timeout",
+            "1",
+            "--expire-file",
+            str(expire),
+            "--receipt",
+            str(tmp_path / "cleanup.json"),
+            "--",
+            sys.executable,
+            "-c",
+            harness,
+        ]
+    )
+    if requested == "while_running":
+        deadline = time.monotonic() + 10
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        expire.touch()
+    assert supervisor.wait(timeout=10) == 0
+    receipt = json.loads((tmp_path / "cleanup.json").read_text())
+    assert receipt["cleanup_confirmed"] is True and receipt["timed_out"] is True and receipt["error"] is None
+    if requested == "before_launch":
+        assert receipt["return_code"] is None and not started.exists()
+    else:
+        assert receipt["return_code"] == -signal.SIGTERM

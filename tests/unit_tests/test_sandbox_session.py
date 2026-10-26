@@ -580,3 +580,77 @@ async def test_missing_failure_log_does_not_mask_capture_failure(session, monkey
     assert session.cleanup == RECEIPT
     await session.close(timeout=1)
     assert session.closed
+
+
+async def test_expire_while_running_requests_the_timeout_path_once(session, receipt_reader):
+    launched = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def exec_(command, **_):
+        if "--expire-file /session/expire.request" in command:
+            launched.set()
+            await finish.wait()
+        return OK
+
+    session.sandbox.exec.side_effect = exec_
+    activation = asyncio.create_task(execute(session))
+    await launched.wait()
+    assert await session.expire(timeout=1) is True
+    assert await session.expire(timeout=1) is False
+    commands = [call.args[0] for call in session.sandbox.exec.await_args_list]
+    assert commands[-1] == "[ -d /session ] && touch /session/expire.request"
+    assert not session.expired
+    session.sandbox.exec.side_effect = None
+    receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": -15, "timed_out": True})
+    finish.set()
+    assert await activation == "transcript"
+    assert session.expired and not session.expired_before_launch
+    assert await session.expire(timeout=1) is False
+    await session.close(timeout=1)
+
+
+async def test_expire_before_launch_marks_the_launch_expired(session, receipt_reader):
+    assert await session.expire(timeout=1) is True
+    session.sandbox.exec.assert_not_awaited()
+    receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": None, "timed_out": True})
+    assert await execute(session) == "transcript"
+    assert session.expired and session.expired_before_launch
+    first, launch = (call.args[0] for call in session.sandbox.exec.await_args_list[:2])
+    assert first == "[ -d /session ] && touch /session/expire.request"
+    assert "--expire-file /session/expire.request" in launch
+    await session.close(timeout=1)
+
+
+async def test_expire_refused_once_closing(session):
+    await session.close(timeout=1)
+    calls = session.sandbox.exec.await_count
+    assert await session.expire(timeout=1) is False
+    assert session.sandbox.exec.await_count == calls
+
+
+async def test_failed_expire_request_can_be_retried(session):
+    launched = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def exec_(command, **_):
+        if "touch" in command and not launched.is_set():
+            return OK
+        if "--expire-file" in command:
+            launched.set()
+            await finish.wait()
+            return OK
+        if "touch" in command and exec_.fail:
+            exec_.fail = False
+            return SandboxExecResult(stdout="", stderr="no dir", return_code=1)
+        return OK
+
+    exec_.fail = True
+    session.sandbox.exec.side_effect = exec_
+    activation = asyncio.create_task(execute(session))
+    await launched.wait()
+    with pytest.raises(RuntimeError, match="Could not request test expiry: no dir"):
+        await session.expire(timeout=1)
+    assert await session.expire(timeout=1) is True
+    finish.set()
+    await activation
+    await session.close(timeout=1)

@@ -22,7 +22,7 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest, RolloutStopRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
@@ -126,6 +126,11 @@ class Sandbox:
     async def execute(self, command, **kwargs):
         if "exec python3 -I " in command and "process_supervisor.py" in command:
             return await self.launch(command=command, **kwargs)
+        if "touch " in command and "expire.request" in command:
+            # The supervisor ends the harness as at its deadline; before launch, it never starts it.
+            self.result.update(timed_out=True, return_code=-signal.SIGTERM if hasattr(self, "directory") else None)
+            self.exited.set()
+            return self.exec.return_value
         if "touch " in command and "stop.request" in command:
             self.signals.append("SIGTERM")
             if hasattr(self, "directory"):
@@ -140,6 +145,12 @@ class Sandbox:
         assert payload["cwd"] == getattr(self, "expected_workdir", "/app")
         assert kwargs["cwd"] == getattr(self, "expected_workdir", "/app")
         assert "sandbox_runner.py" in kwargs["command"]
+        if self.result["timed_out"] and self.result["return_code"] is None:
+            self.files[f"{payload['directory']}/cleanup.json"] = json.dumps(
+                {key: value for key, value in self.result.items() if key not in ("hostname", "pid")}
+            )
+            self.started.set()
+            return self.exec.return_value
         self.directory = payload["directory"]
         self.started.set()
         if not self.blocked:
@@ -877,6 +888,41 @@ async def activate(agent, sandbox):
     task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
     await asyncio.wait_for(sandbox.started.wait(), 2)
     return request, seeded.agent_session_id, task
+
+
+async def test_rollout_stop_ends_codex_as_a_timeout(setup):
+    agent, sandbox = setup
+    sandbox.blocked = True
+    sandbox.events = "\n".join(sandbox.events.splitlines()[:-1])
+    request, session_id, task = await activate(agent, sandbox)
+    rollout_id = seed().episode_id.capture_key
+    assert (await agent.stop_rollout(rollout_id, RolloutStopRequest(reason="budget"))).stopped is True
+    assert (await agent.stop_rollout(rollout_id)).stopped is False
+    response = await task
+    # The same response as at the run's own deadline, graded as a timeout, plus the stop's cause.
+    assert response.status == "incomplete" and response.error is None
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_limit"}
+    assert [item.type for item in response.output] == ["reasoning", "function_call", "function_call_output", "message"]
+    assert sandbox.signals == []
+    assert (await agent.stop_rollout(rollout_id)).stopped is False
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert closed.agent_observations.records[0].status == "incomplete"
+    with pytest.raises(HTTPException) as unknown:
+        await agent.stop_rollout(rollout_id)
+    assert unknown.value.status_code == 404
+
+
+async def test_rollout_stop_before_activation_never_starts_codex(setup):
+    agent, sandbox = setup
+    request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "codex-smoke-a2"}})
+    session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
+    assert (await agent.stop_rollout(seed().episode_id.capture_key)).stopped is True
+    response = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert response.status == "incomplete" and response.error is None and response.output == []
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_limit"}
+    launch = next(call.kwargs["command"] for call in sandbox.launch.await_args_list)
+    assert "--expire-file" in launch
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
 async def test_close_cancels_active_codex_before_detaching(setup):

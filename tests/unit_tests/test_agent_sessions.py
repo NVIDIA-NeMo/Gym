@@ -3,10 +3,10 @@
 
 import asyncio
 import logging
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -18,6 +18,8 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
     AgentSessionState,
+    RolloutStopRequest,
+    RolloutStopResponse,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
@@ -235,3 +237,83 @@ def test_agent_session_seed_carries_the_tasks_agent_timeout() -> None:
     assert timed.agent_timeout_sec == 900.0
     with pytest.raises(ValidationError):
         AgentSeedSessionRequest.model_validate({**seed.model_dump(mode="json"), "agent_timeout_sec": 0})
+
+
+class _StoppableAgent(_Agent):
+    """Hands each session one fake sandbox session; seeding waits for ``installed``."""
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
+        await self._installed.wait()
+        return AgentSessionState(request=body)
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
+
+    def _rollout_sandbox_session(self, state: AgentSessionState):
+        return self._sandbox_session
+
+
+def _stoppable_agent(expired: list[bool]) -> _StoppableAgent:
+    agent = _StoppableAgent.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+    agent._installed = asyncio.Event()
+    agent._sandbox_session = MagicMock(expire=AsyncMock(side_effect=lambda *, timeout: expired.pop(0)))
+    return agent
+
+
+def test_rollout_stop_answers_501_for_an_agent_without_sandbox_sessions() -> None:
+    agent = _Agent.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+    response = TestClient(agent.setup_webserver()).post("/rollouts/rollout-a2/stop")
+    assert response.status_code == 501
+
+
+def test_rollout_stop_expires_the_running_harness_once() -> None:
+    async def scenario():
+        agent = _stoppable_agent([True, False])
+        agent._installed.set()
+        await agent.seed_agent_session(MagicMock(session={}), _seed_request())
+        with pytest.raises(HTTPException) as unknown:
+            await agent.stop_rollout("other-rollout")
+        assert unknown.value.status_code == 404
+        first = await agent.stop_rollout("rollout-a2", RolloutStopRequest(reason="budget"))
+        second = await agent.stop_rollout("rollout-a2")
+        return agent, first, second
+
+    agent, first, second = asyncio.run(scenario())
+    assert first == RolloutStopResponse(rollout_id="rollout-a2", stopped=True)
+    assert second == RolloutStopResponse(rollout_id="rollout-a2", stopped=False)
+    assert agent._sandbox_session.expire.await_count == 2
+
+
+def test_rollout_stop_during_install_expires_the_harness_at_launch() -> None:
+    async def scenario():
+        agent = _stoppable_agent([True])
+        seeding = asyncio.create_task(agent.seed_agent_session(MagicMock(session={}), _seed_request()))
+        await asyncio.sleep(0)
+        first = await agent.stop_rollout("rollout-a2")
+        second = await agent.stop_rollout("rollout-a2")
+        agent._sandbox_session.expire.assert_not_awaited()
+        agent._installed.set()
+        await seeding
+        return agent, first, second
+
+    agent, first, second = asyncio.run(scenario())
+    assert (first.stopped, second.stopped) == (True, False)
+    agent._sandbox_session.expire.assert_awaited_once()
+
+
+def test_rollout_stop_after_close_is_unknown() -> None:
+    async def scenario():
+        agent = _stoppable_agent([])
+        agent._installed.set()
+        await agent.seed_agent_session(MagicMock(session={}), _seed_request())
+        await agent.close_agent_session(
+            MagicMock(session={}),
+            AgentCloseSessionRequest(
+                agent_session_id="agent-session", episode_id=EpisodeId(rollout_id="rollout", attempt=2)
+            ),
+        )
+        with pytest.raises(HTTPException) as closed:
+            await agent.stop_rollout("rollout-a2")
+        return closed.value.status_code
+
+    assert asyncio.run(scenario()) == 404

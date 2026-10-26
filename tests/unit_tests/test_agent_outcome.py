@@ -80,3 +80,42 @@ def test_rejects_unregistered_failure_kinds(kind):
         AgentOutcome(**fields)
     with pytest.raises(ValidationError, match="Unregistered failure kind"):
         AgentOutcome.model_validate_json(json.dumps(fields))
+
+
+@pytest.mark.parametrize(
+    "status, expired, marked",
+    [("incomplete", True, True), ("incomplete", False, False), ("failed", True, False), ("completed", True, False)],
+)
+def test_rollout_stop_marks_only_the_timeout_shaped_response_it_ended(status: str, expired: bool, marked: bool):
+    class Agent(SimpleResponsesAPIAgent):
+        async def responses(self, body):
+            pass
+
+        async def run(self, body):
+            pass
+
+    agent = Agent(
+        config=BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name=""),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    response = NeMoGymResponse(
+        id="response",
+        created_at=0,
+        model="model",
+        object="response",
+        output=[],
+        tool_choice="auto",
+        parallel_tool_calls=True,
+        tools=[],
+        status=status,
+        metadata={"existing": "retained"},
+    )
+    reported = agent.report_rollout_stop(response, MagicMock(expired=expired))
+    if marked:
+        assert reported.metadata == {
+            "existing": "retained",
+            AGENT_OUTCOME_METADATA_KEY: '{"failure_kind":"agent_limit"}',
+        }
+        assert reported.model_dump(exclude={"metadata"}) == response.model_dump(exclude={"metadata"})
+    else:
+        assert reported is response

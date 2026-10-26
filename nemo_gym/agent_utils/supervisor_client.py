@@ -14,6 +14,7 @@ process_supervisor.py Session              Uploaded before launch
 launch.claim          Launch or stop shell Atomically claims launch or fences it
 supervisor.pid        Launch shell         After claiming launch, before exec
 stop.request          Stop shell           Before signalling the supervisor
+expire.request        Expire shell         Ends the harness as at its time limit
 cleanup.json          Supervisor or stop   After cleanup, or when stop fences launch
 output.log            Launch shell         Captures supervisor and harness diagnostics
 ===================== ==================== ===========================================
@@ -35,6 +36,7 @@ SUPERVISOR_FILE = "process_supervisor.py"
 LAUNCH_CLAIM_FILE = "launch.claim"
 SUPERVISOR_PID_FILE = "supervisor.pid"
 STOP_REQUEST_FILE = "stop.request"
+EXPIRE_REQUEST_FILE = "expire.request"
 CLEANUP_RECEIPT_FILE = "cleanup.json"
 OUTPUT_LOG_FILE = "output.log"
 
@@ -116,6 +118,7 @@ def supervised_launch_command(
         f"exec {quote(python)} -I {supervisor} "
         f"--timeout {timeout} --cleanup-timeout {cleanup_timeout} "
         f"--stop-file {quote(f'{session_dir}/{STOP_REQUEST_FILE}')} "
+        f"--expire-file {quote(f'{session_dir}/{EXPIRE_REQUEST_FILE}')} "
         f"--receipt {quote(f'{session_dir}/{CLEANUP_RECEIPT_FILE}')} -- {join(command)} "
         f">{quote(f'{session_dir}/{OUTPUT_LOG_FILE}')} 2>&1"
     )

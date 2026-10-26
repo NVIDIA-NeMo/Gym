@@ -103,6 +103,8 @@ class CodexSandboxSession(AgentSessionState):
 
     async def collect_artifacts(self) -> str:
         """Keep partial events even when worker metadata is unavailable."""
+        if self.session.expired_before_launch:
+            return ""  # A rollout stop arrived before launch, so Codex never ran.
         try:
             events = await self.read_text("events.jsonl")
         except Exception as error:

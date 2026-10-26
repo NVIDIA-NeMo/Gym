@@ -612,6 +612,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
             or AgentObservationBundle(source="codex", gaps=[ObservationGap(code="agent_activation_interrupted")]),
         )
 
+    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
+        return state.session if isinstance(state, CodexSandboxSession) else None
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> CodexSandboxSession:
         # Match Hermes: session initialization owns the sandbox runtime setup,
         # with the same AgentSeedSessionRequest/SandboxAccess wire contracts.
@@ -1135,7 +1138,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             },
         )
 
-        return self.report_outcome(response, terminal)
+        return self.report_outcome(self.report_rollout_stop(response, state.session), terminal)
 
     async def _startup_stderr_tail(self, state: CodexSandboxSession) -> str:
         """The end of Codex's stderr, with the session's MCP grant headers redacted; empty if unreadable.

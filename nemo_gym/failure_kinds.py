@@ -73,6 +73,7 @@ AGENT_RUN_ERROR = "agent_run_error"
 AGENT_REQUEST_FAILED = "agent_request_failed"
 AGENT_TIMEOUT = "agent_timeout"
 AGENT_COMMAND_NOT_ALLOWED = "agent_command_not_allowed"
+# Also a run ended by a caller-imposed budget, such as POST /rollouts/<id>/stop on an agent server.
 AGENT_LIMIT = "agent_limit"
 AGENT_INVALID_OUTPUT = "agent_invalid_output"
 

@@ -7,12 +7,14 @@ import logging
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
+from shlex import quote
 from time import monotonic
 from typing import cast
 
 from nemo_gym.agent_utils import process_supervisor
 from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
 from nemo_gym.agent_utils.supervisor_client import (
+    EXPIRE_REQUEST_FILE,
     OUTPUT_LOG_FILE,
     STOP_REQUEST_FILE,
     SUPERVISOR_FILE,
@@ -95,6 +97,7 @@ class SandboxSession[Artifacts]:
     _close_task: asyncio.Task[None] | None = field(default=None, init=False)
     _collect: Callable[[], Awaitable[Artifacts]] | None = field(default=None, init=False)
     _capture_attempted: bool = field(default=False, init=False)
+    _expire_requested: bool = field(default=False, init=False)
 
     @property
     def closing(self) -> bool:
@@ -119,6 +122,16 @@ class SandboxSession[Artifacts]:
     def stop_request_path(self) -> str:
         """Marker path an adapter may pass to its harness for cancellation diagnostics."""
         return f"{self.session_dir}/{STOP_REQUEST_FILE}"
+
+    @property
+    def expired(self) -> bool:
+        """Whether ``expire`` ended this activation; its receipt then records the timeout."""
+        return self._expire_requested and bool(self.cleanup and self.cleanup["timed_out"])
+
+    @property
+    def expired_before_launch(self) -> bool:
+        """Whether ``expire`` kept the harness from starting, so it left no output to collect."""
+        return self.expired and self.cleanup["return_code"] is None and self.cleanup["error"] is None
 
     async def read_output_log(self) -> str:
         """Read combined supervisor/harness diagnostics without masking the original failure."""
@@ -156,6 +169,8 @@ class SandboxSession[Artifacts]:
         try:
             async with asyncio.timeout_at(deadline):
                 command = await asyncio.shield(self._stage_task)
+            if self._expire_requested:
+                await self._request_expiry(timeout=close_timeout)
             if self.closing or self._finalize_task is not None:
                 raise RuntimeError(f"{self.harness} sandbox session closed before launch")
             if deadline is not None:
@@ -220,6 +235,8 @@ class SandboxSession[Artifacts]:
                 raise RuntimeError(f"{self.harness} sandbox session is closing")
             if not self.cleanup_confirmed:
                 raise RuntimeError(f"{self.harness} previous activation cleanup is unconfirmed")
+            # An expiry applies to the activation it was requested for; one requested before the first launch stays.
+            self._expire_requested = False
         if self._session_root is None:
             self._session_root = self.session_dir
         self.session_dir = session_dir
@@ -232,6 +249,35 @@ class SandboxSession[Artifacts]:
         self._finalize_task = None
         self._collect = None
         self._capture_attempted = False
+
+    async def expire(self, *, timeout: float) -> bool:
+        """End the harness as at its time limit, so its receipt records ``timed_out``.
+
+        Unlike ``stop_harness`` (a cancellation), the activation is then graded like a timeout.
+        A request made before launch ends the harness as it would launch. Returns False when the
+        activation already finished, the session is closing, or expiry was already requested.
+        """
+        if self.closing or self.sandbox_stopped or self._expire_requested or self.cleanup is not None:
+            return False
+        if self._exec_task is not None and self._exec_task.done():
+            return False
+        self._expire_requested = True
+        if self.launch_started:
+            try:
+                await self._request_expiry(timeout=timeout)
+            except BaseException:
+                self._expire_requested = False
+                raise
+        return True
+
+    async def _request_expiry(self, *, timeout: float) -> None:
+        result = await self.sandbox.exec(
+            f"[ -d {quote(self.session_dir)} ] && touch {quote(f'{self.session_dir}/{EXPIRE_REQUEST_FILE}')}",
+            cwd=self.workdir,
+            timeout_s=timeout,
+        )
+        if result.return_code != 0 or result.error_type:
+            raise RuntimeError(f"Could not request {self.harness} expiry: {result.error_type or result.stderr}")
 
     async def stop_harness(self, *, timeout: float) -> None:
         """Confirm harness termination before capture and transport release."""

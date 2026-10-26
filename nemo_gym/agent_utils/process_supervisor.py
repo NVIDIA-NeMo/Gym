@@ -117,8 +117,13 @@ def _supervise(
     timeout: float,
     cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT,
     stop_path: Path | None = None,
+    expire_path: Path | None = None,
 ) -> CleanupReceipt:
-    """Stop the harness and forced-stop tools; preserve earlier detached services."""
+    """Stop the harness and forced-stop tools; preserve earlier detached services.
+
+    An ``expire_path`` that appears moves the deadline to now, so the harness ends exactly as at its
+    time limit and the receipt records ``timed_out``. A stop request (TERM) records a cancellation.
+    """
     process = None
     launch_attempted = False
     stopping = False
@@ -131,12 +136,18 @@ def _supervise(
         # A signal between Popen and handle assignment must not lose the child.
         stopping = True
 
+    def expired() -> bool:
+        return expire_path is not None and expire_path.exists()
+
     signal.signal(signal.SIGTERM, interrupt)
     try:
         # TERM can be ignored during interpreter startup. A durable stop marker fences
         # that window; later signals are handled without interrupting Popen.
         if stopping or (stop_path is not None and stop_path.exists()):
             return receipt  # The finally block confirms that no harness process was launched.
+        if expired():
+            receipt["timed_out"] = True
+            return receipt
         if sys.platform != "linux":
             raise RuntimeError("Sandbox process supervision requires Linux")
         # Leave the provider group when possible. An exec launcher may already make us
@@ -151,7 +162,7 @@ def _supervise(
         launch_attempted = True
         process = subprocess.Popen(command, start_new_session=True)
         deadline = time.monotonic() + timeout
-        while process.poll() is None and not stopping and time.monotonic() < deadline:
+        while process.poll() is None and not stopping and not expired() and time.monotonic() < deadline:
             time.sleep(0.05)
         if process.poll() is None:
             forced_stop = True
@@ -206,6 +217,7 @@ def main() -> int:
     parser.add_argument("--cleanup-timeout", type=_positive_seconds, default=DEFAULT_CLEANUP_TIMEOUT)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--stop-file", type=Path)
+    parser.add_argument("--expire-file", type=Path)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -216,6 +228,7 @@ def main() -> int:
         timeout=args.timeout,
         cleanup_timeout=args.cleanup_timeout,
         stop_path=args.stop_file,
+        expire_path=args.expire_file,
     )
     temporary = args.receipt.with_suffix(".tmp")
     temporary.write_text(json.dumps(receipt))
