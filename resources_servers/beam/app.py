@@ -97,6 +97,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.reward_profile import compute_subset_metrics
 from resources_servers.beam.prompts import (
     BINARY_LLM_JUDGE_BASE_PROMPT,
     EQUIVALENCE_SYSTEM_PROMPT,
@@ -447,47 +448,58 @@ class BEAMResourcesServer(SimpleResourcesServer):
 
     @staticmethod
     def _pass_at_1_avg_of_k(tasks: List[List[Dict[str, Any]]]) -> Dict[str, float]:
-        """``pass@1[avg-of-k]``: each question scores the mean of its rollouts with index < k;
-        ``pass@k``: the best of them. The ten abilities are then macro-averaged (as ``overall``).
-        Run ``i`` is rollout index ``i`` of every question that has it, which gives the spread
-        across runs at the largest k. Keying by ``_ng_rollout_index`` keeps runs aligned when a
-        rollout is missing (e.g. a masked judge failure or a policy timeout)."""
+        """``pass@1[avg-of-k]`` and ``pass@k`` for ``reward`` and ``all_pass``, macro-averaged over abilities.
 
-        def macro(per_task: List[Tuple[str, float]]) -> Optional[float]:
+        The per-ability math is the shared ``compute_subset_metrics`` / ``compute_pass_majority_metrics``
+        (each question scores the mean of its first k rollouts, or pass@k; percentages); the ten
+        abilities are then averaged as BEAM's ``overall`` is, and rescaled to [0, 1]. Rollouts are
+        ordered by ``_ng_rollout_index`` first. The spread across runs is computed here instead: run
+        ``i`` is rollout index ``i`` of every question that has it, so a missing rollout (a masked
+        judge failure or a policy timeout) cannot shift the other runs.
+        """
+        ordered = [
+            sorted(
+                (r for r in rollouts if _is_reward(r.get("reward"))),
+                key=lambda r: int(r.get("_ng_rollout_index") or 0),
+            )
+            for rollouts in tasks
+        ]
+        ordered = [rollouts for rollouts in ordered if rollouts]
+        if not ordered:
+            return {}
+        per_ability = compute_subset_metrics(
+            ordered,
+            subset_key="ability",
+            score_fn=lambda r: {"reward": float(r["reward"]), "all_pass": float(r.get("score_all_pass") or 0.0)},
+        )
+
+        def macro(metric: str, name: str) -> Optional[float]:
+            values = [per_ability[f"{a}/{metric}/{name}"] for a in ABILITIES if f"{a}/{metric}/{name}" in per_ability]
+            return sum(values) / len(values) / 100.0 if values else None
+
+        metrics: Dict[str, float] = {}
+        max_k = max(len(rollouts) for rollouts in ordered)
+        for k in range(1, max_k + 1):
+            for prefix, name in (("", "reward"), ("all_pass/", "all_pass")):
+                for metric in (f"pass@1[avg-of-{k}]", f"pass@{k}"):
+                    value = macro(metric, name)
+                    if value is not None:
+                        metrics[f"{metric}/{prefix}overall"] = value
+
+        def overall(per_task: List[Tuple[str, float]]) -> Optional[float]:
             by_ability: Dict[str, List[float]] = defaultdict(list)
             for ability, value in per_task:
                 by_ability[ability].append(value)
             known = [sum(v) / len(v) for a, v in by_ability.items() if a in ABILITIES]
             return sum(known) / len(known) if known else None
 
-        groups: List[Tuple[str, Dict[int, Dict[str, Any]]]] = []
-        for rollouts in tasks:
-            by_index = {int(r.get("_ng_rollout_index") or 0): r for r in rollouts if _is_reward(r.get("reward"))}
-            if by_index:
-                groups.append((str(next(iter(by_index.values())).get("ability")), by_index))
-        metrics: Dict[str, float] = {}
-        if not groups:
-            return metrics
-        max_k = max(max(by_index) for _, by_index in groups) + 1
-        for k in range(1, max_k + 1):
-            for prefix, field in (("", "reward"), ("all_pass/", "score_all_pass")):
-                firsts = [
-                    (ability, [float(r.get(field) or 0.0) for i, r in by_index.items() if i < k])
-                    for ability, by_index in groups
-                ]
-                firsts = [(ability, vals) for ability, vals in firsts if vals]
-                value = macro([(ability, sum(vals) / len(vals)) for ability, vals in firsts])
-                if value is not None:
-                    metrics[f"pass@1[avg-of-{k}]/{prefix}overall"] = value
-                # pass@k: best of the first k rollouts (max-of-k for continuous scores).
-                best = macro([(ability, max(vals)) for ability, vals in firsts])
-                if best is not None:
-                    metrics[f"pass@{k}/{prefix}overall"] = best
+        by_index = [{int(r.get("_ng_rollout_index") or 0): r for r in rollouts} for rollouts in ordered]
+        n_runs = max(max(runs) for runs in by_index) + 1
         runs = [
-            macro([(ability, float(by_index[i]["reward"])) for ability, by_index in groups if i in by_index])
-            for i in range(max_k)
+            overall([(str(r[i].get("ability")), float(r[i]["reward"])) for r in by_index if i in r])
+            for i in range(n_runs)
         ]
-        runs = [r for r in runs if r is not None]
+        runs = [value for value in runs if value is not None]
         if len(runs) > 1:
             std_dev = statistics.stdev(runs)
             metrics[f"pass@1[avg-of-{max_k}]/overall/std_dev_across_runs"] = std_dev

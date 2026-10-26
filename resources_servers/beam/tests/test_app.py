@@ -549,7 +549,9 @@ def test_compute_metrics_pass_at_1_avg_of_k() -> None:
     assert m["pass@1[avg-of-2]/overall"] == approx(m["overall"])
     assert m["pass@1[avg-of-2]/all_pass/overall"] == approx((0.5 + 0.5) / 2)
     assert m["pass@2/overall"] == approx((1.0 + 1.0) / 2)
-    assert m["pass@1/overall"] == approx(m["pass@1[avg-of-1]/overall"])
+    # Shared pass@k estimator: unbiased over all rollouts for 0/1 rewards (abstention: 1 of 2 -> 0.5),
+    # best of the first k for continuous ones (summarization: first rollout 0.5).
+    assert m["pass@1/overall"] == approx((0.5 + 0.5) / 2)
     # Run 0 overall = 0.75, run 1 overall = 0.5.
     assert m["pass@1[avg-of-2]/overall/std_dev_across_runs"] == approx(0.1767767, abs=1e-6)
     key = server.get_key_metrics(m)
