@@ -50,6 +50,22 @@ to NeMo-RL.
 | `memory.py` | Centralized host and logical-server process-tree memory sampling. |
 | `_fallbacks.py` | The single import point for instrumentation primitives. |
 
+## FastAPI emits spans Gym did not write
+
+FastAPI 0.142+ instruments itself natively, which is separate from anything in this
+directory: it finds the global providers `init_telemetry` installed and starts exporting.
+Its request spans are wanted. Its *operation* spans — one each per dependency resolution,
+endpoint call and serialization — are not, so `fastapi_operation_spans` defaults to false
+and every `FastAPI(...)` in Gym is built with `fastapi_telemetry_kwargs()`.
+
+On one NeMo-RL run those three were 160,665 of 336,228 spans, 48% of the job, and carried
+nothing new: `fastapi.endpoint` was 1:1 with its parent request span and within 1% of its
+duration, and the other two had medians of 0.07 ms and 0.23 ms. The knob only governs the
+children — request spans and `http.server.request.duration` are unaffected.
+
+Set it in the `telemetry:` block to get them back. The keyword is dropped entirely on
+FastAPI < 0.142, which raises on it.
+
 ## Two rules worth knowing before you edit
 
 **1. Gate at the call site, before `managed_span`.**

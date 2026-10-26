@@ -590,3 +590,42 @@ def test_init_registers_the_rollout_id_provider_for_sandbox_spans(enabled_consol
 
     init_telemetry()
     assert sandbox_observability._span_attribute_provider is rollout_span_attributes
+
+
+def test_fastapi_operation_spans_are_off_unless_asked_for(clean_otel_env, monkeypatch):
+    """FastAPI's native instrumentation traces dependency resolution, the endpoint and
+    serialization beneath every request span. On one NeMo-RL run that was 48% of all
+    spans, duplicating what the parent HTTP server span already recorded.
+    """
+    from nemo_gym.telemetry.setup import is_fastapi_operation_spans_enabled
+
+    assert is_fastapi_operation_spans_enabled() is False
+
+    monkeypatch.setenv("NEMO_GYM_OTEL_FASTAPI_OPERATION_SPANS", "1")
+    assert is_fastapi_operation_spans_enabled() is True
+
+
+def test_fastapi_telemetry_kwargs_match_the_installed_fastapi(clean_otel_env):
+    """``telemetry=`` arrived in FastAPI 0.142; older versions raise on the keyword."""
+    import inspect
+
+    from fastapi import FastAPI
+
+    from nemo_gym.telemetry.setup import fastapi_telemetry_kwargs
+
+    kwargs = fastapi_telemetry_kwargs()
+    if "telemetry" in inspect.signature(FastAPI.__init__).parameters:
+        assert kwargs == {"telemetry": {"operation_spans": False}}
+    else:
+        assert kwargs == {}
+    FastAPI(**kwargs)
+
+
+def test_fastapi_operation_spans_setting_reaches_a_server_process(clean_otel_env):
+    """The flag is read in the server process, so it has to survive `configure_telemetry_env`."""
+    from nemo_gym.telemetry.config import TelemetryConfig
+    from nemo_gym.telemetry.setup import configure_telemetry_env, is_fastapi_operation_spans_enabled
+
+    configure_telemetry_env(TelemetryConfig(enabled=True, fastapi_operation_spans=True))
+
+    assert is_fastapi_operation_spans_enabled() is True

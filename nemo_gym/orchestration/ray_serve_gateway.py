@@ -40,6 +40,8 @@ import ray
 from fastapi import FastAPI, Request, Response
 from ray import serve
 
+from nemo_gym.telemetry.setup import fastapi_telemetry_kwargs
+
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +135,7 @@ def build_instance_command(
     return cmd
 
 
-app = FastAPI()
+app = FastAPI(**fastapi_telemetry_kwargs())
 
 
 @serve.deployment

@@ -87,6 +87,7 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.session_routing import SessionClaims, SessionKind
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
+from nemo_gym.telemetry.setup import fastapi_telemetry_kwargs
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.tool_access import ToolAccess
 
@@ -609,7 +610,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return list(accesses.values())
 
     def setup_webserver(self) -> FastAPI:
-        app = FastAPI()
+        app = FastAPI(**fastapi_telemetry_kwargs())
 
         self.setup_session_middleware(app)
         self.setup_agent_checkpoint(app)

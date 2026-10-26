@@ -28,6 +28,7 @@ from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, Epis
 from nemo_gym.failure_kinds import FailureStage
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SimpleServer, format_exception_with_response_body
+from nemo_gym.telemetry.setup import fastapi_telemetry_kwargs
 
 
 LOGGER = logging.getLogger(__name__)
@@ -216,7 +217,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         )
 
     def setup_webserver(self) -> FastAPI:
-        app = FastAPI()
+        app = FastAPI(**fastapi_telemetry_kwargs())
         self.setup_environment_checkpoint(app)
 
         async def run_endpoint(body: Any) -> Any:

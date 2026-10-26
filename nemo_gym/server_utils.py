@@ -116,7 +116,7 @@ from nemo_gym.telemetry.connection_pool import (
     set_server_name,
 )
 from nemo_gym.telemetry.observer import observe_app_event_loop, request_counts
-from nemo_gym.telemetry.setup import is_trace_exporter_active
+from nemo_gym.telemetry.setup import fastapi_telemetry_kwargs, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
 
@@ -2085,7 +2085,7 @@ class HeadServer(BaseServer):
     _cached_yaml: Optional[str] = None
 
     def setup_webserver(self) -> FastAPI:
-        app = FastAPI()
+        app = FastAPI(**fastapi_telemetry_kwargs())
 
         @app.get("/livez", include_in_schema=False)
         @app.get("/", include_in_schema=False)

@@ -102,6 +102,9 @@ _ENV_FIELD_MAP = {
     "run_id": f"{_OTEL_PREFIX}_RUN_ID",
     # Gym-owned flag, read back by init_telemetry rather than by lens.
     "service_name_per_server": f"{_OTEL_PREFIX}_SERVICE_NAME_PER_SERVER",
+    # Gym-owned too, but read back at app construction rather than at setup: FastAPI
+    # takes its telemetry settings in its constructor, which runs before init_telemetry.
+    "fastapi_operation_spans": f"{_OTEL_PREFIX}_FASTAPI_OPERATION_SPANS",
 }
 
 #: The ``_ENV_FIELD_MAP`` fields that nemo-lens itself reads, each with a ``NEMO_LENS_<KEY>`` fallback.
@@ -148,6 +151,29 @@ def _env_flag(name: str, default: bool) -> bool:
     if not raw:
         return default
     return raw in _TRUTHY
+
+
+def is_fastapi_operation_spans_enabled() -> bool:
+    """Whether FastAPI should trace dependencies, endpoints and serialization.
+
+    Read from the environment rather than from a config object because a server builds
+    its app before ``init_telemetry`` runs -- FastAPI takes this in its constructor.
+    """
+    return _env_flag(_ENV_FIELD_MAP["fastapi_operation_spans"], False)
+
+
+def fastapi_telemetry_kwargs() -> dict:
+    """Keyword arguments for a Gym server's ``FastAPI(...)`` call.
+
+    Empty on FastAPI < 0.142, which has no native telemetry and raises on the keyword.
+    """
+    import inspect
+
+    from fastapi import FastAPI
+
+    if "telemetry" not in inspect.signature(FastAPI.__init__).parameters:
+        return {}
+    return {"telemetry": {"operation_spans": is_fastapi_operation_spans_enabled()}}
 
 
 def is_telemetry_env_enabled() -> bool:

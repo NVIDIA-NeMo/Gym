@@ -93,6 +93,7 @@ from nemo_gym.server_utils import (
     is_nemo_gym_fastapi_worker,
 )
 from nemo_gym.telemetry.endpoints import traced_endpoint
+from nemo_gym.telemetry.setup import fastapi_telemetry_kwargs
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
     CaptureContext,
@@ -360,7 +361,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         return True
 
     def setup_webserver(self) -> FastAPI:
-        app = FastAPI()
+        app = FastAPI(**fastapi_telemetry_kwargs())
 
         @app.exception_handler(ClientResponseError)
         async def upstream_error(request: Request, error: ClientResponseError) -> Response:
