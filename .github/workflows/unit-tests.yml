@@ -40,6 +40,10 @@ jobs:
       run_session_routing_e2e: >-
         ${{ steps.session-routing-changes.outputs.any_changed == 'true'
         || (inputs.base-ref == '' && github.event_name != 'pull_request') }}
+      # Same rule for the Go tests of the h2-ping-sidecar.
+      run_sidecar_go: >-
+        ${{ steps.sidecar-changes.outputs.any_changed == 'true'
+        || (inputs.base-ref == '' && github.event_name != 'pull_request') }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -69,6 +73,64 @@ jobs:
             nemo_gym/base_resources_server.py
             nemo_gym/mcp_auto_exposure.py
             tests/e2e/session_routing/**
+
+      - name: Detect sidecar changes
+        id: sidecar-changes
+        if: inputs.base-ref != '' || github.event_name == 'pull_request'
+        uses: step-security/changed-files@3dbe17c78367e7d60f00d78ae6781a35be47b4a1 # v45.0.1
+        with:
+          base_sha: ${{ inputs.base-ref || github.event.pull_request.base.sha || '' }}
+          files: |
+            nemo_gym/tools/sidecar/**
+            .github/workflows/unit-tests.yml
+
+  # The h2-ping-sidecar is Go, so the pytest jobs below never see it. Its tests build the binary and run
+  # it against local fake HTTP/2 origins and relays, so they need no network or secrets.
+  sidecar-go-tests:
+    name: Sidecar Go tests (${{ matrix.name }})
+    needs: detect
+    if: needs.detect.outputs.run_sidecar_go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest Go the sidecar promises to build with, then the newest, which is what the container
+          # image is built with (docker/Dockerfile, GO_VERSION).
+          - name: go.mod minimum
+            go-version: ""
+            go-version-file: nemo_gym/tools/sidecar/go.mod
+          - name: latest stable
+            go-version: stable
+            go-version-file: ""
+    env:
+      # Use the Go that setup-go installed; never download another toolchain mid-test.
+      GOTOOLCHAIN: local
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: ${{ matrix.go-version }}
+          go-version-file: ${{ matrix.go-version-file }}
+          # The sidecar uses only the standard library, so there is no go.sum to key a cache on.
+          cache: false
+
+      - name: Format, vet and test
+        working-directory: nemo_gym/tools/sidecar
+        run: |
+          go version
+          unformatted="$(gofmt -l .)"
+          if [[ -n "${unformatted}" ]]; then
+            echo "gofmt needed on:" >&2
+            echo "${unformatted}" >&2
+            exit 1
+          fi
+          go vet ./...
+          go test -race -count=1 ./...
 
   # Core library unit tests (run once on a full run) + the changed-servers path. The full
   # server suite is sharded into the parallel `server-suite` matrix below.
