@@ -2,8 +2,9 @@
 
 This Environment Server runs a materialized NeMo User Sim episode. It owns the
 `ProbeEpisodeRuntime`, routes user and assistant activations through their Agent
-Servers, and routes support and embedding calls through configured Model
-Servers.
+Servers, and routes judge, summary, and tool-simulation calls through configured
+Model Servers. Embedding calls go directly to `/embeddings` on the endpoint
+configured for `embedding_model`, using its `base_url` and `api_key`.
 
 Before execution, it asks the paired Resources Server in
 `resources_servers/nemo_user_sim` to validate and snapshot the materialized row.

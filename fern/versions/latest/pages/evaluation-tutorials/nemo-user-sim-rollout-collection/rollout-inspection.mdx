@@ -31,8 +31,7 @@ jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
          name: ([.persona.first_name, .persona.last_name] | map(select(. != null)) | join(" "))
        },
        trajectory_id,
-       theme,
-       tool_subset
+       theme
      }' \
   "${inputs}"
 ```
@@ -73,11 +72,11 @@ for the prepared probe. The integration evaluates Assistant behavior, not the si
 
 Two related fields expose quality:
 
-- `verification.verifier_data.normalized_axis_scores` is the full User Sim quality map.
+- `verification.verifier_data.normalized_axis_scores` is the full NeMo User Sim quality map.
 - `reward_components` is Gym's flat metrics projection. It repeats quality axes with a `quality.` prefix and
   adds completion/scoring flags plus `assistant_quality`, so aggregate metrics can consume them directly.
 
-The duplication is intentional: the first field preserves User Sim's structured verifier evidence, while the
+The duplication is intentional: the first field preserves NeMo User Sim's structured verifier evidence, while the
 second uses Gym's standard scalar metrics contract.
 
 ```bash
@@ -110,7 +109,7 @@ Interpret the fields as follows:
 - `scorer_result` contains probe-specific evidence. A failed applicable check is a measured policy result.
 - `assistant_eval.axes` contains the judge's original scores and explanations.
 
-## Inspect Environment-owned invocations
+## Inspect Environment Server invocations
 
 The top-level `invocations` ledger records User and Assistant Agent activations and support-model calls made by
 the Environment Server:
@@ -132,12 +131,12 @@ jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
 ```
 
 Roles can include `user`, `assistant`, `judge`, `summary`, and `tool_simulation`. Use `invocations` to inspect
-support-model calls. Native function calls and tool results remain in `usersim_result.conversation_messages`.
+support-model calls. Function calls and tool results remain in `usersim_result.conversation_messages`.
 
 ## Inspect captured participant model calls
 
 `ng_model_call_capture` and the capture JSONL files contain provider-level calls made through the User and
-Assistant Agents. They do not include plain support-model or Resources-verifier calls; inspect those through
+Assistant Agents. They do not include plain support-model or Resources Server verifier calls; inspect those through
 `invocations` and `verification`.
 
 ```bash
@@ -170,5 +169,5 @@ jq --argjson task "${task_index}" --argjson repeat "${rollout_index}" \
   "${rollouts}"
 ```
 
-`ng_trajectory.gaps` identifies information that the participating Agent did not expose. The complete User Sim
+`ng_trajectory.gaps` identifies information that the participating Agent did not expose. The complete NeMo User Sim
 conversation remains available in `usersim_result.conversation_messages`.

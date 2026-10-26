@@ -1,7 +1,7 @@
 ---
 title: "Run Multi-turn User Simulation with NeMo User Sim"
 description: "Generate NeMo User Sim validation tasks, evaluate an assistant, and inspect one rollout."
-position: 4
+position: 6
 ---
 
 <Info>
@@ -59,16 +59,34 @@ run commands from the repository root:
 source .venv/bin/activate
 ```
 
-NeMo User Sim samples personas from the extended Nemotron-Personas dataset on NGC. If `en_US` is not already
-cached under `~/.data-designer/managed-assets/datasets/`, export an NGC API key:
+NeMo User Sim samples personas from Nemotron-Personas version 0.0.2 on NGC. Preparation reads `en_US.parquet` from
+`~/.data-designer/managed-assets/datasets/` and rejects any file whose SHA-256 differs from the pinned version. If
+the pinned file is not already there, export an NGC API key:
 
 ```bash
 export NGC_CLI_API_KEY="<your-ngc-key>"
 ```
 
-Preparation installs the pinned NGC CLI, downloads the pinned persona asset, verifies its checksum, and caches it
-for later runs. See the [API key guide](https://docs.nvidia.com/ngc/latest/ngc-catalog-user-guide.html#ngc-api-keys)
-to create a key. If organization discovery fails, also export `NGC_CLI_ORG`.
+Preparation then installs the NGC CLI, downloads the pinned persona resource, verifies its checksum, and caches
+`en_US.parquet` for later runs. See the
+[API key guide](https://docs.nvidia.com/ngc/latest/ngc-catalog-user-guide.html#ngc-api-keys) to create a key. If
+organization discovery fails, also export `NGC_CLI_ORG`.
+
+To use another cache directory, set `DATA_DESIGNER_MANAGED_ASSETS_PATH` (the file goes in
+`<path>/datasets/en_US.parquet`) or `DATA_DESIGNER_HOME` (the file goes in
+`<path>/managed-assets/datasets/en_US.parquet`). To download the file yourself, install the
+[NGC CLI](https://docs.nvidia.com/ngc/latest/ngc-catalog-user-guide.html#installing-ngc-catalog-cli), then run:
+
+```bash
+ngc registry resource download-version \
+  "nvidia/nemotron-personas/nemotron-personas-dataset-en_us:0.0.2" --dest /tmp/nemotron-personas
+mkdir -p ~/.data-designer/managed-assets/datasets
+find /tmp/nemotron-personas -name en_US.parquet \
+  -exec cp {} ~/.data-designer/managed-assets/datasets/en_US.parquet \;
+```
+
+A persona file from another release, such as the latest `data-designer download personas` download, fails the
+checksum.
 
 Create or update `env.yaml` in the repository root:
 
@@ -86,9 +104,19 @@ support_model_api_key: ${oc.env:SUPPORT_MODEL_API_KEY}
 support_model_name: your-structured-output-model
 ```
 
+`user_model_*` and `support_model_*` default to the `policy_*` values; set them only when those roles use a
+different endpoint.
+
 All three URLs must expose an OpenAI-compatible Chat Completions API. The support endpoint must also accept
-`json_schema` response formats. If it rejects the scorer schema, verification is masked with
-`verifier_error`.
+`json_schema` response formats. If it rejects the probe-scorer schema, verification is masked as `verifier_error`.
+If it rejects the judge schema, NeMo User Sim returns no quality axes, and a completed scenario is masked as
+`judge_failed`.
+
+The `financial_services` probe also retrieves documents through an embedding endpoint. `embedding_model_base_url`,
+`embedding_model_api_key`, and `embedding_model_name` default to the `support_model_*` values, and Gym sends
+embedding requests to `<embedding_model_base_url>/embeddings`. If that endpoint does not serve embeddings, retrieval
+falls back to lexical search without failing the episode, so set these three keys when the support endpoint is
+chat-only.
 
 Export the referenced secrets:
 
@@ -120,9 +148,10 @@ jq '.resolved_row | {
 }' environments/nemo_user_sim/data/nemo_user_sim.jsonl
 ```
 
-The Resources Server validates required fields and the pinned NeMo User Sim revision when it seeds a session.
-It stores a digest and compares it during verification, proving that the materialized row did not change during
-the episode.
+When it seeds a session, the Resources Server validates required fields, the pinned NeMo User Sim revision, and
+the Nemotron-Personas version (`"0.0.2"`, or `"synthetic"` for the committed example rows), and rejects guarded
+health rows. It stores a digest and compares it during verification, proving that the materialized row did not
+change during the episode.
 
 ## Collect one rollout
 
@@ -147,6 +176,9 @@ gym eval run \
 
 The parser flags above use the configuration defaults. Set one to `true` only when that endpoint returns a
 separate reasoning field that Gym must parse.
+
+The first generated task is `financial_services`, so this smoke run calls the embedding endpoint described above.
+If that endpoint does not serve embeddings, the run still completes, with lexical retrieval.
 
 A successful run writes:
 
@@ -181,8 +213,8 @@ jq '.invocations[]
   results/nemo_user_sim/rollouts.jsonl
 ```
 
-The smoke run is complete when the rollout contains alternating User and Assistant messages, a non-error
-verification object, and the expected `mask_sample` value.
+The smoke run is complete when the rollout alternates User and Assistant messages,
+`verification.verifier_data.assistant_eval` has no `error`, and `mask_sample` is `false`.
 
 ## Run all validation tasks
 

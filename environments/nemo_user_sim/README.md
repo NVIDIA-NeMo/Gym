@@ -2,11 +2,11 @@
 
 This environment runs population-grounded, multi-turn user simulation with
 NeMo User Sim. Its generated validation set includes one task for each
-first-party User Sim probe.
+first-party NeMo User Sim probe.
 
 ## Generate validation tasks
 
-Preparation runs the pinned User Sim package in an isolated dependency
+Preparation runs the pinned NeMo User Sim package in an isolated dependency
 environment and asks its canonical sampler to materialize one fully resolved
 input for every registered probe:
 
@@ -16,9 +16,9 @@ gym eval prepare --config environments/nemo_user_sim/config.yaml
 
 The resulting `environments/nemo_user_sim/data/nemo_user_sim.jsonl` contains 14 rows. Each
 generated row contains a
-stable string `task_id` and the complete User Sim row under `resolved_row`.
+stable string `task_id` and the complete NeMo User Sim row under `resolved_row`.
 Gym adds the remaining task metadata when it materializes the dataset for a
-run. User Sim owns persona, probe, theme, toolset, locale, configuration,
+run. NeMo User Sim owns persona, probe, theme, toolset, locale, configuration,
 trajectory identity, and provenance selection; Gym does not maintain sampling
 templates or persona panels.
 
@@ -32,18 +32,18 @@ New rows store `usersim_provenance` as JSON text, including when
 
 The Environment Server creates the sole
 `ProbeEpisodeRuntime.from_resolved_row(...)` for each episode. The runtime
-owns User Sim's conversation lifecycle, probe state, tools, semantic
+owns NeMo User Sim's conversation lifecycle, probe state, tools, semantic
 indices, and evidence.
 
 The User Agent and Assistant Agent each perform one model activation per
 request. For `tool_calling`, `safety_agentic`, and `financial_services`, the
-Assistant returns function calls without executing them. User Sim validates and
-executes those calls inside the Environment, adds tool results, and
+Assistant returns function calls without executing them. NeMo User Sim validates and
+executes those calls inside the Environment Server, adds tool results, and
 requests another Assistant activation when necessary. Internal
 `api_response_model` calls route through `tool_simulation_model`.
 
 The Resources Server validates the materialized row, stores its episode
-identity and digest, and verifies the episode result with User Sim's
+identity and digest, and verifies the episode result with NeMo User Sim's
 trajectory evaluator and registered probe scorer. It owns no second runtime
 and exposes no probe tool endpoints.
 
@@ -57,7 +57,14 @@ tool calls, tool results, and simulation outcome.
 The User Agent uses `user_model`, the Assistant Agent uses `policy_model`, and
 Judge, Summary, tool simulation, and verification use `support_model`. These
 are independently configured Model Servers, although their upstream endpoints
-may match when one provider satisfies multiple roles.
+may match when one provider satisfies multiple roles. `user_model_*` and
+`support_model_*` default to the `policy_*` values.
+
+`financial_services` retrieval also calls `/embeddings` directly on the
+endpoint configured by `embedding_model_base_url`, `embedding_model_api_key`,
+and `embedding_model_name`, which default to the `support_model_*` values. If
+that call fails, NeMo User Sim falls back to lexical retrieval without failing
+the episode.
 
 ## Run
 
