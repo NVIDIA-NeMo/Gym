@@ -9,6 +9,10 @@ Preparation writes, under ``results/harbor/<taskset>/``:
 - ``skipped.json``: omitted task IDs and reasons (empty when all tasks load);
 - ``run_config_<agent>.yaml``: the agent and environment server blocks.
 
+Beside the task folders it reconciles ``manifest.toml`` (:mod:`nemo_gym.tasks.harbor.manifest`) before
+anything is built or pushed: a fetched dataset whose folders no longer match the manifest is refused, a
+local folder gets one. The dataset digest goes into the rows and the run config.
+
 Then the ordinary end-to-end rollout collection runs with that config plus the
 selected agent, environment server and model configs.
 """
@@ -29,8 +33,17 @@ from nemo_gym import component_search_roots
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError
 from nemo_gym.path_utils import materialized_path_for
-from nemo_gym.tasks.harbor.build_options import BuildOptions, build_options_from_overrides
+from nemo_gym.sandbox.compose_config import deployment_platform
+from nemo_gym.sandbox.compose_fields import DEFAULT_PLATFORM
+from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
+from nemo_gym.tasks.harbor.build_options import (
+    BuildOptions,
+    _block_from_overrides,
+    _merged_cli_config,
+    build_options_from_overrides,
+)
 from nemo_gym.tasks.harbor.build_plan import (
+    DEFAULT_PLATFORM,
     BuildError,
 )
 from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE, read_dataset_config
@@ -41,8 +54,22 @@ from nemo_gym.tasks.harbor.image_configs import (
     record_base_images,
     record_compose_images,
 )
-from nemo_gym.tasks.harbor.materialize import run_config, write_rows
-from nemo_gym.tasks.harbor.prepare_builds import _build_dockerfiles, unsupported_compose_fields_error
+from nemo_gym.tasks.harbor.manifest import (
+    LOCAL_SOURCE,
+    Manifest,
+    ManifestError,
+    check_manifest,
+    check_task_manifest,
+    dataset_digest,
+    dataset_toml_digest,
+)
+from nemo_gym.tasks.harbor.materialize import (
+    ENVIRONMENT_SERVER_IMPL,
+    ENVIRONMENT_SERVER_INSTANCE,
+    run_config,
+    write_rows,
+)
+from nemo_gym.tasks.harbor.prepare_builds import _build_dockerfiles
 from nemo_gym.tasks.harbor.records import read_image_configs
 from nemo_gym.tasks.harbor.registry import ImageConfigError
 from nemo_gym.tasks.harbor.task import HarborTask, discover_tasks, is_task_folder
@@ -76,6 +103,14 @@ USE_ABSOLUTE_IP_KEY = "use_absolute_ip"
 ABSOLUTE_IP_SERVER_TYPES_KEY = "absolute_ip_server_types"
 SANDBOX_REACHABLE_SERVER_TYPES = ("responses_api_models",)
 SANDBOX_PROVIDER_CONFIG = "nemo_gym/sandbox/providers/{provider}/configs/{provider}.yaml"
+# The top-level block the Harbor environment server reads its provider from by default (`sandbox_provider`).
+SANDBOX_BLOCK_KEY = "sandbox"
+# Where the server's settings sit in the configuration a command names: the shipped environment server instance
+# every run config inherits from. `gpu_sandbox_provider` names the block GPU-declaring tasks and GPU sidecars run
+# on; `sandbox_provider_options.platform` ({os, arch}) is the platform a service's `platform` must match.
+HARBOR_SERVER_KEY = f"{ENVIRONMENT_SERVER_INSTANCE}.environment_servers.{ENVIRONMENT_SERVER_IMPL}"
+GPU_SANDBOX_PROVIDER_KEY = f"{HARBOR_SERVER_KEY}.gpu_sandbox_provider"
+SANDBOX_PROVIDER_OPTIONS_KEY = f"{HARBOR_SERVER_KEY}.sandbox_provider_options"
 # Harness-specific settings a Harbor run needs; keyed by the agent implementation folder.
 AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
     # Hermes borrows the task sandbox and drives it through its terminal toolset. vLLM-only
@@ -94,6 +129,121 @@ AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
 }
 
 
+def _block_provider_name(overrides: list[str], sandbox: str | None, block_key: str) -> str | None:
+    """The provider name a top-level sandbox block carries, read from its keys alone (never its values)."""
+    from omegaconf import OmegaConf
+
+    from nemo_gym.sandbox.config import SANDBOX_BLOCK_RESERVED_KEYS
+
+    files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
+    block = OmegaConf.select(_merged_cli_config(overrides, files), block_key, throw_on_resolution_failure=False)
+    if block is None or not hasattr(block, "keys"):
+        return None
+    providers = [str(key) for key in block.keys() if key not in SANDBOX_BLOCK_RESERVED_KEYS]
+    return providers[0] if len(providers) == 1 else None
+
+
+def sandbox_provider_from_overrides(overrides: list[str], sandbox: str | None) -> str | None:
+    """The provider name (``opensandbox``, ``docker``, ...) of the ``sandbox:`` block the command names.
+
+    The block comes from the ``--sandbox`` provider file (when given) and the configuration the command line
+    names, merged as :func:`_merged_cli_config` does; only its keys are read, never its values, so provider
+    credentials are not needed at prepare. Prepare checks each Compose task's ``tmpfs``, ``ulimits``,
+    ``sysctls`` and ``security_opt`` against this provider's capabilities. ``None`` when no block names a
+    provider: the check then runs at seed, against the live provider.
+    """
+    return _block_provider_name(overrides, sandbox, SANDBOX_BLOCK_KEY)
+
+
+def gpu_sandbox_provider_from_overrides(overrides: list[str], sandbox: str | None) -> str | None:
+    """The provider name of the block GPU-declaring tasks and GPU sidecars run on: the environment server's
+    ``gpu_sandbox_provider`` in the configuration the command names (``GPU_SANDBOX_PROVIDER_KEY``), read like
+    :func:`sandbox_provider_from_overrides` reads the ``sandbox:`` block. ``None`` when no GPU block is set
+    (every service is then checked against the ``sandbox:`` block) or the block does not name one provider."""
+    block = _block_from_overrides(overrides, GPU_SANDBOX_PROVIDER_KEY)
+    if block is None:
+        return None
+    if not isinstance(block, str) or not block:
+        raise ValueError(f"`{GPU_SANDBOX_PROVIDER_KEY}` must name a top-level sandbox block; got {block!r}")
+    return _block_provider_name(overrides, sandbox, block)
+
+
+def compose_platform_from_overrides(overrides: list[str]) -> str:
+    """The platform a Compose service's ``platform`` must match at prepare: the environment server's
+    ``sandbox_provider_options.platform`` (``{os, arch}``) in the configuration the command names, else
+    linux/amd64, exactly as the server reads it at seed (``deployment_platform``).
+
+    Only the ``platform`` subkey is selected and resolved. The sibling options (volumes, credentials, a
+    ``${results_dir}`` the server's configuration parser defaults later) are not needed at prepare and are
+    not evaluated; a block that is not a mapping selects no platform and the default stands, the server's own
+    configuration validation names the malformed block at dispatch."""
+    platform = _block_from_overrides(overrides, f"{SANDBOX_PROVIDER_OPTIONS_KEY}.platform")
+    return deployment_platform({"platform": platform} if platform is not None else None)
+
+
+def volume_sources_from_overrides(overrides: list[str], sandbox: str | None) -> dict[str, str] | None:
+    """The ``volume_sources`` of the ``sandbox:`` block the command names, for checking Compose volumes at prepare.
+
+    The block comes from the ``--sandbox`` provider file (when given) and the configuration the command
+    line names, merged as :func:`_block_from_overrides` does. ``None`` when no ``volume_sources`` is
+    configured: prepare then reports every external volume and foreign bind mount as unmapped.
+    """
+    return _block_volume_sources(overrides, sandbox, SANDBOX_BLOCK_KEY)
+
+
+def gpu_volume_sources_from_overrides(overrides: list[str], sandbox: str | None) -> dict[str, str] | None:
+    """The ``volume_sources`` of the block GPU-declaring tasks run on, for checking their Compose volumes at prepare.
+
+    The block is the environment server's ``gpu_sandbox_provider`` in the configuration the command names
+    (``GPU_SANDBOX_PROVIDER_KEY``). ``None`` when no GPU block is set: every task is then checked against
+    the ``sandbox:`` block. An empty mapping when the block is set but carries no ``volume_sources``, which
+    is what the server resolves such a task against.
+    """
+    block = _block_from_overrides(overrides, GPU_SANDBOX_PROVIDER_KEY)
+    if block is None:
+        return None
+    if not isinstance(block, str) or not block:
+        raise ValueError(f"`{GPU_SANDBOX_PROVIDER_KEY}` must name a top-level sandbox block; got {block!r}")
+    return _block_volume_sources(overrides, sandbox, block) or {}
+
+
+def _block_volume_sources(overrides: list[str], sandbox: str | None, block: str) -> dict[str, str] | None:
+    files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
+    sources = _block_from_overrides(overrides, f"{block}.{SANDBOX_BLOCK_VOLUME_SOURCES_KEY}", config_files=files)
+    if sources is None:
+        return None
+    return validate_volume_sources(sources, f"the `{block}:` block")
+
+
+def shared_storage_from_overrides(overrides: list[str], sandbox: str | None) -> bool | None:
+    """Whether the ``sandbox:`` block's provider configures shared storage, for checking Compose named volumes and
+    shared logs binds at prepare: OpenSandbox's ``shared_storage.host_path`` under the block's one provider key,
+    read from the ``--sandbox`` provider file and the configuration the command names. ``None`` when the block
+    names no single provider (the adapter then decides at seed); otherwise whether the path is set, which is
+    the one setting the server's provider requires for every such volume."""
+    return _block_shared_storage(overrides, sandbox, SANDBOX_BLOCK_KEY)
+
+
+def gpu_shared_storage_from_overrides(overrides: list[str], sandbox: str | None) -> bool | None:
+    """:func:`shared_storage_from_overrides` for the block GPU-declaring tasks and GPU sidecars run on
+    (``GPU_SANDBOX_PROVIDER_KEY``); ``None`` when no GPU block is set."""
+    block = _block_from_overrides(overrides, GPU_SANDBOX_PROVIDER_KEY)
+    if block is None:
+        return None
+    if not isinstance(block, str) or not block:
+        raise ValueError(f"`{GPU_SANDBOX_PROVIDER_KEY}` must name a top-level sandbox block; got {block!r}")
+    return _block_shared_storage(overrides, sandbox, block)
+
+
+def _block_shared_storage(overrides: list[str], sandbox: str | None, block: str) -> bool | None:
+    provider = _block_provider_name(overrides, sandbox, block)
+    if provider is None:
+        return None
+    files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
+    host_path = _block_from_overrides(overrides, f"{block}.{provider}.shared_storage.host_path", config_files=files)
+    return bool(host_path)
+
+
 @dataclass(frozen=True)
 class PreparedTaskset:
     taskset: str
@@ -102,8 +252,13 @@ class PreparedTaskset:
     rows_path: Path
     output_dir: Path
     skipped: dict[str, str] = field(default_factory=dict)
-    # Every distinct image the prepared tasks start from, for pre-pulling.
+    # Every distinct image a run of the prepared tasks starts, for pre-pulling (``run_images``): the task images,
+    # the separate verifiers' (declared or built from tests/Dockerfile) and the Compose services' as recorded.
     images: tuple[str, ...] = ()
+    # The dataset's identity (``manifest.toml``'s ``[dataset].digest``) and the digest of its
+    # ``dataset.toml``, recorded in every row and in the run config.
+    dataset_digest: str | None = None
+    dataset_toml_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +284,13 @@ def prepare_target(
     exclude: list[str] | None = None,
     only: list[str] | None = None,
     build: BuildOptions | None = None,
+    sandbox_provider: str | None = None,
+    gpu_sandbox_provider: str | None = None,
+    compose_platform: str = DEFAULT_PLATFORM,
+    volume_sources: dict[str, str] | None = None,
+    gpu_volume_sources: dict[str, str] | None = None,
+    shared_storage: bool | None = None,
+    gpu_shared_storage: bool | None = None,
     rows_name: str = "tasks.jsonl",
 ) -> PreparedTaskset:
     """Fetch (for hub references) and load the tasks, then write the rows file.
@@ -142,9 +304,26 @@ def prepare_target(
     rows and listed on stdout. Dockerfiles outside pull and overlay mode are built once and
     recorded before the tasks load, as ``build`` (the ``builds:`` configuration block) says; the
     default builds locally with docker, and pushes with the first tool on PATH when a repository
-    is named. ``rows_name`` names the rows file inside the taskset's output folder: a run scopes
-    it to its agent, so two agents prepared with different selections on one taskset keep their
-    own rows.
+    is named. Compose service fields are checked against ``sandbox_provider`` and ``gpu_sandbox_provider``,
+    the provider names of the ``sandbox:`` and GPU blocks, which decide the ``tmpfs``, ``ulimits``, ``sysctls``
+    and ``security_opt`` each service's provider can apply, and against ``compose_platform``, the deployment's (see
+    ``nemo_gym.tasks.harbor.image_configs.check_task_compose_fields``). Compose ``volumes`` are checked against ``volume_sources``, the deployment's mapping of
+    external volumes and foreign bind sources to shared storage (see ``nemo_gym.sandbox.config``); a task that
+    declares GPUs is checked against ``gpu_volume_sources`` when given, the mapping of the block the server runs
+    such tasks on; ``shared_storage`` and ``gpu_shared_storage`` say whether each block's provider has the shared
+    storage named volumes and shared logs binds need, so a task that needs it is left out at prepare, naming the
+    setting, when the block has none (``None``: unknown, decided at seed). ``rows_name`` names the rows file inside the taskset's output folder: a run scopes it to its
+    agent, so two agents prepared with different selections on one taskset keep their own rows.
+
+    Before any image is recorded, built or pushed, ``manifest.toml`` beside the task folders is
+    reconciled with their digests (:func:`~nemo_gym.tasks.harbor.manifest.check_manifest`): a fetched
+    dataset whose folders changed is refused, a local folder gets a manifest. The digests hashed for
+    that check are reused for the tasks that do not load; the loader's own folder digests are checked
+    against them. Selection does not enter the dataset digest; it covers every task folder, so two runs of
+    different subsets still name one dataset. A task folder that cannot be hashed (a file under it escapes
+    it through a link, or cannot be read) is recorded in the manifest by name without a digest and does
+    not enter the dataset digest; the loader refuses it, so it is skipped like any task that does not load,
+    and selection applies to it as to any other task.
     """
     build = build or BuildOptions()
     if is_hub_ref(target):
@@ -153,18 +332,37 @@ def prepare_target(
     else:
         folder = Path(target).expanduser().resolve()
     taskset = folder.name
+    # Dataset-level files (dataset.toml, the recorded image configurations, the built images) live at the
+    # dataset root, which is where the loader and the environment server read them from for nested tasks.
+    dataset_root = folder.parent if is_task_folder(folder) else folder
     exclude = exclude or []
+    # The refusal of a hand-edited fetched dataset comes first, so no image of unverified content is
+    # built, pushed or recorded. A single task folder has no manifest of its own (see _dataset_identity).
+    digests: dict[str, str] = {}
+    identity = check_manifest(folder, digests=digests) if folder.is_dir() and not is_task_folder(folder) else None
 
     def selected(task_id: str) -> bool:
         return selection_reason(task_id, exclude, only) is None
+
+    # A single task folder inside a fetched dataset is held here to the manifest its dataset folder's check holds it
+    # to (the nearest fetched one within that check's discovery range: at most MAX_DISCOVERY_DEPTH levels up, through
+    # visible folders that are not links), before any image is recorded or built (check_task_manifest): preparing
+    # one task of a fetched dataset is no way around the check its dataset folder gets. Its identity then carries
+    # the fetch's source (see _dataset_identity); a task no such manifest holds is held to nothing.
+    parent = check_task_manifest(folder, digests=digests) if is_task_folder(folder) else None
 
     # Dockerfile ENV, WORKDIR and USER resolve from the base image's configuration, so it is recorded
     # before the tasks load; a base image the registry cannot resolve stops the preparation here. Only
     # the selected tasks' images are recorded, so an image a left-out task uses cannot stop it. A target
     # that is itself a task folder always loads (discover_tasks raises for it); selection applies after.
-    # A missing or unreadable target is reported by discover_tasks below, in its own words.
+    # A missing or unreadable target is reported by discover_tasks below, in its own words. Duplicate
+    # task IDs are rejected by the folder walk itself, before any registry or docker work. Images are
+    # recorded for the platform the sandboxes run, ``builds.platform`` (linux/amd64 unless set), as the
+    # built ones are.
     images = (
-        record_base_images(folder, select=None if is_task_folder(folder) else selected) if folder.is_dir() else None
+        record_base_images(folder, select=None if is_task_folder(folder) else selected, platform=build.platform)
+        if folder.is_dir()
+        else None
     )
     if images is not None:
         print(f"Base image configurations recorded in {images}")
@@ -190,6 +388,7 @@ def prepare_target(
     loaded = [task for task in loaded if task.task_id not in unbuilt]
     _write_skipped(output_dir, errors)
     _check_dataset_task_keys(folder, loaded, errors)
+    identity = _dataset_identity(folder, loaded, identity, digests, parent=parent)
     tasks, skipped = select_tasks(loaded, exclude, only)
     # A left-out task that did not load (its base image was not recorded) is left out, not reported as broken.
     for task_id in [task_id for task_id in errors if not selected(task_id)]:
@@ -202,9 +401,23 @@ def prepare_target(
         print(f"Skipping {task_id}: {reason}")
     if not tasks:
         raise _no_runnable_task(folder, errors)
-    # A Compose file that does not resolve leaves its task out the same way; the others' images are still recorded.
+    # A Compose file that does not resolve, a field the sandbox Compose adapter would refuse at seed, or volumes the
+    # group cannot run, leaves its task out the same way, with the field named, as an unloadable task is, not as a
+    # seed failure of every episode; the others' images are still recorded.
     unresolved: dict[str, str] = {}
-    images = record_compose_images(tasks, tasks[0].path.parent, skipped=unresolved)
+    images = record_compose_images(
+        tasks,
+        dataset_root,
+        skipped=unresolved,
+        platform=build.platform,
+        sandbox_provider=sandbox_provider,
+        gpu_sandbox_provider=gpu_sandbox_provider,
+        compose_platform=compose_platform,
+        volume_sources=volume_sources,
+        gpu_volume_sources=gpu_volume_sources,
+        shared_storage=shared_storage,
+        gpu_shared_storage=gpu_shared_storage,
+    )
     if unresolved:
         for task_id, reason in unresolved.items():
             errors[task_id] = HarborTaskError(reason)
@@ -215,21 +428,11 @@ def prepare_target(
             raise _no_runnable_task(folder, errors)
     if images is not None:
         print(f"Compose image configurations recorded in {images}")
-    # The Compose adapter's field check, per task and before any sandbox exists: a field it does not start is
-    # a skipped task with the field named, as an unloadable task is, not a seed failure of every episode.
-    refused = {task.task_id: error for task in tasks if (error := unsupported_compose_fields_error(task))}
-    if refused:
-        errors.update(refused)
-        _write_skipped(output_dir, errors)
-        for task_id, error in refused.items():
-            logger.warning("Skipping task %s: %s", task_id, error)
-        tasks = [task for task in tasks if task.task_id not in refused]
-        if not tasks:
-            raise _no_runnable_task(folder, errors)
     rows_path = output_dir / rows_name
-    write_rows(tasks, taskset, rows_path)
+    write_rows(tasks, taskset, rows_path, dataset_digest=identity.digest)
     skipped_note = f", skipped {len(errors)}" if errors else ""
     print(f"Materialized {len(tasks)} task(s) from {folder} into {rows_path}{skipped_note}")
+    print(f"Dataset digest {identity.digest} ({identity.source})")
     # Every distinct image a run starts, for pre-pulling onto the sandbox hosts before it: the task images, the
     # Compose sidecars' (as recorded, the pinned reference the sandbox gets) and the separate verifiers'.
     distinct = run_images(tasks, read_image_configs(tasks[0].path.parent))
@@ -246,6 +449,8 @@ def prepare_target(
         output_dir=output_dir,
         skipped={task_id: str(error) for task_id, error in errors.items()},
         images=distinct,
+        dataset_digest=identity.digest,
+        dataset_toml_digest=identity.dataset_toml_digest,
     )
 
 
@@ -258,6 +463,11 @@ def run_images(tasks: list[HarborTask], image_configs: Mapping[str, Any]) -> tup
     for task in tasks:
         if task.image:
             images.add(task.image)
+        if task.verifier_image:
+            # The separate verifier's sandbox starts this image: the one prepare built from tests/Dockerfile
+            # (recorded under the tests/ digest, never a Compose service, so nothing below would name it) or the
+            # declared one, which the check below names too (HarborTask.verifier_image covers both).
+            images.add(task.verifier_image)
         verifier_environment = task.config.verifier.environment
         if (
             not task.config.is_shared_verifier
@@ -282,6 +492,52 @@ def _listed(reasons: Mapping[str, object]) -> str:
 def _no_runnable_task(folder: Path, errors: Mapping[str, object]) -> ValueError:
     """The error of a preparation that keeps no task, listing every task left out and why."""
     return ValueError(f"No runnable task left in {folder}" + (f"; left out:{_listed(errors)}" if errors else ""))
+
+
+def _dataset_identity(
+    folder: Path,
+    loaded: list[HarborTask],
+    checked: Manifest | None,
+    digests: dict[str, str],
+    *,
+    parent: Manifest | None = None,
+) -> Manifest:
+    """The dataset's manifest, reconciled with the loaded tasks' folder digests.
+
+    A folder of task folders carries ``manifest.toml``, reconciled by ``check_manifest`` before the
+    builds (``checked``, with the folder ``digests`` it hashed). The loader hashed the folders that loaded
+    again, with the same function (``HarborTask.folder_digest``); a digest that differs means a folder
+    changed under the preparation, so the manifest is reconciled once more with the loader's digests (and
+    a fetched dataset refused). The manifest records folder digests only: ``HarborTask.digest``, the one
+    rows carry, also folds in the ``dataset.toml`` settings, which the manifest covers once through
+    ``dataset_toml_digest``, so a settings edit changes the dataset digest but is not a task file edit.
+    A single task folder names no dataset folder of its own (its parent is whatever holds it), so its
+    identity is computed in memory over that one task, with the ``dataset.toml`` beside it, and nothing
+    is written (``checked`` is ``None`` exactly then). When a fetched dataset's check reaches the task (its
+    manifest is the nearest fetched one within discovery range, wherever under that folder the task sits),
+    ``parent`` is that manifest, which ``check_task_manifest`` held the folder to before the builds: the identity
+    is that same in-memory one with the fetch's source instead of ``local`` (still over the ``dataset.toml`` beside
+    the task: the manifest holds the task's content, not the settings a nested task is prepared with), and a
+    folder that changed under the preparation is held to the manifest once more with the loader's digest, as a
+    dataset folder is.
+    """
+    if parent is not None:
+        hashed = {task.task_id: task.folder_digest for task in loaded}
+        if any(digests.get(name) != digest for name, digest in hashed.items()):
+            check_task_manifest(folder, digests=hashed)
+        return replace(_dataset_identity(folder, loaded, None, digests), source=parent.source)
+    if checked is None:
+        hashed = {task.task_id: task.folder_digest for task in loaded}
+        toml_digest = dataset_toml_digest(folder.parent)
+        return Manifest(
+            source=LOCAL_SOURCE,
+            digest=dataset_digest(hashed, toml_digest),
+            dataset_toml_digest=toml_digest,
+            tasks={name: {"digest": digest} for name, digest in hashed.items()},
+        )
+    if all(digests.get(task.task_id) == task.folder_digest for task in loaded):
+        return checked
+    return check_manifest(folder, digests={task.task_id: task.folder_digest for task in loaded})
 
 
 def _check_dataset_task_keys(folder: Path, loaded: list[HarborTask], errors: dict[str, HarborTaskError]) -> None:
@@ -433,6 +689,8 @@ def build_run(
         agent_instance_name=agent.instance_name,
         agent_impl=agent.impl_name,
         agent_overrides=AGENT_OVERRIDES.get(agent.impl_name),
+        dataset_digest=prepared.dataset_digest,
+        dataset_toml_digest=prepared.dataset_toml_digest,
     )
     # Defaults belong below explicit config files and command-line overrides.
     config["output_jsonl_fpath"] = str(prepared.output_dir / "rollouts.jsonl")
@@ -479,16 +737,33 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
         validate_target(args, overrides, agent=agent)
         return
     try:
-        # The `builds:` block comes from the configuration the command names; the run config does not exist yet.
+        # The `builds:` and `sandbox:` blocks come from the configuration the command names; the run config
+        # does not exist yet.
         build = build_options_from_overrides(overrides)
         prepared = prepare_target(
             args.target,
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
             build=build,
+            sandbox_provider=sandbox_provider_from_overrides(overrides, sandbox),
+            gpu_sandbox_provider=gpu_sandbox_provider_from_overrides(overrides, sandbox),
+            compose_platform=compose_platform_from_overrides(overrides),
+            volume_sources=volume_sources_from_overrides(overrides, sandbox),
+            gpu_volume_sources=gpu_volume_sources_from_overrides(overrides, sandbox),
+            shared_storage=shared_storage_from_overrides(overrides, sandbox),
+            gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
             rows_name=_rows_name(agent),
         )
-    except (HarborTaskError, HubError, BuildError, ImageConfigError, ConfigError, ValueError, OSError) as exc:
+    except (
+        HarborTaskError,
+        HubError,
+        BuildError,
+        ImageConfigError,
+        ManifestError,
+        ConfigError,
+        ValueError,
+        OSError,
+    ) as exc:
         args._parser.error(str(exc))
     if prepared.skipped and not getattr(args, "skip_unloadable", False):
         args._parser.error(
@@ -605,6 +880,13 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
             build=build_options_from_overrides(overrides),
+            sandbox_provider=sandbox_provider_from_overrides(overrides, sandbox),
+            gpu_sandbox_provider=gpu_sandbox_provider_from_overrides(overrides, sandbox),
+            compose_platform=compose_platform_from_overrides(overrides),
+            volume_sources=volume_sources_from_overrides(overrides, sandbox),
+            gpu_volume_sources=gpu_volume_sources_from_overrides(overrides, sandbox),
+            shared_storage=shared_storage_from_overrides(overrides, sandbox),
+            gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
             rows_name=_rows_name(agent),
         )
     except (
@@ -620,7 +902,7 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
         args._parser.error(str(exc))
     unvalidated = [task.task_id for task in prepared.tasks if not task.has_solution]
     prepared = replace(prepared, tasks=[task for task in prepared.tasks if task.has_solution])
-    write_rows(prepared.tasks, prepared.taskset, prepared.rows_path)
+    write_rows(prepared.tasks, prepared.taskset, prepared.rows_path, dataset_digest=prepared.dataset_digest)
     rollouts = prepared.output_dir / "rollouts.jsonl"
     expected = []
     if prepared.tasks:

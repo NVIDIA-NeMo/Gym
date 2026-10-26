@@ -924,6 +924,16 @@ class OpenSandboxProvider:
         self._pty_sessions: set[Any] = set()
         self._renewals: dict[str, asyncio.Task[None]] = {}
 
+    def pull_policy_options(self, policy: str) -> dict[str, Any]:
+        """Compose's ``pull_policy`` as the per-sandbox image pull policy extension (``_resolve_extensions`` lets a
+        per-sandbox value win over the deployment default)."""
+        mapped = {"always": "Always", "missing": "IfNotPresent", "never": "Never"}.get(policy)
+        if mapped is None:
+            raise ValueError(f"pull policy must be always, missing or never, got {policy!r}")
+        return {
+            "extensions": {IMAGE_PULL_POLICY_EXTENSION_KEY: mapped, IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY: mapped}
+        }
+
     def validate_runtime_requirements(self, *, cap_add: tuple[str, ...], shm_size: int | None) -> dict[str, str]:
         """Reject requirements without an operator-configured implementation."""
         metadata = {}

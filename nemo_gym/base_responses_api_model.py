@@ -113,7 +113,7 @@ from nemo_gym.token_id_capture.config import NonGeneratingRequest, token_id_capt
 from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
 from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolver
-from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.token_id_capture.records import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -134,9 +134,6 @@ _RESPONSES_LIFECYCLE_SSE_PREFIXES = (b"event: response.created\n", b"event: resp
 # answers with OpenAI's error envelope, and the chat-SSE error event reports it with the same
 # message and code.
 PROPAGATED_REFUSAL_CODE_ATTRIBUTE = "nemo_gym_propagated_refusal_code"
-# OpenAI's error code for a request that exceeds the model's context window; OpenAI-compatible
-# harnesses (Codex, OpenCode) compact their history and retry when they see it.
-CONTEXT_LENGTH_EXCEEDED_ERROR_CODE = "context_length_exceeded"
 
 
 def is_propagated_refusal(error: BaseException) -> bool:
@@ -583,7 +580,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         """Serve the same converted response to capture and Responses SSE clients."""
         keepalive_s = self.config.stream_keepalive_s
         if keepalive_s is None:
-            return await self._stream_buffered_responses(self._invoke_responses(request, params), ns_map)
+            return await self._stream_buffered_responses(request, self._invoke_responses(request, params), ns_map)
 
         pending = asyncio.create_task(self._invoke_responses(request, params))
         try:
@@ -595,17 +592,19 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             await asyncio.gather(pending, return_exceptions=True)
             raise
         if done:
-            return await self._stream_buffered_responses(pending, ns_map)
+            return await self._stream_buffered_responses(request, pending, ns_map)
         return StreamingResponse(
-            self._responses_keepalive_events(pending, ns_map, keepalive_s),
+            self._responses_keepalive_events(request, pending, ns_map, keepalive_s),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    async def _stream_buffered_responses(self, invocation: Awaitable[Any], ns_map: NamespaceMap) -> StreamingResponse:
+    async def _stream_buffered_responses(
+        self, request: Request, invocation: Awaitable[Any], ns_map: NamespaceMap
+    ) -> StreamingResponse:
         """Stream a completed response; until it completes nothing is sent to the client."""
         try:
-            return await self._serve_responses_sse(await invocation, ns_map)
+            return await self._serve_responses_sse(request, await invocation, ns_map)
         except (ClientResponseError, HTTPException):
             # Generation is buffered: no headers or SSE bytes have been sent yet.
             # Let the shared HTTP handler retain the upstream error code and body.
@@ -620,7 +619,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             )
 
     async def _responses_keepalive_events(
-        self, pending: "asyncio.Task[Any]", ns_map: NamespaceMap, keepalive_s: float
+        self, request: Request, pending: "asyncio.Task[Any]", ns_map: NamespaceMap, keepalive_s: float
     ) -> AsyncIterator[str | bytes]:
         """Keep an opened Responses stream alive until ``pending`` completes, then finish it."""
         response_id = f"resp_{uuid4().hex}"
@@ -634,7 +633,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 for event in synthesize_responses_keepalive_sse(response_id, include_created=False):
                     yield event
             try:
-                served = await self._serve_responses_sse(pending.result(), ns_map, include_created=False)
+                served = await self._serve_responses_sse(request, pending.result(), ns_map, include_created=False)
             except Exception as exc:
                 # The stream is already open, so only a terminal event can report the failure.
                 code, message = self._streamed_responses_failure(exc)
@@ -675,15 +674,19 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         return "server_error", str(exc)
 
     async def _serve_responses_sse(
-        self, response: Any, ns_map: NamespaceMap, *, include_created: bool = True
+        self, request: Request, response: Any, ns_map: NamespaceMap, *, include_created: bool = True
     ) -> StreamingResponse:
         response_json = (
             response.model_dump(mode="json", by_alias=True) if isinstance(response, BaseModel) else dict(response)
         )
         response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
-        return await self._stream_served_response(
+        streamed = await self._stream_served_response(
             response_json, synthesize_responses_sse(response_json, include_created=include_created)
         )
+        if "usage" in response_json:
+            # The SSE usage reports an unknown detail count as 0; capture records Gym's own usage instead.
+            request.state.nemo_gym_internal_usage = response_json["usage"]
+        return streamed
 
     async def chat_completions_dispatch(self, request: Request, body: dict = Body()):
         """Default ``/v1/chat/completions`` entrypoint shared by every Gym model server.
@@ -1460,7 +1463,10 @@ def _record(
 
 
 async def _fail_uncommitted_external_call(context: CaptureContext | None) -> None:
-    """Record a failure when an admitted worker call returns without commit coordinates."""
+    """Record a failure when an admitted worker call returns without commit coordinates.
+
+    A call the engine refused is skipped: ``capture_engine_refusal`` already wrote its definite reason.
+    """
     if (
         context is None
         or not context.external_staging
@@ -1469,6 +1475,7 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         # A checkpoint gate owns a deferred row: it publishes it when the response starts,
         # and a call whose response never starts made no answer to record, so it is not poisoned.
         or context.deferred_commit is not None
+        or context.engine_refusal_recorded
         or context.lineage_store is None
     ):
         return
@@ -1819,6 +1826,9 @@ class _CaptureMiddleware:
                     )
                     if not isinstance(response_body, dict):
                         response_body = None
+                    elif streaming and "nemo_gym_internal_usage" in request_state:
+                        # Keep unknown detail counts as None, as non-streaming capture does.
+                        response_body["usage"] = request_state["nemo_gym_internal_usage"]
                 except Exception:
                     response_body = None
             error_category = _classify_status(status) if status is not None else None

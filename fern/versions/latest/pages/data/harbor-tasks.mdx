@@ -125,7 +125,7 @@ gym eval run harbor:terminal-bench/terminal-bench@4.0.0 --agent hermes_agent --s
 
 | Option | Description |
 | --- | --- |
-| `TARGET` | A task folder, a folder of task folders, or `harbor:<dataset>[@<version>]`. `harbor:<org>/<name>[@<tag>]` fetches a package-store dataset. Fetched datasets land in `$NEMO_GYM_DATASETS_DIR` (default `./datasets`). |
+| `TARGET` | A task folder, a folder of task folders, or `harbor:<dataset>[@<version>]`. `harbor:<org>/<name>[@<tag>]` fetches a package-store dataset. Fetched datasets land in `$NEMO_GYM_DATASETS_DIR` (default `./datasets`); the fetch stages its clone in a hidden `.nemo-gym-harbor-*` directory there, which discovery skips. An unhidden `nemo-gym-harbor-*` directory left by a fetch interrupted under a `main` build from before this change is refused as a duplicate task ID: delete it once. |
 | `--agent`, `-a` | The harness that works in the task sandbox. It must accept `sandbox_access` in its session seed. |
 | `--sandbox PROVIDER` | Sandbox provider for the task containers. |
 | `--only-tasks`, `--exclude-tasks` | Select tasks by name or glob. Left-out tasks are listed on stdout. |
