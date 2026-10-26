@@ -19,6 +19,7 @@ import shlex
 import socket
 import subprocess
 import tempfile
+import time
 from asyncio import Semaphore
 from contextvars import ContextVar
 from pathlib import Path
@@ -88,6 +89,23 @@ _WORKDIR_KEYS = {
 }
 
 
+def _empty_response() -> dict[str, Any]:
+    return NeMoGymResponse(
+        id=f"resp_{uuid4().hex}",
+        created_at=int(time.time()),
+        model="",
+        object="response",
+        output=[],
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
+    ).model_dump(mode="json")
+
+
+class SandboxEvaluationFailed(RuntimeError):
+    """In-box grading failed after the harness ran. Never scored as a failed harness run."""
+
+
 def resolve_agent(name: str) -> tuple[str, str, str]:
     try:
         return _AGENTS[name]
@@ -147,6 +165,9 @@ class HarnessAgentConfig(BaseResponsesAPIAgentConfig):
 
     eval_timeout: int = 1800
     rollout_timeout: int = 2400
+    # Score a crashed harness run (sandbox OOM, runner error, context overflow) as an empty
+    # response instead of failing /run, so one pathological prompt cannot end a training run.
+    score_failed_runs: bool = False
     # Zero the reward of a run that made no tool call, so a direct answer that skips the harness earns nothing.
     # The verifier's own score stays in harness_pre_gate_reward.
     require_tool_call: bool = False
@@ -282,9 +303,20 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 "url_prefix": self.url_path_for_run("", body),
             }
             token = _RUN_CONTEXT.set(run_context)
+            scored_failure = False
             try:
-                agent_resp = await self.responses(request, body.responses_create_params)
-                agent_resp_json = agent_resp.model_dump(mode="json")
+                try:
+                    agent_resp = await self.responses(request, body.responses_create_params)
+                    agent_resp_json = agent_resp.model_dump(mode="json")
+                except SandboxEvaluationFailed:
+                    raise
+                except Exception:
+                    if not self.config.score_failed_runs:
+                        raise
+                    LOG.warning("harness run failed, scoring it as an empty response", exc_info=True)
+                    # a stateful verifier may still read the resource-owned sandbox, close it after /verify
+                    scored_failure = True
+                    agent_resp_json = _empty_response()
                 verify_resp = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path="/verify",
@@ -300,7 +332,10 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                         for item in agent_resp_json.get("output") or []
                     ):
                         verify_json["reward"] = 0.0
-                return HarnessAgentVerifyResponse.model_validate(verify_json)
+                result = HarnessAgentVerifyResponse.model_validate(verify_json)
+                if scored_failure:
+                    await self._close_run_sandbox(run_context)
+                return result
             except BaseException:
                 await self._close_run_sandbox(run_context)
                 raise
@@ -467,11 +502,16 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 await self._download_json(handle, self._box_path(handle, "/work/response.json"))
             )
 
-            grade_raw = meta.get("sandbox_eval")
-            grade_spec = json.loads(grade_raw) if isinstance(grade_raw, str) else grade_raw
-            if grade_spec:
-                reward = await self._grade_in_box(handle, grade_spec)
-                resp.metadata = (resp.metadata or {}) | {"sandbox_reward": str(reward)}
+            try:
+                grade_raw = meta.get("sandbox_eval")
+                grade_spec = json.loads(grade_raw) if isinstance(grade_raw, str) else grade_raw
+                if grade_spec:
+                    reward = await self._grade_in_box(handle, grade_spec)
+                    resp.metadata = (resp.metadata or {}) | {"sandbox_reward": str(reward)}
+            except Exception as exc:
+                if not self.config.score_failed_runs:
+                    raise
+                raise SandboxEvaluationFailed(str(exc)) from exc
             return resp
         finally:
             if not descriptor:
