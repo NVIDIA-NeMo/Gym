@@ -7886,15 +7886,10 @@ class TestCodexRequests:
             {"role": "assistant", "content": None, "reasoning": cls.REASONING_TEXT, "tool_calls": [call]}
         )
 
-    def test_custom_tools_as_functions_needs_the_chat_path_without_token_ids(self) -> None:
-        with raises(ValueError, match="requires is_responses_native=false"):
-            self._server(custom_tools_as_functions=True, is_responses_native=True)
-        with raises(ValueError, match="does not support return_token_id_information"):
-            self._server(custom_tools_as_functions=True, return_token_id_information=True)
-
-    def test_codex_apply_patch_round_trips_through_a_function_tool(self) -> None:
-        # drop_custom_tools stays on for any other server: the conversion takes precedence here.
-        server, client = self._server(**self.CODEX_FIELDS, drop_custom_tools=True, custom_tools_as_functions=True)
+    def test_codex_apply_patch_round_trips_through_the_function_bridge(self) -> None:
+        # The configuration a Codex deployment uses: the request-field options and main's function
+        # bridge for apply_patch. drop_custom_tools stays off, because it would drop the tool first.
+        server, client = self._server(**self.CODEX_FIELDS, custom_tool_strategy="function_bridge")
         client.create_chat_completion = AsyncMock(return_value=self._apply_patch_completion())
         app = server.setup_webserver()
 
@@ -7925,19 +7920,13 @@ class TestCodexRequests:
             "type": "function",
             "function": {
                 "name": "apply_patch",
-                "description": "Use the `apply_patch` tool to edit files.\n\n"
-                "Pass the tool's entire free-form input as raw text in the `input` argument.\n\n"
-                "The input must conform to this lark grammar:\nstart: begin_patch hunk+ end_patch",
+                "description": "Use the `apply_patch` tool to edit files.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "input": {
-                            "type": "string",
-                            "description": "The entire free-form input for apply_patch, as raw text.",
-                        }
+                        "input": {"type": "string", "description": "The raw text payload of this free-form tool."}
                     },
                     "required": ["input"],
-                    "additionalProperties": False,
                 },
             },
         }
@@ -7976,7 +7965,7 @@ class TestCodexRequests:
         ]
 
     def test_non_streaming_response_carries_the_custom_tool_call(self) -> None:
-        server, client = self._server(custom_tools_as_functions=True)
+        server, client = self._server(custom_tool_strategy="function_bridge")
         client.create_chat_completion = AsyncMock(return_value=self._apply_patch_completion())
 
         response = TestClient(server.setup_webserver()).post(
@@ -8087,6 +8076,7 @@ class TestCodexRequests:
         assert terminal["type"] == "response.failed"
         assert "input_image" in terminal["response"]["error"]["message"]
         client.create_chat_completion.assert_not_awaited()
+
 
 def _custom_tool_config(**overrides: Any) -> VLLMModelConfig:
     return VLLMModelConfig(

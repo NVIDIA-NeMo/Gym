@@ -22,7 +22,7 @@ convert between the two formats (e.g. vllm_model, inference_provider).
 import json
 import logging
 import re
-from typing import Any, ClassVar, Collection, Dict, FrozenSet, List, Literal, Optional, Tuple
+from typing import Any, ClassVar, Collection, Dict, List, Literal, Optional, Tuple
 from uuid import uuid4
 
 from openai.types.completion_usage import CompletionUsage
@@ -89,35 +89,6 @@ _REPORTING_ONLY_REASONING_FIELDS = ("summary", "generate_summary")
 # earlier turns' reasoning to be left out, which the conversion does not do, so it stays refused.
 # The Codex CLI sends `all_turns` when its model catalog enables reasoning context.
 _DROPPABLE_REASONING_CONTEXTS = ("auto", "all_turns")
-
-# The one string parameter of the function tool that stands in for a custom tool
-# (``custom_tools_as_functions``), named after the ``custom_tool_call`` field that carries the input.
-CUSTOM_TOOL_INPUT_PARAMETER = "input"
-
-
-def custom_tool_names(tools: Optional[List[Any]]) -> FrozenSet[str]:
-    """Names of the Responses ``custom`` tools in a request's ``tools``."""
-    return frozenset(tool["name"] for tool in tools or [] if isinstance(tool, dict) and tool.get("type") == "custom")
-
-
-def _custom_tool_input(name: str, arguments: str) -> str:
-    """The free-form input a call to a custom tool's stand-in function carries.
-
-    Arguments that are not a JSON object with a string ``input`` are passed through as the input
-    unchanged, so the client's tool reports the malformed call to the model instead of the turn failing.
-    """
-    try:
-        parsed = json.loads(arguments)
-    except (TypeError, ValueError):
-        parsed = None
-    if isinstance(parsed, dict) and isinstance(parsed.get(CUSTOM_TOOL_INPUT_PARAMETER), str):
-        return parsed[CUSTOM_TOOL_INPUT_PARAMETER]
-    logger.warning(
-        "Call to custom tool %r has no string %r argument; passing its raw arguments as the input.",
-        name,
-        CUSTOM_TOOL_INPUT_PARAMETER,
-    )
-    return arguments
 
 
 def message_content_to_text(content: Any) -> str:
@@ -543,14 +514,6 @@ class ResponsesConverter(BaseModel):
                     "returned call could not be attributed to one of the two. Rename one of them."
                 )
         if tools:
-            if self.custom_tools_as_functions:
-                function_names = {tool.get("name") for tool in tools if tool.get("type") == "function"}
-                clashing = sorted(custom_tool_names(tools) & function_names)
-                if clashing:
-                    raise ValueError(
-                        f"Custom tool(s) {clashing} share a name with a function tool, so a call to the "
-                        "function standing in for the custom tool would be ambiguous."
-                    )
             responses_create_params["tools"] = []
             for tool_dict in tools:
                 tool_type = tool_dict.get("type")
@@ -1045,12 +1008,6 @@ class ResponsesConverter(BaseModel):
         if tool_choice is None or isinstance(tool_choice, str):
             return tool_choice
 
-        def reference_to_chat(tool: dict) -> dict:
-            if self.custom_tools_as_functions and tool.get("type") == "custom":
-                # The custom tool is the function that stands in for it.
-                tool = {**tool, "type": "function"}
-            return self._tool_reference_to_chat(tool)
-
         tool_type = tool_choice.get("type")
         if tool_type in {"function", "custom"}:
             return self._tool_reference_to_chat_lowered(tool_choice)
@@ -1240,31 +1197,6 @@ class ResponsesConverter(BaseModel):
             )
 
         return response_output
-
-    @staticmethod
-    def _restore_custom_tool_calls(
-        items: List[NeMoGymResponseOutputItem], names: FrozenSet[str]
-    ) -> List[NeMoGymResponseOutputItem]:
-        """Turn calls to the functions that stand in for custom tools back into ``custom_tool_call`` items."""
-        restored: List[NeMoGymResponseOutputItem] = []
-        for item in items:
-            if isinstance(item, NeMoGymResponseFunctionToolCall) and item.name in names:
-                if isinstance(item, TokenIDLogProbMixin):
-                    # custom_tool_call has no ForTraining variant to carry the sampled tokens.
-                    raise NotImplementedError(
-                        f"Cannot attach token IDs to the call to custom tool {item.name!r}: "
-                        "custom_tools_as_functions does not support return_token_id_information."
-                    )
-                item = NeMoGymResponseCustomToolCall(
-                    type="custom_tool_call",
-                    call_id=item.call_id,
-                    name=item.name,
-                    input=_custom_tool_input(item.name, item.arguments),
-                    id=item.id,
-                    status="completed",
-                )
-            restored.append(item)
-        return restored
 
     def _extract_reasoning_from_content(self, content: str) -> Tuple[List[str], str]:
         return self._parse_think_tags(content)

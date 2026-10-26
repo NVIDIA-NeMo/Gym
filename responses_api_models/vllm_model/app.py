@@ -388,21 +388,6 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             "`use_completions_api: false`."
         ),
     )
-    custom_tools_as_functions: bool = Field(
-        default=False,
-        description=(
-            "Present each Responses `custom` (free-form) tool to the engine as a function tool with one "
-            "required string parameter, `input`, whose description carries the tool's description, how to "
-            "pass the input, and the tool's grammar if it has one. The engine's calls to that function return "
-            "as `custom_tool_call` items whose `input` is the `input` argument (or the raw arguments when they "
-            "carry no string `input`), and replayed `custom_tool_call` and `custom_tool_call_output` items "
-            "become the matching chat tool call and tool message. A named `tool_choice` of a custom tool "
-            "selects its function. This is how the Codex CLI's freeform `apply_patch` reaches an engine that "
-            "serves function tools only. Takes precedence over `drop_custom_tools`. A custom tool that shares "
-            "a name with a function tool fails the request. Requires `is_responses_native: false` and "
-            "`return_token_id_information: false`: a `custom_tool_call` item cannot carry token IDs."
-        ),
-    )
     inline_tool_output_images: bool = Field(
         default=False,
         description=(
@@ -514,7 +499,6 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
         if self.is_responses_native:
             for option in (
                 "forward_unvalidated_reasoning_effort",
-                "custom_tools_as_functions",
                 "inline_tool_output_images",
             ):
                 if getattr(self, option):
@@ -525,11 +509,6 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             raise ValueError(
                 "forward_unvalidated_reasoning_effort requires use_completions_api=false: /v1/completions has no "
                 "reasoning_effort, so the effort would be dropped"
-            )
-        if self.custom_tools_as_functions and self.return_token_id_information:
-            raise ValueError(
-                "custom_tools_as_functions does not support return_token_id_information: custom_tool_call "
-                "items have no variant that carries token IDs"
             )
         return self
 
@@ -653,10 +632,6 @@ class VLLMModel(SimpleResponsesAPIModel):
             custom_tool_strategy=self.config.custom_tool_strategy,
             inline_tool_output_images=self.config.inline_tool_output_images,
         )
-
-    def _streaming_drops_custom_tools(self) -> bool:
-        # A converter that turns every custom tool into a function tool leaves none to drop.
-        return self.config.drop_custom_tools and not self._converter.custom_tools_as_functions
 
     def model_post_init(self, context):
         self._post_init()
