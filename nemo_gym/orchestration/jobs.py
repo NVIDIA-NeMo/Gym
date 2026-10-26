@@ -53,7 +53,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictBool, field_validator
 
 from nemo_gym._moved_paths import moved_names_getattr
 
@@ -179,6 +179,7 @@ class SubmissionRecord(BaseModel):
     # is the executor's business; a reader keys off `executor` before reading it.
     executor_metadata: dict[str, str] = {}
     environment: SubmissionEnvironment | None = Field(default=None, exclude_if=lambda value: value is None)
+    provenance: dict[str, JsonValue] = Field(default_factory=dict)
     schema_version: int = SCHEMA_VERSION
 
     @property
