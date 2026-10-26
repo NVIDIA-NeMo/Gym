@@ -58,6 +58,9 @@ def run(params: dict) -> int:
                     if stopping and process.poll() is None:
                         process.terminate()
                         stopping = False
+                    # Check for exit first: what Pi wrote before exiting is then in the pipe, so an empty select
+                    # after an exit means nothing is left.
+                    exited = process.poll() is not None
                     ready = selector.select(timeout=0.05)
                     if ready:
                         chunk = os.read(process.stdout.fileno(), 64 * 1024)
@@ -67,7 +70,7 @@ def run(params: dict) -> int:
                         while b"\n" in pending:
                             line, _, pending = pending.partition(b"\n")
                             capture(line)
-                    elif process.poll() is not None:
+                    elif exited:
                         break
             if pending:
                 capture(pending)

@@ -4,6 +4,7 @@
 
 import json
 import os
+import selectors
 import shutil
 import signal
 import subprocess
@@ -150,3 +151,59 @@ def test_spawn_error_is_not_success(tmp_path):
     summary = result(tmp_path, process)
     assert summary["cleanup_confirmed"] is True
     assert summary["return_code"] != 0
+
+
+def test_last_lines_are_kept_without_waiting_for_a_detached_tool(tmp_path, monkeypatch):
+    """Pi's last lines, such as its final ng_pi_outcome, can arrive just after a select that found nothing, and a
+    tool Pi started can hold its stdout open after Pi exits."""
+    started, waited = [], []
+    popen = subprocess.Popen
+
+    def recording_popen(*args, **kwargs):
+        started.append(popen(*args, **kwargs))
+        return started[-1]
+
+    class LateSelector(selectors.DefaultSelector):
+        def select(self, timeout=None):
+            if timeout and not waited:
+                # This wait ends empty, and only then does Pi write its last line and exit.
+                (tmp_path / "go").touch()
+                waited.append(started[0].wait(timeout=30))
+                return []
+            return super().select(timeout)
+
+    pi = (
+        "import json, os, pathlib, subprocess, sys, time\n"
+        "deadline = time.monotonic() + 10\n"
+        "while not os.path.exists('go') and time.monotonic() < deadline: time.sleep(0.005)\n"
+        "tool = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'], start_new_session=True)\n"
+        "pathlib.Path('tool.pid').write_text(str(tool.pid))\n"
+        "print(json.dumps({'type': 'ng_pi_outcome'}))\n"
+    )
+    monkeypatch.setattr(subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(selectors, "DefaultSelector", LateSelector)
+    handler = signal.getsignal(signal.SIGTERM)
+    began = time.monotonic()
+    try:
+        exit_code = sandbox_runner.run(
+            {
+                "directory": str(tmp_path),
+                "command": [sys.executable, "-c", pi],
+                "cwd": str(tmp_path),
+                "env": {},
+                "prompt": "",
+            }
+        )
+        elapsed = time.monotonic() - began
+    finally:
+        signal.signal(signal.SIGTERM, handler)
+        if (tmp_path / "tool.pid").exists():
+            try:
+                os.kill(int((tmp_path / "tool.pid").read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    assert exit_code == 0
+    events = [json.loads(line)[1] for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert events == [{"type": "ng_pi_outcome"}]
+    # The tool still holds the pipe, so waiting for its end would take the tool's 10 s.
+    assert elapsed < 5

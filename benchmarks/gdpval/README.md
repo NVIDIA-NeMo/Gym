@@ -432,8 +432,12 @@ gym eval run \
 - It calls `finish`, `abandon_task_finish`, `web_search` and `fetch_web_page` over MCP: the resources server sets
   `expose_tools_over_mcp: true` and the environment server sets `resources_tool_transports: [mcp]`. The model sees
   them as `gdpval_resources_server_<tool>`, and rollouts record the calls as `mcp__gdpval_resources_server__<tool>`.
-- The rows come from `data/gdpval_benchmark_harness_neutral.jsonl`, written by `prepare_harness_neutral.py`: the same
-  tasks without the tool list, which session harnesses reject, rendered with `prompts/harness-neutral.yaml`.
+- The rows come from `data/gdpval_benchmark_harness_neutral.jsonl`, written by `prepare_harness_neutral.py`: the rows
+  `prepare.py` writes, without the tool list, and rendered with `prompts/harness-neutral.yaml`. Stirrup takes its tools
+  from that list, while Pi and Codex get them over the MCP grant and reject a tool list in the request. It is a
+  separate script because a dataset cannot pass its own arguments to its prepare script: `gym eval prepare` gives
+  every dataset the same top-level `prepare_script_args`, and the file the script writes must be the dataset's
+  `jsonl_fpath`.
 - `propagate_context_overflow_errors=true` passes the model server's context-length error to Pi, which then compacts
   its context and continues. By default `vllm_model` returns an empty, length-capped completion instead, and the
   episode ends at the context limit without a submission. With `openai_model`, set
@@ -446,9 +450,12 @@ gym eval run \
 - Deliverables are stored by task and repeat only, so give each run its own `PERSIST_DELIVERABLES_DIR`, for example
   by changing `gdpval_pi` in the export above. A run into another run's directory replaces that run's files, and
   re-judging the earlier run then judges the later one's.
-- A Pi run that reaches its `timeout` before a successful `finish` is judged as an empty submission and is not
-  retried. Stirrup reports a timeout with `stop_reason: wall_time`, which GDPVal masks as `agent_timeout` and
-  `--resume` reruns; Pi does not set it yet. So a timeout counts against Pi's score, but not against Stirrup's.
+- A Pi run that reaches its `timeout` while still working, before a successful `finish` or `abandon_task_finish`,
+  reports `stop_reason: wall_time`, as Stirrup does, so GDPVal masks it as `agent_timeout` and `--resume` reruns it.
+  A run that reaches its `timeout` after such a call, or after a last reply that ended the run without a tool call, is
+  judged as usual. Pi has no turn limit like Stirrup's `agent_max_turns`, so a Pi run that keeps
+  calling tools without submitting runs until its `timeout` and stays out of the score, where Stirrup would stop and
+  be judged. In rubric mode, `+count_failure_classes_as_zero=[agent_timeout]` counts such runs as 0.
 - The prompt and the harness differ from the certified Stirrup setup, so these are not AA v2 scores.
 
 `benchmarks/gdpval/codex.yaml` runs [Codex](../../responses_api_agents/codex_agent/README.md) the same way. Codex sends
@@ -479,14 +486,20 @@ gym eval run \
 - Codex checks `model_auto_compact_token_limit` after each reply that calls a tool, so the context can pass it by
   about a reply and its tool output before Codex compacts, and the compaction call reserves 32,768 tokens for its own
   reply. So keep the limit at about the window minus twice the output limit or lower: `codex.yaml` uses 196,608 for
-  a 262,144-token window. A near-full reply with a large tool result can still overflow the compaction call, and the
-  run then fails.
-- Codex does not compact on a context-length error; the run fails. `propagate_upstream_http_status_codes: [400]`
-  makes it fail within seconds with vLLM's message. By default `openai_model` returns HTTP 500, and Codex sends the
-  request 30 times before failing with a "high demand" error.
+  a 262,144-token window. A near-full reply with a large tool result can still overflow the compaction call.
+- Codex does not compact on a context-length error, so the run ends there. With
+  `propagate_upstream_http_status_codes: [400]` it ends within seconds with vLLM's message, and the environment
+  server's default `agent_outcome_policy` sends a run that failed with HTTP 400 to `/verify`: the run is judged on its
+  last `finish` or `abandon_task_finish`, or as an empty submission without one. By default `openai_model` returns
+  HTTP 500 instead; Codex sends the request 30 times and fails with a "high demand" error. That run is not judged: it
+  is a failure that `--resume` runs again.
 - `finish` does not end a Codex run: Codex continues until the model replies without a tool call, and a later
-  `finish` or `abandon_task_finish` replaces the recorded call. The files are collected when the run ends, so a run
-  that fails after `finish`, for example on a context-length error, is not judged.
+  `finish` or `abandon_task_finish` replaces the recorded call. The files are collected when the run ends, so they are
+  judged as they are then.
+- Codex sets no `stop_reason: wall_time`, so GDPVal's `agent_timeout` mask does not apply to it. A Codex run that
+  reaches its `timeout` is judged on its last `finish` or `abandon_task_finish`, with the files as they are when it
+  stops, or as an empty submission without one. It is not retried. So a Codex run that times out before `finish`
+  scores as an empty submission, where a Pi or Stirrup run is masked.
 - The Codex agent rejects sampling and output limits in the request, so every row fails if `gym eval run` gets
   `--temperature`, `--top-p` or `--max-output-tokens`. Change Codex's own settings, such as `model_context_window`
   and `model_auto_compact_token_limit` for another window, with
