@@ -180,6 +180,37 @@ def test_each_legacy_signal_is_still_written_by_its_producer(signal) -> None:
 
 
 class TestTimeSplit:
+    def test_the_recorded_policy_server_is_policy_time_under_any_alias(self) -> None:
+        """A policy server configured under another name is still the policy, by the name collection records."""
+        row = timed_out_row(
+            elapsed=100.0,
+            calls=[
+                model_call(0, 40, model="policy", tokens_out=400),
+                model_call(50, 60, model="judge_model"),
+                model_call(60, 70, model="user_simulator_model"),
+            ],
+            tools=[],
+            ng_policy_model_server="policy",
+        )
+
+        split = section(row)["time_split"]
+
+        assert (split["policy_model"], split["other_model"]) == (0.4, 0.2)
+        assert (split["policy_calls_per_rollout"]["p50"], split["policy_calls_per_rollout"]["p95"]) == (1, 1)
+        assert split["policy_output_tokens_per_s"] == {"p50": 10.0, "p5": 10.0}
+
+    def test_a_record_without_the_policy_server_keeps_the_policy_model_convention(self) -> None:
+        """Older records carry no recorded policy server: an alias stays other-model time, a missing ref is policy."""
+        row = timed_out_row(
+            elapsed=100.0,
+            calls=[model_call(0, 40, model="policy"), {**model_call(50, 60), "model_ref": None}],
+            tools=[],
+        )
+
+        split = section(row)["time_split"]
+
+        assert (split["policy_model"], split["other_model"]) == (0.1, 0.4)
+
     def test_policy_judge_and_tool_time_divide_the_elapsed_time(self) -> None:
         row = timed_out_row(
             elapsed=100.0,
@@ -464,6 +495,23 @@ class TestCapturesOfFailedRollouts:
         assert split["policy_calls_per_rollout"]["p50"] == 2
         # The failure row records no tool calls, so tool time and the untracked share stay unknown.
         assert (split["tool"], split["untracked"]) == (None, None)
+
+    def test_a_failure_row_partitions_its_captured_calls_by_the_recorded_policy_server(self, tmp_path: Path) -> None:
+        """The reported scenario offline: a failed rollout of an aliased policy, timed from the capture dir."""
+        captures = {
+            "0-0": [
+                exchange(0, 40, model="policy"),
+                exchange(40, 45, model="policy"),  # a retried attempt of the same turn stays a policy call
+                exchange(50, 60, model="judge_model"),
+            ]
+        }
+
+        timeouts = self.timeouts(tmp_path, [deadline_failure(0, ng_policy_model_server="policy")], captures)
+
+        split = timeouts["time_split"]
+        assert (timeouts["timed_out"], split["rollouts_with_captures"]) == (1, 1)
+        assert (split["policy_model"], split["other_model"]) == (0.45, 0.1)
+        assert split["policy_calls_per_rollout"]["p50"] == 2
 
     def test_the_last_attempt_reads_its_own_capture(self, tmp_path: Path) -> None:
         failures = [deadline_failure(0, elapsed=90.0), deadline_failure(0, attempt=1)]

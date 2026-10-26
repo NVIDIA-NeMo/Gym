@@ -77,6 +77,7 @@ from nemo_gym.global_config import (
     dataset_agent_pins,
     environment_server_agent_names,
     environment_server_attributed_agent,
+    get_first_server_config_dict,
     get_global_config_dict,
     label_runs,
     pairing_override_enabled,
@@ -802,6 +803,23 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         tool_calls=tools,
         gaps=list({(gap.code, gap.invocation_id, gap.detail): gap for gap in gaps}.values()),
     )
+
+
+NG_POLICY_MODEL_SERVER_KEY = "ng_policy_model_server"
+
+
+def _record_policy_model_server(result: dict[str, Any], global_config: Any, agent_name: str | None) -> None:
+    """Name the agent's configured policy server on the record (landed or failed), so offline timing needs no
+    live config and a capture joined later from the capture dir is still partitioned by role."""
+    if not agent_name:
+        return
+    try:
+        model_server = get_first_server_config_dict(global_config, agent_name).get("model_server")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return
+    name = model_server.get("name") if hasattr(model_server, "get") else None
+    if isinstance(name, str) and name:
+        result[NG_POLICY_MODEL_SERVER_KEY] = name
 
 
 def _strip_capture_payloads(result: dict[str, Any]) -> None:
@@ -3570,6 +3588,8 @@ class RolloutCollectionHelper(BaseModel):
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)
                 # No rollout happened, so there is nothing to capture, tokenize or average.
                 no_result = failure_class in _NO_RESULT_FAILURE_CLASSES or bool(result.get(NG_DISPATCH_DRAINED_KEY))
+
+                _record_policy_model_server(result, global_config, self._agent_name_for_row(row, global_config))
 
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
                 # when capture is off). Never alters the harness output/reward already in `result`.

@@ -10880,3 +10880,103 @@ class TestRecordedAttemptCap:
 
     def test_the_recorded_cap_is_not_a_metric_of_a_counted_failure(self) -> None:
         assert NG_FAILURE_MAX_ATTEMPTS_KEY not in _counted_failure_row(self._failure(0, 3))
+
+
+class TestRecordPolicyModelServer:
+    def _config(self, model_server: dict | None):
+        from omegaconf import OmegaConf
+
+        agent = (
+            {"entrypoint": "app.py"}
+            if model_server is None
+            else {"entrypoint": "app.py", "model_server": model_server}
+        )
+        return OmegaConf.create({"my_agent": {"responses_api_agents": {"simple_agent": agent}}})
+
+    def test_names_the_agents_policy_server_in_the_capture(self) -> None:
+        from nemo_gym.rollout_collection import _record_policy_model_server
+
+        result = {"ng_model_call_capture": {"calls": []}}
+        config = self._config({"type": "responses_api_models", "name": "policy_model_reasoning_off"})
+        _record_policy_model_server(result, config, "my_agent")
+        assert result["ng_policy_model_server"] == "policy_model_reasoning_off"
+
+    def test_leaves_the_capture_unchanged_without_a_policy_server(self) -> None:
+        from nemo_gym.rollout_collection import _record_policy_model_server
+
+        for config, agent in ((self._config(None), "my_agent"), (self._config(None), "unknown_agent")):
+            result = {"ng_model_call_capture": {"calls": []}}
+            _record_policy_model_server(result, config, agent)
+            assert result == {"ng_model_call_capture": {"calls": []}}
+        failed_without_capture: dict = {"_ng_failure_class": "timeout_exceeded"}
+        _record_policy_model_server(failed_without_capture, self._config({"name": "p"}), "my_agent")
+        assert failed_without_capture["ng_policy_model_server"] == "p"
+
+
+async def test_collection_persists_policy_alias_for_offline_failed_rollout_timing(tmp_path, monkeypatch):
+    import time
+
+    from nemo_gym.observability.model_calls import CaptureStore
+    from nemo_gym.rollout_health import health_check_run_dir
+    from tests.unit_tests.test_health_timeouts import exchange
+
+    elapsed = [0.0]
+
+    class Clock:
+        def monotonic(self):
+            return elapsed[0]
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+    monkeypatch.setattr(nemo_gym.rollout_collection, "time", Clock())
+    config_dict = {
+        "my_agent": {
+            "responses_api_agents": {
+                "pinchbench_agent": {"model_server": {"type": "responses_api_models", "name": "policy"}}
+            }
+        }
+    }
+    monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda *a, **k: config_dict)
+    (tmp_path / "input.jsonl").write_text(
+        json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}}) + "\n"
+    )
+    output = tmp_path / "rollouts.jsonl"
+
+    async def post(server_name: str, url_path: str, json: dict, **kwargs):
+        assert url_path == "/run"
+        elapsed[0] += 100.0
+        # The environment's episode deadline cut the rollout: a failure row with no embedded capture.
+        return FakeResponse(
+            200,
+            {"_ng_failure_class": "environment_server_failed", "_ng_failure_message": "Episode timed out"},
+        )
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    with pytest.raises(RuntimeError, match="None of the 1 dispatched rollouts produced a result"):
+        await RolloutCollectionHelper().run_from_config(
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+                output_jsonl_fpath=str(output),
+                route_failures_to_sidecar=True,
+                disable_health_check=True,
+                require_complete=False,
+            )
+        )
+    failures = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
+    assert [r.get("ng_policy_model_server") for r in failures] == ["policy"]
+    assert "ng_model_call_capture" not in failures[0]
+    assert failures[0]["_ng_elapsed_s"] == 100.0
+
+    capture_dir = tmp_path / "model-calls"
+    store = CaptureStore(capture_dir)
+    for recorded in (exchange(0, 40, model="policy"), exchange(50, 60, model="judge_model")):
+        if recorded["model_ref"]["name"] == "policy":
+            recorded["response"] = {"usage": {"completion_tokens": 400}}
+        store.record("0-0", recorded)
+    timeouts = health_check_run_dir(tmp_path, model_call_capture_dir=capture_dir).summary["run"]["stats"]["timeouts"]
+    split = timeouts["time_split"]
+    assert split["rollouts_with_captures"] == 1
+    assert split["policy_calls_per_rollout"]["p50"] == 1
+    assert (split["policy_model"], split["other_model"]) == (0.4, 0.1)
+    assert split["policy_output_tokens_per_s"] == {"p50": 10.0, "p5": 10.0}

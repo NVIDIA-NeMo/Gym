@@ -203,8 +203,11 @@ def read_rollout_timing(row: Mapping[str, Any]) -> RolloutTiming:
     calls = capture.get("calls")
     whole = isinstance(calls, list) and all(isinstance(call, Mapping) for call in calls)
     model_calls = list(calls) if whole and not partial else []
-    policy_calls = [call for call in model_calls if _is_policy_call(call)]
-    other_calls = [call for call in model_calls if not _is_policy_call(call)]
+    # Collection records which server the agent used as its policy; records without it follow the convention.
+    policy_server = row.get("ng_policy_model_server")
+    policy_server = policy_server if isinstance(policy_server, str) and policy_server else POLICY_MODEL_SERVER
+    policy_calls = [call for call in model_calls if _is_policy_call(call, policy_server)]
+    other_calls = [call for call in model_calls if not _is_policy_call(call, policy_server)]
     events, invalid_events = _timeout_events(row)
     speeds = (_tokens_per_s(call) for call in policy_calls)
     tool_spans = _tool_spans(trajectory)
@@ -279,10 +282,10 @@ def classify_timeout(row: Mapping[str, Any]) -> Optional[TimedOut]:
     return None
 
 
-def _is_policy_call(call: Mapping[str, Any]) -> bool:
+def _is_policy_call(call: Mapping[str, Any], policy_model_server: str = POLICY_MODEL_SERVER) -> bool:
     model_ref = call.get("model_ref")
     # Captures made before `model_ref` existed held only policy calls.
-    return model_ref is None or _mapping(model_ref).get("name") == POLICY_MODEL_SERVER
+    return model_ref is None or _mapping(model_ref).get("name") == policy_model_server
 
 
 def _model_call_span(call: Mapping[str, Any]) -> _Span:
