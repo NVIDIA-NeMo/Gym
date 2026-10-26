@@ -32,7 +32,12 @@ from pydantic import ValidationError
 
 from nemo_gym.config_types import ConfigError
 from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME
-from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, resubmit_offset_path_for
+from nemo_gym.path_utils import (
+    aggregate_metrics_path_for,
+    aggregation_sources_path_for,
+    failures_path_for,
+    resubmit_offset_path_for,
+)
 from nemo_gym.rollout_records import (
     RUN_ID_KEY,
     RolloutRecord,
@@ -233,6 +238,8 @@ class RolloutStore:
             journal_path_for(output),
             coverage_path_for(output),
             aggregate_metrics_path_for(output),
+            # A shard list an earlier aggregation into this path left names other rows.
+            aggregation_sources_path_for(output),
         ):
             path.unlink(missing_ok=True)
         output.touch()

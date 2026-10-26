@@ -54,7 +54,12 @@ from nemo_gym.global_config import (
     rollout_run_key,
     rollout_run_labels,
 )
-from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, resubmit_offset_path_for
+from nemo_gym.path_utils import (
+    aggregate_metrics_path_for,
+    aggregation_sources_path_for,
+    failures_path_for,
+    resubmit_offset_path_for,
+)
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
@@ -546,6 +551,9 @@ def _seed_output_with_successes(successes_fpath: Path, output_fpath: Path) -> se
                 if key in present:
                     continue
                 present.add(key)
+            if seeded == 0:
+                # Seeded rows are not the merged ones an aggregation's shard list names.
+                aggregation_sources_path_for(output_fpath).unlink(missing_ok=True)
             dst.write(line if line.endswith(b"\n") else line + b"\n")
             seeded += 1
     print(f"Recovery mode: seeded {seeded} successful rollout(s) into {output_fpath}")
@@ -995,6 +1003,8 @@ def _prepare_output_fpaths(
                     f"Output file already exists: '{fpath}'. Pass --overwrite to delete it and start fresh, "
                     "or --resume to continue from it."
                 )
+        # Nor the shard list of the merged rows it deleted. A run that appends drops it when it starts writing.
+        aggregation_sources_path_for(destination).unlink(missing_ok=True)
     return OutputPaths(output=destination, failures=failures_fpath)
 
 
@@ -1127,6 +1137,7 @@ class RolloutReverificationHelper(BaseModel):
         failures_file = output_fpaths.failures.open("ab")
         failure_counts: Counter = Counter()
         completed = 0  # number of rows re-verified this run (for progress reporting)
+        sources_dropped = False
         try:
             for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
                 row, result = await future
@@ -1150,6 +1161,12 @@ class RolloutReverificationHelper(BaseModel):
 
                 serialized = orjson.dumps(result)
 
+                # ATIF writes kill-shaped diagnostics to its sidecar too.
+                if not sources_dropped and (not no_persist or config.input_format == "atif"):
+                    # The rows this run adds are not the merged ones an aggregation's shard list names. The list goes with the
+                    # first row the run writes, so a run that writes none leaves it as it was.
+                    aggregation_sources_path_for(output_fpaths.output).unlink(missing_ok=True)
+                    sources_dropped = True
                 if no_persist and config.input_format != "atif":
                     # kill_shaped: don't write anywhere. Set-difference on resume
                     # naturally re-dispatches; per-task timeout bounds wallclock.
