@@ -86,9 +86,11 @@ Each JSONL row contains:
 | `verbosity_acceptance_rate` | Fraction of valid lmarena_v3 responses accepted by reference-length style control. |
 | `max_token_reached_rate` | Fraction of lmarena_v3 responses that generated to the policy output limit. They receive score 0 and do not count as rollout failures. |
 | `context_window_exceeded_rate` | Fraction of lmarena_v3 policy requests where prompt tokens plus requested output exceeded the model context window. They receive score 0 and do not count as rollout failures. |
-| `rollout_failure_rate` | Fraction excluded because judgments were missing or unparseable. |
+| `rollout_failure_rate` | Fraction of main-output rows excluded because judgments were missing or unparseable. Scoring fails when it exceeds `max_rollout_failure_rate` (1% for LMArena, 5% for Vision Arena). Judge call outages are not counted here: they go to the failures sidecar, not the main metrics. |
 | `response_tokens/*`, `reasoning_tokens/*` | Response and reasoning length statistics. |
 | `arena/*`, `taxonomy-language/*`, `taxonomy-task-type/*` | Prompt count and ON/OFF scores for slices with at least 50 prompts. |
+
+Each benchmark config also sets `health_check_max_not_final_failure_fraction` to the same limit. When judge outages exceed that share of expected rollouts, the run health check reports the run as unhealthy, but the score is still published. Withholding the score of an unhealthy run is a separate shared-health follow-up; these limits do not yet replace Arena's aggregation-time protection.
 
 `lmarena_v3` keeps the judge score when `0.5 < response length / reference length < 1.75`; otherwise it assigns zero. The reference length is the median length from reference models. For short references (at most 100 tokens), responses from 0 to 175 tokens are accepted.
 
