@@ -3,9 +3,9 @@
 > [!warning]
 > **Deprecated.** This agent is superseded by the Harbor task format, where Harbor tasks run through the Harbor
 > environment server with NeMo Gym's own sandboxed harnesses and the `harbor_oracle` agent, with no Harbor
-> dependency. New work should use that path (the PR stack starting at
-> [#3674](https://github.com/NVIDIA-NeMo/Gym/pull/3674), `environments/harbor` once it lands). This agent will be
-> removed soon.
+> dependency. New work should use that path: the [`harbor` environment server](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/harbor) and the
+> [Harbor Tasks](https://docs.nvidia.com/nemo/gym/main/data/harbor-tasks) docs page. This agent stays until the benchmarks that still run through it
+> (biomnibench_da, biomysterybench, bixbench_hypothesis, genebench_pro, labbench2_pdf, legal_agent_bench and openthoughts_tblite) have moved to the Harbor task format; it is then removed.
 
 This agent integrates [Harbor](https://github.com/laude-institute/harbor) into NeMo Gym.
 It runs Harbor agents (e.g., `terminus-2`) in Harbor-managed environments and returns NeMo Gym-compatible outputs.
