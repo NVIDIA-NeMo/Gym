@@ -1,85 +1,50 @@
 skill_trigger_settings:
   release: benchmarks/skill_trigger/data/release
   manifest_sha256: UNPREPARED
-  tasks: benchmarks/skill_trigger/data/${skill_trigger_settings.harness}/tasks
-  catalog: bionemo-9984d9c3ec80
-  image: skill-trigger-harnesses:local
-  jobs: benchmarks/skill_trigger/data/${skill_trigger_settings.harness}/jobs
-  evidence: benchmarks/skill_trigger/data/${skill_trigger_settings.harness}/private
-  gateway_host: 127.0.0.1
-  gateway_port: 0
-  node_binary: node
-  provider: null
-  api: null
-  model_catalog_path: null
-  model_catalog_sha256: null
-skills:
-  # The E2E collector needs a concrete path; the runner overrides this per catalog.
-  path: benchmarks/skill_trigger/data/release/catalogs/bionemo-9984d9c3ec80
+  tasks: benchmarks/skill_trigger/data/tasks
+  jobs: benchmarks/skill_trigger/data/jobs
+  harness: pi
+  model_catalog_path: UNPREPARED
+  model_catalog_sha256: UNPREPARED
 num_samples_in_parallel: 2
 count_failure_classes_as_zero: []
 count_missing_rollouts_as_zero: false
 prepare_script_args:
   release: ${skill_trigger_settings.release}
   manifest_sha256: ${skill_trigger_settings.manifest_sha256}
-  image: ${skill_trigger_settings.image}
-  harness: ${skill_trigger_settings.harness}
-  gateway_host: ${skill_trigger_settings.gateway_host}
-  catalog: ${skill_trigger_settings.catalog}
   output: ${skill_trigger_settings.tasks}
-skill_trigger:
+harbor_agent_general:
   responses_api_agents:
-    skill_trigger:
+    harbor_agent_general:
       entrypoint: app.py
       domain: agent
-      description: Skill-opening benchmark using pinned Harbor harnesses and verified
-        catalog provenance.
       harbor_unique_job_names: true
-      harbor_ray_max_retries: 0
+      harbor_resolve_paths_from_gym_root: true
       harbor_reward_key: reward
       harbor_worker_env:
-        SKILL_MODEL_API_KEY: ${oc.env:SKILL_MODEL_API_KEY,''}
+        OPENAI_API_KEY: ${oc.env:OPENAI_API_KEY,''}
+        OPENAI_BASE_URL: ${policy_base_url}
       job:
         jobs_dir: ${skill_trigger_settings.jobs}
+        datasets:
+        - path: ${skill_trigger_settings.tasks}
         n_attempts: 1
         n_concurrent_trials: 1
         retry:
           max_retries: 0
-        datasets:
-        - path: ${skill_trigger_settings.tasks}
         environment:
           type: docker
-          cpu_enforcement_policy: ignore
           delete: true
-        agents:
-        - import_path: environments.skill_trigger.agent:SkillAgent
-          model_name: ${policy_model_name}
-          kwargs:
-            release: ${skill_trigger_settings.release}
-            manifest_sha256: ${skill_trigger_settings.manifest_sha256}
-            harness: ${skill_trigger_settings.harness}
-            evidence_root: ${skill_trigger_settings.evidence}
-            gateway_host: ${skill_trigger_settings.gateway_host}
-            gateway_port: ${skill_trigger_settings.gateway_port}
-            node_binary: ${skill_trigger_settings.node_binary}
-            provider: ${skill_trigger_settings.provider}
-            api: ${skill_trigger_settings.api}
-            model_catalog_path: ${skill_trigger_settings.model_catalog_path}
-            model_catalog_sha256: ${skill_trigger_settings.model_catalog_sha256}
-            upstream_url: ${policy_base_url}
-            api_key_env: SKILL_MODEL_API_KEY
         verifier:
-          import_path: environments.skill_trigger.verifier:SkillOpeningVerifier
+          import_path: benchmarks.skill_trigger.verifier:SkillOpeningVerifier
           kwargs:
             release: ${skill_trigger_settings.release}
             manifest_sha256: ${skill_trigger_settings.manifest_sha256}
             harness: ${skill_trigger_settings.harness}
-            evidence_root: ${skill_trigger_settings.evidence}
-            model: ${policy_model_name}
 skill_trigger_environment_server:
   environment_servers:
     legacy_agent:
       entrypoint: app.py
       agent_server:
         type: responses_api_agents
-        name: skill_trigger
+        name: harbor_agent_general

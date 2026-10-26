@@ -219,6 +219,3 @@ Example rollout metadata:
   }
 }
 ```
-
-
-To prevent automatic task replay after a Ray worker crashes, set `harbor_ray_max_retries: 0` beside `job`. This is separate from `job.retry.max_retries`, which controls Harbor retries. Omitting it preserves Ray's existing default behavior.

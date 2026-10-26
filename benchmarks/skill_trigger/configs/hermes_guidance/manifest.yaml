@@ -1,12 +1,11 @@
 name: skill_trigger/configs/hermes_guidance
-version: 0.1.0
+version: 0.2.0
 experimental: true
 kind: benchmark
 integration_profile: external-agent-loop
 domain: agent
-description: Skill-opening evaluation with hermes_guidance; run separately per frozen
-  catalog. Implementation draft; release terms and live migration validation remain
-  incomplete.
+description: Skill instructions returned by hermes_guidance under standard Harbor
+  execution.
 modality: text
 licensing: unknown
 authors:
@@ -19,12 +18,12 @@ reward:
 determinism: stochastic
 config_path: config.yaml
 resources_server: null
-agent_server: skill_trigger
+agent_server: harbor_agent_general
 datasets:
 - name: skill_trigger
   type: benchmark
-  jsonl_fpath: benchmarks/skill_trigger/data/hermes_guidance/tasks/catalogs/bionemo-9984d9c3ec80.jsonl
-  prepare_script: environments/skill_trigger/package.py
+  jsonl_fpath: benchmarks/skill_trigger/data/tasks/gym.jsonl
+  prepare_script: benchmarks/skill_trigger/package.py
   num_repeats: 1
 model_server: null
 canonical_split: positive-trigger

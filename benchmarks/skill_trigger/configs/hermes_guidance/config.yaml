@@ -2,12 +2,18 @@ config_paths:
 - benchmarks/skill_trigger/common.yaml
 skill_trigger_settings:
   harness: hermes_guidance
-skill_trigger:
+harbor_agent_general:
   responses_api_agents:
-    skill_trigger:
+    harbor_agent_general:
       datasets:
       - name: skill_trigger
         type: benchmark
-        jsonl_fpath: benchmarks/skill_trigger/data/hermes_guidance/tasks/catalogs/bionemo-9984d9c3ec80.jsonl
-        prepare_script: environments/skill_trigger/package.py
+        jsonl_fpath: ${skill_trigger_settings.tasks}/gym.jsonl
+        prepare_script: benchmarks/skill_trigger/package.py
         num_repeats: 1
+      job:
+        agents:
+        - model_name: ${policy_model_name}
+          kwargs:
+            version: 0.22.2
+          import_path: benchmarks.skill_trigger.profiles:HermesGuidance

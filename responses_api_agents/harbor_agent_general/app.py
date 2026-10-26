@@ -95,8 +95,6 @@ def harbor_job_worker(job_config_dict: dict, task_name: str, worker_env: dict[st
 
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     harbor_ray_task_num_cpus: float = Field(default=0.25, ge=0)
-    # None preserves Ray defaults; zero prevents replay after a crashed worker.
-    harbor_ray_max_retries: int | None = Field(default=None, ge=0)
     # Preserve cwd-based paths and stable resumable jobs for existing callers.
     harbor_resolve_paths_from_gym_root: bool = False
     harbor_unique_job_names: bool = False
@@ -242,10 +240,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     job_name=f"t{body.task_index}-r{body.rollout_index}",
                 )
 
-                ray_options = {"num_cpus": self.config.harbor_ray_task_num_cpus}
-                if self.config.harbor_ray_max_retries is not None:
-                    ray_options["max_retries"] = self.config.harbor_ray_max_retries
-                job_ref = harbor_job_worker.options(**ray_options).remote(
+                job_ref = harbor_job_worker.options(num_cpus=self.config.harbor_ray_task_num_cpus).remote(
                     job_config.model_dump(mode="json"),
                     body.task_name,
                     dict(self.config.harbor_worker_env),
