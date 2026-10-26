@@ -340,7 +340,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        self._checkpoint = EnvironmentParticipant()
+        self._checkpoint = EnvironmentParticipant(mode=self.checkpoint_mode)
         install_server_participant(
             app,
             self._checkpoint,

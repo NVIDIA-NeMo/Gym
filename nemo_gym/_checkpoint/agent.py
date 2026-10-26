@@ -178,6 +178,7 @@ class Activation:
 
 class AgentSessionParticipant(CheckpointParticipant):
     kind = "agent"
+    mode = "exported"
     record_model = AgentSessionRecord
 
     def __init__(self, hooks: AgentSessionHooks) -> None:
@@ -705,9 +706,7 @@ class AgentSessionParticipant(CheckpointParticipant):
         }
 
     def status_extra(self) -> dict[str, Any]:
-        # The agent's checkpoint mode, as a resources server reports its own, so a controller can tell before
-        # any checkpoint whether this agent's rollouts continue after a crash.
-        return {"accepting": self.accepting, "mode": "exported"}
+        return {"accepting": self.accepting}
 
 
 def require_rollout(capture_key: Optional[str]) -> str:
@@ -733,6 +732,7 @@ class RestartOnlyAgentParticipant(CheckpointParticipant):
     """
 
     kind = "agent"
+    mode = "restart_only"
     record_model = CheckpointRecord
 
     def __init__(self, retire_session: Optional[Callable[[str], Awaitable[None]]] = None) -> None:
@@ -746,10 +746,6 @@ class RestartOnlyAgentParticipant(CheckpointParticipant):
         # Cleared while a checkpoint is open: a new session would add a restart the checkpoint did not report.
         self._open = asyncio.Event()
         self._open.set()
-
-    def status_extra(self) -> dict[str, Any]:
-        # Every rollout of this agent starts over after a crash; a controller that needs them continued can refuse it.
-        return {"mode": "restart_only"}
 
     def admit(self, capture_key: Optional[str]) -> str:
         """Refuse work that a checkpoint could neither report nor retire, and work of a retired attempt."""

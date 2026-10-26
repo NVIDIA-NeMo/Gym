@@ -110,6 +110,21 @@ def test_an_environment_server_with_an_unknown_checkpoint_declaration_fails_at_s
         server_type(config=config, server_client=MagicMock(spec=ServerClient)).setup_webserver()
 
 
+@pytest.mark.parametrize("mode", ["restart_only", "exported"])
+def test_an_environment_servers_checkpoint_status_reports_its_declared_mode(mode: str) -> None:
+    """A controller can refuse, from discovery alone, a server whose episodes start over after a crash."""
+    server_type = type("Declared", (_EnvironmentServer,), {"checkpoint_mode": mode})
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "t"}}
+    server = server_type(config=_environment_server().config, server_client=client)
+
+    status = TestClient(server.setup_webserver()).get(
+        "/ng-control/v1/checkpoint/status", headers={"Authorization": "Bearer t"}
+    )
+
+    assert (status.json()["kind"], status.json()["mode"]) == ("environment", mode)
+
+
 def test_environment_server_binds_concrete_schema_and_rejects_invalid_input() -> None:
     app = _environment_server().setup_webserver()
     schema = app.openapi()["paths"]["/run"]["post"]["requestBody"]["content"]["application/json"]["schema"]
@@ -449,7 +464,7 @@ async def test_the_episodes_of_a_protocol_without_boundaries_are_restarts(record
 
     config = _environment_server().config
     server = _Blocking(config=config, server_client=MagicMock(spec=ServerClient))
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     server._checkpoint = participant
     running = asyncio.create_task(server.run_request(_request()))
     await started.wait()
@@ -478,7 +493,7 @@ async def test_a_refused_duplicate_run_leaves_the_live_episode_tracked() -> None
             return await super().run(request, cleanup)
 
     server = _Blocking(config=_environment_server().config, server_client=MagicMock(spec=ServerClient))
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     server._checkpoint = participant
     running = asyncio.create_task(server.run_request(_request()))
     await started.wait()
@@ -508,7 +523,7 @@ async def test_an_episode_is_untracked_even_if_its_cleanup_is_cancelled() -> Non
             return await super().run(request, cleanup)
 
     server = _CancelledCleanup(config=_environment_server().config, server_client=MagicMock(spec=ServerClient))
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     server._checkpoint = participant
     with pytest.raises(asyncio.CancelledError):
         await server.run_request(_request())

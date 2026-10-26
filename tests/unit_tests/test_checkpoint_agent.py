@@ -1350,7 +1350,7 @@ async def test_an_episode_the_environment_reports_as_a_restart_does_not_hold_up_
     )
     resources_server.gate = asyncio.Event()
     agent = AgentSessionParticipant(Hooks())
-    environment = EnvironmentParticipant()
+    environment = EnvironmentParticipant(mode="exported")
     # The control routes and the data routes are one app, which holds one participant.
     apps: dict[str, Any] = {"resources": resources._transport.app}
     for name, participant in [("environment", environment), ("agent", agent), ("policy", Recorder("model", [], "p"))]:
