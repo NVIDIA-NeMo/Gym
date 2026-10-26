@@ -2596,7 +2596,7 @@ def test_duplicate_type_tags_are_documented() -> None:
     They also make an unrecognized item report errors from every union member.
     """
     duplicates = {tag for tag, owners in GYM_INPUT_TAG_OWNERS.items() if len(owners) > 1}
-    assert duplicates == {"message", "function_call", "reasoning"}, (
+    assert duplicates == {"message", "function_call", "custom_tool_call", "reasoning"}, (
         f"duplicate type tags changed: {sorted(duplicates)}. Each duplicate widens the error "
         f"report for an unrecognised item; update this test if the change is intended."
     )

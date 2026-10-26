@@ -636,15 +636,24 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 if trial_result.task_name != task_name and Path(trial_result.task_name).name != task_name:
                     continue
 
-                exception_info = trial_result.exception_info or next(
+                failures = [
+                    result
+                    for result in [trial_result, *(trial_result.step_results or [])]
+                    if result.exception_info is not None
+                ]
+                ## Harbor still runs the tests after an agent timeout and scores that result, so Gym keeps it too,
+                ## but only when every recorded failure is such a graded timeout.
+                failed = next(
                     (
-                        step.exception_info
-                        for step in trial_result.step_results or []
-                        if step.exception_info is not None
+                        result
+                        for result in failures
+                        if result.exception_info.exception_type != "AgentTimeoutError"
+                        or result.verifier_result is None
                     ),
                     None,
                 )
-                if exception_info is not None:
+                if failed is not None:
+                    exception_info = failed.exception_info
                     ## Deleting the trial result forces Harbor to delete the old trial and re-run when Gym retries.
                     result_path.unlink()
                     raise RuntimeError(

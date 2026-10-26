@@ -235,6 +235,10 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         default=None,
         description="Request tools that end the episode when they succeed. None uses Stirrup's own finish tool.",
     )
+    code_exec: bool = Field(
+        default=True,
+        description="Give the model the code_exec shell tool. Off for tasks whose only tools are the request's.",
+    )
     sandbox_provider: Optional[str] = Field(
         default=None, description="Sandbox provider config to start a sandbox from when the session lends none."
     )
@@ -351,6 +355,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "instructions": params["instructions"],
             "tools": params["tools"],
             "finish_tool_names": self.config.finish_tool_names,
+            "code_exec": self.config.code_exec,
             "tool_access": state.tool_access.model_dump(mode="json") if state.tool_access else None,
             "workdir": state.session.workdir,
             "stop_request_path": state.session.stop_request_path,
