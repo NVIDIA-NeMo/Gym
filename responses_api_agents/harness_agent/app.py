@@ -425,7 +425,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         if workdir:
             runner_config["cwd"] = workdir
             if workdir_key := _WORKDIR_KEYS.get(self.config.agent):
-                agent_config[workdir_key] = workdir
+                # An explicit agent_kwargs value wins, e.g. a DeepAgents filesystem root of "/".
+                agent_config.setdefault(workdir_key, workdir)
         model_url = self._sandbox_model_url(request)
         files = {
             "/work/model_url.txt": model_url,
@@ -443,7 +444,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 if workdir:
                     runner_config["cwd"] = workdir
                     if workdir_key := _WORKDIR_KEYS.get(self.config.agent):
-                        agent_config[workdir_key] = workdir
+                        agent_config.setdefault(workdir_key, workdir)
                     await self._upload_files(
                         handle,
                         {

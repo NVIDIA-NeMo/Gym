@@ -230,6 +230,24 @@ class TestRegistry:
         # The masking must not have mutated the config the exporter authenticates with.
         assert wandb_config["wandb_api_key"] == "secret-key"  # pragma: allowlist secret
 
+    def test_exported_config_masks_every_value_of_a_secrets_mapping(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
+    ) -> None:
+        """The Harbor server's `secrets` are keyed by environment variable name: one without a secret-shaped
+        substring (`JUDGE_AUTH`) must still never reach a tracking backend."""
+        _register_recording(monkeypatch)
+        canary = "sk-FAKE-CANARY"  # pragma: allowlist secret
+        wandb_config["harbor_environment_server"] = {
+            "environment_servers": {"harbor": {"secrets": {"JUDGE_AUTH": canary, "JUDGE_API_KEY": canary}}}
+        }
+
+        exporter = setup_exporters(wandb_config)[0]
+
+        logged = exporter.configs[0]["harbor_environment_server"]["environment_servers"]["harbor"]["secrets"]
+        assert dict(logged) == {"JUDGE_AUTH": "****", "JUDGE_API_KEY": "****"}
+        live = wandb_config["harbor_environment_server"]["environment_servers"]["harbor"]["secrets"]
+        assert live["JUDGE_AUTH"] == canary
+
     def test_setup_failure_is_skipped_rather_than_raised(
         self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
     ) -> None:

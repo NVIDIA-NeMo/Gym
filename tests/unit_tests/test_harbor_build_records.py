@@ -16,8 +16,124 @@ import pytest
 
 from nemo_gym.tasks.harbor.build_plan import BuildResult
 from nemo_gym.tasks.harbor.build_records import record_built_image
+from nemo_gym.tasks.harbor.digest import context_digest
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE, read_built_images, read_image_configs
+from nemo_gym.tasks.harbor.task import built_image, built_service_images, load_task
+from tests.unit_tests.harbor_build_helpers import REPO, UBUNTU_RECORD, write_task
+
+
+class TestBuildRecords:
+    """``built-images.json``: one entry per context, one image per built service, readable by older readers."""
+
+    def test_a_legacy_record_is_main_alone_and_a_services_record_without_main_has_no_built_image(self, tmp_path):
+        from nemo_gym.tasks.harbor.build_records import recorded_image_mismatch
+
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        digest = context_digest(folder / "a" / "environment")
+        legacy = {"image": "reg/hb__x@sha256:1", "tasks": ["a"], "tool": "docker", "pushed": True}
+        configs = {"reg/hb__x@sha256:1": UBUNTU_RECORD, "reg/hb__x-world@sha256:2": UBUNTU_RECORD}
+        (folder / IMAGE_CONFIGS_FILE).write_text(json.dumps(configs))
+        (folder / BUILT_IMAGES_FILE).write_text(json.dumps({digest: legacy}))
+        # A record written before sidecars were built reads as main alone, and the task loads from it.
+        assert built_service_images(folder / "a") == {"main": "reg/hb__x@sha256:1"}
+        assert built_image(folder / "a") == "reg/hb__x@sha256:1" == load_task(folder / "a").image
+        assert recorded_image_mismatch(legacy, configs, repository="reg", platform="linux/amd64") is None
+        assert recorded_image_mismatch(legacy, configs, repository="reg", platform="linux/amd64", service="world") == (
+            "no image is recorded for service world"
+        )
+        # A services record without main: the sidecar is recorded, main is not built, and the loader says so.
+        sidecar_only = {
+            "tasks": ["a"],
+            "tool": "docker",
+            "pushed": True,
+            "services": {"world": {"image": "reg/hb__x-world@sha256:2"}},
+        }
+        (folder / BUILT_IMAGES_FILE).write_text(json.dumps({digest: sidecar_only}))
+        assert built_service_images(folder / "a") == {"world": "reg/hb__x-world@sha256:2"}
+        assert built_image(folder / "a") is None
+        with pytest.raises(HarborTaskError, match="needs a build"):
+            load_task(folder / "a")
+        assert (
+            recorded_image_mismatch(sidecar_only, configs, repository="reg", platform="linux/amd64", service="world")
+            is None
+        )
+        assert recorded_image_mismatch(
+            sidecar_only, configs, repository="reg", platform="linux/arm64", service="world"
+        ) == ("it is linux/amd64, not linux/arm64")
+        assert built_service_images(tmp_path / "nowhere") == {}
+
+    def test_record_built_image_merges_services_and_keeps_main_at_the_top_level(self, tmp_path):
+        folder = tmp_path / "ds"
+        folder.mkdir()
+        digest = "d" * 32
+        world = BuildResult(digest, ("a",), "t-world", "t-world@sha256:w", "docker", False, {"os": "linux"}, "world")
+        main = BuildResult(digest, ("a", "b"), "t", "t@sha256:m", "docker", False, {"os": "linux"})
+        record_built_image(folder, world)
+        entry = json.loads((folder / BUILT_IMAGES_FILE).read_text())[digest]
+        # No main yet: no top-level image, so an older reader sees no built main rather than the sidecar.
+        assert entry == {
+            "tasks": ["a"],
+            "tool": "docker",
+            "pushed": False,
+            "services": {"world": {"image": "t-world@sha256:w", "tool": "docker", "pushed": False}},
+        }
+        record_built_image(folder, main)
+        entry = json.loads((folder / BUILT_IMAGES_FILE).read_text())[digest]
+        assert entry["image"] == "t@sha256:m" and entry["tasks"] == ["a", "b"]
+        assert entry["services"] == {
+            "world": {"image": "t-world@sha256:w", "tool": "docker", "pushed": False},
+            "main": {"image": "t@sha256:m", "tool": "docker", "pushed": False},
+        }
+        # Pinned per service: a second main is ignored, a rebuilt world replaces only world.
+        record_built_image(folder, BuildResult(digest, ("a",), "t2", "t2@sha256:n", "docker", False, {}))
+        again = BuildResult(digest, ("a",), "t-world", "t-world@sha256:w2", "podman", True, {"os": "linux"}, "world")
+        record_built_image(folder, again, overwrite=True)
+        entry = json.loads((folder / BUILT_IMAGES_FILE).read_text())[digest]
+        assert entry["services"] == {
+            "world": {"image": "t-world@sha256:w2", "tool": "podman", "pushed": True},
+            "main": {"image": "t@sha256:m", "tool": "docker", "pushed": False},
+        }
+        # The top-level pair is main's, never the last build's: a pushed world does not vouch for a local main.
+        assert entry["image"] == "t@sha256:m" and entry["tool"] == "docker" and entry["pushed"] is False
+        assert {"t-world@sha256:w", "t-world@sha256:w2", "t@sha256:m"} <= set(
+            json.loads((folder / IMAGE_CONFIGS_FILE).read_text())
+        )
+
+    def test_each_service_is_judged_by_its_own_pushed_flag(self, tmp_path):
+        from nemo_gym.tasks.harbor.build_records import recorded_image_mismatch
+
+        folder = tmp_path / "ds"
+        folder.mkdir()
+        digest = "d" * 32
+        pushed = f"{REPO}/hb__{digest}@sha256:m1"
+        record_built_image(folder, BuildResult(digest, ("a",), f"{REPO}/hb__{digest}", pushed, "buildah", True, {}))
+        # A local docker run then builds the sidecar: its record is local while main's stays pushed.
+        local = f"hb__{digest}-world"
+        record_built_image(
+            folder, BuildResult(digest, ("a",), local, local, "docker", False, {}, "world"), overwrite=True
+        )
+        entry = json.loads((folder / BUILT_IMAGES_FILE).read_text())[digest]
+        configs = {pushed: UBUNTU_RECORD, local: UBUNTU_RECORD}
+        assert entry["pushed"] is True and entry["tool"] == "buildah"
+        assert entry["services"]["world"] == {"image": local, "tool": "docker", "pushed": False}
+        assert recorded_image_mismatch(entry, configs, repository=REPO, platform="linux/amd64") is None
+        assert recorded_image_mismatch(entry, configs, repository=REPO, platform="linux/amd64", service="world") == (
+            "it was built locally and this run pushes to a repository"
+        )
+        assert (
+            recorded_image_mismatch(entry, configs, repository=None, platform="linux/amd64", service="world") is None
+        )
+        # A record without per-service flags (written before they were kept) reads the entry's for every service.
+        old = {"tasks": ["a"], "tool": "podman", "pushed": False, "services": {"world": {"image": local}}}
+        assert recorded_image_mismatch(old, configs, repository=REPO, platform="linux/amd64", service="world") == (
+            "it was built locally and this run pushes to a repository"
+        )
+        assert recorded_image_mismatch(old, configs, repository=None, platform="linux/amd64", service="world") is None
+        assert recorded_image_mismatch(old, configs, repository=None, platform="linux/amd64") == (
+            "no image is recorded for service main"
+        )
 
 
 def _d2_writer(folder: str, wid: int, count: int, barrier, errors) -> None:

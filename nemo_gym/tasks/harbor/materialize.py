@@ -9,9 +9,9 @@ from typing import Any
 
 from nemo_gym.episode_types import MaterializedTask, TaskId
 from nemo_gym.single_agent_turn_types import SingleAgentTurnTaskInput
-from nemo_gym.tasks.harbor.digest import DIGEST_KEY
+from nemo_gym.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY
 from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.task import HarborTask
+from nemo_gym.tasks.harbor.task import HarborTask, is_task_folder
 
 
 AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"
@@ -38,8 +38,18 @@ def environment_server_instance(taskset: str) -> str:
     return f"harbor_{_instance_taskset(taskset)}_environment"
 
 
-def materialize_task(task: HarborTask, taskset: str) -> MaterializedTask[SingleAgentTurnTaskInput]:
-    """One row: the instruction as a user message, the folder digest in ``task_data``."""
+def materialize_task(
+    task: HarborTask, taskset: str, *, dataset_digest: str | None = None
+) -> MaterializedTask[SingleAgentTurnTaskInput]:
+    """One row: the instruction as a user message, the folder digest in ``task_data``.
+
+    With ``dataset_digest``, the row also carries the dataset's digest (``manifest.toml``'s
+    ``[dataset].digest``). Rollout collection copies the ``_ng_*`` keys of ``task_data`` onto every
+    results row it writes, so each row then says which task folder and which dataset it ran.
+    """
+    task_data = {DIGEST_KEY: task.digest}
+    if dataset_digest is not None:
+        task_data[DATASET_DIGEST_KEY] = dataset_digest
     return MaterializedTask(
         task_id=TaskId(taskset=taskset, task_id=task.task_id),
         task_input=SingleAgentTurnTaskInput(
@@ -47,7 +57,7 @@ def materialize_task(task: HarborTask, taskset: str) -> MaterializedTask[SingleA
                 "input": [{"role": "user", "content": task.instruction}],
                 "metadata": {AGENT_TIMEOUT_METADATA_KEY: str(task.config.agent.timeout_sec)},
             },
-            task_data={DIGEST_KEY: task.digest},
+            task_data=task_data,
         ),
     )
 
@@ -60,10 +70,15 @@ def _validate_task_ids(tasks: list[HarborTask]) -> None:
         seen.add(task.task_id)
 
 
-def write_rows(tasks: list[HarborTask], taskset: str, path: Path) -> list[dict[str, Any]]:
+def write_rows(
+    tasks: list[HarborTask], taskset: str, path: Path, *, dataset_digest: str | None = None
+) -> list[dict[str, Any]]:
     """Write one materialized row per task as JSONL and return the rows."""
     _validate_task_ids(tasks)
-    rows = [materialize_task(task, taskset).model_dump(mode="json", exclude_unset=True) for task in tasks]
+    rows = [
+        materialize_task(task, taskset, dataset_digest=dataset_digest).model_dump(mode="json", exclude_unset=True)
+        for task in tasks
+    ]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as stream:
         for row in rows:
@@ -74,15 +89,27 @@ def write_rows(tasks: list[HarborTask], taskset: str, path: Path) -> list[dict[s
 def taskset_mapping(tasks: list[HarborTask], folder: Path) -> dict[str, Any]:
     """Where a taskset's folders live and which digest each task had at materialization.
 
-    Servers resolve a task as ``<folder>/<task_id>``. For a folder of task folders that is
-    the folder itself; for a single task folder it is the task's parent, so ``folder`` is
-    always the tasks' common parent directory.
+    Servers resolve a task as ``<folder>/<task_id>``, or ``<folder>/<paths[task_id]>`` for a task
+    found below the first level (see :func:`nemo_gym.tasks.harbor.task.discover_tasks`). For a
+    folder of task folders ``folder`` is the folder itself; for a single task folder it is the
+    task's parent, so ``folder`` is always the root the tasks were discovered under.
     """
     _validate_task_ids(tasks)
-    parents = {task.path.parent for task in tasks}
-    if len(parents) != 1:
-        raise ValueError(f"Tasks of one taskset must share a parent folder, got {sorted(map(str, parents))}")
-    return {"folder": str(parents.pop().resolve()), "tasks": {task.task_id: task.digest for task in tasks}}
+    root = Path(folder).resolve()
+    if is_task_folder(root):
+        root = root.parent
+    paths: dict[str, str] = {}
+    for task in tasks:
+        try:
+            relative = task.path.relative_to(root)
+        except ValueError:
+            raise ValueError(f"Task {task.path} is not under the taskset folder {root}") from None
+        if relative.as_posix() != task.task_id:
+            paths[task.task_id] = relative.as_posix()
+    mapping: dict[str, Any] = {"folder": str(root), "tasks": {task.task_id: task.digest for task in tasks}}
+    if paths:
+        mapping["paths"] = paths
+    return mapping
 
 
 def run_config(
@@ -95,16 +122,25 @@ def run_config(
     agent_impl: str,
     agent_overrides: dict[str, Any] | None = None,
     sandbox_provider: str = "sandbox",
+    dataset_digest: str | None = None,
+    dataset_toml_digest: str | None = None,
 ) -> dict[str, Any]:
     """The run-config blocks that bind one taskset to the ``harbor`` environment server.
 
     The environment server block inherits the shipped ``harbor_environment_server`` config and
     names the taskset's agent. The agent block inherits the selected harness config and declares
     the taskset's rows as its validation dataset, which is where rollout collection looks for
-    datasets. Rows route to the environment server by taskset.
+    datasets. Rows route to the environment server by taskset. The taskset mapping records the
+    dataset digest and the ``dataset.toml`` digest, so the run config says which dataset ran and
+    whether the Gym layer or upstream moved between two runs.
     """
     agent_name = agent_instance(taskset)
     environment_name = environment_server_instance(taskset)
+    mapping = taskset_mapping(tasks, folder)
+    if dataset_digest is not None:
+        mapping["dataset_digest"] = dataset_digest
+    if dataset_toml_digest is not None:
+        mapping["dataset_toml_digest"] = dataset_toml_digest
     return {
         "environment_routing_mode": "taskset",
         "environment_server_routes": {taskset: environment_name},
@@ -134,7 +170,7 @@ def run_config(
                     # Verifier logs sit beside the run's rollouts, as an absolute path: the server
                     # process runs from its own folder, so a relative default would land there.
                     "artifacts_dir": str(Path(rows_path).resolve().parent / "verifier"),
-                    "tasksets": {taskset: taskset_mapping(tasks, folder)},
+                    "tasksets": {taskset: mapping},
                     "agent_server": {"type": "responses_api_agents", "name": agent_name},
                 }
             },
