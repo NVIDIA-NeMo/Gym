@@ -10725,7 +10725,8 @@ class TestEnvironmentServerRouting:
                 futures = []
                 for example in examples:
                     reply = {
-                        "episode_id": {"rollout_id": "0-a", "attempt": 0},
+                        # The identity the collector dispatched; a reply for any other episode is stale.
+                        "episode_id": nemo_gym.rollout_collection._episode_request_body(example)["episode_id"],
                         "task_id": example["task_id"],
                         "result": {"reward": 1.0},
                     }
