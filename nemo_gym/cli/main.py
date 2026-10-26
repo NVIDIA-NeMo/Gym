@@ -1327,6 +1327,7 @@ COMMANDS = {
                 "input_glob",
                 "Glob (or comma-separated globs) matching the rollout shards to aggregate.",
                 aliases=("-i",),
+                quote=True,
             ),
             _value_flag(
                 "output",
@@ -1364,7 +1365,10 @@ COMMANDS = {
                     dest="rollout_file",
                     type=Path,
                     metavar="PATH",
-                    help="Rollout JSONL path; relative paths resolve under RUN_DIR (default: rollouts.jsonl).",
+                    help=(
+                        "Rollout JSONL path, checked alone; relative paths resolve under RUN_DIR (default: "
+                        "rollouts.jsonl, or the shards `gym eval aggregate` merged into it)."
+                    ),
                 )
             ),
             Flag(register=lambda p: p.add_argument("--workers", type=int, help="Number of worker processes.")),

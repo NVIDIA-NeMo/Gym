@@ -25,9 +25,18 @@ from nemo_gym.tasks.harbor.errors import HarborTaskError
 # tasks wrote it (see ``nemo_gym.tasks.harbor.image_configs``): Compose sidecar images and the base image
 # of every Dockerfile the loader resolves.
 IMAGE_CONFIGS_FILE = "compose-images.json"
-# The images prepare built for Dockerfiles outside pull and overlay mode, next to the task folders, keyed by
-# Harbor's content hash of the task's ``environment/`` build context (see ``nemo_gym.tasks.harbor.image_build``).
+# The images prepare built, next to the task folders, keyed by Harbor's content hash of the task's ``environment/``
+# build context (see ``nemo_gym.tasks.harbor.image_build``). An entry records one image per built Compose service
+# under ``services`` (``main`` for the Dockerfile outside pull and overlay mode, each sidecar with a ``build:``
+# section under its own name) and keeps ``main``'s image at the top level as ``image`` for older readers; an entry
+# with ``image`` and no ``services`` is a record of ``main`` alone.
 BUILT_IMAGES_FILE = "built-images.json"
+# The Compose service name of the task's own image, in Harbor's templates and the task's Compose file.
+MAIN_SERVICE = "main"
+# The service name the separate verifier's image is recorded under in ``built-images.json``, in the entry keyed by
+# Harbor's content hash of ``tests/`` (its own build context, so it never shares an entry with ``environment/``'s
+# services and a Compose sidecar of that name, kumo's ``verifier``, keeps its own record).
+VERIFIER_SERVICE = "verifier"
 
 # The sidecar lock file next to a record file (``<file>.lock``), see :func:`record_lock`.
 RECORD_LOCK_SUFFIX = ".lock"
@@ -115,3 +124,32 @@ def read_image_configs(folder: Path) -> dict[str, Any]:
 def read_built_images(folder: Path) -> dict[str, Any]:
     """The built images recorded in ``folder`` (the tasks' parent), or ``{}`` when none were."""
     return read_json_record(Path(folder) / BUILT_IMAGES_FILE)
+
+
+def recorded_service_records(entry: Any) -> dict[str, dict[str, Any]]:
+    """The per-service records of one ``built-images.json`` entry, by Compose service name: ``image`` plus ``tool``
+    and ``pushed`` as recorded for that service.
+
+    A ``services`` map is read as written; a service record without the two flags (written before they were kept
+    per service) takes the entry's own, as does the single ``main`` record of an entry with ``image`` and no
+    ``services``, written before sidecars were built. Anything else records nothing.
+    """
+    if not isinstance(entry, dict):
+        return {}
+    flags = {key: entry[key] for key in ("tool", "pushed") if key in entry}
+    services = entry.get("services")
+    if isinstance(services, dict):
+        records: dict[str, dict[str, Any]] = {}
+        for name, record in services.items():
+            fields = dict(record) if isinstance(record, dict) else {"image": record}
+            if fields.get("image"):
+                records[str(name)] = {**flags, **fields, "image": str(fields["image"])}
+        return records
+    image = entry.get("image")
+    return {MAIN_SERVICE: {**flags, "image": str(image)}} if image else {}
+
+
+def recorded_service_images(entry: Any) -> dict[str, str]:
+    """The images one ``built-images.json`` entry records, by Compose service name (:func:`recorded_service_records`
+    without the flags)."""
+    return {name: record["image"] for name, record in recorded_service_records(entry).items()}

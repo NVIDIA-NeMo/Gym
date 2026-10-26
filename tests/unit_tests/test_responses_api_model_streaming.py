@@ -37,6 +37,7 @@ from nemo_gym.base_responses_api_model import (
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
     BaseResponsesAPIModelConfig,
+    CaptureStore,
     SimpleResponsesAPIModel,
 )
 from nemo_gym.openai_utils import (
@@ -936,10 +937,18 @@ class _HTTPErrorModel(_EchoModel):
         raise HTTPException(status_code=400, detail={"error": {"code": "context_length_exceeded"}})
 
 
-def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
+class _UnknownUsageModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        response = _build_response([_message_item("hi")])
+        response.usage.input_tokens_details.cached_tokens = None
+        response.usage.output_tokens_details.reasoning_tokens = None
+        return response
+
+
+def _client(model_cls, *, global_config_dict: dict | None = None) -> tuple[TestClient, SimpleResponsesAPIModel]:
     server = model_cls(
         config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name=""),
-        server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        server_client=MagicMock(spec=ServerClient, global_config_dict=global_config_dict or {}),
     )
     return TestClient(server.setup_webserver()), server
 
@@ -1025,6 +1034,19 @@ class TestResponsesDispatchRoute:
         assert response.status_code == 422
         assert server.last_params is None
         assert response.json()["detail"][0]["loc"][0] == "body"
+
+    def test_streaming_capture_keeps_unknown_usage_counts(self, tmp_path) -> None:
+        client, _ = _client(
+            _UnknownUsageModel,
+            global_config_dict={"observability_enabled": True, "model_call_capture_dir": str(tmp_path)},
+        )
+        response = client.post("/ng-rollout/r-0/v1/responses", json={"stream": True, "input": "task"})
+        assert response.status_code == 200
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        assert events[-1]["response"]["usage"]["input_tokens_details"] == {"cached_tokens": 0}
+        [exchange] = CaptureStore(tmp_path).read("r-0")
+        assert exchange["response"]["usage"]["input_tokens_details"] == {"cached_tokens": None}
+        assert exchange["response"]["usage"]["output_tokens_details"] == {"reasoning_tokens": None}
 
     def test_non_streaming_request_returns_plain_json(self) -> None:
         client, server = _client(_EchoModel)
@@ -1180,12 +1202,20 @@ class _SlowUnpropagatedErrorModel(_SlowUpstreamErrorModel):
         return False
 
 
-def _keepalive_client(model_cls, keepalive_s: float = _KEEPALIVE_S) -> tuple[TestClient, SimpleResponsesAPIModel]:
+class _SlowUnknownUsageModel(_UnknownUsageModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        await asyncio.sleep(_SLOW_CALL_S)
+        return await super().responses(body)
+
+
+def _keepalive_client(
+    model_cls, keepalive_s: float = _KEEPALIVE_S, *, global_config_dict: dict | None = None
+) -> tuple[TestClient, SimpleResponsesAPIModel]:
     server = model_cls(
         config=BaseResponsesAPIModelConfig(
             host="0.0.0.0", port=8099, entrypoint="", name="", stream_keepalive_s=keepalive_s
         ),
-        server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        server_client=MagicMock(spec=ServerClient, global_config_dict=global_config_dict or {}),
     )
     return TestClient(server.setup_webserver()), server
 
@@ -1228,6 +1258,20 @@ class TestResponsesStreamKeepalive:
         assert resp.text.endswith(expected)
         assert events[len(keepalives) :] == _sse_payloads(expected)
         assert events[-1]["type"] == "response.completed"
+
+    def test_capture_after_keepalives_keeps_unknown_usage_counts(self, tmp_path) -> None:
+        client, _ = _keepalive_client(
+            _SlowUnknownUsageModel,
+            global_config_dict={"observability_enabled": True, "model_call_capture_dir": str(tmp_path)},
+        )
+        resp = client.post("/ng-rollout/r-0/v1/responses", json=self.STREAM_BODY)
+        assert resp.status_code == 200
+        events = _sse_payloads(resp.text)
+        assert events[1]["type"] == "response.in_progress", "keepalives opened the stream"
+        assert events[-1]["response"]["usage"]["input_tokens_details"] == {"cached_tokens": 0}
+        [exchange] = CaptureStore(tmp_path).read("r-0")
+        assert exchange["response"]["usage"]["input_tokens_details"] == {"cached_tokens": None}
+        assert exchange["response"]["usage"]["output_tokens_details"] == {"reasoning_tokens": None}
 
     def test_fast_call_keeps_the_buffered_stream(self) -> None:
         client, _ = _keepalive_client(_EchoModel, keepalive_s=30.0)

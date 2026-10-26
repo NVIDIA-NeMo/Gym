@@ -94,14 +94,17 @@ def is_keepalive_entrypoint(argv: list[str] | tuple[str, ...]) -> bool:
     return False
 
 
-def entrypoint_to_run(task: HarborTask) -> list[str] | None:
+def entrypoint_to_run(task: HarborTask, *, compose_managed: bool = False) -> list[str] | None:
     """The image ``ENTRYPOINT`` the seed starts beside the keepalive, or ``None`` when nothing is to run.
 
-    Nothing runs for a Compose task (the adapter runs ``main``'s entrypoint), an image whose recorded
-    configuration has no entrypoint or none is recorded (a prebuilt ``docker_image``: today's behaviour),
-    a Dockerfile that cleared it with ``ENTRYPOINT []``, and an entrypoint that is itself a keepalive.
+    Nothing runs in a sandbox the Compose adapter started (``compose_managed``: the agent's ``main`` of a
+    Compose task, whose entrypoint the adapter ran), for an image whose recorded configuration has no
+    entrypoint or none is recorded (a prebuilt ``docker_image``: today's behaviour), a Dockerfile that
+    cleared it with ``ENTRYPOINT []``, and an entrypoint that is itself a keepalive. The decision is the
+    sandbox's, not the task's: a separate verifier is always a plain sandbox of its own, under a Compose
+    task too, so its image's entrypoint runs there (Harbor ``up --wait``s the verifier image on its own).
     """
-    if task.needs_compose or not task.entrypoint:
+    if compose_managed or not task.entrypoint:
         return None
     argv = list(task.entrypoint)
     return None if is_keepalive_entrypoint(argv) else argv
@@ -201,7 +204,13 @@ class HarborEntrypointMixin:
     """
 
     async def _start_entrypoint(
-        self, sandbox: AsyncSandbox, task: HarborTask, user: str | None, *, prepared_workdir: str | None = None
+        self,
+        sandbox: AsyncSandbox,
+        task: HarborTask,
+        user: str | None,
+        *,
+        prepared_workdir: str | None = None,
+        compose_managed: bool = False,
     ) -> EntrypointLaunch | None:
         """Start the image's ``ENTRYPOINT`` beside the keepalive, as Harbor's Compose start leaves it running.
 
@@ -210,7 +219,9 @@ class HarborEntrypointMixin:
         Gym's providers start their own keepalive instead, so the same process is started here as a
         long-lived exec through a ``run.sh`` that records a started marker, the exit status and the
         output under :data:`ENTRYPOINT_DIR`, the way the Compose adapter starts a service. ``user`` is
-        the image's user by name (:meth:`_image_user_name`). For a Dockerfile the loader resolved (not a
+        the image's user by name (:meth:`_image_user_name`); ``compose_managed`` says the adapter started this
+        sandbox's service, entrypoint included, so nothing is started here (see :func:`entrypoint_to_run`).
+        For a Dockerfile the loader resolved (not a
         built image, which holds its ``WorkingDir``) the entrypoint's working directory is created as
         ``docker build`` would when it is not ``prepared_workdir``, the one the seed made. The call
         returns once the marker exists and the first exit probe has passed (:meth:`_check_entrypoint`).
@@ -218,7 +229,7 @@ class HarborEntrypointMixin:
         could not run it (:class:`HarborEntrypointUnavailable`, retried), or its own shell failed (a
         ``su`` or ``chdir`` for the image's user or directory: :class:`HarborEntrypointError`, terminal).
         """
-        argv = entrypoint_to_run(task)
+        argv = entrypoint_to_run(task, compose_managed=compose_managed)
         if argv is None:
             return None
         made = await exec_as_root(sandbox, f"mkdir -p {ENTRYPOINT_DIR} && chmod 777 {ENTRYPOINT_DIR}", timeout_s=60)
@@ -428,22 +439,23 @@ class HarborEntrypointMixin:
         *,
         user: str | None = None,
         task_check: bool = True,
+        compose_managed: bool = False,
     ) -> None:
         """Poll the image's ``HEALTHCHECK``, then the task's ``[environment.healthcheck]``, until each passes.
 
         That is Harbor's order: ``up --wait`` gates on the image HEALTHCHECK, then ``run_healthcheck()``
         runs the task's, before the agent user is set. Both run as the container's user (``user``, the
         image's ``User`` by name; ``None`` is root): the daemon runs the image check in the image
-        ``WorkingDir``, Harbor's exec runs the task check in the task workdir. ``task_check=False`` leaves
-        the task's check out (the separate verifier's sandbox, where Harbor never runs it). An entrypoint
+        ``WorkingDir``, Harbor's exec runs the task check in the task workdir. ``compose_managed`` leaves
+        the image check out: the adapter already waited for the recorded healthcheck of the service it
+        started (the agent's ``main`` of a Compose task), while a separate verifier's sandbox is a plain
+        one under a Compose task too and gets its image check here. ``task_check=False`` leaves the
+        task's check out (the separate verifier's sandbox, where Harbor never runs it). An entrypoint
         started by the seed is probed before every attempt, so one that dies fails fast with its output
         instead of waiting out the retries. A check that never passes is a retryable seed failure.
         """
         checks: list[tuple[str, HarborHealthcheck, str | None]] = []
-        # A Compose task's main service already waited for its recorded healthcheck in the adapter.
-        image_check = (
-            None if task.needs_compose else image_healthcheck_settings(task.image_healthcheck, task.image_shell)
-        )
+        image_check = None if compose_managed else image_healthcheck_settings(task.image_healthcheck, task.image_shell)
         if image_check is not None:
             checks.append((" (the image HEALTHCHECK)", image_check, task.entrypoint_workdir or "/"))
         if task_check and task.config.environment.healthcheck is not None:

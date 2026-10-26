@@ -27,5 +27,22 @@ harbor_environment_server:
         benchmark: harbor
       artifacts_dir: ${results_dir}/harbor/verifier
 
-      # taskset name -> {folder, tasks: {task_id: digest}}; written by the loader.
+      # Operator secrets by environment variable name (judge API keys and the like). They fill `${NAME}`
+      # templates in a task's `[verifier].env`, the `test.sh` process environment, and reach nothing else.
+      # Set them from env.yaml or with `++harbor_environment_server.environment_servers.harbor.secrets.NAME=...`.
+      secrets: {}
+      # Every episode runs under its task's own time budget, from the sandbox being ready: `harness_setup_allowance_s`,
+      # `[agent].timeout_sec`, `[verifier].timeout_sec` and `verifier_grace_s`. With one sandbox start it is capped
+      # by `default_episode_timeout_seconds`; the sandbox lives for that budget. `false` ignores task timeouts.
+      enforce_task_timeouts: true
+      harness_setup_allowance_s: 300
+      # Sandbox and Compose group starts that fail on an image pull are retried here, with jittered backoff,
+      # before the failure is reported as retryable.
+      image_pull_retries: 2
+      # Verify tasks that declare `artifacts` in a fresh sandbox even when task.toml keeps the shared mode
+      # (tamper-proof grading, as training runs want). Tasks without artifacts keep their declared mode.
+      separate_verifier_for_artifacts: false
+
+      # taskset name -> {folder, tasks: {task_id: digest}, paths: {task_id: relative path, for tasks found
+      # below the first level of the folder}}; written by the loader.
       tasksets: {}
