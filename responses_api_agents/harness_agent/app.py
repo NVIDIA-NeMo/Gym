@@ -30,13 +30,14 @@ from fastapi import Request
 from omegaconf import ListConfig
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse, ResourcesCloseSessionRequest
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -303,9 +304,29 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 return HarnessAgentVerifyResponse.model_validate(verify_json)
             except BaseException:
                 await self._close_run_sandbox(run_context)
+                await self._close_resources_session(body, cookies, seed.get("resources_session_id"))
                 raise
             finally:
                 _RUN_CONTEXT.reset(token)
+
+    async def _close_resources_session(self, body: HarnessAgentRunRequest, cookies: Any, session_id: Any) -> None:
+        # A failed run never reaches /verify. A server whose seed reply names its session releases it now, not at its
+        # TTL. Session routing refuses a close whose body and cookie name different sessions, so only that id works.
+        if not isinstance(session_id, str) or not session_id:
+            return
+        try:
+            episode_id = EpisodeId.from_capture_key(self.rollout_id_from_run(body) or "harness-run")
+            resp = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/close_session",
+                json=ResourcesCloseSessionRequest(resources_session_id=session_id, episode_id=episode_id).model_dump(
+                    mode="json"
+                ),
+                cookies=cookies,
+            )
+            await raise_for_status(resp)
+        except Exception:
+            LOG.warning("could not close the resources session of a failed run", exc_info=True)
 
     async def _grade_in_box(self, handle, grade_spec: dict) -> float:
         return await stage_and_run_eval(

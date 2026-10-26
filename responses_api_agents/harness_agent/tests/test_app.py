@@ -338,6 +338,32 @@ async def test_pre_provision_failure_closes_resource_sandbox(exception_type):
     agent._provider.close.assert_awaited_once_with(handle)
 
 
+@pytest.mark.parametrize("named", [True, False])
+async def test_failed_run_closes_the_session_the_seed_names(named):
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(return_value=MagicMock(cookies={"session": "s"}))
+    agent._provider.connect = AsyncMock(return_value=MagicMock(provider_name="opensandbox"))
+    agent._provider.close = AsyncMock()
+    seed = {"sandbox_handle": "box-1"} | ({"resources_session_id": "sess-1"} if named else {})
+    body = HarnessAgentRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+    )
+    with (
+        patch.object(HarnessAgent, "responses", new=AsyncMock(side_effect=RuntimeError("agent failed"))),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch("responses_api_agents.harness_agent.app.get_response_json", new=AsyncMock(return_value=seed)),
+        pytest.raises(RuntimeError, match="agent failed"),
+    ):
+        await agent.run(MagicMock(cookies={}), body)
+    closes = [c for c in agent.server_client.post.await_args_list if c.kwargs["url_path"] == "/close_session"]
+    if named:
+        (close,) = closes
+        assert close.kwargs["json"]["resources_session_id"] == "sess-1"
+        assert close.kwargs["cookies"] == {"session": "s"}
+    else:
+        assert closes == []
+
+
 async def test_response_serialization_failure_closes_resource_sandbox():
     agent = _make_agent()
     agent.server_client.post = AsyncMock(return_value=MagicMock(cookies={}))
