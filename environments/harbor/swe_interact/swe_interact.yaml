@@ -20,10 +20,12 @@ harbor_environment_server:
       task_mcp_grants: required
       # The simulated user's model: a Gym model server, reached from inside the sandbox under the episode's
       # rollout prefix, so its calls are recorded with the rollout and never become training tokens.
+      # The sidecar calls LiteLLM at ${LITELLM_BASE_URL}/v1; the `openai/` prefix routes it as OpenAI-compatible
+      # whatever the model name.
       compose_variables:
         LITELLM_BASE_URL: {model_server: user_model}
         LITELLM_API_KEY: {value: unused}
-        SIM_USER_MODEL: {value: gpt-5.5}
+        SIM_USER_MODEL: {value: openai/gpt-5.5}
 
 user_model:
   responses_api_models:

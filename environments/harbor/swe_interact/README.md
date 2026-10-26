@@ -6,14 +6,22 @@ through the generic `harbor` environment server:
 
 ```sh
 git clone https://github.com/scaleapi/SWE-Interact.git
+gym eval prepare SWE-Interact/data/multiturn --sandbox opensandbox \
+  --config environments/harbor/swe_interact/swe_interact.yaml
 export USER_MODEL_BASE_URL=<openai-compatible endpoint> USER_MODEL_API_KEY=<key>
 gym eval run SWE-Interact/data/multiturn --agent codex_agent --sandbox opensandbox \
   --config environments/harbor/swe_interact/swe_interact.yaml \
   --model-type openai_model --model <model> --model-url <url>
 ```
 
+`gym eval prepare` builds the 150 image contexts and records the image configurations once, so later runs, and
+the jobs of a fan-out, reuse them and send no registry request.
+
 Each task is a Harbor multi-step task, and each step runs as one turn on the same sandbox, in a fresh agent
-session (`environment_servers/harbor/README.md`, Multi-step tasks):
+session (`environment_servers/harbor/README.md`, Multi-step tasks). The published runs do not pass Harbor's
+`--resume-trajectory`, so keep the server's default `turn_sessions`; the agent carries context between steps
+through the repository, its commits and `/tmp/plan.md`. The `user-server` sidecar lives for the whole episode and
+keeps its own conversation across steps.
 
 | Turn | The agent | Verifier |
 | --- | --- | --- |
@@ -35,7 +43,8 @@ session (`environment_servers/harbor/README.md`, Multi-step tasks):
   `builds.repository` for OpenSandbox.
 - `task_mcp_grants: required`: the agent is granted the task's `user-server` MCP server on every turn.
 - `compose_variables`: the sidecar's `${LITELLM_*}` and `${SIM_USER_MODEL}` point at the `user_model` Gym model
-  server, under the episode's rollout prefix, so provider keys stay on the Gym host.
+  server, under the episode's rollout prefix, so provider keys stay on the Gym host. The `user_model` server
+  picks the model (`USER_MODEL_NAME`, default `gpt-5.5`); `SIM_USER_MODEL` only tells LiteLLM how to route.
 
 Each episode runs under its task's own time budget (`enforce_task_timeouts`, on by default); Atlas tasks budget
 about 26,000 s across their turns and verifiers.
