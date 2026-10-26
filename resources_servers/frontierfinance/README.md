@@ -120,5 +120,11 @@ Code in this directory is Apache-2.0. The `frontier-finance` grader (Apache-2.0)
 `finance-agent` (MIT) and `model-library` (MIT) are installed as dependencies, not
 copied. The FrontierFinance dataset is CC-BY-4.0, gated on Hugging Face, and may not
 be reshared outside a gated repository; it is downloaded at prepare time and never
-committed. The five queries in `data/example.jsonl` are hand-written for testing and
-are not from the dataset.
+committed. The queries in `data/example.jsonl` are not from the dataset.
+
+## Example data
+
+`data/example.jsonl` holds five single-fact SEC filing lookups, each with one rubric
+that restates the expected answer. They are easy to check by hand and any capable
+model should score close to 1.0 on them, so a low score points to a broken setup
+(tools, date cap or judges) rather than a weak model.

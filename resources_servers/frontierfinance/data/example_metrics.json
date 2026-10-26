@@ -17,10 +17,10 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 1834.4,
-        "Min": 1831.0,
-        "Max": 1838.0,
-        "Standard deviation": 2.88
+        "Average": 1836.8,
+        "Min": 1835.0,
+        "Max": 1839.0,
+        "Standard deviation": 1.48
     },
     "Number of turns": {
         "Total # non-null values": 5,
@@ -45,15 +45,15 @@
         "total_count": 5
     },
     "as_of_date": {
-        "unique_count": 5,
-        "total_count": 5
-    },
-    "use_cases": {
         "unique_count": 4,
         "total_count": 5
     },
+    "use_cases": {
+        "unique_count": 1,
+        "total_count": 5
+    },
     "capabilities": {
-        "unique_count": 3,
+        "unique_count": 1,
         "total_count": 5
     }
 }
