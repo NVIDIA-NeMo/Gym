@@ -77,7 +77,13 @@ def http_response(status: int, payload=None) -> MagicMock:
     return response
 
 
+NEUTRAL_QUESTION = "What is the boiling point of water at sea level in kelvin?"
+
+
 async def search(server, query: str, session_id: str = "session-a"):
+    # web_search fails closed on an unseeded session; tests of the other rules get a question unrelated to their queries.
+    if session_id not in server._session_spans:
+        await seed(server, {"question": NEUTRAL_QUESTION}, session_id)
     return await server.web_search(tool_request(session_id), WebSearchRequest(query=query))
 
 
@@ -205,7 +211,7 @@ async def test_query_restricting_search_to_a_blocked_site_is_refused(server, cap
 async def test_query_repeating_a_verbatim_question_span_is_refused_per_session(server, caplog, seed_body):
     backend = stub_backend(server, results=[result("https://example.com/ok")])
     await seed(server, seed_body, "session-a")
-    await seed(server, {"question": "What is the boiling point of water at sea level in kelvin?"}, "session-b")
+    await seed(server, {"question": NEUTRAL_QUESTION}, "session-b")
     eight = "Theta characteristic: how many odd spin structures admit"  # case and punctuation differ from the question
     with caplog.at_level(logging.WARNING, logger=module.__name__):
         refused = await search(server, f"{eight} paper", "session-a")
@@ -216,6 +222,29 @@ async def test_query_repeating_a_verbatim_question_span_is_refused_per_session(s
     assert not (await search(server, f"{seven} paper", "session-a")).refused
     assert not (await search(server, f"{eight} paper", "session-b")).refused  # another rollout's question
     assert backend.search.await_count == 2
+
+
+async def test_search_from_a_session_without_a_seeded_question_is_refused(caplog):
+    """The plain POST route stays served next to /mcp: a call without the rollout's cookie or token lands in a
+    fresh session with no question, which must fail closed rather than skip the verbatim-span rule."""
+    server = make_server()
+    backend = stub_backend(server, results=[result("https://example.com/ok")])
+    app = server.setup_webserver()
+    eight = "Theta characteristic: how many odd spin structures admit paper"
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        client.post("/seed_session", json={"question": QUESTION, "responses_create_params": {"input": []}})
+        assert client.post("/web_search", json={"query": eight}).json()["refused"]  # the rollout's own session
+        client.cookies.clear()
+        with caplog.at_level(logging.WARNING, logger=module.__name__):
+            bare = client.post("/web_search", json={"query": eight}).json()
+    assert bare["refused"] and "seeded with its question" in bare["text"]
+    assert "family=unseeded_session rule='require_seeded_question' where=session" in caplog.text
+    backend.search.assert_not_awaited()
+    # Opting out restores the previous behaviour: an unseeded session is served without the span rule.
+    lenient = make_server(require_seeded_question=False)
+    stub_backend(lenient, results=[result("https://example.com/ok")])
+    served = await lenient.web_search(tool_request("never-seeded"), WebSearchRequest(query=eight))
+    assert not served.refused
 
 
 @pytest.mark.parametrize(

@@ -18,9 +18,14 @@ The HLE authors' with-tools protocol (``docs/evaluation-with-tools.md`` in cente
 exactly two web tools to the agent and loads ``docs/blocklist.json`` in the wrapper around them. This
 server is that wrapper: it holds the search provider's credentials (Tavily), applies every rule family of
 the blocklist with the semantics the protocol describes, refuses leaky queries and URLs, re-checks fetched
-and cached pages, and logs each blocked call with the family and rule that matched. The agent reaches it
-only over MCP with a per-rollout session token; the question of the rollout arrives through
-``/seed_session`` and drives the verbatim-span refusal.
+and cached pages, and logs each blocked call with the family and rule that matched. The question of the
+rollout arrives through ``/seed_session`` and drives the verbatim-span refusal.
+
+The sandbox is meant to reach the tools over MCP with the per-rollout session token, but the plain
+``POST /web_search`` and ``POST /web_fetch`` routes stay served, and a call without the rollout's cookie
+or token lands in a fresh session that carries no question. The policy therefore does not depend on the
+transport: every family applies on both routes, and ``web_search`` fails closed on a session that was never
+seeded with a question (``require_seeded_question``, default on) rather than skipping the span rule.
 """
 
 import hashlib
@@ -95,6 +100,8 @@ BLOCKLIST_FAMILIES = (
 # Protocol rules that are not blocklist families but refuse a call all the same.
 QUESTION_SPAN_FAMILY = "question_span"
 MALFORMED_URL_FAMILY = "malformed_url"
+# This server's own fail-closed rule: a search from a session with no seeded question cannot be span-checked.
+UNSEEDED_SESSION_FAMILY = "unseeded_session"
 
 # Keys Tavily rejects outright; the pool moves on to the next key for the same call.
 TAVILY_KEY_REJECTED_CODES = frozenset({401, 432, 433})
@@ -162,6 +169,7 @@ class Block:
             "answer_title_patterns": "the page title matches an answer-key pattern",
             QUESTION_SPAN_FAMILY: f"the query repeats {self.rule} verbatim; rephrase it in your own words",
             MALFORMED_URL_FAMILY: "the URL is not a valid http(s) URL",
+            UNSEEDED_SESSION_FAMILY: "search is served only to a rollout session seeded with its question",
         }[self.family]
         return f"Refused by the HLE web-tool policy: {reason}."
 
@@ -505,6 +513,10 @@ class HLEWebToolsResourcesServerConfig(BaseResourcesServerConfig):
     verbatim_span_words: int = Field(default=8, ge=2)
     # The seed-body field that carries the question; the last user message is the fallback.
     question_field: str = "question"
+    # Fail closed: refuse web_search from any session that was not seeded with a question (a plain-HTTP call
+    # without the rollout's cookie or MCP token, or a rollout whose seed carried no question). Off serves such
+    # sessions without the span rule.
+    require_seeded_question: bool = True
     max_results: int = Field(default=TAVILY_MAX_RESULTS, ge=1, le=TAVILY_MAX_RESULTS)
     max_fetch_chars: int = Field(default=PROTOCOL_MAX_FETCH_CHARS, ge=1)
     max_query_chars: int = Field(default=TAVILY_MAX_QUERY_CHARS, ge=1)
@@ -619,10 +631,12 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
         question = extract_question(body.model_dump(), self.config.question_field)
         if question is None:
             logger.warning(
-                "hle_web_tools session %s seeded without a question (field %r or a user message): the verbatim-span "
-                "rule cannot apply to its queries",
+                "hle_web_tools session %s seeded without a question (field %r or a user message): %s",
                 session_id,
                 self.config.question_field,
+                "its web_search calls will be refused (require_seeded_question)"
+                if self.config.require_seeded_question
+                else "the verbatim-span rule cannot apply to its queries",
             )
             self._session_spans.pop(session_id, None)
         else:
@@ -648,6 +662,11 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
         evaluation blocklist are removed, and a query that restricts search to a blocked site or quotes a long
         span of the question verbatim is refused."""
         session_id = request.session[SESSION_ID_KEY]
+        spans = self._session_spans.get(session_id)
+        if spans is None and self.config.require_seeded_question:
+            block = Block(UNSEEDED_SESSION_FAMILY, "require_seeded_question", session_id, "session")
+            self._log_block("web_search", session_id, block)
+            return WebSearchResponse(text=block.refusal(), result_count=0, refused=True)
         query = body.query.strip()
         if not query:
             return WebSearchResponse(text="The query is empty.", result_count=0, refused=True)
@@ -657,7 +676,7 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
                 result_count=0,
                 refused=True,
             )
-        block = self._blocklist.query_block(query, self._session_spans.get(session_id))
+        block = self._blocklist.query_block(query, spans)
         if block is not None:
             self._log_block("web_search", session_id, block)
             return WebSearchResponse(text=block.refusal(), result_count=0, refused=True)

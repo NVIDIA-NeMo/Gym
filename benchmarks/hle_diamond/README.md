@@ -720,7 +720,9 @@ that implements section 3 of upstream's `docs/evaluation-with-tools.md` (commit
 - The upstream `docs/blocklist.json`, byte-exact (digest pinned in the server and checked at start),
   with **all seven rule families** enforced with the semantics the protocol describes, plus its query
   refusals (a blocked `site:` domain, a verbatim span of the question: 8 consecutive words, the
-  server's choice where upstream states no length), its fetch-URL checks after percent-decoding
+  server's choice where upstream states no length; a search from a session not seeded with the
+  question, such as a plain-HTTP call from the sandbox carrying no session, is refused outright so
+  the span rule cannot be skipped), its fetch-URL checks after percent-decoding
   archive and proxy wrappers, its title-and-Markdown re-check of fetched and cached pages, and a log
   line per blocked call naming the family and rule. This closes the four unenforced and one
   approximated families of the `opencode_search` preset (Search exclusions below), which stays as the

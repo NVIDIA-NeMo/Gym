@@ -8,8 +8,16 @@ SHA-256 of that document, of `docs/blocklist.json` and of `docs/requirements-too
 and `blocklist.json` next to it is a byte-exact copy of the upstream blocklist whose digest the server
 verifies at start (`blocklist_sha256`; set it to `null` to run a deliberately different policy file).
 
-The server holds the search provider's credentials. The sandbox receives only the per-rollout MCP
-session token minted by `/seed_session`, and the token lists exactly these two tools.
+The server holds the search provider's credentials. The sandbox receives the per-rollout MCP session
+token minted by `/seed_session`, and the token lists exactly these two tools. Gym's MCP exposure keeps
+the plain `POST /web_search` and `POST /web_fetch` routes served next to `/mcp`, and a sandbox whose
+egress policy admits the tool-server host can call them directly; a call without the rollout's cookie or
+token lands in a fresh session that carries no question. The policy therefore does not depend on the
+transport: every blocklist family applies on both routes, and `web_search` is refused for any session
+that was not seeded with a question (`require_seeded_question`, default on), so the one session-dependent
+rule fails closed instead of being skipped. What this server cannot tell apart is a seed sent by the
+agent server from one sent by the sandbox itself: keeping the sandbox from seeding its own session is the
+job of the egress policy, which the Diamond README discusses under Sandboxed agents.
 
 ## Tools
 
@@ -51,9 +59,11 @@ Beyond the families, the protocol's own refusals:
   reaches the server through `/seed_session`: an Agent seeds its tool servers with its run request,
   whose extra fields are the task row (`question` for the HLE presets, configurable as
   `question_field`); the last user message of `responses_create_params.input` is the fallback, and an
-  Environment Server's `task_data` is read the same way. A session seeded without any question is
-  served without the span rule and the server logs a warning for it. The words of a blocked span are
-  never logged, only their count.
+  Environment Server's `task_data` is read the same way. A search from a session that was not seeded
+  with a question (a seed without one, or a plain-HTTP call carrying no session) is refused with the
+  family `unseeded_session`, and a seed without a question is logged at WARNING; set
+  `require_seeded_question: false` to serve such sessions without the span rule instead. The words of a
+  blocked span are never logged, only their count.
 - **Fetch URLs** must be `http(s)` without credentials. The URL, its percent-decoded forms (up to four
   rounds, so double encoding does not help) and every URL wrapped inside any of them are checked
   against the URL-shaped families and the text families: the path remainder of the Wayback Machine
@@ -102,6 +112,7 @@ hle_tools:
 | `blocklist_sha256` | upstream digest | the digest the file must have; `null` accepts any file |
 | `verbatim_span_words` | 8 | consecutive question words that refuse a query |
 | `question_field` | `question` | the seed-body field carrying the question |
+| `require_seeded_question` | `true` | refuse `web_search` from a session that was not seeded with a question; `false` serves it without the span rule |
 | `max_results` | 20 | results requested and returned per search (Tavily's and the protocol's cap) |
 | `max_fetch_chars` | 60,000 | the Markdown cap |
 | `max_query_chars` | 400 | Tavily rejects longer queries |
@@ -126,6 +137,7 @@ pytest resources_servers/hle_web_tools/tests/test_app.py
 ```
 
 Model-free; the Tavily transport is stubbed. Each rule family has one test built on rules taken from
-the upstream blocklist, plus the two query refusals, wrapper decoding, the cap and marker, the exact
-two-tool list over a real MCP `tools/list`, the 20-result cap, the cache re-check, the redirect check,
-key failover and the blocklist digest pin.
+the upstream blocklist, plus the two query refusals, the fail-closed refusal of a cookie-less
+`POST /web_search` after a seed, wrapper decoding, the cap and marker, the exact two-tool list over a
+real MCP `tools/list`, the 20-result cap, the cache re-check, the redirect check, key failover and the
+blocklist digest pin.
