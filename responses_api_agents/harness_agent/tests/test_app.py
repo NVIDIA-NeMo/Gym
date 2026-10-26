@@ -441,6 +441,38 @@ def test_forwarding_mcp_tools_needs_a_server_that_serves_them():
         agent._mcp_server_entry({})
 
 
+@pytest.mark.parametrize(("agent_kwargs", "expected"), [({}, "/app"), ({"cwd": "/"}, "/")])
+async def test_task_workdir_does_not_override_explicit_agent_kwargs(agent_kwargs, expected):
+    agent = _make_agent(agent="deepagents", agent_kwargs=agent_kwargs)
+    agent._gym_tar = None
+    handle = MagicMock(provider_name="opensandbox")
+    agent._provider.connect = AsyncMock(return_value=handle)
+    agent._provider.exec = AsyncMock(
+        side_effect=[
+            SandboxExecResult("", "", 0),
+            SandboxExecResult("", "", 0),
+            SandboxExecResult("RUNNER_DONE", "", 0),
+        ]
+    )
+    uploaded = {}
+
+    async def upload(_, source, target):
+        uploaded[target] = source.read_text()
+
+    agent._provider.upload_file = AsyncMock(side_effect=upload)
+    response = _response()
+    agent._provider.download_file = AsyncMock(side_effect=lambda _, __, path: path.write_text(json.dumps(response)))
+    body = NeMoGymResponseCreateParamsNonStreaming(input="hello", metadata={"workdir": "/app"})
+    token = _RUN_CONTEXT.set({"sandbox_descriptor": {"sandbox_id": "box-1"}})
+    try:
+        with patch.object(agent, "_sandbox_model_url", return_value="https://model.example"):
+            await agent.responses(MagicMock(), body)
+    finally:
+        _RUN_CONTEXT.reset(token)
+    assert json.loads(uploaded["/work/runner_config.json"])["cwd"] == "/app"
+    assert json.loads(uploaded["/work/agent_config.json"])["cwd"] == expected
+
+
 async def test_resource_sandbox_requires_connectable_provider(tmp_path):
     agent = _make_agent()
     agent._provider = LocalProvider(workspace_root=str(tmp_path))

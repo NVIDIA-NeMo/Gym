@@ -13,7 +13,9 @@ Control routes:
 - ``POST /_ctl/hold {"after_calls_per_rollout": n}``:
   each rollout's calls after its own first ``n`` wait until released.
   A call names its rollout in its capture admission, so this needs token capture.
-- ``POST /_ctl/release``: release held calls.
+- ``POST /_ctl/release``: release held calls, and stop gating.
+- ``POST /_ctl/gate``: from now on every call waits until a step releases it.
+- ``POST /_ctl/step {"calls": n}``: release the ``n`` longest-waiting gated calls; returns how many were released.
 - ``POST /_ctl/script {"tool_calls": [...]}``: set the scripted tool calls.
 - ``GET /_ctl/calls``: every request received, with its message count and capture admission.
 - ``GET /_ctl/call_count``: how many requests were received and how many returned, without the list.
@@ -65,6 +67,9 @@ STATE: dict[str, Any] = {
     # Calls received per rollout, and calls that returned.
     "rollout_calls": collections.Counter(),
     "returned": 0,
+    "gated": False,
+    # Gated calls waiting for a step, oldest first.
+    "waiting": [],
 }
 SCRIPT: list[dict[str, Any]] = list(DEFAULT_SCRIPT)
 
@@ -96,7 +101,26 @@ async def release() -> dict:
     STATE["hold_after"] = None
     STATE["hold_after_per_rollout"] = None
     STATE["released"].set()
+    STATE["gated"] = False
+    waiting, STATE["waiting"] = STATE["waiting"], []
+    for event in waiting:
+        event.set()
     return {"ok": True}
+
+
+@app.post("/_ctl/gate")
+async def gate() -> dict:
+    STATE["gated"] = True
+    return {"ok": True}
+
+
+@app.post("/_ctl/step")
+async def step(body: dict) -> dict:
+    released = STATE["waiting"][: body["calls"]]
+    del STATE["waiting"][: body["calls"]]
+    for event in released:
+        event.set()
+    return {"released": len(released), "waiting": len(STATE["waiting"])}
 
 
 @app.post("/_ctl/script")
@@ -219,6 +243,10 @@ async def chat(request: Request) -> dict:
         hold_after_per_rollout is not None and rollout_index >= hold_after_per_rollout
     ):
         await STATE["released"].wait()
+    if STATE["gated"]:
+        event = asyncio.Event()
+        STATE["waiting"].append(event)
+        await event.wait()
 
     coords = None
     if capture is not None:
