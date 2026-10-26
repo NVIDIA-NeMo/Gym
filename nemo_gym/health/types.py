@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -216,6 +216,8 @@ class _CallBindings:
     matched_calls: tuple[dict[str, Any], ...]
     missing_references: tuple[str, ...]
     duplicated_references: tuple[tuple[str, int], ...]
+    # What each reference resolved to, by `_call_reference_signature`: one call, none, or several.
+    resolutions: Mapping[tuple[str, str, str, str], tuple[dict[str, Any], ...]] = field(default_factory=dict)
 
     @property
     def observed(self) -> bool:
