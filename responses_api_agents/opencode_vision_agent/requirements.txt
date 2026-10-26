@@ -3,3 +3,8 @@ pillow
 numpy
 scipy
 opencv-python-headless
+# Gym's `sandbox` extra, for opencode_agent's session_sandbox (OpenSandbox sessions); versions as tested in
+# workspace/visual_tracking_rl/opensandbox/install_gym_sandbox_deps.sh.
+opensandbox==1.1.1
+tenacity>=9.1.4
+httpx-aiohttp>=0.2.0
