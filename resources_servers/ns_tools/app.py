@@ -47,7 +47,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ResourcesServerRef
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status
 
 
 logger = logging.getLogger(__name__)
@@ -438,7 +438,9 @@ class NSToolsResourcesServer(SimpleResourcesServer):
                 server_name=verifier_ref.name,
                 url_path="/verify",
                 json=body.model_dump(),
+                cookies=request.cookies if request else None,
             )
+            await raise_for_status(response)
 
             result = await response.json()
 
