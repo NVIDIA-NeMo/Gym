@@ -744,6 +744,26 @@ class TestProviderBackoff:
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:
+    @pytest.mark.parametrize("effort", ["max", "xhigh", "high", "medium", "low", "minimal", "none", None])
+    def test_reasoning_effort_round_trips_requests_and_responses(self, effort) -> None:
+        reasoning = {"effort": effort, "summary": "auto"}
+        params = NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": "hello", "reasoning": reasoning})
+        assert params.model_dump(exclude_unset=True)["reasoning"] == reasoning
+        payload = {**_response_with_output([]), "reasoning": reasoning}
+        response = NeMoGymResponse.model_validate(payload)
+        assert response.reasoning.effort == effort
+        assert response.model_dump(exclude_unset=True)["reasoning"] == reasoning
+
+    def test_reasoning_effort_remains_optional_and_rejects_unknown_values(self) -> None:
+        params = NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": "hello", "reasoning": {}})
+        assert params.reasoning == {}
+        with pytest.raises(ValidationError):
+            NeMoGymResponseCreateParamsNonStreaming.model_validate(
+                {"input": "hello", "reasoning": {"effort": "invalid"}}
+            )
+        with pytest.raises(ValidationError):
+            NeMoGymResponse.model_validate({**_response_with_output([]), "reasoning": {"effort": "invalid"}})
+
     def test_seed_rejected_at_top_level(self) -> None:
         """seed is not part of the OpenAI Responses schema; it must be passed via metadata.extra_body."""
         with pytest.raises(ValidationError):
