@@ -108,13 +108,15 @@ def current_failures(failures: list[dict[str, Any]], scored: list[dict[str, Any]
 
 def load_rollouts(path: str | Path) -> list[dict[str, Any]]:
     """Read a rollouts JSONL plus, when present, its sibling `<name>_failures.jsonl` of masked failures. A failure
-    superseded by a later attempt (another sidecar record or a scored row) is left out."""
+    superseded by a later attempt (another sidecar record or a scored row) is left out, and so is a record marked
+    `_ng_no_persist`: it says the rollout produced no result, so the rollout is missing, not failed."""
     path = Path(path)
     rows = _read_jsonl(path)
     if path.suffix == ".jsonl":
         failures_path = path.with_name(path.stem + FAILURES_SUFFIX)
         if failures_path.is_file():
-            failures = current_failures(_read_jsonl(failures_path), rows)
+            attempts = [record for record in _read_jsonl(failures_path) if not record.get("_ng_no_persist")]
+            failures = current_failures(attempts, rows)
             rows.extend(_failure_as_masked_row(f) for f in failures)
     return rows
 

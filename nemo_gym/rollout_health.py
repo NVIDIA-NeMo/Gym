@@ -490,7 +490,8 @@ def _rollout_accounting(
 
     ``landed`` holds ``(input index, task index, rollout index)`` of every persisted record. Failures come
     from each input's ``_failures.jsonl`` sidecar, where the last attempt of a rollout stands; one that
-    later landed is not failed. ``is_terminal_failure`` splits them into
+    later landed is not failed. A row marked ``_ng_no_persist`` records no result, so its rollout is missing.
+    ``is_terminal_failure`` splits them into
     final ones, which are not retried, and not final ones, which are; the split says nothing of the cause. ``failed`` is null when no input has a sidecar.
     ``expected``, ``missing`` and ``healthy`` need the ``_materialized_inputs.jsonl`` inventory and
     are null when an input has none. A run is healthy when nothing is missing, no rollout is
@@ -498,7 +499,7 @@ def _rollout_accounting(
     The limits are off (None) by default, so failures alone never make a run unhealthy unless configured.
     """
     # Lazy: rollout_collection imports this module, and health workers need none of its dependencies.
-    from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, is_terminal_failure
+    from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, is_terminal_failure
 
     failed: dict[tuple[Any, ...], dict[str, Any]] = {}
     any_sidecar = False
@@ -507,6 +508,8 @@ def _rollout_accounting(
         if failures_path_for(path).is_file():
             any_sidecar = True
             for row in _jsonl_rows(failures_path_for(path)):
+                if row.get(NG_NO_PERSIST_KEY):
+                    continue
                 failed[(source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))] = row
         if not materialized_path_for(path).is_file():
             owed = None
