@@ -5,6 +5,7 @@
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -16,7 +17,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
@@ -293,11 +294,15 @@ async def test_connection_failure_never_falls_back_to_host() -> None:
     install.assert_not_called()
 
 
-async def test_artifacts_keep_partial_output_without_inventing_exit_code() -> None:
+@pytest.mark.parametrize("timed_out", [False, True])
+async def test_artifacts_take_the_exit_code_from_cleanup_only_when_kilo_finished(timed_out: bool) -> None:
     session = state()
+    session.session.cleanup = receipt(return_code=143 if timed_out else 3, timed_out=timed_out)
     with patch(f"{TRANSPORT}.read_text", side_effect=["partial", "diagnostic", RuntimeError("not written")]):
         artifacts = await session.collect_artifacts()
-    assert artifacts == KiloArtifacts(stdout="partial", stderr="diagnostic", exit_code=None)
+    assert (artifacts.stdout, artifacts.stderr) == ("partial", "diagnostic")
+    # The supervisor's TERM status after a timeout is not an exit Kilo chose.
+    assert artifacts.exit_code == (None if timed_out else 3)
 
 
 async def test_identical_activations_join_and_replay_independent_copies() -> None:
@@ -452,7 +457,7 @@ async def test_runner_identity_reaches_response_metadata() -> None:
     session = state()
     with patch(
         f"{TRANSPORT}.read_text",
-        side_effect=[TEXT, "", "0", json.dumps({"hostname": "sandbox-7", "pid": 42}), "ready\n"],
+        side_effect=[TEXT, "", json.dumps({"hostname": "sandbox-7", "pid": 42}), "ready\n"],
     ):
         artifacts = await session.collect_artifacts()
     assert (artifacts.runner_hostname, artifacts.runner_pid) == ("sandbox-7", 42)
@@ -494,8 +499,27 @@ async def test_retried_close_does_not_interrupt_a_cancelling_activation() -> Non
     assert cleaned.is_set() and session.task.cancelled()
 
 
+class LocalFiles:
+    """File transfer onto the local filesystem, standing in for the sandbox."""
+
+    async def upload(self, source: Path, destination: str) -> None:
+        shutil.copyfile(source, destination)
+
+
+async def stage_locally(directory: Path, workdir: Path, command: list[str]) -> list[str]:
+    """Stage an activation into ``directory`` as the sandbox would receive it; return the runner argv."""
+    session = KiloSandboxSession(
+        request=seed(workdir=str(workdir)),
+        session=SandboxSession(
+            sandbox=LocalFiles(), session_dir=str(directory), workdir=str(workdir), harness="KiloCode"
+        ),
+    )
+    shutil.copyfile(HARNESS_RUNNER_SCRIPT, directory / HARNESS_RUNNER_FILE)
+    return (await session.stage_activation(command=command, config="{}")).argv
+
+
 @pytest.mark.parametrize("exit_code", [0, 3])
-def test_standalone_runner_executes_in_task_directory(tmp_path: Path, exit_code: int) -> None:
+async def test_runner_executes_in_task_directory(tmp_path: Path, exit_code: int) -> None:
     directory, repo = tmp_path / "session", tmp_path / "repo"
     directory.mkdir()
     repo.mkdir()
@@ -505,19 +529,17 @@ def test_standalone_runner_executes_in_task_directory(tmp_path: Path, exit_code:
         "print(json.dumps({'cwd':os.getcwd(),'config':os.environ['KILO_CONFIG'],"
         "'home':os.environ['HOME'],'db':os.environ['KILO_DB'],"
         "'project':os.environ['KILO_DISABLE_PROJECT_CONFIG'],'key':os.getenv('OPENAI_API_KEY'),"
-        "'stdin':sys.stdin.read()})); "
+        "'kilo':os.getenv('KILO_MODEL'),'kept':os.getenv('KEPT'),'stdin':sys.stdin.read()})); "
         "sys.stderr.buffer.write(b'diagnostic\\xff'); "
         f"sys.exit({exit_code})"
     )
-    (directory / "input.json").write_text(json.dumps({"command": [sys.executable, "-c", script]}))
-    runner = Path(__file__).parents[1] / "sandbox_runner.py"
-    result = subprocess.run(
-        [sys.executable, str(runner), str(directory), str(repo)],
-        env={**os.environ, "OPENAI_API_KEY": "test-credential"},
-        input=b"unexpected inherited input",
-        capture_output=True,
-    )
-    assert result.returncode == exit_code
+    argv = await stage_locally(directory, repo, [sys.executable, "-c", script])
+    assert argv == ["bash", f"{directory}/harness_runner.sh", f"{directory}/params.sh"]
+    task_home = str(tmp_path / 'task "home" \\')
+    env = {key: value for key, value in os.environ.items() if not key.startswith("XDG_")}
+    inherited = {"OPENAI_API_KEY": "test-credential", "KILO_MODEL": "other", "KEPT": "yes", "HOME": task_home}
+    result = subprocess.run(argv, env=env | inherited, input=b"unexpected inherited input", capture_output=True)
+    assert result.returncode == exit_code, result.stderr
     output = json.loads((directory / "stdout.jsonl").read_text())
     assert output == {
         "cwd": str(repo),
@@ -526,12 +548,22 @@ def test_standalone_runner_executes_in_task_directory(tmp_path: Path, exit_code:
         "db": str(directory / "kilo.db"),
         "project": "1",
         "key": None,
+        "kilo": None,
+        "kept": "yes",
         "stdin": "",
     }
     assert (repo / "patch.txt").read_text() == "changed"
     assert not (repo / "kilo.json").exists()
     assert (directory / "stderr.log").read_bytes() == b"diagnostic\xff"
-    assert json.loads((directory / "exit.json").read_text()) == exit_code
+    # The plugin's shell.env hook receives the task's directories, recorded before Kilo's overrides.
+    assert json.loads((directory / "task-env.json").read_text()) == {
+        "HOME": task_home,
+        "XDG_DATA_HOME": f"{task_home}/.local/share",
+        "XDG_CONFIG_HOME": f"{task_home}/.config",
+        "XDG_CACHE_HOME": f"{task_home}/.cache",
+        "XDG_STATE_HOME": f"{task_home}/.local/state",
+    }
+    assert all((directory / name).is_dir() for name in ("home", "data", "config", "cache"))
     runtime = json.loads((directory / "runtime.json").read_text())
     assert runtime["hostname"] == os.uname().nodename and runtime["pid"] != os.getpid()
 
@@ -611,7 +643,7 @@ async def test_snapshot_requires_confirmed_cleanup_before_any_io() -> None:
     session = state()
     session.started_at = 0.0
     session.session.cleanup = {**receipt(), "cleanup_confirmed": False}
-    with patch(f"{TRANSPORT}.read_text", side_effect=["partial", "diagnostic", "0"]):
+    with patch(f"{TRANSPORT}.read_text", side_effect=["partial", "diagnostic"]):
         artifacts = await session.collect_artifacts()
     assert artifacts.stdout == "partial" and artifacts.observations is None
     session.session.sandbox.exec.assert_not_awaited()

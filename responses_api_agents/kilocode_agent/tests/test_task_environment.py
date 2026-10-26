@@ -11,16 +11,16 @@ from pathlib import Path
 
 import pytest
 
-from responses_api_agents.kilocode_agent import sandbox_runner
+from responses_api_agents.kilocode_agent.tests.test_sandbox import stage_locally
 
 
-PLUGIN = Path(sandbox_runner.__file__).with_name("task_environment.mjs")
+PLUGIN = Path(__file__).parents[1] / "task_environment.mjs"
 TASK_DIRECTORIES = ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for the Kilo plugin")
 @pytest.mark.parametrize("custom_xdg", [False, True])
-def test_shell_environment_keeps_task_files_after_session_close(tmp_path: Path, custom_xdg: bool) -> None:
+async def test_shell_environment_keeps_task_files_after_session_close(tmp_path: Path, custom_xdg: bool) -> None:
     session, workdir, home = tmp_path / "session", tmp_path / "task", tmp_path / "task-home"
     for directory in (session, workdir, home):
         directory.mkdir()
@@ -41,14 +41,14 @@ execFileSync("/bin/sh", ["-c", 'mkdir -p "$XDG_CONFIG_HOME"; printf task > "$HOM
 console.log(JSON.stringify({cliHome: process.env.HOME, cliConfig: process.env.XDG_CONFIG_HOME, tool: output.env}));
 """
     )
-    (session / "input.json").write_text(json.dumps({"command": [shutil.which("node"), str(session / "probe.mjs")]}))
+    argv = await stage_locally(session, workdir, [shutil.which("node"), str(session / "probe.mjs")])
     # No task directories leak in from the agent-server host.
     env = {key: value for key, value in os.environ.items() if not key.startswith("XDG_")}
     env["HOME"] = str(home)
     if custom_xdg:
         env["XDG_CONFIG_HOME"] = str(tmp_path / "task-config")
     result = subprocess.run(
-        [sys.executable, "-I", sandbox_runner.__file__, str(session), str(workdir)],
+        argv,
         env=env,
         capture_output=True,
         text=True,
@@ -98,16 +98,15 @@ def test_invalid_task_environment_cannot_acknowledge_hook_initialization(tmp_pat
     assert not (tmp_path / "task-environment.ready").exists()
 
 
-def test_runner_removes_stale_task_environment_receipt_before_launch(tmp_path: Path) -> None:
+async def test_runner_removes_stale_task_environment_receipt_before_launch(tmp_path: Path) -> None:
     session, workdir = tmp_path / "session", tmp_path / "task"
     session.mkdir()
     workdir.mkdir()
     receipt = session / "task-environment.ready"
     receipt.write_text("ready\n")
     command = [sys.executable, "-c", "print('Kilo continued without loading the hook')"]
-    (session / "input.json").write_text(json.dumps({"command": command}))
     result = subprocess.run(
-        [sys.executable, "-I", sandbox_runner.__file__, str(session), str(workdir)],
+        await stage_locally(session, workdir, command),
         capture_output=True,
         text=True,
         timeout=30,
