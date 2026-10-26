@@ -11118,7 +11118,7 @@ class TestLiveHealthEvaluation:
         monkeypatch.setattr(
             nemo_gym.rollout_collection,
             "_record_rollout_health",
-            lambda result, outcome, ignored: evaluated.append((outcome, result)),
+            lambda result, outcome, ignored, span_context=None: evaluated.append((outcome, result)),
         )
         output_path = tmp_path / "native-output.jsonl"
         await RolloutCollectionHelper().run_from_config(
