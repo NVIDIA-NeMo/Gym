@@ -1,0 +1,214 @@
+---
+title: "Add an Exporter"
+description: "Send a finished evaluation run to a new destination with gym eval export."
+position: 6
+---
+
+An exporter takes a finished run, the rollouts file and the files `gym eval run` wrote beside it, and sends it somewhere or converts it: a tracking system, a results store, another trajectory format. Users run it with `gym eval export <name>`, and `gym eval submit` can run it after each benchmark. This page shows how to add one. For using the existing exporters, see [`gym eval export`](/reference/cli-commands#gym-eval-export) and the [`export` setting of a submit config](/orchestration/configuration#export).
+
+## How an Export Runs
+
+1. `gym eval export <name> key=value ...` resolves its configuration like every Gym command (command line, `env.yaml`) and loads the exporter class registered under `<name>`.
+2. The exporter's settings model validates that configuration before anything else happens.
+3. The exporter's `export(artifacts)` runs and returns an `ExportResult`.
+4. The command prints the state and the result's `detail`, and exits with the result's exit code when it failed. With `result_json_fpath`, the result is also kept as a JSON file.
+
+## The Contract
+
+`Exporter` (in `nemo_gym/exporters/base.py`) has one method to implement and two things to declare:
+
+| | |
+| --- | --- |
+| `name` | The name users type: `gym eval export <name>`. Lowercase, one word. |
+| `config_model` | A pydantic model of the exporter's settings. It extends `RunExportConfig`, which already holds `rollouts_jsonl_fpath` and `result_json_fpath`. |
+| `export(artifacts) -> ExportResult` | Does the export. |
+
+**The run.** `RunArtifacts` derives the files of a run from the rollouts path, without checking that they exist: `rollouts_jsonl_fpath`, `failures_jsonl_fpath`, `materialized_inputs_jsonl_fpath`, `aggregate_metrics_json_fpath` and `resolved_config_yaml_fpath` (the run's saved configuration, with secrets masked). Each exporter decides which it needs. `unexportable_reason(artifacts)` returns what is missing for a faithful export of the whole run (rollouts, fresh aggregate metrics, saved config), or `None`.
+
+**The result.** Report an expected failure, such as a missing file or a refused upload, in the result and raise only for a bug:
+
+| Constructor | Meaning |
+| --- | --- |
+| `ExportResult.succeeded(**detail)` | The run was exported. |
+| `ExportResult.skipped(**detail)` | Nothing was done because the run was already exported. |
+| `ExportResult.failed(error, exit_code=1, **detail)` | The export failed. Use a distinct `exit_code` for failures callers may want to tell apart. |
+
+`detail` is printed by the command and stored in the result file, so it should be small and hold nothing secret. Make a second export of the same run harmless: report `skipped` when the destination already has it, as `gym eval submit` may run an export again.
+
+**The settings.** The settings model must be importable without the exporter's SDK, because `gym eval submit` validates it on a machine that may not have the SDK. Keep SDK imports inside `export()` (or inside the worker, below). Hydra types command-line values, so `1` arrives as an integer and a `str` field rejects it. Say so in the field's `description` when a setting is likely to look numeric, such as a version.
+
+## Write the Exporter
+
+This exporter writes a small JSON summary of a run to a directory. It needs no SDK, so it is a plain `Exporter`.
+
+```python title="summary_exporter.py"
+import json
+from pathlib import Path
+from typing import ClassVar
+
+from pydantic import Field
+
+from nemo_gym.config_types import RunExportConfig
+from nemo_gym.exporters.base import Exporter, ExportResult, unexportable_reason
+from nemo_gym.run_artifacts import RunArtifacts
+
+
+class SummaryExportConfig(RunExportConfig):
+    """Settings of `gym eval export summary`."""
+
+    destination_dirpath: Path = Field(description="Directory the summary is written to.")
+
+
+class SummaryExporter(Exporter):
+    """Write a small JSON summary of a finished run."""
+
+    name: ClassVar[str] = "summary"
+    config_model: ClassVar[type[RunExportConfig]] = SummaryExportConfig
+
+    config: SummaryExportConfig
+
+    def export(self, artifacts: RunArtifacts) -> ExportResult:
+        problem = unexportable_reason(artifacts)
+        if problem is not None:
+            return ExportResult.failed(problem)
+
+        destination = self.config.destination_dirpath / f"{artifacts.rollouts_jsonl_fpath.stem}_summary.json"
+        if destination.exists():
+            return ExportResult.skipped(reason="already exported", destination=str(destination))
+
+        with artifacts.rollouts_jsonl_fpath.open("rb") as rollouts:
+            rollout_count = sum(1 for line in rollouts if line.strip())
+        summary = {
+            "rollouts": rollout_count,
+            "aggregate_metrics": json.loads(artifacts.aggregate_metrics_json_fpath.read_text()),
+        }
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(json.dumps(summary, indent=2))
+        except OSError as exc:
+            return ExportResult.failed(str(exc))
+        return ExportResult.succeeded(destination=str(destination), rollouts=rollout_count)
+```
+
+The pieces to copy: a settings model, a precondition check that fails before doing work, a `skipped` result for a run that is already exported, filesystem errors returned as `failed`, and the outcome in `succeeded`. Compare `AtifExporter` in `nemo_gym/exporters/atif.py`, which wraps an existing converter the same way.
+
+## Register It
+
+Put the exporter and its settings model in `nemo_gym/exporters/<name>.py`, then add both to `nemo_gym/run_exporter_registry.py`:
+
+```python
+RUN_EXPORTERS = {
+    ...
+    "summary": "nemo_gym.exporters.summary:SummaryExporter",
+}
+RUN_EXPORTER_CONFIGS = {
+    ...
+    "summary": "nemo_gym.exporters.summary:SummaryExportConfig",
+}
+```
+
+The registry holds dotted paths, not classes, so `gym eval export --help` lists exporters without importing any of them. Check it:
+
+```bash
+gym eval export --help        # lists summary
+gym eval export summary rollouts_jsonl_fpath=results/rollouts.jsonl destination_dirpath=results/summaries
+```
+
+**With `gym eval submit`.** An entry for the exporter under `export` in a submit config is validated against the settings model before anything is sent: unknown settings and invalid values are rejected. Submit fills in `rollouts_jsonl_fpath` and `result_json_fpath` per benchmark. If your exporter needs names derived from the benchmark or submission, such as a run name, add a branch for it in `export_run_settings` in `nemo_gym/orchestration/exports.py`.
+
+## In-Process or Isolated
+
+| | In-process | Isolated |
+| --- | --- | --- |
+| Base class | `Exporter`, or `BaseExporter` for a tracking backend | `IsolatedExporter` |
+| Runs | In the `gym eval export` process | In a worker, in its own virtual environment |
+| Use when | There is no SDK, or it is a light library Gym already depends on | The SDK has heavy or conflicting dependencies, or updates itself |
+| SDK install | An extra of Gym (`nemo-gym[<extra>]`) | The exporter installs it into its own environment on first use |
+
+`BaseExporter` is for tracking backends such as MLflow and W&B. It is the same class live runs use: you implement `setup`, `teardown`, `_log_config`, `_log_metrics` and `_log_rollouts`, and `gym eval export` replays the run's saved configuration, aggregate metrics and rollouts through them. It also makes the backend usable live during `gym eval run`, which needs an `ExporterConfig` (with `is_available`) registered in `EXPORTER_REGISTRY` in `nemo_gym/exporters/__init__.py` and an extra in `pyproject.toml`. Read `nemo_gym/exporters/mlflow.py` for a complete example. If the destination is not a tracking backend, prefer `Exporter` or `IsolatedExporter`.
+
+## Run the SDK in Its Own Environment
+
+An `IsolatedExporter` keeps the destination's SDK out of Gym's environment. The main process validates the settings and stages what the upload needs; a small worker file does the upload. This exporter uploads a run's aggregate metrics with a made-up `acme_sdk`.
+
+```python title="acme_exporter.py"
+import shutil
+from pathlib import Path
+from typing import Any, ClassVar
+
+from pydantic import Field
+
+from nemo_gym.config_types import RunExportConfig
+from nemo_gym.exporters.base import unexportable_reason
+from nemo_gym.exporters.isolated import ExportPreparationError, IsolatedExporter
+from nemo_gym.run_artifacts import RunArtifacts
+
+
+class AcmeExportConfig(RunExportConfig):
+    """Settings of `gym eval export acme`."""
+
+    project: str = Field(description="Acme project to upload to.")
+    requirement: str = Field(default="acme-sdk", description="pip requirement for the Acme SDK.")
+
+
+class AcmeExporter(IsolatedExporter):
+    """Upload a finished run's aggregate metrics to Acme, with the SDK in its own virtual environment."""
+
+    name: ClassVar[str] = "acme"
+    config_model: ClassVar[type[RunExportConfig]] = AcmeExportConfig
+    worker_fpath: ClassVar[Path] = Path(__file__).with_name("acme_worker.py")
+
+    config: AcmeExportConfig
+
+    def required_packages(self) -> tuple[str, ...]:
+        return (self.config.requirement,)
+
+    def build_payload(self, artifacts: RunArtifacts, workdir: Path) -> dict[str, Any]:
+        problem = unexportable_reason(artifacts)
+        if problem is not None:
+            raise ExportPreparationError(problem)
+
+        staged_dir = workdir / "run"
+        staged_dir.mkdir()
+        shutil.copy2(artifacts.aggregate_metrics_json_fpath, staged_dir)
+        return {"project": self.config.project, "staged_dir": str(staged_dir)}
+```
+
+The worker is a standalone file next to it:
+
+```python title="acme_worker.py"
+def run(payload: dict) -> dict:
+    from acme_sdk import Client, UploadRefused
+
+    try:
+        upload = Client().upload(payload["staged_dir"], project=payload["project"])
+    except UploadRefused as exc:
+        return {"state": "failed", "error": f"Acme refused the upload: {exc}", "exit_code": 4}
+
+    if upload.duplicate:
+        return {"state": "skipped", "detail": {"upload_id": upload.id}}
+    return {"detail": {"upload_id": upload.id}}
+```
+
+How it fits together:
+
+- **`build_payload(artifacts, workdir)`** runs in the main process. It returns a JSON-serializable dict for the worker, and anything it stages goes under `workdir`, which is removed afterwards. Raise `ExportPreparationError` when the run cannot be exported; it becomes a `failed` result, before any environment is built.
+- **The environment** is built on first use from `required_packages()` (or a `requirements` class attribute), under `<uv_venv_dir>/exporters/<name>/`, and reused afterwards. A changed requirement list gets a fresh one. Where the SDK is installed from is the user's uv configuration, so do not hard-code a package index.
+- **The worker** defines `run(payload) -> dict` and must not import `nemo_gym`: its environment does not have it. It returns `state` (`succeeded` by default, `skipped` or `failed`), and optionally `error`, `exit_code` and `detail`. An exception it raises becomes a `failed` result.
+- **The payload** reaches the worker as JSON on stdin and the result comes back in a file, so credentials stay out of the process list and anything the SDK prints cannot corrupt the result.
+
+Register `acme` in `RUN_EXPORTERS` and `RUN_EXPORTER_CONFIGS` exactly as above. No extra is needed, because the SDK never enters Gym's environment.
+
+## Test It
+
+- Test an in-process exporter with a temporary run: write a rollouts file, its aggregate metrics and saved config, call `export`, and assert the result and the destination. Cover the failure and `skipped` paths too.
+- Test an isolated exporter against a stand-in for the SDK, not the real one. Put a small fake package (here `acme_sdk`) on the worker's `PYTHONPATH` and run the real worker as a subprocess, so the payload, the harness and the result protocol are all exercised.
+- If a test needs the real SDK, make it opt-in rather than blocking, like the `--with_downloads` option in `tests/conftest.py`: a flag, a marker, and a skip without the flag. It can check that the calls your worker makes still exist, without uploading anything.
+
+The two examples on this page live in `tests/unit_tests/exporter_guide/`, are exercised by `tests/unit_tests/test_exporter_guide.py`, and a test checks that the code blocks above match those files.
+
+## Handle Credentials Safely
+
+- Credentials come from the export command (command line, `env.yaml`) or from the SDK's own login or environment. The run's saved configuration has its secrets masked, so never read credentials from it.
+- Keep secrets out of `detail`, error messages and logs: results are printed and written to files.
+- Do not hard-code package indexes, endpoints or tokens. Take an endpoint as a setting, and leave package indexes to the user's uv configuration.
