@@ -180,7 +180,7 @@ def apply_tool_call(
 
     elapsed = time.monotonic() - started
     spec = registry.get(tool)
-    # Charge the time to the axis it was spent on.
+    # Charge the time to the axis the tool's cost class names. A GPU tool run on CPU still charges gpu_seconds.
     on_gpu = spec.cost is not Cost.CHEAP
     budget.charge(tool_calls=1, gpu_seconds=elapsed if on_gpu else 0.0, cpu_seconds=0.0 if on_gpu else elapsed)
     state.record(
