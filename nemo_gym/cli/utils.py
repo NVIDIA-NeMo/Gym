@@ -21,6 +21,12 @@ from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.utils.text import did_you_mean
 
 
+def listed_names(names: list[str], *, limit: int = 10) -> str:
+    """Quote and join names for an error message, showing at most ``limit`` of them."""
+    shown = ", ".join(repr(name) for name in names[:limit])
+    return f"{shown} and {len(names) - limit} more" if len(names) > limit else shown
+
+
 def exit_unknown_component(name: str, candidates: Iterable[str], type_label: str) -> None:
     """Print an `unknown <type> '<name>'` error (with a did-you-mean hint) and exit nonzero."""
     import rich

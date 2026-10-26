@@ -5149,10 +5149,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         unknown = sorted(requested - available)
         if not unknown:
             return
-        instances_by_server_type: Dict[str, List[str]] = defaultdict(list)
+        from nemo_gym.cli.utils import listed_names
+
+        instances_by_agent_type: Dict[str, List[str]] = defaultdict(list)
         for name in sorted(available):
-            for server_type in global_config_dict[name]["responses_api_agents"]:
-                instances_by_server_type[str(server_type)].append(name)
+            for agent_type in global_config_dict[name]["responses_api_agents"]:
+                instances_by_agent_type[str(agent_type)].append(name)
         hints = []
         for name in unknown:
             # Naming a non-agent instance (e.g. a resources server via agent_map) is as fatal as a
@@ -5160,16 +5162,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             if name in global_config_dict:
                 hints.append(f"{name!r} (exists but is not an agent instance)")
                 continue
-            if name in instances_by_server_type:
-                instances = _listed_names(instances_by_server_type[name])
-                hints.append(f"{name!r} (an agent server type, not an instance; use {instances})")
+            if name in instances_by_agent_type:
+                instances = listed_names(instances_by_agent_type[name])
+                hints.append(f"{name!r} (an agent type, not an instance; use {instances})")
                 continue
             close = get_close_matches(name, available, n=1)
             hints.append(f"{name!r}" + (f" (did you mean {close[0]!r}?)" if close else ""))
         raise ValueError(
             f"Rows reference agents not present in the running config: {', '.join(hints)}. "
-            "`--agent` takes the agent instance name, the top-level key in the config. "
-            f"Agent instances in this run: {_listed_names(sorted(available)) or 'none'}. "
+            "Agent names (`--agent`, `agent_ref.name`) are agent instance names, the top-level keys in the config. "
+            f"Agent instances in this run: {listed_names(sorted(available)) or 'none'}. "
             "Include the agent's config in the run, or re-route with +agent_map/+agent_name."
         )
 
@@ -6567,8 +6569,3 @@ def __getattr__(name: str) -> Any:
     except AttributeError:
         return _moved_cli_entry_points(name)
 
-
-def _listed_names(names: List[str], *, limit: int = 10) -> str:
-    """Quote and join names for an error message, showing at most ``limit`` of them."""
-    shown = ", ".join(repr(name) for name in names[:limit])
-    return f"{shown} and {len(names) - limit} more" if len(names) > limit else shown
