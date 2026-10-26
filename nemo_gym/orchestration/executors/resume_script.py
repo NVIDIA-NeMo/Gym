@@ -105,21 +105,52 @@ fi
 # This job continues the run, so an earlier stop no longer describes it.
 rm -f "$_incomplete_file"
 echo "$SLURM_JOB_ID" >> "$OUTPUT_DIR/{job_chain_name}"
-# A requeued job keeps its job id and runs this script again. One follow-up per job id, so a requeue
-# does not queue a second one on the same dependency. mkdir is atomic on shared filesystems.
+# A requeued job keeps its job id and runs this script again. One follow-up per job id: the marker is a
+# claim on it, taken with an O_EXCL create (bash noclobber, not mkdir: uutils coreutils 0.10.0's mkdir tells
+# concurrent callers that both succeeded). A claim with no follow-up pending on this job was left by a shell
+# that died before sbatch answered, or by an sbatch that failed; replace it.
 _guard_marker="$OUTPUT_DIR/.gym_followup_queued.$SLURM_JOB_ID"
-if ! mkdir "$_guard_marker" 2>/dev/null; then
-    echo "Auto-resume follow-up for job $SLURM_JOB_ID is already queued (requeued job). Not queueing another."
-# kill-on-invalid-dep: without it, clusters lacking kill_invalid_depend keep the successor pending forever.
-elif _next_output=$(sbatch --dependency=afternotok:$SLURM_JOB_ID --kill-on-invalid-dep=yes "$_this_script" $SLURM_JOB_ID 2>&1); then
-    _next_id=$(echo "$_next_output" | grep -oE '[0-9]+')
-    if [[ -n "$_next_id" ]]; then
-        echo "Auto-resume follow-up queued: $_next_id (afternotok:$SLURM_JOB_ID)"
+_gym_claim_followup() {{ (set -C; : > "$_guard_marker") 2>/dev/null; }}
+_gym_queue_followup=1
+if ! _gym_claim_followup; then
+    _gym_queue_followup=0
+    # squeue's %E lists the dependencies, e.g. "afternotok:123(unfulfilled)", and %Z the job's working directory.
+    # The follow-up runs in this job dir (--chdir), so a dependent job of another run does not count. %Z is the
+    # --chdir path as given, while $PWD in the job can be the resolved one, so the two are compared with -ef
+    # (same file), never as strings.
+    # --all: without it squeue does not list jobs, ours included, in a hidden partition.
+    if ! _pending=$(squeue --me --all --noheader --states=PENDING --format='%i|%E|%Z' 2>&1); then
+        # Unknown is not none: a second follow-up would run the job dir twice, so keep the claim.
+        echo "WARNING: squeue failed ($_pending); cannot tell whether job $SLURM_JOB_ID has a follow-up, so none is queued."
+    elif _followup=$(
+            while IFS='|' read -r _id _deps _cwd; do
+                [[ -n "$_cwd" && "$_cwd" -ef "$OUTPUT_DIR" ]] || continue
+                if grep -qE "(^|[ ,])afternotok:$SLURM_JOB_ID([(,]|$)" <<< "$_deps"; then
+                    echo "$_id"
+                    break
+                fi
+            done <<< "$_pending"
+        ) && [[ -n "$_followup" ]]; then
+        echo "Auto-resume follow-up for job $SLURM_JOB_ID is already queued: $_followup (requeued job). Not queueing another."
+    else
+        echo "Follow-up claim of job $SLURM_JOB_ID has no pending follow-up (submission interrupted or failed). Queueing one."
+        rm -rf -- "$_guard_marker"
+        _gym_claim_followup && _gym_queue_followup=1
     fi
-else
-    # Release the marker so a requeue of this job can try again.
-    rmdir "$_guard_marker" 2>/dev/null
-    echo "WARNING: Failed to submit auto-resume follow-up. Chain will NOT continue on failure."
+fi
+if [[ $_gym_queue_followup == 1 ]]; then
+    # kill-on-invalid-dep: without it, clusters lacking kill_invalid_depend keep the successor pending forever.
+    if _next_output=$(sbatch --dependency=afternotok:$SLURM_JOB_ID --kill-on-invalid-dep=yes "$_this_script" $SLURM_JOB_ID 2>&1); then
+        _next_id=$(echo "$_next_output" | grep -oE '[0-9]+')
+        if [[ -n "$_next_id" ]]; then
+            echo "$_next_id" > "$_guard_marker"
+            echo "Auto-resume follow-up queued: $_next_id (afternotok:$SLURM_JOB_ID)"
+        fi
+    else
+        # Keep the claim: sbatch can fail after the job was created (a lost reply). A requeue of this job asks
+        # squeue, and queues the follow-up only if none is pending.
+        echo "WARNING: Failed to submit auto-resume follow-up. The chain may not continue on failure; a requeue of this job queues one if squeue shows none pending."
+    fi
 fi
 """
 

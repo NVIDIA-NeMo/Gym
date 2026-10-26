@@ -107,6 +107,7 @@ def test_config_defaults():
     cfg = _config()
     assert cfg.sandbox_image == "python:3.12-slim"
     assert cfg.sandbox_python == "python3"
+    assert cfg.require_tool_call is False
 
 
 def test_registry_exposes_all_harness_agents():
@@ -273,6 +274,45 @@ async def test_verify_failure_closes_resource_sandbox():
     agent._provider.close.assert_awaited_once_with(handle)
 
 
+@pytest.mark.parametrize(
+    ("output", "reward"),
+    [
+        ([], 0.0),
+        (
+            [
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "42"}],
+                }
+            ],
+            0.0,
+        ),
+        ([{"type": "function_call", "call_id": "c1", "name": "bash", "arguments": "{}"}], 1.0),
+        ([{"type": "custom_tool_call", "call_id": "c1", "name": "apply_patch", "input": ""}], 1.0),
+    ],
+)
+async def test_require_tool_call_zeroes_runs_without_tool_calls(output, reward):
+    agent = _make_agent(require_tool_call=True)
+    agent.server_client.post = AsyncMock(side_effect=[MagicMock(cookies={}), MagicMock(cookies={})])
+    body = HarnessAgentRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+    )
+    response = NeMoGymResponse.model_validate(_response() | {"output": output})
+    with (
+        patch.object(HarnessAgent, "responses", new=AsyncMock(return_value=response)),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch(
+            "responses_api_agents.harness_agent.app.get_response_json",
+            new=AsyncMock(side_effect=[{}, body.model_dump() | {"response": response.model_dump(), "reward": 1.0}]),
+        ),
+    ):
+        result = await agent.run(MagicMock(cookies={}), body)
+    assert result.reward == reward
+    assert result.harness_pre_gate_reward == 1.0
+
+
 @pytest.mark.parametrize("exception_type", [RuntimeError, asyncio.CancelledError])
 async def test_pre_provision_failure_closes_resource_sandbox(exception_type):
     agent = _make_agent()
@@ -356,6 +396,38 @@ async def test_resource_sandbox_survives_until_verification():
     agent._provider.create.assert_not_awaited()
     assert json.loads(uploaded["/work/runner_config.json"])["cwd"] == "/testbed"
     assert json.loads(uploaded["/work/agent_config.json"])["repo_dir"] == "/testbed"
+
+
+@pytest.mark.parametrize(("agent_kwargs", "expected"), [({}, "/app"), ({"cwd": "/"}, "/")])
+async def test_task_workdir_does_not_override_explicit_agent_kwargs(agent_kwargs, expected):
+    agent = _make_agent(agent="deepagents", agent_kwargs=agent_kwargs)
+    agent._gym_tar = None
+    handle = MagicMock(provider_name="opensandbox")
+    agent._provider.connect = AsyncMock(return_value=handle)
+    agent._provider.exec = AsyncMock(
+        side_effect=[
+            SandboxExecResult("", "", 0),
+            SandboxExecResult("", "", 0),
+            SandboxExecResult("RUNNER_DONE", "", 0),
+        ]
+    )
+    uploaded = {}
+
+    async def upload(_, source, target):
+        uploaded[target] = source.read_text()
+
+    agent._provider.upload_file = AsyncMock(side_effect=upload)
+    response = _response()
+    agent._provider.download_file = AsyncMock(side_effect=lambda _, __, path: path.write_text(json.dumps(response)))
+    body = NeMoGymResponseCreateParamsNonStreaming(input="hello", metadata={"workdir": "/app"})
+    token = _RUN_CONTEXT.set({"sandbox_descriptor": {"sandbox_id": "box-1"}})
+    try:
+        with patch.object(agent, "_sandbox_model_url", return_value="https://model.example"):
+            await agent.responses(MagicMock(), body)
+    finally:
+        _RUN_CONTEXT.reset(token)
+    assert json.loads(uploaded["/work/runner_config.json"])["cwd"] == "/app"
+    assert json.loads(uploaded["/work/agent_config.json"])["cwd"] == expected
 
 
 async def test_resource_sandbox_requires_connectable_provider(tmp_path):

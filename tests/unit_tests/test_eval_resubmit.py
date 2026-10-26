@@ -18,8 +18,7 @@ import json
 import os
 import re
 import subprocess
-import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import pytest
@@ -108,7 +107,11 @@ def slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """squeue prints the `squeue_workdirs` file; sbatch records its cwd and environment and answers 4242."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    (bin_dir / "squeue").write_text('#!/bin/bash\ncat "$(dirname "$0")/squeue_workdirs" 2>/dev/null; exit 0\n')
+    # A job in a hidden partition is listed only with --all.
+    (bin_dir / "squeue").write_text(
+        '#!/bin/bash\ncat "$(dirname "$0")/squeue_workdirs" 2>/dev/null\n'
+        '[[ " $* " == *" --all "* ]] && cat "$(dirname "$0")/squeue_workdirs_hidden" 2>/dev/null\nexit 0\n'
+    )
     (bin_dir / "sbatch").write_text(
         '#!/bin/bash\necho "$PWD" > "$(dirname "$0")/cwd"\nenv > "$(dirname "$0")/env"\necho 4242\n'
     )
@@ -197,6 +200,18 @@ def test_resubmit_refuses_while_a_job_runs_in_the_job_dir(tmp_path: Path, slurm_
     assert _record(job_dir).benchmark_job("gsm8k").job_id == "100"
 
 
+def test_resubmit_refuses_while_a_job_runs_in_the_job_dir_in_a_hidden_partition(
+    tmp_path: Path, slurm_bin: Path
+) -> None:
+    job_dir = _staged_run(tmp_path)
+    (slurm_bin / "squeue_workdirs_hidden").write_text(f"{job_dir}\n")
+
+    with pytest.raises(RuntimeError, match="still pending or running"):
+        resubmit(*_handle(job_dir))
+
+    assert not (slurm_bin / "cwd").exists()
+
+
 def test_resubmit_refuses_an_unknown_submission(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="No submission 'gym-job-nope'"):
         resubmit("gym-job-nope", "gsm8k")
@@ -209,23 +224,31 @@ def test_resubmit_refuses_an_unknown_executor(tmp_path: Path) -> None:
 
 def test_two_concurrent_resubmits_queue_one_job(tmp_path: Path, slurm_bin: Path) -> None:
     job_dir = _staged_run(tmp_path)
-    # squeue lists what sbatch queued; sbatch is slow, so both resubmits pass an unlocked squeue check first.
+    # Hold sbatch until the competing resubmit returns, so the lock is tested without a timing guess.
     (slurm_bin / "squeue").write_text('#!/bin/bash\ncat "$(dirname "$0")/queued" 2>/dev/null; exit 0\n')
-    (slurm_bin / "sbatch").write_text('#!/bin/bash\nsleep 1\necho "$PWD" >> "$(dirname "$0")/queued"\necho 4242\n')
-    barrier = threading.Barrier(2)
+    (slurm_bin / "sbatch").write_text(
+        '#!/bin/bash\nstub_dir=$(dirname "$0")\n'
+        'while [ ! -f "$stub_dir/release" ]; do sleep 0.01; done\n'
+        'echo "$PWD" >> "$stub_dir/queued"\necho 4242\n'
+    )
 
     def attempt() -> str:
-        barrier.wait()
         try:
             return resubmit(*_handle(job_dir)).job_id
         except RuntimeError as error:
             return str(error)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        outcomes = list(pool.map(lambda _: attempt(), range(2)))
+        attempts = [pool.submit(attempt) for _ in range(2)]
+        try:
+            done, pending = wait(attempts, timeout=10, return_when=FIRST_COMPLETED)
+            assert len(done) == len(pending) == 1, "one resubmit must refuse while the other holds the lock"
+            assert "another resubmit holds" in next(iter(done)).result()
+        finally:
+            (slurm_bin / "release").touch()
+        outcomes = [attempt.result(timeout=10) for attempt in attempts]
 
     assert sorted(outcome == "4242" for outcome in outcomes) == [False, True]
-    assert re.search("another resubmit holds|still pending or running", next(o for o in outcomes if o != "4242"))
     assert (slurm_bin / "queued").read_text() == f"{job_dir}\n"
     assert not (job_dir / ".gym_resubmit.lock").exists()
 

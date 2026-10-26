@@ -65,6 +65,7 @@ from nemo_gym.token_id_capture import (
     TokenCaptureStore,
     TokenEntry,
     TokenIdCaptureConfig,
+    capture_engine_refusal,
     capture_tokens,
     commit_entry,
     compute_digest,
@@ -86,8 +87,18 @@ from nemo_gym.token_id_capture.lineage import (
     LineageIndex,
     RolloutLineage,
 )
-from nemo_gym.token_id_capture.protocols import TokenCaptureFrozenError, TokenCaptureRetiredError, TokenSource
-from nemo_gym.token_id_capture.records import response_finish_reason
+from nemo_gym.token_id_capture.protocols import (
+    LineageMatch,
+    TokenCaptureFrozenError,
+    TokenCaptureRetiredError,
+    TokenSource,
+)
+from nemo_gym.token_id_capture.records import (
+    ENGINE_REFUSED_CALL_REASON,
+    UNCOMMITTED_CALL_REASON,
+    UNSERVED_CALL_FAILURE_REASONS,
+    response_finish_reason,
+)
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -352,6 +363,187 @@ def test_register_call_intent_uses_optional_sink_extension():
         reset_token_sink(token)
 
     assert calls == [("r", "c")]
+
+
+def test_a_refused_call_resolves_its_intent_and_the_snapshot_reports_it(tmp_path):
+    """A call the engine refused never generated, so its intent is resolved rather than lost."""
+    store = TokenCaptureStore(tmp_path)
+    asyncio.run(store.begin_call("refused", "c1"))
+    entry = TokenEntry(
+        rollout_id="refused",
+        model_call_id="c1",
+        prompt_token_ids=PTOKS,
+        generation_token_ids=GTOKS,
+        generation_log_probs=LPS,
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    asyncio.run(store.put(entry))
+    asyncio.run(store.begin_call("refused", "c2"))
+    asyncio.run(store.record_engine_refusal("refused", model_call_id="c2", code="context_length_exceeded"))
+
+    snapshot = store.freeze_now("refused")
+
+    assert [entry.model_call_id for entry in snapshot.entries] == ["c1"]
+    assert snapshot.incomplete is False
+    assert [(record.model_call_id, record.code) for record in snapshot.engine_refusals] == [
+        ("c2", "context_length_exceeded")
+    ]
+    assert snapshot.engine_refusals[0].created_at > 0
+    # The refusal is a lifecycle fact and lives in the fsynced state file; there is no payload file for it.
+    state = orjson.loads(store.state_path_for("refused").read_bytes())
+    assert [record["model_call_id"] for record in state["engine_refusals"]] == ["c2"]
+    assert sorted(path.suffix for path in tmp_path.iterdir()) == [".intents", ".json", ".jsonl", ".lock"]
+
+
+def test_a_refusal_repeats_idempotently_and_conflicts_on_a_different_code(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    asyncio.run(store.record_engine_refusal("r0", model_call_id="c2", code="context_length_exceeded"))
+    asyncio.run(store.record_engine_refusal("r0", model_call_id="c2", code="context_length_exceeded"))
+
+    with pytest.raises(ValueError, match="different code"):
+        asyncio.run(store.record_engine_refusal("r0", model_call_id="c2", code=None))
+
+    assert len(store.freeze_now("r0").engine_refusals) == 1
+
+
+def test_a_refusal_after_freeze_is_rejected_and_the_snapshot_is_unchanged(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    before = store.freeze_now("r0")
+
+    with pytest.raises(TokenCaptureFrozenError):
+        asyncio.run(store.record_engine_refusal("r0", model_call_id="c9", code="context_length_exceeded"))
+
+    after = store.freeze_now("r0")
+    assert after.engine_refusals == ()
+    assert (after.snapshot_id, after.version) == (before.snapshot_id, before.version)
+
+
+def test_retire_clears_the_recorded_engine_refusals(tmp_path):
+    # The retirement fence keeps the state file so a late writer still meets it, and the fence
+    # carries no refusal of the retired attempt: a refusal is a lifecycle fact of the records it
+    # resolved an intent for, and those records are gone.
+    store = TokenCaptureStore(tmp_path)
+    _store_entry(store, "r0")
+    asyncio.run(store.begin_call("r0", "c2"))
+    asyncio.run(store.record_engine_refusal("r0", model_call_id="c2", code="context_length_exceeded"))
+
+    assert store.retire_now(["r0"]) == {"removed": ["r0"], "absent": []}
+
+    state = orjson.loads(store.state_path_for("r0").read_bytes())
+    assert state["retired"] is True
+    assert state["engine_refusals"] == []
+
+
+def test_a_refusal_for_a_retired_rollout_is_rejected(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    snapshot = store.freeze_now("r0")
+    assert asyncio.run(store.drop("r0", snapshot_id=snapshot.snapshot_id, version=snapshot.version))
+
+    with pytest.raises(TokenCaptureRetiredError):
+        asyncio.run(store.record_engine_refusal("r0", model_call_id="c9", code="context_length_exceeded"))
+
+
+def test_record_refusal_uses_the_optional_sink_extension():
+    # The record carries the lineage decision ``resolve_parent`` made for the request before
+    # dispatch, so the builder can place the refusal on the branch it continued.
+    calls: list[tuple] = []
+
+    class Sink:
+        async def record_engine_refusal(
+            self,
+            rollout_id: str,
+            *,
+            model_call_id: str,
+            code: str | None,
+            parent_call_id: str | None = None,
+            parent_resolution: ParentResolutionStatus | None = None,
+        ) -> None:
+            calls.append((rollout_id, model_call_id, code, parent_call_id, parent_resolution))
+
+    context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
+    context.parent_resolution = LineageResolution(
+        ParentResolutionStatus.RESOLVED,
+        match=LineageMatch(model_call_id="p", cumulative_token_ids=(1, 2, 3), digest="d"),
+    )
+    token = set_token_sink(context)
+    try:
+        asyncio.run(capture_engine_refusal("context_length_exceeded"))
+    finally:
+        reset_token_sink(token)
+
+    assert calls == [("r", "c", "context_length_exceeded", "p", ParentResolutionStatus.RESOLVED)]
+    assert context.engine_refusal_recorded is True
+
+
+def test_record_refusal_without_a_lineage_decision_records_no_parent():
+    calls: list[tuple] = []
+
+    class Sink:
+        async def record_engine_refusal(
+            self, rollout_id: str, *, model_call_id: str, code: str | None, **lineage
+        ) -> None:
+            calls.append((code, lineage))
+
+    context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
+    token = set_token_sink(context)
+    try:
+        asyncio.run(capture_engine_refusal(None))
+    finally:
+        reset_token_sink(token)
+
+    assert calls == [(None, {"parent_call_id": None, "parent_resolution": None})]
+
+
+def test_record_refusal_without_the_extension_warns_once_and_leaves_the_intent_dangling(caplog):
+    class Sink:
+        async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+            pass
+
+    context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
+    token = set_token_sink(context)
+    try:
+        with patch("nemo_gym.token_id_capture.sink._REFUSE_CALL_MISSING_NOTED", [False]):
+            with caplog.at_level(logging.WARNING, logger="nemo_gym.token_id_capture.sink"):
+                asyncio.run(register_call_intent())
+                asyncio.run(capture_engine_refusal("context_length_exceeded"))
+                asyncio.run(capture_engine_refusal("context_length_exceeded"))
+    finally:
+        reset_token_sink(token)
+
+    warnings = [r.getMessage() for r in caplog.records if "does not implement record_engine_refusal" in r.getMessage()]
+    assert len(warnings) == 1
+    assert warnings[0].startswith("Sink Sink does not implement record_engine_refusal")
+    assert context.engine_refusal_recorded is False
+
+
+def test_the_unserved_call_reasons_are_the_refusal_and_the_uncommitted_call():
+    """Pin the set a framework's receipt builder treats as off-chain rather than poisoning."""
+    import nemo_gym.token_id_capture as token_id_capture
+
+    assert UNSERVED_CALL_FAILURE_REASONS == frozenset({UNCOMMITTED_CALL_REASON, ENGINE_REFUSED_CALL_REASON})
+    # NeMo RL reads both names from the package root with a getattr fallback, so a dropped export
+    # would silently poison refused calls' receipts rather than fail an import.
+    assert token_id_capture.UNSERVED_CALL_FAILURE_REASONS is UNSERVED_CALL_FAILURE_REASONS
+    assert token_id_capture.ENGINE_REFUSED_CALL_REASON == ENGINE_REFUSED_CALL_REASON
+
+
+def test_record_refusal_never_raises(caplog):
+    class Sink:
+        async def record_engine_refusal(
+            self, rollout_id: str, *, model_call_id: str, code: str | None, **lineage
+        ) -> None:
+            raise RuntimeError("disk full")
+
+    context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
+    token = set_token_sink(context)
+    try:
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.token_id_capture.sink"):
+            asyncio.run(capture_engine_refusal("context_length_exceeded"))
+    finally:
+        reset_token_sink(token)
+
+    assert context.engine_refusal_recorded is False
+    assert any("Could not record the engine refusal" in r.getMessage() for r in caplog.records)
 
 
 def test_token_store_freeze_is_atomic_and_conditional_drop_is_race_safe(tmp_path):
@@ -1371,6 +1563,19 @@ def test_model_server_can_declare_successful_non_generating_route(tmp_path):
     assert TokenCaptureStore(tmp_path).freeze_now("declared-roll0").incomplete is False
 
 
+def test_embeddings_route_is_non_generating(tmp_path):
+    class _EmbeddingsModel(_CapturingModel):
+        async def embeddings(self, body: dict = Body()) -> dict:
+            return {"data": [{"embedding": [0.5], "index": 0}]}
+
+    client = TestClient(_server(_both_enabled(tmp_path), model_cls=_EmbeddingsModel).setup_webserver())
+
+    response = client.post("/ng-rollout/embed-roll0/training-token-capture/v1/embeddings", json={"input": "hi"})
+
+    assert response.status_code == 200
+    assert TokenCaptureStore(tmp_path).freeze_now("embed-roll0").incomplete is False
+
+
 def test_package_is_dependency_free_leaf():
     """Keep token capture independent of Gym's server stack.
 
@@ -1570,10 +1775,14 @@ def test_delete_removes_records_and_marker(tmp_path):
         )
     )
     asyncio.run(store.mark_incomplete("gone-0", "c"))
+    asyncio.run(store.record_engine_refusal("gone-0", model_call_id="c2", code="context_length_exceeded"))
     assert store.path_for("gone-0").exists() and store.is_incomplete("gone-0")
     store.delete_now(["gone-0"])
     assert not store.path_for("gone-0").exists()
     assert not store.is_incomplete("gone-0")
+    # The refusal went with the state file.
+    assert not store.state_path_for("gone-0").exists()
+    assert store.freeze_now("gone-0").engine_refusals == ()
     # Idempotent: consuming a rollout twice must not raise.
     store.delete_now(["gone-0"])
 
