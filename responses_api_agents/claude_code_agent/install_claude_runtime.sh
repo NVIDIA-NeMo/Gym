@@ -8,12 +8,12 @@
 # Prints the version of the verified runtime. --check-only exits 3 when the runtime is absent or unhealthy.
 
 set -euo pipefail
-version="" runtime="" expected="" source="" check_only="" compressed="" temporary="" lock_dir=""
+version="" runtime="" expected="" source="" check_only="" compressed="" temporary="" lock_link=""
 while (($#)); do
     case $1 in
         --version) version=$2 && shift 2 ;;
         --runtime) runtime=$2 && shift 2 ;;
-        --sha256) expected=${2,,} && shift 2 ;;
+        --sha256) expected=$(tr A-F a-f <<<"$2") && shift 2 ;;
         --source) source=$2 && shift 2 ;;
         --check-only) check_only=1 && shift ;;
         --gzip) compressed=1 && shift ;;
@@ -34,15 +34,39 @@ verify() {
     echo "$actual"
 }
 
-trap 'rm -f -- "$temporary"; [[ -z $lock_dir ]] || rmdir -- "$lock_dir"' EXIT
+# A process as "PID START" from /proc, so a reused PID never matches its former owner; PID alone
+# where /proc is missing.
+process_identity() {
+    local stat=
+    IFS= read -r -d '' stat 2>/dev/null <"/proc/$1/stat" || true
+    if [[ $stat == *') '* ]]; then
+        set -- "$1" ${stat##*) }
+        echo "$1 ${21}"
+    elif kill -0 "$1" 2>/dev/null; then
+        echo "$1"
+    fi
+}
+
+trap 'rm -f -- "$temporary"; [[ -z $lock_link ]] || rm -f -- "$lock_link"' EXIT
 mkdir -p -- "$(dirname -- "$runtime")"
 # Concurrent sessions in one sandbox share the runtime; only one may replace it.
 if command -v flock >/dev/null 2>&1; then
     exec 9>>"$runtime.lock"
     flock 9
 else
-    until mkdir -- "$runtime.lock.d" 2>/dev/null; do sleep 0.1; done
-    lock_dir=$runtime.lock.d
+    # Without flock, a symlink names the owner. A lock whose owner is gone is removed under a second
+    # lock and only after re-reading it, so a lock taken in the meantime is never removed.
+    owner=$(process_identity $$)
+    until ln -s "$owner" "$runtime.lock.owner" 2>/dev/null; do
+        current=$(readlink "$runtime.lock.owner" 2>/dev/null) || current=
+        if [[ -n $current && $(process_identity "${current%% *}") != "$current" ]] &&
+            mkdir "$runtime.lock.reclaim" 2>/dev/null; then
+            [[ $(readlink "$runtime.lock.owner" 2>/dev/null) != "$current" ]] || rm -f "$runtime.lock.owner"
+            rmdir "$runtime.lock.reclaim"
+        fi
+        sleep 0.1
+    done
+    lock_link=$runtime.lock.owner
 fi
 
 verify "$runtime/claude" 2>/dev/null && exit 0

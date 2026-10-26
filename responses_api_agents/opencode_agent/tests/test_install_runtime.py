@@ -21,7 +21,8 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     """Run the real installer with an isolated PATH and no access to the host package manager."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    for name in ("bash", "uname", "getconf", "mkdir", "cp", "tar", "gzip", "chmod", "rm", "sleep"):
+    tools = ("bash", "uname", "getconf", "mkdir", "cp", "tar", "gzip", "chmod", "rm", "sleep", "ln", "readlink", "rmdir")
+    for name in (*tools, "mktemp", "sha256sum", "mv"):
         executable = shutil.which(name)
         if executable is None:
             pytest.skip(f"Installer test requires {name}")
@@ -223,19 +224,34 @@ def cache_runtime(root: Path) -> None:
     (root / "runtime/opencode").chmod(0o755)
 
 
-def test_lock_of_a_killed_installer_is_reclaimed(sandbox: tuple[Path, dict[str, str]]) -> None:
+def identity(pid: int) -> str:
+    """The lock owner as the installer records it: PID and start time."""
+    return f"{pid} {Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()[19]}"
+
+
+@pytest.mark.parametrize("owner", ["exited", "reused"])
+def test_lock_of_a_killed_installer_is_reclaimed(sandbox: tuple[Path, dict[str, str]], owner: str) -> None:
     root, env = sandbox
     cache_runtime(root)
-    killed = subprocess.Popen(["true"])
-    killed.wait()
-    (root / "runtime.lock.d").mkdir()
-    (root / "runtime.lock.d/pid").write_text(f"{killed.pid}\n")
-    result = run_installer(root, env)
-    assert result.returncode == 0, result.stderr
-    assert not (root / "runtime.lock.d").exists()
+    process = subprocess.Popen(["true"] if owner == "exited" else ["sleep", "30"])
+    try:
+        if owner == "exited":
+            process.wait()
+            recorded = f"{process.pid} 1"
+        else:
+            # A live process that reuses the owner's PID started later, so it does not hold the lock.
+            recorded = f"{process.pid} {int(identity(process.pid).split()[1]) - 1}"
+        (root / "runtime.lock.owner").symlink_to(recorded)
+        result = run_installer(root, env)
+        assert result.returncode == 0, result.stderr
+        assert not (root / "runtime.lock.owner").is_symlink()
+        assert not (root / "runtime.lock.reclaim").exists()
+    finally:
+        process.kill()
+        process.wait()
 
 
-@pytest.mark.parametrize("lock", ["mkdir", "flock"])
+@pytest.mark.parametrize("lock", ["owner", "flock"])
 def test_concurrent_installers_wait_for_the_lock_holder(sandbox: tuple[Path, dict[str, str]], lock: str) -> None:
     root, env = sandbox
     cache_runtime(root)
@@ -250,8 +266,7 @@ def test_concurrent_installers_wait_for_the_lock_holder(sandbox: tuple[Path, dic
             time.sleep(0.01)
     else:
         holder = subprocess.Popen(["sleep", "30"])
-        (root / "runtime.lock.d").mkdir()
-        (root / "runtime.lock.d/pid").write_text(f"{holder.pid}\n")
+        (root / "runtime.lock.owner").symlink_to(identity(holder.pid))
     try:
         installer = subprocess.Popen(
             [str(root / "bin/bash"), str(root / "install.sh"), str(root / "runtime"), "1.17.11"], env=env

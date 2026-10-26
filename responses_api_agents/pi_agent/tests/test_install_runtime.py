@@ -13,7 +13,9 @@ import pytest
 INSTALLER = Path(__file__).parents[1] / "install_pi_runtime.sh"
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Pi requires Linux")
 # On musl the installer looks for the task's C++ library where musl's loader does; this host may lack it there.
-MUSL_LIBSTDCXX = [] if any(Path(d, "libstdc++.so.6").exists() for d in ("/lib", "/usr/lib")) else ["libstdc++"]
+MUSL_LIBSTDCXX = (
+    [] if any(Path(d, "libstdc++.so.6").exists() for d in ("/lib", "/usr/local/lib", "/usr/lib")) else ["libstdc++"]
+)
 
 
 @pytest.fixture

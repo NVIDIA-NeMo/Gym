@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import shutil
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -15,8 +16,12 @@ from responses_api_agents.claude_code_agent import runtime as host_runtime
 
 INSTALLER = Path(host_runtime.__file__).with_name("install_claude_runtime.sh")
 pytestmark = pytest.mark.skipif(
-    shutil.which("bash") is None or shutil.which("sha256sum") is None, reason="bash and sha256sum are required"
+    any(shutil.which(tool) is None for tool in ("bash", "sha256sum", "timeout")),
+    reason="bash, sha256sum and timeout are required",
 )
+# The installer's tools without flock, for its fallback lock.
+FALLBACK_TOOLS = ("bash", "sha256sum", "timeout", "mktemp", "gzip", "cat", "chmod", "mv", "rm", "mkdir", "dirname")
+FALLBACK_TOOLS += ("ln", "readlink", "rmdir", "sleep", "tr", "kill")
 
 
 @pytest.fixture
@@ -93,3 +98,60 @@ def test_installer_verifies_decompressed_native_bytes_and_check_only_reports_abs
     assert (runtime / "claude").read_bytes() == source.read_bytes()
     checked = install(runtime, "--sha256", checksum, "--check-only")
     assert (checked.returncode, checked.stdout) == (0, "2.1.108 (Claude Code)\n")
+
+
+def _without_flock(tmp_path: Path) -> dict[str, str]:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for tool in FALLBACK_TOOLS:
+        if shutil.which(tool) is None:
+            continue
+        (bindir / tool).symlink_to(shutil.which(tool))
+    return {"PATH": str(bindir)}
+
+
+def _identity(pid: int) -> str:
+    stat = Path(f"/proc/{pid}/stat")
+    return f"{pid} {stat.read_text().rsplit(') ', 1)[1].split()[19]}" if stat.exists() else str(pid)
+
+
+def test_lock_left_by_a_killed_installer_is_reclaimed_without_flock(tmp_path, binary):
+    source, checksum = binary
+    exited = subprocess.Popen(["true"])
+    exited.wait()
+    (tmp_path / "runtime.lock.owner").symlink_to(_identity(exited.pid))
+    result = subprocess.run(
+        ["bash", str(INSTALLER), "--version", "2.1.108", "--runtime", str(tmp_path / "runtime")]
+        + ["--sha256", checksum, "--source", str(source)],
+        env=_without_flock(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert (result.returncode, result.stdout) == (0, "2.1.108 (Claude Code)\n"), result.stderr
+    assert not (tmp_path / "runtime.lock.owner").is_symlink()
+
+
+def test_installer_without_flock_waits_for_a_live_lock_owner(tmp_path, binary):
+    source, checksum = binary
+    holder = subprocess.Popen(["sleep", "30"])
+    try:
+        (tmp_path / "runtime.lock.owner").symlink_to(_identity(holder.pid))
+        installer = subprocess.Popen(
+            ["bash", str(INSTALLER), "--version", "2.1.108", "--runtime", str(tmp_path / "runtime")]
+            + ["--sha256", checksum, "--source", str(source)],
+            env=_without_flock(tmp_path),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        time.sleep(0.5)
+        assert installer.poll() is None
+        holder.kill()
+        holder.wait()
+        # The owner is gone, so its lock is reclaimed and the install proceeds.
+        stdout, stderr = installer.communicate(timeout=20)
+        assert (installer.returncode, stdout) == (0, "2.1.108 (Claude Code)\n"), stderr
+    finally:
+        holder.kill()
+        holder.wait()

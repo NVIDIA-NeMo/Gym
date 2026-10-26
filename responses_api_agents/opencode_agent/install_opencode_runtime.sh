@@ -11,23 +11,36 @@ path_prefix=${5:-}
 if [ -n "$path_prefix" ]; then export PATH="$path_prefix:$PATH"; fi
 
 [ "$(uname -s)" = Linux ] || { echo 'OpenCode sandbox execution requires a Linux task image' >&2; exit 1; }
+# A process as "PID START" from /proc, so a reused PID never matches its former owner; PID alone
+# where /proc is missing.
+process_identity() {
+  local stat=
+  IFS= read -r -d '' stat 2>/dev/null <"/proc/$1/stat" || true
+  if [[ $stat == *') '* ]]; then
+    set -- "$1" ${stat##*) }
+    echo "$1 ${21}"
+  elif kill -0 "$1" 2>/dev/null; then
+    echo "$1"
+  fi
+}
 # Serialize preparation of the version-scoped cache in a shared task sandbox.
 if command -v flock >/dev/null 2>&1; then
   # The kernel releases the lock when the installer exits, however it exits.
   exec 9>"$runtime.lock"
   flock 9
 else
-  # The lock directory names its owner, so the lock of a killed installer can be reclaimed.
-  until mkdir "$runtime.lock.d" 2>/dev/null; do
-    owner=
-    { read -r owner <"$runtime.lock.d/pid"; } 2>/dev/null || true
-    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
-      rm -rf "$runtime.lock.d"
+  # Without flock, a symlink names the owner. A lock whose owner is gone is removed under a second
+  # lock and only after re-reading it, so a lock taken in the meantime is never removed.
+  owner=$(process_identity $$)
+  until ln -s "$owner" "$runtime.lock.owner" 2>/dev/null; do
+    current=$(readlink "$runtime.lock.owner" 2>/dev/null) || current=
+    if [[ -n $current && $(process_identity "${current%% *}") != "$current" ]] && mkdir "$runtime.lock.reclaim" 2>/dev/null; then
+      [[ $(readlink "$runtime.lock.owner" 2>/dev/null) != "$current" ]] || rm -f "$runtime.lock.owner"
+      rmdir "$runtime.lock.reclaim"
     fi
     sleep 0.1
   done
-  echo "$$" >"$runtime.lock.d/pid"
-  trap 'rm -rf "$runtime.lock.d"' EXIT
+  trap 'rm -f "$runtime.lock.owner"' EXIT
 fi
 case "$(uname -m)" in
   x86_64) arch=x64-baseline ;;
