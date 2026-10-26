@@ -70,6 +70,7 @@ from nemo_gym.health.types import (
     _WorkerInput,
 )
 from nemo_gym.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
+from nemo_gym.rollout_records import resolve_rollout_path
 from nemo_gym.rollout_recovery import manifest_path_for
 from nemo_gym.rollout_store import RolloutStore, raw_outcomes_are_selected
 
@@ -687,7 +688,9 @@ def run_health_checks(
         if not path.is_file():
             raise FileNotFoundError(f"Rollout JSONL not found: {path}")
 
-    paths = [path.resolve() for path in paths]
+    # A legacy run reached through a link keeps the link's name when its companions sit beside the link, as the
+    # aggregation that read it did; otherwise its companions are the ones beside the file the link resolves to.
+    paths = [resolve_rollout_path(path, read_only=True) for path in paths]
     lines = _index_jsonl(paths)
     worker_inputs = [
         _WorkerInput(
