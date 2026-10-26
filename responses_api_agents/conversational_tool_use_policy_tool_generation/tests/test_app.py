@@ -37,8 +37,8 @@ from responses_api_agents.conversational_tool_use_policy_tool_generation.models 
 PACKAGE_DIR = Path(__file__).resolve().parents[1]
 
 
-def chat_completion(text: str, completion_id: str) -> dict[str, Any]:
-    return {
+def chat_completion(text: str, completion_id: str, usage: dict[str, Any] | None = None) -> dict[str, Any]:
+    completion = {
         "id": completion_id,
         "choices": [
             {
@@ -51,6 +51,19 @@ def chat_completion(text: str, completion_id: str) -> dict[str, Any]:
         "created": 0,
         "model": "test-chat-model",
         "object": "chat.completion",
+    }
+    if usage is not None:
+        completion["usage"] = usage
+    return completion
+
+
+def chat_usage(prompt: int, completion: int, *, cached: int = 0, reasoning: int = 0) -> dict[str, Any]:
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion,
+        "prompt_tokens_details": {"cached_tokens": cached},
+        "completion_tokens_details": {"reasoning_tokens": reasoning},
     }
 
 
@@ -174,6 +187,31 @@ async def test_internal_run_uses_message_only_chat_calls_and_converts_final_comp
         call["json"]["messages"][0]["role"] == "user" and isinstance(call["json"]["messages"][0]["content"], str)
         for call in client.calls
     )
+
+
+@pytest.mark.asyncio
+async def test_run_usage_sums_policy_calls_and_excludes_judges() -> None:
+    final_tool = '{"name":"lookup","doc":"Lookup","params":null,"returns":null}'
+    judge_usage = chat_usage(1000, 1000)
+    payloads = [
+        chat_completion("<policy>draft</policy>", "policy-v1", chat_usage(300, 1400, cached=100, reasoning=1200)),
+        chat_completion(f"<tools>{final_tool}</tools>", "tools-v1", chat_usage(1818, 24, cached=300)),
+        chat_completion("<policy>final</policy>", "policy-refine", chat_usage(10, 5)),
+        chat_completion(f"<tools>{final_tool}</tools>", "tools-refine", chat_usage(20, 6)),
+        *[chat_completion("<judgment>true</judgment>", f"cohesion-{index}", judge_usage) for index in range(3)],
+        *[chat_completion("<judgment>0</judgment>", f"golden-{index}", judge_usage) for index in range(4)],
+    ]
+
+    result = await agent(QueueClient(payloads)).run(request("/run"), run_body())
+
+    # Usage covers every policy-model call; judge calls are auxiliary and stay out of the rollout's usage.
+    assert result.response.usage.model_dump() == {
+        "input_tokens": 2148,
+        "input_tokens_details": {"cached_tokens": 400},
+        "output_tokens": 1435,
+        "output_tokens_details": {"reasoning_tokens": 1200},
+        "total_tokens": 3583,
+    }
 
 
 @pytest.mark.asyncio

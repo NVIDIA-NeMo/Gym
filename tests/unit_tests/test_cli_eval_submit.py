@@ -547,6 +547,9 @@ class TestEvalSubmitResolveOnly:
             def run(self, config, *, dry_run: bool = False):
                 raise AssertionError("persist() does not go through run()")
 
+            def resubmit(self, record, benchmark):  # pragma: no cover - unused
+                raise NotImplementedError
+
         config = SubmitConfig.model_validate(
             {"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": DRIVER, "job": JOB}
         )
@@ -580,6 +583,9 @@ class TestEvalSubmitResolveOnly:
             def run(self, config, *, dry_run: bool = False):
                 raise AssertionError("persist() does not go through run()")
 
+            def resubmit(self, record, benchmark):  # pragma: no cover - unused
+                raise NotImplementedError
+
         _NoRunExecutor().persist(
             _record(), config, lambda path, text, **kw: written.__setitem__(path.name, (text, kw))
         )
@@ -589,7 +595,7 @@ class TestEvalSubmitResolveOnly:
         assert "s3cr3t-value" not in record_text
         assert record_kwargs.get("private") is not True
         for env_out in (record["driver"]["env"], record["services"]["svc"]["env"]):
-            assert env_out == {"API_KEY": "host:GYM_TEST_SECRET", "MODE": "fast", "LATE": "runtime:LATE"}
+            assert env_out == env
 
         capsys.readouterr()
         _eval_submit(_args(config_path, resolve_only=True), overrides=[])

@@ -47,6 +47,9 @@ if TYPE_CHECKING:
 
 # Web fetches can take minutes; the runner's own deadline still bounds a hung call.
 _TOOL_TIMEOUT_S = 900
+# Connection attempts before a task tool call fails. httpx retries only before the request is sent, so a call that
+# reached the route is never repeated.
+_TOOL_CONNECT_RETRIES = 3
 
 # Statuses with which a Model Server says the request itself is invalid. Other errors are infrastructure failures.
 _REJECTION_STATUSES = frozenset({400, 413, 422})
@@ -351,12 +354,10 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
         cookies=access["cookies"],
         headers=access["headers"],
         timeout=_TOOL_TIMEOUT_S,
+        transport=httpx.AsyncHTTPTransport(retries=_TOOL_CONNECT_RETRIES),
     ) as http:
         finish_names = payload["finish_tool_names"]
         task_tools = [remote_tool(spec, http) for spec in payload["tools"]]
-        missing = set(finish_names or []) - {tool.name for tool in task_tools}
-        if missing:
-            raise ValueError(f"Finish tools {sorted(missing)} are not among the request's tools")
         client = DynamicMaxTokensChatCompletionsClient(api_key="gym", **payload["client"])
         shell = LocalShell(payload["workdir"], scratch)
         observer.watch_model_calls(client)
@@ -367,7 +368,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             name="stirrup_agent",
             max_turns=payload["max_turns"],
             tools=[
-                shell,
+                *([shell] if payload["code_exec"] else []),
                 TaskTools([tool for tool in task_tools if tool.name not in (finish_names or [])]),
             ],
             finish_tool=[tool for tool in task_tools if tool.name in finish_names] if finish_names else None,

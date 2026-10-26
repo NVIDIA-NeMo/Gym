@@ -61,6 +61,7 @@ from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
 from responses_api_agents.stirrup_agent.sandbox import StirrupSessionState
+from responses_api_agents.stirrup_agent.stirrup_utils import messages_from_input
 
 
 def _usage(usages: list[dict[str, Any]]) -> Optional[NeMoGymResponseUsage]:
@@ -147,6 +148,8 @@ _REMOVED_OPTIONS = [
     "gdpval_container_path",
     "system_prompt_template",
     "user_prompt_template",
+    "model_id",
+    "task",
 ]
 
 
@@ -231,6 +234,10 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
     finish_tool_names: Optional[List[str]] = Field(
         default=None,
         description="Request tools that end the episode when they succeed. None uses Stirrup's own finish tool.",
+    )
+    code_exec: bool = Field(
+        default=True,
+        description="Give the model the code_exec shell tool. Off for tasks whose only tools are the request's.",
     )
     sandbox_provider: Optional[str] = Field(
         default=None, description="Sandbox provider config to start a sandbox from when the session lends none."
@@ -329,16 +336,26 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         if body.tools and state.tool_access is None:
             raise HTTPException(422, "The request has tools, but the session grants no tool access to call them")
+        params = body.model_dump(mode="json")
+        # Checked here, before the runner starts, so a request that can never run is a terminal 422 and not a
+        # retryable 500 that re-seeds a sandbox and installs the runtime again.
+        try:
+            messages_from_input(params["input"], params["instructions"])
+        except (ValueError, NotImplementedError) as error:
+            raise HTTPException(422, str(error)) from error
+        missing = set(self.config.finish_tool_names or []) - {tool["name"] for tool in params["tools"] or []}
+        if missing:
+            raise HTTPException(422, f"Finish tools {sorted(missing)} are not among the request's tools")
         max_completion_tokens_cap = self.config.max_completion_tokens_cap
         if body.max_output_tokens is not None:
             max_completion_tokens_cap = min(max_completion_tokens_cap, body.max_output_tokens)
         model_name = body.model or "default"
-        params = body.model_dump(mode="json")
         payload = {
             "input": params["input"],
             "instructions": params["instructions"],
             "tools": params["tools"],
             "finish_tool_names": self.config.finish_tool_names,
+            "code_exec": self.config.code_exec,
             "tool_access": state.tool_access.model_dump(mode="json") if state.tool_access else None,
             "workdir": state.session.workdir,
             "stop_request_path": state.session.stop_request_path,

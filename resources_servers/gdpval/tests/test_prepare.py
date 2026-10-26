@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from benchmarks.gdpval import prepare as prepare_module
+from benchmarks.gdpval import prepare_harness_neutral
 from benchmarks.gdpval.prepare import reference_files_str
 from nemo_gym.prompt import fill_prompt, load_prompt_config
 
@@ -113,3 +114,12 @@ def test_every_benchmark_prompt_renders_a_prepared_record(prepared, prompt_file)
     assert "- reference_files/a/Plan.docx" in content
     assert "<task>\nSector: Finance\nOccupation: Auditor\n\nAudit the ledger.\n</task>" in content
     assert "{" not in content
+
+
+def test_harness_neutral_rows_are_the_benchmark_rows_without_the_tool_list(prepared, tmp_path, monkeypatch):
+    monkeypatch.setattr(prepare_harness_neutral, "OUTPUT_FPATH", tmp_path / "data" / "harness_neutral.jsonl")
+
+    output = prepare_harness_neutral.prepare()
+
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert rows == [{key: value for key, value in row.items() if key != "responses_create_params"} for row in prepared]
