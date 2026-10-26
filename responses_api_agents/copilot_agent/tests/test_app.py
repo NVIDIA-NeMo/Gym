@@ -369,6 +369,25 @@ def test_omitted_provider_usage_stays_unknown(setup):
     assert "partial_model_usage_unavailable" in {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
 
 
+@pytest.mark.parametrize("compacted", [False, True])
+def test_compaction_does_not_publish_partial_token_totals(setup, compacted):
+    agent, sandbox = setup
+    span = json.loads(chat_span("chatcmpl-2", usage=(5, 2)))
+    # Real Copilot 1.0.103 marks the next chat span but omits the compaction call's span.
+    span["attributes"]["gen_ai.conversation.compacted"] = compacted
+    sandbox.otel = otel(chat_span("chatcmpl-1", usage=(10, 3)), json.dumps(span))
+    result, closed = run_session(agent)
+    assert result.json()["status"] == "completed"
+    observations = closed.json()["agent_observations"]
+    assert [call["response_id"] for call in observations["records"][0]["model_calls"]] == ["chatcmpl-1", "chatcmpl-2"]
+    if compacted:
+        assert result.json()["usage"] is None
+        assert "compaction_model_usage_unavailable" in {gap["code"] for gap in observations["gaps"]}
+    else:
+        assert result.json()["usage"]["total_tokens"] == 20
+        assert "compaction_model_usage_unavailable" not in {gap["code"] for gap in observations["gaps"]}
+
+
 def test_reported_provider_error_is_a_classified_failed_response(setup):
     agent, sandbox = setup
     sandbox.events = copilot_events(error={"errorType": "query", "message": "400 rejected", "statusCode": 400})

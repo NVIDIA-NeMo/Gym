@@ -252,6 +252,7 @@ class CopilotUsage:
     cached_tokens: Optional[int]
     reasoning_tokens: Optional[int]
     response_ids: list[str]
+    compaction_usage_unavailable: bool = False
 
 
 def parse_copilot_usage(otel: Optional[str]) -> Optional[CopilotUsage]:
@@ -260,12 +261,15 @@ def parse_copilot_usage(otel: Optional[str]) -> Optional[CopilotUsage]:
     Copilot's own usage file reports zero when the provider omits usage, so it is not used for counts.
     Returns ``None`` when no chat spans were observed. Rejected calls contribute zero
     completed-response tokens; missing usage on a successful call remains unknown.
+    Copilot 1.0.103 omits compaction calls from its spans, so observed compaction
+    makes aggregate usage unknown. Per-call counts remain in Gym model capture.
     """
     if otel is None:
         return None
     totals: dict[str, Optional[int]] = {"input": 0, "output": 0, "cached": 0, "reasoning": 0}
     response_ids: list[str] = []
     observed_calls = 0
+    compacted = False
     for line in otel.split("\n"):
         if not line.strip():
             continue
@@ -279,6 +283,7 @@ def parse_copilot_usage(otel: Optional[str]) -> Optional[CopilotUsage]:
         if attributes.get("gen_ai.operation.name") != "chat":
             continue
         observed_calls += 1
+        compacted |= attributes.get("gen_ai.conversation.compacted") is True
         status = record.get("status") if isinstance(record.get("status"), dict) else {}
         if status.get("code") == 2:
             continue  # A failed attempt returned no tokens to count.
@@ -299,11 +304,12 @@ def parse_copilot_usage(otel: Optional[str]) -> Optional[CopilotUsage]:
     if not observed_calls:
         return None
     return CopilotUsage(
-        input_tokens=totals["input"],
-        output_tokens=totals["output"],
-        cached_tokens=totals["cached"],
-        reasoning_tokens=totals["reasoning"],
+        input_tokens=None if compacted else totals["input"],
+        output_tokens=None if compacted else totals["output"],
+        cached_tokens=None if compacted else totals["cached"],
+        reasoning_tokens=None if compacted else totals["reasoning"],
         response_ids=response_ids,
+        compaction_usage_unavailable=compacted,
     )
 
 
@@ -586,6 +592,13 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         ]
         if usage is None:
             gaps.append(ObservationGap(code="model_usage_unavailable", detail="Copilot wrote no OpenTelemetry spans"))
+        if usage is not None and usage.compaction_usage_unavailable:
+            gaps.append(
+                ObservationGap(
+                    code="compaction_model_usage_unavailable",
+                    detail="Copilot omits compaction model calls from native usage spans; aggregate usage is unknown",
+                )
+            )
         cleanup = state.session.cleanup
         access = state.request.sandbox_access
         if cleanup is None:
