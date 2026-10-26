@@ -42,6 +42,7 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxRuntimeRequirements,
     SupportsSandboxSharedStorage,
     SupportsSandboxSidecars,
+    clamp_resource_requests,
     create_provider,
     get_provider_class,
     list_providers,
@@ -87,4 +88,5 @@ __all__ = [
     "resolve_provider_config",
     "resolve_provider_metadata",
     "rewrite_image",
+    "clamp_resource_requests",
 ]

@@ -124,7 +124,26 @@ class TestSandboxAPI:
 
     def test_model_url_carries_rollout_correlation(self) -> None:
         assert _model_url_for_rollout("http://model-host:8000", "3-1") == "http://model-host:8000/ng-rollout/3-1"
+        # No rollout id and no exported traces: byte-for-byte unchanged.
         assert _model_url_for_rollout("http://model-host:8000", None) == "http://model-host:8000"
+        assert _model_url_for_rollout("", None) == ""
+
+    def test_model_url_carries_trace_context_without_a_rollout_id(self, monkeypatch) -> None:
+        # Capture off, traces on: the harness still gets the current span in the URL.
+        from nemo_gym import server_utils
+
+        monkeypatch.setattr(
+            server_utils, "trace_context_path_segment", lambda: "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+        )
+        assert (
+            _model_url_for_rollout("http://model-host:8000", None)
+            == "http://model-host:8000/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+        )
+        assert (
+            _model_url_for_rollout("http://model-host:8000", "3-1")
+            == "http://model-host:8000/ng-rollout/3-1/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+        )
+        assert _model_url_for_rollout("", None) == ""
 
     def test_default_provider_is_named_sandbox(self) -> None:
         config = AnySweAgentConfig(
@@ -228,7 +247,8 @@ class TestSandboxAPI:
         assert _dataset_family("SWE-bench_Multilingual") == "swebench_multilingual"
         assert _dataset_family("R2E-Gym/R2E-Gym-Subset") == "r2e"
 
-    def test_r2e_required_tests(self) -> None:
+    @pytest.mark.parametrize("colored", [False, True])
+    def test_r2e_required_tests(self, colored: bool) -> None:
         instance = {
             "FAIL_TO_PASS": ["tests/test_a.py::test_fix"],
             "PASS_TO_PASS": ["tests/test_b.py::test_stays_green"],
@@ -239,11 +259,15 @@ class TestSandboxAPI:
                 "PASSED tests/test_b.py::test_stays_green",
             ]
         )
-        failing = passing.replace("PASSED tests/test_a.py", "FAILED tests/test_a.py")
-        skipped = passing.replace("PASSED tests/test_a.py", "SKIPPED tests/test_a.py")
+        if colored:
+            passing = passing.replace("PASSED", "\x1b[32mPASSED\x1b[0m")
+            passing = passing.replace("::test_fix", "::\x1b[1mtest_fix\x1b[0m")
+            passing = passing.replace("::test_stays_green", "::\x1b[1mtest_stays_green\x1b[0m")
         assert _r2e_resolved(instance, passing)
-        assert not _r2e_resolved(instance, failing)
-        assert not _r2e_resolved(instance, skipped)
+        for status in ("FAILED", "ERROR", "XFAIL", "SKIPPED"):
+            nonpassing = passing.replace("PASSED", status, 1)
+            assert not _r2e_resolved(instance, nonpassing)
+        assert not _r2e_resolved(instance, passing.splitlines()[0])
 
     def test_safe_config_redacts_provider_key(self) -> None:
         class Params:

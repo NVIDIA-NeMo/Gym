@@ -76,8 +76,11 @@ jobs:
     name: Test
     needs: detect
     if: needs.detect.outputs.run_full == 'true' || needs.detect.outputs.run_servers == 'true'
-    runs-on: ubuntu-latest
+    runs-on: nemo-ci-aws-cpu-4-16
     timeout-minutes: 45
+    env:
+      NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
+      NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -97,12 +100,10 @@ jobs:
 
       - name: Install system test dependencies
         timeout-minutes: 20
-        run: |
-          for i in 1 2 3 4; do
-            timeout 5m sudo bash -c "apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates" && exit 0
-            echo "apt-get attempt $i/4 failed or timed out after 5m; retrying"
-          done
-          exit 1
+        run: bash scripts/ci/install_test_dependencies.sh
+
+      - name: Check shared test-data inventory
+        run: python3 scripts/ci/check_test_data.py --nltk-cache "$HOME/.cache/gym-test-data"
 
       # Unconditional (not gated on run_full) and merged into one step, matching
       # full-test-suite.yml's "Test" step, so the coverage gate below runs on every PR.
@@ -184,8 +185,11 @@ jobs:
     name: Server suite (shard ${{ matrix.shard }})
     needs: detect
     if: needs.detect.outputs.run_full == 'true'
-    runs-on: ubuntu-latest
+    runs-on: nemo-ci-aws-cpu-4-16
     timeout-minutes: 45
+    env:
+      NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
+      NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
     strategy:
       fail-fast: false
       matrix:
@@ -209,12 +213,10 @@ jobs:
 
       - name: Install system test dependencies
         timeout-minutes: 20
-        run: |
-          for i in 1 2 3 4; do
-            timeout 5m sudo bash -c "apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates" && exit 0
-            echo "apt-get attempt $i/4 failed or timed out after 5m; retrying"
-          done
-          exit 1
+        run: bash scripts/ci/install_test_dependencies.sh
+
+      - name: Check shared test-data inventory
+        run: python3 scripts/ci/check_test_data.py --nltk-cache "$HOME/.cache/gym-test-data"
 
       - name: Server tests (shard ${{ matrix.shard }}/${{ env.NUM_SHARDS }})
         run: ./scripts/ci/server_tests.sh "${{ matrix.shard }}" "${{ env.NUM_SHARDS }}"

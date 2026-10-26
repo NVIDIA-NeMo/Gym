@@ -25,7 +25,17 @@ from nemo_gym.environment.validation import (
 
 
 @pytest.mark.parametrize(
-    "name", ["terminal_bench_4/miniswe", "deepsearchqa", "widesearch", "fukuyamabench", "moldetox", "scicodepile"]
+    "name",
+    [
+        "terminal_bench_4/miniswe",
+        "terminal_bench_science/miniswe",
+        "deepsearchqa",
+        "widesearch",
+        "fukuyamabench",
+        "moldetox",
+        "scicodepile",
+        "partner_if",
+    ],
 )
 def test_current_benchmark_manifests_match_runtime_composition(name: str) -> None:
     from nemo_gym.environment.manifest import resolve_manifest_config_path
