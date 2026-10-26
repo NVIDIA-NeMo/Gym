@@ -2,7 +2,7 @@
 
 This sequential Responses agent applies a semantic history policy before each model call. Original image content stays in that history, so retained images are sent through the ordinary model request again. No MediaArena or training-segment definitions are exposed by the harness.
 
-Use the regular `vllm_model` server with framework-owned external capture. NeMo-RL enables `token_id_capture.framework_owned_context` when its `token_capture.context_compaction` option is active. The paired capture protocol uses schema v3; both repositories must be upgraded together.
+Use the regular `vllm_model` server with framework-owned external capture. NeMo-RL sets `token_id_capture.parent_resolution: source_history` when its `token_capture.forest_training` option is active. The paired capture protocol uses schema v3; both repositories must be upgraded together.
 
 The result contains one logical attempt ID, ordered selected response IDs and an outcome. NeMo-RL owns serving-prefix decisions, captured model inputs, training-row planning, logical advantages, and processed media. This agent keeps policy decisions, tool execution and verification. Its reasoning-only/empty-output termination follows the ordinary simple agent.
 
