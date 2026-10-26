@@ -25,7 +25,7 @@ from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
 from aiohttp import ClientResponseError, RequestInfo
-from fastapi import Response
+from fastapi import HTTPException, Response
 from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
 from pytest import MonkeyPatch, mark, raises
@@ -5948,6 +5948,7 @@ def _make_top_logprobs_model(
     return_token_id_information: bool,
     *,
     extra_body: dict[str, Any] | None = None,
+    sampling_overrides: dict[str, Any] | None = None,
     request_prompt_and_generation_token_ids: bool = False,
 ) -> VLLMModel:
     """A VLLMModel with the minimum config needed to exercise top_logprobs handling."""
@@ -5964,6 +5965,7 @@ def _make_top_logprobs_model(
         uses_reasoning_parser=False,
         uses_interleaved_reasoning=False,
         extra_body=extra_body,
+        sampling_overrides=sampling_overrides,
     )
     return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
@@ -5974,6 +5976,88 @@ class TestTopLogprobsHandling:
     replayed rollout JSONL and empties the captured token ids, zeroing the training loss
     mask. These tests cover how the model server defends against that.
     """
+
+    @mark.parametrize("source", ["request", "extra_body", "sampling_overrides"])
+    @mark.parametrize("count", [None, 0, 16])
+    @mark.parametrize("captured", [False, True])
+    def test_normalizes_after_all_overrides(self, source: str, count: int | None, captured: bool) -> None:
+        fields = {"top_logprobs": count}
+        model = _make_top_logprobs_model(
+            return_token_id_information=False,
+            extra_body=fields if source == "extra_body" else None,
+            sampling_overrides=fields if source == "sampling_overrides" else None,
+        )
+        body = {"messages": [{"role": "user", "content": "hi"}], "logprobs": not captured, "temperature": 0.6}
+        if source == "request":
+            body.update(fields)
+        if captured:
+            model._external_capture_handler = VLLMWorkerCaptureHandler()
+            token = set_token_sink(
+                CaptureContext(
+                    rollout_id="r1",
+                    model_call_id="c1",
+                    token_sink=None,
+                    external_staging=True,
+                    capture_admission=CaptureAdmission(rollout_id="r1", model_call_id="c1", mode="text"),
+                )
+            )
+        try:
+            result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        finally:
+            if captured:
+                reset_token_sink(token)
+        assert result["logprobs"] is True
+        assert result["top_logprobs"] == (0 if count is None else count)
+        assert result["temperature"] == 0.6
+
+    @mark.parametrize("source", ["request", "extra_body", "sampling_overrides"])
+    @mark.parametrize("token_ids", [[1], list(range(16))])
+    def test_topk_capture_rejects_specific_logprob_ids(self, source: str, token_ids: list[int]) -> None:
+        fields = {"logprob_token_ids": token_ids}
+        model = _make_top_logprobs_model(
+            return_token_id_information=False,
+            extra_body=fields if source == "extra_body" else None,
+            sampling_overrides=fields if source == "sampling_overrides" else None,
+        )
+        model._external_capture_handler = VLLMWorkerCaptureHandler()
+        body = {"messages": [{"role": "user", "content": "hi"}], "top_logprobs": 16}
+        if source == "request":
+            body.update(fields)
+        token = set_token_sink(
+            CaptureContext(
+                rollout_id="r1",
+                model_call_id="c1",
+                token_sink=None,
+                external_staging=True,
+                capture_admission=CaptureAdmission(rollout_id="r1", model_call_id="c1", mode="text"),
+            )
+        )
+        try:
+            with raises(HTTPException) as error:
+                model._preprocess_chat_completion_create_params(MagicMock(), body)
+        finally:
+            reset_token_sink(token)
+        assert error.value.status_code == 400
+        assert "logprob_token_ids" in error.value.detail
+
+    @mark.parametrize("token_ids", [None, []])
+    def test_topk_capture_allows_unset_specific_logprob_ids(self, token_ids: list[int] | None) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=False)
+        body = {
+            "messages": [],
+            "logprobs": True,
+            "top_logprobs": 16,
+            "ng_capture": {"rollout_id": "r1"},
+            "logprob_token_ids": token_ids,
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        assert result["top_logprobs"] == 16
+
+    def test_specific_logprob_ids_without_capture_are_preserved(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=False)
+        body = {"messages": [], "logprobs": True, "top_logprobs": 16, "logprob_token_ids": [1, 2]}
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        assert result["logprob_token_ids"] == [1, 2]
 
     def test_capture_path_pins_top_logprobs_to_zero(self) -> None:
         """With return_token_id_information=True the server pins top_logprobs=0 regardless
@@ -6023,9 +6107,8 @@ class TestTopLogprobsHandling:
                 },
             )
 
-    def test_noncapture_path_strips_null_top_logprobs(self) -> None:
-        """On the non-capture path a null top_logprobs is dropped (letting vLLM apply its
-        default) rather than forwarded as null (which vLLM reads as "no logprobs")."""
+    def test_noncapture_path_normalizes_null_top_logprobs(self) -> None:
+        """Enabled logprobs use an explicit zero count instead of forwarding null."""
         model = _make_top_logprobs_model(return_token_id_information=False)
 
         result = model._preprocess_chat_completion_create_params(
@@ -6037,7 +6120,7 @@ class TestTopLogprobsHandling:
                 "top_logprobs": None,
             },
         )
-        assert "top_logprobs" not in result
+        assert result["top_logprobs"] == 0
 
         # A genuine integer value must pass through untouched.
         result = model._preprocess_chat_completion_create_params(

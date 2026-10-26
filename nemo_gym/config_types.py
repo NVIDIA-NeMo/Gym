@@ -1005,3 +1005,8 @@ class AggregateMetrics(BaseModel):
 ROLLOUT_PATH_PREFIX = "ng-rollout"
 TOKEN_CAPTURE_PATH_SEGMENT = "training-token-capture"
 TRACE_CONTEXT_PATH_SEGMENT = "ng-trace"
+
+# The listen backlog of every Gym server socket, above uvicorn's default of 2048.
+# A burst of new connections at Gym's concurrency then waits in the queue rather than on TCP retransmission backoff.
+# The kernel caps it at net.core.somaxconn.
+DEFAULT_UVICORN_BACKLOG = 16384

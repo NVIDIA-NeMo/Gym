@@ -958,12 +958,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                 else:
                     raise NotImplementedError
 
-        # Drop a null top_logprobs on the non-capture path (caller-supplied logprobs=True).
-        # vLLM treats null as "no logprobs" but a missing field as its default (0), so forwarding null is never useful.
-        # The capture path above already set it to 0 and is unaffected.
-        if body_dict.get("top_logprobs") is None:
-            body_dict.pop("top_logprobs", None)
-
         if extra_body:
             body_dict = extra_body | body_dict
 
@@ -975,6 +969,22 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict = self._external_capture_handler.prepare_request(body_dict)
         else:
             body_dict = self._apply_prefix_supply(body_dict)
+
+        if body_dict.get("ng_capture") and body_dict.get("top_logprobs") and body_dict.get("logprob_token_ids"):
+            # vLLM ignores top_logprobs when specific IDs are requested. Equal
+            # counts do not guarantee those IDs are the sampler's top-k head.
+            raise HTTPException(
+                status_code=400,
+                detail="Top-k token capture does not support logprob_token_ids; omit it to collect the sampler's top-k.",
+            )
+
+        # Normalize after all request overrides and capture controls. vLLM treats
+        # null as no logprobs; zero explicitly requests the chosen token only.
+        if body_dict.get("top_logprobs") is None:
+            if body_dict.get("logprobs"):
+                body_dict["top_logprobs"] = 0
+            else:
+                body_dict.pop("top_logprobs", None)
 
         return body_dict
 
