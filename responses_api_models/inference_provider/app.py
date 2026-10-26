@@ -131,6 +131,12 @@ class InferenceProvider(SimpleResponsesAPIModel):
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
+    async def embeddings(self, body: dict = Body()) -> dict:
+        """Pass an OpenAI-compatible embeddings request through to the provider; the configured model replaces the request's model."""
+        body_dict = self.config.extra_body | body | {"model": self.config.model}
+        async with self._semaphore:
+            return await self._client.create_embeddings(**body_dict)
+
 
 if __name__ == "__main__":
     InferenceProvider.run_webserver()
