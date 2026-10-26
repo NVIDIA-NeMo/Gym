@@ -15,6 +15,8 @@
 # Writes runtime.json beside PARAMS.
 
 shopt -s extglob
+# Inherited variables with these names must not configure the runner or leak into the CLI.
+unset -v cwd command env stdin stdout stderr setup unset_env events
 source "$1" || exit 1
 printf '{"hostname": "%s", "pid": %d}\n' "$HOSTNAME" "$$" >"$(dirname "$1")/runtime.json"
 eval "${setup-}" || exit 1
@@ -34,12 +36,17 @@ exec 3<"$stdout" 4>"$events"
 cli=$!
 trap 'kill -TERM "$cli" 2>/dev/null' TERM
 pending=""
-emit() { [[ $1 == {* ]] && printf '[%s, %s]\n' "$seen" "$1" >&4; }
-# Stamp new complete lines, keeping a partial one for the next pass. Bash < 5 has whole seconds.
+emit() {
+    local line=${1%$'\r'}
+    [[ $line == {* ]] && printf '[%s, %s]\n' "$seen" "$line" >&4
+}
+# Stamp new complete lines, keeping a partial one for the next pass. Bash < 5 has whole seconds;
+# bash < 4.2 has no strftime in printf and forks date.
 stamp() {
     local line
     seen=${EPOCHREALTIME/,/.}
-    [[ -n $seen ]] || printf -v seen '%(%s)T' -1
+    [[ -n $seen ]] || printf -v seen '%(%s)T' -1 2>/dev/null
+    [[ $seen =~ ^[0-9.]+$ ]] || seen=$(date +%s)
     while IFS= read -r line <&3; do
         emit "$pending$line"
         pending=""

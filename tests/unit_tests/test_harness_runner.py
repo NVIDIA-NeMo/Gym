@@ -83,6 +83,32 @@ def test_events_keep_json_objects_with_the_time_they_were_seen(tmp_path: Path) -
     assert all(before - 1 <= seen <= time.time() for seen, _ in events)
 
 
+
+def test_events_keep_numeric_times_and_crlf_lines_without_epochrealtime(tmp_path: Path) -> None:
+    # Bash < 5 has no EPOCHREALTIME and bash < 4.2 no printf strftime; both still stamp numbers.
+    script = 'printf \'{"type": "a"}\\r\\n{"type": "partial"}\'; sleep 0.2'
+    params = _params(tmp_path, command=["bash", "-c", script], events=str(tmp_path / "events.jsonl"))
+    result = subprocess.run(
+        ["bash", "-c", 'unset EPOCHREALTIME; . "$0" "$1"', str(HARNESS_RUNNER_SCRIPT), str(params)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert [event for _, event in events] == [{"type": "a"}, {"type": "partial"}]
+    assert all(isinstance(seen, (int, float)) and seen > 0 for seen, _ in events)
+
+
+def test_inherited_runner_names_neither_configure_the_runner_nor_reach_the_cli(tmp_path: Path) -> None:
+    params = _params(tmp_path, command=["bash", "-c", 'echo "${stdout-unset}|${setup-unset}"'])
+    inherited = {"setup": f"touch {tmp_path}/evaluated", "events": str(tmp_path / "events.jsonl"), "stdout": "leak"}
+    result = _run(params, env=os.environ | inherited)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "stdout.log").read_text() == "unset|unset\n"
+    assert not (tmp_path / "evaluated").exists()
+    assert not (tmp_path / "events.jsonl").exists()
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux process semantics")
 def test_events_mode_forwards_term_and_ignores_a_detached_stdout_holder(tmp_path: Path) -> None:
     # A detached tool keeps stdout open; the runner must still finish when the CLI does.
