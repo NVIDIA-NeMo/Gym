@@ -102,11 +102,14 @@ Apply the checks for the areas the diff touches.
   Hydra YAML wiring of resources server, agent, and model.
 - **Baselining evidence.** The `add-verified-flag` hook starts new
   resources-server configs at `verified: false`. A PR that sets
-  `verified: true`, or that changes verifier or reward logic, must cite
-  reward-profiling evidence: baseline reward numbers from a profiling run for
-  a new benchmark, or a before/after comparison showing the reward
-  distribution did not shift unintentionally. Missing evidence is a finding;
-  name the numbers to provide.
+  `verified: true`, or that changes verifier or reward logic for a fixed
+  evaluation benchmark, must cite reward-profiling evidence: baseline reward
+  numbers from a profiling run for a new benchmark, or a before/after
+  comparison showing the reward distribution did not shift unintentionally.
+  Missing evidence is a finding; name the numbers to provide. For training
+  environments a reward profile is optional, not a merge gate (see
+  CONTRIBUTING.md); behavior-changing verifier or agent code there needs the
+  representative real smoke-rollout evidence AGENTS.md requires instead.
 - **Agent harnesses (`responses_api_agents/`).** Check multi-turn and
   tool-calling trajectory handling in the Responses API format. A
   self-contained agent that declares datasets must own a task-data schema
