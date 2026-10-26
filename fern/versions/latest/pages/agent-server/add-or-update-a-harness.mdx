@@ -48,7 +48,7 @@ An adapter can stop at any level below. Each level adds work and enables a speci
 An adapter supplies the knowledge that is specific to the harness or framework:
 
 1. **Install or load the agent.** For example, a framework adapter lists the framework in its `requirements.txt`, while Pi and Codex install a pinned runtime into the task sandbox at seed.
-2. **Configure and invoke it.** Build the harness configuration from the adapter configuration and the request, then call the SDK or start the CLI. For example, Hermes writes a `config.yaml`, and Pi and Codex start their CLI through the shared `harness_runner.sh`.
+2. **Configure and invoke it.** Build the harness configuration from the adapter configuration and the request, then call the SDK or start the CLI. For example, Hermes writes a `config.yaml`, Pi starts its CLI through the shared `harness_runner.sh`, and Codex starts its CLI from its own `sandbox_runner.py`, which also runs a sandbox-local retry proxy for model requests.
 3. **Map the harness's inputs, results, and traces to Gym.** Convert the request into the harness's input, the harness's output into a `NeMoGymResponse`, and its model and tool activity into an `AgentObservationBundle`.
 4. **Map Gym connections into the harness's own configuration.** Set the rollout-prefixed Model Server URL as the harness's model base URL, add tool grants to its tool configuration, and run it in `SandboxAccess.workdir`. For example, Hermes adds each MCP grant to the `mcp_servers` section of its configuration.
 
@@ -317,13 +317,13 @@ The [`nemo_gym/agent_utils`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_g
 
 ### Code layout
 
-Organize a new adapter under `responses_api_agents/<harness>/`. The adapter's `sandbox.py` runs on the Agent Server. Inside the sandbox, the shared `harness_runner.sh` starts the harness CLI, or an adapter-specific `sandbox_runner.py` shim wraps a harness that is itself a Python program.
+Organize a new adapter under `responses_api_agents/<harness>/`. The adapter's `sandbox.py` runs on the Agent Server. Inside the sandbox, the shared `harness_runner.sh` starts the harness CLI, or an adapter-specific `sandbox_runner.py` shim wraps a harness that is itself a Python program or needs Python next to its CLI. Run such a shim with an interpreter the adapter installs privately, as Hermes, Stirrup and NOOA do, so the task image does not need Python; Codex is the exception and still uses the task image's Python 3.8 or newer.
 
 | Adapter file | Responsibility |
 | --- | --- |
 | `app.py` | Gym endpoints and configuration; request validation and mapping; session hooks; response and observation conversion; dispatch to host or sandbox execution. |
 | `sandbox.py` | A harness-specific session state class that composes `SandboxSession`. It installs the runtime at seed, stages input in `stage_activation()`, collects artifacts, and holds harness-specific state and diagnostics. |
-| `sandbox_runner.py` (Python harnesses only) | Reads the staged input, invokes the harness SDK, writes the harness's output and optional process diagnostics, and keeps partial output where the harness supports it. Handles `SIGTERM` by stopping the harness and writing that partial output before it exits, because the supervisor sends `SIGTERM` at the deadline and on close. CLI harnesses use the shared `harness_runner.sh` instead, so the task image needs only bash. |
+| `sandbox_runner.py` (only when the shim needs Python) | Reads the staged input, invokes the harness SDK, writes the harness's output and optional process diagnostics, and keeps partial output where the harness supports it. Handles `SIGTERM` by stopping the harness and writing that partial output before it exits, because the supervisor sends `SIGTERM` at the deadline and on close. CLI harnesses use the shared `harness_runner.sh` instead, so the task image needs only bash. |
 | `install_<harness>_runtime.sh` or an existing harness-specific installer | Installs the pinned harness and its private dependencies, then checks that they run. Keep installation out of the activation path. |
 | `requirements.txt` | The adapter's isolated environment: `-e nemo-gym[dev,sandbox] @ ../../` plus packages that run on the Agent Server, such as a framework or SDK. Without the `sandbox` extra, an SDK-backed provider such as OpenSandbox cannot import its SDK, and the first sandbox session fails. |
 | `tests/` | Host dispatch, session setup, request semantics, output parsing, installation, and lifecycle regressions. |
