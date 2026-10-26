@@ -31,9 +31,9 @@ from nemo_gym.health.checks import (
     _bind_policy_call_views,
     _canonical_trajectory,
     _ended_on_failed_call,
-    _is_context_overflow_rejection,
     _is_failed,
     _is_failed_attempt,
+    _is_length_refusal,
     _is_successful,
     _normalized_trajectory_calls,
     _replay_identity,
@@ -215,7 +215,7 @@ def evaluate_record(
             unobserved.append(spec.id)
             continue
         if spec.id == "model_call_runaway_generation" and any(
-            not _is_context_overflow_rejection(call)
+            not _is_length_refusal(call)
             and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
             and call.get("response") is None
             for call in bindings.matched_calls
@@ -266,7 +266,7 @@ def evaluate_record(
             for call in failed
         ),
         errors_by_status=dict(errors_by_status),
-        ended_on_error=_ended_on_failed_call(calls),
+        ended_on_error=model_calls_observed and _ended_on_failed_call(calls),
         duplicated_calls=duplicated,
         transcript_prompt_tokens=transcript_prompt,
         transcript_completion_tokens=transcript_completion,

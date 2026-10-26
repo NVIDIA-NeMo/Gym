@@ -543,12 +543,21 @@ class TestEvalAggregateFlags:
         )
         assert target == "nemo_gym.cli.eval:aggregate_rollouts"
         assert set(overrides) == {
-            "+input_glob=results/rollouts-*.jsonl",
+            "+input_glob='results/rollouts-*.jsonl'",
             "+output_jsonl_fpath=out.jsonl",
             "+disable_health_check=true",
             "+health_check_workers=3",
             '+health_check_ignored_checks=["model_call_missing_token_counts","model_call_zero_completion_tokens"]',
         }
+
+    def test_comma_separated_input_glob_is_one_string_override(self, monkeypatch: MonkeyPatch) -> None:
+        # The flag help offers comma-separated globs. Left unquoted, Hydra reads `a,b` as a sweep and
+        # `gym eval aggregate` fails with "Ambiguous value for argument" before reading any shard.
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "aggregate", "-i", "a/*.jsonl,b/*.jsonl"])
+        assert overrides == ["+input_glob='a/*.jsonl,b/*.jsonl'"]
+        parsed = OverridesParser.create().parse_override(overrides[0])
+        assert not parsed.is_sweep_override()
+        assert parsed.value() == "a/*.jsonl,b/*.jsonl"
 
 
 class TestFriendlyValidationError:

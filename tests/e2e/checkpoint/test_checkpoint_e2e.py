@@ -22,19 +22,22 @@ parser, for example::
 
 import asyncio
 import collections
+import itertools
 import json
 import os
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 from checkpoint_deployment import (
     CAPTURE_CONTROL_TOKEN,
     COUNTER_SCRIPT,
+    TOKEN,
     Deployment,
     GymHTTP,
+    Reply,
     counter_row,
     weather_episode,
     weather_row,
@@ -47,6 +50,8 @@ from nemo_gym.episode_types import EpisodeId
 
 # The policy model server runs in one process, or as a coordinator plus uvicorn workers.
 POLICY_WORKERS = pytest.mark.parametrize("policy_workers", [1, 2])
+# So do the environment, agent, and resources servers.
+SERVER_WORKERS = pytest.mark.parametrize("server_workers", [1, 2], ids=["servers1", "servers2"])
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("NEMO_GYM_CHECKPOINT_E2E") != "1",
@@ -165,8 +170,12 @@ async def crash_and_restore(
     skip_kinds: tuple[str, ...] = (),
     attempt: int = 0,
     restore_id: str = "r1",
+    server_workers: Optional[int] = None,
 ) -> None:
+    """Crash, restart, and restore; ``server_workers`` restarts the servers with a different worker count."""
     deployment.crash_gym()
+    if server_workers is not None:
+        deployment.set_server_workers(server_workers)
     if not deployment.external_inference:
         deployment.backend("/_ctl/release", {})
     deployment.slow_verify_flag.unlink(missing_ok=True)
@@ -197,16 +206,41 @@ def records_file(participant_dir: Path) -> Path:
     return path
 
 
+def reward_of(row: dict) -> Optional[float]:
+    """A flat row carries its reward at the top level.
+
+    An episode record from the typed ``single_agent_turn`` request path nests it in its result.
+    """
+    if "reward" in row:
+        return row["reward"]
+    return (row.get("result") or {}).get("reward")
+
+
+async def checkpoint_replies(deployment: Deployment, checkpoint_dir: Path, rollout_ids: list[str]) -> dict[str, Any]:
+    """Prepare and commit as ``checkpoint`` does, and return each participant's commit reply."""
+    participants = await deployment.participants()
+    prepared = await coordination.prepare(participants, "c1", deadline_ts=deadline())
+    assert prepared.prepared, prepared.blockers()
+    episode_ids = [EpisodeId(rollout_id=rollout_id) for rollout_id in rollout_ids]
+    return await coordination.commit(participants, "c1", str(checkpoint_dir), episode_ids, deadline_ts=deadline())
+
+
+def session_records(checkpoint_dir: Path, kind: str) -> list[str]:
+    [path] = (checkpoint_dir / "gym" / kind).rglob("records-*.jsonl")
+    return path.read_text().splitlines()
+
+
 def environment_record(checkpoint_dir: Path) -> dict:
     [line] = records_file(checkpoint_dir / "gym/environment/environment").read_text().splitlines()
     return json.loads(line)
 
 
 @POLICY_WORKERS
+@SERVER_WORKERS
 async def test_session_episode_continues_from_its_last_boundary_after_a_crash(
-    deploy, tmp_path: Path, policy_workers: int
+    deploy, tmp_path: Path, policy_workers: int, server_workers: int
 ) -> None:
-    deployment = deploy("sessions", policy_workers=policy_workers)
+    deployment = deploy("sessions", policy_workers=policy_workers, server_workers=server_workers)
     deployment.backend("/_ctl/hold", {"after_calls": 1})
     async with GymHTTP(deployment.url("environment"), timeout=120) as http:
         first = asyncio.create_task(http.post("/run", json=weather_episode("crash-1")))
@@ -225,10 +259,11 @@ async def test_session_episode_continues_from_its_last_boundary_after_a_crash(
 
 
 @POLICY_WORKERS
+@SERVER_WORKERS
 async def test_a_second_crash_before_the_replacement_starts_still_continues(
-    deploy, tmp_path: Path, policy_workers: int
+    deploy, tmp_path: Path, policy_workers: int, server_workers: int
 ) -> None:
-    deployment = deploy("sessions", policy_workers=policy_workers)
+    deployment = deploy("sessions", policy_workers=policy_workers, server_workers=server_workers)
     deployment.backend("/_ctl/hold", {"after_calls": 1})
     async with GymHTTP(deployment.url("environment"), timeout=120) as http:
         first = asyncio.create_task(http.post("/run", json=weather_episode("twice-1")))
@@ -281,8 +316,11 @@ async def test_a_checkpoint_restores_again_after_its_replacement_made_calls(
     assert not manifest.get("failures")
 
 
-async def test_legacy_run_continues_from_its_last_boundary_after_a_crash(deploy, tmp_path: Path) -> None:
-    deployment = deploy("relay")
+@SERVER_WORKERS
+async def test_legacy_run_continues_from_its_last_boundary_after_a_crash(
+    deploy, tmp_path: Path, server_workers: int
+) -> None:
+    deployment = deploy("relay", server_workers=server_workers)
     deployment.backend("/_ctl/hold", {"after_calls": 1})
     async with GymHTTP(deployment.url("environment"), timeout=120) as http:
         first = asyncio.create_task(http.post("/run", json=weather_row("legacy-1")))
@@ -298,8 +336,11 @@ async def test_legacy_run_continues_from_its_last_boundary_after_a_crash(deploy,
 
 
 @pytest.mark.parametrize("restore_resources", [True, False])
-async def test_resources_state_is_restored_with_the_episode(deploy, tmp_path: Path, restore_resources: bool) -> None:
-    deployment = deploy("counter")
+@SERVER_WORKERS
+async def test_resources_state_is_restored_with_the_episode(
+    deploy, tmp_path: Path, restore_resources: bool, server_workers: int
+) -> None:
+    deployment = deploy("counter", server_workers=server_workers)
     deployment.backend("/_ctl/script", COUNTER_SCRIPT)
     # The first increment runs before the checkpoint; the model call for the second is held.
     deployment.backend("/_ctl/hold", {"after_calls": 1})
@@ -314,10 +355,16 @@ async def test_resources_state_is_restored_with_the_episode(deploy, tmp_path: Pa
         replacement = await http.post("/run", json=counter_row("counter-1", attempt=1))
 
     # Only the restored counter (3 + 1) reaches the expected 6 after the second increment.
-    # Without it, the continued episode increments a fresh counter to 2 and verifies normally, with no reward:
-    # the negative control shows the restore matters.
-    assert replacement.status_code == 200, replacement.text
-    assert replacement.json()["reward"] == (1.0 if restore_resources else 0.0)
+    # The negative controls show the restore matters.
+    if restore_resources:
+        assert replacement.status_code == 200, replacement.text
+        assert replacement.json()["reward"] == 1.0
+    else:
+        # The continued episode increments a fresh counter to 2 and verifies normally, with no reward.
+        # With several workers, nothing claims the old cookie's session,
+        # so the worker that serves its first request claims it, and the rest follow, as with one worker.
+        assert replacement.status_code == 200, replacement.text
+        assert replacement.json()["reward"] == 0.0
 
 
 @POLICY_WORKERS
@@ -370,10 +417,11 @@ async def test_an_in_flight_generation_is_cut_and_its_prefix_continued(
 
 
 @POLICY_WORKERS
+@SERVER_WORKERS
 async def test_a_checkpoint_without_a_crash_parks_and_then_resumes_the_episode(
-    deploy, tmp_path: Path, policy_workers: int
+    deploy, tmp_path: Path, policy_workers: int, server_workers: int
 ) -> None:
-    deployment = deploy("sessions", policy_workers=policy_workers)
+    deployment = deploy("sessions", policy_workers=policy_workers, server_workers=server_workers)
     deployment.backend("/_ctl/hold", {"after_calls": 0})
     async with GymHTTP(deployment.url("environment"), timeout=120) as http:
         run = asyncio.create_task(http.post("/run", json=weather_episode("park-1")))
@@ -395,16 +443,74 @@ async def test_a_checkpoint_without_a_crash_parks_and_then_resumes_the_episode(
     assert len(deployment.backend_calls()) == 2
 
 
-@pytest.mark.parametrize("mode", ["replay", "wait"])
-async def test_verification_in_flight_is_replayed_or_waited_for(deploy, tmp_path: Path, mode: str) -> None:
-    deployment = deploy("slow", checkpoint_verify=mode)
+@pytest.mark.parametrize("topology", ["sessions", "counter"])
+@pytest.mark.parametrize(
+    ("workers_before", "workers_after"),
+    [(1, 1), (2, 2), (1, 2), (2, 1), (2, 4)],
+    ids=["servers1to1", "servers2to2", "servers1to2", "servers2to1", "servers2to4"],
+)
+async def test_concurrent_sessions_across_workers_all_continue_after_a_crash(
+    deploy, tmp_path: Path, topology: str, workers_before: int, workers_after: int
+) -> None:
+    """Many rollouts in flight at once, their sessions spread over every worker, all continue after a crash.
+
+    The servers may restart with a different worker count than they were checkpointed with.
+    """
+    count = 16
+    deployment = deploy(topology, server_workers=workers_before)
+    if topology == "counter":
+        deployment.backend("/_ctl/script", COUNTER_SCRIPT)
+        rows = {f"many-{index}": counter_row(f"many-{index}") for index in range(count)}
+        # Sessions topology: the turn loop's agent sessions.
+        # Counter: the resources sessions holding each counter.
+        # The relay keeps no episode state; the agent holds each /run episode.
+        session_kind, episode_owner, calls_per_rollout = "resources", "agent", 3
+    else:
+        rows = {f"many-{index}": weather_episode(f"many-{index}") for index in range(count)}
+        session_kind, episode_owner, calls_per_rollout = "agent", "environment", 2
+    # Every rollout's first model call returns; every later call is held.
+    # The first calls are released only once all of them have arrived.
+    # Otherwise a rollout answered early could send its second call before another rollout sent its first.
+    deployment.backend("/_ctl/gate", {})
+    async with GymHTTP(deployment.url("environment"), timeout=120) as http:
+        runs = [asyncio.create_task(http.post("/run", json=row)) for row in rows.values()]
+        await wait_for_calls(deployment, count, timeout=60)
+        deployment.backend("/_ctl/step", {"calls": count})
+        await wait_for_calls(deployment, 2 * count, timeout=60)
+        replies = await checkpoint_replies(deployment, tmp_path / "ckpt", list(rows))
+        # Each worker holds the sessions it created, as its claims say.
+        holders = deployment.claims(session_kind)
+        await crash_and_restore(deployment, tmp_path / "ckpt", list(rows), server_workers=workers_after)
+        for run in runs:
+            run.cancel()
+        if topology == "counter":
+            replacements = [counter_row(rollout_id, attempt=1) for rollout_id in rows]
+        else:
+            replacements = [weather_episode(rollout_id, attempt=1) for rollout_id in rows]
+        results = await asyncio.gather(*(http.post("/run", json=row) for row in replacements))
+
+    rewards = [reward_of(result.json()) for result in results]
+    assert replies[episode_owner]["episode_ids"] == sorted(rows)
+    # With one worker nothing is claimed; with several, the sessions come from every worker.
+    assert len(holders) == (0 if workers_before == 1 else workers_before)
+    assert len(session_records(tmp_path / "ckpt", session_kind)) == count
+    assert rewards == [1.0] * count
+    # Between them, the rollouts had one call delivered each before the crash.
+    # Every continued rollout makes only the calls it still needed,
+    # so none repeats a delivered call or restarts from its input.
+    assert len(deployment.backend_calls()) == 2 * count + (calls_per_rollout - 1) * count
+
+
+@pytest.mark.parametrize("verify", ["replay", "wait"])
+async def test_verification_in_flight_is_replayed_or_waited_for(deploy, tmp_path: Path, verify: str) -> None:
+    deployment = deploy("slow", checkpoint_verify=verify)
     deployment.slow_verify_flag.touch()
     async with GymHTTP(deployment.url("environment"), timeout=120) as http:
         first = asyncio.create_task(http.post("/run", json=weather_episode("verify-1")))
         await wait_until(lambda: deployment.verifications() == 1)
         participants = await deployment.participants()
         early = await coordination.prepare(participants, "c1", deadline_ts=deadline(1))
-        if mode == "wait":
+        if verify == "wait":
             deployment.slow_verify_flag.unlink()
         await checkpoint(deployment, tmp_path / "ckpt", ["verify-1"])
         record = environment_record(tmp_path / "ckpt")
@@ -414,7 +520,7 @@ async def test_verification_in_flight_is_replayed_or_waited_for(deploy, tmp_path
 
     assert replacement.json()["result"]["reward"] == 1.0
     assert len(deployment.backend_calls()) == 2
-    if mode == "replay":
+    if verify == "replay":
         # A replay step does not hold the checkpoint; the restored episode runs verification again.
         assert early.prepared
         assert record["boundary"]["next"] == "verify"
@@ -467,11 +573,17 @@ async def test_an_episode_that_finishes_during_prepare_is_neither_lost_nor_redon
 @pytest.mark.skipif(
     not os.environ.get("NEMO_GYM_CHECKPOINT_VLLM_URL"), reason="set NEMO_GYM_CHECKPOINT_VLLM_URL to a vLLM server"
 )
-async def test_real_model_rollouts_are_either_finished_or_continued_after_a_crash(deploy, tmp_path: Path) -> None:
+@POLICY_WORKERS
+@SERVER_WORKERS
+async def test_real_model_rollouts_are_either_finished_or_continued_after_a_crash(
+    deploy, tmp_path: Path, policy_workers: int, server_workers: int
+) -> None:
     deployment = deploy(
         "sessions",
         inference_url=os.environ["NEMO_GYM_CHECKPOINT_VLLM_URL"],
         model_name=os.environ.get("NEMO_GYM_CHECKPOINT_VLLM_MODEL", "Qwen/Qwen3-0.6B"),
+        policy_workers=policy_workers,
+        server_workers=server_workers,
     )
     rollout_ids = [f"real-{index}" for index in range(64)]
     async with GymHTTP(deployment.url("environment"), timeout=300) as http:
@@ -542,13 +654,17 @@ async def test_real_model_rollouts_are_either_finished_or_continued_after_a_cras
 @pytest.mark.skipif(
     not os.environ.get("NEMO_GYM_CHECKPOINT_VLLM_URL"), reason="set NEMO_GYM_CHECKPOINT_VLLM_URL to a vLLM server"
 )
+@POLICY_WORKERS
+@SERVER_WORKERS
 async def test_real_model_restarts_keep_running_through_a_checkpoint_and_start_over_after_a_crash(
-    deploy, tmp_path: Path
+    deploy, tmp_path: Path, policy_workers: int, server_workers: int
 ) -> None:
     deployment = deploy(
         "mixed",
         inference_url=os.environ["NEMO_GYM_CHECKPOINT_VLLM_URL"],
         model_name=os.environ.get("NEMO_GYM_CHECKPOINT_VLLM_MODEL", "Qwen/Qwen3-0.6B"),
+        policy_workers=policy_workers,
+        server_workers=server_workers,
     )
     environment = GymHTTP(deployment.url("environment"), timeout=300)
     restarting = GymHTTP(deployment.url("restart_environment"), timeout=300)
@@ -607,13 +723,21 @@ async def test_real_model_restarts_keep_running_through_a_checkpoint_and_start_o
     not os.environ.get("NEMO_GYM_CHECKPOINT_SCALE"), reason="set NEMO_GYM_CHECKPOINT_SCALE to a rollout count"
 )
 @POLICY_WORKERS
-async def test_checkpoint_at_scale(deploy, tmp_path: Path, policy_workers: int) -> None:
+@SERVER_WORKERS
+async def test_checkpoint_at_scale(deploy, tmp_path: Path, policy_workers: int, server_workers: int) -> None:
     """Checkpoint thousands of in-flight rollouts, crash, restore, and finish every one of them."""
     count = int(os.environ["NEMO_GYM_CHECKPOINT_SCALE"])
+    # At most this many rollouts open connections at once,
+    # as a training framework bounds the episodes it has in flight.
+    # A busy server worker on uvloop accepts about one new connection per event-loop iteration.
+    # A larger burst waits in the accept queue, and a session close can outlast the environment's cleanup timeout,
+    # so the test would measure connection setup rather than the checkpoint.
+    in_flight = int(os.environ.get("NEMO_GYM_CHECKPOINT_SCALE_IN_FLIGHT", "500"))
     # The training framework raises Gym's per-host connection limit the same way.
     deployment = deploy(
         "sessions",
         policy_workers=policy_workers,
+        server_workers=server_workers,
         token_capture=True,
         generation_cuts=True,
         extra_config={"global_aiohttp_connector_limit_per_host": 16384},
@@ -627,8 +751,15 @@ async def test_checkpoint_at_scale(deploy, tmp_path: Path, policy_workers: int) 
     await lift_connection_limit()
     async with GymHTTP(deployment.url("environment"), timeout=900) as http:
         started = time.monotonic()
-        runs = [asyncio.create_task(http.post("/run", json=weather_episode(rollout_id))) for rollout_id in rollout_ids]
-        await wait_until(lambda: every_rollout_held_at_its_second_call(deployment, count), timeout=600)
+        runs: list[asyncio.Task] = []
+        # Dispatch in waves, and start the next wave once every rollout so far is held at its second call.
+        # A held rollout keeps its connections open until the checkpoint, so it must not count against the bound:
+        # a semaphore held until each run returns would stop dispatch at the bound and never reach the checkpoint.
+        for wave in itertools.batched(rollout_ids, in_flight):
+            runs.extend(
+                asyncio.create_task(http.post("/run", json=weather_episode(rollout_id))) for rollout_id in wave
+            )
+            await wait_until(lambda: every_rollout_held_at_its_second_call(deployment, len(runs)), timeout=600)
         timings["dispatch_to_held"] = time.monotonic() - started
 
         participants = await deployment.participants()
@@ -685,10 +816,15 @@ async def test_checkpoint_at_scale(deploy, tmp_path: Path, policy_workers: int) 
         await coordination.resume(participants, "scale-restore", deadline_ts=deadline(120))
         timings["resume"] = time.monotonic() - clock
 
+        # A replacement runs to its end, so a semaphore bounds the replacements in flight.
+        replacing = asyncio.Semaphore(in_flight)
+
+        async def replace(key: str) -> Reply:
+            async with replacing:
+                return await http.post("/run", json=weather_episode(key, attempt=1))
+
         clock = time.monotonic()
-        replacements = await asyncio.gather(
-            *(http.post("/run", json=weather_episode(key, attempt=1)) for key in exported)
-        )
+        replacements = await asyncio.gather(*(replace(key) for key in exported))
         timings["replacements"] = time.monotonic() - clock
         cuts = deployment.backend("/_ctl/cuts")
         continued = sum(1 for call in deployment.backend_calls() if call.get("continued_from"))
@@ -703,7 +839,7 @@ async def test_checkpoint_at_scale(deploy, tmp_path: Path, policy_workers: int) 
         str(result.get("failure") or result)[:160] for result, reward in zip(results, rewards) if reward != 1.0
     )
     print(
-        f"\nscale={count} policy_workers={policy_workers} finished_before={len(finished)} exported={len(exported)}"
+        f"\nscale={count} in_flight={in_flight} policy_workers={policy_workers} server_workers={server_workers} finished_before={len(finished)} exported={len(exported)}"
         f"\ntimings_s={ {name: round(value, 2) for name, value in timings.items()} }"
         f"\nrecords_bytes={sizes} report={prepared.replies['policy_model']['report']['counts']}"
         f"\ncut_rounds={len(cuts)} prefixes_cut={sum(len(round_) for round_ in cuts)} calls_continued={continued}"
@@ -716,14 +852,25 @@ async def test_checkpoint_at_scale(deploy, tmp_path: Path, policy_workers: int) 
     assert rewards == [1.0] * len(exported)
 
 
-async def test_a_retired_episode_stops_everywhere_and_leaves_nothing_behind(deploy, tmp_path: Path) -> None:
-    deployment = deploy("sessions", token_capture=True)
+@SERVER_WORKERS
+async def test_a_retired_episode_stops_everywhere_and_leaves_nothing_behind(
+    deploy, tmp_path: Path, server_workers: int
+) -> None:
+    deployment = deploy("sessions", token_capture=True, server_workers=server_workers)
     # The episode's first model call is answered; the second is held, so the episode is mid-flight.
     deployment.backend("/_ctl/hold", {"after_calls": 1})
     async with GymHTTP(deployment.url("environment"), timeout=120) as http:
         run = asyncio.create_task(http.post("/run", json=weather_episode("gone-1")))
         await wait_for_calls(deployment, 2)
         participants = await deployment.participants()
+        # A retire whose deadline has passed only refuses the attempt: its resources session is marked,
+        # and counted as retired until a retire frees it, on whichever worker holds it.
+        late_retire = await GymHTTP(deployment.url("resources"), timeout=10).post(
+            "/ng-control/v1/checkpoint/retire",
+            json={"checkpoint_id": "mark", "deadline_ts": time.time() - 1, "episode_ids": [{"rollout_id": "gone-1"}]},
+            headers={"authorization": f"Bearer {TOKEN}"},
+        )
+        marked = await deployment.status("resources")
 
         await coordination.retire(participants, "retire", [EpisodeId(rollout_id="gone-1")], deadline_ts=deadline())
 
@@ -751,8 +898,11 @@ async def test_a_retired_episode_stops_everywhere_and_leaves_nothing_behind(depl
     assert after_retire["policy_model"]["report"]["counts"]["inflight"] == 0
     # Only the rollout's refusal remains, one entry per server, until the controller forgets it.
     assert {name: status["retired_rollouts"] for name, status in after_retire.items()} == dict.fromkeys(servers, 1)
-    assert "stale_attempt" in late.text
+    assert "checkpoint_stale_attempt" in late.text
     assert {name: status["retired_rollouts"] for name, status in after_forget.items()} == dict.fromkeys(servers, 0)
+    assert late_retire.json()["error"]["code"] == "checkpoint_deadline_exceeded"
+    # The marked session refuses the episode's cleanup, and stays counted as retired until the forget.
+    assert marked["retired_sessions"] == 1 and after_retire["resources"]["retired_sessions"] == 1
     assert after_forget["resources"]["retired_sessions"] == 0
     # The checkpoint retire also retired the attempt's capture ledger.
     assert manifest.status_code == 410 and "is retired" in manifest.json()["detail"]
@@ -771,10 +921,11 @@ async def _mixed_checkpoint(deployment: Deployment, checkpoint_dir: Path) -> coo
     return prepared
 
 
+@SERVER_WORKERS
 async def test_a_restart_episode_never_holds_up_a_checkpoint_and_starts_over_after_a_crash(
-    deploy, tmp_path: Path
+    deploy, tmp_path: Path, server_workers: int
 ) -> None:
-    deployment = deploy("mixed")
+    deployment = deploy("mixed", server_workers=server_workers)
     # Every model call waits, so both episodes are in flight at the checkpoint.
     deployment.backend("/_ctl/hold", {"after_calls": 0})
     environment = GymHTTP(deployment.url("environment"), timeout=120)
@@ -803,8 +954,11 @@ async def test_a_restart_episode_never_holds_up_a_checkpoint_and_starts_over_aft
     assert restarted.json()["result"]["reward"] == 1.0
 
 
-async def test_a_restart_episode_keeps_running_through_a_checkpoint_without_a_crash(deploy, tmp_path: Path) -> None:
-    deployment = deploy("mixed")
+@SERVER_WORKERS
+async def test_a_restart_episode_keeps_running_through_a_checkpoint_without_a_crash(
+    deploy, tmp_path: Path, server_workers: int
+) -> None:
+    deployment = deploy("mixed", server_workers=server_workers)
     deployment.backend("/_ctl/hold", {"after_calls": 0})
     environment = GymHTTP(deployment.url("environment"), timeout=120)
     restarting = GymHTTP(deployment.url("restart_environment"), timeout=120)
@@ -821,3 +975,72 @@ async def test_a_restart_episode_keeps_running_through_a_checkpoint_without_a_cr
     assert continued.json()["result"]["reward"] == 1.0
     assert restarted.json()["result"]["reward"] == 1.0
     assert restarted.json()["episode_id"]["attempt"] == 0
+
+
+MCP_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
+
+
+async def mcp_reply(http: GymHTTP, token: str, name: str, arguments: dict) -> Reply:
+    """Call a tool as a CLI agent harness does: the MCP session token only, never the session cookie."""
+    return await http.post(
+        "/mcp",
+        headers={"accept": "application/json, text/event-stream", MCP_TOKEN_HEADER: token},
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}},
+    )
+
+
+async def mcp_call(http: GymHTTP, token: str, name: str, arguments: dict) -> dict:
+    response = await mcp_reply(http, token, name, arguments)
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result.get("isError") is not True, result
+    return json.loads(result["content"][0]["text"])
+
+
+async def test_mcp_tool_calls_wait_out_a_checkpoint_and_a_restore_hands_their_sessions_to_new_tokens(
+    deploy, tmp_path: Path
+) -> None:
+    deployment = deploy("counter", server_workers=2, resources_mcp=True)
+    rollout_ids = [f"mcp-{index}" for index in range(8)]
+    # Gym's aiohttp client keeps no cookies, so each MCP call names its session by the token alone.
+    async with GymHTTP(deployment.url("resources"), timeout=60) as http:
+        tokens, cookies = [], []
+        for index, rollout_id in enumerate(rollout_ids):
+            seeded = await http.post(f"/ng-rollout/{rollout_id}/seed_session", json={"initial_count": index})
+            tokens.append(seeded.json()["mcp"]["headers"][MCP_TOKEN_HEADER])
+            cookies.append(seeded.cookies)
+            await mcp_call(http, tokens[-1], "increment_counter", {"count": 10})
+
+        participants = await deployment.participants()
+        prepared = await coordination.prepare(participants, "c1", deadline_ts=deadline())
+        assert prepared.prepared, prepared.blockers()
+        # Calls made while the checkpoint is open wait on whichever worker owns the session, instead of failing.
+        waiting = [asyncio.create_task(mcp_call(http, token, "increment_counter", {"count": 100})) for token in tokens]
+        await asyncio.sleep(1)
+        assert not any(task.done() for task in waiting)
+        episode_ids = [EpisodeId(rollout_id=rollout_id) for rollout_id in rollout_ids]
+        await coordination.commit(participants, "c1", str(tmp_path / "ckpt"), episode_ids, deadline_ts=deadline())
+        await coordination.resume(participants, "c1", deadline_ts=deadline())
+        await asyncio.gather(*waiting)
+
+        # Gym restarts with three workers per server.
+        await crash_and_restore(deployment, tmp_path / "ckpt", rollout_ids, server_workers=3)
+        # A harness of the crashed attempt that outlived the crash still holds its token, which names that attempt.
+        stale = [await mcp_reply(http, token, "increment_counter", {"count": 1000}) for token in tokens]
+        # Each replacement seeds under its own attempt with the session's cookie, which claims the restored session.
+        # The seed reply carries a token that names the new attempt.
+        restored = []
+        for rollout_id, cookie in zip(rollout_ids, cookies):
+            reseeded = await http.post(
+                f"/ng-rollout/{rollout_id}-a1/seed_session",
+                json={"initial_count": 0},
+                headers={"cookie": "; ".join(f"{name}={value}" for name, value in cookie.items())},
+            )
+            token = reseeded.json()["mcp"]["headers"][MCP_TOKEN_HEADER]
+            restored.append((await mcp_call(http, token, "get_counter_value", {}))["count"])
+
+    assert all(
+        reply.status_code == 409 and reply.json()["error"]["code"] == "checkpoint_stale_attempt" for reply in stale
+    )
+    # The checkpoint holds the counts from before the waiting calls ran, and no stale call changed them.
+    assert restored == [index + 10 for index in range(len(rollout_ids))]

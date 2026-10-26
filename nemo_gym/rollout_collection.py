@@ -116,6 +116,8 @@ from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
 from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 from nemo_gym.telemetry.gym_metrics import (
     DISPATCH_NAME_ATTRIBUTE,
+    HEALTH_CHECKS_ATTRIBUTE,
+    HEALTH_VERDICT_ATTRIBUTE,
     HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE,
     UNREGISTERED_FAILURE_KIND,
     record_rollout_completed,
@@ -243,6 +245,13 @@ NG_ENVIRONMENT_SERVER_KEY = ENVIRONMENT_SERVER_STAMP_KEY_NAME
 # Implementation name under `environment_servers:`, so readers know which result type a record holds.
 NG_RESULT_TYPE_KEY = "_ng_result_type"
 NG_TASK_ID_KEY = "_ng_task_id"
+# Provenance stamps preparation writes into a materialized row's task_data (the same strings as
+# nemo_gym.tasks.harbor.digest's DIGEST_KEY and DATASET_DIGEST_KEY, which this module does not import).
+# The collector copies only these from a row onto its record: task_data is dataset-controlled, and any
+# other `_ng_*` key there (`_ng_no_persist`, `_ng_failure_class`, ...) would steer the collector.
+NG_DIGEST_KEY = "_ng_digest"
+NG_DATASET_DIGEST_KEY = "_ng_dataset_digest"
+PROVENANCE_KEYS = (NG_DIGEST_KEY, NG_DATASET_DIGEST_KEY)
 _NO_RESULT_FAILURE_CLASSES = frozenset(
     {
         AGENT_REQUEST_FAILED_FAILURE_CLASS,
@@ -394,6 +403,24 @@ def _is_collector_key(key: str) -> bool:
     return key.startswith("_ng_") or key in ("ng_model_call_capture", NG_PERF_KEY)
 
 
+def _task_data_provenance(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """The :data:`PROVENANCE_KEYS` of a materialized row's ``task_data``: provenance stamps for the record.
+
+    Preparation writes them (a Harbor row carries the task folder digest as ``_ng_digest`` and the
+    dataset digest as ``_ng_dataset_digest``) so that every results row names the inputs it ran, without
+    the materialized-inputs sidecar. An Environment Server never returns them (``_ng_*`` is the
+    collector's namespace), so the collector copies them from the row onto the record. Only the
+    allowlisted keys are copied: ``task_data`` comes from the dataset, and the collector reads other
+    ``_ng_*`` keys (``_ng_no_persist``, ``_ng_failure_class``, ``_ng_result_type``, ...) that a success
+    record does not carry, so a dataset could otherwise drop, reroute or relabel its own results.
+    """
+    task_input = row.get("task_input")
+    task_data = task_input.get("task_data") if isinstance(task_input, Mapping) else None
+    if not isinstance(task_data, Mapping):
+        return {}
+    return {key: task_data[key] for key in PROVENANCE_KEYS if key in task_data}
+
+
 def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     """Turn a ``BaseEpisodeResponse`` into the rollout record the collector stores.
 
@@ -405,6 +432,9 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     Every Environment Server type is scored the same way: through the result's top-level ``reward``,
     with optional top-level ``reward_components``. A reward nested elsewhere in the result is stored as
     data, and a result without a top-level ``reward`` is unscored.
+
+    A failure's ``failure_kind`` is kept under that name, next to the ``_ng_failure_*`` diagnostics: it is
+    the key ``_record_rollout_outcome`` reads for the metric label and ``_counted_failure_row`` drops.
     """
     task_id = response.get("task_id")
     failure = response.get("failure")
@@ -421,6 +451,8 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
         }
         if failure.get("stage") is not None:
             record["_ng_failure_stage"] = failure["stage"]
+        if failure.get("failure_kind") is not None:
+            record["failure_kind"] = failure["failure_kind"]
         if failure.get("partial_response") is not None:
             record["_ng_failure_partial_response"] = failure["partial_response"]
         if failure.get("agent_observations") is not None:
@@ -463,6 +495,7 @@ class _CompletedRollout:
     rollout_latency_ms: Optional[float]
     environment_server: Optional[str] = None
     environment_server_type: Optional[str] = None
+    dispatch_span_context: Optional["SpanContext"] = None
 
 
 def _round_robin_by_agent(examples: List[Dict]) -> List[Dict]:
@@ -1996,8 +2029,19 @@ def _current_span_is_valid() -> bool:
     return otel_trace.get_current_span().get_span_context().is_valid
 
 
+TASK_ID_ATTRIBUTE = "nemo.gym.task.id"
+ROLLOUT_REPEAT_ATTRIBUTE = "nemo.gym.rollout.repeat"
+
+
+def _span_task_id(row: Mapping[str, Any]) -> Optional[str]:
+    identity = row.get("task_id")
+    if isinstance(identity, Mapping):
+        return identity.get("task_id")
+    return next((str(row[key]) for key in (*TASK_ID_FIELDS, "task_name") if row.get(key) is not None), None)
+
+
 @contextmanager
-def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: str) -> Iterator[None]:
+def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: str) -> Iterator["SpanContext"]:
     """One rollout's dispatch as the root of its own trace, linked to the run's `job` span.
 
     The `/run` call made inside carries this span as `traceparent`, so the agent's
@@ -2010,6 +2054,8 @@ def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: s
     a row routed by agent. Only a job the driver opened as its own root is split; under an
     embedder's trace the dispatch keeps nesting (see `linked_root_span`). Gate on the
     `rollout` group and the trace exporter before calling.
+
+    Yields the span's context, which the driver keeps to attach `gym.rollout.health` later.
     """
     from nemo_gym.telemetry.spans import linked_root_span
 
@@ -2024,8 +2070,14 @@ def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: s
         rollout_id = None
     if rollout_id:
         attributes[ROLLOUT_ID_ATTRIBUTE] = rollout_id
-    with linked_root_span("gym.rollout.dispatch", split_from=_OWNED_JOB_SPAN_CONTEXT.get(), **attributes):
-        yield None
+    task_id = _span_task_id(row)
+    if task_id is not None:
+        attributes[TASK_ID_ATTRIBUTE] = task_id
+    repeat = row.get(ROLLOUT_INDEX_KEY_NAME)
+    if isinstance(repeat, int) and not isinstance(repeat, bool):
+        attributes[ROLLOUT_REPEAT_ATTRIBUTE] = repeat
+    with linked_root_span("gym.rollout.dispatch", split_from=_OWNED_JOB_SPAN_CONTEXT.get(), **attributes) as span:
+        yield span.get_span_context()
 
 
 def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name: str) -> None:
@@ -2066,18 +2118,36 @@ def _metric_failure_kind(failure_kind: Any) -> Optional[str]:
     return UNREGISTERED_FAILURE_KIND
 
 
-def _record_rollout_health(result: Dict[str, Any], outcome: str, ignored_checks: frozenset[str]) -> None:
+def _record_rollout_health(
+    result: Dict[str, Any],
+    outcome: str,
+    ignored_checks: frozenset[str],
+    dispatch_span_context: Optional["SpanContext"] = None,
+) -> None:
     """Evaluate the trajectory health checks on a finished rollout and count the verdict and flagged checks.
 
-    Gated on telemetry only, not on the post-run report switch. Never raises: telemetry must not fail a rollout.
+    With a `dispatch_span_context`, the verdict and the flagged checks also go on a `gym.rollout.health` span
+    under that dispatch span. Gated on telemetry only, not on the post-run report switch. Never raises:
+    telemetry must not fail a rollout.
     """
     from nemo_gym.rollout_health import evaluate_record
 
     try:
         digest = evaluate_record(result, ignored_checks)
-        record_rollout_health(digest.verdict, outcome=outcome, flagged_checks=(f.check for f in digest.findings))
+        checks = sorted({finding.check for finding in digest.findings})
+        record_rollout_health(digest.verdict, outcome=outcome, flagged_checks=checks)
+        if dispatch_span_context is not None:
+            from nemo_gym.telemetry.spans import record_child_span
+
+            attributes = {HEALTH_VERDICT_ATTRIBUTE: digest.verdict}
+            if checks:
+                attributes[HEALTH_CHECKS_ATTRIBUTE] = checks
+            rollout_id = maybe_rollout_id_from_run_body(result)
+            if rollout_id:
+                attributes[ROLLOUT_ID_ATTRIBUTE] = rollout_id
+            record_child_span("gym.rollout.health", dispatch_span_context, **attributes)
     except Exception:
-        logger.debug("Could not record rollout health metrics.", exc_info=True)
+        logger.debug("Could not record rollout health telemetry.", exc_info=True)
 
 
 def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dict[str, Any]:
@@ -3310,7 +3380,7 @@ class RolloutCollectionHelper(BaseModel):
         capture_dirs = model_call_capture_dirs_from_config(global_config)
         observability_enabled = observability_enabled_from_config(global_config)
         # Live health metrics follow the metrics exporter alone: `disable_health_check` only gates the post-run
-        # report, and span groups only select traces. Without an exporter the evaluation would feed nothing.
+        # report. A traced dispatch also gets a `gym.rollout.health` span, whatever the metrics exporter does.
         health_metrics_enabled = is_metrics_exporter_active()
         health_ignored_checks = frozenset(config.health_check_ignored_checks)
         # How a finalized rollout with an incomplete capture is treated
@@ -3485,9 +3555,13 @@ class RolloutCollectionHelper(BaseModel):
             for future in completion_iterator:
                 completed = await future
                 row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
-                if _materialized_taskset(row) is not None and _is_episode_response(result):
-                    # The row went out as an episode request, so the reply is a BaseEpisodeResponse.
-                    result = _episode_record(result)
+                if _materialized_taskset(row) is not None:
+                    if _is_episode_response(result):
+                        # The row went out as an episode request, so the reply is a BaseEpisodeResponse.
+                        result = _episode_record(result)
+                    # Result or failure, the record names the inputs it ran (task and dataset digests).
+                    for key, value in _task_data_provenance(row).items():
+                        result.setdefault(key, value)
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -3742,8 +3816,15 @@ class RolloutCollectionHelper(BaseModel):
                         export_metrics(step_metrics, step=int(current_pct))
 
                 # Last, so a cancellation here costs a health sample and never the bookkeeping above.
-                if health_metrics_enabled and health_outcome is not None:
-                    await asyncio.to_thread(_record_rollout_health, result, health_outcome, health_ignored_checks)
+                health_span_context = completed.dispatch_span_context
+                if health_outcome is not None and (health_metrics_enabled or health_span_context is not None):
+                    await asyncio.to_thread(
+                        _record_rollout_health,
+                        result,
+                        health_outcome,
+                        health_ignored_checks,
+                        health_span_context,
+                    )
 
             # The scans of whole artifacts after collection run in a worker thread.
             # On the event loop they would stall telemetry, other tasks, and shutdown.
@@ -4452,10 +4533,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     run_timing.record_start(started)
                 res = None
                 succeeded = False
+                dispatch_span_context = None
                 try:
                     request_body = _episode_request_body(row) if _materialized_taskset(row) else row
                     if is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active():
-                        with _dispatch_span(row, self._dispatch_name(row), server_name=server_name):
+                        with _dispatch_span(row, self._dispatch_name(row), server_name=server_name) as span_context:
+                            dispatch_span_context = span_context
                             res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
                     else:
                         res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
@@ -4473,6 +4556,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         rollout_latency_ms=rollout_latency_ms,
                         environment_server=server_name,
                         environment_server_type=server_type,
+                        dispatch_span_context=dispatch_span_context,
                     )
                 except Exception as e:
                     print(
@@ -4494,6 +4578,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         rollout_latency_ms=None,
                         environment_server=server_name,
                         environment_server_type=server_type,
+                        dispatch_span_context=dispatch_span_context,
                     )
                 finally:
                     # Failed and timed-out tasks inform the adaptive margin too, but only by
