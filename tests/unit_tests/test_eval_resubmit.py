@@ -108,7 +108,11 @@ def slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """squeue prints the `squeue_workdirs` file; sbatch records its cwd and environment and answers 4242."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    (bin_dir / "squeue").write_text('#!/bin/bash\ncat "$(dirname "$0")/squeue_workdirs" 2>/dev/null; exit 0\n')
+    # A job in a hidden partition is listed only with --all.
+    (bin_dir / "squeue").write_text(
+        '#!/bin/bash\ncat "$(dirname "$0")/squeue_workdirs" 2>/dev/null\n'
+        '[[ " $* " == *" --all "* ]] && cat "$(dirname "$0")/squeue_workdirs_hidden" 2>/dev/null\nexit 0\n'
+    )
     (bin_dir / "sbatch").write_text(
         '#!/bin/bash\necho "$PWD" > "$(dirname "$0")/cwd"\nenv > "$(dirname "$0")/env"\necho 4242\n'
     )
@@ -195,6 +199,18 @@ def test_resubmit_refuses_while_a_job_runs_in_the_job_dir(tmp_path: Path, slurm_
 
     assert not (slurm_bin / "cwd").exists()
     assert _record(job_dir).benchmark_job("gsm8k").job_id == "100"
+
+
+def test_resubmit_refuses_while_a_job_runs_in_the_job_dir_in_a_hidden_partition(
+    tmp_path: Path, slurm_bin: Path
+) -> None:
+    job_dir = _staged_run(tmp_path)
+    (slurm_bin / "squeue_workdirs_hidden").write_text(f"{job_dir}\n")
+
+    with pytest.raises(RuntimeError, match="still pending or running"):
+        resubmit(*_handle(job_dir))
+
+    assert not (slurm_bin / "cwd").exists()
 
 
 def test_resubmit_refuses_an_unknown_submission(tmp_path: Path) -> None:

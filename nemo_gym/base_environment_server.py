@@ -11,26 +11,32 @@ from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Generic, TypeVar
 
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from anyio import CancelScope
 from fastapi import Body, FastAPI
 from pydantic import ConfigDict, Field, JsonValue, PositiveFloat, PositiveInt, model_validator
 from typing_extensions import Self
 
-from nemo_gym._checkpoint.control import install_participant
+from nemo_gym._checkpoint.control import CheckpointMode
 from nemo_gym._checkpoint.environment import EnvironmentParticipant
 from nemo_gym._checkpoint.errors import ControlError
+from nemo_gym._checkpoint.participant_workers import install_server_participant
 from nemo_gym._checkpoint.settings import checkpoint_settings
-from nemo_gym._checkpoint.steps import StepMode
+from nemo_gym._checkpoint.steps import StepType
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure, EpisodeId
+from nemo_gym.failure_kinds import FailureStage
 from nemo_gym.rollout_correlation import rollout_context
-from nemo_gym.server_utils import SimpleServer
+from nemo_gym.server_utils import SimpleServer, format_exception_with_response_body
 
 
 LOGGER = logging.getLogger(__name__)
+# An environment server either records boundaries or restarts its episodes; it has no stateless mode.
+_ENVIRONMENT_CHECKPOINT_MODES = ("restart_only", "exported")
 
 EpisodeRequestT = TypeVar("EpisodeRequestT", bound=BaseEpisodeRequest[Any])
 EpisodeResponseT = TypeVar("EpisodeResponseT", bound=BaseEpisodeResponse[Any])
+EpisodeFailureT = TypeVar("EpisodeFailureT", bound=EpisodeFailure)
 CleanupCallback = Callable[[], Awaitable[None]]
 
 
@@ -130,6 +136,62 @@ class HandledEpisodeError(Exception):
         self.failure = failure
 
 
+# Request Timeout, Too Early and Too Many Requests clear on a later attempt.
+# Any other 4xx faults the request itself, so a retry is refused the same way.
+_RETRYABLE_CLIENT_ERROR_STATUSES = frozenset({408, 425, 429})
+
+
+def is_retryable_dependency_status(status: int) -> bool:
+    """Return whether an HTTP error status from another server is worth another episode attempt.
+
+    408, 425, 429 and every 5xx are retried; every other 4xx is final.
+    """
+    return status in _RETRYABLE_CLIENT_ERROR_STATUSES or status >= 500
+
+
+def is_retryable_dependency_error(error: BaseException) -> bool:
+    """Return whether a failed call to another server is worth another episode attempt.
+
+    An HTTP error is classified by its status (see ``is_retryable_dependency_status``). A refused or dropped
+    connection and a timeout are transient. Any other error, such as a reply that fails validation, would fail the
+    same way again.
+    """
+    if isinstance(error, ClientResponseError):
+        return is_retryable_dependency_status(error.status)
+    # A dropped connection mid-body raises ClientPayloadError, which is transient like a refused connection.
+    return isinstance(error, (ClientConnectionError, ClientPayloadError, TimeoutError))
+
+
+def dependency_failure(
+    error: BaseException,
+    *,
+    failure_model: type[EpisodeFailureT],
+    stage: FailureStage,
+    terminal: bool | None = None,
+    name_error_type: bool = False,
+    **fields: Any,
+) -> HandledEpisodeError:
+    """Turn a failed call to another server into the episode's failure.
+
+    ``failure_reason`` keeps the dependency's own explanation from its response body
+    (see ``format_exception_with_response_body``), prefixed with the error's class name when ``name_error_type`` is set,
+    and bounded to the failure's 2000 characters. ``terminal`` defaults to
+    ``not is_retryable_dependency_error(error)``; pass it only where the stage decides on its own.
+    ``fields`` fill the failure model's own fields, such as a partial response.
+    """
+    failure_reason = format_exception_with_response_body(error)
+    if name_error_type:
+        failure_reason = f"{type(error).__name__}: {failure_reason}"
+    return HandledEpisodeError(
+        failure_model(
+            stage=stage,
+            failure_reason=failure_reason[:2000],
+            terminal=not is_retryable_dependency_error(error) if terminal is None else terminal,
+            **fields,
+        )
+    )
+
+
 class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeResponseT]):
     """Expose a typed episode protocol with shared limits and cleanup."""
 
@@ -138,10 +200,12 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
     response_model: ClassVar[type[EpisodeResponseT]]
     _admission: asyncio.Semaphore | None = None
     _checkpoint: EnvironmentParticipant | None = None
-    # Whether ``run`` records checkpoint boundaries.
-    # Episodes of a protocol that records none cannot be continued, so they are restarts:
-    # they never hold up a checkpoint, and start over from their input after a crash.
-    checkpoint_boundaries: ClassVar[bool] = False
+    # How this server's episodes take part in partial-rollout checkpoints.
+    # A protocol whose ``run`` records checkpoint boundaries declares "exported".
+    # Its episodes continue after a restore.
+    # The default fails closed: episodes of a protocol that records no boundaries cannot be continued.
+    # They are restarts, which never hold up a checkpoint and start over from their input after a crash.
+    checkpoint_mode: ClassVar[CheckpointMode] = "restart_only"
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -207,11 +271,12 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 try:
                     async with deadline:
                         if self._checkpoint is not None:
+                            await self._checkpoint.claim(request.episode_id)
                             self._checkpoint.begin(
                                 request.episode_id,
                                 request.task.model_dump(mode="json"),
                                 deadline,
-                                restart=not self.checkpoint_boundaries,
+                                restart=self.checkpoint_mode == "restart_only",
                             )
                             begun = True
                         response = await self.run(request, cleanup)
@@ -261,20 +326,25 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         """Take part in partial-rollout checkpoints when they are enabled.
 
         Every episode is tracked.
-        A protocol that records boundaries (``checkpoint_boundaries``) continues after a restore;
+        A protocol that records boundaries (``checkpoint_mode = "exported"``) continues after a restore;
         the episodes of a protocol that records none are restarts,
         which never hold up a checkpoint and start over from their input after a crash.
         Call this from any ``setup_webserver`` that builds its own app.
         """
+        # The declaration is a class attribute nothing else checks: a typo would act as a mode of its own.
+        if self.checkpoint_mode not in _ENVIRONMENT_CHECKPOINT_MODES:
+            raise ValueError(
+                f"{type(self).__name__} declares checkpoint_mode={self.checkpoint_mode!r}; "
+                f"expected one of {_ENVIRONMENT_CHECKPOINT_MODES}"
+            )
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        if (self.config.num_workers or 1) != 1:
-            raise ValueError("environment checkpointing requires num_workers=1: episodes live in one process")
         self._checkpoint = EnvironmentParticipant()
-        install_participant(
+        install_server_participant(
             app,
             self._checkpoint,
+            num_workers=self.config.num_workers or 1,
             auth_token=settings.control_auth_token,
             lease_grace_seconds=settings.lease_grace_seconds,
             instance_name=self.config.name,
@@ -313,15 +383,15 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         if self._checkpoint is not None:
             await self._checkpoint.mark_restart(request.episode_id)
 
-    def checkpoint_step(self, request: EpisodeRequestT, mode: StepMode) -> AbstractAsyncContextManager[None]:
-        """Run one protocol step in ``wait`` or ``replay`` mode (see ``nemo_gym._checkpoint.steps``).
+    def checkpoint_step(self, request: EpisodeRequestT, step_type: StepType) -> AbstractAsyncContextManager[None]:
+        """Run one protocol step as a ``wait`` or ``replay`` step (see ``nemo_gym._checkpoint.steps``).
 
         Use ``replay`` only for a step that is safe to run again after a crash
         and does not change checkpointed state; everything else waits.
         """
         if self._checkpoint is None:
             return nullcontext()
-        return self._checkpoint.step(request.episode_id, mode)
+        return self._checkpoint.step(request.episode_id, step_type)
 
     def _unhandled_failure_response(self, request: EpisodeRequestT, error: Exception) -> EpisodeResponseT:
         LOGGER.exception(f"Unhandled environment server error: episode_id={request.episode_id}")

@@ -82,7 +82,12 @@ def _strip_capture_transport_fields(payload: dict[str, Any]) -> None:
         choice.pop("token_ids", None)
         message = choice.get("message")
         if isinstance(message, dict):
-            for field_name in (*TOKEN_FIELDS, *_MEGATRON_TRANSPORT_FIELDS):
+            for field_name in (
+                *TOKEN_FIELDS,
+                *_MEGATRON_TRANSPORT_FIELDS,
+                "sampler_topk_token_ids",
+                "sampler_topk_logprobs",
+            ):
                 message.pop(field_name, None)
 
 
@@ -327,7 +332,11 @@ async def publish_deferred_commit(context: CaptureContext) -> None:
 
 
 class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):
-    """Commit lineage after a vLLM worker durably stages the token delta."""
+    """Commit lineage after a vLLM worker durably stages the token delta.
+
+    The vLLM model server normalizes missing/null ``top_logprobs`` to zero
+    after all request overrides. This handler preserves explicit counts.
+    """
 
     _BACKEND_LABEL = "vLLM"
 
@@ -339,7 +348,6 @@ class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):
         request_payload[NG_CAPTURE_FIELD] = admission.model_dump(mode="json")
         request_payload.update(
             logprobs=True,
-            top_logprobs=0,
             return_tokens_as_token_ids=True,
         )
         if admission.mode == "token_in":
