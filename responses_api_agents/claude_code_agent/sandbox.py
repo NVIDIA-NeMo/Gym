@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, SandboxCommand, SandboxSession, shell_assignments
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
@@ -34,7 +34,6 @@ class HarnessProcessInfo(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     hostname: str
     pid: int
-    python: str | None = None
 
 
 def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
@@ -165,15 +164,18 @@ class ClaudeCodeSandboxSession(AgentSessionState):
         skills_path = payload.pop("skills_path")
         if skills_path:
             await self.stage_skills(skills_path)
-        await self.upload_json("input.json", payload)
-        return SandboxCommand(
-            argv=[
-                "python3",
-                "-I",
-                f"{self.session.session_dir}/sandbox_runner.py",
-                f"{self.session.session_dir}/input.json",
-            ],
-        )
+        directory = self.session.session_dir
+        # Regular files avoid waiting for detached task services to close inherited pipes.
+        params = {
+            "cwd": payload["cwd"],
+            "command": payload["command"],
+            "env": payload["env"],
+            "stdin": "/dev/null",
+            "stdout": f"{directory}/events.jsonl",
+            "stderr": f"{directory}/stderr.log",
+        }
+        await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
+        return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
     async def collect_artifacts(self) -> ClaudeCodeArtifacts:
         """Copy dedicated stdout and transcripts after confirmed harness termination."""

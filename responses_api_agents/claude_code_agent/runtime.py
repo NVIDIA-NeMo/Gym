@@ -4,6 +4,7 @@
 
 import asyncio
 import gzip
+import hashlib
 import json
 import os
 import re
@@ -18,7 +19,6 @@ from aiohttp import ClientTimeout
 
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 from nemo_gym.server_utils import request
-from responses_api_agents.claude_code_agent.install_claude_runtime import sha256_file
 
 
 CACHE_DIR = Path.home() / ".cache" / "nemo_gym" / "claude"
@@ -26,6 +26,15 @@ _CACHE_LOCKS: dict[Path, asyncio.Lock] = {}
 _HASH_LOCKS: dict[Path, asyncio.Lock] = {}
 _VERIFIED: dict[Path, tuple[tuple[int, ...], str]] = {}
 _UPLOAD_SLOTS = asyncio.Semaphore(4)
+
+
+def sha256_file(path: Path) -> str:
+    """Hash a native binary in bounded chunks."""
+    digest = hashlib.sha256()
+    with path.open("rb") as binary:
+        for chunk in iter(lambda: binary.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _private_directory(path: Path) -> None:
@@ -212,7 +221,7 @@ async def install_sandbox_runtime(
     """Reuse a verified runtime or upload host-cached bytes; never fetch from the sandbox."""
     if (source or local_source) and not expected:
         raise ValueError("A supplied Claude binary requires a trusted SHA-256")
-    command = ["python3", "-I", directory + "/install_claude_runtime.py", "--version", version, "--runtime", runtime]
+    command = ["bash", directory + "/install_claude_runtime.sh", "--version", version, "--runtime", runtime]
     if source:
         command += ["--source", source, "--sha256", expected]
     else:

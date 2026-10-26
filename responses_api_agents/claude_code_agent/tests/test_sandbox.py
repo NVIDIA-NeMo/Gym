@@ -481,7 +481,6 @@ async def test_skills_are_staged_before_launch_and_disable_bare(monkeypatch, tmp
         request=seed(), runtime="/runtime", session=SimpleNamespace(session_dir="/tmp/session", sandbox=remote)
     )
     payload = {
-        "directory": "/tmp/session",
         "command": ["/runtime/claude"],
         "cwd": "/app",
         "env": {},
@@ -494,7 +493,8 @@ async def test_skills_are_staged_before_launch_and_disable_bare(monkeypatch, tmp
     command = await state.stage_activation(payload)
     assert files["/tmp/session/config/skills/example/helper.sh"] == b"echo helper\n"
     assert "SKILL.md" in " ".join(files)
-    assert command.python == "python3"
+    assert command.argv == ["bash", "/tmp/session/harness_runner.sh", "/tmp/session/params.sh"]
+    assert "/runtime/claude" in files["/tmp/session/params.sh"].decode()
     runner_payload = staged.await_args.args[1]
     assert "skills_path" not in runner_payload
     instance = agent()

@@ -33,7 +33,7 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -606,8 +606,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     timeout_s=30,
                 )
                 self._check_sandbox_setup(result)
-                for name in ("sandbox_runner.py", "install_claude_runtime.py"):
-                    await sandbox.upload(Path(__file__).with_name(name), f"{directory}/{name}")
+                await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
+                installer = "install_claude_runtime.sh"
+                await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
                 await install_sandbox_runtime(
                     sandbox,
                     version=version,
@@ -717,7 +718,6 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 command[0] = state.runtime + "/claude"
                 artifacts = await state.execute(
                     {
-                        "directory": directory,
                         "command": command,
                         "cwd": state.session.workdir,
                         "env": env,
