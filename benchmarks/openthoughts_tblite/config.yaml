@@ -1,0 +1,63 @@
+openthoughts_tblite:
+  responses_api_agents:
+    harbor_agent_general:
+      entrypoint: app.py
+      domain: agent
+      description: OpenThoughts-TBLite (Terminal-Bench Lite), 100 Harbor tasks run by Harbor's Terminus-2.
+
+      datasets:
+        - name: openthoughts_tblite
+          type: benchmark
+          jsonl_fpath: benchmarks/openthoughts_tblite/data/benchmark.jsonl
+          prepare_script: benchmarks/openthoughts_tblite/prepare.py
+          num_repeats: 3
+
+      harbor_resolve_paths_from_gym_root: true
+      # Each attempt gets its own Harbor job folder: runs sharing a results folder can't reuse each other's trials.
+      harbor_unique_job_names: true
+      # Harbor's files for every attempt go to a `harbor` folder next to the rollouts.
+      harbor_jobs_dir: ${oc.select:output_jsonl_fpath,results/openthoughts_tblite/rollouts.jsonl}
+      # Gym retries a failed attempt; a Harbor retry would start another sandbox inside the same request.
+      harbor_max_retries: 0
+      # Harbor's Terminus-2 calls the model itself. LiteLLM reads its key from here, which keeps it out of the job
+      # config Harbor writes to disk.
+      harbor_worker_env:
+        HOSTED_VLLM_API_KEY: ${oc.select:policy_api_key,''}
+
+      ##
+      # Follows harbor.models.job.config:DatasetConfig spec. prepare.py writes these task folders.
+      #
+      harbor_dataset:
+        path: benchmarks/openthoughts_tblite/data/tasks
+
+      ##
+      # Follows harbor.models.trial.config:EnvironmentConfig spec. Every task names a prebuilt image.
+      #
+      harbor_environment:
+        type: docker
+
+      ##
+      # Follows harbor.models.trial.config:AgentConfig spec. No override_timeout_sec: each task's own
+      # [agent] timeout_sec applies, after which its tests grade the attempt.
+      #
+      harbor_agent:
+        name: terminus-2
+        model_name: hosted_vllm/${policy_model_name}
+        kwargs:
+          api_base: ${policy_base_url}
+          # No asciinema relay in the task shell: pastes over ~16 KB froze the terminal.
+          record_terminal_session: false
+          # Harbor requires all four for a hosted_vllm model; set max_input_tokens below your model's context.
+          model_info:
+            max_input_tokens: 131072
+            max_output_tokens: 32768
+            input_cost_per_token: 0.0
+            output_cost_per_token: 0.0
+
+openthoughts_tblite_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: openthoughts_tblite

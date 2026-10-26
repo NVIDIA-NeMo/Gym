@@ -20,7 +20,12 @@ from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParse
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
-from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
+from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
+    capture_observations,
+    rejected_events,
+    seed,
+    setup,  # noqa: F401
+)
 
 
 class _Response:
@@ -75,10 +80,16 @@ def _resolved_config():
     )
 
 
+@pytest.mark.parametrize("outcome", ["completed", "initial-rejection", "later-rejection"])
 async def test_session_composition_routes_collector_through_environment_and_responses(
-    setup, monkeypatch: pytest.MonkeyPatch
+    setup, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str
 ):
     agent, sandbox = setup
+    if outcome != "completed":
+        sandbox.events = rejected_events(after_work=outcome == "later-rejection")
+        sandbox.result["return_code"] = 1
+        capture_observations(sandbox, tmp_path)
+    reward = {"completed": 1.0, "initial-rejection": 0.0, "later-rejection": 0.5}[outcome]
     monkeypatch.chdir(Path(__file__).resolve().parents[3])
     # The benchmark's existing allowlist is unchanged; this integration is opt-in.
     monkeypatch.setenv("NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING", "1")
@@ -149,7 +160,7 @@ async def test_session_composition_routes_collector_through_environment_and_resp
             if url_path == "/verify":
                 sandbox.disconnect.assert_awaited_once()
                 assert body["response"] == responses_body
-                return _Response({**body, "reward": 1.0})
+                return _Response({**body, "reward": reward, "evaluation_completed": True, "mask_sample": False})
             assert url_path == "/close_session"
             return _Response({"resources_session_id": body["resources_session_id"]})
 
@@ -174,7 +185,9 @@ async def test_session_composition_routes_collector_through_environment_and_resp
         )
         _, result = await next(RolloutCollectionHelper().run_examples(rows))
     assert result["failure"] is None, result
-    assert result["result"]["reward"] == 1.0
+    assert result["result"]["reward"] == reward
+    assert result["result"]["evaluation_completed"] is True
+    assert result["result"]["mask_sample"] is False
     assert [path for _, path, _ in calls] == [
         "/run",
         "/seed_session",
@@ -187,7 +200,12 @@ async def test_session_composition_routes_collector_through_environment_and_resp
     assert calls[0][0] == environment_name
     assert calls[3][2]["input"] == "Fix the code"
     assert "grader-only" not in json.dumps(calls[3][2])
-    assert responses_body["output"][-1]["content"][0]["text"] == "Fixed"
-    assert responses_body["usage"]["total_tokens"] == 16
+    assert responses_body["status"] == ("completed" if outcome == "completed" else "failed")
+    if outcome == "initial-rejection":
+        assert responses_body["output"] == []
+        assert responses_body["usage"]["total_tokens"] == 0
+    else:
+        assert responses_body["output"][-1]["content"][0]["text"] == "Fixed"
+        assert responses_body["usage"]["total_tokens"] == 16
     assert not any(record.state is not None for record in agent._session_records.values())
     sandbox.stop.assert_not_awaited()

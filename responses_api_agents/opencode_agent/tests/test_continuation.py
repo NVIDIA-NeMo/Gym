@@ -569,6 +569,59 @@ def test_opencode_error_during_timeout_fails_http_activation(setup, tmp_path, pr
         assert invocation["error_type"] == ("server_error" if error_event else "timeout")
 
 
+@pytest.mark.parametrize(
+    "error_name,expected_status,expected_error_type",
+    [("APIError", "failed", "provider_error"), ("ContextOverflowError", "incomplete", "context_limit")],
+)
+def test_reported_error_retains_continuation_evidence(
+    setup, tmp_path, error_name, expected_status, expected_error_type
+):
+    agent, sandbox = setup
+    payloads = install_artifact_runner(sandbox, tmp_path)
+    launch = sandbox.launch.side_effect
+
+    async def report_error(**kwargs):
+        result = await launch(**kwargs)
+        path = f"{payloads[-1]['directory']}/export.json"
+        export = json.loads(sandbox.files[path])
+        info = export["messages"][-1]["info"]
+        info["finish"] = "error" if error_name == "ContextOverflowError" else None
+        info["error"] = {
+            "name": error_name,
+            "data": {"statusCode": 503, "message": "provider message", "responseBody": "private-body"},
+        }
+        sandbox.files[path] = json.dumps(export)
+        return result
+
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        first = activate(client, 1).json()
+        assert first["status"] == "completed"
+        sandbox.launch.side_effect = report_error
+        sandbox.result["return_code"] = 1
+        response = activate(client, 2, "Continue")
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["status"] == expected_status
+        assert result["metadata"]["activation_id"] == "2"
+        assert result["metadata"]["harness_session_id"] == "opencode-session"
+        if error_name == "APIError":
+            assert result["error"]["message"] == "HTTP 503: provider message"
+            assert json.loads(result["metadata"]["ng_agent_outcome"]) == {
+                "failure_kind": "model_request_error",
+                "status_code": 503,
+            }
+        else:
+            assert result["error"] is None
+        [invocation] = roots(result["_ng_agent_observations"])
+        assert invocation["activation_id"] == 2
+        assert (invocation["status"], invocation["error_type"]) == (expected_status, expected_error_type)
+        assert activate(client, 2, "Continue").json() == result
+        assert len(payloads) == 2
+        invocations = roots(close(client, request)["agent_observations"])
+        assert [(r["activation_id"], r["status"]) for r in invocations] == [(1, "completed"), (2, expected_status)]
+
+
 def test_collector_and_existing_conformance_keep_two_activation_owners(setup, tmp_path):
     from nemo_gym.base_responses_api_model import ModelCallRecord
     from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record

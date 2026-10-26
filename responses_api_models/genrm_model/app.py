@@ -42,6 +42,7 @@ class GenRMModelMixin:
         return VLLMConverter(
             return_token_id_information=self.config.return_token_id_information,
             uses_reasoning_parser=self.config.uses_reasoning_parser,
+            custom_tool_strategy=self.config.custom_tool_strategy,
         )
 
     def _preprocess_chat_completion_create_params(self, request: Request, body_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -70,6 +71,7 @@ class GenRMModelMixin:
         if self.config.supports_principle_role and principle:
             messages.append({"role": "principle", "content": principle})
 
+        # Candidate responses currently support text only; the user message may contain images.
         if response_1 is not None:
             messages.append({"role": "response_1", "content": response_1})
 
