@@ -400,6 +400,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
                     episode_id=request.episode_id,
                     task_id=request.task.task_id,
                     task_data=task.model_dump(mode="json"),
+                    rollout_index=request.rollout_index,
                 ),
             )
             resources_cookies.update(_cookies(seed_http_response))

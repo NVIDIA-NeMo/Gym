@@ -128,6 +128,18 @@ class BaseEpisodeRequest(BaseModel, Generic[TaskInputT]):
 
     episode_id: EpisodeId
     task: MaterializedTask[TaskInputT]
+    # Kept out of EpisodeId: identity must stay recoverable from a capture key, which does not encode the repeat.
+    rollout_index: int | None = Field(
+        default=None,
+        ge=0,
+        strict=True,
+        description=(
+            "The row's `_ng_rollout_index`: the collector numbers each task's rollouts across every agent a row fans "
+            "out to, so a second agent's rollouts continue after the first's, and the numbers stay the same for a "
+            "materialized input. It is never parsed from `episode_id.rollout_id`, which may be explicit. "
+            "`None` when the caller does not number rollouts."
+        ),
+    )
 
 
 class BaseEpisodeResponse(BaseModel, Generic[EpisodeResultT]):

@@ -10363,6 +10363,7 @@ class TestEnvironmentServerRouting:
                     "task_data": {"instance_id": "instance"},
                 },
             },
+            "rollout_index": 0,
         }
 
     def test_taskset_route_requires_a_configured_environment_server(self) -> None:
@@ -10552,6 +10553,7 @@ class TestEnvironmentServerRouting:
         # The materialized row goes to its taskset's route as an episode request.
         assert calls["environment"]["task"]["task_id"]["taskset"] == "swe_pro"
         assert calls["environment"]["episode_id"] == {"rollout_id": "0-0", "attempt": 0}
+        assert calls["environment"]["rollout_index"] == 0
         # The flat row goes to the environment server fronting its agent, as today's flat body.
         assert calls["legacy_environment"] is flat_row
         assert calls["legacy_environment"][AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}
@@ -11508,6 +11510,23 @@ class TestRecordedAttemptCap:
 
     def test_the_recorded_cap_is_not_a_metric_of_a_counted_failure(self) -> None:
         assert NG_FAILURE_MAX_ATTEMPTS_KEY not in _counted_failure_row(self._failure(0, 3))
+
+
+@pytest.mark.parametrize(
+    "row, expected",
+    [
+        # An explicit rollout ID need not encode the repeat, so the index travels on its own.
+        ({ROLLOUT_ID_KEY_NAME: "batch-7", ROLLOUT_INDEX_KEY_NAME: 2}, {"rollout_index": 2}),
+        ({TASK_INDEX_KEY_NAME: 4, ROLLOUT_INDEX_KEY_NAME: 1}, {"rollout_index": 1}),
+        ({ROLLOUT_ID_KEY_NAME: "explicit"}, {}),
+    ],
+)
+def test_episode_request_carries_the_rows_rollout_index(row: dict, expected: dict) -> None:
+    row = {**row, "task_id": {"taskset": "t", "task_id": "x"}, "task_input": {}}
+
+    body = nemo_gym.rollout_collection._episode_request_body(row)
+
+    assert {key: body[key] for key in body.keys() - {"episode_id", "task"}} == expected
 
 
 class TestOmittedRolloutRecords:
