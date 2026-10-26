@@ -1310,6 +1310,47 @@ class TestNeMoGymChatCompletionSchemas:
         assert replayed[1] == {"role": "tool", "tool_call_id": "call_1", "content": "/app"}
         assert message == original
 
+    @pytest.mark.parametrize(
+        "content",
+        ["Build finished\n<shellId: 30 completed with exit code 0>", [{"type": "text", "text": "Build finished"}]],
+    )
+    def test_copilot_background_tool_message_source_is_not_forwarded(self, content: object) -> None:
+        tool_result = {
+            "role": "tool",
+            "tool_call_id": "background-call",
+            "content": content,
+            "__copilotMessageSource": {"kind": "tool", "name": "read_bash", "summary": "Reading command output"},
+        }
+        payload = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "background-call",
+                            "type": "function",
+                            "function": {"name": "read_bash", "arguments": '{"shellId":"30","delay":0}'},
+                        }
+                    ],
+                },
+                tool_result,
+            ]
+        }
+        original = deepcopy(payload)
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+        expected = deepcopy(original)
+        del expected["messages"][1]["__copilotMessageSource"]
+        assert params.model_dump(exclude_unset=True) == expected
+        assert payload == original
+
+    @pytest.mark.parametrize("extra", ["__copilotMessageSourceUnknown", "other_client_metadata"])
+    def test_copilot_background_tool_other_metadata_remains_strict(self, extra: str) -> None:
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+                {"messages": [{"role": "tool", "tool_call_id": "call", "content": "result", extra: {"kind": "tool"}}]}
+            )
+
     def test_nonempty_response_annotations_are_not_silently_discarded(self) -> None:
         with pytest.raises(ValidationError):
             NeMoGymChatCompletionCreateParamsNonStreaming(

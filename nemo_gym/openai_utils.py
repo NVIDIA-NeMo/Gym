@@ -1480,6 +1480,26 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def drop_copilot_message_source(cls, value: object) -> object:
+        """Remove Copilot's client-only provenance from replayed messages.
+
+        Copilot attaches this UI metadata to background tool results. It is not
+        Chat Completion model input; retain the tool content and call identity.
+        """
+        if not isinstance(value, dict) or not isinstance(value.get("messages"), list):
+            return value
+        return {
+            **value,
+            "messages": [
+                {key: item for key, item in message.items() if key != "__copilotMessageSource"}
+                if isinstance(message, dict)
+                else message
+                for message in value["messages"]
+            ],
+        }
+
+    @model_validator(mode="before")
+    @classmethod
     def drop_litellm_provider_specific_fields(cls, value: Any) -> Any:
         """Drop ``provider_specific_fields`` from replayed assistant history.
 
