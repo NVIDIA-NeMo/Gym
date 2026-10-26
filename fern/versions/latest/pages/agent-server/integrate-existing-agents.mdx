@@ -177,7 +177,7 @@ The taskset route selects the Environment Server, and its `agent_server` referen
 
 Before you increase concurrency, inspect the response, reward, failure sidecar, and cleanup evidence. When you raise `--concurrency`, raise `max_concurrent_episodes` to match and set `queue_timeout_seconds` above the expected episode duration; otherwise queued episodes fail admission after 60 seconds. A configuration that resolves has not yet been validated: resolution does not check task-image installation, model and tool behavior, or verification.
 
-For callers that still submit flat rows, `single_agent_turn_legacy` wraps the same session lifecycle as a migration adapter. The separate `legacy_agent` implementation delegates to the agent's old `/run` endpoint. New experiments should use the taskset configuration above.
+For callers that still submit flat rows, `single_agent_turn_legacy` wraps the same session lifecycle as a migration adapter. Name both `resources_server` and `agent_server` in its block. The separate `legacy_agent` implementation delegates to the agent's old `/run` endpoint and names only `agent_server`. New experiments should use the taskset configuration above.
 
 ### Swap the agent or the benchmark
 

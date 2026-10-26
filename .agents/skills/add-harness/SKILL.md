@@ -1,0 +1,166 @@
+---
+name: add-harness
+description: >
+  Guide for adding or updating an agent harness in NeMo-Gym: a CLI or SDK agent runtime
+  (for example Hermes, Pi, Codex, OpenCode, or an agent framework) wrapped as an Agent Server
+  adapter that runs through Gym's Environment Server and agent sessions. Use when the user asks
+  to add, integrate, onboard, wrap, upgrade, or migrate a harness or agent runtime, pair a harness
+  with a benchmark, or move an existing agent off the legacy /run path. Covers scoping, the session
+  contract, pairing configuration, harness conformance, real pairing runs, and the exit checks a
+  harness must pass before its PR merges. Triggered by: "add harness", "new agent harness",
+  "integrate <CLI> agent", "onboard harness", "upgrade harness version", "migrate agent to sessions".
+---
+
+# Add or Update a Harness in NeMo-Gym
+
+The Gym page [Add or Update a Harness](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx) is the contract and command reference. When it and this skill disagree, the page wins. This skill adds the order of work, the decisions to make before writing code, and the checks a harness must pass before it merges (Step 7). Read the linked sections; do not work from this summary alone.
+
+Words used below follow the page's [Terminology](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#terminology): the *harness* is the agent runtime, the *adapter* is the Agent Server that wraps it.
+
+## Step 0: Scope before code
+
+1. **Check what already exists.** Look for the harness in [Built-in agents](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#built-in-agents), [Sandboxed harnesses](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#sandboxed-harnesses), and under `responses_api_agents/`, including generic bridges such as `harbor_agent` that can already launch some harnesses on the legacy `/run` path. If an adapter exists, the work is an update or a migration, not a new adapter. Read its README and tests first.
+2. **Pick the path.** Use [Choose a Path](../../../fern/versions/latest/pages/agent-server/index.mdx#choose-a-path). This skill covers an adapter that runs one agent turn per episode through `single_agent_turn`. An agent that runs its own multi-turn episode, simulated users, or several verify calls needs its own Environment Server instead.
+3. **Pick the execution model** and read [Select an execution mode](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#select-an-execution-mode).
+   - *Sandboxed harness*: the harness runs inside the benchmark's task sandbox, supervised by `SandboxSession`. Models: `pi_agent` and `codex_agent` (CLIs), `hermes_agent` (a Python harness started through a shim).
+   - *In-process harness*: an SDK or framework that runs inside the Agent Server with its own tools. Models: `simple_agent` for the session hooks, `langchain_deepagents_agent` for a framework adapter that inherits them.
+   - Host execution is optional. If the adapter offers it, keep it working and test it separately.
+4. **Pick the capability level.** Use [Choose the capabilities you need](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#choose-the-capabilities-you-need): Evaluation, Observability, Environment tools and task sandboxes, Training. The level decides which later checks apply. Write it down; it goes in the adapter README.
+5. **Name the first pairing.** Choose a benchmark whose Resources Server supports the session contract, and read its README (for example `benchmarks/terminal_bench_2_1/README.md`) for its run config and the harnesses it lists. Check that the harness's real behavior fits the tasks: a harness that only edits files cannot solve tasks that need commands run. A benchmark lists the agents it accepts in `allowed_agents`, and a new harness is not listed yet. During development, pass `--allow-unsupported-pairing` to `gym eval run`. Add the agent to `allowed_agents` in the same PR only after Step 5 passes, and ask the benchmark's owner to review that line. Do not edit the benchmark's data, prompts, or verifier to fit the harness.
+6. **Ask the user for what you cannot invent:** the pinned harness version and its runtime requirements, a model endpoint and its credentials (kept in `env.yaml`, never in committed config), a sandbox provider for sandboxed runs, and approval for downloads such as task images or benchmark data.
+
+## Step 1: Build the adapter
+
+Follow these sections of the page, in order:
+
+- [Code layout](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#code-layout) and [Adapter configuration](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#adapter-configuration)
+- [Agent Server and Environment Server](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#agent-server-and-environment-server): the seed, activation, and close contract
+- [Agent Server and task sandbox](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#agent-server-and-task-sandbox) and [Tools](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#tools)
+- [Wire an adapter to `SandboxSession`](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#wire-an-adapter-to-sandboxsession) and [Installation contract](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#installation-contract), for a sandboxed harness
+- [Preserve inputs, outputs, and errors](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#preserve-inputs-outputs-and-errors)
+- [Make retries and close safe](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#make-retries-and-close-safe)
+
+Before moving on, confirm each of these in the code:
+
+- [ ] Every model call, including summarization, compaction, and subagent calls, goes through Gym's rollout-prefixed Model Server URL.
+- [ ] A seed the adapter cannot serve (a sandbox it cannot use, a required tool grant it never consumes) raises `AgentSeedRejectedError`; optional grants it does not use are skipped.
+- [ ] Close returns an `AgentObservationBundle`, with gaps for evidence the harness cannot report, even when activation failed.
+- [ ] Agent sessions run with `num_workers: 1`.
+- [ ] A sandbox failure never falls back to running on the host.
+- [ ] Controls the harness does not support are rejected or documented, not silently dropped.
+- [ ] The harness's own files (configuration, history, caches) stay out of the task repository. Where the harness has no setting to move them, the README says what it writes under the task's home.
+
+## Step 2: Unit tests
+
+Cover the behaviors in [Runtime and compatibility](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#runtime-and-compatibility) that apply to your execution model. At minimum:
+
+- Each unsupported seed returns a final 422. Use `nemo_gym.testing.agent_session_conformance.check_agent_seed_rejected`, as `responses_api_agents/hermes_agent/tests/test_app.py` does.
+- An activation runs the harness once. An activation for an unknown or closed session returns 409; a request with no session cookie takes the host path, if the adapter has one.
+- Close returns observations or gaps, and returns `resources_cookies` only when the session holds a Resources cookie jar.
+- Retries, cancellation, and termination, with every wait bounded.
+
+Check that each new test fails when you revert the behavior it covers. Run the adapter's tests in its own environment:
+
+```bash
+gym env test +entrypoint=responses_api_agents/<adapter_name>
+```
+
+## Step 3: Compose a pairing
+
+Follow [Configure an experiment](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#configure-an-experiment) (separate model, benchmark, agent, and run configs) and the paired benchmark's README.
+
+- New pairings use typed tasksets: the benchmark's dataset declares `taskset`, `environment_server_routes` maps it to a `single_agent_turn` instance, and that instance's `agent_server` selects the harness.
+- Existing flat-row configs migrate to `single_agent_turn_legacy`. Name both `resources_server` and `agent_server` in its block.
+- Set `resources_tool_transports` to the grants the adapter consumes, or `[]` when it uses only its own tools.
+- Swapping in another compatible harness must change only agent configuration and wiring. A pairing that needs pair-specific adapter code is a design problem; stop and report it.
+
+Check the config offline, then start it:
+
+```bash
+gym env resolve --config <run.yaml>
+gym env validate --config <run.yaml>
+gym env start --config <run.yaml>
+```
+
+A config that resolves and validates can still fail when its servers start. Read the server logs before claiming the pairing works.
+
+## Step 4: Harness conformance
+
+Read [Harness Conformance](../../../fern/versions/latest/pages/observability/harness-conformance.mdx) and the [Observability](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#observability) section.
+
+- **The probes apply** to a harness that offers the model a shell tool through function calling: the scripted replies call the shell tool listed in the request's `tools`. Register the harness under a short key as the [runner guide](../../../scripts/harness_conformance/README.md) describes: an entry in `registry.HARNESSES`, its runtime install in `ci.install_runtime`, and its episode configuration. Run on Linux with a new output directory:
+
+  ```bash
+  python scripts/run_harness_conformance.py --harness <registry-key> --output <new-dir>
+  ```
+
+  Fix each failing check in the adapter, not in the checker, then rerun the failed scenarios and the full suite. [Read individual results](../../../fern/versions/latest/pages/observability/harness-conformance.mdx#read-individual-results) explains each output file.
+- **The probes do not apply** to a harness without a function-calling shell tool, including one that runs commands it reads from the model's text. Say so in the PR; Steps 2 and 5 carry the evidence.
+
+## Step 5: Real pairing runs
+
+Run a real model on real tasks for every pairing you claim. Enable [model-call capture](../../../fern/versions/latest/pages/model-server/model-call-capture.mdx): set `observability_enabled: true` and an absolute `model_call_capture_dir` in `run.yaml`.
+
+```bash
+gym env start --config <run.yaml>
+gym eval run --no-serve --config <run.yaml> \
+  --input <tasks.jsonl> --output <run_dir>/rollouts.jsonl \
+  --limit 5 --concurrency 1
+gym eval health-check <run_dir>
+python scripts/inspect_harness_conformance.py \
+  --bundle <run_dir>/rollouts.jsonl --output <run_dir>/evidence --require-sandbox
+```
+
+- `--input` needs `--no-serve`. With a taskset config you can instead let `gym eval run` serve and pass `--split`, as [Configure an experiment](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#configure-an-experiment) shows; the benchmark README shows how its rows are prepared.
+- Add `--allow-unsupported-pairing` to `gym eval run` while the harness is not yet in the benchmark's `allowed_agents`.
+- Inspector flags: drop `--require-sandbox` for an in-process harness, and pass `--no-tools` when the pair dispatches no tools.
+
+Read the rollouts, not the exit code:
+
+- Reward, response, and failures sidecar for each task.
+- The agent closed before verification, and the sandbox owner cleaned up.
+- [Rollout health](../../../fern/versions/latest/pages/evaluation/rollout-health.mdx) counts: `unhealthy` is a finding; `unobserved` means missing evidence, which is expected only at the Evaluation level.
+
+Then show a second compatible pairing through configuration changes alone. For an upgrade, compare before and after with the same model, tasks, prompts, sampling, limits, image, verifier, and concurrency.
+
+## Step 6: Training (only if the capability level includes it)
+
+Follow [Training on External Agent Harnesses](../../../fern/versions/latest/pages/training-tutorials/external-agent-harnesses.mdx). Validate token capture separately from inference. Training frameworks send sampling controls such as `temperature`, `top_p`, and `max_output_tokens` on every request; decide how the adapter maps or rejects each one, and state whether a token limit is per model call or per episode. Model output that a later call reuses as input, such as a summary, must also go through the capture route.
+
+## Step 7: Exit checks
+
+A harness merges only when it passes these checks. Put the evidence in the PR.
+
+| Check | What it asks | How to check |
+|---|---|---|
+| Unit tests | Session contract, refusals, close, retries, termination. | `gym env test +entrypoint=responses_api_agents/<adapter_name>` |
+| Conformance | Every applicable P0 check passes, or the PR explains why the probes do not apply. | `scripts/run_harness_conformance.py` report |
+| Real pairing | Each claimed pairing produces rewards on a real model and tasks; the agent closes before verification; cleanup runs. | `rollouts.jsonl`, failures sidecar, server logs |
+| Health | Very few `unhealthy` rollouts; every `unobserved` count is explained by the capability level. | `quality_summary.json`, `gym eval health-check` |
+| Evidence | The saved rollouts pass the evidence check at the claimed capability level. | `scripts/inspect_harness_conformance.py` |
+| Composition | A second pairing works through configuration alone. | Its run folder |
+| Pairing declared | The harness is in each paired benchmark's `allowed_agents`, reviewed by the benchmark's owner. | Benchmark config diff |
+| Catalog | The adapter README states the harness version, capability level, supported pairings, and limits. The [Sandboxed harnesses](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#sandboxed-harnesses) and [Tools](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#tools) tables, and each paired benchmark's README harness table, list the harness. | Docs diff |
+
+The [capability matrix](../../../fern/versions/latest/pages/reference/trajectory-capabilities.mdx) is published by CI from registered harnesses. A local `python -m scripts.harness_conformance.table` run is a preview only; do not commit its output.
+
+## Step 8: Pre-commit and PR
+
+```bash
+pre-commit run --all-files
+pytest tests/unit_tests/test_session_contract_repo.py
+```
+
+- `test_session_contract_repo.py` checks every adapter's source for the session hooks; a search for your adapter's name does not find it.
+- Search `tests/` for every config file you changed (`grep -rn <config or agent name> tests/`) and run those tests too. Core tests can assert a config's shape, and they are not part of the adapter's own suite.
+- Use a Conventional Commit title such as `feat(<harness>): add the <harness> harness adapter`, and DCO sign-off (`git commit -s`).
+- Use the `nemo-gym-pr-checks-and-labels` skill for CI routing and labels.
+- In the PR body, list the harness version, commands, run folders, health counts, conformance result or why it does not apply, and known limits.
+
+## Constraints
+
+- One adapter per harness. Never add a pair-specific adapter or launcher.
+- Never change a benchmark's data, prompts, or verifier to fit a harness.
+- Keep credentials out of committed files; reference them from `env.yaml`.
+- Use aiohttp through `nemo_gym.server_utils.request()`, not httpx, for async HTTP.
+- `/run` and activation code must be async; code must run on Linux.

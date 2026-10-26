@@ -43,6 +43,8 @@ An adapter can stop at any level below. Each level adds work and enables a speci
 | Environment tools and task sandboxes | The same agent runs against environment-provided tools and sandboxes, across benchmarks. | Map tool grants and `SandboxAccess` into the harness's configuration. See [Integration contracts](#integration-contracts). | A second pairing that works through configuration changes alone. |
 | Training | Exact token IDs and log probabilities for policy optimization. | Send every model call that can return policy-generated text through the training-capture route. See [Route every model call through the Model Server](#route-every-model-call-through-the-model-server). | `_ng_token_capture` metrics on the collected rollouts, with `mask_sample` absent or `false`. |
 
+An adapter that stops at Evaluation returns no invocation or turn records, so its rollouts are `unobserved` in [rollout health](/main/evaluation/rollout-health) and fail the evidence check. That is expected at that level. Its close still returns an `AgentObservationBundle` whose gaps name the missing evidence.
+
 ### What you write
 
 An adapter supplies the knowledge that is specific to the harness or framework:
@@ -745,6 +747,8 @@ python scripts/run_harness_conformance.py \
 
 The runner uses scripted model replies and real local tools, then runs the evidence checker automatically. Review `conformance_report.md`, fix missing or inconsistent evidence, and rerun. The P0 gate passes only when every applicable P0 check passes, including ownership and call-to-step attribution. TE labels group results; they do not grant exemptions.
 
+The scripted replies call the shell tool that the harness lists in its model request's `tools`, so the probes apply only to a harness that offers the model a shell tool through function calling. An adapter without one, such as a framework adapter that runs only its own tools inside the Agent Server, or a harness that runs commands it reads from the model's text, cannot run them. Say so in the PR, and validate the adapter with its session tests, a real pairing, and the saved-rollout inspection below.
+
 Also check saved rollouts from each target sandbox pairing:
 
 ```bash
@@ -764,7 +768,7 @@ Record evidence conformance and sandbox lifecycle validation separately, because
 - **Process termination.** Use real Linux processes. Cover tool commands in the harness group, with grandchildren, under a harness that exits on `SIGTERM` and one that must be killed, for both a deadline and a close. A tool in the harness group, or in its own session while the harness still runs, must not change the task after a confirmed receipt, and a detached service must survive. Check that every harness process shares the supervised process group, and that a zombie does not block confirmation. Read the process state from `/proc/<pid>/stat`, because `os.kill(pid, 0)` also succeeds for a zombie. Run the `sandbox`-marked tests with the local provider, which exposes a surviving process that holds the exec output pipe open.
 - **Test hygiene.** Bound every wait in lifecycle tests, for example with `asyncio.wait_for()`, so that a regression fails instead of hanging. Check that each new regression test fails when you revert the fix it covers.
 - **Task environment.** Confirm that tool shells keep the task's `HOME` and `XDG_*` directories, and that files a tool writes under `~` are visible to verification.
-- **Real smoke test.** Run a real model on a real task with tools and verification. Confirm that the harness runs in the sandbox, that the agent closes before verification, and that the sandbox owner cleans it up. Inspect failures, traces, artifacts, and grading coverage.
+- **Real smoke test.** Run a real model on a real task with tools and verification. Confirm that the harness runs in the sandbox, that the agent closes before verification, and that the sandbox owner cleans it up. Inspect failures, traces, artifacts, and grading coverage. To collect your own task file, start the servers with `gym env start --config <run.yaml>`, then run `gym eval run --no-serve --config <run.yaml> --input <tasks.jsonl>`. Without `--no-serve`, `gym eval run` accepts only the prepared dataset of the requested split. A configuration that resolves and validates can still fail when its servers start, so start them before you claim a pairing works.
 - **Composition.** Show a second compatible pairing that works through configuration changes alone. Record versions and unsupported combinations.
 - **Upgrades.** Compare the same harness before and after the upgrade with a fixed model, tasks, prompts, sampling parameters, limits, images, verifier, and concurrency. Compare scores and failures. Different harnesses do not need to score the same.
 - **Isolation.** Run concurrent sessions with different configurations and credentials, and check that no setting, credential, or file from one session reaches another.
