@@ -34,7 +34,7 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.path_utils import aggregation_sources_path_for
-from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.rollout_collection import NG_DISPATCH_DRAINED_KEY, NG_OMITTED_ROLLOUT_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_reverification import (
     _RECOVERY_TWO_SOURCES_WARNING,
     ATIF_PROVENANCE_KEY,
@@ -3096,6 +3096,41 @@ class TestRunFromConfigJudgeFailedOnly:
         # judge_failed_only), so the output is un-prefixed (no `unsafe_`), regardless of RS mode
         assert (tmp_path / "recovered.jsonl").exists()
         assert not (tmp_path / "unsafe_recovered.jsonl").exists()
+
+    @pytest.mark.parametrize(
+        "omitted",
+        [
+            pytest.param({NG_FAILURE_CLASS_KEY: "kill_shaped"}, id="killed"),
+            pytest.param({NG_FAILURE_CLASS_KEY: "cancelled", NG_DISPATCH_DRAINED_KEY: True}, id="never-started"),
+            pytest.param({NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS}, id="judge-class"),
+            pytest.param({NG_FAILURE_CLASS_KEY: "kill_shaped", "stage_index": 1}, id="multi-stage"),
+        ],
+    )
+    async def test_rows_for_rollouts_with_no_result_are_not_recovered(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, omitted: dict
+    ) -> None:
+        """A `record_omitted_rollouts` sidecar row has no response to judge, so recovery neither re-verifies it nor
+        refuses the run because of its stage."""
+        omitted_row = {
+            TASK_INDEX_KEY_NAME: 1,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            NG_NO_PERSIST_KEY: True,
+            NG_OMITTED_ROLLOUT_KEY: True,
+            **omitted,
+        }
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(3)],
+            successes=[self._success(0)],
+            failures=[omitted_row, self._failure(2)],
+        )
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched)
+
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+
+        assert [p[TASK_INDEX_KEY_NAME] for p in dispatched] == [2]
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in self._read_jsonl(tmp_path / "recovered.jsonl")) == [0, 2]
 
     async def test_rejects_multistage_rows_before_writing_anything(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

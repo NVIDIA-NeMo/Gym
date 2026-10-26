@@ -89,6 +89,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     get_global_config_dict,
+    maybe_get_global_config_dict,
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import (
@@ -378,17 +379,27 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
 def get_global_aiohttp_client(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
-) -> ClientSession:  # pragma: no cover
+) -> ClientSession:
     global _GLOBAL_AIOHTTP_CLIENT
 
     if _GLOBAL_AIOHTTP_CLIENT is not None:
         return _GLOBAL_AIOHTTP_CLIENT
 
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=global_config_dict_parser_config,
-        global_config_dict_parser_cls=global_config_dict_parser_cls,
-    )
-    cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
+    # Read only a config this process already has, cached or injected through NEMO_GYM_CONFIG_DICT; never parse
+    # its argv here, which in a Ray task worker exits the process. A process with neither gets the default client
+    # limits: env.yaml and +global_aiohttp_* do not reach it. An explicit parser config or class still parses.
+    global_config_dict = maybe_get_global_config_dict()
+    if global_config_dict is None and (
+        global_config_dict_parser_config is not None or global_config_dict_parser_cls is not GlobalConfigDictParser
+    ):
+        global_config_dict = get_global_config_dict(
+            global_config_dict_parser_config=global_config_dict_parser_config,
+            global_config_dict_parser_cls=global_config_dict_parser_cls,
+        )
+    if global_config_dict is None:
+        cfg = GlobalAIOHTTPAsyncClientConfig()
+    else:
+        cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
 
     return set_global_aiohttp_client(cfg)
 

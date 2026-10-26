@@ -238,6 +238,15 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         app.post("/aggregate_metrics", response_model=AggregateMetrics)(aggregate_metrics_endpoint)
         return app
 
+    async def episode_timeout_seconds(self, request: EpisodeRequestT) -> float | None:
+        """The wall-clock bound of this episode: ``default_episode_timeout_seconds`` (``None`` is no bound).
+
+        A protocol whose tasks carry their own budgets may derive a longer one per episode (the Harbor server
+        does for a multi-step task whose steps add up to more than the default); it must never raise here, as
+        nothing of the episode has started yet.
+        """
+        return self.config.default_episode_timeout_seconds
+
     async def run_request(self, request: EpisodeRequestT) -> EpisodeResponseT:
         acquired = False
         if self._admission is not None:
@@ -270,12 +279,15 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         # A begin refused as a duplicate or a retired attempt owns nothing,
         # so it must not end the live episode with the same key.
         begun = False
-        deadline = asyncio.timeout(self.config.default_episode_timeout_seconds)
+        # Opened inside the guard below: a protocol's bound may await a lookup (the Harbor server resolves the
+        # task's snapshot), and a request cancelled or failing during it must still release its admission slot.
+        deadline: asyncio.Timeout | None = None
         # Every downstream call of this episode, including final cleanup, carries its attempt-qualified
         # rollout id, so Resources and Model Server calls stay correlated with the rollout.
         with rollout_context(request.episode_id.capture_key):
             try:
                 try:
+                    deadline = asyncio.timeout(await self.episode_timeout_seconds(request))
                     async with deadline:
                         if self._checkpoint is not None:
                             await self._checkpoint.claim(request.episode_id)
@@ -288,7 +300,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                             begun = True
                         response = await self.run(request, cleanup)
                 except TimeoutError as error:
-                    if deadline.expired():
+                    if deadline is not None and deadline.expired():
                         response = self.failure_response(
                             request,
                             self._attach_failure_events(
@@ -350,7 +362,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        self._checkpoint = EnvironmentParticipant()
+        self._checkpoint = EnvironmentParticipant(mode=self.checkpoint_mode)
         install_server_participant(
             app,
             self._checkpoint,

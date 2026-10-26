@@ -606,6 +606,29 @@ class TestPrepareChecksTheFieldsBeforeBuilding:
         recorded = json.loads((folder / BUILT_IMAGES_FILE).read_text())
         assert [entry["tasks"] for entry in recorded.values()] == [["featurebench"]]
 
+    def test_force_survives_the_plan_made_again_without_a_refused_task(self, tmp_path, monkeypatch):
+        """A task the key screen refuses before any build (a ``main.build.args`` Gym cannot apply) has the others
+        planned again; ``builds.force`` still builds a declared image's Dockerfile for them (Harbor's
+        ``--force-build``), and the record names them as forced for the loader."""
+        folder = tmp_path / "ds"
+        folder.mkdir()
+        refused = self.write_with_sidecar(folder, "t", '{context: ., args: {X: "1"}}')
+        forced = write_task(folder, "forced", compose=GOOD, dockerfile=BUILD_DOCKERFILE, docker_image="org/prebuilt:1")
+        assert list(prepare_builds.refused_before_build(plan_builds(folder, force=True))) == ["t"]
+        tool = self.docker_tool(monkeypatch)
+
+        prepared = prepare_target(
+            str(folder), output_root=tmp_path / "out", build=BuildOptions(repository="registry.example/r", force=True)
+        )
+
+        assert [task.task_id for task in prepared.tasks] == ["forced"] and list(prepared.skipped) == ["t"]
+        assert any("build" in call and str(forced / "environment") in " ".join(call) for call in tool.calls)
+        assert not any(str(refused / "environment") in " ".join(call) for call in tool.calls)
+        (entry,) = json.loads((folder / BUILT_IMAGES_FILE).read_text()).values()
+        assert (entry["tasks"], entry["forced_tasks"]) == (["forced"], ["forced"])
+        # The loader runs the forced build, not the declared image.
+        assert prepared.tasks[0].image == entry["image"] != "org/prebuilt:1"
+
     def test_with_builds_disabled_the_field_is_still_the_reason(self, tmp_path):
         folder = tmp_path / "ds"
         folder.mkdir()

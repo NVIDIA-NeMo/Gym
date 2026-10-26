@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Literal, 
 import aiohttp
 import orjson
 from aiohttp import ClientError
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 from tqdm.asyncio import tqdm
 
@@ -66,6 +66,7 @@ from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
+    ALLOWED_AGENTS_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
@@ -92,6 +93,7 @@ from nemo_gym.observability.model_calls import (
     model_call_capture_dirs_from_config,
     observability_enabled_from_config,
 )
+from nemo_gym.omitted_rollouts import omitted_rollout_record
 from nemo_gym.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
@@ -239,6 +241,9 @@ def _masking_step_metrics(agent_name: str, scored: Counter, dropped: Counter) ->
 #   - Rows that ``dispatch_budget_s`` never started go nowhere either. Gym
 #     marks them ``cancelled`` with ``_ng_dispatch_drained``: no rollout
 #     ran, so there is nothing to capture, tokenize or average.
+#   - ``record_omitted_rollouts`` writes a sidecar row for both, marked
+#     ``_ng_omitted_rollout``. No reader counts such a row, so it is
+#     evidence only: not scored, not an attempt, and resume still runs it.
 #   - On resume, ``_load_from_cache`` reads BOTH files: main jsonl tells
 #     it what's permanently done, sidecar tells it how many attempts each
 #     non-success has consumed (capped at NEMO_GYM_MAX_ROLLOUT_ATTEMPTS,
@@ -251,6 +256,21 @@ NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 # Set only by Gym, on the result it builds for a row the dispatch budget never started.
 NG_DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
+# Set only on the failures-sidecar row ``record_omitted_rollouts`` writes for a rollout that produced no result.
+# Readers key on it, not on ``_ng_no_persist``, which other sidecar rows (ATIF reverification) carry and count.
+NG_OMITTED_ROLLOUT_KEY = "_ng_omitted_rollout"
+
+
+def is_omitted_rollout_row(row: Mapping[str, Any]) -> bool:
+    """Whether a failures-sidecar row is a ``record_omitted_rollouts`` record of a rollout that produced no result."""
+    return bool(row.get(NG_OMITTED_ROLLOUT_KEY))
+
+
+def is_unstarted_rollout_row(row: Mapping[str, Any]) -> bool:
+    """Whether a sidecar row records a rollout the dispatch budget never started: no execution, so no history."""
+    return is_omitted_rollout_row(row) and bool(row.get(NG_DISPATCH_DRAINED_KEY))
+
+
 NG_TERMINAL_KEY = "_ng_failure_terminal"
 # The attempt cap the collecting process ran with, stamped on each sidecar row: offline aggregation reads it
 # instead of its own environment. The `_ng_failure_` prefix keeps it out of the metrics of a counted row.
@@ -329,6 +349,71 @@ def _materialized_taskset(row: Mapping[str, Any]) -> str | None:
     assert isinstance(task_id, Mapping)
     taskset = task_id.get("taskset")
     return taskset if isinstance(taskset, str) and taskset else None
+
+
+def _declared_datasets(agent_config: DictConfig) -> list[DictConfig]:
+    """The ``datasets`` entries one agent block declares; a list that is missing, a placeholder or not a list
+    declares nothing."""
+    datasets = OmegaConf.select(agent_config, "datasets", throw_on_resolution_failure=False)
+    if not isinstance(datasets, ListConfig):
+        return []
+    return [entry for entry in datasets if isinstance(entry, DictConfig)]
+
+
+def _datasets_declaring_taskset(global_config_dict: DictConfig, taskset: str) -> list[DictConfig]:
+    """The entries that declare the rows of ``taskset``, on whichever agent block declares them: an entry whose
+    ``taskset`` is that name, or whose ``name`` is when it sets none (a Harbor dataset's generated entry, named after
+    its taskset and routed by it)."""
+    declaring: list[DictConfig] = []
+    for _, block in global_config_dict.items_ex(resolve=False):
+        if not isinstance(block, DictConfig):
+            continue
+        agents = OmegaConf.select(block, AGENT_SERVER_TYPE_KEY_NAME, throw_on_resolution_failure=False)
+        if not isinstance(agents, DictConfig):
+            continue
+        for agent_config in agents.values():
+            if not isinstance(agent_config, DictConfig):
+                continue
+            for entry in _declared_datasets(agent_config):
+                declared = entry.get("taskset")
+                if declared == taskset or (declared is None and entry.get("name") == taskset):
+                    declaring.append(entry)
+    return declaring
+
+
+def _dataset_admitted_agents(
+    global_config_dict: DictConfig, agent_config: DictConfig, taskset: str | None
+) -> list[tuple[str, list[str]]]:
+    """``(dataset name, allowed_agents)`` for each dataset entry that declares the dispatched rows with a non-empty
+    ``allowed_agents``.
+
+    A materialized row names its dataset through its taskset, so only the entry that declares that taskset counts
+    (:func:`_datasets_declaring_taskset`), not every dataset the executing agent happens to declare: a second,
+    unrelated entry on the agent cannot refuse the rows. The lookup covers every agent block, not the executing
+    agent's alone: a Harbor dataset's entry sits on the agent block ``gym eval run`` generated for it, and a run
+    config edited to route the taskset's environment server to another agent block afterwards still has to meet
+    the dataset's list. A flat row routed to an agent directly names no dataset, so every dataset that agent
+    declares counts. So do the executing agent's entries that set no ``taskset`` when no entry anywhere declares
+    the rows' taskset: a hand-written entry may list pre-materialized rows under a name of its own
+    (``collate_samples`` accepts such rows in any entry), and those rows are still that agent's dataset, so they are
+    checked rather than none; an entry that sets a ``taskset`` materializes and routes its rows as that taskset, so
+    one naming another taskset does not hold these rows.
+
+    A bare string is one entry, as ``allowed_agents_for`` reads a resources server's.
+    """
+    entries = _declared_datasets(agent_config)
+    if taskset is not None:
+        entries = _datasets_declaring_taskset(global_config_dict, taskset) or [
+            entry for entry in entries if entry.get("taskset") is None
+        ]
+    admitted: list[tuple[str, list[str]]] = []
+    for entry in entries:
+        declared = entry.get(ALLOWED_AGENTS_KEY_NAME)
+        if not declared:
+            continue
+        names = [declared] if isinstance(declared, str) else [str(name) for name in declared]
+        admitted.append((str(entry.get("name")), names))
+    return admitted
 
 
 def _environment_server_for_config_row(row: Mapping[str, Any], config: Any) -> str | None:
@@ -1296,7 +1381,7 @@ class SharedRolloutCollectionConfig(
             "resumed run scores it. Scores the metrics only; no artifact is changed. With "
             "disable_aggregation this run scores nothing, so a run with no row still fails. "
             "Off by default. Needs the run's materialized inputs; a shard without them is warned "
-            "about and skipped. A rollout recorded in the failures sidecar is never counted here, "
+            "about and skipped. A rollout with a failure row in the sidecar is never counted here, "
             "whatever its class, so this does not override count_failure_classes_as_zero. The "
             "count is reported separately as coverage/imputed. Known limitation, shared with "
             "count_failure_classes_as_zero: the added row carries its task's dataset fields, but no "
@@ -1703,7 +1788,7 @@ class DispatchLatencyTracker:
         if self._drained:
             lines.append(
                 f"Drained (not dispatched, no time left in the budget): {self._drained}. "
-                "These wrote no row and will be re-dispatched on resume."
+                "They are not attempts and will be re-dispatched on resume."
             )
         return "\n".join(lines)
 
@@ -1983,9 +2068,21 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
             "Seconds from collection start during which new rollouts may be dispatched. Set it to "
             "the usable walltime of the allocation (Slurm walltime minus startup and teardown). "
             "Once the budget is spent, queued tasks are left undispatched rather than started and "
-            "killed mid-flight: they write no row, so a `resume_from_cache` run re-dispatches them "
+            "killed mid-flight: they are not attempts, so a `resume_from_cache` run re-dispatches them "
             "with a full allocation ahead of them. Unset (default) preserves the old behaviour of "
             "dispatching everything regardless of how little time is left."
+        ),
+    )
+
+    record_omitted_rollouts: bool = Field(
+        default=False,
+        description=(
+            "Write a failures-sidecar row for each rollout that produced no result: an attempt the agent "
+            "reports as kill_shaped and a row dispatch_budget_s never started. The row carries "
+            "_ng_no_persist, _ng_omitted_rollout, the result's failure class and a reason in _ng_failure_message. It is evidence "
+            "only: it is not scored, not counted as an attempt or a failure, and resume_from_cache still runs "
+            "the rollout. Off by default, which writes nothing for these rollouts, until readers of the "
+            "sidecar outside Gym treat such rows as not run rather than as failed."
         ),
     )
 
@@ -2314,7 +2411,12 @@ def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
 
 
 def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], Dict[str, Any]]:
-    """The last attempt recorded for each rollout across the failures sidecars."""
+    """The last failed attempt recorded for each rollout across the failures sidecars.
+
+    An interrupted attempt that ``record_omitted_rollouts`` recorded is the rollout's latest execution but no
+    failure: it hides any older failure, so the rollout is left out here and is missing. A row the dispatch budget
+    never started is no execution and is skipped.
+    """
     latest_by_key: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
     for fpath in failures_fpaths:
         if not fpath.exists():
@@ -2325,8 +2427,10 @@ def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], D
                 if not line:
                     continue
                 row = loads_jsonl_line(line, fpath, line_no)
+                if is_unstarted_rollout_row(row):
+                    continue
                 latest_by_key[(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))] = row
-    return latest_by_key
+    return {key: row for key, row in latest_by_key.items() if not is_omitted_rollout_row(row)}
 
 
 def _failure_rows_counted_as_zero(
@@ -2537,10 +2641,12 @@ def _failure_export_metrics(
     more than once, and ``retries/at_cap`` the rollouts with no row that used all their attempts. Each rollout
     is held to the cap its collection recorded on its last attempt (``_ng_failure_max_attempts``), or the
     current cap for a row written before the cap was recorded. ``retries/max_attempts`` is that cap, and is
-    left out when the rollouts were collected with different caps.
+    left out when the rollouts were collected with different caps. A ``record_omitted_rollouts`` row is no failed
+    attempt; an interrupted one is still the rollout's latest execution, so an older failure's class is not counted.
     """
     attempts: Counter = Counter()
     latest: Dict[Any, Dict[str, Any]] = {}
+    latest_failure: Dict[Any, Dict[str, Any]] = {}
     # Every class the sidecars name starts at 0: a reopened tracking run keeps a class's last value until it is sent.
     failed: Counter = Counter()
     for fpath in failures_fpaths:
@@ -2552,12 +2658,21 @@ def _failure_export_metrics(
                 if not line:
                     continue
                 row = loads_jsonl_line(line, fpath, line_no)
+                if is_unstarted_rollout_row(row):
+                    continue
+                latest[identity(row)] = row
+                if is_omitted_rollout_row(row):
+                    continue
                 failed.setdefault(row.get(NG_FAILURE_CLASS_KEY) or "unknown", 0)
                 attempts[identity(row)] += 1
-                latest[identity(row)] = row
+                latest_failure[identity(row)] = row
     current_cap = get_max_rollout_attempts()
-    caps = {key: row.get(NG_FAILURE_MAX_ATTEMPTS_KEY) or current_cap for key, row in latest.items()}
-    failed.update(row.get(NG_FAILURE_CLASS_KEY) or "unknown" for key, row in latest.items() if key not in landed)
+    caps = {key: row.get(NG_FAILURE_MAX_ATTEMPTS_KEY) or current_cap for key, row in latest_failure.items()}
+    failed.update(
+        row.get(NG_FAILURE_CLASS_KEY) or "unknown"
+        for key, row in latest.items()
+        if key not in landed and not is_omitted_rollout_row(row)
+    )
     recorded_caps = set(caps.values()) or {current_cap}
     return {
         "retries/attempts": sum(attempts.values()),
@@ -3251,6 +3366,9 @@ class RolloutCollectionHelper(BaseModel):
                     if not line:
                         continue
                     fr = orjson.loads(line)
+                    # A rollout that produced no result used no attempt; resume runs it again.
+                    if is_omitted_rollout_row(fr):
+                        continue
                     if TASK_INDEX_KEY_NAME not in fr or ROLLOUT_INDEX_KEY_NAME not in fr:
                         continue
                     k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
@@ -3771,9 +3889,15 @@ class RolloutCollectionHelper(BaseModel):
                     aggregation_sources_path_for(output_fpath).unlink(missing_ok=True)
                     sources_dropped = True
                 if no_persist:
-                    # kill_shaped, or drained by the dispatch budget: written to neither
-                    # the jsonl nor the sidecar. Set-difference on resume naturally
-                    # re-dispatches; per-task timeout bounds wallclock.
+                    # kill_shaped, or drained by the dispatch budget: no result, so nothing in the
+                    # jsonl. Set-difference on resume naturally re-dispatches; per-task timeout
+                    # bounds wallclock. The sidecar row, when asked for, is counted by no reader.
+                    if config.record_omitted_rollouts:
+                        write_started = perf_counter()
+                        omitted_bytes = orjson.dumps(omitted_rollout_record(result))
+                        failures_file.write(omitted_bytes + b"\n")
+                        failures_file.flush()
+                        _record_output_write(write_started, omitted_bytes)
                     if not result.get(NG_DISPATCH_DRAINED_KEY):
                         # A drained row never ran, so it is not an attempt.
                         _record_rollout_outcome(result, "omitted", dispatch_name)
@@ -4493,6 +4617,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     {
                         AGENT_REF_KEY_NAME: {"name": configured_agent},
                         TASK_SOURCE_KEY_NAME: configured_resources,
+                        # A materialized row's taskset names the dataset entry that declares it, which the
+                        # pairing guard checks the agent against (see ``_dataset_admitted_agents``).
+                        **{key: row[key] for key in ("task_id", "task_input") if key in row},
                     }
                 )
 
@@ -4501,16 +4628,25 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
     @staticmethod
     def _validate_agent_pairings(examples: List[Dict], global_config_dict: DictConfig) -> None:
-        """Fail before dispatch when a row points to agent incompatible with the resources server it runs on."""
+        """Fail before dispatch when a row points to agent incompatible with the resources server it runs on.
+
+        The verifier's ``allowed_agents`` is read from the row's ``task_source`` and from the resources server the
+        agent binds; the dataset entry that declares the rows may also name the harnesses it admits (a Harbor
+        dataset's ``[gym] allowed_agents``, carried into its generated ``datasets:`` entry, whose rows route by
+        taskset to an environment server that binds no resources server). That list is checked against the agent's
+        own type, so a run config edited to another harness after ``gym eval run`` admitted one is refused here as
+        well. A materialized row is matched to its entry by taskset, wherever the entry is declared; a flat row
+        meets every entry the agent declares (see ``_dataset_admitted_agents``).
+        """
         if pairing_override_enabled(global_config_dict):
             return
         routes = {
-            (name, row.get(TASK_SOURCE_KEY_NAME))
+            (name, row.get(TASK_SOURCE_KEY_NAME), _materialized_taskset(row))
             for row in examples
             if (name := (row.get(AGENT_REF_KEY_NAME) or {}).get("name")) is not None
         }
         rejected: Dict[Tuple[str, str], str] = {}
-        for agent, task_source in routes:
+        for agent, task_source, taskset in routes:
             # indexing by name is safe because we already validated the agent names
             agents = global_config_dict[agent][AGENT_SERVER_TYPE_KEY_NAME]
             if not agents:
@@ -4529,6 +4665,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 rejected[(agent, str(verifier))] = (
                     f"  - rows routed to '{agent}' run '{agent_type}', but {relation} "
                     f"'{verifier}' accepts only: {', '.join(allowed)}"
+                )
+            for dataset, admitted in _dataset_admitted_agents(global_config_dict, agents[agent_type], taskset):
+                if agent_type in admitted:
+                    continue
+                rejected[(agent, f"dataset {dataset}")] = (
+                    f"  - rows routed to '{agent}' run '{agent_type}', but its dataset "
+                    f"'{dataset}' admits only: {', '.join(admitted)}"
                 )
         if not rejected:
             return

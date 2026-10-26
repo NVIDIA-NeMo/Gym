@@ -563,7 +563,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 response.model_dump(mode="json", by_alias=True) if isinstance(response, BaseModel) else dict(response)
             )
             response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
-            return await self._stream_served_response(response_json, synthesize_responses_sse(response_json))
+            streamed = await self._stream_served_response(response_json, synthesize_responses_sse(response_json))
+            if "usage" in response_json:
+                # The SSE usage reports an unknown detail count as 0; capture records Gym's own usage instead.
+                request.state.nemo_gym_internal_usage = response_json["usage"]
+            return streamed
         except (ClientResponseError, HTTPException):
             # Generation is buffered: no headers or SSE bytes have been sent yet.
             # Let the shared HTTP handler retain the upstream error code and body.
@@ -1710,6 +1714,9 @@ class _CaptureMiddleware:
                     )
                     if not isinstance(response_body, dict):
                         response_body = None
+                    elif streaming and "nemo_gym_internal_usage" in request_state:
+                        # Keep unknown detail counts as None, as non-streaming capture does.
+                        response_body["usage"] = request_state["nemo_gym_internal_usage"]
                 except Exception:
                     response_body = None
             error_category = _classify_status(status) if status is not None else None

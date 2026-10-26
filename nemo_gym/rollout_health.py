@@ -498,7 +498,9 @@ def _rollout_accounting(
 
     ``landed`` holds ``(input index, task index, rollout index)`` of every persisted record. Failures come
     from each input's ``_failures.jsonl`` sidecar, where the last attempt of a rollout stands; one that
-    later landed is not failed. ``is_terminal_failure`` splits them into
+    later landed is not failed. A ``record_omitted_rollouts`` row records no result: an interrupted attempt is the
+    rollout's latest execution and leaves it missing, and a row never started is skipped.
+    ``is_terminal_failure`` splits them into
     final ones, which are not retried, and not final ones, which are; the split says nothing of the cause. ``failed`` is null when no input has a sidecar.
     ``expected``, ``missing`` and ``healthy`` need the ``_materialized_inputs.jsonl`` inventory and
     are null when an input has none. A run is healthy when nothing is missing, no rollout is
@@ -506,7 +508,12 @@ def _rollout_accounting(
     The limits are off (None) by default, so failures alone never make a run unhealthy unless configured.
     """
     # Lazy: rollout_collection imports this module, and health workers need none of its dependencies.
-    from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, is_terminal_failure
+    from nemo_gym.rollout_collection import (
+        NG_FAILURE_CLASS_KEY,
+        is_omitted_rollout_row,
+        is_terminal_failure,
+        is_unstarted_rollout_row,
+    )
 
     failed: dict[tuple[Any, ...], dict[str, Any]] = {}
     any_sidecar = False
@@ -515,6 +522,8 @@ def _rollout_accounting(
         if failures_path_for(path).is_file():
             any_sidecar = True
             for row in _jsonl_rows(failures_path_for(path)):
+                if is_unstarted_rollout_row(row):
+                    continue
                 failed[(source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))] = row
         if not materialized_path_for(path).is_file():
             owed = None
@@ -523,6 +532,7 @@ def _rollout_accounting(
                 (source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))
                 for row in _jsonl_rows(materialized_path_for(path))
             )
+    failed = {key: row for key, row in failed.items() if not is_omitted_rollout_row(row)}
     for key in landed:
         failed.pop(key, None)
     if owed is not None:

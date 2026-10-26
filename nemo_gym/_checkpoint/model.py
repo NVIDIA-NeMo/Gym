@@ -760,6 +760,7 @@ class PolicyModelParticipant(CheckpointParticipant):
     """The participant of a policy model server that runs in one process."""
 
     kind = "model"
+    mode = "exported"
     record_model = ModelRecord
 
     def __init__(

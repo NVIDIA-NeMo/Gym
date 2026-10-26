@@ -35,8 +35,9 @@ and dataset rows for each run.
 ### Or fetch from the Harbor package store
 
 The same dataset is published in Harbor's package store as `terminal-bench/terminal-bench-2-1`. A
-`harbor:<org>/<name>` reference fetches it into Gym's shared datasets folder (`$NEMO_GYM_DATASETS_DIR`, default
-`./datasets`) and takes the place of `terminal-bench-2-1/tasks` in every command below:
+`harbor:<org>/<name>` reference fetches it into Gym's pulled datasets folder (`$NEMO_GYM_DATASETS_DIR`, default
+`environments/harbor/` in the Gym checkout, or under the working directory when Gym is installed as a package) and
+takes the place of `terminal-bench-2-1/tasks` in every command below:
 
 ```bash
 gym dataset validate harbor:terminal-bench/terminal-bench-2-1 --sandbox opensandbox --output tb21-oracle.jsonl
@@ -44,11 +45,11 @@ gym eval run harbor:terminal-bench/terminal-bench-2-1 --agent terminus_2_sandbox
   --model-type openai_model --model <model> --model-url <url>
 ```
 
-The plain reference resolves the store's `latest` tag, writes the task folders into `datasets/terminal-bench-2-1/`
+The plain reference resolves the store's `latest` tag, writes the task folders into `environments/harbor/terminal-bench-2-1/`
 and records the package and the version it resolved in the `manifest.toml` there. A later fetch keeps every folder
 whose content still matches, and once `latest` has moved on it refuses the folder and names both versions, so a
 stale copy is never mixed with a newer one. To pin the version, name its content hash; the folder then carries the
-first twelve characters of the hash (`datasets/terminal-bench-2-1-7d7bdc1cbeda/`):
+first twelve characters of the hash (`environments/harbor/terminal-bench-2-1-7d7bdc1cbeda/`):
 
 ```bash
 gym dataset validate harbor:terminal-bench/terminal-bench-2-1@sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a \
