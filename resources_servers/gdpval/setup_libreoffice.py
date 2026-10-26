@@ -177,7 +177,7 @@ def _probe_converts(libreoffice_command: Sequence[str], root: Path | None) -> bo
         return False
     left = [directory for directory in (probe_dir, profile_dir) if directory.exists()]
     if left:
-        owner = _foreign_owner(left)
+        owner = _other_owner_uid(left)
         if owner is None:
             # Not an ownership problem: e.g. a container still running after a timeout, or NFS `.nfs*` files.
             LOGGER.warning(
@@ -200,7 +200,7 @@ def _probe_converts(libreoffice_command: Sequence[str], root: Path | None) -> bo
     return True
 
 
-def _foreign_owner(directories: Sequence[Path]) -> int | None:
+def _other_owner_uid(directories: Sequence[Path]) -> int | None:
     """Return the uid of a file under *directories* that the server's user does not own, or None."""
     uid = os.getuid()
     for directory in directories:
