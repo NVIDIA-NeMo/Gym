@@ -15,8 +15,8 @@ coordinator is the server's participant:
 
   - State that spans requests (resources sessions, agent sessions) is installed on a live worker,
     spread evenly one session at a time.
-    That worker rewrites the session's routing claim to name itself (see ``nemo_gym.session_routing``),
-    and every other worker drops any claim it held on the session.
+    That worker becomes the session's owner in session routing (see ``nemo_gym.session_routing``),
+    and every other worker drops any ownership it held of the session.
     Cookies and MCP tokens name only the session ID, so one from before the crash,
     or from a single-process server, reaches the worker that holds the session now.
   - State that lives inside one request (environment episodes, an agent's own ``/run`` episodes) stays with
@@ -24,13 +24,13 @@ coordinator is the server's participant:
     claim succeeds. The claim leases the record to that worker, which settles it once it has installed the
     record, or returns it if the install failed. A record whose worker is lost goes back too. While a lease
     is open, prepare waits for it. A record nobody has claimed is exported again by the next checkpoint.
-    A failed install goes back only once its worker has freed what it installed, so no two workers hold it.
+    A failed install goes back only once its worker has released what it installed, so no two workers hold it.
     Until then a claim from any worker is told the record is still settling, and asks again,
     and prepare names the attempt as a blocker (see ``ParticipantWorkerLink.claim``).
 
   A restore is all or nothing across the workers: if one worker's install fails, or a worker the restore installs
   sessions on is lost before every install has finished, even after it acknowledged its own,
-  the workers that installed theirs delete what they installed, and release its claims, before the restore fails.
+  the workers that installed theirs delete what they installed, and release ownership of it, before the restore fails.
   A worker that cannot delete it keeps every worker closed until a repeated rollback there succeeds,
   or that worker is lost.
   A failed restore whose install outlived it and lost such a worker afterwards is rolled back the same way
@@ -41,7 +41,7 @@ coordinator is the server's participant:
   so none serves until every worker holding restored sessions is ready.
 
 - **retire** reaches every worker, and the coordinator retires what it holds for the attempt.
-  A resources session a retire frees keeps its routing claim until the forget that ends its refusal,
+  A resources session a retire releases keeps its owner until the forget that ends its refusal,
   so a late request that carries only its cookie still reaches the worker that refuses it.
 
 Claims are refused while a checkpoint is open, as a new episode is: the caller retries the episode later.
@@ -90,7 +90,7 @@ from nemo_gym._checkpoint.workers import (
 )
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.server_utils import is_nemo_gym_fastapi_worker
-from nemo_gym.session_routing import ROUTED_LIFESPANS_STATE, ResourcesSessionLifetimes, SessionClaims
+from nemo_gym.session_routing import ROUTED_LIFESPANS_STATE, ResourcesSessionLifetimes, SessionOwners
 
 
 LOGGER = logging.getLogger(__name__)
@@ -286,7 +286,8 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
         """Roll back a failed restore whose install finished, if a worker it installed sessions on was lost since.
 
         Those sessions are gone, so the restore cannot be served in part:
-        every worker left deletes what it installed and releases its claims, and the coordinator drops its records.
+        every worker left deletes what it installed and releases ownership of it,
+        and the coordinator drops its records.
         Without such a loss,
         what the install brought stays until the controller retires the restored attempts, as on one process.
         A rollback that does not complete on a worker, now or when the restore failed, is repeated there,
@@ -321,7 +322,7 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
         """Delete the restored state of ``episode_id`` here and on every worker, refusing nothing later.
 
         Each worker deletes only what no request has used, as a single process does;
-        a retire would also free the sessions the replacement uses and refuse them until a forget that never comes.
+        a retire would also release the sessions the replacement uses and refuse them until a forget that never comes.
         """
         self.retire_restored(episode_id)
         # As long as the deletion takes, as in a single process; a resume waits for it within its own deadline.
@@ -423,7 +424,7 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
 
         A restored session can be seeded again on another worker,
         for example when an episode continues from before its seed and the seed is routed elsewhere.
-        That worker's copy is live; the restored copy nothing used is stale, so it is left out and freed.
+        That worker's copy is live; the restored copy nothing used is stale, so it is left out and released.
         Records the kind gives no identity, and records of different identities, are all kept.
         """
         copies: dict[Any, list[tuple[int, CheckpointRecord, bool]]] = defaultdict(list)
@@ -459,14 +460,14 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
         """Install the records on the live workers, all or nothing.
 
         Each session goes to the live worker with the fewest sessions so far,
-        which rewrites the session's routing claim to name itself.
-        Every other worker drops any claim it held on a restored session.
+        which becomes the session's owner in session routing.
+        Every other worker drops any ownership it held of a restored session.
         If a worker's install fails, or the worker is lost,
-        the workers that installed theirs delete it again and release its claims.
+        the workers that installed theirs delete it again and release ownership of it.
         Only then does this raise.
         Admission reopens after a failed restore only once this has returned, so nothing of it can be used.
         The controller then retires the restored attempts, as it does after a failed restore on one process,
-        and that retire finds nothing left to free.
+        and that retire finds nothing left to release.
         """
         if self.restored:
             raise ControlError(f"{self.kind} restore requires a server without restored state")
@@ -494,7 +495,7 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
         for identity, worker_index in placement.items():
             installs[worker_index].extend(record.to_json_record() for record in sessions[identity])
         # Every worker installs, even with nothing to install, so each checks that it holds no live state,
-        # and drops its claims on the sessions placed elsewhere.
+        # and drops its ownership of the sessions placed elsewhere.
         scope_json = [episode_id.model_dump(mode="json") for episode_id in scope]
         self._restored_scope = scope_json
         restored_sessions = sorted(sessions)
@@ -523,7 +524,7 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
         self.restored = held
 
     async def _uninstall(self, scopes: dict[int, list[dict[str, Any]]]) -> None:
-        """Delete what a failed restore with each scope installed on each worker, and release its claims.
+        """Delete what a failed restore with each scope installed on each worker, and release ownership of it.
 
         Admission is still closed, so no request has used it.
         Each connected worker counts as still holding it until it answers that it has deleted it,
@@ -637,7 +638,7 @@ def _merge_status(first: Any, second: Any) -> Any:
 class ParticipantWorkerLink(WorkerLink):
     """One worker's participant, driven by the server's coordinator.
 
-    ``app`` is the worker's app, whose session claims a restore rewrites (see ``nemo_gym.session_routing``).
+    ``app`` is the worker's app, whose session owners a restore rewrites (see ``nemo_gym.session_routing``).
     """
 
     def __init__(
@@ -656,7 +657,7 @@ class ParticipantWorkerLink(WorkerLink):
         participant.retired = self.retired
         participant.on_change = self.changed
         participant.claim_restored = self.claim
-        participant.on_session_freed = self._session_freed
+        participant.on_session_released = self._session_released
         self._accepting = True
         # Claim keys the coordinator holds a restored record for, as of the last reopen.
         self.restored_keys: set[str] = set()
@@ -664,13 +665,13 @@ class ParticipantWorkerLink(WorkerLink):
         self._poll_task: Optional[asyncio.Task] = None
         # Settlements of claimed records still being sent; each ends once sent, or once this worker disconnects.
         self._settling: set[asyncio.Task] = set()
-        # The settlements among them still freeing a rolled-back install, by claim key, until each has freed it.
+        # The settlements among them still releasing a rolled-back install, by claim key, until each has released it.
         self._tearing_down: dict[str, asyncio.Task] = {}
         # The teardown calls given up while still running, as they ignored their cancellation, by claim key.
-        # Each keeps its key from being claimed here until it ends, since it could free what that claim opens.
+        # Each keeps its key from being claimed here until it ends, since it could release what that claim opens.
         # One that never ends keeps its key unavailable on this worker for the worker's life.
         self._blocked: dict[str, asyncio.Task] = {}
-        # The sessions the last restore installed here, whose claims a failed restore releases again.
+        # The sessions the last restore installed here, whose ownership a failed restore releases again.
         self._installed_sessions: set[str] = set()
 
     @property
@@ -689,17 +690,17 @@ class ParticipantWorkerLink(WorkerLink):
         self.restored_keys = set(state["restored_keys"])
         self.participant.carried_restarts = set(state.get("carried_restarts") or ())
 
-    def _claims(self) -> Optional[SessionClaims]:
-        """This worker's session claims, with session routing across several workers."""
-        return getattr(self.app.state, "nemo_gym_session_claims", None)
+    def _owners(self) -> Optional[SessionOwners]:
+        """This worker's view of the session owners, with session routing across several workers."""
+        return getattr(self.app.state, "nemo_gym_session_owners", None)
 
     def _lifetimes(self) -> Optional[ResourcesSessionLifetimes]:
-        """How long this worker keeps its resources sessions' claims, on a resources server with session routing."""
+        """How long this worker owns its resources sessions, on a resources server with session routing."""
         return getattr(self.app.state, "nemo_gym_resources_session_lifetimes", None)
 
-    def _session_freed(self, session_id: str, *, until_forget: bool = False) -> None:
-        # The participant freed the session outside a request, which the router would otherwise never see end.
-        # A retired session keeps its claim until the forget, so its requests keep reaching this worker's refusal.
+    def _session_released(self, session_id: str, *, until_forget: bool = False) -> None:
+        # The participant released the session outside a request, which the router would otherwise never see end.
+        # A retired session keeps its owner until the forget, so its requests keep reaching this worker's refusal.
         lifetimes = self._lifetimes()
         if lifetimes is None:
             return
@@ -709,35 +710,35 @@ class ParticipantWorkerLink(WorkerLink):
             lifetimes.ended(session_id)
 
     async def _route_restored(self, records: list[CheckpointRecord], restored: list[str]) -> None:
-        """Claim the sessions installed here for this worker, and drop any claim on those installed elsewhere."""
-        claims = self._claims()
-        if claims is None:
+        """Make this worker the owner of the sessions installed here, and drop ownership of those installed elsewhere."""
+        owners = self._owners()
+        if owners is None:
             return
         installed = {self.participant.record_identity(record) for record in records} - {None}
         self._installed_sessions = installed
         for session_id in restored:
             if session_id not in installed:
-                # A request for it before the restore may have claimed it here; the restore placed it elsewhere.
-                claims.disown(session_id)
+                # A request before the restore may have made this worker its owner; the restore placed it elsewhere.
+                owners.disown(session_id)
         lifetimes = self._lifetimes()
         if lifetimes is not None:
             for session_id in installed:
                 # Open until its close or verify, as after a successful seed.
-                # Held before its claim is rewritten, so no release here can remove the rewritten claim.
+                # Held before its owner file is rewritten, so no release here can remove the rewritten owner file.
                 lifetimes.opened(session_id)
         # Off the event loop, in one batch, which a restore of many sessions needs.
-        await claims.rewrite_all(sorted(installed))
+        await owners.rewrite_all(sorted(installed))
 
     async def _uninstall_local(self, scope: list[dict[str, Any]]) -> None:
-        """Delete what a failed restore installed here, and release its claims."""
+        """Delete what a failed restore installed here, and release ownership of it."""
         for episode_id in scope:
             await self.participant.delete_restored(next_attempt(EpisodeId.model_validate(episode_id)))
-        claims, lifetimes = self._claims(), self._lifetimes()
+        owners, lifetimes = self._owners(), self._lifetimes()
         for session_id in self._installed_sessions:
             if lifetimes is not None:
                 lifetimes.forget(session_id)
-            if claims is not None:
-                claims.release(session_id)
+            if owners is not None:
+                owners.release(session_id)
         self._installed_sessions = set()
 
     async def close_local(self, request: CheckpointRequest) -> None:
@@ -797,7 +798,7 @@ class ParticipantWorkerLink(WorkerLink):
             await asyncio.gather(*(delete(identity) for identity in body["identities"]))
             return {}
         if kind == "uninstall":
-            # A restore failed on another worker: what this worker installed goes, and so do its claims.
+            # A restore failed on another worker: what this worker installed goes, and so does its ownership.
             await self._uninstall_local(body["scope"])
             return {}
         if kind == "status":
@@ -852,7 +853,7 @@ class ParticipantWorkerLink(WorkerLink):
         The coordinator leases the record to this worker.
         Install it inside the block: the lease is settled when the block ends.
         If the block raised, the record goes back to the coordinator, to be claimed again,
-        but only once ``teardown``, which frees whatever the block left installed outside the participant, succeeds.
+        but only once ``teardown``, which releases whatever the block left installed outside the participant, succeeds.
         Until then the lease holds the record, so no other worker installs a second copy,
         and prepare names the attempt as a blocker.
         The teardown is retried in the background (see ``_tear_down``),
@@ -862,8 +863,8 @@ class ParticipantWorkerLink(WorkerLink):
         the teardown gets ``_TEARDOWN_ATTEMPTS_WITHOUT_LEASE`` more attempts, and is then given up.
         A record another claim holds may be on its way back, so the claim is sent again, with a growing wait,
         for as long as the caller waits, and at most ``MESSAGE_TIMEOUT_SECONDS``.
-        A rolled-back install of the same key still being freed here is waited for as long,
-        whether or not a record is left to claim, so its teardown cannot free what this claim's caller opens next;
+        A rolled-back install of the same key still being released here is waited for as long,
+        whether or not a record is left to claim, so its teardown cannot release what this claim's caller opens next;
         past that, the claim raises ``ClaimSettlingError``, which its caller can retry.
         That includes a teardown given up while its call still runs: the key stays blocked until that call ends.
         """
@@ -897,7 +898,7 @@ class ParticipantWorkerLink(WorkerLink):
             remaining = give_up_at - loop.time()
             if remaining <= 0:
                 raise ClaimSettlingError(
-                    f"this {self.worker_label} worker is still freeing a rolled-back install of {key}; try again later"
+                    f"this {self.worker_label} worker is still releasing a rolled-back install of {key}; try again later"
                 )
             await asyncio.wait(pending, timeout=remaining)
 
@@ -940,10 +941,10 @@ class ParticipantWorkerLink(WorkerLink):
 
         async def send() -> None:
             if teardown is not None:
-                freed = await self._tear_down(key, lease_id, teardown, episode)
-                # Freed or given up: a later claim of the key no longer waits for this settlement.
+                released = await self._tear_down(key, lease_id, teardown, episode)
+                # Released or given up: a later claim of the key no longer waits for this settlement.
                 self._torn_down(key, task)
-                if not freed:
+                if not released:
                     # The lease is gone, so there is nothing left to settle.
                     return
             while self._channel is not None:
@@ -966,7 +967,7 @@ class ParticipantWorkerLink(WorkerLink):
             del self._tearing_down[key]
 
     async def _tear_down(self, key: str, lease_id: str, teardown: Callable[[], Awaitable[None]], episode: str) -> bool:
-        """Free what a rolled-back install of ``key`` left outside the participant; return whether it did.
+        """Release what a rolled-back install of ``key`` left outside the participant; return whether it did.
 
         Each attempt is cancelled after ``_TEARDOWN_ATTEMPT_SECONDS`` and tried again after a growing wait,
         as is one that fails or raises ``CancelledError`` on its own, so a teardown that hangs is tried again.
@@ -993,7 +994,7 @@ class ParticipantWorkerLink(WorkerLink):
                     if not attempt.cancelled() and attempt.exception() is None:
                         return True
                     LOGGER.warning(
-                        "could not free the rolled-back install of %s; retrying",
+                        "could not release the rolled-back install of %s; retrying",
                         key,
                         exc_info=None if attempt.cancelled() else attempt.exception(),
                     )
@@ -1003,7 +1004,7 @@ class ParticipantWorkerLink(WorkerLink):
                 if tries_left is not None:
                     if tries_left == 0:
                         LOGGER.error(
-                            "gave up freeing the rolled-back install of %s for %s after its lease ended; "
+                            "gave up releasing the rolled-back install of %s for %s after its lease ended; "
                             "what the install left outside the participant may be orphaned",
                             key,
                             episode,
@@ -1030,7 +1031,7 @@ class ParticipantWorkerLink(WorkerLink):
     def _block(self, key: str, attempt: asyncio.Task) -> None:
         """Keep ``key`` from being claimed here until ``attempt``, a teardown call no longer waited for, ends.
 
-        Teardowns act on the key alone, so the call could otherwise free what a later claim of the key opens here.
+        Teardowns act on the key alone, so the call could otherwise release what a later claim of the key opens here.
         A call that never ends keeps the key unavailable on this worker until the worker stops.
         """
         if attempt.done():
@@ -1064,7 +1065,7 @@ class ParticipantWorkerLink(WorkerLink):
     async def disconnect(self) -> None:
         """Leave the coordinator, once the teardowns still running have finished or ``_TEARDOWN_GRACE_SECONDS`` passed.
 
-        A teardown frees what a rolled-back install left outside the participant, such as a sandbox.
+        A teardown releases what a rolled-back install left outside the participant, such as a sandbox.
         One that finishes within the grace settles its claim before this worker leaves, so nothing is left behind.
         One still running then is cancelled, and the coordinator takes the record back as this worker leaves:
         the checkpoint stays consistent, but what the install left outside the participant may outlive it,

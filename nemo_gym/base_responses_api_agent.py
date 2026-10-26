@@ -85,7 +85,7 @@ from nemo_gym.server_utils import (
     apply_rollout_prefix,
     rollout_path_prefix,
 )
-from nemo_gym.session_routing import SessionClaims, SessionKind
+from nemo_gym.session_routing import SessionKind, SessionOwners
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.tool_access import ToolAccess
@@ -417,23 +417,23 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     # Seeds whose setup failed, kept for the caller's close until session_close_retry_window_seconds passes.
     _failed_seed_records: OrderedDict[str, _AgentSessionRecord] = PrivateAttr(default_factory=OrderedDict)
     _failed_seed_releases: set[asyncio.Task] = PrivateAttr(default_factory=set)
-    # With several workers, which worker claimed each agent_session_id (see nemo_gym.session_routing).
-    _agent_session_claims: Optional[SessionClaims] = PrivateAttr(default=None)
+    # With several workers, which worker owns each agent_session_id (see nemo_gym.session_routing).
+    _agent_session_owners: Optional[SessionOwners] = PrivateAttr(default=None)
 
-    def claimed_session_routing(self) -> dict[str, Any]:
+    def owned_session_routing(self) -> dict[str, Any]:
         return {"kind": AGENT_SESSIONS, "agent_sessions": self}
 
     def holds_agent_session(self, agent_session_id: str) -> bool:
         """Whether this worker keeps any record of the session: open, failed and awaiting close, or closed."""
         return agent_session_id in self._session_records
 
-    def use_agent_session_claims(self, claims: SessionClaims) -> None:
-        """Release a session's claim when this worker drops its last record (see nemo_gym.session_routing)."""
-        self._agent_session_claims = claims
+    def use_agent_session_owners(self, owners: SessionOwners) -> None:
+        """Release ownership of a session when this worker drops its last record (see nemo_gym.session_routing)."""
+        self._agent_session_owners = owners
 
-    def _release_agent_session_claim(self, agent_session_id: str) -> None:
-        if self._agent_session_claims is not None:
-            self._agent_session_claims.release(agent_session_id)
+    def _release_agent_session_ownership(self, agent_session_id: str) -> None:
+        if self._agent_session_owners is not None:
+            self._agent_session_owners.release(agent_session_id)
 
     def expire_agent_session_records(self) -> None:
         """Drop the fences that expired, and release the failed seeds nobody closed."""
@@ -446,7 +446,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             # A retire may have released the session, and a new one may have taken its ID since.
             if self._session_records.get(key) is record:
                 del self._session_records[key]
-                self._release_agent_session_claim(key)
+                self._release_agent_session_ownership(key)
         while self._failed_seed_records:
             key, record = next(iter(self._failed_seed_records.items()))
             if record.expires_at > now:
@@ -478,7 +478,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                         and self._session_records.get(session_id) is record
                     ):
                         del self._session_records[session_id]
-                        self._release_agent_session_claim(session_id)
+                        self._release_agent_session_ownership(session_id)
                 return
 
     def _keep_failed_seed(self, agent_session_id: str, record: _AgentSessionRecord) -> None:
@@ -716,7 +716,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                         self._restart_only.open_session(body.agent_session_id, body.episode_id)
                 except Exception:
                     # Nothing tracks the session, so undo the seed: release its state now,
-                    # so the lock's exit drops the record and, with several workers, its claim.
+                    # so the lock's exit drops the record and, with several workers, this worker's ownership.
                     await self._undo_seed(body.agent_session_id, record)
                     raise
             elif record.state.request != body:
@@ -839,7 +839,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         record = self._session_records.get(agent_session_id)
         if record is not None and record.close_response is None:
             self._session_records.pop(agent_session_id, None)
-            self._release_agent_session_claim(agent_session_id)
+            self._release_agent_session_ownership(agent_session_id)
 
     def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities | None:
         """Opt into multi-turn continuation; existing one-activation adapters stay unchanged."""

@@ -145,7 +145,7 @@ async def test_a_retire_waits_for_a_tool_call_in_flight_over_mcp() -> None:
                 headers=AUTH,
             )
         )
-        # The retire refuses the session, then waits for the call in flight before freeing it.
+        # The retire refuses the session, then waits for the call in flight before releasing it.
         await until(lambda: server._checkpoint.status_extra()["retired_sessions"] == 1)
         waited = not retire.done() and server._checkpoint.readiness().counts["sessions"] == 1
         server.gate.set()
@@ -199,7 +199,7 @@ async def test_a_stale_harness_cannot_create_state_for_a_session_the_fresh_proce
         late = await increment(fresh, token)
 
     assert refused(late)
-    # Nothing was created for a session no seed bound to an episode, which nothing would ever free.
+    # Nothing was created for a session no seed bound to an episode, which nothing would ever release.
     assert server.counters == {}
 
 

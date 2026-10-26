@@ -555,7 +555,7 @@ async def test_undelivered_call_is_cut_and_continued_by_the_reissued_call(tmp_pa
     assert hook(other_request, admission).generation_cut is None
     continued = hook(reissued, admission).generation_cut
     assert (continued.source_model_call_id, continued.staging_keys) == ("c2", ("__generation_cut__/c2",))
-    # The cut is kept until the call delivers its response, then freed.
+    # The cut is kept until the call delivers its response, then released.
     await restored.gate.deliver_response(ticket)
     await restored.gate.exit(ticket)
     later = restored.gate.enter("r-a1")
@@ -1041,7 +1041,7 @@ async def test_a_restore_retires_the_ledgers_of_the_attempts_it_continues(tmp_pa
     restored_ledger, _, restored = await _ledger_participant(tmp_path / "ledger")
     await restored.restore(_restore_request("r1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
 
-    # Attempt 0 continues as attempt 1, so attempt 0's ledger is freed and fenced against late rows.
+    # Attempt 0 continues as attempt 1, so attempt 0's ledger is released and fenced against late rows.
     assert [row["model_call_id"] for row in restored_ledger.export_rows("r-a1")] == ["c1"]
     with pytest.raises(RolloutRetiredError):
         await restored_ledger.has_rows("r")

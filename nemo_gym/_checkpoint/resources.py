@@ -30,7 +30,7 @@ A server declares how its sessions checkpoint:
 - ``stateless``: sessions hold nothing a continuation needs.
   A checkpoint still records which sessions are live, without state,
   so with several workers a restore places them on a worker that their cookies then reach,
-  and frees them like any other session.
+  and releases them like any other session.
 - ``exported``: the server exports and restores each session's state through ``ResourcesSessionHooks``.
 - ``restart_only``: the default.
   Nothing of the server is in a checkpoint: its requests never hold up prepare,
@@ -41,7 +41,7 @@ A server declares how its sessions checkpoint:
   every other request is admitted.
   This fails closed for servers nobody has audited.
 
-A retire frees each of the attempt's sessions through ``retire_session_state`` in every mode,
+A retire releases each of the attempt's sessions through ``retire_session_state`` in every mode,
 so a server that keeps per-session state without checkpointing it, such as a restart-only game, still releases it.
 
 Prepare closes admission for data routes and is ready once no request is in flight.
@@ -127,7 +127,7 @@ class ResourcesSessionHooks(Protocol):
       The crashed process's sandboxes are still running and can be stopped here.
     - ``retire_session_state`` runs when an attempt is discarded, whatever the server's mode.
       Stop its sandbox.
-      It runs again for the same session if a retire was cut short, so it must tolerate state it already freed.
+      It runs again for the same session if a retire was cut short, so it must tolerate state it already released.
 
     Whatever a checkpoint keeps outside Gym, such as snapshots,
     is the server's to delete once no checkpoint the controller may restore refers to it.
@@ -164,13 +164,14 @@ class ResourcesParticipant(CheckpointParticipant):
         self._sessions: dict[str, EpisodeId] = {}
         # The same sessions by rollout, so retiring a batch of rollouts does not scan every session for each one.
         self._rollout_sessions: dict[str, set[str]] = {}
-        # Seeds admitted and not finished, by attempt: a retire waits for them, so a session they create is freed too.
+        # Seeds admitted and not finished, by attempt: a retire waits for them,
+        # so a session they create is released too.
         self._seeding: Counter[EpisodeId] = Counter()
         # Sessions a restore installed, until they end.
         # A request on one must name its attempt, since the attempt the restore replaced holds the same cookie.
         self._restored_sessions: set[str] = set()
         # Sessions of retired attempts, by rollout, refused until the controller forgets the rollout:
-        # a request without a rollout prefix names only its session, which is gone once retire freed it.
+        # a request without a rollout prefix names only its session, which is gone once retire released it.
         # And requests in flight per session.
         self._retired_sessions: dict[str, set[str]] = {}
         self._retired_session_rollouts: dict[str, str] = {}
@@ -209,7 +210,7 @@ class ResourcesParticipant(CheckpointParticipant):
                     f"resources session {session_id!r} belongs to {bound.capture_key!r}, not {episode_id.capture_key!r}"
                 )
         # A close from the owning attempt is never refused, even once that attempt is retired:
-        # it is how the server frees a session's state.
+        # it is how the server releases a session's state.
         if path != _SESSION_CLOSE:
             if session_id in self._retired_session_rollouts:
                 raise StaleAttemptError(f"resources session {session_id!r} belongs to a retired attempt")
@@ -241,7 +242,7 @@ class ResourcesParticipant(CheckpointParticipant):
         self._bind(session_id, episode_id)
         if self._is_retired(episode_id):
             # A seed can finish after its attempt was retired, for example when a retire was cut short while it waited.
-            # Its session is retired too: refused, never exported, and kept until a retried retire frees it.
+            # Its session is retired too: refused, never exported, and kept until a retried retire releases it.
             self._retired_sessions.setdefault(episode_id.rollout_id, set()).add(session_id)
             self._retired_session_rollouts[session_id] = episode_id.rollout_id
 
@@ -312,7 +313,7 @@ class ResourcesParticipant(CheckpointParticipant):
             if self.mode == "restart_only"
             else []
         )
-        # A session whose retire was cut short is still being freed: a checkpoint waits for a retried retire.
+        # A session whose retire was cut short is still being released: a checkpoint waits for a retried retire.
         blockers = sorted(
             {
                 self._sessions[session_id].capture_key
@@ -332,7 +333,7 @@ class ResourcesParticipant(CheckpointParticipant):
     def ready(self) -> bool:
         if self.mode != "restart_only" and self.inflight > self._carried_inflight():
             return False
-        # Retired sessions not yet freed are few; scanning them, not every session, keeps each prepare wake cheap.
+        # Retired sessions not yet released are few; scanning them, not every session, keeps each prepare wake cheap.
         return not any(session_id in self._sessions for session_id in self._retired_session_rollouts)
 
     def _carried_inflight(self) -> int:
@@ -363,7 +364,7 @@ class ResourcesParticipant(CheckpointParticipant):
 
         It runs as the attempts are marked, before anything awaits,
         so a retire that is cut short or arrives after its deadline still leaves those sessions refused,
-        held up in readiness, and left out of exports until a retried retire frees them.
+        held up in readiness, and left out of exports until a retried retire releases them.
         """
         for episode_id in episode_ids:
             self._mark_sessions(episode_id)
@@ -386,7 +387,7 @@ class ResourcesParticipant(CheckpointParticipant):
         # The sessions known now are refused before the first await, whether or not this retire finishes.
         self._mark_sessions(episode_id)
         # A seed admitted before the retire marked its attempt registers its session when it finishes; wait for it,
-        # so that session is freed here and not left behind.
+        # so that session is released here and not left behind.
         while any(
             seeding.rollout_id == episode_id.rollout_id and seeding.attempt <= episode_id.attempt
             for seeding in self._seeding
@@ -397,21 +398,21 @@ class ResourcesParticipant(CheckpointParticipant):
         while any(self._session_requests[session_id] for session_id in retired):
             await self.wait_changed(1.0)
         for session_id in retired:
-            # The session stays tracked until its state is freed, so a retire cut short leaves it for a retry.
-            # Every mode: a late request of a retired session is refused, so nothing else would free it.
+            # The session stays tracked until its state is released, so a retire cut short leaves it for a retry.
+            # Every mode: a late request of a retired session is refused, so nothing else would release it.
             await self.hooks.retire_session_state(session_id)
-            self._freed(session_id)
+            self._released(session_id)
 
-    def _freed(self, session_id: str) -> None:
-        """Stop tracking a session whose state was freed outside a request, which no route ends.
+    def _released(self, session_id: str) -> None:
+        """Stop tracking a session whose state was released outside a request, which no route ends.
 
         A retired session stays refused until the controller forgets its rollout.
-        With several workers its routing claim lasts until then too,
+        With several workers this worker keeps ownership of it until then too,
         so a late request that carries only its cookie still reaches this worker, which refuses it.
         """
         self.ended(session_id)
-        if self.on_session_freed is not None:
-            self.on_session_freed(session_id, until_forget=session_id in self._retired_session_rollouts)
+        if self.on_session_released is not None:
+            self.on_session_released(session_id, until_forget=session_id in self._retired_session_rollouts)
 
     def is_open(self, session_id: str) -> bool:
         """Whether ``session_id`` is a live session of an attempt that has not been retired.
@@ -432,14 +433,14 @@ class ResourcesParticipant(CheckpointParticipant):
         return sorted(self._unclaimed)
 
     async def delete_unclaimed_session(self, session_id: str) -> None:
-        """Free a restored session no request has used, without refusing anything later."""
+        """Release a restored session no request has used, without refusing anything later."""
         if session_id in self._unclaimed:
             if self.mode == "exported":
                 await self.hooks.retire_session_state(session_id)
-            self._freed(session_id)
+            self._released(session_id)
 
     async def delete_restored(self, episode_id: EpisodeId) -> None:
-        """Free the restored sessions of ``episode_id`` that no request has used, without refusing anything later:
+        """Release the restored sessions of ``episode_id`` that no request has used, without refusing anything later:
         the controller may still start the rollout over as that attempt."""
         # Through the rollout index, so deleting many restored episodes does not scan every restored session for each.
         for session_id in [
@@ -449,7 +450,7 @@ class ResourcesParticipant(CheckpointParticipant):
         ]:
             if self.mode == "exported":
                 await self.hooks.retire_session_state(session_id)
-            self._freed(session_id)
+            self._released(session_id)
 
     def check_forget(self, rollout_ids: list[str]) -> None:
         # A seed of a retired attempt still in flight would bind its session as live once the mark is gone.
@@ -462,16 +463,16 @@ class ResourcesParticipant(CheckpointParticipant):
             raise RetireIncompleteError(f"seeds of retired attempts {seeding[:10]} are still in flight")
         # Every tracked session of a retired attempt, marked or not,
         # so a mark a retire never reached cannot leave a session live once the attempt's mark is gone.
-        unfreed = sorted(
+        unreleased = sorted(
             session_id
             for rollout_id in rollout_ids
             for session_id in self._rollout_sessions.get(rollout_id, ())
             if self._is_retired(self._sessions[session_id])
         )
-        if unfreed:
+        if unreleased:
             # Forgetting would make these sessions live again: exportable, restorable and admitted.
-            # Nothing changes until a repeated retire has freed them.
-            raise RetireIncompleteError(f"retire has not finished freeing resources sessions {unfreed[:10]}")
+            # Nothing changes until a repeated retire has released them.
+            raise RetireIncompleteError(f"retire has not finished releasing resources sessions {unreleased[:10]}")
 
     async def forget(self, rollout_ids: list[str]) -> None:
         self.check_forget(rollout_ids)
@@ -479,9 +480,9 @@ class ResourcesParticipant(CheckpointParticipant):
         for rollout_id in rollout_ids:
             for session_id in self._retired_sessions.pop(rollout_id, ()):
                 self._retired_session_rollouts.pop(session_id, None)
-                if self.on_session_freed is not None and session_id not in self._sessions:
-                    # Its refusal ends here, and so does its routing claim, one close retry window later.
-                    self.on_session_freed(session_id)
+                if self.on_session_released is not None and session_id not in self._sessions:
+                    # Its refusal ends here, and so does this worker's ownership, one close retry window later.
+                    self.on_session_released(session_id)
 
     def request_started(self, session_id: Optional[str], *, counted: bool) -> None:
         if session_id is not None:
@@ -527,7 +528,7 @@ class ResourcesParticipant(CheckpointParticipant):
                 # The server already dropped this session, for example when a failed verification cleaned it up.
                 # There is nothing to continue, so stop tracking it rather than fail the commit.
                 LOGGER.warning("resources session %s of %s is gone; not exported", session_id, episode_id.capture_key)
-                self._freed(session_id)
+                self._released(session_id)
                 continue
             state = states[session_id]
             records.append(ResourcesSessionRecord(session_id=session_id, episode_id=episode_id, state=state))
@@ -628,7 +629,7 @@ class ResourcesCheckpointMiddleware:
         # Inside an episode every resources call carries the rollout prefix, seeds from an Environment Server included.
         seed = current_episode_id() if starts_session else None
         # A session start without the prefix creates a session that nothing tracks.
-        # No checkpoint would export it, and no retire would free it.
+        # No checkpoint would export it, and no retire would release it.
         # A session end without it could come from any attempt, including one a restore replaced.
         if (starts_session or path in _SESSION_ENDS) and current_episode_id() is None:
             error = RolloutIdRequiredError(

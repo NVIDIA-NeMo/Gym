@@ -476,10 +476,10 @@ class Deployment:
 
     # -- access ---------------------------------------------------------------------------------
 
-    def claims(self, name: str) -> Counter:
-        """The session claims in the runtime directory of ``name``, counted by the worker that holds them."""
+    def owner_files(self, name: str) -> Counter:
+        """The session owner files in the runtime directory of ``name``, counted by the worker that holds them."""
         holders: Counter = Counter()
-        for path in glob.glob(os.path.join(RUNTIME_ROOT, f"ng-{self.procs[name].pid}-*", "session-claims", "*")):
+        for path in glob.glob(os.path.join(RUNTIME_ROOT, f"ng-{self.procs[name].pid}-*", "session-owners", "*")):
             if path.endswith(".tmp"):
                 continue
             with contextlib.suppress(OSError):

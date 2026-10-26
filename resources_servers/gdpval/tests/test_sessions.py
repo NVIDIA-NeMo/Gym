@@ -410,7 +410,7 @@ def _app(server: GDPValResourcesServer, *, routed: bool):
         # resources_session_id before the handler runs.
         key = server.get_session_middleware_key()
         install_session_routing(
-            app, socket_dir=None, session_cookie=key, secret_key=key, **server.claimed_session_routing()
+            app, socket_dir=None, session_cookie=key, secret_key=key, **server.owned_session_routing()
         )
     return app
 

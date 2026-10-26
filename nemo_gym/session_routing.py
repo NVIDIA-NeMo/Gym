@@ -20,12 +20,12 @@ With more than one worker, each worker also serves the same app on a private Uni
 in a directory the main process creates for the server, and requests are routed by one rule:
 
 1. Find the request's session ID.
-2. Look up the session's claim, which names the worker that created the session.
+2. Look up the session's owner, the worker that created the session.
 3. Forward the request to that worker's private socket, unchanged, and stream its reply back unchanged.
-   If this worker holds the claim, or the session has no claim, the request is handled here.
+   If this worker owns the session, or the session has no owner, the request is handled here.
 
 A request that arrives over a private socket is always handled where it arrives, so it is forwarded at most once.
-If the claimant's socket is gone, because its worker exited, the request gets a 410
+If the owner's socket is gone, because its worker exited, the request gets a 410
 instead of silently running against empty state.
 
 Where the session ID comes from:
@@ -43,33 +43,36 @@ If the cookie and the body name different sessions, the reply is 409.
 An episode's resources session uses its ``resources_session_id`` as its cookie's ``session_id`` too,
 so the seed, its close and every request in between name the session by the same ID.
 A resources request with no session ID gets a new ID, which this router mints.
-A session start, such as a seed, claims it before its handler runs, since its reply's cookie names the session.
-Any other request claims it only if the handler used the session, before the reply leaves the worker.
-A request that keeps nothing, such as a health check or ``/aggregate_metrics``, leaves no claim and gets no cookie,
-so no cookie names a session nobody claims.
-A request whose cookie names a session whose claim ended is claimed the same way by the worker that serves it.
+A session start, such as a seed, takes ownership of the session before its handler runs,
+since its reply's cookie names the session.
+Any other request takes ownership only if the handler used the session, before the reply leaves the worker.
+A request that keeps nothing, such as a health check or ``/aggregate_metrics``, takes no ownership and gets no cookie,
+so no cookie names a session nobody owns.
+A request whose cookie names a session whose ownership ended makes the worker that serves it the owner the same way.
 
-A claim is a file in the socket directory, named by a hash of the session ID and holding the claimant's worker ID.
-The worker that creates the session creates the claim, atomically, so two workers can never claim one ID.
-Seeds and closes create claims, so a retried seed, a cleanup close, or a delayed seed after a close
+Ownership is recorded in an owner file in the socket directory,
+named by a hash of the session ID and holding the owner's worker ID.
+The worker that creates the session creates the owner file, atomically, so two workers can never own one ID.
+Seeds and closes take ownership, so a retried seed, a cleanup close, or a delayed seed after a close
 all reach the worker that saw the ID first.
-A claim ends once its session's last record on the claimant is gone:
+Ownership ends once its session's last record on the owner is gone:
 
-- an agent session's claim ends when the agent drops the session's last record,
+- an agent session's ownership ends when the agent drops the session's last record,
   which is its fence or failed seed, ``session_close_retry_window_seconds`` after it was written;
-- a resources session's claim lasts while the session is open, from a successful seed until its close or ``/verify``,
+- a resources session's ownership lasts while the session is open,
+  from a successful seed until its close or ``/verify``,
   and expires ``session_close_retry_window_seconds`` after the last request for it otherwise.
   A ``/verify`` that says a close follows, as an environment server's does, leaves the session open for that close.
 
-The claims of a worker that exited stay until the server exits, so its sessions keep getting a 410.
+The owner files of a worker that exited stay until the server exits, so its sessions keep getting a 410.
 The whole directory goes with the server's runtime directory when the server exits.
-With one worker there is no private socket and no claim.
+With one worker there is no private socket and no owner.
 
 A request without a session ID that belongs to one worker, such as an agent's call to itself within one ``/run``,
 names that worker in the ``x-ng-session-owner`` header, and is forwarded there, or gets a 410 if that worker is gone.
 
 A partial-rollout checkpoint restore installs each restored session on one live worker,
-which rewrites the session's claim to name itself (see ``SessionClaims.rewrite``).
+which rewrites the session's owner file to name itself (see ``SessionOwners.rewrite``).
 A cookie or MCP token from before the restore names only the session ID, so its requests reach the new holder.
 """
 
@@ -109,24 +112,24 @@ from nemo_gym.runtime_dir import server_runtime_dir
 LOG = logging.getLogger(__name__)
 
 #: Set by the main process of a multi-worker server for the workers it spawns: the directory that holds the
-#: workers' private sockets and the session claims.
+#: workers' private sockets and the session owner files.
 SESSION_SOCKET_DIR_ENV = "NEMO_GYM_SESSION_SOCKET_DIR"
-#: Subdirectory of the socket directory that holds the session claims.
-SESSION_CLAIMS_DIR = "session-claims"
+#: Subdirectory of the socket directory that holds the session owner files.
+SESSION_OWNERS_DIR = "session-owners"
 #: Scope key with the session ID the router chose for a request whose cookie has none:
 #: an episode seed's or close's ID, or a new one. The session middleware gives the cookie session this ID.
 SESSION_ID_SCOPE_KEY = "nemo_gym.session_id"
-#: Scope key with a callable that claims the request's unclaimed session ID for this worker, and says whether it could:
-#: a new ID, or one a cookie names whose claim ended.
+#: Scope key with a callable that makes this worker the owner of the request's session ID, and says whether it could:
+#: a new ID, or one a cookie names whose ownership ended.
 #: The session middleware calls it once the handler has used the session.
-SESSION_CLAIM_SCOPE_KEY = "nemo_gym.claim_session"
+SESSION_ACQUIRE_SCOPE_KEY = "nemo_gym.acquire_session"
 #: App state key with the lifespans, each called with the app, that a worker enters once its private socket listens,
 #: before it serves any request, and leaves before the socket closes.
 #: A checkpoint coordinator's link is one: the coordinator may place restored sessions on the worker once it joins.
 ROUTED_LIFESPANS_STATE = "nemo_gym_routed_lifespans"
 #: Header naming the worker a request without a session belongs to.
 SESSION_OWNER_HEADER = "x-ng-session-owner"
-# How many claims a batched rewrite replaces per hold of the workers' claims lock,
+# How many owner files a batched rewrite replaces per hold of the workers' owners lock,
 # so a release on any worker waits for at most one batch.
 _REWRITE_BATCH = 256
 #: Scope key marking a request that arrived over a worker's private socket.
@@ -141,7 +144,7 @@ _HOP_BY_HOP_HEADERS = frozenset({"connection", "keep-alive", "transfer-encoding"
 _FORWARD_KEEPALIVE_SECONDS = 15.0
 _PRIVATE_SERVER_KEEPALIVE_SECONDS = 30
 _ROLLOUT_PREFIX = rf"(?:/{ROLLOUT_PATH_PREFIX}/[^/]+(?:/[^/]+)?)?"
-# How often a worker releases the claims whose session has ended, at most.
+# How often a worker releases ownership of the sessions that have ended, at most.
 _MAX_SWEEP_SECONDS = 30.0
 _MIN_SWEEP_SECONDS = 0.05
 
@@ -164,7 +167,7 @@ class SessionKind:
     close_path: str
     #: Whether the session ID is the cookie session's own ID, as on a resources server:
     #: an episode seed's ID becomes it, and a request without one gets a new ID,
-    #: claimed if the request starts a session or its handler uses the session.
+    #: owned by this worker if the request starts a session or its handler uses the session.
     #: An agent session is named by a key of its own in the cookie instead.
     cookie_session: bool
 
@@ -174,7 +177,7 @@ class SessionKind:
 
 
 def create_session_socket_dir() -> str:
-    """The directory for one server's private worker sockets and claims: this process's runtime directory."""
+    """The directory for one server's private worker sockets and owner files: this process's runtime directory."""
     return server_runtime_dir()
 
 
@@ -212,51 +215,52 @@ def mcp_token_session_id(token: str, *, serializer: itsdangerous.URLSafeSerializ
     return session_id if isinstance(session_id, str) else None
 
 
-class SessionClaims:
+class SessionOwners:
     """Which worker created each session, shared by the workers of one server.
 
-    A claim is a file in the claims directory, named by a hash of the session ID and holding the claimant's worker ID.
-    It is created with a hard link from a complete temporary file, which fails if the claim exists,
-    so two workers cannot both claim one ID and a reader never sees a partly written claim.
+    Each session's owner is recorded in an owner file in the owners directory,
+    named by a hash of the session ID and holding the owner's worker ID.
+    It is created with a hard link from a complete temporary file, which fails if the owner file exists,
+    so two workers cannot both own one ID and a reader never sees a partly written owner file.
 
-    A claim lives as long as ``holds`` says its claimant keeps anything of the session.
-    It is not released while a request for the session is being served here,
+    A worker owns a session as long as ``holds`` says it keeps anything of the session.
+    It does not release ownership while a request for the session is being served here,
     since that request may be about to create a record.
-    Only the claimant removes its claim, so a removal cannot delete another worker's claim made since.
-    A checkpoint restore can rewrite a claim for another worker at any time, though.
-    The removal's check of the claimant and its unlink, and every rewrite, hold one lock file shared by the workers,
-    so a removal never deletes a claim a rewrite has just written.
+    Only the owner removes its owner file, so a removal cannot delete an owner file another worker wrote since.
+    A checkpoint restore can rewrite an owner file for another worker at any time, though.
+    The removal's check of the owner and its unlink, and every rewrite, hold one lock file shared by the workers,
+    so a removal never deletes an owner file a rewrite has just written.
     """
 
     def __init__(self, socket_dir: str, routing_id: str, holds: Callable[[str], bool]) -> None:
         self.routing_id = routing_id
         self.holds = holds
-        self.directory = os.path.join(socket_dir, SESSION_CLAIMS_DIR)
+        self.directory = os.path.join(socket_dir, SESSION_OWNERS_DIR)
         os.makedirs(self.directory, mode=0o700, exist_ok=True)
-        # Beside the claims, so a listing of the claims directory finds only claims.
+        # Beside the owner files, so a listing of the owners directory finds only owner files.
         self._lock_path = f"{self.directory}.lock"
-        # The IDs this worker has claimed and not released, and the requests for an ID being served here.
-        # Only this worker removes its claims, so an ID in the set is claimed by this worker on disk too.
+        # The IDs this worker owns and has not released, and the requests for an ID being served here.
+        # Only this worker removes its owner files, so an ID in the set is owned by this worker on disk too.
         self._mine: set[str] = set()
         self._serving: dict[str, int] = {}
 
     def _path(self, session_id: str) -> str:
         return os.path.join(self.directory, hashlib.sha256(session_id.encode("utf-8")).hexdigest())
 
-    def claimant(self, session_id: str) -> Optional[str]:
-        """The worker that claims the ID, or None if nobody does."""
+    def owner(self, session_id: str) -> Optional[str]:
+        """The worker that owns the ID, or None if nobody does."""
         if session_id in self._mine:
             return self.routing_id
         try:
-            with open(self._path(session_id), encoding="ascii") as claim:
-                return _valid_routing_id(claim.read())
+            with open(self._path(session_id), encoding="ascii") as owner_file:
+                return _valid_routing_id(owner_file.read())
         except FileNotFoundError:
             return None
 
-    def claim(self, session_id: str) -> Optional[str]:
-        """Claim the ID for this worker unless another worker has; return the claimant.
+    def acquire(self, session_id: str) -> Optional[str]:
+        """Make this worker the ID's owner unless another worker already owns it; return the owner.
 
-        Returns None for a claim file that names no valid worker, which nothing here writes.
+        Returns None for an owner file that names no valid worker, which nothing here writes.
         """
         if session_id in self._mine:
             return self.routing_id
@@ -278,32 +282,32 @@ class SessionClaims:
                 return self.routing_id
             finally:
                 os.unlink(temporary)
-            claimant = self.claimant(session_id)
-            if claimant is not None or os.path.exists(path):
-                return claimant
-            # The claimant released it between the two calls: claim it again.
+            owner = self.owner(session_id)
+            if owner is not None or os.path.exists(path):
+                return owner
+            # The owner released it between the two calls: try again.
 
     def rewrite(self, session_id: str) -> None:
-        """Claim the ID for this worker whoever claims it now, for a session a checkpoint restore installs here.
+        """Make this worker the ID's owner whoever owns it now, for a session a checkpoint restore installs here.
 
-        The claim file is replaced by one rename, so a reader finds either the old claimant or this one.
-        A live worker that claimed the ID before must ``disown`` it, since a worker trusts its own claims first.
+        The owner file is replaced by one rename, so a reader finds either the old owner or this one.
+        A live worker that owned the ID before must ``disown`` it, since a worker trusts its own ownership first.
         """
-        self._replace_claims([session_id], [])
+        self._replace_owner_files([session_id], [])
         self._mine.add(session_id)
 
     async def rewrite_all(self, session_ids: list[str]) -> None:
         """``rewrite`` each ID, in a thread, so a restore of many sessions does not hold up the event loop.
 
-        The thread only replaces files, and holds the workers' claims lock once per ``_REWRITE_BATCH`` renames.
-        The IDs this worker claims change only on the event loop, once the thread has ended,
+        The thread only replaces files, and holds the workers' owners lock once per ``_REWRITE_BATCH`` renames.
+        The IDs this worker owns change only on the event loop, once the thread has ended,
         even if the caller was cancelled meanwhile.
-        They then name exactly the claims the thread rewrote, so a release after a failure misses none of them.
+        They then name exactly the owner files the thread rewrote, so a release after a failure misses none of them.
         Until then this worker does not count them as its own, so a release here leaves them alone.
         The caller holds the sessions (see ``holds``) from before this call, so no release afterwards removes them.
         """
         replaced: list[str] = []
-        replacing = asyncio.ensure_future(asyncio.to_thread(self._replace_claims, session_ids, replaced))
+        replacing = asyncio.ensure_future(asyncio.to_thread(self._replace_owner_files, session_ids, replaced))
         cancelled = False
         while True:
             try:
@@ -319,8 +323,8 @@ class SessionClaims:
             raise asyncio.CancelledError()
         replacing.result()
 
-    def _replace_claims(self, session_ids: list[str], replaced: list[str]) -> None:
-        """Replace the claim file of each ID with one naming this worker, and append each ID to ``replaced`` once done.
+    def _replace_owner_files(self, session_ids: list[str], replaced: list[str]) -> None:
+        """Replace the owner file of each ID with one naming this worker, and append each ID to ``replaced`` once done.
 
         It touches only files, so it can run in a thread.
         """
@@ -329,7 +333,7 @@ class SessionClaims:
             try:
                 for session_id in session_ids[start : start + _REWRITE_BATCH]:
                     path = self._path(session_id)
-                    # Its own scratch file, so a claim of the same ID on this worker meanwhile cannot remove it.
+                    # Its own scratch file, so an acquire of the same ID on this worker meanwhile cannot remove it.
                     temporary = f"{path}.{self.routing_id}.{secrets.token_hex(8)}.tmp"
                     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                     batch.append((session_id, temporary, path))
@@ -350,7 +354,7 @@ class SessionClaims:
                         pass
 
     def disown(self, session_id: str) -> None:
-        """Stop holding the ID here, and leave its claim file to the worker a checkpoint restore moved it to."""
+        """Stop owning the ID here, and leave its owner file to the worker a checkpoint restore moved it to."""
         self._mine.discard(session_id)
 
     def mine(self, session_id: str) -> bool:
@@ -358,7 +362,7 @@ class SessionClaims:
 
     @contextmanager
     def serving(self, session_id: str) -> Iterator[None]:
-        """Hold the claim while a request for the ID is served here, and release it after if nothing is left."""
+        """Keep ownership while a request for the ID is served here, and release it after if nothing is left."""
         self._serving[session_id] = self._serving.get(session_id, 0) + 1
         try:
             yield
@@ -369,14 +373,14 @@ class SessionClaims:
             self.release(session_id)
 
     def release(self, session_id: str) -> None:
-        """Remove this worker's claim on the ID, unless a request for it is in progress or the session remains."""
+        """Release this worker's ownership of the ID, unless a request for it is in progress or the session remains."""
         if session_id not in self._mine or session_id in self._serving or self.holds(session_id):
             return
         self._mine.discard(session_id)
         path = self._path(session_id)
         with self._exclusive():
-            # A restore may have rewritten the claim for another worker before this worker disowned it.
-            if self.claimant(session_id) != self.routing_id:
+            # A restore may have rewritten the owner file for another worker before this worker disowned it.
+            if self.owner(session_id) != self.routing_id:
                 return
             try:
                 os.unlink(path)
@@ -385,7 +389,7 @@ class SessionClaims:
 
     @contextmanager
     def _exclusive(self) -> Iterator[None]:
-        """Hold the workers' claims lock; it is held only for a few file operations, never across an await."""
+        """Hold the workers' owners lock; it is held only for a few file operations, never across an await."""
         fd = os.open(self._lock_path, os.O_RDONLY | os.O_CREAT, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -399,41 +403,41 @@ class SessionClaims:
 
 
 class SessionLifetimes(Protocol):
-    """How long a worker keeps the claims on the sessions it created."""
+    """How long a worker keeps ownership of the sessions it created."""
 
     def holds(self, session_id: str) -> bool:
         """Whether this worker still keeps any record of the session."""
         ...
 
     def served(self, session_id: str, scope: Scope, status: Optional[int]) -> None:
-        """Record a request for a session this worker claims, once it is served; ``status`` is None if it failed."""
+        """Record a request for a session this worker owns, once it is served; ``status`` is None if it failed."""
         ...
 
     def starts(self, path: str) -> bool:
-        """Whether a request on ``path`` starts a session, so it claims its session whatever its handler does."""
+        """Whether a request on ``path`` starts a session, so it takes ownership whatever its handler does."""
         ...
 
     def sweep(self) -> list[str]:
-        """Drop the records whose time has passed, and return the sessions whose claims can be released."""
+        """Drop the records whose time has passed, and return the sessions whose ownership can be released."""
         ...
 
 
 class ResourcesSessionLifetimes:
-    """How long a resources server's worker keeps the claim on a session, judged from the requests it served.
+    """How long a resources server's worker keeps ownership of a session, judged from the requests it served.
 
     A resources server keeps its per-session state in its own subclass, so the router judges by the requests:
 
     - A successful seed, or another declared session start such as a Gymnasium ``/reset``,
-      opens the session: its claim lasts until the session ends.
+      opens the session: its ownership lasts until the session ends.
     - A successful ``/close_session`` or ``/verify``, or ``SimpleResourcesServer.checkpoint_session_ended``,
       ends it, unless the request says a close follows, as an environment server's ``/verify`` does.
-    - A session that is not open keeps its claim ``close_retry_window_seconds`` after the last request for it.
-      The caller's retried or cleanup close reaches the claimant within that window.
+    - A session that is not open keeps its owner ``close_retry_window_seconds`` after the last request for it.
+      The caller's retried or cleanup close reaches the owner within that window.
       A delayed seed after a close reaches it too, where the server refuses it while the session is fenced.
     - A failed seed or close of an open session leaves it open.
 
-    So a claim outlives the session's last request by at most the close retry window, except for a session never closed,
-    which keeps its claim as long as the server keeps the session.
+    So ownership outlives the session's last request by at most the close retry window,
+    except for a session never closed, which keeps its owner as long as the server keeps the session.
     """
 
     def __init__(
@@ -448,13 +452,13 @@ class ResourcesSessionLifetimes:
         self._starts = _paths(starts)
         self._ends = _paths(ends)
         self._close_follows = close_follows_header.lower().encode("latin-1") if close_follows_header else None
-        # Each session's claim lasts until this time, infinite while it is open.
+        # Each session's ownership lasts until this time, infinite while it is open.
         self._until: dict[str, float] = {}
         # One entry per session with a finite time, earliest first, so the heap never outgrows ``_until``.
         # An entry can be earlier than its session's time, which moved on; the sweep then queues it again.
         self._expiries: list[tuple[float, str]] = []
         self._queued: set[str] = set()
-        # Sessions a checkpoint retire released, whose claims last until ``ended`` whatever requests for them do.
+        # Sessions a checkpoint retire released, whose ownership lasts until ``ended`` whatever requests for them do.
         self._retained: set[str] = set()
 
     def holds(self, session_id: str) -> bool:
@@ -481,14 +485,14 @@ class ResourcesSessionLifetimes:
         )
 
     def ended(self, session_id: str) -> None:
-        """End a session this worker claims, from a route that ends a session under another name."""
+        """End a session this worker owns, from a route that ends a session under another name."""
         retained = session_id in self._retained
         self._retained.discard(session_id)
         if retained or session_id in self._until:
             self._expire_after_window(session_id)
 
     def retain(self, session_id: str) -> None:
-        """Keep the claim on a session a checkpoint retire released until ``ended``, when the retire's refusal ends.
+        """Keep ownership of a session a checkpoint retire released until ``ended``, when the retire's refusal ends.
 
         Until then a late request that carries only the session's cookie reaches this worker, which refuses it.
         """
@@ -499,7 +503,7 @@ class ResourcesSessionLifetimes:
         self._until[session_id] = math.inf
 
     def forget(self, session_id: str) -> None:
-        """Drop a session whose install a failed restore undid, so its claim can be released at once."""
+        """Drop a session whose install a failed restore undid, so its ownership can be released at once."""
         self._until.pop(session_id, None)
         self._retained.discard(session_id)
 
@@ -532,23 +536,23 @@ class ResourcesSessionLifetimes:
 
 
 class AgentSessionHolder(Protocol):
-    """An agent server, whose sessions are claimed by ``agent_session_id`` across workers."""
+    """An agent server, whose sessions are owned by ``agent_session_id`` across workers."""
 
     def holds_agent_session(self, agent_session_id: str) -> bool:
         """Whether this worker still keeps any record of the session, open, failed or closed."""
         ...
 
-    def use_agent_session_claims(self, claims: SessionClaims) -> None:
-        """Keep the claims, to release one when the worker drops the session's last record."""
+    def use_agent_session_owners(self, owners: SessionOwners) -> None:
+        """Keep the session owners, to release this worker's ownership when it drops a session's last record."""
         ...
 
     def expire_agent_session_records(self) -> None:
-        """Drop the fences and failed seeds that expired, releasing their claims."""
+        """Drop the fences and failed seeds that expired, releasing ownership of their sessions."""
         ...
 
 
 class _AgentSessionLifetimes:
-    """An agent's own records decide its claims: it releases a claim itself when it drops a session's last record."""
+    """An agent's own records decide its ownership: it releases a session when it drops the session's last record."""
 
     def __init__(self, agent: AgentSessionHolder) -> None:
         self.agent = agent
@@ -569,14 +573,14 @@ class _AgentSessionLifetimes:
 
 
 class SessionRoutingMiddleware:
-    """Find a request's session ID, and forward the request to the worker that claims the session.
+    """Find a request's session ID, and forward the request to the worker that owns the session.
 
     It sits outside SessionMiddleware and reads the cookie by decoding it with the same secret.
     A forwarded request therefore never reaches this worker's SessionMiddleware,
-    so the reply carries only the claimant's Set-Cookie, built from the session as the claimant left it.
+    so the reply carries only the owner's Set-Cookie, built from the session as the owner left it.
     Sitting inside SessionMiddleware instead would add this worker's stale copy of the session as a second Set-Cookie.
 
-    With one worker there are no claims, and it only reads the session ID of seeds and closes:
+    With one worker there is no ownership, and it only reads the session ID of seeds and closes:
     it refuses a request whose cookie and body name different sessions,
     and gives an episode's resources session its ID in the cookie.
     """
@@ -591,7 +595,7 @@ class SessionRoutingMiddleware:
         routing_id: Optional[str] = None,
         socket_dir: Optional[str] = None,
         clients: Optional[dict[str, ClientSession]] = None,
-        claims: Optional[SessionClaims] = None,
+        owners: Optional[SessionOwners] = None,
         lifetimes: Optional[SessionLifetimes] = None,
         mcp_token_header: Optional[str] = None,
         mcp_token_serializer: Optional[itsdangerous.URLSafeSerializer] = None,
@@ -604,10 +608,10 @@ class SessionRoutingMiddleware:
         self.signer = itsdangerous.TimestampSigner(secret_key)
         self.routing_id = routing_id
         self.socket_dir = socket_dir
-        # One connection pool per claimant socket, kept for the life of this worker and closed at its shutdown.
-        # Not Gym's shared aiohttp client: each pool needs a UnixConnector bound to its claimant's socket.
+        # One connection pool per owner socket, kept for the life of this worker and closed at its shutdown.
+        # Not Gym's shared aiohttp client: each pool needs a UnixConnector bound to its owner's socket.
         self.clients = clients if clients is not None else {}
-        self.claims = claims
+        self.owners = owners
         self.lifetimes = lifetimes
         self.mcp_token_header = mcp_token_header
         self.mcp_token_serializer = mcp_token_serializer
@@ -617,9 +621,9 @@ class SessionRoutingMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        claims = self.claims
+        owners = self.owners
         names_by_body = scope["method"] == "POST" and self.body_paths.fullmatch(scope["path"]) is not None
-        if claims is None and not names_by_body:
+        if owners is None and not names_by_body:
             await self.app(scope, receive, send)
             return
 
@@ -647,11 +651,11 @@ class SessionRoutingMiddleware:
                 if session_id is None and self.kind.cookie_session:
                     scope[SESSION_ID_SCOPE_KEY] = body_session_id
                 session_id = body_session_id
-        if claims is None:
+        if owners is None:
             await self.app(scope, receive, send)
             return
 
-        # 2. Look up the session's claim. A seed, a close or another session start creates it if nobody has.
+        # 2. Look up the session's owner. A seed, a close or another session start takes ownership if nobody has it.
         forwarded = bool(scope.get(_FORWARDED_SCOPE_KEY))
         starts = self.lifetimes is not None and self.lifetimes.starts(scope["path"])
         if session_id is None:
@@ -666,35 +670,38 @@ class SessionRoutingMiddleware:
             new_session_id = scope[SESSION_ID_SCOPE_KEY] = str(uuid4())
             if starts:
                 # A session start's reply names the new session, whether or not its handler reads it.
-                if claims.claim(new_session_id) != self.routing_id:
-                    await _conflict("This new session's ID is already claimed. Retry it.", scope, receive, send)
+                if owners.acquire(new_session_id) != self.routing_id:
+                    await _conflict(
+                        "This new session's ID is already owned by another worker. Retry it.", scope, receive, send
+                    )
                     return
             else:
-                # Claimed by the session middleware only if the handler uses it; otherwise no cookie names it.
-                scope[SESSION_CLAIM_SCOPE_KEY] = lambda: claims.claim(new_session_id) == self.routing_id
-            await self._serve_claimed(claims, new_session_id, scope, receive, send)
+                # Owned through the session middleware only if the handler uses it; otherwise no cookie names it.
+                scope[SESSION_ACQUIRE_SCOPE_KEY] = lambda: owners.acquire(new_session_id) == self.routing_id
+            await self._serve_owned(owners, new_session_id, scope, receive, send)
             return
         elif names_by_body or starts:
-            claimant = claims.claim(session_id)
+            owner = owners.acquire(session_id)
         elif forwarded:
-            # Never forwarded again; served here as a session of this worker only if it still claims it.
-            claimant = self.routing_id if claims.mine(session_id) else None
+            # Never forwarded again; served here as a session of this worker only if it still owns it.
+            owner = self.routing_id if owners.mine(session_id) else None
         else:
-            claimant = claims.claimant(session_id)
+            owner = owners.owner(session_id)
 
-        # 3. Forward it to the claimant, or handle it here.
-        if claimant == self.routing_id:
-            await self._serve_claimed(claims, session_id, scope, receive, send)
-        elif claimant is None and self.kind.cookie_session and not forwarded:
-            # A cookie or token whose claim ended, or was never made: the session is claimed here if the handler uses it,
+        # 3. Forward it to the owner, or handle it here.
+        if owner == self.routing_id:
+            await self._serve_owned(owners, session_id, scope, receive, send)
+        elif owner is None and self.kind.cookie_session and not forwarded:
+            # A cookie or token whose ownership ended, or never began:
+            # this worker takes ownership if the handler uses it,
             # so its later requests reach this worker.
             scope[SESSION_ID_SCOPE_KEY] = session_id
-            scope[SESSION_CLAIM_SCOPE_KEY] = lambda: claims.claim(session_id) == self.routing_id
-            await self._serve_claimed(claims, session_id, scope, receive, send)
-        elif claimant is None:
+            scope[SESSION_ACQUIRE_SCOPE_KEY] = lambda: owners.acquire(session_id) == self.routing_id
+            await self._serve_owned(owners, session_id, scope, receive, send)
+        elif owner is None:
             await self.app(scope, receive, send)
         elif forwarded:
-            # The claimant released the ID while the request was forwarded here, and another worker claimed it since.
+            # The owner released the ID while the request was forwarded here, and another worker took ownership since.
             await _conflict(
                 f"This {self.kind.id_field} moved to another server worker while the request was forwarded. Retry it.",
                 scope,
@@ -702,12 +709,12 @@ class SessionRoutingMiddleware:
                 send,
             )
         else:
-            await self._forward(claimant, scope, receive, send, body=body)
+            await self._forward(owner, scope, receive, send, body=body)
 
-    async def _serve_claimed(
-        self, claims: SessionClaims, session_id: str, scope: Scope, receive: Receive, send: Send
+    async def _serve_owned(
+        self, owners: SessionOwners, session_id: str, scope: Scope, receive: Receive, send: Send
     ) -> None:
-        """Serve a request for a session this worker claims, or may claim, and record it for the claim's lifetime."""
+        """Serve a request for a session this worker owns, or may take, and record it for the ownership's lifetime."""
         status: list[int] = []
 
         async def send_and_record(message: Message) -> None:
@@ -715,11 +722,11 @@ class SessionRoutingMiddleware:
                 status.append(message["status"])
             await send(message)
 
-        with claims.serving(session_id):
+        with owners.serving(session_id):
             try:
                 await self.app(scope, receive, send_and_record)
             finally:
-                if self.lifetimes is not None and claims.mine(session_id):
+                if self.lifetimes is not None and owners.mine(session_id):
                     self.lifetimes.served(session_id, scope, status[0] if status else None)
 
     def _session_id_from_headers(self, connection: HTTPConnection) -> Optional[str]:
@@ -742,9 +749,9 @@ class SessionRoutingMiddleware:
                     worker_socket_path(self.socket_dir, owner), limit=0, keepalive_timeout=_FORWARD_KEEPALIVE_SECONDS
                 ),
                 cookie_jar=DummyCookieJar(),
-                # Pass the reply's bytes through exactly as the claimant encoded them.
+                # Pass the reply's bytes through exactly as the owner encoded them.
                 auto_decompress=False,
-                # The claimant's handler takes as long as it takes; the caller holds its own timeout.
+                # The owner's handler takes as long as it takes; the caller holds its own timeout.
                 timeout=ClientTimeout(total=None),
             )
         return client
@@ -779,7 +786,7 @@ class SessionRoutingMiddleware:
                 skip_auto_headers=("User-Agent", "Accept", "Accept-Encoding", "Content-Type"),
             )
         except ClientConnectorError:
-            # The claimant's socket is gone or refuses connections: the worker that held this session exited.
+            # The owner's socket is gone or refuses connections: the worker that held this session exited.
             await self._discard_client(owner)
             await JSONResponse(
                 {
@@ -917,16 +924,16 @@ async def serve_private_socket(
             pass
 
 
-async def _sweep_claims(claims: SessionClaims, lifetimes: SessionLifetimes, interval_seconds: float) -> None:
-    """Release the claims whose session has ended, so a claim ends even when no more requests arrive."""
+async def _sweep_ownership(owners: SessionOwners, lifetimes: SessionLifetimes, interval_seconds: float) -> None:
+    """Release ownership of the sessions that have ended, so ownership ends even when no more requests arrive."""
     while True:
         await asyncio.sleep(interval_seconds)
         try:
             for session_id in lifetimes.sweep():
-                claims.release(session_id)
+                owners.release(session_id)
         except Exception:
             # A failed sweep is tried again at the next interval rather than ending every later one.
-            LOG.exception("Could not release the claims of ended sessions")
+            LOG.exception("Could not release ownership of ended sessions")
 
 
 def install_session_routing(
@@ -948,10 +955,12 @@ def install_session_routing(
     """Route this worker's requests by session ID, and serve forwarded requests on a private socket.
 
     Call once the app's middleware is otherwise in place: the router must sit outside SessionMiddleware.
-    Without a ``socket_dir`` (one worker), it only reads the session ID of seeds and closes, and claims nothing.
-    With one, it claims sessions in it and returns this worker's ID, also stored in ``app.state.nemo_gym_routing_id``.
-    Pass the agent for an agent server, whose own records decide its claims' lifetimes,
-    or the close retry window and the session start and end routes for a resources server (see ``ResourcesSessionLifetimes``).
+    Without a ``socket_dir`` (one worker), it only reads the session ID of seeds and closes, and owns nothing.
+    With one, it records session owners in it and returns this worker's ID,
+    also stored in ``app.state.nemo_gym_routing_id``.
+    Pass the agent for an agent server, whose own records decide how long it owns its sessions,
+    or the close retry window and the session start and end routes for a resources server
+    (see ``ResourcesSessionLifetimes``).
     """
     route_by = dict(
         kind=kind,
@@ -986,10 +995,10 @@ def install_session_routing(
         raise ValueError(
             "install_session_routing needs agent_sessions or close_retry_window_seconds with a socket_dir"
         )
-    claims = SessionClaims(socket_dir, routing_id, lifetimes.holds)
-    app.state.nemo_gym_session_claims = claims
+    owners = SessionOwners(socket_dir, routing_id, lifetimes.holds)
+    app.state.nemo_gym_session_owners = owners
     if agent_sessions is not None:
-        agent_sessions.use_agent_session_claims(claims)
+        agent_sessions.use_agent_session_owners(owners)
         window = getattr(getattr(agent_sessions, "config", None), "session_close_retry_window_seconds", None)
     sweep_seconds = min(_MAX_SWEEP_SECONDS, max(_MIN_SWEEP_SECONDS, (window or _MAX_SWEEP_SECONDS) / 4))
     app.add_middleware(
@@ -998,7 +1007,7 @@ def install_session_routing(
         routing_id=routing_id,
         socket_dir=socket_dir,
         clients=clients,
-        claims=claims,
+        owners=owners,
         lifetimes=lifetimes,
     )
     original_lifespan = app.router.lifespan_context
@@ -1008,7 +1017,7 @@ def install_session_routing(
         async with original_lifespan(application) as state:
             # Started after the app's own startup, so a forwarded request never reaches a half-started app.
             async with serve_private_socket(application, worker_socket_path(socket_dir, routing_id), backlog=backlog):
-                sweeper = asyncio.create_task(_sweep_claims(claims, lifetimes, sweep_seconds))
+                sweeper = asyncio.create_task(_sweep_ownership(owners, lifetimes, sweep_seconds))
                 try:
                     async with AsyncExitStack() as routed:
                         for lifespan in getattr(application.state, ROUTED_LIFESPANS_STATE, ()):

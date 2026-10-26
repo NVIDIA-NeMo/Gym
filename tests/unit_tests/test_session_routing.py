@@ -14,7 +14,7 @@
 # limitations under the License.
 """Session routing across uvicorn workers, with in-process workers that share a real socket directory.
 
-Every test follows one rule: find the session ID, look up its claim, and forward to the claimant or handle locally.
+Every test follows one rule: find the session ID, look up its owner, and forward to the owner or handle locally.
 """
 
 import asyncio
@@ -66,10 +66,10 @@ from nemo_gym.base_responses_api_agent import (
 from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_token_serializer
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.session_routing import (
-    SESSION_CLAIMS_DIR,
     SESSION_OWNER_HEADER,
+    SESSION_OWNERS_DIR,
     ResourcesSessionLifetimes,
-    SessionClaims,
+    SessionOwners,
     SessionRoutingMiddleware,
     install_session_routing,
     serve_private_socket,
@@ -81,20 +81,20 @@ from nemo_gym.session_routing import (
 OLD_WORKER_STAMP = "nemo_gym_worker"
 
 
-def _claim_path(socket_dir: str, session_id: str) -> str:
-    return os.path.join(socket_dir, SESSION_CLAIMS_DIR, hashlib.sha256(session_id.encode("utf-8")).hexdigest())
+def _owner_path(socket_dir: str, session_id: str) -> str:
+    return os.path.join(socket_dir, SESSION_OWNERS_DIR, hashlib.sha256(session_id.encode("utf-8")).hexdigest())
 
 
-def _claimant(socket_dir: str, session_id: str) -> Optional[str]:
+def _owner(socket_dir: str, session_id: str) -> Optional[str]:
     try:
-        with open(_claim_path(socket_dir, session_id)) as claim:
-            return claim.read()
+        with open(_owner_path(socket_dir, session_id)) as owner_file:
+            return owner_file.read()
     except FileNotFoundError:
         return None
 
 
-def _claim_files(socket_dir: str) -> list[str]:
-    directory = os.path.join(socket_dir, SESSION_CLAIMS_DIR)
+def _owner_files(socket_dir: str) -> list[str]:
+    directory = os.path.join(socket_dir, SESSION_OWNERS_DIR)
     return os.listdir(directory) if os.path.isdir(directory) else []
 
 
@@ -234,7 +234,7 @@ class Worker:
             session_cookie=self.cookie_name,
             secret_key=self.cookie_name,
             **mcp_routing,
-            **self.server.claimed_session_routing(),
+            **self.server.owned_session_routing(),
         )
         # A failed seed answers 500, as the exception middleware does for a running server.
         self.client = TestClient(self.app, raise_server_exceptions=False)
@@ -362,7 +362,7 @@ class AgentWorker:
             socket_dir=socket_dir,
             session_cookie=self.cookie_name,
             secret_key=self.cookie_name,
-            **self.agent.claimed_session_routing(),
+            **self.agent.owned_session_routing(),
         )
         self.client = TestClient(self.app, raise_server_exceptions=False)
 
@@ -416,7 +416,7 @@ class TestTheSessionIdSources:
         assert a.server.store == {} and b.server.store == {}
 
     @pytest.mark.parametrize("route", ["seed", "close"])
-    def test_the_typed_resources_seed_and_close_body(self, workers, route: str) -> None:
+    def test_the_episode_resources_seed_and_close_body(self, workers, route: str) -> None:
         a, b = workers
         assert a.seed().status_code == 200
 
@@ -459,20 +459,20 @@ class TestTheSessionIdSources:
         assert "s" in a.agent._fenced_session_records
         assert not b.agent._session_records and not b.agent._fenced_session_records
 
-    def test_a_typed_seed_gives_the_cookie_its_resources_session_id(self, workers) -> None:
+    def test_an_episode_seed_gives_the_cookie_its_resources_session_id(self, workers) -> None:
         a, b = workers
 
-        seeded = b.seed("typed")
+        seeded = b.seed("episode")
 
-        assert a.server.seed_cookie_ids == [] and b.server.seed_cookie_ids == ["typed"]
-        assert b.session(seeded)[SESSION_ID_KEY] == "typed"
+        assert a.server.seed_cookie_ids == [] and b.server.seed_cookie_ids == ["episode"]
+        assert b.session(seeded)[SESSION_ID_KEY] == "episode"
         # A later request with that cookie names the same session.
         assert a.post("/store", json={"value": 1}, cookie=seeded.cookies[b.cookie_name]).json() == {"worker": "b"}
-        assert b.server.store == {"typed": 1}
+        assert b.server.store == {"episode": 1}
 
 
-class TestClaimCreation:
-    """Whichever worker creates a session claims it, on every path that creates one."""
+class TestOwnershipCreation:
+    """Whichever worker creates a session owns it, on every path that creates one."""
 
     @pytest.mark.parametrize(
         "create",
@@ -481,41 +481,41 @@ class TestClaimCreation:
             pytest.param(lambda w: w.close("s"), id="close of an unknown id"),
         ],
     )
-    def test_a_typed_seed_or_close_claims_its_id(self, workers, socket_dir: str, create) -> None:
+    def test_an_episode_seed_or_close_takes_ownership_of_its_id(self, workers, socket_dir: str, create) -> None:
         a, b = workers
 
         assert create(b).status_code == 200
 
-        assert _claimant(socket_dir, "s") == b.routing_id
+        assert _owner(socket_dir, "s") == b.routing_id
 
-    def test_a_typed_seed_with_its_own_cookie_keeps_its_claim(self, workers, socket_dir: str) -> None:
+    def test_an_episode_seed_with_its_own_cookie_keeps_its_owner(self, workers, socket_dir: str) -> None:
         a, b = workers
         seeded = b.seed()
 
         retried = a.seed(cookie=seeded.cookies[b.cookie_name])
 
         assert retried.status_code == 200
-        assert _claimant(socket_dir, "s") == b.routing_id and b.server.seeds == ["s", "s"]
+        assert _owner(socket_dir, "s") == b.routing_id and b.server.seeds == ["s", "s"]
 
     @pytest.mark.parametrize("path", ["/seed_session", "/store"])
-    def test_a_new_session_is_claimed_by_the_worker_that_mints_its_id(self, workers, socket_dir: str, path) -> None:
+    def test_a_new_session_is_owned_by_the_worker_that_mints_its_id(self, workers, socket_dir: str, path) -> None:
         a, b = workers
         body = {} if path == "/seed_session" else {"value": 1}
 
         response = b.post(path, json=body)
 
         session_id = b.session(response)[SESSION_ID_KEY]
-        assert _claimant(socket_dir, session_id) == b.routing_id
-        assert len(_claim_files(socket_dir)) == 1
+        assert _owner(socket_dir, session_id) == b.routing_id
+        assert len(_owner_files(socket_dir)) == 1
 
-    def test_a_post_whose_handler_keeps_no_session_leaves_no_claim(self, workers, socket_dir: str) -> None:
+    def test_a_post_whose_handler_keeps_no_session_leaves_no_owner(self, workers, socket_dir: str) -> None:
         a, b = workers
 
         assert b.post("/ping").json() == {"worker": "b"}
         metrics = b.post("/aggregate_metrics", json={"verify_responses": []})
         assert metrics.status_code == 200, metrics.text
 
-        assert _claim_files(socket_dir) == []
+        assert _owner_files(socket_dir) == []
         assert len(b.app.state.nemo_gym_resources_session_lifetimes) == 0
 
     def test_a_post_whose_handler_keeps_no_session_gets_no_session_cookie(self, workers) -> None:
@@ -523,10 +523,10 @@ class TestClaimCreation:
 
         for response in (b.post("/ping"), b.post("/aggregate_metrics", json={"verify_responses": []})):
             assert response.status_code == 200, response.text
-            # A cookie would name a session nobody claims, whose later requests could reach any worker.
+            # A cookie would name a session nobody owns, whose later requests could reach any worker.
             assert _set_cookies(response, b.cookie_name) == []
 
-    def test_a_seed_whose_handler_ignores_the_session_still_claims_it(self, socket_dir: str) -> None:
+    def test_a_seed_whose_handler_ignores_the_session_still_takes_ownership(self, socket_dir: str) -> None:
         a = Worker("a", socket_dir, server_class=SessionIgnoringSeedServer)
         b = Worker("b", socket_dir, server_class=SessionIgnoringSeedServer)
         with a.client, b.client:
@@ -537,90 +537,90 @@ class TestClaimCreation:
             stored = b.post("/store", json={"value": 3}, cookie=cookie)
             taken = b.post("/take", cookie=cookie)
 
-        assert seeded.status_code == 200 and _claimant(socket_dir, session_id) == a.routing_id
+        assert seeded.status_code == 200 and _owner(socket_dir, session_id) == a.routing_id
         # Every later request of the session reaches the worker that seeded it.
         assert stored.json() == {"worker": "a"}
         assert taken.json() == {"worker": "a", "value": 3}
 
-    def test_a_cookie_whose_claim_ended_is_claimed_again_by_the_worker_that_uses_it(self, socket_dir: str) -> None:
+    def test_a_cookie_whose_ownership_ended_is_owned_again_by_the_worker_that_uses_it(self, socket_dir: str) -> None:
         a = Worker("a", socket_dir, close_retry_window_seconds=0.1)
         b = Worker("b", socket_dir, close_retry_window_seconds=0.1)
         with a.client, b.client:
             stored = a.post("/store", json={"value": 7})
             cookie = stored.cookies[a.cookie_name]
             session_id = a.session(stored)[SESSION_ID_KEY]
-            _wait_until(lambda: _claimant(socket_dir, session_id) is None)
+            _wait_until(lambda: _owner(socket_dir, session_id) is None)
 
             again = b.post("/store", json={"value": 9}, cookie=cookie)
-            claimant = _claimant(socket_dir, session_id)
+            owner = _owner(socket_dir, session_id)
             taken = a.post("/take", cookie=cookie)
 
-        assert again.json() == {"worker": "b"} and claimant == b.routing_id
-        # The session's next request reaches the worker that claimed it again, not the one that kept a stale copy.
+        assert again.json() == {"worker": "b"} and owner == b.routing_id
+        # The session's next request reaches the worker that took ownership again, not the one that kept a stale copy.
         assert taken.json() == {"worker": "b", "value": 9}
 
-    def test_a_new_session_is_claimed_before_its_reply_arrives(self, workers, socket_dir: str) -> None:
+    def test_a_new_session_is_owned_before_its_reply_arrives(self, workers, socket_dir: str) -> None:
         a, b = workers
 
         stored = b.post("/store", json={"value": 5})
 
-        # Claimed by the time the client has the reply, so its next request through another worker finds it.
-        assert _claimant(socket_dir, b.session(stored)[SESSION_ID_KEY]) == b.routing_id
+        # Owned by the time the client has the reply, so its next request through another worker finds it.
+        assert _owner(socket_dir, b.session(stored)[SESSION_ID_KEY]) == b.routing_id
         assert a.post("/take", cookie=stored.cookies[b.cookie_name]).json() == {"worker": "b", "value": 5}
 
-    def test_a_minted_id_another_worker_claimed_meanwhile_is_refused(
-        self, workers, socket_dir: str, monkeypatch
-    ) -> None:
+    def test_a_minted_id_another_worker_took_meanwhile_is_refused(self, workers, socket_dir: str, monkeypatch) -> None:
         a, b = workers
         monkeypatch.setattr("nemo_gym.session_routing.uuid4", lambda: "taken-id")
-        assert a.app.state.nemo_gym_session_claims.claim("taken-id") == a.routing_id
+        assert a.app.state.nemo_gym_session_owners.acquire("taken-id") == a.routing_id
 
         response = b.post("/store", json={"value": 5})
 
         assert response.status_code == 409
-        assert _claimant(socket_dir, "taken-id") == a.routing_id
+        assert _owner(socket_dir, "taken-id") == a.routing_id
 
-    def test_a_get_without_a_session_claims_nothing(self, workers, socket_dir: str) -> None:
+    def test_a_get_without_a_session_takes_no_ownership(self, workers, socket_dir: str) -> None:
         a, b = workers
 
         for path in ("/echo", "/health"):
             assert b.client.get(path).status_code == 200
 
-        assert _claim_files(socket_dir) == []
+        assert _owner_files(socket_dir) == []
 
     @pytest.mark.parametrize("create", ["seed", "close"])
-    def test_an_agent_seed_or_close_claims_its_id(self, agent_workers, socket_dir: str, create: str) -> None:
+    def test_an_agent_seed_or_close_takes_ownership_of_its_id(
+        self, agent_workers, socket_dir: str, create: str
+    ) -> None:
         a, b = agent_workers
 
         response = b.seed() if create == "seed" else b.close()
 
         assert response.status_code == 200
-        assert _claimant(socket_dir, "s") == b.routing_id
+        assert _owner(socket_dir, "s") == b.routing_id
 
-    def test_an_agent_request_without_a_session_claims_nothing(self, agent_workers, socket_dir: str) -> None:
+    def test_an_agent_request_without_a_session_takes_no_ownership(self, agent_workers, socket_dir: str) -> None:
         a, b = agent_workers
 
         assert b.client.get("/whoami").json() == {"worker": "b", "agent_session_id": None}
 
-        assert _claim_files(socket_dir) == []
+        assert _owner_files(socket_dir) == []
 
-    def test_two_workers_racing_to_claim_ids_agree_on_one_claimant_each(self, socket_dir: str) -> None:
-        claims = [SessionClaims(socket_dir, routing_id, lambda _: False) for routing_id in ("a" * 32, "b" * 32)]
+    def test_two_workers_racing_for_ids_agree_on_one_owner_each(self, socket_dir: str) -> None:
+        owners = [SessionOwners(socket_dir, routing_id, lambda _: False) for routing_id in ("a" * 32, "b" * 32)]
         ids = [f"id-{index}" for index in range(500)]
 
-        def claim_all(worker: SessionClaims) -> list[Optional[str]]:
-            return [worker.claim(session_id) for session_id in ids]
+        def acquire_all(worker: SessionOwners) -> list[Optional[str]]:
+            return [worker.acquire(session_id) for session_id in ids]
 
         with ThreadPoolExecutor(2) as pool:
-            first, second = pool.map(claim_all, claims)
+            first, second = pool.map(acquire_all, owners)
 
         assert first == second
-        for session_id, claimant in zip(ids, first):
-            assert _claimant(socket_dir, session_id) == claimant
-        for worker in claims:
+        for session_id, owner in zip(ids, first):
+            assert _owner(socket_dir, session_id) == owner
+        for worker in owners:
             assert worker._mine == {session_id for session_id, c in zip(ids, first) if c == worker.routing_id}
-        # Only claim files remain: every temporary file was removed.
-        assert len(_claim_files(socket_dir)) == len(ids)
+        # Only owner files remain: every temporary file was removed.
+        assert len(_owner_files(socket_dir)) == len(ids)
 
     def test_new_sessions_minted_on_two_workers_at_once_are_distinct(self, workers, socket_dir: str) -> None:
         a, b = workers
@@ -638,14 +638,14 @@ class TestClaimCreation:
 
         signer = itsdangerous.TimestampSigner(a.cookie_name)
         ids = [json.loads(b64decode(signer.unsign(c.encode())))[SESSION_ID_KEY] for c in cookies_a + cookies_b]
-        assert len(set(ids)) == 100 and len(_claim_files(socket_dir)) == 100
+        assert len(set(ids)) == 100 and len(_owner_files(socket_dir)) == 100
         assert len(a.server.store) == 50 and len(b.server.store) == 50
 
 
-class TestClaimLifetime:
-    """A claim ends once its session's last record on the claimant is gone; one worker writes no claims."""
+class TestOwnershipLifetime:
+    """Ownership ends once its session's last record on the owner is gone; one worker writes no owner files."""
 
-    def test_a_typed_session_keeps_its_claim_while_open_and_releases_it_a_window_after_its_close(
+    def test_an_episode_session_keeps_its_owner_while_open_and_releases_it_a_window_after_its_close(
         self, socket_dir: str
     ) -> None:
         a = Worker("a", socket_dir, close_retry_window_seconds=0.2)
@@ -653,16 +653,16 @@ class TestClaimLifetime:
         with a.client, b.client:
             assert b.seed().status_code == 200
             time.sleep(0.4)
-            open_after_window = _claimant(socket_dir, "s")
+            open_after_window = _owner(socket_dir, "s")
             assert a.close().json()["resources_session_id"] == "s@b"
-            closed_now = _claimant(socket_dir, "s")
-            # No further request: the claimant's sweep releases it.
-            _wait_until(lambda: _claimant(socket_dir, "s") is None)
+            closed_now = _owner(socket_dir, "s")
+            # No further request: the owner's sweep releases it.
+            _wait_until(lambda: _owner(socket_dir, "s") is None)
 
         assert open_after_window == closed_now == b.routing_id
-        assert not b.app.state.nemo_gym_session_claims._mine
+        assert not b.app.state.nemo_gym_session_owners._mine
 
-    def test_a_new_session_keeps_its_claim_until_verify_and_a_window_after(self, socket_dir: str) -> None:
+    def test_a_new_session_keeps_its_owner_until_verify_and_a_window_after(self, socket_dir: str) -> None:
         a = Worker("a", socket_dir, close_retry_window_seconds=0.2)
         b = Worker("b", socket_dir, close_retry_window_seconds=0.2)
         with a.client, b.client:
@@ -673,10 +673,10 @@ class TestClaimLifetime:
             assert a.post("/store", json={"value": 3}, cookie=cookie).json() == {"worker": "b"}
             verified = a.post("/verify", json={}, cookie=cookie)
             assert verified.json() == {"worker": "b", "value": 3}
-            claimed_after_verify = _claimant(socket_dir, session_id)
-            _wait_until(lambda: _claimant(socket_dir, session_id) is None)
+            owned_after_verify = _owner(socket_dir, session_id)
+            _wait_until(lambda: _owner(socket_dir, session_id) is None)
 
-        assert claimed_after_verify == b.routing_id
+        assert owned_after_verify == b.routing_id
 
     def test_a_verify_that_says_a_close_follows_keeps_the_session_open_until_the_close(self, socket_dir: str) -> None:
         a = Worker("a", socket_dir, close_retry_window_seconds=0.2)
@@ -687,24 +687,24 @@ class TestClaimLifetime:
             verified = a.post("/verify", json={}, cookie=cookie, headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"})
             assert verified.json()["worker"] == "b"
             time.sleep(0.5)
-            claimed_before_close = _claimant(socket_dir, "s")
+            owned_before_close = _owner(socket_dir, "s")
 
             closed = a.close(cookie=cookie)
 
             assert closed.json()["resources_session_id"] == "s@b"
-            _wait_until(lambda: _claimant(socket_dir, "s") is None)
-        assert claimed_before_close == b.routing_id and b.server.closes == ["s"] and a.server.closes == []
+            _wait_until(lambda: _owner(socket_dir, "s") is None)
+        assert owned_before_close == b.routing_id and b.server.closes == ["s"] and a.server.closes == []
 
-    def test_a_session_ended_under_another_route_releases_its_claim(self, socket_dir: str) -> None:
+    def test_a_session_ended_under_another_route_releases_its_ownership(self, socket_dir: str) -> None:
         a = Worker("a", socket_dir, close_retry_window_seconds=0.2)
         b = Worker("b", socket_dir, close_retry_window_seconds=0.2)
         with a.client, b.client:
             seeded = b.post("/seed_session", json={})
             session_id = b.session(seeded)[SESSION_ID_KEY]
             assert a.post("/end", cookie=seeded.cookies[b.cookie_name]).json() == {"worker": "b"}
-            _wait_until(lambda: _claimant(socket_dir, session_id) is None)
+            _wait_until(lambda: _owner(socket_dir, session_id) is None)
 
-    def test_a_session_started_by_another_request_keeps_its_claim_a_window_after_each_request(
+    def test_a_session_started_by_another_request_keeps_its_owner_a_window_after_each_request(
         self, socket_dir: str
     ) -> None:
         a = Worker("a", socket_dir, close_retry_window_seconds=0.3)
@@ -716,12 +716,14 @@ class TestClaimLifetime:
             for _ in range(4):
                 time.sleep(0.15)
                 assert a.post("/store", json={"value": 2}, cookie=cookie).json() == {"worker": "b"}
-            still_claimed = _claimant(socket_dir, session_id)
-            _wait_until(lambda: _claimant(socket_dir, session_id) is None)
+            still_owned = _owner(socket_dir, session_id)
+            _wait_until(lambda: _owner(socket_dir, session_id) is None)
 
-        assert still_claimed == b.routing_id
+        assert still_owned == b.routing_id
 
-    def test_a_failed_typed_seed_keeps_its_claim_for_the_cleanup_close_then_releases_it(self, socket_dir: str) -> None:
+    def test_a_failed_episode_seed_keeps_its_owner_for_the_cleanup_close_then_releases_it(
+        self, socket_dir: str
+    ) -> None:
         a = Worker("a", socket_dir, close_retry_window_seconds=0.3)
         b = Worker("b", socket_dir, close_retry_window_seconds=0.3)
         with a.client, b.client:
@@ -734,9 +736,9 @@ class TestClaimLifetime:
             assert closed.status_code == 200, closed.text
             assert closed.json()["resources_session_id"] == "s@a"
             assert a.server.closes == ["s"] and not a.server.sessions and b.server.closes == []
-            _wait_until(lambda: _claimant(socket_dir, "s") is None)
+            _wait_until(lambda: _owner(socket_dir, "s") is None)
 
-    def test_a_delayed_typed_seed_after_a_close_of_an_unknown_id_is_refused(self, workers) -> None:
+    def test_a_delayed_episode_seed_after_a_close_of_an_unknown_id_is_refused(self, workers) -> None:
         a, b = workers
         assert a.close().status_code == 200
 
@@ -760,19 +762,19 @@ class TestClaimLifetime:
         clock[0] = 20.0
         assert lifetimes.sweep() == ["s"] and not lifetimes._expiries and len(lifetimes) == 0
 
-    def test_an_agent_claim_is_released_once_the_owner_drops_the_closed_record(self, socket_dir: str) -> None:
+    def test_an_agent_session_owner_is_released_once_it_drops_the_closed_record(self, socket_dir: str) -> None:
         a = AgentWorker("a", socket_dir, close_retry_window_seconds=0.1)
         b = AgentWorker("b", socket_dir, close_retry_window_seconds=0.1)
         with a.client, b.client:
             assert a.seed().status_code == 200
             assert b.close().json()["agent_session_id"] == "s@a"
-            claimed_after_close = _claimant(socket_dir, "s")
-            # No further request: the claimant's sweep drops the receipt and releases the claim.
-            _wait_until(lambda: _claimant(socket_dir, "s") is None)
+            owned_after_close = _owner(socket_dir, "s")
+            # No further request: the owner's sweep drops the fence and releases ownership.
+            _wait_until(lambda: _owner(socket_dir, "s") is None)
             assert "s" not in a.agent._session_records
-            # With the claim gone, the ID is new again to whichever worker sees it first.
+            # With no owner, the ID is new again to whichever worker sees it first.
             assert b.seed().status_code == 200
-        assert claimed_after_close == a.routing_id
+        assert owned_after_close == a.routing_id
         assert b.agent.seeds == ["s"] and a.agent.seeds == ["s"]
 
     def test_an_agent_failed_seed_that_nobody_closes_is_released_after_the_window(self, socket_dir: str) -> None:
@@ -784,40 +786,40 @@ class TestClaimLifetime:
 
             _wait_until(lambda: "s" not in a.agent._session_records)
             assert a.agent.closes == ["s"]
-            _wait_until(lambda: _claimant(socket_dir, "s") is None)
+            _wait_until(lambda: _owner(socket_dir, "s") is None)
             assert not a.agent._failed_seed_records
 
     @pytest.mark.parametrize("kind", ["resources", "agent"])
-    def test_one_worker_writes_no_claims(self, socket_dir: str, kind: str) -> None:
+    def test_one_worker_writes_no_owner_files(self, socket_dir: str, kind: str) -> None:
         single = Worker("single", None) if kind == "resources" else AgentWorker("single", None)
         with single.client:
             if kind == "resources":
                 assert single.seed().status_code == 200
                 assert single.post("/store", json={"value": 1}).status_code == 200
                 assert single.close().status_code == 200
-                assert not hasattr(single.app.state, "nemo_gym_session_claims")
+                assert not hasattr(single.app.state, "nemo_gym_session_owners")
             else:
                 assert single.seed().status_code == 200
                 assert single.close().status_code == 200
-                assert single.agent._agent_session_claims is None
+                assert single.agent._agent_session_owners is None
                 # An agent with one worker has nothing to route.
                 assert not any(m.cls is SessionRoutingMiddleware for m in single.app.user_middleware)
 
         assert single.routing_id is None
         assert os.listdir(socket_dir) == []
 
-    def test_one_worker_gives_a_typed_seed_its_id_in_the_cookie(self) -> None:
+    def test_one_worker_gives_an_episode_seed_its_id_in_the_cookie(self) -> None:
         single = Worker("single", None)
         with single.client:
-            seeded = single.seed("typed")
+            seeded = single.seed("episode")
 
-        assert single.session(seeded)[SESSION_ID_KEY] == "typed" and single.server.seed_cookie_ids == ["typed"]
+        assert single.session(seeded)[SESSION_ID_KEY] == "episode" and single.server.seed_cookie_ids == ["episode"]
 
 
 class TestRollback:
-    """A seed that fails to create its session leaves no claim behind for longer than the window."""
+    """A seed that fails to create its session leaves no owner behind for longer than the window."""
 
-    def test_an_agent_seed_that_creates_nothing_releases_its_claim_at_once(
+    def test_an_agent_seed_that_creates_nothing_releases_its_ownership_at_once(
         self, agent_workers, socket_dir: str
     ) -> None:
         a, b = agent_workers
@@ -825,7 +827,7 @@ class TestRollback:
 
         assert b.seed().status_code == 500
 
-        assert _claimant(socket_dir, "s") is None and not b.agent._session_records
+        assert _owner(socket_dir, "s") is None and not b.agent._session_records
 
     def test_an_agent_seed_whose_session_cannot_be_registered_is_undone(self, agent_workers, socket_dir: str) -> None:
         a, b = agent_workers
@@ -838,7 +840,7 @@ class TestRollback:
 
         assert response.status_code == 500
         assert b.agent.closes == ["s"]
-        assert not b.agent._session_records and _claimant(socket_dir, "s") is None
+        assert not b.agent._session_records and _owner(socket_dir, "s") is None
         # The ID is new again, to either worker.
         assert a.seed().status_code == 200 and a.agent.seeds == ["s"]
 
@@ -854,14 +856,14 @@ class TestRollback:
         assert b.seed().status_code == 500
 
         assert b.agent._session_records["s"].state is not None and "s" in b.agent._failed_seed_records
-        assert _claimant(socket_dir, "s") == b.routing_id
+        assert _owner(socket_dir, "s") == b.routing_id
         b.agent.fail_close = False
         closed = a.close()
         assert closed.status_code == 200 and closed.json()["agent_session_id"] == "s@b"
 
 
 class TestConflictsAndLostWorkers:
-    def test_a_typed_seed_whose_cookie_names_another_session_is_refused(self, workers) -> None:
+    def test_an_episode_seed_whose_cookie_names_another_session_is_refused(self, workers) -> None:
         a, b = workers
         other = a.seed("other").cookies[a.cookie_name]
 
@@ -870,7 +872,7 @@ class TestConflictsAndLostWorkers:
         assert response.status_code == 409 and "names another session" in response.json()["detail"]
         assert a.server.seeds == ["other"] and b.server.seeds == []
 
-    def test_one_worker_refuses_a_typed_seed_whose_cookie_names_another_session(self) -> None:
+    def test_one_worker_refuses_an_episode_seed_whose_cookie_names_another_session(self) -> None:
         single = Worker("single", None)
         with single.client:
             other = single.seed("other").cookies[single.cookie_name]
@@ -947,7 +949,7 @@ class TestConflictsAndLostWorkers:
         response = b.post("/store", json={"value": 3}, cookie=forged)
 
         assert response.json() == {"worker": "b"}
-        assert _claimant(socket_dir, b.session(response)[SESSION_ID_KEY]) == b.routing_id
+        assert _owner(socket_dir, b.session(response)[SESSION_ID_KEY]) == b.routing_id
 
     def test_a_badly_signed_mcp_token_is_handled_locally_and_refused(self, mcp_workers) -> None:
         a, b = mcp_workers
@@ -969,7 +971,7 @@ class TestPrivateSockets:
 
         assert response.json() == {"worker": "a", "query": "x=1&y=a%20b", "probe": "p"}
 
-    def test_only_the_claimants_set_cookie_comes_back(self, workers) -> None:
+    def test_only_the_owners_set_cookie_comes_back(self, workers) -> None:
         a, b = workers
         stored = a.post("/store", json={"value": 7})
 
@@ -989,13 +991,13 @@ class TestPrivateSockets:
                 async with client.post("http://localhost/take", cookies={a.cookie_name: cookie}) as response:
                     return await response.json()
 
-        # Arriving over b's private socket, the request runs on b even though a claims the session.
+        # Arriving over b's private socket, the request runs on b even though a owns the session.
         assert asyncio.run(take_over_private_socket()) == {"worker": "b", "value": None}
         assert list(a.server.store.values()) == [7]
 
-    def test_a_seed_forwarded_after_its_claim_moved_is_refused(self, workers, socket_dir: str) -> None:
+    def test_a_seed_forwarded_after_its_owner_moved_is_refused(self, workers, socket_dir: str) -> None:
         a, b = workers
-        # a claims the ID; the seed then reaches b's private socket, as if b had held the claim and released it.
+        # a owns the ID; the seed then reaches b's private socket, as if b had owned it and released it.
         assert a.seed().status_code == 200
         body = {
             "resources_session_id": "s",
@@ -1028,7 +1030,7 @@ class TestOldStamps:
 
         assert response.json() == {"worker": "a", "value": 7}
 
-    def test_an_old_cookie_of_a_dead_worker_without_a_claim_is_handled_locally(self, workers) -> None:
+    def test_an_old_cookie_of_a_dead_worker_without_an_owner_is_handled_locally(self, workers) -> None:
         a, b = workers
         old = _sign_cookie(a.cookie_name, {SESSION_ID_KEY: "from-before", OLD_WORKER_STAMP: "f" * 32})
 
@@ -1053,7 +1055,7 @@ class TestOldStamps:
 
 
 class TestRaces:
-    def test_a_restarted_server_starts_with_no_claims(self, socket_dir: str) -> None:
+    def test_a_restarted_server_starts_with_no_owners(self, socket_dir: str) -> None:
         a, b = AgentWorker("a", socket_dir), AgentWorker("b", socket_dir)
         with a.client, b.client:
             assert a.seed().status_code == 200
@@ -1063,13 +1065,13 @@ class TestRaces:
             c, d = AgentWorker("c", fresh_dir), AgentWorker("d", fresh_dir)
             with c.client, d.client:
                 closed = d.close()
-            claimed_fresh = _claimant(fresh_dir, "s")
+            owned_fresh = _owner(fresh_dir, "s")
         finally:
             shutil.rmtree(fresh_dir, ignore_errors=True)
 
         # As on one worker after a restart: the close of an ID nobody here has seen is answered with a receipt.
         assert closed.status_code == 200 and closed.json()["agent_session_id"] == "s"
-        assert claimed_fresh == d.routing_id and not c.agent._session_records
+        assert owned_fresh == d.routing_id and not c.agent._session_records
 
     def test_a_seed_and_a_close_of_one_id_on_two_workers_at_once_run_on_one_worker(self, socket_dir: str) -> None:
         for attempt in range(20):
@@ -1094,7 +1096,7 @@ class TestRaces:
             assert len(served) == 1, statuses
             assert closed.result() == 200 and seeded.result() in (200, 409)
 
-    def test_a_claim_released_while_a_request_is_forwarded_is_handled_by_the_former_claimant(
+    def test_ownership_released_while_a_request_is_forwarded_is_handled_by_the_former_owner(
         self, socket_dir: str
     ) -> None:
         a = Worker("a", socket_dir, close_retry_window_seconds=0.1)
@@ -1102,56 +1104,56 @@ class TestRaces:
         with a.client, b.client:
             stored = a.post("/store", json={"value": 7})
             session_id = a.session(stored)[SESSION_ID_KEY]
-            _wait_until(lambda: _claimant(socket_dir, session_id) is None)
-            # b read the claim just before the release and forwards to a anyway.
-            b.app.state.nemo_gym_session_claims.claimant = lambda _: a.routing_id
+            _wait_until(lambda: _owner(socket_dir, session_id) is None)
+            # b read the owner just before the release and forwards to a anyway.
+            b.app.state.nemo_gym_session_owners.owner = lambda _: a.routing_id
 
             response = b.post("/take", cookie=stored.cookies[a.cookie_name])
 
         assert response.json() == {"worker": "a", "value": 7}
-        # The former claimant served it without claiming the ID again.
-        assert _claimant(socket_dir, session_id) is None
+        # The former owner served it without taking ownership of the ID again.
+        assert _owner(socket_dir, session_id) is None
 
 
 class TestCheckpointRestores:
-    """A partial-rollout checkpoint restore moves a session to another worker by rewriting its claim."""
+    """A partial-rollout checkpoint restore moves a session to another worker by rewriting its owner file."""
 
     def test_an_old_cookie_follows_its_session_to_the_worker_a_restore_moved_it_to(self, workers, socket_dir) -> None:
         a, b = workers
         stored = a.post("/store", json={"value": 7})
         session_id = a.session(stored)[SESSION_ID_KEY]
-        # The restore installs the session's state on b, which claims it; a drops its own claim.
+        # The restore installs the session's state on b, which becomes its owner; a drops its own ownership.
         b.server.store[session_id] = a.server.store.pop(session_id)
-        b.app.state.nemo_gym_session_claims.rewrite(session_id)
-        a.app.state.nemo_gym_session_claims.disown(session_id)
+        b.app.state.nemo_gym_session_owners.rewrite(session_id)
+        a.app.state.nemo_gym_session_owners.disown(session_id)
 
         taken = a.post("/take", cookie=stored.cookies[a.cookie_name])
 
-        assert _claimant(socket_dir, session_id) == b.routing_id
+        assert _owner(socket_dir, session_id) == b.routing_id
         assert taken.json() == {"worker": "b", "value": 7}
 
-    def test_a_release_after_a_restore_moved_the_claim_leaves_the_new_claim(self, socket_dir: str) -> None:
+    def test_a_release_after_a_restore_moved_the_owner_leaves_the_new_owner(self, socket_dir: str) -> None:
         a = Worker("a", socket_dir, close_retry_window_seconds=0.1)
         b = Worker("b", socket_dir)
         with a.client, b.client:
             stored = a.post("/store", json={"value": 7})
             session_id = a.session(stored)[SESSION_ID_KEY]
-            # b rewrites the claim before a has dropped it, and a's own window then ends.
-            b.app.state.nemo_gym_session_claims.rewrite(session_id)
-            _wait_until(lambda: not a.app.state.nemo_gym_session_claims.mine(session_id))
+            # b rewrites the owner file before a has dropped it, and a's own window then ends.
+            b.app.state.nemo_gym_session_owners.rewrite(session_id)
+            _wait_until(lambda: not a.app.state.nemo_gym_session_owners.mine(session_id))
 
-            assert _claimant(socket_dir, session_id) == b.routing_id
+            assert _owner(socket_dir, session_id) == b.routing_id
 
-    def test_a_release_cannot_delete_a_claim_a_restore_rewrites_while_it_releases(self, socket_dir: str) -> None:
-        former = SessionClaims(socket_dir, "a" * 32, lambda _: False)
-        holder = SessionClaims(socket_dir, "b" * 32, lambda _: False)
-        assert former.claim("s") == former.routing_id
-        read_claimant = former.claimant
+    def test_a_release_cannot_delete_an_owner_file_a_restore_rewrites_while_it_releases(self, socket_dir: str) -> None:
+        former = SessionOwners(socket_dir, "a" * 32, lambda _: False)
+        holder = SessionOwners(socket_dir, "b" * 32, lambda _: False)
+        assert former.acquire("s") == former.routing_id
+        read_owner = former.owner
         rewrites: list[threading.Thread] = []
 
         def rewritten_right_after_the_check(session_id: str) -> Optional[str]:
-            # The release has found its own claim; the restore on another worker rewrites it now, before the unlink.
-            found = read_claimant(session_id)
+            # The release has found its own owner file; the restore on another worker rewrites it now, before the unlink.
+            found = read_owner(session_id)
             rewrite = threading.Thread(target=holder.rewrite, args=(session_id,))
             rewrite.start()
             rewrites.append(rewrite)
@@ -1159,42 +1161,42 @@ class TestCheckpointRestores:
             rewrite.join(timeout=0.5)
             return found
 
-        former.claimant = rewritten_right_after_the_check
+        former.owner = rewritten_right_after_the_check
         former.release("s")
         for rewrite in rewrites:
             rewrite.join()
 
-        assert rewrites and _claimant(socket_dir, "s") == holder.routing_id
+        assert rewrites and _owner(socket_dir, "s") == holder.routing_id
 
-    async def test_a_claim_on_this_worker_during_a_batched_rewrite_of_the_same_id_does_not_fail_the_rewrite(
+    async def test_an_acquire_on_this_worker_during_a_batched_rewrite_of_the_same_id_does_not_fail_the_rewrite(
         self, socket_dir: str
     ) -> None:
-        holder = SessionClaims(socket_dir, "b" * 32, lambda _: True)
+        holder = SessionOwners(socket_dir, "b" * 32, lambda _: True)
         real_exclusive = holder._exclusive
 
         @contextlib.contextmanager
-        def claimed_meanwhile() -> Iterator[None]:
+        def acquired_meanwhile() -> Iterator[None]:
             # A stale seed naming the restored session reaches this worker while the restore's thread rewrites it.
-            assert holder.claim("s") == holder.routing_id
+            assert holder.acquire("s") == holder.routing_id
             with real_exclusive():
                 yield
 
-        holder._exclusive = claimed_meanwhile
+        holder._exclusive = acquired_meanwhile
         await holder.rewrite_all(["s"])
 
-        assert _claimant(socket_dir, "s") == holder.routing_id
-        claims_dir = os.path.dirname(holder._path("s"))
-        assert not [name for name in os.listdir(claims_dir) if name.endswith(".tmp")]
+        assert _owner(socket_dir, "s") == holder.routing_id
+        owners_dir = os.path.dirname(holder._path("s"))
+        assert not [name for name in os.listdir(owners_dir) if name.endswith(".tmp")]
 
-    async def test_a_batched_rewrite_whose_caller_is_cancelled_finishes_before_the_worker_counts_its_claims(
+    async def test_a_batched_rewrite_whose_caller_is_cancelled_finishes_before_the_worker_counts_its_sessions(
         self, socket_dir: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(session_routing, "_REWRITE_BATCH", 10)
-        former = SessionClaims(socket_dir, "a" * 32, lambda _: False)
-        holder = SessionClaims(socket_dir, "b" * 32, lambda _: True)
+        former = SessionOwners(socket_dir, "a" * 32, lambda _: False)
+        holder = SessionOwners(socket_dir, "b" * 32, lambda _: True)
         session_ids = [f"s{index}" for index in range(200)]
         for session_id in session_ids:
-            former.claim(session_id)
+            former.acquire(session_id)
         renamed = threading.Event()
         real_replace = os.replace
 
@@ -1213,10 +1215,10 @@ class TestCheckpointRestores:
             await rewriting
         monkeypatch.setattr(session_routing.os, "replace", real_replace)
 
-        # The thread ran to the end, and only then did the worker count the claims as its own: every one of them.
+        # The thread ran to the end, and only then did the worker count the sessions as its own: every one of them.
         assert mine_while_rewriting == 0
         assert len(holder) == len(session_ids)
-        assert all(_claimant(socket_dir, session_id) == holder.routing_id for session_id in session_ids)
+        assert all(_owner(socket_dir, session_id) == holder.routing_id for session_id in session_ids)
 
     def test_a_request_without_a_session_goes_to_the_worker_its_header_names(self, agent_workers) -> None:
         a, b = agent_workers
@@ -1231,7 +1233,7 @@ class TestCheckpointRestores:
 
 
 class TestBodies:
-    def test_a_typed_seed_with_large_task_data_is_routed_to_the_claimant(self, workers) -> None:
+    def test_an_episode_seed_with_large_task_data_is_routed_to_the_owner(self, workers) -> None:
         a, b = workers
         assert a.seed().status_code == 200
 
@@ -1251,19 +1253,19 @@ class TestBodies:
         seeded = b.post("/seed_session", content=body, headers={"content-type": "application/json"})
 
         assert seeded.status_code == 200 and b.server.seeds == ["cookie session"] and a.server.seeds == []
-        assert _claimant(socket_dir, b.session(seeded)[SESSION_ID_KEY]) == b.routing_id
+        assert _owner(socket_dir, b.session(seeded)[SESSION_ID_KEY]) == b.routing_id
 
     @pytest.mark.parametrize(
         ("body", "status"),
         [
             (b"not json", 422),
             (b"[1, 2]", 422),
-            # No typed ID, so the app takes these as seeds of the cookie session.
+            # No valid resources_session_id, so the app takes these as agent-run seeds of the cookie session.
             (b'{"resources_session_id": 5}', 200),
             (b'{"resources_session_id": ""}', 200),
         ],
     )
-    def test_a_seed_without_a_valid_typed_id_is_served_where_it_lands(
+    def test_a_seed_without_a_valid_resources_session_id_is_served_where_it_lands(
         self, socket_dir: str, body: bytes, status: int
     ) -> None:
         a = Worker("a", socket_dir, close_retry_window_seconds=0.1)
@@ -1271,17 +1273,17 @@ class TestBodies:
         with a.client, b.client:
             response = b.post("/seed_session", content=body, headers={"content-type": "application/json"})
             assert response.status_code == status
-            claims = _claim_files(socket_dir)
-            # A seed claims its session even when the app refuses its body, since its reply's cookie names it;
-            # a refused seed's claim ends after the window.
+            owner_files = _owner_files(socket_dir)
+            # A seed takes ownership of its session even when the app refuses its body, since its reply's cookie names it;
+            # a refused seed's ownership ends after the window.
             if status != 200:
-                _wait_until(lambda: _claim_files(socket_dir) == [])
-        assert len(claims) == 1 and a.server.seeds == []
+                _wait_until(lambda: _owner_files(socket_dir) == [])
+        assert len(owner_files) == 1 and a.server.seeds == []
 
     @pytest.mark.parametrize(
         "body", [b"not json", b"[1, 2]", b'{"agent_session_id": 5}', b'{"episode_id": {"rollout_id": "r"}}']
     )
-    def test_an_agent_body_without_a_string_id_is_refused_by_the_app_and_claims_nothing(
+    def test_an_agent_body_without_a_string_id_is_refused_by_the_app_and_takes_no_ownership(
         self, agent_workers, socket_dir: str, body: bytes
     ) -> None:
         a, b = agent_workers
@@ -1289,7 +1291,7 @@ class TestBodies:
         response = b.client.post("/v1/agent_sessions", content=body, headers={"content-type": "application/json"})
 
         assert response.status_code == 422
-        assert _claim_files(socket_dir) == []
+        assert _owner_files(socket_dir) == []
         assert not a.agent._session_records and not b.agent._session_records
 
     def test_a_rollout_prefixed_close_is_routed_too(self, agent_workers) -> None:

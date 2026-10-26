@@ -604,7 +604,7 @@ async def test_a_retire_waits_for_the_sessions_request_in_flight() -> None:
                 headers=AUTH,
             )
         )
-        # The retire refuses the session, then waits for the request in flight before freeing it.
+        # The retire refuses the session, then waits for the request in flight before releasing it.
         await until(lambda: server._checkpoint.status_extra()["retired_sessions"] == 1)
         waited = not retire.done() and server._checkpoint.readiness().counts["sessions"] == 1
         # A new request for the session while it stops is refused.
@@ -661,7 +661,7 @@ async def test_late_requests_of_a_retired_attempt_are_refused_until_forget_but_a
         )
         # A tool call its caller sent before its own retire, carrying only the session cookie.
         late_tool = await client.post("/increment")
-        # A seed for the retired attempt would create session state nothing frees.
+        # A seed for the retired attempt would create session state nothing releases.
         late_seed = await client.post("/ng-rollout/r/seed_session", json=SEED)
         close = await client.post(
             "/ng-rollout/r/close_session", json={"resources_session_id": "s", "episode_id": {"rollout_id": "r"}}
@@ -711,7 +711,7 @@ async def retire_cut_short_in_its_hook(
     pytest.fail("the retire never reached its hook")
 
 
-async def test_a_session_whose_retire_was_cut_short_stays_until_a_retry_frees_it_and_blocks_meanwhile(
+async def test_a_session_whose_retire_was_cut_short_stays_until_a_retry_releases_it_and_blocks_meanwhile(
     tmp_path: Path,
 ) -> None:
     server, client = make_server(SlowRetireServer)
@@ -720,7 +720,7 @@ async def test_a_session_whose_retire_was_cut_short_stays_until_a_retry_frees_it
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
         cut_short = await retire_cut_short_in_its_hook(client, server, retire)
-        # The session is still being freed: the next checkpoint waits for it and does not export it.
+        # The session is still being released: the next checkpoint waits for it and does not export it.
         prepared = await client.post("/ng-control/v1/checkpoint/prepare", json=control(timeout=0.1), headers=AUTH)
         await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
         server.release.set()
@@ -787,7 +787,7 @@ class GatedSeedServer(CounterServer):
         return await super().seed_session(request, body)
 
 
-async def test_a_retire_waits_for_a_seed_of_its_attempt_and_frees_the_session_it_creates() -> None:
+async def test_a_retire_waits_for_a_seed_of_its_attempt_and_releases_the_session_it_creates() -> None:
     server, client = make_server(GatedSeedServer)
     server.seed_gate, server.seeding = asyncio.Event(), asyncio.Event()
     async with client:
@@ -806,7 +806,7 @@ async def test_a_retire_waits_for_a_seed_of_its_attempt_and_frees_the_session_it
 
     assert waited
     assert retired.status_code == 200
-    # Nothing of the retired attempt is left: the session the seed created was freed.
+    # Nothing of the retired attempt is left: the session the seed created was released.
     assert server._checkpoint.readiness().counts["sessions"] == 0 and server.counters == {}
 
 
@@ -840,7 +840,7 @@ async def test_a_seed_that_finishes_after_its_retire_was_cut_short_registers_its
     assert late.status_code == 409 and late.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert exported == []
     assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_retire_incomplete"
-    # The retried retire frees the session the seed created.
+    # The retried retire releases the session the seed created.
     assert retried.status_code == 200 and server.counters == {}
     assert forgotten.status_code == 200 and server._checkpoint.readiness().counts["sessions"] == 0
 
@@ -894,7 +894,7 @@ async def test_a_retire_that_arrives_after_its_deadline_still_marks_the_attempt_
     server, client = make_server()
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
-        # A retire that arrives after its deadline only marks the attempt: it stops and frees nothing.
+        # A retire that arrives after its deadline only marks the attempt: it stops and releases nothing.
         late_retire = await client.post(
             "/ng-control/v1/checkpoint/retire",
             json=control("retire", timeout=-1, episode_ids=[{"rollout_id": "r"}]),
@@ -929,7 +929,7 @@ async def test_a_session_is_open_from_its_seed_until_a_close_or_a_verify_ends_it
     assert not participant.is_open("never-seeded")
 
 
-async def test_a_session_is_not_open_once_a_retire_marks_it_even_before_it_is_freed() -> None:
+async def test_a_session_is_not_open_once_a_retire_marks_it_even_before_it_is_released() -> None:
     server, client = make_server()
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
@@ -980,7 +980,7 @@ async def test_forget_is_refused_while_a_seed_of_a_retired_attempt_is_in_flight(
     assert late.status_code == 409 and late.json()["error"]["code"] == "checkpoint_stale_attempt"
 
 
-async def test_forget_is_refused_while_a_retire_has_not_freed_its_sessions() -> None:
+async def test_forget_is_refused_while_a_retire_has_not_released_its_sessions() -> None:
     server, client = make_server(SlowRetireServer)
     server.release, server.entered = asyncio.Event(), asyncio.Event()
     retire = control("retire", episode_ids=[{"rollout_id": "r"}])
@@ -1460,7 +1460,7 @@ def test_an_unknown_checkpoint_declaration_fails_at_startup(name: str, value: st
 
 
 @pytest.mark.parametrize("server_type", [RestartOnlyServer, StatelessServer])
-async def test_a_retire_frees_the_sessions_of_a_server_that_does_not_export_them(
+async def test_a_retire_releases_the_sessions_of_a_server_that_does_not_export_them(
     server_type: type[CounterServer],
 ) -> None:
     server, client = make_server(server_type)
@@ -1475,7 +1475,7 @@ async def test_a_retire_frees_the_sessions_of_a_server_that_does_not_export_them
 
     assert retired.status_code == 200
     assert late.json()["error"]["code"] == "checkpoint_stale_attempt"
-    # Nothing else would free it: the late request that would have ended the session is refused.
+    # Nothing else would release it: the late request that would have ended the session is refused.
     assert server.counters == {}
 
 

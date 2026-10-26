@@ -27,9 +27,9 @@ The tests run in order, and each one prints its numbers:
 - cookieless seeds and closes (a seed that fails without a cookie, a seed whose reply is lost and retried,
   a delayed seed after a close) never create a session twice or leave one behind;
 - MCP tool calls that carry only the session token reach their session;
-- routing's added latency against one worker, next to the cost of a claim lookup alone;
-- once the run is over and the close retry window has passed, no claim is left;
-- killing a worker gives its sessions a 410, other sessions carry on, and its claims go with the server.
+- routing's added latency against one worker, next to the cost of an owner lookup alone;
+- once the run is over and the close retry window has passed, no owner file is left;
+- killing a worker gives its sessions a 410, other sessions carry on, and its owner files go with the server.
 
 NEMO_GYM_STRESS_EPISODES (default 4000) sets the episodes per route, and NEMO_GYM_STRESS_SESSIONS (default 1000)
 the sessions of each other test. NEMO_GYM_STRESS_REPORT names a JSON file for all the numbers.
@@ -71,7 +71,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 EPISODES = int(os.getenv("NEMO_GYM_STRESS_EPISODES", "4000"))
 SESSIONS = int(os.getenv("NEMO_GYM_STRESS_SESSIONS", "1000"))
-# Short, so the claims of finished sessions end within the test.
+# Short, so ownership of finished sessions ends within the test.
 CLOSE_WINDOW_SECONDS = 5.0
 STRESS_SERVER = HERE / "stress_servers" / "resources_servers" / "session_routing_stress"
 TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
@@ -211,8 +211,8 @@ class StressDeployment:
             assert time.time() < deadline, f"the workers of {name} did not start"
             time.sleep(0.2)
 
-    def claims(self, name: str) -> Counter:
-        """The claim files in the server's runtime directory, counted by the worker that holds them."""
+    def owner_files(self, name: str) -> Counter:
+        """The owner files in the server's runtime directory, counted by the worker that holds them."""
         directory = self.runtime_dir(name)
         holders: Counter = Counter()
         if directory is None:
@@ -224,7 +224,7 @@ class StressDeployment:
                 holders[Path(path).read_text()] += 1
         return holders
 
-    def claimant(self, name: str, session_id: str) -> Optional[str]:
+    def owner(self, name: str, session_id: str) -> Optional[str]:
         digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
         for path in glob.glob(os.path.join(self.runtime_dir(name) or "/nonexistent", "*", digest)):
             return Path(path).read_text()
@@ -259,8 +259,8 @@ class StressDeployment:
             proc.wait()
 
 
-class ClaimSampler:
-    """Counts the claims of each routing server every half second, for the claim count over time."""
+class OwnerFileSampler:
+    """Counts the owner files of each routing server every half second, for the owner file count over time."""
 
     def __init__(self, deployment: StressDeployment, names: tuple[str, ...]) -> None:
         self.deployment = deployment
@@ -277,14 +277,14 @@ class ClaimSampler:
     def sample(self) -> dict[str, Any]:
         row = {"t": round(time.monotonic() - self.start, 2)}
         for name in self.names:
-            row[name] = sum(self.deployment.claims(name).values())
+            row[name] = sum(self.deployment.owner_files(name).values())
         self.samples.append(row)
         return row
 
     def mark(self, label: str) -> None:
         self.samples.append({"t": round(time.monotonic() - self.start, 2), "phase": label})
 
-    def __enter__(self) -> "ClaimSampler":
+    def __enter__(self) -> "OwnerFileSampler":
         self._thread.start()
         return self
 
@@ -309,10 +309,10 @@ def deployment() -> Iterator[StressDeployment]:
 
 
 @pytest.fixture(scope="module")
-def sampler(deployment: StressDeployment) -> Iterator[ClaimSampler]:
-    with ClaimSampler(deployment, ("resources", "mcp_resources", "agent")) as sampler:
+def sampler(deployment: StressDeployment) -> Iterator[OwnerFileSampler]:
+    with OwnerFileSampler(deployment, ("resources", "mcp_resources", "agent")) as sampler:
         yield sampler
-    REPORT["claims_over_time"] = sampler.samples
+    REPORT["owner_files_over_time"] = sampler.samples
 
 
 def _client(timeout: float = 1800) -> aiohttp.ClientSession:
@@ -396,7 +396,7 @@ async def _no_session_twice(deployment: StressDeployment, name: str) -> tuple[di
 
 
 @pytest.mark.parametrize("route", ["episode", "flat_row"])
-def test_every_episode_scores_at_scale(deployment: StressDeployment, sampler: ClaimSampler, route: str) -> None:
+def test_every_episode_scores_at_scale(deployment: StressDeployment, sampler: OwnerFileSampler, route: str) -> None:
     sampler.mark(f"scale {route} start")
     url = deployment.url("environment" if route == "episode" else "flat_environment")
 
@@ -438,7 +438,7 @@ def test_every_episode_scores_at_scale(deployment: StressDeployment, sampler: Cl
     assert not twice
 
 
-def test_cookieless_seeds_and_closes_never_duplicate_or_leak(deployment: StressDeployment, sampler: ClaimSampler):
+def test_cookieless_seeds_and_closes_never_duplicate_or_leak(deployment: StressDeployment, sampler: OwnerFileSampler):
     sampler.mark("cookieless start")
     url = deployment.url("resources")
 
@@ -512,7 +512,7 @@ def test_cookieless_seeds_and_closes_never_duplicate_or_leak(deployment: StressD
             "sessions_created_on_two_workers": len(twice),
             "live_sessions_by_worker": live,
             "live_sessions": sorted(session_id for report in stats.values() for session_id in report["live"])[:20],
-            "claims_by_worker": dict(deployment.claims("resources")),
+            "owner_files_by_worker": dict(deployment.owner_files("resources")),
         },
     )
     sampler.mark("cookieless end")
@@ -521,7 +521,7 @@ def test_cookieless_seeds_and_closes_never_duplicate_or_leak(deployment: StressD
     assert sum(live.values()) == 0
 
 
-def test_mcp_tool_calls_with_only_the_session_token(deployment: StressDeployment, sampler: ClaimSampler) -> None:
+def test_mcp_tool_calls_with_only_the_session_token(deployment: StressDeployment, sampler: OwnerFileSampler) -> None:
     sampler.mark("mcp start")
     url = deployment.url("mcp_resources")
 
@@ -569,7 +569,7 @@ def test_mcp_tool_calls_with_only_the_session_token(deployment: StressDeployment
 
 
 def test_agent_run_seeds_that_never_read_the_session_keep_their_session_on_one_worker(
-    deployment: StressDeployment, sampler: ClaimSampler
+    deployment: StressDeployment, sampler: OwnerFileSampler
 ) -> None:
     """An agent's own /run seeds without a session ID, and only the later tool calls read the session."""
     sampler.mark("agent-run seeds start")
@@ -609,7 +609,7 @@ def test_agent_run_seeds_that_never_read_the_session_keep_their_session_on_one_w
     assert all(correct) and not split and not left
 
 
-def test_routing_overhead_against_one_worker(deployment: StressDeployment, sampler: ClaimSampler) -> None:
+def test_routing_overhead_against_one_worker(deployment: StressDeployment, sampler: OwnerFileSampler) -> None:
     """Sequential tool calls over one kept-alive connection, so the accepting worker never changes."""
     sampler.mark("overhead start")
     requests = 2000
@@ -636,8 +636,8 @@ def test_routing_overhead_against_one_worker(deployment: StressDeployment, sampl
                     await response.read()
                     assert response.status == 200
                 elapsed = time.perf_counter() - start
-                claimant = deployment.claimant(name, session_id)
-                by_path["local" if claimant in (None, accepting) else "forwarded"].append(elapsed)
+                owner = deployment.owner(name, session_id)
+                by_path["local" if owner in (None, accepting) else "forwarded"].append(elapsed)
             for session_id, _ in sessions:
                 await _post(client, f"{url}/close_session", _close(session_id))
             return by_path
@@ -652,19 +652,19 @@ def test_routing_overhead_against_one_worker(deployment: StressDeployment, sampl
         "overhead",
         {
             "one_worker": single,
-            "eight_workers_claimant_accepted": local,
+            "eight_workers_owner_accepted": local,
             "eight_workers_forwarded": forwarded,
             "added_by_forwarding_ms": {
                 key: round(forwarded[key] - single[key], 3) for key in ("p50_ms", "p99_ms", "max_ms")
             },
-            "claim_lookup_alone_us": lookup,
+            "owner_lookup_alone_us": lookup,
         },
     )
     sampler.mark("overhead end")
 
 
 def _lookup_cost() -> dict[str, float]:
-    """One claim lookup by a worker that does not hold the claim: open and read a small file."""
+    """One owner lookup by a worker that does not own the session: open and read a small file."""
     directory = tempfile.mkdtemp(prefix="ng-stress-lookup-", dir="/tmp")
     try:
         paths = []
@@ -675,8 +675,8 @@ def _lookup_cost() -> dict[str, float]:
         samples = []
         for request in range(20000):
             start = time.perf_counter_ns()
-            with open(paths[request % len(paths)], encoding="ascii") as claim:
-                claim.read()
+            with open(paths[request % len(paths)], encoding="ascii") as owner_file:
+                owner_file.read()
             samples.append(time.perf_counter_ns() - start)
         samples.sort()
         return {
@@ -688,9 +688,11 @@ def _lookup_cost() -> dict[str, float]:
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def test_no_claim_remains_once_the_close_window_has_passed(deployment: StressDeployment, sampler: ClaimSampler):
+def test_no_owner_file_remains_once_the_close_retry_window_has_passed(
+    deployment: StressDeployment, sampler: OwnerFileSampler
+):
     sampler.mark("idle start")
-    # Every session above was closed, verified or failed, so each claim ends a window after its last request.
+    # Every session above was closed, verified or failed, so each ownership ends a window after its last request.
     deadline = time.monotonic() + CLOSE_WINDOW_SECONDS + 30
     while time.monotonic() < deadline:
         row = sampler.sample()
@@ -698,13 +700,13 @@ def test_no_claim_remains_once_the_close_window_has_passed(deployment: StressDep
             break
         time.sleep(0.5)
     waited = round(time.monotonic() - (deadline - CLOSE_WINDOW_SECONDS - 30), 1)
-    remaining = {name: dict(deployment.claims(name)) for name in sampler.names}
-    _report("lifetime", {"seconds_waited_after_run": waited, "claims_remaining": remaining})
+    remaining = {name: dict(deployment.owner_files(name)) for name in sampler.names}
+    _report("lifetime", {"seconds_waited_after_run": waited, "owner_files_remaining": remaining})
     sampler.mark("idle end")
     assert all(not holders for holders in remaining.values()), remaining
 
 
-def test_a_lost_worker_loses_only_its_sessions(deployment: StressDeployment, sampler: ClaimSampler) -> None:
+def test_a_lost_worker_loses_only_its_sessions(deployment: StressDeployment, sampler: OwnerFileSampler) -> None:
     sampler.mark("worker loss start")
     url = deployment.url("resources")
 
@@ -736,7 +738,7 @@ def test_a_lost_worker_loses_only_its_sessions(deployment: StressDeployment, sam
             return await asyncio.gather(*(one(s, c) for s, c in sessions))
 
     sessions = asyncio.run(seed_all())
-    owner = {session_id: deployment.claimant("resources", session_id) for session_id, _ in sessions}
+    owner = {session_id: deployment.owner("resources", session_id) for session_id, _ in sessions}
     victim_id, victim_sessions = Counter(owner.values()).most_common(1)[0]
     stats = asyncio.run(deployment.stats("resources"))
     victim = psutil.Process(stats[victim_id]["pid"])
@@ -748,7 +750,7 @@ def test_a_lost_worker_loses_only_its_sessions(deployment: StressDeployment, sam
     lost = [r for r in results if owner[r[0]] == victim_id]
     kept = [r for r in results if owner[r[0]] != victim_id]
     index_of = {session_id: index for index, (session_id, _) in enumerate(sessions)}
-    claims_before_shutdown = deployment.claims("resources")
+    owner_files_before_shutdown = deployment.owner_files("resources")
     runtime_dir = deployment.runtime_dir("resources")
     deployment.stop_one("resources")
     _report(
@@ -759,7 +761,7 @@ def test_a_lost_worker_loses_only_its_sessions(deployment: StressDeployment, sam
             "lost_statuses": dict(Counter(f"{status}/{close}" for _, status, _, close in lost)),
             "kept_statuses": dict(Counter(f"{status}/{close}" for _, status, _, close in kept)),
             "kept_correct": sum(count == index_of[s] + 3 for s, _, count, _ in kept),
-            "claims_of_the_lost_worker_before_shutdown": claims_before_shutdown.get(victim_id, 0),
+            "owner_files_of_the_lost_worker_before_shutdown": owner_files_before_shutdown.get(victim_id, 0),
             "runtime_dir_after_shutdown": os.path.exists(runtime_dir) if runtime_dir else None,
         },
     )
