@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
 import shutil
+import socket
 import sys
 import time
 import uuid
@@ -10,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from traceback import format_exc
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -130,6 +132,7 @@ class KernelGymConfig(BaseResponsesAPIAgentConfig):
     )
     sandbox_provider: str | Dict[str, Any] = Field(default_factory=lambda: {"docker": {}})
     sandbox_default_metadata: Dict[str, Any] = Field(default_factory=dict)
+    # Only for a relay or tunnel to the Gym model server when its host:port is unreachable from the sandbox.
     sandbox_model_base_url: Optional[str] = None
     kb_agent_timeout: int = 1800
     global_agent_timeout: Optional[int] = Field(default=None, gt=0)
@@ -338,6 +341,18 @@ class KernelGymAgent(SimpleResponsesAPIAgent):
             if not model_url:
                 model_url = self.server_client._build_server_base_url(model_cfg)
 
+        model_url = str(model_url).rstrip("/").removesuffix("/v1")
+        if model_url and not self.config.sandbox_model_base_url:
+            parsed = urlsplit(model_url)
+            if parsed.hostname in ("127.0.0.1", "localhost", "0.0.0.0"):
+                try:
+                    host = socket.gethostbyname(socket.gethostname())
+                except OSError:
+                    pass
+                else:
+                    netloc = f"{host}:{parsed.port}" if parsed.port else host
+                    model_url = urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
         model_name = str(self.server_client.global_config_dict.get("policy_model_name") or "")
 
         workspace = Path(__file__).parent
@@ -387,7 +402,7 @@ class KernelGymAgent(SimpleResponsesAPIAgent):
             config_overrides["kb_sandbox_ttl"] = required_ttl
 
         model_server_url = self._model_server_url
-        if not self.config.sandbox_model_base_url and rollout_id and model_server_url:
+        if rollout_id and model_server_url:
             model_server_url = apply_rollout_prefix(
                 model_server_url, rollout_id, token_capture=self._token_id_capture_enabled()
             )
