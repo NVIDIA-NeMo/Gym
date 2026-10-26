@@ -341,6 +341,7 @@ RUN export HOME=/home/nemo-runtime \
     test -x /usr/local/bin/uv && \
     test -x /usr/local/bin/uvx && \
     test -x /opt/nemo_gym_venv/bin/python && \
+    # The binary must exist and print its usage (`-h` exits 0 and writes to stderr).
     test -x "${NEMO_GYM_H2_PING_SIDECAR_BINARY}" && \
     "${NEMO_GYM_H2_PING_SIDECAR_BINARY}" -h 2>&1 | grep -q -- -ping-interval && \
     venv_site_packages="$(python -c 'import site; print(site.getsitepackages()[0])')" && \

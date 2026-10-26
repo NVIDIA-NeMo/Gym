@@ -96,8 +96,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The oldest Go the sidecar promises to build with, then the newest, which is what the container
-          # image is built with (docker/Dockerfile, GO_VERSION).
+          # The oldest Go the sidecar promises to build with, then the newest. The container image pins a
+          # recent release (docker/Dockerfile, GO_VERSION), so this leg tells you when a newer Go breaks it.
           - name: go.mod minimum
             go-version: ""
             go-version-file: nemo_gym/tools/sidecar/go.mod
@@ -119,10 +119,12 @@ jobs:
           # The sidecar uses only the standard library, so there is no go.sum to key a cache on.
           cache: false
 
-      - name: Format, vet and test
+      # Only on the pinned minimum: a new Go release can add vet checks or change gofmt output, and that
+      # must not turn unrelated PRs red. The tests below still run on both.
+      - name: Format and vet
+        if: matrix.go-version-file != ''
         working-directory: nemo_gym/tools/sidecar
         run: |
-          go version
           unformatted="$(gofmt -l .)"
           if [[ -n "${unformatted}" ]]; then
             echo "gofmt needed on:" >&2
@@ -130,6 +132,11 @@ jobs:
             exit 1
           fi
           go vet ./...
+
+      - name: Test
+        working-directory: nemo_gym/tools/sidecar
+        run: |
+          go version
           go test -race -count=1 ./...
 
   # Core library unit tests (run once on a full run) + the changed-servers path. The full

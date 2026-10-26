@@ -30,7 +30,8 @@ Gym's container image (`docker/Dockerfile`) builds this program in a Go stage an
 To put the sidecar in another image, such as one that vendors Gym as a submodule, build it in a Go stage from the Gym checkout and set the variable:
 
 ```dockerfile
-FROM --platform=$BUILDPLATFORM golang:1.27.3 AS sidecar-build
+# Use a recent Go release; Gym's image takes it from GO_VERSION in docker/Dockerfile.
+FROM --platform=$BUILDPLATFORM golang:<go version> AS sidecar-build
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src

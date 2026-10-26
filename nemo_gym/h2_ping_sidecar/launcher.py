@@ -125,9 +125,19 @@ def _source_digest() -> str:
 
 
 def prebuilt_binary_path() -> Optional[Path]:
-    """The executable a container image shipped, or ``None`` when there is none."""
-    path = Path(os.environ.get(PREBUILT_BINARY_ENV_NAME) or PREBUILT_BINARY_DEFAULT_PATH)
-    return path if path.is_file() and os.access(path, os.X_OK) else None
+    """The executable a container image shipped, or ``None`` when there is none.
+
+    The path is the one ``NEMO_GYM_H2_PING_SIDECAR_BINARY`` names (an empty value counts as unset), else
+    ``/opt/nemo-gym/bin/h2-ping-sidecar``, and it must be an executable file. A path that was set
+    explicitly but is not one is reported and then ignored, so Gym goes on to the cache and the build.
+    """
+    configured = os.environ.get(PREBUILT_BINARY_ENV_NAME)
+    path = Path(configured).expanduser() if configured else PREBUILT_BINARY_DEFAULT_PATH
+    if path.is_file() and os.access(path, os.X_OK):
+        return path
+    if configured:
+        print(f"h2-ping-sidecar: {PREBUILT_BINARY_ENV_NAME}={configured} is not an executable file, ignoring it")
+    return None
 
 
 def default_binary_path(global_config_dict: Any) -> Path:
@@ -143,6 +153,8 @@ def default_binary_path(global_config_dict: Any) -> Path:
     """
     prebuilt = prebuilt_binary_path()
     if prebuilt is not None:
+        # It is used as is, never rebuilt, so say which one runs: edits to the Go sources do not reach it.
+        print(f"Using the prebuilt h2-ping-sidecar {prebuilt}")
         return prebuilt
     cache_dir = global_config_dict.get(CACHE_DIR_KEY_NAME) or "cache"
     sources = Path(cache_dir).expanduser().resolve() / SIDECAR_BINARY_NAME / _source_digest()

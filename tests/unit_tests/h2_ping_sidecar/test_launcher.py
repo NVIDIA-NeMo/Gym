@@ -348,7 +348,48 @@ class TestBinaryCacheKey:
         go = _fake_go(tmp_path, 'echo "go must not run" >&2; exit 1\n')
         with patch.object(launcher.shutil, "which", return_value=str(go)):
             assert resolve_binary(_cfg(), gcd) == prebuilt
+            assert resolve_binary(_cfg(build_if_missing=False), gcd) == prebuilt
         assert not (tmp_path / "cache").exists()
+
+    def test_prebuilt_binary_is_reported(self, tmp_path, monkeypatch, capsys):
+        prebuilt = _fake_binary(tmp_path / "image", "pass")
+        monkeypatch.setenv(launcher.PREBUILT_BINARY_ENV_NAME, str(prebuilt))
+        launcher.default_binary_path(OmegaConf.create({}))
+        assert f"Using the prebuilt h2-ping-sidecar {prebuilt}" in capsys.readouterr().out
+
+    def test_empty_env_var_uses_the_default_path(self, tmp_path, monkeypatch):
+        prebuilt = _fake_binary(tmp_path / "image", "pass")
+        monkeypatch.setattr(launcher, "PREBUILT_BINARY_DEFAULT_PATH", prebuilt)
+        monkeypatch.setenv(launcher.PREBUILT_BINARY_ENV_NAME, "")
+        assert launcher.prebuilt_binary_path() == prebuilt
+
+    def test_a_bad_env_var_is_reported_not_replaced_by_the_default(self, tmp_path, monkeypatch, capsys):
+        default = _fake_binary(tmp_path / "image", "pass")
+        monkeypatch.setattr(launcher, "PREBUILT_BINARY_DEFAULT_PATH", default)
+        mine = _fake_binary(tmp_path / "mine", "pass")
+        monkeypatch.setenv(launcher.PREBUILT_BINARY_ENV_NAME, str(mine))
+        assert launcher.prebuilt_binary_path() == mine
+
+        monkeypatch.setenv(launcher.PREBUILT_BINARY_ENV_NAME, str(tmp_path / "typo"))
+        assert launcher.prebuilt_binary_path() is None
+        assert f"{launcher.PREBUILT_BINARY_ENV_NAME}={tmp_path / 'typo'} is not an executable file" in (
+            capsys.readouterr().out
+        )
+
+    def test_env_var_expands_the_home_directory(self, tmp_path, monkeypatch):
+        prebuilt = _fake_binary(tmp_path / "home" / "bin", "pass")
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv(launcher.PREBUILT_BINARY_ENV_NAME, "~/bin/h2-ping-sidecar")
+        assert launcher.prebuilt_binary_path() == prebuilt
+
+    def test_the_container_image_matches_the_prebuilt_contract(self, monkeypatch):
+        monkeypatch.undo()  # the autouse fixture's stand-in path; this test compares the real constants
+        dockerfile = Path(__file__).resolve().parents[3] / "docker" / "Dockerfile"
+        if not dockerfile.is_file():
+            pytest.skip("docker/Dockerfile is not part of this checkout")
+        text = dockerfile.read_text()
+        assert f"ENV {launcher.PREBUILT_BINARY_ENV_NAME}={launcher.PREBUILT_BINARY_DEFAULT_PATH}" in text
+        assert f"/out/h2-ping-sidecar {launcher.PREBUILT_BINARY_DEFAULT_PATH}" in text
 
     def test_prebuilt_binary_defaults_to_the_image_path(self, tmp_path, monkeypatch):
         prebuilt = _fake_binary(tmp_path / "image", "pass")
