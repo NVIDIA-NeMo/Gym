@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
 from collections import Counter
 from contextlib import contextmanager
 from itertools import permutations, product
@@ -464,7 +465,13 @@ async def test_failed_merge_keeps_the_original_projection(run, monkeypatch, fail
                 input_glob=str(source), output_jsonl_fpath=str(target), disable_health_check=True
             )
         )
-    assert {path.name: path.read_bytes() for path in source.parent.iterdir()} == before
+    after = {path.name: path.read_bytes() for path in source.parent.iterdir()}
+    if failure == "publication":
+        # The shard list is written before the merged rows take their place. They never did, so it names
+        # contents that are not there, and a recheck refuses rather than lend the shards to the old rows.
+        sources = orjson.loads(after.pop("combined_sources.json"))
+        assert sources["merged_sha256"] != hashlib.sha256(target.read_bytes()).hexdigest()
+    assert after == before
     aggregate.assert_not_called()
 
 

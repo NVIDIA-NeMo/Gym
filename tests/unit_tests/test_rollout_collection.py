@@ -20,7 +20,6 @@ import pickle
 import shutil
 import signal
 import sys
-import threading
 import time
 import warnings
 import weakref
@@ -8956,7 +8955,8 @@ class TestRolloutAggregationHelper:
     async def test_a_recheck_reads_the_artifacts_beside_the_path_the_aggregation_read(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock, link: str
     ) -> None:
-        """A shard's sidecars and inventory are the ones beside the path the aggregation was given, link or not."""
+        """A shard's sidecars and inventory are read where the aggregation read them: beside a file link when they sit
+        there, otherwise beside the file the link resolves to, which then owns them."""
         shard = tmp_path / "alias" / "rollouts.jsonl"
         target = tmp_path / "pool" / ("rollouts.jsonl" if link == "directory link" else "data.jsonl")
         self._write_rows(target, self._rollout(0, "agent_a", reward=1.0))
@@ -8977,11 +8977,7 @@ class TestRolloutAggregationHelper:
 
         assert self._accounting(rechecked) == self._accounting(aggregated)
         artifacts = rechecked["artifacts"]
-        if beside == target:
-            # The aggregation never read the target's artifacts, so the recheck does not either.
-            assert (artifacts["expected"], artifacts["failed"]) == (None, None)
-        else:
-            assert (artifacts["expected"], artifacts["missing"], artifacts["failed"]["total"]) == (2, 0, 1)
+        assert (artifacts["expected"], artifacts["missing"], artifacts["failed"]["total"]) == (2, 0, 1)
 
     async def test_shards_left_unmerged_are_not_listed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
@@ -8993,14 +8989,12 @@ class TestRolloutAggregationHelper:
 
         assert not aggregation_sources_path_for(merged_dir / "rollouts.jsonl").exists()
 
-    @pytest.mark.parametrize(
-        "case", ["fresh run", "resumed run", "resumed run that stops before writing", "resumed run with nothing left"]
-    )
+    @pytest.mark.parametrize("case", ["fresh run", "resumed run"])
     async def test_a_run_that_writes_to_a_merged_output_drops_its_shard_list(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock, case: str
     ) -> None:
-        """The run's rows, sidecar and inventory are the ones beside the output now, not the listed shards. A run that
-        writes no row leaves the merged rows, and the shards listed for them, as they were."""
+        """A fresh run's rows, sidecar and inventory replace the merged rows, so the shard list goes with them. A
+        merged output has no run history to resume, so a resume stops before writing and leaves the list."""
 
         class Helper(RolloutCollectionHelper):
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
@@ -9020,37 +9014,28 @@ class TestRolloutAggregationHelper:
         config = dict(
             input_jsonl_fpath=str(tmp_path / "input.jsonl"), output_jsonl_fpath=str(output), disable_aggregation=True
         )
-        await Helper().run_from_config(RolloutCollectionConfig(**config, resume_from_cache=False))
-        # An aggregation into the run's output leaves rollouts of the run there, and its shard list.
-        landed = [orjson.loads(line) for line in output.read_bytes().splitlines()]
+        # An aggregation into the results directory leaves its merged rows there, and its shard list.
         shard = tmp_path / "shard" / "rollouts.jsonl"
-        self._write_rows(shard, *(landed if case == "resumed run with nothing left" else landed[:1]))
+        self._write_rows(shard, self._rollout(0, "agent_a", reward=1.0))
         await self._merge(monkeypatch, output.parent, shard, disable_health_check=True)
-
         listed = aggregation_sources_path_for(output).read_bytes()
-        if case == "resumed run that stops before writing":
-            # The run fails its validation before it writes.
-            with pytest.raises(ConfigPathNotFoundError):
-                await Helper().run_from_config(
-                    RolloutCollectionConfig(
-                        **config, resume_from_cache=True, batch_manifest_fpath=str(tmp_path / "missing.json")
-                    )
-                )
-        else:
-            await Helper().run_from_config(RolloutCollectionConfig(**config, resume_from_cache=case != "fresh run"))
+        merged = output.read_bytes()
 
-        if case in ("fresh run", "resumed run"):
+        if case == "fresh run":
+            await Helper().run_from_config(RolloutCollectionConfig(**config, resume_from_cache=False))
             assert not aggregation_sources_path_for(output).exists()
             artifacts = health_check_run_dir(output.parent).summary["run"]["artifacts"]
             assert (artifacts["expected"], artifacts["missing"]) == (2, 0)
         else:
+            with pytest.raises(ConfigError, match="Saved artifacts were not changed"):
+                await Helper().run_from_config(RolloutCollectionConfig(**config, resume_from_cache=True))
             assert aggregation_sources_path_for(output).read_bytes() == listed
+            assert output.read_bytes() == merged
 
-    async def test_a_resume_with_nothing_left_checks_the_shards_its_output_still_names(
+    async def test_an_aggregation_into_a_run_with_history_is_refused(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
-        """The run writes no row, so the aggregation still owns its output: the run's own health check reads the
-        listed shards, as the aggregation and a recheck do, rather than the run's inventory beside the output."""
+        """Merged rows would replace the rows the run's history indexes, so the aggregation refuses before writing."""
 
         class Helper(RolloutCollectionHelper):
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
@@ -9067,37 +9052,22 @@ class TestRolloutAggregationHelper:
                 for i in range(2)
             ),
         )
-        config = dict(input_jsonl_fpath=str(tmp_path / "input.jsonl"), output_jsonl_fpath=str(output))
         await Helper().run_from_config(
-            RolloutCollectionConfig(**config, resume_from_cache=False, disable_aggregation=True)
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+                output_jsonl_fpath=str(output),
+                disable_aggregation=True,
+            )
         )
-        # An external shard holds the run's two rows, and a third task that timed out.
+        before = {path.name: path.read_bytes() for path in output.parent.iterdir()}
         shard = tmp_path / "shard" / "rollouts.jsonl"
-        self._write_rows(shard, *(orjson.loads(line) for line in output.read_bytes().splitlines()))
-        self._write_rows(materialized_path_for(shard), *(self._rollout(task, "agent_a") for task in range(3)))
-        self._write_rows(
-            _failures_path_for(shard), self._rollout(2, "agent_a", **{NG_FAILURE_CLASS_KEY: "timeout_exceeded"})
-        )
-        await self._merge(monkeypatch, output.parent, shard, disable_health_check=True)
-        listed = aggregation_sources_path_for(output).read_bytes()
+        self._write_rows(shard, self._rollout(0, "agent_a", reward=1.0))
 
-        resolved_on = []
-        resolve = nemo_gym.rollout_health._aggregated_shards
+        with pytest.raises(ConfigError, match="existing recovery artifacts"):
+            await self._merge(monkeypatch, output.parent, shard, disable_health_check=True)
 
-        def recording_resolve(*args, **kwargs):
-            resolved_on.append(threading.current_thread() is threading.main_thread())
-            return resolve(*args, **kwargs)
-
-        monkeypatch.setattr(nemo_gym.rollout_health, "_aggregated_shards", recording_resolve)
-        await Helper().run_from_config(RolloutCollectionConfig(**config, resume_from_cache=True))
-
-        # Resolving the list hashes every listed file, so it runs off the event loop.
-        assert resolved_on == [False]
-        assert aggregation_sources_path_for(output).read_bytes() == listed
-        reported = orjson.loads((output.parent / "quality_summary.json").read_bytes())["run"]["artifacts"]
-        rechecked = health_check_run_dir(output.parent).summary["run"]["artifacts"]
-        for artifacts in (reported, rechecked):
-            assert (artifacts["expected"], artifacts["missing"], artifacts["failed"]["total"]) == (3, 0, 1)
+        assert {path.name: path.read_bytes() for path in output.parent.iterdir()} == before
+        assert not aggregation_sources_path_for(output).exists()
 
     @pytest.mark.parametrize("mode", [0o600, 0o660], ids=["0600", "0660"])
     async def test_merging_onto_an_existing_output_keeps_its_mode(
@@ -9194,21 +9164,28 @@ class TestRolloutAggregationHelper:
 
         assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == files
 
-    async def test_a_run_reached_through_a_directory_link_is_merged_onto_itself(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    @pytest.mark.parametrize("through", ["its own path", "a directory link"])
+    async def test_a_run_is_not_merged_onto_itself(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock, through: str
     ) -> None:
-        """Through a linked directory the shard's name leads to the same sidecars: the in-place repair applies."""
-        run_a, _ = self._landed_and_failed_runs(tmp_path, same_indices=False)
-        linked_dir = tmp_path / "linked"
-        linked_dir.symlink_to(run_a.parent, target_is_directory=True)
+        """Merging would rewrite the run's own rows under the offsets its history indexes, so it is refused before
+        anything is written, however the shard is reached. Recomputing its metrics in place needs merge_shards=false."""
+        run_a, _ = self._landed_and_failed_runs(tmp_path, same_indices=True)
+        self._write_rows(run_a, self._rollout(1, "agent_a", reward=1.0), self._rollout(0, "agent_a", reward=1.0))
+        shard = run_a
+        if through == "a directory link":
+            linked_dir = tmp_path / "linked"
+            linked_dir.symlink_to(run_a.parent, target_is_directory=True)
+            shard = linked_dir / run_a.name
+        before = {path.name: path.read_bytes() for path in run_a.parent.iterdir()}
 
-        aggregated = orjson.loads((await self._merge(monkeypatch, run_a.parent, linked_dir / run_a.name)).read_bytes())
+        with pytest.raises(ConfigError, match="one of the shards"):
+            await self._merge(monkeypatch, run_a.parent, shard)
+        assert {path.name: path.read_bytes() for path in run_a.parent.iterdir()} == before
 
+        await self._merge(monkeypatch, run_a.parent, shard, merge_shards=False, disable_health_check=True)
+        assert run_a.read_bytes() == before[run_a.name]
         assert not aggregation_sources_path_for(run_a).exists()
-        assert self._accounting(health_check_run_dir(run_a.parent).summary["run"]) == self._accounting(
-            aggregated["run"]
-        )
-        assert aggregated["run"]["artifacts"]["expected"] == 1
 
     async def test_the_cli_check_after_a_resume_checks_the_listed_shards(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
@@ -9253,27 +9230,11 @@ class TestRolloutAggregationHelper:
 
         assert (merged_dir / "quality_summary.json").read_bytes() == summary
 
-    async def test_a_run_merged_onto_itself_is_rechecked_alone(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
-    ) -> None:
-        """The in-place repair of a run's metrics: its rows are re-sorted, and its sidecars stay beside it."""
-        run_a, _ = self._landed_and_failed_runs(tmp_path, same_indices=True)
-        self._write_rows(materialized_path_for(run_a), self._rollout(0, "agent_a"), self._rollout(1, "agent_a"))
-        self._write_rows(run_a, self._rollout(1, "agent_a", reward=1.0), self._rollout(0, "agent_a", reward=1.0))
-        unsorted = run_a.read_bytes()
-        # A list an earlier aggregation into this directory left.
-        aggregation_sources_path_for(run_a).write_text("{}")
-
-        aggregated = orjson.loads((await self._merge(monkeypatch, run_a.parent, run_a)).read_bytes())["run"]
-
-        assert run_a.read_bytes() != unsorted
-        assert not aggregation_sources_path_for(run_a).exists()
-        assert self._accounting(health_check_run_dir(run_a.parent).summary["run"]) == self._accounting(aggregated)
-
     async def test_a_linked_output_is_written_through(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
-        """The link stays, its target holds the merged rows, and the list sits beside the link."""
+        """The link stays and its target holds the merged rows. The output's companions, the shard list and the
+        reports among them, sit beside the file the link resolves to, as every companion of an output does."""
         run_a, run_b = self._landed_and_failed_runs(tmp_path, same_indices=False)
         target = tmp_path / "store" / "rollouts.jsonl"
         self._write_rows(target)
@@ -9281,11 +9242,13 @@ class TestRolloutAggregationHelper:
         link.parent.mkdir()
         link.symlink_to(target)
 
-        aggregated = orjson.loads((await self._merge(monkeypatch, link.parent, run_a, run_b)).read_bytes())["run"]
+        await self._merge(monkeypatch, link.parent, run_a, run_b)
+        aggregated = orjson.loads((target.parent / "quality_summary.json").read_bytes())["run"]
 
         assert link.is_symlink() and target.read_bytes() == run_a.read_bytes()
-        assert [path.name for path in target.parent.iterdir()] == ["rollouts.jsonl"]
-        assert self._accounting(health_check_run_dir(link.parent).summary["run"]) == self._accounting(aggregated)
+        assert aggregation_sources_path_for(target).is_file()
+        assert [path.name for path in link.parent.iterdir()] == ["rollouts.jsonl"]
+        assert self._accounting(health_check_run_dir(target.parent).summary["run"]) == self._accounting(aggregated)
 
     @pytest.mark.parametrize("run1_has", ["a row", "a failure"])
     async def test_runs_that_reuse_task_indices_do_not_hide_each_others_lost_rollouts(
