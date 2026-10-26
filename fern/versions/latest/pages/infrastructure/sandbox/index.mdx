@@ -245,7 +245,7 @@ Do not call `Sandbox` from FastAPI handlers, async resources servers, or async a
 | `ready_timeout_s` | Time to wait for sandbox readiness. |
 | `workdir` | Default working directory for `exec()` calls. |
 | `env` | Environment variables injected into the sandbox. Forward only values required by the task. |
-| `files` | Text files to upload at startup, keyed by remote target path. |
+| `files` | Files to upload at startup, keyed by remote target path. A `str` value is written as UTF-8 text and a `bytes` value is written unchanged. |
 | `metadata` | String metadata for tracing, debugging, and backend labels. Providers may normalize values for their runtime. |
 | `resources` | `SandboxResources` or a mapping with `cpu`, `memory_mib`, `disk_gib`, `gpu`, and `gpu_type`. |
 | `entrypoint` | Optional container entrypoint override. |
@@ -268,7 +268,8 @@ Unknown resource keys raise a `ValueError`, which catches config drift early.
 
 ## Startup Files and File Transfer
 
-Use `files` for small text files that should exist before the first command runs:
+Use `files` for small files that should exist before the first command runs.
+A `str` value is written as UTF-8 text, and a `bytes` value, such as an image, is written unchanged:
 
 ```python
 spec = SandboxSpec(
@@ -276,6 +277,7 @@ spec = SandboxSpec(
     workdir="/workspace",
     files={
         "/workspace/input.txt": "hello\n",
+        "/workspace/figure.png": Path("figure.png").read_bytes(),
     },
 )
 ```
@@ -288,6 +290,16 @@ await sandbox.download("/workspace/log.txt", output_path)
 ```
 
 `upload()` and `download()` operate on files. If you need structured values, serialize them locally before uploading and parse the downloaded file locally after the sandbox command completes.
+
+To write in-memory content into a sandbox that is already running, use `upload_bytes()` or `upload_text()` from `nemo_gym.sandbox.utils`.
+Both go through `upload()`, so the content never passes through a shell:
+
+```python
+from nemo_gym.sandbox.utils import upload_bytes, upload_text
+
+await upload_bytes(sandbox, path="/workspace/figure.png", data=image_bytes)
+await upload_text(sandbox, path="/workspace/notes.md", text="# Notes\n")
+```
 
 ## Status and Cleanup
 

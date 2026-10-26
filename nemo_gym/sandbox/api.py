@@ -483,7 +483,10 @@ class AsyncSandbox:
                     tmp_path = Path(tmp_dir)
                     for index, (target_path, contents) in enumerate(requested_spec.files.items()):
                         source_path = tmp_path / f"file-{index}"
-                        source_path.write_text(contents, encoding="utf-8")
+                        if isinstance(contents, bytes):
+                            source_path.write_bytes(contents)
+                        else:
+                            source_path.write_text(contents, encoding="utf-8")
                         await self._provider.upload_file(handle, source_path, target_path)
         except BaseException:
             await self.stop()

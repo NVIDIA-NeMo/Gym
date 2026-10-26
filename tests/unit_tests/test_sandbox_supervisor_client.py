@@ -26,7 +26,7 @@ from nemo_gym.agent_utils.supervisor_client import (
     supervision_timeouts,
 )
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.sandbox.utils import download_bytes, read_text, upload_bytes, upload_text
 
 
 class LocalSandbox:
@@ -61,6 +61,17 @@ async def test_file_transport_keeps_contents_out_of_shell(session):
     assert await read_text(sandbox, path=path) == payload
     Path(path).write_bytes(b"partial output\xff\n")
     assert await read_text(sandbox, path=path) == "partial output\ufffd\n"
+    sandbox.exec.assert_not_awaited()
+
+
+async def test_byte_transfer_keeps_binary_contents_unchanged(session):
+    sandbox, session_dir = session
+    sandbox.exec = AsyncMock(side_effect=AssertionError("file transfer must not invoke a shell"))
+    path = str(session_dir / "image.png")
+    payload = b"\x89PNG\r\n\x1a\n\x00\xff\xfe"
+    await upload_bytes(sandbox, path=path, data=payload)
+    assert Path(path).read_bytes() == payload
+    assert await download_bytes(sandbox, path=path) == payload
     sandbox.exec.assert_not_awaited()
 
 
