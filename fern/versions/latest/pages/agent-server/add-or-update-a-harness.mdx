@@ -780,7 +780,7 @@ In the PR, include the commands, versions, evidence, limitations, tests, and pre
 
 Before merging a new harness or a harness upgrade that claims Terminal-Bench 2.1 support, run the complete benchmark task set at a pinned revision with a real model. This applies at every capability level, including Evaluation. Small-sample smoke runs and scripted conformance probes do not satisfy this requirement.
 
-Use the [benchmark's configuration and sandbox ownership](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_2_1/README.md), with golden-patch mode disabled. Include every task and all declared repeats; remove smoke-only task filters and limits. Record the following in the PR:
+Use the [benchmark's configuration and sandbox ownership](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_2_1/README.md), with golden-patch mode disabled. Include every task with 8 repeats (`num_repeats: 8`, as the benchmark's [OpenCode configuration](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_2_1/opencode.yaml) sets); the README's run configuration declares none, so set it yourself. Remove smoke-only task filters and limits. Record the following in the PR:
 
 - The Gym commit, benchmark revision, harness and model versions, sandbox provider and images, resolved configuration, sampling settings, budgets, timeouts, repeats, and evaluation commands.
 - The expected, attempted, graded, and missing task/repeat counts; aggregate score and its denominator; per-task rewards; and all failed or incomplete evaluations. Keep infrastructure failures separate from valid zero rewards, and explain exclusions and retries. Missing task/repeat outcomes mean the results are incomplete.
