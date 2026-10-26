@@ -291,7 +291,9 @@ def test_closing_a_worker_stops_the_processes_it_started(tmp_path: Path) -> None
         except ProcessLookupError:
             return
         # Killed but not yet reaped, as where PID 1 does not reap orphans.
-        if subprocess.run(["ps", "-o", "stat=", "-p", str(child)], capture_output=True, text=True).stdout.startswith("Z"):
+        if subprocess.run(["ps", "-o", "stat=", "-p", str(child)], capture_output=True, text=True).stdout.startswith(
+            "Z"
+        ):
             return
         time.sleep(0.1)
     raise AssertionError(f"process {child} outlived its tool worker")

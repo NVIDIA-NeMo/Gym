@@ -213,6 +213,12 @@ def generate_grnade(inp: GRNAdeIn) -> dict:
         raise ValueError(f"unknown mode {inp.mode!r}; this tool takes: '2d', '3d' or empty")
     if inp.filter_metric not in FILTER_METRICS:
         raise ValueError(f"unknown filter_metric {inp.filter_metric!r}; this tool takes: {', '.join(FILTER_METRICS)}")
+    if inp.n < 1 or inp.batch_size < 1:
+        raise ValueError(f"n and batch_size must be at least 1, got n={inp.n} and batch_size={inp.batch_size}")
+    if not 0 < inp.temperature_min <= inp.temperature_max:
+        raise ValueError(
+            f"temperatures need 0 < temperature_min <= temperature_max, got {inp.temperature_min} and {inp.temperature_max}"
+        )
     # design.py loops range(total_samples // n_samples), so a batch larger than n samples nothing.
     # Clamp it to n.
     notes = []
@@ -237,8 +243,9 @@ def generate_grnade(inp: GRNAdeIn) -> dict:
             missing = (
                 f"target structure not found at {structure!r}; pass --structure, set RDS_GRNADE_PDB, or use mode='2d'"
             )
-            # A path the model passed is its own mistake. One the operator set up is the machine's.
-            raise ValueError(missing) if inp.structure else EnvironmentFault(missing)
+            # A path the model passed, or 3d asked of a target that supplies no backbone, is the model's mistake.
+            # A backbone the operator should have provided is the machine's.
+            raise ValueError(missing) if inp.structure or not disclosed else EnvironmentFault(missing)
         # 2d mode ignores coordinates, but design.py still loads a PDB for the sequence and length.
         structure = _placeholder_pdb(target, work / "placeholder.pdb")
     checkpoint = os.environ.get("RDS_GRNADE_CKPT", "checkpoints/gRNAde_drop3d@0.75_maxlen@500.h5")

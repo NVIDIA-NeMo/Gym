@@ -77,8 +77,10 @@ partway with nothing solved. Calls that fail on the model's own arguments count 
 
 gRNAde and RibonanzaNet-SS run on the first GPU whenever the worker can see one. On Linux `prepare.py --setup` installs
 the CUDA 12.8 build of torch, so starting Gym on a GPU node is all it takes. EternaFold runs on CPU. On CPU only, long
-targets are slow: raise `rollout_timeout_s`. gRNAde still charges its time to `gpu_seconds` there, so one call can
-spend most of the budget. Benchmark numbers compare across machines only when gRNAde runs on a GPU.
+targets are slow: raise `rollout_timeout_s`. For Claude Code, also raise the resources server's `call_timeout_s` and
+the agent's `MCP_TOOL_TIMEOUT` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`, which cap one tool call at 30 minutes. On CPU
+gRNAde still charges its time to `gpu_seconds`, so one call can spend most of the budget. Benchmark numbers compare
+across machines only when gRNAde runs on a GPU.
 
 ## Tests
 

@@ -327,9 +327,26 @@ class TestReviewFixes:
         from responses_api_agents.rna_design_agent.rds import registry
 
         self._campaign(tmp_path)
-        for bad in ({"mode": "4d"}, {"filter_metric": "unknown_score"}):
-            with pytest.raises(ValueError, match="this tool takes"):
+        for bad, says in (
+            ({"mode": "4d"}, "this tool takes"),
+            ({"filter_metric": "unknown_score"}, "this tool takes"),
+            ({"n": 0}, "at least 1"),
+            ({"batch_size": 0}, "at least 1"),
+            ({"temperature_min": 0.0}, "temperature_min <= temperature_max"),
+            ({"temperature_min": 2.0, "temperature_max": 1.0}, "temperature_min <= temperature_max"),
+        ):
+            with pytest.raises(ValueError, match=says):
                 registry.dispatch("generate.grnade", {"target": "review_hairpin", **bad})
+
+    def test_3d_on_a_target_without_a_backbone_is_the_models_mistake(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from responses_api_agents.rna_design_agent.rds import registry
+
+        self._campaign(tmp_path)
+        monkeypatch.setenv("GRNADE_REPO", str(tmp_path))
+        with pytest.raises(ValueError, match="target structure not found"):
+            registry.dispatch("generate.grnade", {"target": "review_hairpin", "mode": "3d"})
 
     def test_a_missing_structure_the_model_named_fails_instead_of_running_in_2d(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -474,6 +491,25 @@ class TestRun:
 
         assert out.mask_sample is False
         assert out.reward == 1.0 and out.solved is True
+
+    @needs_eternafold
+    @pytest.mark.parametrize("visibility", ["goal", "hidden"])
+    def test_a_hidden_objective_runs_under_an_alias_and_is_judged_by_the_suite(
+        self, tmp_path: Path, visibility: str
+    ) -> None:
+        """Off the metric view the campaign runs under a name that names no puzzle, and the suite's protocol is applied after."""
+        import dataclasses
+
+        from responses_api_agents.rna_design_agent.rds.benchmark import run_one
+        from responses_api_agents.rna_design_agent.rds.suite import Suite
+
+        suite = Suite.load(_agent(tmp_path)._suite_path("rnainvbench_eterna100_v1"))
+        campaign = next(c for c in suite.campaigns() if c.inline_target["name"] == "eterna100_v1_57")
+        result = run_one(dataclasses.replace(campaign, objective_visibility=visibility), tmp_path / "run", arm="fixed")
+
+        assert result["campaign"].startswith("design/target_") and "eterna" not in result["campaign"]
+        assert result["run"]["protocol"]["visibility"] == visibility
+        assert result["official"]["designed"]["solved"] is True
 
     @needs_eternafold
     @pytest.mark.asyncio
