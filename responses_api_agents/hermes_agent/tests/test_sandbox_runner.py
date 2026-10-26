@@ -559,8 +559,8 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
             while not (tmp_path / "model.patch").exists() and process.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.01)
             assert (tmp_path / "model.patch").exists()
+            # Production sends no signal; the stop file alone must stop the supervisor.
             stop_request_path.touch()
-            process.terminate()
         _, stderr = process.communicate(timeout=10)
         assert process.returncode == 0, stderr
     finally:

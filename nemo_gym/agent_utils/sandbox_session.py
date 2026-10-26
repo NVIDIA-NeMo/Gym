@@ -56,20 +56,27 @@ def shell_assignments(values: Mapping[str, str | Sequence[str] | Mapping[str, st
 
     A string becomes a scalar and a sequence an array. A mapping becomes an array of
     ``KEY=VALUE`` words, ready for ``export`` or ``env``. Every word is shell-quoted.
+    Words must be strings without NUL, which bash cannot hold.
     """
+
+    def word(item: object) -> str:
+        if not isinstance(item, str) or "\0" in item:
+            raise ValueError(f"Invalid shell word, which must be a string without NUL: {item!r}")
+        return quote(item)
+
     lines = []
     for name, value in values.items():
         if not _SHELL_NAME.fullmatch(name):
             raise ValueError(f"Invalid shell variable name: {name!r}")
         if isinstance(value, str):
-            lines.append(f"{name}={quote(value)}")
+            lines.append(f"{name}={word(value)}")
             continue
         if isinstance(value, Mapping):
             invalid = [key for key in value if not _SHELL_NAME.fullmatch(key)]
             if invalid:
                 raise ValueError(f"Invalid environment variable names: {invalid!r}")
-            value = [f"{key}={item}" for key, item in value.items()]
-        lines.append(f"{name}=({' '.join(quote(item) for item in value)})")
+            value = [f"{key}={item}" if isinstance(item, str) else item for key, item in value.items()]
+        lines.append(f"{name}=({' '.join(word(item) for item in value)})")
     return "".join(f"{line}\n" for line in lines)
 
 

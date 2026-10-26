@@ -118,6 +118,7 @@ close. Processes that left the harness before the stop remain for the sandbox ow
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
 those processes may still change task files. The stop-time cutoff also has PID races and
 cannot classify later service forks. It is not a security boundary.
+The supervisor runs with the task image's bash; this adapter does not install it.
 Supervisor diagnostics retain at most the last 1 MiB, including a truncation marker.
 Missing termination confirmation skips verification and stops
 the task sandbox. Resources cleanup retains failed handles for retry; final agent

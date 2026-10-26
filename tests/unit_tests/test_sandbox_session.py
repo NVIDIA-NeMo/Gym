@@ -618,7 +618,10 @@ def test_shell_assignments_round_trip_through_bash(tmp_path):
     assert not (tmp_path / "unintended").exists()
 
 
-@pytest.mark.parametrize("values", [{"bad-name": "x"}, {"env": {"BAD KEY": "x"}}])
+@pytest.mark.parametrize(
+    "values",
+    [{"bad-name": "x"}, {"env": {"BAD KEY": "x"}}, {"cwd": "a\0b"}, {"command": ["cli", 1]}, {"env": {"K": None}}],
+)
 def test_shell_assignments_reject_names_bash_cannot_assign(values):
     with pytest.raises(ValueError, match="Invalid"):
         shell_assignments(values)
