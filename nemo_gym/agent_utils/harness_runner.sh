@@ -34,12 +34,15 @@ exec 3<"$stdout" 4>"$events"
 cli=$!
 trap 'kill -TERM "$cli" 2>/dev/null' TERM
 pending=""
+emit() { [[ $1 == {* ]] && printf '[%s, %s]\n' "$seen" "$1" >&4; }
+# Stamp new complete lines, keeping a partial one for the next pass. Bash < 5 has whole seconds.
 stamp() {
-    local line seen=${EPOCHREALTIME/,/.}
+    local line
+    seen=${EPOCHREALTIME/,/.}
     [[ -n $seen ]] || printf -v seen '%(%s)T' -1
     while IFS= read -r line <&3; do
-        line=$pending$line pending=""
-        [[ $line == {* ]] && printf '[%s, %s]\n' "$seen" "$line" >&4
+        emit "$pending$line"
+        pending=""
     done
     pending+=$line
 }
@@ -50,5 +53,5 @@ done
 wait "$cli"
 status=$?
 stamp
-[[ $pending == {* ]] && printf '[%s, %s]\n' "${EPOCHREALTIME/,/.}" "$pending" >&4
+emit "$pending"
 exit "$status"

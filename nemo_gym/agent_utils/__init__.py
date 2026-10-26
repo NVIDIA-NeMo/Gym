@@ -8,9 +8,9 @@ process, collects artifacts, and releases the sandbox. The supervisor client
 implements the shell protocol over session control files. All three run on the
 agent server.
 
-Only process_supervisor.py is copied from this package into the task sandbox. It
-uses the standard library to enforce deadlines, stop and reap the harness process
-group, and write its termination receipt. Explicitly detached task services remain
-for the sandbox owner to stop. Core sandbox APIs and providers live in
+Only process_supervisor.sh and harness_runner.sh are copied from this package into
+the task sandbox; they need bash, not Python. The supervisor enforces deadlines, stops
+the harness process group and writes its termination receipt. Detached task services
+remain for the sandbox owner to stop. Core sandbox APIs and providers live in
 :mod:`nemo_gym.sandbox`.
 """
