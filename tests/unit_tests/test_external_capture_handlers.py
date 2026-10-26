@@ -229,7 +229,7 @@ def _staged_coords(**overrides: Any) -> dict[str, Any]:
 async def test_only_framework_capture_persists_selection_and_validation_evidence(handler_cls, framework, tmp_path):
     store = FileLineageStore(tmp_path)
     context = _root_context(store)
-    context.framework_owned_context = framework
+    context.parent_resolution_mode = "source_history" if framework else "fingerprint"
     if framework:
         context.capture_admission = context.capture_admission.model_copy(
             update={"request_replay": replay_context(context.request_items, render_digest="f" * 64)}

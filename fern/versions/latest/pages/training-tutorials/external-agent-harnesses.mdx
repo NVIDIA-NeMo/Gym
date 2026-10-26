@@ -388,9 +388,9 @@ For a multi-process deployment, run the check against the real shared backend ra
 ## Let the framework own context reconstruction
 
 For compaction-aware training with a compatible framework worker, enable
-`token_id_capture.framework_owned_context: true` together with `external_staging: true`,
+`token_id_capture.parent_resolution: source_history` together with `external_staging: true`,
 `external_staging_backend: vllm_worker`, and `rebuild_response: false`.
-See [Framework-owned context and compaction](/main/model-server/model-call-capture#framework-owned-context-and-compaction)
+See [Source-history continuity and context compaction](/main/model-server/model-call-capture#source-history-continuity-and-context-compaction)
 for configuration prerequisites, supported APIs, measurement, and admission closure.
 
 The harness keeps using rollout-correlated Responses or Chat requests with explicit history.

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Source-content facts for framework-owned context decisions.
+"""Source-content facts for source-history capture decisions.
 
 This module records what the gateway received and exposed. It does not decide
 whether to splice tokens, compact a context, or create a training segment.

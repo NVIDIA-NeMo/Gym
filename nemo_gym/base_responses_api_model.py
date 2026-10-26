@@ -116,6 +116,7 @@ from nemo_gym.token_id_capture.protocols import (
     CaptureInputError,
     CaptureLedger,
     LineageResolver,
+    ParentResolutionMode,
 )
 from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.store import make_token_store
@@ -554,13 +555,13 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         ``response.failed`` events; bad-request validation still fails eagerly.
         """
         context = current_capture_context()
-        if context is not None and context.framework_owned_context:
+        if context is not None and context.parent_resolution_mode == "source_history":
             # ``stream: true`` is allowed: the streaming branch below makes exactly one
             # non-streaming ``responses()`` call and re-emits the completed response as
             # synthesized SSE, so the engine-bound request stays non-streaming (external
             # capture refuses a streamed backend request) and ``_stream_served_response``
             # finalizes the capture before the stream is committed. SSE-only harnesses
-            # such as the Codex CLI thereby run under framework-owned context. Server-held
+            # such as the Codex CLI thereby run under source-history capture. Server-held
             # history is still refused: it hides part of the context from capture.
             if body.get("previous_response_id") or body.get("conversation"):
                 raise HTTPException(status_code=422, detail="Framework context requires explicit history")
@@ -622,7 +623,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         malformed ``stream`` with the same 422 as before.
         """
         context = current_capture_context()
-        if context is not None and context.framework_owned_context and body.get("n") not in (None, 1):
+        if (
+            context is not None
+            and context.parent_resolution_mode == "source_history"
+            and body.get("n") not in (None, 1)
+        ):
             raise HTTPException(status_code=422, detail="Framework context requires one Chat completion")
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
@@ -1401,7 +1406,7 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         or context.capture_admission is None
         or context.committed
         or context.refused
-        or (context.framework_owned_context and not context.intent_registered)
+        or (context.parent_resolution_mode == "source_history" and not context.intent_registered)
         # A checkpoint gate owns a deferred row: it publishes it when the response starts,
         # and a call whose response never starts made no answer to record, so it is not poisoned.
         or context.deferred_commit is not None
@@ -1451,7 +1456,7 @@ class _CaptureMiddleware:
         lineage_store: LineageResolver | None = None,
         delta_records: bool = False,
         external_staging: bool = False,
-        framework_owned_context: bool = False,
+        parent_resolution_mode: ParentResolutionMode = "fingerprint",
         token_capture_enabled: bool = False,
         assistant_message_header: bytes | None = None,
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
@@ -1471,7 +1476,7 @@ class _CaptureMiddleware:
         # A framework inference worker owns record staging; the lineage store
         # doubles as the per-rollout capture ledger.
         self._external_staging = external_staging
-        self._framework_owned_context = framework_owned_context
+        self._parent_resolution_mode = parent_resolution_mode
         self._capture_ledger: CaptureLedger | None = (
             lineage_store if external_staging and isinstance(lineage_store, CaptureLedger) else None
         )
@@ -1518,12 +1523,12 @@ class _CaptureMiddleware:
         capture_wanted = token_capture_requested and (token_sink is not None or self._token_capture_enabled)
         if (
             capture_wanted
-            and self._framework_owned_context
+            and self._parent_resolution_mode == "source_history"
             and dialect is not None
             and dialect not in ("responses", "chat")
         ):
             await Response(
-                content='{"detail":"Framework-owned context currently requires Responses or Chat"}',
+                content='{"detail":"Source-history capture currently requires Responses or Chat"}',
                 status_code=422,
                 media_type="application/json",
             )(scope, receive, send)
@@ -1611,7 +1616,7 @@ class _CaptureMiddleware:
                 lineage_store=self._capture_ledger if self._external_staging else self._lineage_store,
                 delta_records=self._delta_records,
                 external_staging=self._external_staging,
-                framework_owned_context=self._framework_owned_context,
+                parent_resolution_mode=self._parent_resolution_mode,
                 admitted_at=time.time(),
             )
             sink_token = set_token_sink(capture_context)
@@ -1917,8 +1922,8 @@ def install_model_call_capture(
         lineage_store=lineage_store,
         delta_records=(capture_settings.token_id_capture.delta_records if capture_settings is not None else False),
         external_staging=external_staging,
-        framework_owned_context=(
-            capture_settings.token_id_capture.framework_owned_context if capture_settings is not None else False
+        parent_resolution_mode=(
+            capture_settings.token_id_capture.parent_resolution if capture_settings is not None else "fingerprint"
         ),
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
         non_generating_requests=non_generating_requests,

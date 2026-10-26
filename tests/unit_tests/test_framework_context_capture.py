@@ -33,7 +33,7 @@ async def _serve(ledger, call_id, items, *, ordinary=False, splice=False, starte
         token_sink=None,
         lineage_store=ledger,
         external_staging=True,
-        framework_owned_context=True,
+        parent_resolution_mode="source_history",
     )
     token = set_token_sink(context)
     handler = VLLMWorkerCaptureHandler()
@@ -42,7 +42,7 @@ async def _serve(ledger, call_id, items, *, ordinary=False, splice=False, starte
         candidate = context.capture_admission
         await register_call_intent()
         if ordinary:
-            context.framework_owned_context = False
+            context.parent_resolution_mode = "fingerprint"
             context.capture_admission = CaptureAdmission(
                 **{
                     **candidate.model_dump(
@@ -294,7 +294,7 @@ async def test_selected_candidate_survives_an_unrelated_commit(ledger, raced):
         token_sink=None,
         lineage_store=ledger,
         external_staging=True,
-        framework_owned_context=True,
+        parent_resolution_mode="source_history",
     )
     token = set_token_sink(context)
     try:
@@ -323,7 +323,7 @@ async def test_candidate_lookup_is_scoped_to_this_attempt(ledger):
         token_sink=None,
         lineage_store=ledger,
         external_staging=True,
-        framework_owned_context=True,
+        parent_resolution_mode="source_history",
     )
     token = set_token_sink(context)
     try:
@@ -360,7 +360,7 @@ async def test_empty_tool_content_candidate_is_not_just_latest_call(ledger, ambi
         token_sink=None,
         lineage_store=ledger,
         external_staging=True,
-        framework_owned_context=True,
+        parent_resolution_mode="source_history",
     )
     token = set_token_sink(context)
     try:
@@ -533,7 +533,7 @@ async def test_source_and_effective_options_choose_root_or_proven_candidate(ledg
         token_sink=None,
         lineage_store=ledger,
         external_staging=True,
-        framework_owned_context=True,
+        parent_resolution_mode="source_history",
     )
     token = set_token_sink(context)
     try:
@@ -577,7 +577,7 @@ async def test_framework_direct_root_keeps_unsupported_option_guard(ledger, opti
         token_sink=None,
         lineage_store=ledger,
         external_staging=True,
-        framework_owned_context=True,
+        parent_resolution_mode="source_history",
     )
     token = set_token_sink(context)
     try:
@@ -604,7 +604,7 @@ async def test_framework_ack_cannot_change_the_admitted_parent(ledger, continuat
         token_sink=None,
         lineage_store=ledger,
         external_staging=True,
-        framework_owned_context=True,
+        parent_resolution_mode="source_history",
     )
     token = set_token_sink(context)
     try:

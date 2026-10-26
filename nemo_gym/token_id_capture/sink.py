@@ -42,6 +42,7 @@ from nemo_gym.token_id_capture.protocols import (
     CaptureLedger,
     LineageResolution,
     LineageResolver,
+    ParentResolutionMode,
     RolloutRetiredError,
     TokenCaptureFrozenError,
     TokenSink,
@@ -107,7 +108,7 @@ class CaptureContext:
     # store doubles as the rollout's capture ledger and admission is the
     # strict tri-state of the lineage result.
     external_staging: bool = False
-    framework_owned_context: bool = False
+    parent_resolution_mode: ParentResolutionMode = "fingerprint"
     # Stamped once when the middleware admits the call. The ledger row reuses
     # this value on every commit retry so idempotent re-records stay
     # byte-identical.
@@ -231,7 +232,7 @@ async def resolve_parent(request_messages: list | None) -> None:
     if context is None or request_messages is None:
         return
     context.request_items = list(request_messages)
-    if context.framework_owned_context:
+    if context.parent_resolution_mode == "source_history":
         await _admit_candidate(context, request_messages)
         return
     try:
@@ -350,7 +351,7 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
     from nemo_gym.token_id_capture.staging.records import CaptureAdmission, RolloutManifest, RootReason
 
     if not context.external_staging or not isinstance(context.lineage_store, CaptureLedger):
-        raise ValueError("Framework context ownership requires an external capture ledger")
+        raise ValueError("Source-history parent resolution requires an external capture ledger")
     try:
         manifest = RolloutManifest.model_validate(await context.lineage_store.manifest(context.rollout_id))
     except RolloutRetiredError as error:
@@ -448,7 +449,7 @@ async def register_call_intent() -> None:
     Sinks without ``begin_call`` cannot report a missing final entry this way.
     """
     context = _CAPTURE_CONTEXT.get()
-    if context is not None and context.framework_owned_context:
+    if context is not None and context.parent_resolution_mode == "source_history":
         begin = getattr(context.lineage_store, "begin_call", None)
         if begin is None or context.capture_admission is None:
             raise ValueError("Framework-owned capture requires durable call intents")

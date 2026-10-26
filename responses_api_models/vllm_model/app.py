@@ -542,7 +542,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         self, body: NeMoGymResponseCreateParamsNonStreaming | NeMoGymChatCompletionCreateParamsNonStreaming
     ) -> None:
         context = current_capture_context()
-        if context is None or not context.framework_owned_context:
+        if context is None or context.parent_resolution_mode != "source_history":
             return
         try:
             options = json.loads((body.metadata or {}).get("extra_body") or "{}")
@@ -564,9 +564,9 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def _propagate_context_refusal(self, error: ClientResponseError) -> bool:
         """Preserve length errors in framework mode; settle only worker-acknowledged refusals."""
         context = current_capture_context()
-        framework_owned = context is not None and context.framework_owned_context
+        source_history = context is not None and context.parent_resolution_mode == "source_history"
         if (
-            framework_owned
+            source_history
             and context.intent_registered
             and not context.external_worker_response_seen
             and (error.headers or {}).get(CAPTURE_REFUSAL_HEADER) == context.model_call_id
@@ -575,7 +575,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             if refuse is not None:
                 await refuse(context.rollout_id, context.model_call_id)
                 context.refused = True
-        if framework_owned or self.config.propagate_context_overflow_errors:
+        if source_history or self.config.propagate_context_overflow_errors:
             _mark_propagated_overflow(error)
             return True
         return False
@@ -608,7 +608,7 @@ class VLLMModel(SimpleResponsesAPIModel):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         config = token_id_capture_config(self.server_client.global_config_dict)
-        if config.token_id_capture.framework_owned_context:
+        if config.token_id_capture.parent_resolution == "source_history":
             app.post("/context/measure")(self.measure_context)
         return app
 
@@ -632,7 +632,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             token_sink=None,
             lineage_store=self._capture_lineage,
             external_staging=True,
-            framework_owned_context=True,
+            parent_resolution_mode="source_history",
         )
         token = set_token_sink(context)
         try:
@@ -713,7 +713,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._external_capture_handler = None
         if capture_config is not None and capture_config.token_id_capture.external_staging:
             overrides = (self.config.extra_body or {}) | (self.config.sampling_overrides or {})
-            if capture_config.token_id_capture.framework_owned_context:
+            if capture_config.token_id_capture.parent_resolution == "source_history":
                 if self.config.continue_final_assistant_message:
                     raise ValueError("Framework context requires continue_final_assistant_message=false")
                 validate_framework_context_options(overrides)
@@ -1350,7 +1350,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         execution["upstream_attempted"] = True
         context = current_capture_context()
         transport_options = (
-            {"_resend_after_disconnect": False} if context is not None and context.framework_owned_context else {}
+            {"_resend_after_disconnect": False}
+            if context is not None and context.parent_resolution_mode == "source_history"
+            else {}
         )
         try:
             chat_completion_dict = await self._call_endpoint(
@@ -1547,12 +1549,12 @@ class VLLMModel(SimpleResponsesAPIModel):
             context = current_capture_context()
             if (
                 context is not None
-                and context.framework_owned_context
+                and context.parent_resolution_mode == "source_history"
                 and not context.committed
                 # A checkpoint gate publishes this validated row before forwarding the answer.
                 and not (context.publish_on_delivery and context.deferred_commit is not None)
             ):
-                raise RuntimeError("Framework-owned context requires a committed capture before serving a response")
+                raise RuntimeError("Source-history capture requires a committed capture before serving a response")
 
     @staticmethod
     def _require_token_id_list(value: Any, field_name: str) -> List[Any]:
