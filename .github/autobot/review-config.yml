@@ -9,4 +9,3 @@ approval:
   enabled: true
   eligible_teams:
     - automation
-    - gym_maintainers
