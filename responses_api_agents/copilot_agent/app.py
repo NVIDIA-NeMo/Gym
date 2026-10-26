@@ -525,8 +525,8 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         directory = state.session.session_dir
         command = [
             state.runtime.binary,
-            "-p",
-            prompt,
+            # A separate value beginning with "- " is rejected by Copilot's argument parser.
+            f"--prompt={prompt}",
             "--model",
             self.config.model,
             # The task sandbox is the isolation boundary, as for Codex's danger-full-access.

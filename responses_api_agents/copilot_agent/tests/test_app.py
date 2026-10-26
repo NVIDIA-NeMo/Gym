@@ -323,7 +323,7 @@ def test_session_runs_copilot_in_borrowed_sandbox(setup):
     assert body["metadata"]["harness_execution"] == "sandbox"
     assert body["metadata"]["copilot_version"] == "1.0.103"
     command, env = sandbox.payload["command"], sandbox.payload["env"]
-    assert command[0] == RUNTIME["binary"] and command[1:3] == ["-p", "Fix the code"]
+    assert command[0] == RUNTIME["binary"] and command[1] == "--prompt=Fix the code"
     for flag in ("--allow-all-tools", "--no-ask-user", "--disable-builtin-mcps", "--no-auto-update"):
         assert flag in command
     assert command[command.index("--stream") + 1] == "off"
@@ -352,6 +352,15 @@ def test_session_runs_copilot_in_borrowed_sandbox(setup):
     assert "partial_model_usage_unavailable" not in {gap["code"] for gap in observations["gaps"]}
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
+
+
+def test_leading_dash_prompt_is_passed_as_one_option_value(setup):
+    agent, sandbox = setup
+    prompt = '- You are given a PyTorch state dictionary.\nPreserve "quotes", =, and ü.'
+    result, closed = run_session(agent, {"input": prompt})
+    assert result.status_code == 200 and closed.status_code == 200
+    assert sandbox.payload["command"][1] == f"--prompt={prompt}"
+    assert "-p" not in sandbox.payload["command"]
 
 
 def test_configured_limits_reach_copilot(setup):
