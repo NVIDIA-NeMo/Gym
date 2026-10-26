@@ -55,7 +55,7 @@ from nemo_gym.config_types import (
     ConfigPathNotFoundError,
 )
 from nemo_gym.episode_types import EpisodeId
-from nemo_gym.failure_kinds import CANCELLED
+from nemo_gym.failure_kinds import CANCELLED, KILL_SHAPED
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -83,6 +83,7 @@ from nemo_gym.rollout_collection import (
     NG_FAILURE_JUDGE_ERROR_KEY,
     NG_FAILURE_MAX_ATTEMPTS_KEY,
     NG_NO_PERSIST_KEY,
+    NG_OMITTED_ROLLOUT_KEY,
     NG_PERF_KEY,
     NG_RESULT_TYPE_KEY,
     NG_TERMINAL_KEY,
@@ -2464,6 +2465,7 @@ class TestRolloutCollection:
         ids=["off by default", "opted in"],
     )
     @pytest.mark.parametrize("retain_results", [True, False], ids=["retaining", "non-retaining"])
+    @pytest.mark.parametrize("record_omitted", [False, True], ids=["omitted unrecorded", "omitted recorded"])
     async def test_run_from_config_counts_a_rollout_that_produced_no_row_as_zero(
         self,
         tmp_path: Path,
@@ -2471,13 +2473,16 @@ class TestRolloutCollection:
         empty_global_config: MagicMock,
         count_missing: bool,
         retain_results: bool,
+        record_omitted: bool,
         expected_scored: int,
         expected_mean: float,
     ) -> None:
-        """One success and one rollout written nowhere: the second counts only when asked for.
+        """One success and one rollout with no result: the second counts only when asked for.
 
-        A kill-shaped result reaches neither the rollouts jsonl nor the sidecar, so the failure
-        classes cannot see it and the materialized inputs are the only record that it was owed.
+        A kill-shaped result never reaches the rollouts jsonl. By default it leaves nothing in the
+        sidecar either; with record_omitted_rollouts it leaves a row marked _ng_no_persist, which no
+        failure class counts. Either way the materialized inputs are what show it was owed, and the
+        score is the same.
         """
         input_jsonl_fpath = tmp_path / "input.jsonl"
         input_jsonl_fpath.write_text(
@@ -2504,6 +2509,9 @@ class TestRolloutCollection:
             input_jsonl_fpath=str(input_jsonl_fpath),
             output_jsonl_fpath=str(output_jsonl_fpath),
             count_missing_rollouts_as_zero=count_missing,
+            # The class the omitted row carries, which must still not bring it into the score.
+            count_failure_classes_as_zero=[KILL_SHAPED],
+            record_omitted_rollouts=record_omitted,
             retain_results_in_memory=retain_results,
             disable_health_check=True,
         )
@@ -2512,9 +2520,11 @@ class TestRolloutCollection:
         persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
         assert [row["reward"] for row in persisted] == [1.0]
 
-        # Nothing in the sidecar either, so no failure class could have reached it.
         failures_fpath = _failures_path_for(output_jsonl_fpath)
-        assert not failures_fpath.exists() or not failures_fpath.read_bytes().strip()
+        sidecar = [orjson.loads(line) for line in failures_fpath.read_bytes().splitlines()]
+        assert [(row[TASK_INDEX_KEY_NAME], row[NG_NO_PERSIST_KEY]) for row in sidecar] == (
+            [(0, True)] if record_omitted else []
+        )
 
         assert len(aggregated["verify_responses"]) == expected_scored
         assert [row[TASK_INDEX_KEY_NAME] for row in aggregated["verify_responses"]] == (
@@ -4608,12 +4618,16 @@ class TestRolloutCollection:
             assert results == []
             assert peak_live_completed <= 1
 
+    @pytest.mark.parametrize("record_omitted", [False, True], ids=["omitted unrecorded", "omitted recorded"])
     async def test_run_from_config_non_retaining_preserves_upload_semantics(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         empty_global_config: MagicMock,
+        record_omitted: bool,
     ) -> None:
+        """The upload holds each result once, whether held in memory or spooled, and a sidecar row recorded for a
+        rollout with no result adds nothing to it."""
         input_fpath = tmp_path / "input-upload.jsonl"
         input_fpath.write_text(
             "\n".join(
@@ -4673,6 +4687,7 @@ class TestRolloutCollection:
                 output_jsonl_fpath=str(output_fpath),
                 retain_results_in_memory=retain,
                 route_failures_to_sidecar=True,
+                record_omitted_rollouts=record_omitted,
                 disable_aggregation=True,
                 disable_health_check=True,
                 upload_rollouts=True,
@@ -4701,6 +4716,14 @@ class TestRolloutCollection:
                     )
                     + b"\n"
                 )
+                if record_omitted:
+                    # The row an earlier run recorded for the rollout that produced no result.
+                    _failures_path_for(output_fpath).write_bytes(
+                        orjson.dumps(
+                            {**materialized_rows[2], NG_NO_PERSIST_KEY: True, NG_FAILURE_CLASS_KEY: KILL_SHAPED}
+                        )
+                        + b"\n"
+                    )
             await Helper().run_from_config(config)
             assert len(exported) == 1
             return exported.pop()
@@ -4731,6 +4754,8 @@ class TestRolloutCollection:
         )
 
         assert non_retaining_resume == retaining_resume
+        # Resume runs the rollouts that have no result again, and the sidecar row is not uploaded.
+        assert [result["case"] for result in non_retaining_resume] == ["success", "failure", "no-persist"]
 
     async def test_run_from_config_non_retaining_preserves_artifacts_without_reloading_results(
         self,
@@ -7596,10 +7621,14 @@ class TestDispatchBudget:
             await RolloutCollectionHelper().run_from_config(config)
         assert posted == []
 
+    @pytest.mark.parametrize("record_omitted", [False, True], ids=["omitted unrecorded", "omitted recorded"])
     async def test_rows_the_budget_never_started_count_as_zero_until_resume_runs_them(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock, record_omitted: bool
     ) -> None:
-        """A drained row writes nothing, so count_missing_rollouts_as_zero scores it like a lost one."""
+        """A drained row leaves no attempt, so count_missing_rollouts_as_zero scores it like a lost one.
+
+        A row recorded for it under record_omitted_rollouts changes neither the score nor what resume runs.
+        """
         posted: list = []
 
         async def post(server_name: str, url_path: str, json, **kwargs):
@@ -7618,6 +7647,7 @@ class TestDispatchBudget:
                 output_jsonl_fpath=str(output_fpath),
                 num_samples_in_parallel=1,
                 count_missing_rollouts_as_zero=True,
+                record_omitted_rollouts=record_omitted,
                 disable_health_check=True,
                 **overrides,
             )
@@ -7625,6 +7655,8 @@ class TestDispatchBudget:
         await RolloutCollectionHelper().run_from_config(config(dispatch_budget_s=0.0))
         assert posted == []
         assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"] == {"mean/reward": 0.0}
+        sidecar = _failures_path_for(output_fpath).read_bytes().splitlines()
+        assert len(sidecar) == (2 if record_omitted else 0)
 
         # The zeros lived in the metrics only, so the resumed run dispatches both rows and scores them.
         await RolloutCollectionHelper().run_from_config(config(resume_from_cache=True))
@@ -7991,18 +8023,18 @@ class TestDisableAggregationAndCallerTaskIndex:
         assert not (tmp_path / "rollout_verdicts.jsonl").exists()
 
     def test_preprocess_honors_caller_task_index(self, tmp_path: Path) -> None:
-        """A row arriving with `_ng_task_index` pre-set is used verbatim — the
+        """A row arriving with `_ng_task_index` pre-set is used verbatim â€” the
         original `row_to_task_idx` auto-numbering is bypassed. This is the seam
         an upstream slicer relies on to keep task identifiers globally-stable
         across shards.
         """
         fpath = tmp_path / "input.jsonl"
         rows = [
-            # Same prompt twice with *different* caller-stamped indices — must
+            # Same prompt twice with *different* caller-stamped indices â€” must
             # NOT be collapsed to one task by the row_str dedup path.
             {"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}, TASK_INDEX_KEY_NAME: 42},
             {"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}, TASK_INDEX_KEY_NAME: 99},
-            # And a third row with no caller index — auto-numbering still applies.
+            # And a third row with no caller index â€” auto-numbering still applies.
             {"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}, "diff": "row"},
         ]
         fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
@@ -8024,11 +8056,11 @@ class TestDisableAggregationAndCallerTaskIndex:
 
 
 class TestRolloutAggregationHelper:
-    """End-to-end shape of `ng_aggregate_rollouts`: glob → load → sort → aggregate."""
+    """End-to-end shape of `ng_aggregate_rollouts`: glob â†’ load â†’ sort â†’ aggregate."""
 
     async def test_run_from_config_full_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # Two shards. Records have globally-stamped task indices (out of order)
-        # — the helper should sort by (task_index, rollout_index) before calling
+        # â€” the helper should sort by (task_index, rollout_index) before calling
         # _call_aggregate_metrics so downstream groupby is deterministic.
         shard0 = tmp_path / "rollouts-chunk0.jsonl"
         shard1 = tmp_path / "rollouts-chunk1.jsonl"
@@ -8183,7 +8215,7 @@ class TestRolloutAggregationHelper:
         )
         await RolloutAggregationHelper().run_from_config(cfg)
 
-        # merge_shards=False ⇒ no concatenated rollouts file is written, even
+        # merge_shards=False â‡’ no concatenated rollouts file is written, even
         # though output_jsonl_fpath is used to derive the metrics path.
         assert not output_fpath.exists()
         assert (tmp_path / "rollouts_aggregate_metrics.json").exists()
@@ -9383,7 +9415,7 @@ class TestE2EInputJsonlFpathRejected:
 
     def test_e2e_config_rejects_input_jsonl_fpath_from_dictconfig(self) -> None:
         # The CLI passes an OmegaConf DictConfig (a Mapping, not a dict). An isinstance(dict)
-        # check silently let input_jsonl_fpath through on the real path — pin the Mapping match.
+        # check silently let input_jsonl_fpath through on the real path â€” pin the Mapping match.
         with pytest.raises(ConfigError, match=r"not supported when serving end-to-end"):
             E2ERolloutCollectionConfig.model_validate(
                 DictConfig(
@@ -11675,6 +11707,267 @@ async def test_collection_persists_policy_alias_for_offline_failed_rollout_timin
     assert split["policy_calls_per_rollout"]["p50"] == 1
     assert (split["policy_model"], split["other_model"]) == (0.4, 0.1)
     assert split["policy_output_tokens_per_s"] == {"p50": 10.0, "p5": 10.0}
+
+
+class TestOmittedRolloutRecords:
+    """record_omitted_rollouts: a rollout that produced no result leaves one sidecar row marked _ng_no_persist."""
+
+    @pytest.mark.parametrize(
+        ("reply", "budget", "expected_class", "expected_message"),
+        [
+            pytest.param(
+                {NG_NO_PERSIST_KEY: True, NG_FAILURE_CLASS_KEY: KILL_SHAPED, "error": "Ray actor died"},
+                {},
+                KILL_SHAPED,
+                "Ray actor died",
+                id="killed",
+            ),
+            pytest.param(
+                {NG_NO_PERSIST_KEY: True},
+                {},
+                KILL_SHAPED,
+                "kill_shaped: the rollout produced no result",
+                id="killed without a class or reason",
+            ),
+            pytest.param(
+                {NG_NO_PERSIST_KEY: True, NG_FAILURE_CLASS_KEY: "provider_oom_killed", "_ng_failure_message": "OOM"},
+                {},
+                "provider_oom_killed",
+                "OOM",
+                id="no result under another class",
+            ),
+            pytest.param(
+                None,
+                {"dispatch_budget_s": 0.0},
+                CANCELLED,
+                "not dispatched: dispatch budget exhausted",
+                id="budget exhausted",
+            ),
+            pytest.param(
+                None,
+                {"dispatch_budget_s": 3600.0, "drain_margin_s": 7200.0},
+                CANCELLED,
+                "not dispatched: 3600s left in dispatch budget, below the 7200s drain margin",
+                id="below the drain margin",
+            ),
+        ],
+    )
+    async def test_each_rollout_with_no_result_leaves_one_marked_row_and_resume_runs_it(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        reply: dict | None,
+        budget: dict,
+        expected_class: str,
+        expected_message: str,
+    ) -> None:
+        posted: list[dict] = []
+        # A rollout the budget never started sends nothing, so the resumed run's success is its first reply.
+        replies = [reply, {"reward": 1.0}] if reply is not None else [{"reward": 1.0}]
+
+        async def post(server_name: str, url_path: str, json: dict, **kwargs):
+            posted.append(json)
+            return FakeResponse(200, replies[len(posted) - 1])
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(orjson.dumps(failing_row(0)) + b"\n")
+        output_fpath = tmp_path / "output.jsonl"
+
+        def config(**overrides) -> RolloutCollectionConfig:
+            return RolloutCollectionConfig(
+                input_jsonl_fpath=str(input_fpath),
+                output_jsonl_fpath=str(output_fpath),
+                num_samples_in_parallel=1,
+                record_omitted_rollouts=True,
+                disable_aggregation=True,
+                disable_health_check=True,
+                **overrides,
+            )
+
+        with pytest.raises(RuntimeError, match="produced a result"):
+            await RolloutCollectionHelper().run_from_config(config(**budget))
+
+        assert len(posted) == (0 if reply is None else 1)
+        assert output_fpath.read_bytes() == b""
+        (row,) = [orjson.loads(line) for line in _failures_path_for(output_fpath).read_bytes().splitlines()]
+        assert row[NG_NO_PERSIST_KEY] is True
+        assert row[NG_OMITTED_ROLLOUT_KEY] is True
+        assert row[NG_FAILURE_CLASS_KEY] == expected_class
+        assert row["_ng_failure_message"] == expected_message
+        assert (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME], row[AGENT_REF_KEY_NAME]) == (
+            0,
+            0,
+            {"name": "my_agent"},
+        )
+        assert "reward" not in row
+        assert bool(row.get(NG_DISPATCH_DRAINED_KEY)) is (reply is None)
+
+        # The row used no attempt: resume runs the rollout again as its first attempt, and it lands.
+        await RolloutCollectionHelper().run_from_config(config(resume_from_cache=True))
+        assert ATTEMPT_INDEX_KEY_NAME not in posted[-1]
+        assert [orjson.loads(line)["reward"] for line in output_fpath.read_bytes().splitlines()] == [1.0]
+
+
+class TestSidecarReadersSkipOmittedRows:
+    """Every reader of the sidecar treats a record_omitted_rollouts row as no result, never as a failed attempt.
+
+    The sidecar holds one real failure (task 0) and rows for two rollouts that produced no result: a killed
+    one (task 1) and one the budget never started (task 2), the latter repeated and stamped terminal so that a
+    reader counting it as an attempt would retire it.
+    """
+
+    @staticmethod
+    def _output(tmp_path: Path) -> Path:
+        output_fpath = tmp_path / "rollouts.jsonl"
+        output_fpath.write_bytes(b"")
+        materialized_path_for(output_fpath).write_bytes(
+            b"".join(orjson.dumps(failing_row(task)) + b"\n" for task in range(3))
+        )
+        failure = {**failing_row(0), NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS}
+        killed = {
+            **failing_row(1),
+            NG_NO_PERSIST_KEY: True,
+            NG_OMITTED_ROLLOUT_KEY: True,
+            NG_FAILURE_CLASS_KEY: KILL_SHAPED,
+        }
+        never_started = {
+            **failing_row(2),
+            NG_NO_PERSIST_KEY: True,
+            NG_OMITTED_ROLLOUT_KEY: True,
+            NG_DISPATCH_DRAINED_KEY: True,
+            NG_FAILURE_CLASS_KEY: CANCELLED,
+            NG_TERMINAL_KEY: True,
+        }
+        _failures_path_for(output_fpath).write_bytes(
+            b"".join(orjson.dumps(row) + b"\n" for row in [failure, killed, *[never_started] * 5])
+        )
+        return output_fpath
+
+    def test_scoring_counts_them_missing_not_failed(self, tmp_path: Path) -> None:
+        output_fpath = self._output(tmp_path)
+        sidecar = [_failures_path_for(output_fpath)]
+        every_class = [AGENT_RUN_ERROR_FAILURE_CLASS, KILL_SHAPED, CANCELLED]
+
+        counted = _failure_rows_counted_as_zero(sidecar, every_class, set())
+        missing = _missing_rollout_rows_counted_as_zero([materialized_path_for(output_fpath)], sidecar, set())
+
+        assert [row[TASK_INDEX_KEY_NAME] for row in counted] == [0]
+        assert [row[TASK_INDEX_KEY_NAME] for row in missing] == [1, 2]
+
+    def test_exporter_metrics_count_no_attempt_for_them(self, tmp_path: Path) -> None:
+        output_fpath = self._output(tmp_path)
+        identity = lambda row: (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+
+        metrics = _failure_export_metrics([_failures_path_for(output_fpath)], identity, set())
+
+        assert metrics["retries/attempts"] == 1
+        assert {k: v for k, v in metrics.items() if k.startswith("coverage/failed/")} == {
+            f"coverage/failed/{AGENT_RUN_ERROR_FAILURE_CLASS}": 1
+        }
+
+    def test_run_health_counts_them_missing(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_health import _read_failures, _rollout_accounting
+
+        accounting = _rollout_accounting(
+            set(),
+            _read_failures(set(), [self._output(tmp_path)]),
+            limits=RunHealthLimits(),
+            limits_source="config",
+            duplicated=0,
+        )
+
+        assert accounting["failed"]["by_class"] == {AGENT_RUN_ERROR_FAILURE_CLASS: 1}
+        assert (accounting["expected"], accounting["missing"]) == (3, 2)
+
+    def test_rollout_compare_leaves_them_out(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_compare.rows import load_rollouts
+
+        assert [row[TASK_INDEX_KEY_NAME] for row in load_rollouts(self._output(tmp_path))] == [0]
+
+    def test_resume_runs_them_again_without_an_attempt(self, tmp_path: Path) -> None:
+        output_fpath = self._output(tmp_path)
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(materialized_path_for(output_fpath)), output_jsonl_fpath=str(output_fpath)
+        )
+
+        pending, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        assert [(row[TASK_INDEX_KEY_NAME], row.get(ATTEMPT_INDEX_KEY_NAME)) for row in pending] == [
+            (0, 1),
+            (1, None),
+            (2, None),
+        ]
+
+
+class TestOmittedRowsAndTheLatestAttempt:
+    """Review of #5081: readers pick a rollout's latest execution before setting record_omitted_rollouts rows aside.
+
+    Task 0 failed in the judge and was then interrupted on retry: the interrupted attempt is its latest execution,
+    so the old judge failure must not count again and the rollout is missing. Task 1 failed in the judge and its
+    retry was never started: that row is no execution, so the judge failure still stands. Task 2 is a row ATIF
+    reverification writes today (`_ng_no_persist`, `kill_shaped`, no omission marker), which keeps being counted.
+    """
+
+    @staticmethod
+    def _output(tmp_path: Path) -> Path:
+        output_fpath = tmp_path / "rollouts.jsonl"
+        output_fpath.write_bytes(b"")
+        materialized_path_for(output_fpath).write_bytes(
+            b"".join(orjson.dumps(failing_row(task)) + b"\n" for task in range(3))
+        )
+        judge_failed = lambda task: {**failing_row(task), NG_FAILURE_CLASS_KEY: "judge_failed"}
+        omitted = {NG_NO_PERSIST_KEY: True, NG_OMITTED_ROLLOUT_KEY: True}
+        rows = [
+            judge_failed(0),
+            {**failing_row(0), **omitted, NG_FAILURE_CLASS_KEY: KILL_SHAPED},
+            judge_failed(1),
+            {**failing_row(1), **omitted, NG_DISPATCH_DRAINED_KEY: True, NG_FAILURE_CLASS_KEY: CANCELLED},
+            {**failing_row(2), NG_NO_PERSIST_KEY: True, NG_FAILURE_CLASS_KEY: KILL_SHAPED},
+        ]
+        _failures_path_for(output_fpath).write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+        return output_fpath
+
+    def test_scoring(self, tmp_path: Path) -> None:
+        output_fpath = self._output(tmp_path)
+        sidecar = [_failures_path_for(output_fpath)]
+
+        counted = _failure_rows_counted_as_zero(sidecar, ["judge_failed", KILL_SHAPED], set())
+        missing = _missing_rollout_rows_counted_as_zero([materialized_path_for(output_fpath)], sidecar, set())
+
+        assert [row[TASK_INDEX_KEY_NAME] for row in counted] == [1, 2]
+        assert [row[TASK_INDEX_KEY_NAME] for row in missing] == [0]
+
+    def test_exporter_metrics(self, tmp_path: Path) -> None:
+        identity = lambda row: (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+
+        metrics = _failure_export_metrics([_failures_path_for(self._output(tmp_path))], identity, set())
+
+        assert metrics["retries/attempts"] == 3
+        assert {k: v for k, v in metrics.items() if k.startswith("coverage/failed/")} == {
+            "coverage/failed/judge_failed": 1,
+            f"coverage/failed/{KILL_SHAPED}": 1,
+        }
+
+    def test_run_health(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_health import _read_failures, _rollout_accounting
+
+        accounting = _rollout_accounting(
+            set(),
+            _read_failures(set(), [self._output(tmp_path)]),
+            limits=RunHealthLimits(),
+            limits_source="config",
+            duplicated=0,
+        )
+
+        assert accounting["failed"]["by_class"] == {"judge_failed": 1, KILL_SHAPED: 1}
+        assert (accounting["expected"], accounting["missing"]) == (3, 1)
+
+    def test_rollout_compare(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_compare.rows import load_rollouts
+
+        assert [row[TASK_INDEX_KEY_NAME] for row in load_rollouts(self._output(tmp_path))] == [1, 2]
 
 
 def test_episode_record_carries_the_failure_kind_into_the_sidecar_row() -> None:

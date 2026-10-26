@@ -817,3 +817,30 @@ async def test_run_examples_output_is_unchanged(monkeypatch: pytest.MonkeyPatch)
     results = [result for _, result in [await future for future in RolloutCollectionHelper().run_examples(rows)]]
 
     assert results == [reply, reply]
+
+
+@pytest.mark.parametrize("never_started,expected_timeouts", [(False, 0), (True, 1)])
+def test_timeout_selection_respects_omitted_retry_state(tmp_path: Path, never_started: bool, expected_timeouts: int):
+    from nemo_gym.path_utils import materialized_path_for
+
+    output = tmp_path / "rollouts.jsonl"
+    output.write_text("")
+    identity = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+    materialized_path_for(output).write_text(json.dumps(identity) + "\n")
+    timeout = {**identity, NG_FAILURE_CLASS_KEY: "timeout_exceeded", "timed_out": True}
+    retry = {
+        **identity,
+        ATTEMPT_INDEX_KEY_NAME: 1,
+        NG_FAILURE_CLASS_KEY: "cancelled" if never_started else "kill_shaped",
+        "_ng_no_persist": True,
+        "_ng_omitted_rollout": True,
+    }
+    if never_started:
+        retry["_ng_dispatch_drained"] = True
+    failures_path_for(output).write_text("".join(json.dumps(row) + "\n" for row in [timeout, retry]))
+
+    timeouts = health_check_run_dir(tmp_path).summary["run"]["stats"]["timeouts"]
+
+    # A newer interruption supersedes the timeout; an undispatched retry is not a new execution.
+    assert timeouts["timed_out"] == expected_timeouts
+    assert output.read_bytes() == b""
