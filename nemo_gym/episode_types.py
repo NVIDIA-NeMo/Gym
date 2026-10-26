@@ -76,6 +76,22 @@ def is_materialized_task_row(row: Mapping[str, object]) -> bool:
     return isinstance(row.get("task_id"), Mapping) and "task_input" in row
 
 
+class FailureHop(BaseModel):
+    """One hop of ``EpisodeFailure.failure_path``: an exception in the chain, by type, never by text."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    exception_type: str
+    http_status: int | None = None
+    operation: str | None = None
+
+    # A return annotation would replace the public JSON Schema with that type.
+    @model_serializer(mode="wrap")
+    def _serialize_hop(self, handler: SerializerFunctionWrapHandler):
+        # Omit what was not observed, as EpisodeFailure omits its unset fields.
+        return {key: value for key, value in handler(self).items() if value is not None}
+
+
 class EpisodeFailure(BaseModel):
     """Describe a failure using the same fields on the wire and in saved records.
 
@@ -90,6 +106,9 @@ class EpisodeFailure(BaseModel):
     terminal: bool = Field(description="Whether rollout collection must not attempt this episode again.")
     failure_kind: str | None = None
     stage: FailureStage | None = None
+    # The hops from the rollout to the innermost failure, outermost first
+    # (``nemo_gym.typed_exceptions``). Taken from the exception chain by type, never from text.
+    failure_path: list[FailureHop] | None = None
 
     @field_validator("failure_kind")
     @classmethod
@@ -102,7 +121,7 @@ class EpisodeFailure(BaseModel):
         # Omit metadata when the producer cannot classify the failure.
         # Protocol subclasses still serialize their own diagnostic fields.
         result = handler(self)
-        for key in ("failure_kind", "stage"):
+        for key in ("failure_kind", "stage", "failure_path"):
             if result.get(key) is None:
                 result.pop(key, None)
         return result

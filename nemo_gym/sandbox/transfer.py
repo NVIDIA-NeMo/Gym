@@ -26,33 +26,51 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
+from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.typed_exceptions import PositionalException
 
 
 LOGGER = logging.getLogger(__name__)
 
 
-class SandboxTransferError(RuntimeError):
-    """A transfer command failed inside the sandbox."""
+class SandboxTransferError(PositionalException, RuntimeError):
+    """A transfer command failed inside the sandbox.
+
+    Typed: its failure path records the transfer; no kind is set, since the sandbox's own files (a
+    symbolic link, a full disk) can make a transfer fail too.
+    """
+
+    operation_name = "sandbox.transfer"
 
 
-class SandboxUnavailableError(RuntimeError):
+class SandboxUnavailableError(PositionalException, RuntimeError):
     """The provider could not run a transfer command at all (its result carries an ``error_type``).
 
     A timeout, a lost container or an exec the provider refused is Gym's outage, not a property of
     the task or the sandbox's files, so it is not a :class:`SandboxTransferError`: a caller that
     scores a deterministic transfer failure (permission denied, cannot mkdir) lets this one propagate
     and the episode is retried.
+
+    Typed as a ``provider_unavailable``.
     """
 
+    failure_kind = PROVIDER_UNAVAILABLE
+    operation_name = "sandbox.exec"
 
-class SandboxProbeError(RuntimeError):
+
+class SandboxProbeError(PositionalException, RuntimeError):
     """The sandbox could not answer a probe or run a command (lost container, provider timeout).
 
     Not a :class:`SandboxTransferError`: a caller that treats a failed transfer as "this artifact is
     not there" must not treat an outage the same way.
+
+    Typed as a ``provider_unavailable``.
     """
+
+    failure_kind = PROVIDER_UNAVAILABLE
+    operation_name = "sandbox.exec"
 
 
 def _pack(source: Path, archive: Path) -> None:

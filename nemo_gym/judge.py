@@ -35,11 +35,21 @@ import functools
 import re
 from typing import Any, Awaitable, Callable, Type, TypeVar
 
+from aiohttp import ClientConnectorError, ClientResponseError
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from nemo_gym.failure_kinds import (
+    JUDGE_CREDENTIALS_REJECTED,
+    JUDGE_FAILED,
+    JUDGE_RATE_LIMITED,
+    JUDGE_SERVER_ERROR,
+    JUDGE_TIMEOUT,
+    JUDGE_UNREACHABLE,
+)
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
+from nemo_gym.typed_exceptions import TypedException, failure_path_fields, innermost_http_status
 
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
@@ -58,6 +68,69 @@ class JudgeError(Exception):
     """A judge call failed; judge_failsafe routes the row to the failures sidecar."""
 
 
+# Typed judge failures. Each is also a JudgeError, so every ``except JudgeError`` (judge_failsafe
+# and the servers that catch it) runs as before; the text is the same JudgeError text. Each names
+# what the client observed as its failure_kind; any other JudgeError stays a ``judge_failed``.
+
+
+class _TypedJudgeError(JudgeError, TypedException):
+    pass
+
+
+class JudgeCredentialsRejected(_TypedJudgeError):
+    """The judge endpoint answered HTTP 401 or 403."""
+
+    failure_kind = JUDGE_CREDENTIALS_REJECTED
+
+
+class JudgeRateLimited(_TypedJudgeError):
+    """The judge endpoint answered HTTP 429."""
+
+    failure_kind = JUDGE_RATE_LIMITED
+
+
+class JudgeServerError(_TypedJudgeError):
+    """The judge endpoint answered HTTP 5xx."""
+
+    failure_kind = JUDGE_SERVER_ERROR
+
+
+class JudgeUnreachable(_TypedJudgeError):
+    """The connection to the judge endpoint was never established (``ClientConnectorError``)."""
+
+    failure_kind = JUDGE_UNREACHABLE
+
+
+class JudgeTimeout(_TypedJudgeError):
+    """The judge call ran past its timeout (``TimeoutError``)."""
+
+    failure_kind = JUDGE_TIMEOUT
+
+
+def _judge_error(error: Exception) -> JudgeError:
+    """The JudgeError for a failed judge call: typed when its exception type or status decides.
+
+    The status is the innermost one on the call's failure path: a model server that answers 500 for a
+    failed provider call sends the provider's status in its failure header, and that is the observed
+    fact about the judge endpoint.
+    """
+    message = f"{type(error).__name__}: {error}"
+    fields = {"message": message, "operation": "judge.request", "stage": "verification"}
+    if isinstance(error, ClientResponseError):
+        status = innermost_http_status(error) or error.status
+        if status in (401, 403):
+            return JudgeCredentialsRejected(**fields)
+        if status == 429:
+            return JudgeRateLimited(**fields)
+        if status >= 500:
+            return JudgeServerError(**fields)
+    elif isinstance(error, ClientConnectorError):
+        return JudgeUnreachable(**fields)
+    elif isinstance(error, TimeoutError):
+        return JudgeTimeout(**fields)
+    return JudgeError(message)
+
+
 async def reraise_judge_errors(coro: Awaitable[Any]) -> Any:
     """Await a judge call; re-raise any exception as JudgeError (recorded verbatim)."""
     try:
@@ -65,7 +138,7 @@ async def reraise_judge_errors(coro: Awaitable[Any]) -> Any:
     except JudgeError:
         raise
     except Exception as e:
-        raise JudgeError(f"{type(e).__name__}: {e}") from e
+        raise _judge_error(e) from e
 
 
 async def call_judge(
@@ -116,7 +189,8 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
             data |= {
                 "reward": 0.0,
                 "mask_sample": True,
-                "failure_kind": "judge_failed",
+                # What the client observed, where it could tell; the routing class below stays judge_failed.
+                "failure_kind": (e.failure_kind if isinstance(e, TypedException) and e.failure_kind else JUDGE_FAILED),
                 "failure_reason": error,
                 # Keep older NeMo RL consumers working during top-level field migration.
                 "instance_config": {
@@ -126,6 +200,8 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
                 "_ng_failure_class": "judge_failed",
                 "_ng_failure_judge_error": error,
             }
+            # The failed call's hops.
+            data |= failure_path_fields(e)
             return JSONResponse(content=jsonable_encoder(data))
 
     return wrapper

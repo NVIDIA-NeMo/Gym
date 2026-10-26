@@ -104,11 +104,12 @@ def test_saved_record_requires_explicit_run_and_delivery_evidence() -> None:
 def test_public_response_schema_keeps_the_explicit_failure_fields() -> None:
     schema = RolloutFailure.model_json_schema(mode="serialization")
     failure = schema["$defs"]["EpisodeFailure"]
-    assert schema["properties"]["schema_version"]["const"] == 1
+    assert schema["properties"]["schema_version"]["enum"] == [1, 2]
     properties = {
         "RolloutFailure": set(schema["properties"]),
         "EpisodeFailure": set(failure["properties"]),
         "EpisodeId": set(schema["$defs"]["EpisodeId"]["properties"]),
+        "FailureHop": set(schema["$defs"]["FailureHop"]["properties"]),
     }
     assert properties == {
         "RolloutFailure": {
@@ -121,10 +122,19 @@ def test_public_response_schema_keeps_the_explicit_failure_fields() -> None:
             "http_status",
             "exception_type",
         },
-        "EpisodeFailure": {"failure_reason", "terminal", "failure_kind", "stage"},
+        "EpisodeFailure": {
+            "failure_reason",
+            "terminal",
+            "failure_kind",
+            "stage",
+            "failure_path",
+        },
         "EpisodeId": {"rollout_id", "attempt"},
+        "FailureHop": {"exception_type", "http_status", "operation"},
     }, "Changing version-1 saved fields requires reviewing the RolloutFailure schema_version bump policy"
     assert failure["additionalProperties"] is False
+    assert schema["$defs"]["FailureHop"]["additionalProperties"] is False
+    assert schema["$defs"]["FailureHop"]["required"] == ["exception_type"]
     assert failure["required"] == ["failure_reason", "terminal"]
     assert failure["properties"]["failure_reason"]["maxLength"] == 2000
     assert "message" not in failure["properties"]
@@ -138,7 +148,7 @@ def test_public_response_schema_keeps_the_explicit_failure_fields() -> None:
     assert "failure_kind" in failure["properties"]
 
 
-@pytest.mark.parametrize("schema_version", [None, 1, 2])
+@pytest.mark.parametrize("schema_version", [None, 1, 3])
 def test_saved_failure_record_versions(schema_version: int | None) -> None:
     payload = {
         "episode_id": {"rollout_id": "task-7"},
@@ -149,7 +159,7 @@ def test_saved_failure_record_versions(schema_version: int | None) -> None:
     }
     if schema_version is not None:
         payload["schema_version"] = schema_version
-    if schema_version == 2:
+    if schema_version == 3:
         with pytest.raises(ValidationError, match="schema_version"):
             RolloutFailure.model_validate(payload)
     else:
@@ -197,3 +207,65 @@ def test_environment_failure_requires_established_delivery(source: str, delivery
         record = RolloutFailure.model_validate_json(json.dumps(payload))
         assert record.source == source and record.delivery == delivery
         assert RolloutFailure.model_validate_json(record.model_dump_json()) == record
+
+
+_JUDGE_429 = {
+    "failure_reason": "ClientResponseError: 429, message='Too Many Requests'",
+    "terminal": False,
+    "failure_kind": "judge_rate_limited",
+    "stage": "verification",
+    "failure_path": [
+        {"operation": "judge.request", "exception_type": "nemo_gym.judge.JudgeRateLimited"},
+        {"exception_type": "aiohttp.client_exceptions.ClientResponseError", "http_status": 429},
+    ],
+}
+
+
+def _record(**overrides: object) -> dict:
+    return {
+        "episode_id": {"rollout_id": "task-7", "attempt": 1},
+        "run_id": "eval-1",
+        "source": "environment",
+        "delivery": "delivered",
+        "failure": _JUDGE_429,
+        **overrides,
+    }
+
+
+def test_a_version_two_record_round_trips_with_its_failure_path() -> None:
+    record = RolloutFailure.model_validate(_record(schema_version=2))
+    saved = json.loads(record.model_dump_json())
+    assert saved["schema_version"] == 2 and saved["failure"] == _JUDGE_429
+    assert RolloutFailure.model_validate_json(record.model_dump_json()) == record
+    # One kind per failure: the judge 429 is a judge_rate_limited, and its status is a hop on the path.
+    assert record.failure.failure_kind == "judge_rate_limited"
+    assert record.failure.failure_path[-1].http_status == 429
+
+
+def test_a_record_with_a_failure_path_must_say_version_two() -> None:
+    for version in (None, 1):
+        payload = _record() if version is None else _record(schema_version=version)
+        with pytest.raises(ValidationError, match="requires schema_version=2"):
+            RolloutFailure.model_validate(payload)
+
+
+def test_a_version_one_record_still_loads_and_saves_unchanged() -> None:
+    plain = {"failure_reason": "No reply", "terminal": False, "failure_kind": "transport_timeout"}
+    payload = _record(failure=plain, source="collector", delivery="possibly_delivered")
+    saved = json.loads(RolloutFailure.model_validate(payload).model_dump_json())
+    assert saved["schema_version"] == 1 and saved["failure"] == plain
+    # A version-2 reader loads it too: version 2 only adds the optional path.
+    assert RolloutFailure.model_validate(payload | {"schema_version": 2}).failure.failure_path is None
+
+
+@pytest.mark.parametrize(
+    "hop",
+    [
+        {"exception_type": "ValueError", "message": "x"},  # unknown field
+        {"http_status": 429},  # no exception type
+        {"exception_type": "ValueError", "http_status": "Too Many Requests"},  # not a status
+    ],
+)
+def test_a_hop_is_a_strict_model(hop: dict) -> None:
+    with pytest.raises(ValidationError):
+        RolloutFailure.model_validate(_record(schema_version=2, failure=_JUDGE_429 | {"failure_path": [hop]}))

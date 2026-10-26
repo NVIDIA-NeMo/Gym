@@ -78,6 +78,7 @@ from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose
+from nemo_gym.sandbox.providers.base import SandboxCredentialsRejected
 from nemo_gym.server_utils import (
     get_response_json,
     is_nemo_gym_fastapi_entrypoint,
@@ -88,6 +89,7 @@ from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
 from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+from nemo_gym.typed_exceptions import http_status
 
 
 LOGGER = logging.getLogger(__name__)
@@ -586,7 +588,7 @@ class HarborEnvironmentServer(
             except Exception:
                 LOGGER.exception("Failed to stop Harbor sandbox after failed seed")
             LOGGER.exception("Sandbox setup failed for %s", task.task_id)
-            raise HTTPException(503, f"Could not set up sandbox for {task.task_id!r}: {exc}") from exc
+            raise HTTPException(503, f"Could not set up sandbox for {task.task_id!r}: {exc}") from _setup_cause(exc)
         self._sessions[episode_key] = session
         return session
 
@@ -620,6 +622,17 @@ class HarborEnvironmentServer(
                 agent_observations=agent_observations,
             )
         )
+
+
+def _setup_cause(exc: Exception) -> BaseException:
+    """``exc``, behind a SandboxCredentialsRejected when the sandbox provider answered 401 or 403."""
+    if http_status(exc) not in (401, 403):
+        return exc
+    rejected = SandboxCredentialsRejected(
+        message=f"{type(exc).__name__}: {exc}"[:2000], operation="sandbox.setup", stage="seed"
+    )
+    rejected.__cause__ = exc
+    return rejected
 
 
 def _cookies(response: Any) -> dict[str, str]:

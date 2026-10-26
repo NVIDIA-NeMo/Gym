@@ -21,6 +21,9 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
+from nemo_gym.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, PROVIDER_UNAVAILABLE
+from nemo_gym.typed_exceptions import PositionalException, TypedException
+
 
 # How long a provider may spend finding and deleting the sandbox a timed-out create left behind (one list
 # and one delete per orphan). A caller that puts its own deadline on a create leaves at least this much room
@@ -258,12 +261,34 @@ class SandboxPtySpec:
     pty: bool = True
 
 
-class SandboxPtyError(RuntimeError):
-    """Raised when a PTY session fails outside normal process exit."""
+class SandboxPtyError(PositionalException, RuntimeError):
+    """Raised when a PTY session fails outside normal process exit.
+
+    Typed: its failure path records the session's end; no kind is set, since both the provider and the
+    model's own ``exit`` end a session this way.
+    """
+
+    operation_name = "sandbox.pty"
 
 
-class SandboxCreateError(RuntimeError):
-    """Raised when a provider cannot create a sandbox."""
+class SandboxCredentialsRejected(TypedException):
+    """The sandbox provider answered HTTP 401 or 403: it refused the sandbox credentials.
+
+    A caller that observes the status chains this between the provider's error and the error it raises,
+    so the raised type, its handlers and its reply stay what they were.
+    """
+
+    failure_kind = PROVIDER_CREDENTIALS_REJECTED
+
+
+class SandboxCreateError(PositionalException, RuntimeError):
+    """Raised when a provider cannot create a sandbox.
+
+    Typed as a ``provider_unavailable``; every provider's create error subclasses it.
+    """
+
+    failure_kind = PROVIDER_UNAVAILABLE
+    operation_name = "sandbox.create"
 
 
 class SandboxCreateVerificationError(SandboxCreateError):

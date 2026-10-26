@@ -84,8 +84,14 @@ MODEL_TRANSPORT_ERROR = "model_transport_error"
 MODEL_CONTEXT_LIMIT = "model_context_limit"
 
 # --- verifier and judge --------------------------------------------------------------- #
-# ``judge_failed`` is produced today by judge_failsafe and by reverification.
+# ``judge_failed`` is produced today by judge_failsafe and by reverification. The judge client
+# names what it observed where it can: the endpoint's HTTP status, a connection never made, a timeout.
 JUDGE_FAILED = "judge_failed"
+JUDGE_CREDENTIALS_REJECTED = "judge_credentials_rejected"
+JUDGE_RATE_LIMITED = "judge_rate_limited"
+JUDGE_SERVER_ERROR = "judge_server_error"
+JUDGE_UNREACHABLE = "judge_unreachable"
+JUDGE_TIMEOUT = "judge_timeout"
 JUDGE_UNPARSEABLE = "judge_unparseable"
 VERIFIER_ERROR = "verifier_error"
 
@@ -93,6 +99,8 @@ VERIFIER_ERROR = "verifier_error"
 PROVIDER_UNAVAILABLE = "provider_unavailable"
 PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
 PROVIDER_OOM_KILLED = "provider_oom_killed"
+# The provider answered HTTP 401 or 403: the sandbox credentials were refused.
+PROVIDER_CREDENTIALS_REJECTED = "provider_credentials_rejected"
 
 # --- resources session ------------------------------------------------------------------ #
 SESSION_LOST = "session_lost"
@@ -127,11 +135,17 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         MODEL_TRANSPORT_ERROR,
         MODEL_CONTEXT_LIMIT,
         JUDGE_FAILED,
+        JUDGE_CREDENTIALS_REJECTED,
+        JUDGE_RATE_LIMITED,
+        JUDGE_SERVER_ERROR,
+        JUDGE_UNREACHABLE,
+        JUDGE_TIMEOUT,
         JUDGE_UNPARSEABLE,
         VERIFIER_ERROR,
         PROVIDER_UNAVAILABLE,
         PROVIDER_QUOTA_EXHAUSTED,
         PROVIDER_OOM_KILLED,
+        PROVIDER_CREDENTIALS_REJECTED,
         SESSION_LOST,
         SESSION_EXPIRED,
         SESSION_RELEASE_FAILED,

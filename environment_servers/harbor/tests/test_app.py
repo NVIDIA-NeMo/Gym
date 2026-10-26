@@ -298,6 +298,30 @@ class TestEpisode:
         assert "pull failed" in response.failure.failure_reason
         assert server.server_client.calls == []
 
+    @pytest.mark.parametrize("status", [401, 403, 500, None])
+    async def test_sandbox_credentials_refused_at_seed_are_named(self, tmp_path, monkeypatch, status):
+        """A 401 or 403 from the sandbox provider sets the kind; the reply is the one any setup failure gets."""
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+
+        class SandboxApiException(Exception):  # the provider SDK's error, with its integer status_code
+            status_code = status
+
+        async def refused(task, workdir, *, episode_key):
+            raise SandboxApiException("Create sandbox failed: Authentication credentials are invalid.")
+
+        monkeypatch.setattr(server, "_create_sandbox", refused)
+        failure = (await run_episode(server, task)).failure
+        assert failure.stage == "seed" and not failure.terminal
+        assert "Could not set up sandbox for 'hello'" in failure.failure_reason
+        hops = [hop.exception_type.rsplit(".", 1)[-1] for hop in failure.failure_path]
+        if status in (401, 403):
+            assert failure.failure_kind == "provider_credentials_rejected"
+            assert hops[-2:] == ["SandboxCredentialsRejected", "SandboxApiException"]
+            assert failure.failure_path[-2].operation == "sandbox.setup"
+            assert failure.failure_path[-1].http_status == status
+        else:
+            assert failure.failure_kind is None and "SandboxCredentialsRejected" not in hops
+
     async def test_shutdown_refuses_new_episodes(self, tmp_path, monkeypatch):
         server, task, _, created = make_server(tmp_path, monkeypatch)
         await server.shutdown()

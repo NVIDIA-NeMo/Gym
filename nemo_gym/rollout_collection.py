@@ -127,6 +127,7 @@ from nemo_gym.telemetry.gym_metrics import (
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.typed_exceptions import PATH_ROW_KEY, decode_header, row_fields
 
 
 if TYPE_CHECKING:
@@ -423,6 +424,11 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
         }
         if failure.get("stage") is not None:
             record["_ng_failure_stage"] = failure["stage"]
+        # The reason the failure names, kept apart from the routing class above, which it does not change.
+        if failure.get("failure_kind") is not None:
+            record["_ng_failure_kind"] = failure["failure_kind"]
+        if failure.get("failure_path") is not None:
+            record[PATH_ROW_KEY] = failure["failure_path"]
         if failure.get("partial_response") is not None:
             record["_ng_failure_partial_response"] = failure["partial_response"]
         if failure.get("agent_observations") is not None:
@@ -441,6 +447,9 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             NG_FAILURE_CLASS_KEY: JUDGE_FAILED,
             NG_FAILURE_JUDGE_ERROR_KEY: result.get(NG_FAILURE_JUDGE_ERROR_KEY),
         }
+        # judge_failsafe also puts the failed call's hops on the row.
+        if PATH_ROW_KEY in result:
+            judge_failure[PATH_ROW_KEY] = result[PATH_ROW_KEY]
         # drop the judge failure keys from the result so it doesn't raise in _is_collector_key
         # we don't want to modify the check itself because we want it to raise for other values
         # of `NG_FAILURE_CLASS_KEY` field
@@ -466,6 +475,9 @@ class _CompletedRollout:
     environment_server: Optional[str] = None
     environment_server_type: Optional[str] = None
     dispatch_span_context: Optional["SpanContext"] = None
+    # The failure path in the failed reply's X-NG-Failure-Event header, as a failure-row key. Only the
+    # writer adds it, so run_examples yields the same result as before.
+    failure_path: Optional[Dict[str, Any]] = None
 
 
 def _round_robin_by_agent(examples: List[Dict]) -> List[Dict]:
@@ -3549,6 +3561,7 @@ class RolloutCollectionHelper(BaseModel):
                     result[NG_ENVIRONMENT_SERVER_KEY] = completed.environment_server
                 if completed.environment_server_type is not None:
                     result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
+                result.update(completed.failure_path or {})
 
                 # Set below for a rollout whose trajectory is health-evaluated once the bookkeeping is done.
                 health_outcome: Optional[str] = None
@@ -4545,6 +4558,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server=server_name,
                         environment_server_type=server_type,
                         dispatch_span_context=dispatch_span_context,
+                        failure_path=row_fields(
+                            decode_header(getattr(e, "headers", None) or getattr(res, "headers", None))
+                        ),
                     )
                 finally:
                     # Failed and timed-out tasks inform the adaptive margin too, but only by

@@ -118,6 +118,7 @@ from nemo_gym.telemetry.observer import observe_app_event_loop, request_counts
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
+from nemo_gym.typed_exceptions import FAILURE_EVENT_HEADER, safe_failure_header
 
 
 try:
@@ -1793,16 +1794,27 @@ class SimpleServer(BaseServer):
                 response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
                 print(_format_upstream_error_log(self.get_session_middleware_key(), e), flush=True)
 
-                return JSONResponse(content=response_content, status_code=500)
-            except CancelledError:
-                return JSONResponse(content="Request was cancelled", status_code=500)
+                # The inner server's own event is the more specific one; pass it on unchanged.
+                inner = (e.headers or {}).get(FAILURE_EVENT_HEADER)
+                # Only a legal (ASCII) header is passed on; anything else is replaced by this server's own.
+                relay = isinstance(inner, str) and inner and inner.isascii()
+                headers = {FAILURE_EVENT_HEADER: inner} if relay else safe_failure_header(e, server=self.config.name)
+                return JSONResponse(content=response_content, status_code=500, headers=headers)
+            except CancelledError as e:
+                return JSONResponse(
+                    content="Request was cancelled",
+                    status_code=500,
+                    headers=safe_failure_header(e, server=self.config.name),
+                )
             except Exception as e:
                 print(
                     f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
 Formatted exception: {format_exc()}
 repr(e): {repr(e)}"""
                 )
-                return JSONResponse(content=repr(e), status_code=500)
+                return JSONResponse(
+                    content=repr(e), status_code=500, headers=safe_failure_header(e, server=self.config.name)
+                )
             except:
                 print_exc()
                 print(
