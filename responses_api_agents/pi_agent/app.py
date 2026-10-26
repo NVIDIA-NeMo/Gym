@@ -25,12 +25,13 @@ from asyncio import Semaphore
 from collections.abc import Mapping
 from pathlib import Path
 from time import time
-from typing import Any, Literal, Optional
+from typing import Any, ClassVar, Literal, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
+from nemo_gym.agent_outcome import AgentOutcome
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -44,6 +45,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -81,6 +83,17 @@ MCP_SETUP_ERROR_EXIT_CODE = 78  # Must match gym_mcp.mjs (EX_CONFIG).
 # gym_mcp.mjs names each tool `<grant>_<tool>` and allows at most 64 of these characters.
 _MCP_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]{1,62}")
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
+
+
+def _reported_model_error(assistant: Mapping[str, Any], cleanup: Mapping[str, Any], *, will_retry: bool) -> bool:
+    """Recognize Pi 0.80.2's final agent_end error report without hiding worker or cleanup failures."""
+    return (
+        cleanup["return_code"] == 0
+        and not cleanup["timed_out"]
+        and not cleanup["error"]
+        and assistant.get("stopReason") == "error"
+        and not will_retry
+    )
 
 
 def _ends_on_finish_tool(messages: list[Any]) -> bool:
@@ -607,7 +620,21 @@ class PiAgentVerifyResponse(BaseVerifyResponse):
 class PiAgent(SimpleResponsesAPIAgent):
     """Runs the pi CLI (pi --print --mode json --no-session)"""
 
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Read Pi 0.80.2's terminal assistant error; tested on that pinned version."""
+        if native_result.get("stopReason") != "error":
+            return AgentOutcome(failure_kind="unknown")
+        message = str(native_result.get("errorMessage") or "")
+        match = re.match(r"^(?:HTTP )?([45]\d{2})(?::|\s|$)", message)
+        if match:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
+        if message in {"Connection error.", "Connection error", "fetch failed", "Request timed out."}:
+            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        return AgentOutcome(failure_kind="unknown")
+
     config: PiAgentConfig
+    # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
@@ -904,6 +931,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                     self.config.model_server,
                     [*conversation, *output],
                     transcript_available=bool(output),
+                    capture_correlated=True,
                 )
             except Exception:
                 LOG.exception("failed to build interrupted Pi observations")
@@ -927,6 +955,8 @@ class PiAgent(SimpleResponsesAPIAgent):
         cached_tokens: int | None = 0
         terminal_error = None
         context_overflow = False
+        compaction_started = False
+        recovery_error = None
         stop_reasons = []
         mcp_setup_failure = None
         messages = []
@@ -935,6 +965,16 @@ class PiAgent(SimpleResponsesAPIAgent):
                 context_overflow = event.get("context_overflow") is True
             elif event.get("type") == "ng_gym_mcp_setup_failed":
                 mcp_setup_failure = str(event.get("error") or "")
+            elif event.get("type") == "compaction_start":
+                compaction_started = True
+            elif event.get("type") == "compaction_end":
+                # Pi recovers from an overflow by compacting, then retrying. A compaction that started and failed (a 503,
+                # a dropped connection) ends the run with no retry. Pi's verdict that the retry overflowed again comes
+                # with no start.
+                failure = event.get("errorMessage")
+                if compaction_started and event.get("reason") == "overflow" and isinstance(failure, str):
+                    recovery_error = failure
+                compaction_started = False
             message = event.get("message") or {}
             if event.get("type") == "message_end":
                 messages.append(message)
@@ -971,31 +1011,39 @@ class PiAgent(SimpleResponsesAPIAgent):
         runtime = state.runtime_info
         assert cleanup is not None
         model_limit = bool(stop_reasons and stop_reasons[-1] == "error" and context_overflow)
+        compaction_failure = None
+        if recovery_error and stop_reasons and stop_reasons[-1] == "error":
+            # Pi's overflow recovery failed on its compaction call, so the failed call was never retried, even when
+            # Gym does not count its error as an overflow. Pi wraps the compaction call's error in its own message,
+            # which classify_outcome leaves unknown: retryable by default, even if that call hit the context limit.
+            model_limit, terminal_error = False, recovery_error
+            compaction_failure = {"stopReason": "error", "errorMessage": recovery_error}
         if model_limit or (stop_reasons and stop_reasons[-1] == "aborted"):
             # Expected model limits/interruptions do not invalidate partial work.
             # They must not erase an independently confirmed worker or cleanup failure.
             terminal_error = None
-        error = cleanup["error"] or terminal_error
+        execution_error = cleanup["error"]
         if mcp_servers and cleanup["return_code"] == MCP_SETUP_ERROR_EXIT_CODE:
             cause = f": {mcp_setup_failure}" if mcp_setup_failure else ""
-            error = error or f"Required Gym MCP tools could not be initialized{cause}"
+            execution_error = execution_error or f"Required Gym MCP tools could not be initialized{cause}"
         ended_on_finish_tool = _ends_on_finish_tool(messages)
         if cleanup["return_code"] not in (None, 0) and not cleanup["timed_out"] and not model_limit:
-            error = error or f"Pi exited with code {cleanup['return_code']}"
+            execution_error = execution_error or f"Pi exited with code {cleanup['return_code']}"
         if not stop_reasons:
             cached_tokens = None
-            error = error or "Pi produced no assistant result"
+            execution_error = execution_error or "Pi produced no assistant result"
         elif (
             stop_reasons[-1] not in ("stop", "length", "error", "aborted")
             and not cleanup["timed_out"]
             and not ended_on_finish_tool
         ):
-            error = error or "Pi ended without a terminal assistant result"
+            execution_error = execution_error or "Pi ended without a terminal assistant result"
         incomplete = (
             cleanup["timed_out"] or model_limit or (stop_reasons and stop_reasons[-1] in ("length", "aborted"))
         )
         if cleanup["timed_out"] and not stop_reasons and cleanup["error"] is None:
-            error = None
+            execution_error = None
+        error = execution_error or terminal_error
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
@@ -1036,6 +1084,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 self.config.model_server,
                 [*conversation_input, *output],
                 transcript_available=bool(output),
+                capture_correlated=True,
             )
         except Exception:
             # Observation parsing must not turn a valid response/patch into a
@@ -1062,8 +1111,13 @@ class PiAgent(SimpleResponsesAPIAgent):
                 )
             )
         if error:
-            # Keep the captured trajectory on session state for close, but do not invoke
-            # the benchmark verifier after a provider/runtime failure (same as Hermes).
+            terminal = next((event for _, event in reversed(events) if event.get("type") == "agent_end"), {})
+            assistant = next((m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {})
+            if not execution_error and _reported_model_error(
+                assistant, cleanup, will_retry=terminal.get("willRetry") is True
+            ):
+                # Classify a failed compaction call, not the overflow it was recovering from.
+                return self.report_outcome(response, compaction_failure or assistant)
             raise RuntimeError(f"Pi agent failed: {error}")
         return response
 
