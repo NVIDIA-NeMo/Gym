@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Spans nemo-lens cannot produce: a CLIENT-kind span, and a linked root for a new trace.
+"""Spans nemo-lens cannot produce: a CLIENT-kind span, a linked root for a new trace, and a child of an ended span.
 
 ``client_span``: ``nemo.lens.helpers.managed_span`` calls ``tracer.start_span(name)`` with no
 ``kind`` argument and exposes no way to pass one, so every span it creates is
@@ -30,8 +30,12 @@ has ``create_linked_span`` for cross-rank correlation but nothing that also deci
 to split and attaches the result as current. The eval driver uses it so that a run is one
 small job trace plus one bounded trace per rollout.
 
-Both are deliberately identical to ``managed_span`` otherwise: context attach/detach,
-exception recording, and an unconditional ``end()`` in ``finally``.
+``record_child_span``: emits a finished span under a parent given as a ``SpanContext``, which may
+have ended already. The eval driver evaluates a rollout's health after ``gym.rollout.dispatch``
+closed and puts the verdict on a child of it.
+
+``client_span`` and ``linked_root_span`` are otherwise identical to ``managed_span``: context
+attach/detach, exception recording, and an unconditional ``end()`` in ``finally``.
 
 **Callers must gate on the span group themselves.** Nothing here checks it, so that a
 disabled site does not pay for entering a context manager at all
@@ -136,3 +140,18 @@ def linked_root_span(
     finally:
         otel_ctx.detach(token)
         span.end()
+
+
+def record_child_span(name: str, parent: "SpanContext", tracer: Any = None, **attributes: Any) -> None:
+    """Emit *name* as a finished child of *parent*, which may have ended. Gate on the span group first."""
+    from opentelemetry import trace as otel_trace
+    from opentelemetry.trace import NonRecordingSpan, set_span_in_context
+
+    from nemo_gym.telemetry._fallbacks import safe_set_span_attributes
+
+    if tracer is None:
+        tracer = otel_trace.get_tracer("nemo.gym")
+
+    span = tracer.start_span(name, context=set_span_in_context(NonRecordingSpan(parent)))
+    safe_set_span_attributes(span, attributes)
+    span.end()

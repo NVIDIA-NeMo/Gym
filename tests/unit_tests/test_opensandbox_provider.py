@@ -1290,6 +1290,78 @@ async def test_exec_background_polls_status_and_logs(monkeypatch: pytest.MonkeyP
     assert raw.commands.log_calls == ["exec-42"]
 
 
+DELETED_OUTPUT_LOG_ERROR = (
+    "Get command logs failed: error open combined output file for command exec-42: no such file or directory"
+)
+
+
+@pytest.mark.parametrize(
+    "log_error,exit_code,kept",
+    [
+        (DELETED_OUTPUT_LOG_ERROR, 3, True),
+        # Without an exit code there is no evidence of how the command ended.
+        (DELETED_OUTPUT_LOG_ERROR, None, False),
+        ("Get command logs failed: HTTP 500", 3, False),
+    ],
+)
+@pytest.mark.parametrize("status_error", [None, "killed by signal"])
+@pytest.mark.asyncio
+async def test_exec_background_keeps_exit_status_when_the_command_deleted_its_output(
+    monkeypatch: pytest.MonkeyPatch, log_error: str, exit_code: int | None, kept: bool, status_error: str | None
+) -> None:
+    from opensandbox.exceptions import SandboxApiException
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        log_calls = 0
+
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            return SimpleNamespace(id="exec-42")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            return SimpleNamespace(running=False, exit_code=exit_code, error=status_error)
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            self.log_calls += 1
+            # As the SDK raises it: a 500 is otherwise retryable.
+            raise SandboxApiException(log_error, status_code=500)
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "background_poll_interval_s": 0.01, "retries": 2},
+    )
+    commands = FakeCommands()
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-bg", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
+    )
+
+    if kept:
+        result = await provider.exec(handle, "/tests/test.sh", timeout_s=30)
+        # The exit status stands, and the empty output says why instead of looking like silence.
+        note = opensandbox_provider.DELETED_OUTPUT_NOTE
+        assert result == opensandbox_provider.SandboxExecResult(
+            stdout=None,
+            stderr=f"{status_error}\n{note}" if status_error else note,
+            return_code=3,
+            error_type=None,
+        )
+    else:
+        with pytest.raises(SandboxApiException, match="combined output file|HTTP 500"):
+            await provider.exec(handle, "/tests/test.sh", timeout_s=30)
+    # A deleted output file cannot come back, so it is read once; other 500s keep their retries.
+    assert commands.log_calls == (1 if log_error == DELETED_OUTPUT_LOG_ERROR else 3)
+
+
 @pytest.mark.asyncio
 async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.MonkeyPatch) -> None:
     class Backend502Error(Exception):

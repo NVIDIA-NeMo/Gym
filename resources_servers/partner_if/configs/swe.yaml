@@ -1,0 +1,46 @@
+# The SWE adapter (swe_app.py): the OpenCode agent on a Scale-SWE sandbox, graded by the shared IF judge.
+# It validates without services, but it runs only with a sandbox provider and Scale-SWE rows that carry
+# a live_agent contract, and Gym ships neither.
+config_paths:
+  - resources_servers/partner_if/configs/verifier.yaml
+  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+
+partner_if_swe:
+  resources_servers:
+    partner_if:
+      entrypoint: swe_app.py
+      domain: instruction_following
+      verified: false
+      description: Instruction-following rubric verification of OpenCode trajectories on Scale-SWE tasks.
+      num_workers: 1
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 7200
+        ready_timeout_s: 600
+        resources: {cpu: 4, memory_mib: 16384, disk_gib: 20}
+      # The judge reads the instructions from here, so they must be the prompt the agent runs with.
+      actor_system_prompt: ${partner_if_swe_system_prompt}
+      judge_model_server:
+        type: responses_api_models
+        name: partner_if_judge
+
+partner_if_swe_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: partner_if_swe
+      opencode_config:
+        agent:
+          build: {prompt: "${partner_if_swe_system_prompt}"}
+
+partner_if_swe_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: partner_if_swe_agent
+
+partner_if_swe_system_prompt: You are a coding agent. Resolve the user's issue in the repository, then summarize your change.

@@ -17,12 +17,13 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from environment_servers.single_agent_turn.app import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
 from nemo_gym.agent_utils import process_supervisor
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE, SUPERVISOR_FILE, parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest, _AgentSessionRecord
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.hermes_agent import sandbox as hermes_sandbox
@@ -270,7 +271,26 @@ async def test_activation_replay_survives_disconnected_waiter(agent, state):
         )
 
 
-def test_provider_failure_is_http_500_and_replays_without_rerunning(agent, state):
+@pytest.mark.parametrize(
+    "error_message,outcome,retryable",
+    [
+        *[
+            (
+                f"{prefix}{status} controlled model failure",
+                {"failure_kind": "model_request_error", "status_code": status},
+                status in {429, 500},
+            )
+            for status in (400, 401, 422, 429, 500)
+            for prefix in ("HTTP ", "Error code: ")
+        ],
+        ("Request timed out.", {"failure_kind": "model_transport_error"}, True),
+        ("Request timed out: upstream read", {"failure_kind": "model_transport_error"}, True),
+        ("Connection error: reset by peer", {"failure_kind": "model_transport_error"}, True),
+        ("All connection attempts failed: refused", {"failure_kind": "model_transport_error"}, True),
+        ("Provider said Connection error", {"failure_kind": "unknown"}, True),
+    ],
+)
+def test_provider_failure_is_reported_and_replays_without_rerunning(agent, state, error_message, outcome, retryable):
     agent._initialize_agent_session_state = AsyncMock(return_value=state)
     state.upload_json = AsyncMock()
     mock_json_download(
@@ -278,7 +298,7 @@ def test_provider_failure_is_http_500_and_replays_without_rerunning(agent, state
         side_effect=[
             {"cleanup_confirmed": True, "error": None},
             {
-                "result": {"failed": True, "error": "HTTP 429 Too Many Requests", "messages": []},
+                "result": {"failed": True, "error": error_message, "messages": []},
                 "runtime": {"hostname": "sandbox", "pid": 123},
             },
         ],
@@ -288,7 +308,13 @@ def test_provider_failure_is_http_500_and_replays_without_rerunning(agent, state
         path = f"/ng-rollout/{state.request.episode_id.capture_key}/v1/responses"
         for _ in range(2):
             response = client.post(path, json={"input": "task"})
-            assert response.status_code == 500
+            assert response.status_code == 200
+            assert response.json()["status"] == "failed"
+            assert json.loads(response.json()["metadata"]["ng_agent_outcome"]) == outcome
+            assert response.json()["error"]["message"] == error_message
+            policy = agent_outcome_policy(NeMoGymResponse.model_validate(response.json()))
+            assert (policy == OutcomeAction.RETRY) is retryable
+            assert (policy == OutcomeAction.VERIFY) is (outcome.get("status_code") in {400, 422})
         state.upload_json.assert_awaited_once()
         assert state.session.cleanup is not None and state.session.cleanup["cleanup_confirmed"] is True
         close = client.post(
@@ -1183,6 +1209,35 @@ async def test_task_timeout_reaches_the_sandbox_supervisor(agent, state, tmp_pat
     )
 
 
+@pytest.mark.parametrize("captured", [False, True])
+async def test_context_limit_keeps_partial_work_verifiable(agent, state, captured):
+    messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "Partial answer"}]
+    output = {
+        "result": {
+            "completed": False,
+            "partial": True,
+            "error": "Context length exceeded: max compression attempts (3) reached.",
+            "messages": messages,
+        }
+    }
+    if captured:
+        output["observations"] = {"invocations": [{"invocation_id": "root", "status": "failed", "messages": messages}]}
+    state.execute = AsyncMock(return_value=output)
+
+    episode = await agent._run_sandbox_episode(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
+    )
+
+    assert episode.response.status == "incomplete"
+    assert episode.response.error is None
+    assert episode.response.output[-1].content[0].text == "Partial answer"
+    assert json.loads(episode.response.metadata["ng_agent_outcome"])["failure_kind"] == "model_context_limit"
+    assert agent_outcome_policy(episode.response) == OutcomeAction.VERIFY
+    root = episode.observations.records[0]
+    assert root.status == "incomplete"
+    assert root.stop_reason == "context_limit"
+
+
 async def test_runner_stopped_at_the_deadline_is_a_partial_response(agent, state):
     """The runner's interrupted transcript is graded as an incomplete response that records the timeout."""
     state.execute = AsyncMock(
@@ -1475,3 +1530,60 @@ async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monk
     assert sum("use_absolute_ip" in record.getMessage() for record in caplog.records) == 1
     factory.connect.assert_awaited_once()
     assert state.session.sandbox.upload.await_count >= 3
+
+
+@pytest.mark.parametrize(
+    "result,expected_kind",
+    [
+        ({"stop_reason": "max_iterations"}, "agent_limit"),
+        ({"stop_reason": "wall_time"}, "agent_limit"),
+        ({"failed": True, "error": "First response truncated due to output length limit"}, "agent_limit"),
+        ({"partial": True, "error": "Response truncated due to output length limit"}, "agent_limit"),
+        ({"partial": True, "error": "Request payload too large (413). Cannot compress further."}, "agent_limit"),
+        (
+            {"partial": True, "error": "Request payload too large: max compression attempts (3) reached."},
+            "agent_limit",
+        ),
+        (
+            {"partial": True, "error": "Context length exceeded (200,000 tokens). Cannot compress further."},
+            "model_context_limit",
+        ),
+        (
+            {"partial": True, "error": "Context length exceeded: max compression attempts (3) reached."},
+            "model_context_limit",
+        ),
+        ({"partial": True, "error": "Model generated invalid tool call: nonexistent"}, "agent_invalid_output"),
+    ],
+)
+def test_limit_and_invalid_output_keep_distinct_policy_routes(agent, result, expected_kind):
+    outcome = agent.classify_outcome(result)
+    assert outcome.failure_kind == expected_kind
+    response = NeMoGymResponse(
+        id="response",
+        created_at=0,
+        model="model",
+        object="response",
+        output=[],
+        tool_choice="auto",
+        tools=[],
+        parallel_tool_calls=True,
+        status="failed",
+    )
+    reported = agent.report_outcome(response, result)
+    # Distinct overrides expose misclassification that the default verify policy hides.
+    actions = {
+        "agent_limit": OutcomeAction.RETRY,
+        "agent_invalid_output": OutcomeAction.FAIL,
+        "model_context_limit": OutcomeAction.VERIFY,
+    }
+    policy = AgentOutcomePolicyConfig(by_failure_kind=actions)
+    assert agent_outcome_policy(reported, config=policy) == actions[expected_kind]
+
+
+@pytest.mark.parametrize("status", [400, 413])
+def test_http_status_alone_does_not_establish_context_overflow(agent, status):
+    outcome = agent.classify_outcome({"failed": True, "error": f"Error code: {status}"})
+    assert (outcome.failure_kind, outcome.status_code) == (
+        "model_request_error",
+        status,
+    )
