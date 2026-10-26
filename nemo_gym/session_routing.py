@@ -15,12 +15,12 @@
 """Route each session's requests to the uvicorn worker that holds its state.
 
 uvicorn's workers share one listening socket, so a request reaches whichever worker accepts the connection,
-while a session's state lives in the memory of the worker that created it.
+while a session's state lives in the memory of its current owner.
 With more than one worker, each worker also serves the same app on a private Unix socket,
 in a directory the main process creates for the server, and requests are routed by one rule:
 
 1. Find the request's session ID.
-2. Look up the session's owner, the worker that created the session.
+2. Look up the session's owner, the worker that currently holds the session.
 3. Forward the request to that worker's private socket, unchanged, and stream its reply back unchanged.
    If this worker owns the session, or the session has no owner, the request is handled here.
 
@@ -216,7 +216,7 @@ def mcp_token_session_id(token: str, *, serializer: itsdangerous.URLSafeSerializ
 
 
 class SessionOwners:
-    """Which worker created each session, shared by the workers of one server.
+    """Which worker currently owns each session, shared by the workers of one server.
 
     Each session's owner is recorded in an owner file in the owners directory,
     named by a hash of the session ID and holding the owner's worker ID.
