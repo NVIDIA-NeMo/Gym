@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -771,6 +772,33 @@ class TestArenaResourcesServer:
 
         result = await server.verify(self._make_verify_request("Answer."))
         assert result.reward == approx(0.5)
+
+    @mark.parametrize("failed_ordering", [1, 2])
+    async def test_verify_cancels_the_other_ordering_when_one_judge_call_fails(
+        self, server: ArenaResourcesServer, monkeypatch, failed_ordering: int
+    ):
+        # Either failed ordering must cancel and await the sibling before returning the error.
+        started = asyncio.Event()
+        state = {"calls": 0, "cancelled": False}
+
+        async def judge_game(self, *args, **kwargs):
+            state["calls"] += 1
+            ordering = state["calls"]
+            if state["calls"] == 2:
+                started.set()
+            if ordering == failed_ordering:
+                await started.wait()
+                raise RuntimeError("judge down")
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                state["cancelled"] = True
+                raise
+
+        monkeypatch.setattr(ArenaResourcesServer, "_run_judge_game", judge_game)
+        with raises(RuntimeError, match="judge down"):
+            await asyncio.wait_for(server.verify(self._make_verify_request("My answer.")), timeout=2)
+        assert state == {"calls": 2, "cancelled": True}
 
     async def test_verify_unparseable_judge_output(self, server: ArenaResourcesServer):
         # Judge doesn't output a valid verdict label → 0.0 for both rounds

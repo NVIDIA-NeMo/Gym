@@ -79,7 +79,7 @@ Each JSONL row contains:
 
 | Metric | Meaning |
 |---|---|
-| `mean/reward` | Arithmetic mean of rewards returned by Arena verification; empty responses and failed judge games receive zero. `[[BB]]` is assigned a 0.5 reward. No bootstrap is applied. |
+| `mean/reward` | Arithmetic mean of rewards returned by Arena verification; empty responses receive zero; a failed judge call returns a masked `judge_failed` response containing the existing answer, rather than a zero-valued game. `[[BB]]` is assigned a 0.5 reward. No bootstrap is applied. |
 | `win_rate_no_SC` | Raw judge score computed from valid judgments, excluding failures. |
 | `win_rate` | Style-controlled win rate. |
 | `*_ci95_lower`, `*_ci95_upper` | Bootstrap 95% confidence interval, resampling individual judge games. |
