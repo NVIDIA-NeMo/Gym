@@ -832,6 +832,8 @@ class TestApp:
         endpoint_failure_threshold: int = 3,
         endpoint_retry_after_s: float = 60.0,
         forward_session_id_as_conversation_id: bool = False,
+        endpoint_placement: str = "hash",
+        least_loaded_state_path: str | None = None,
     ):
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -849,6 +851,8 @@ class TestApp:
             endpoint_failure_threshold=endpoint_failure_threshold,
             endpoint_retry_after_s=endpoint_retry_after_s,
             forward_session_id_as_conversation_id=forward_session_id_as_conversation_id,
+            endpoint_placement=endpoint_placement,
+            least_loaded_state_path=least_loaded_state_path,
         )
 
         get_global_config_dict_mock = MagicMock()
@@ -1747,6 +1751,105 @@ class TestApp:
         server._note_endpoint_success(own)
         assert server._resolve_client(request) is own
         assert server._resolve_client(request) is own
+
+    def _setup_least_loaded_server(self, monkeypatch: MonkeyPatch, state_path: str, **config_kwargs) -> VLLMModel:
+        server = self._setup_server(
+            monkeypatch, endpoint_placement="least_loaded", least_loaded_state_path=state_path, **config_kwargs
+        )
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI, base_url=f"http://engine-{i}/v1") for i in range(4)]
+        return server
+
+    async def test_least_loaded_placement_spreads_rollouts_evenly(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = self._setup_least_loaded_server(monkeypatch, str(tmp_path / "state.sqlite"))
+
+        picked = []
+        for task in range(8):
+            with rollout_context(f"task-{task}-0"):
+                picked.append(await server._resolve_client_for_call(self._request_for_session("shared-session")))
+
+        assert sorted(server._clients.index(client) for client in picked) == [0, 0, 1, 1, 2, 2, 3, 3]
+
+    async def test_least_loaded_rollouts_stay_on_their_endpoint_across_workers(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        state_path = str(tmp_path / "state.sqlite")
+        workers = [self._setup_least_loaded_server(monkeypatch, state_path) for _ in range(2)]
+
+        with rollout_context("task-7-0"):
+            first = await workers[0]._resolve_client_for_call(self._request_for_session("fresh-0"))
+            # Another worker, a new session cookie: the rollout's placement still decides.
+            later = await workers[1]._resolve_client_for_call(self._request_for_session("fresh-1"))
+
+        assert workers[1]._clients.index(later) == workers[0]._clients.index(first)
+
+    async def test_least_loaded_falls_back_to_the_hash_without_its_state_file(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        server = self._setup_least_loaded_server(monkeypatch, str(tmp_path / "missing-dir" / "state.sqlite"))
+
+        with rollout_context("task-3-0"):
+            picked = await server._resolve_client_for_call(self._request_for_session("session-a"))
+
+        assert picked is server._clients[self._hashed_client_idx("task-3-0", 4)]
+
+    async def test_a_worker_adopts_the_shared_placement_after_a_failed_lookup(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        state_path = str(tmp_path / "state.sqlite")
+        worker_a, worker_b = (self._setup_least_loaded_server(monkeypatch, state_path) for _ in range(2))
+        for worker in (worker_a, worker_b):
+            worker._clients = worker._clients[:2]
+        rollout = "task-9-0"
+        hashed = self._hashed_client_idx(rollout, 2)
+        placed = 1 - hashed
+        # A live rollout already on the hash endpoint, so a successful placement picks the other one.
+        worker_b._least_loaded._connect().execute(
+            "insert into placements values (?, ?, ?, ?)", ("busy-rollout", hashed, 2, time.time())
+        )
+        # Worker A's first lookup fails, as when the shared file is briefly unavailable.
+        lookup = worker_a._least_loaded.endpoint_for
+        failed_once = []
+
+        async def flaky_lookup(rollout_id: str, n_endpoints: int):
+            if not failed_once:
+                failed_once.append(True)
+                return None
+            return await lookup(rollout_id, n_endpoints)
+
+        monkeypatch.setattr(worker_a._least_loaded, "endpoint_for", flaky_lookup)
+
+        with rollout_context(rollout):
+            first_on_a = await worker_a._resolve_client_for_call(self._request_for_session("session-0"))
+            on_b = await worker_b._resolve_client_for_call(self._request_for_session("session-1"))
+            later_on_a = [
+                await worker_a._resolve_client_for_call(self._request_for_session(f"session-{i}")) for i in (2, 3, 4)
+            ]
+
+        assert worker_a._clients.index(first_on_a) == hashed
+        assert worker_b._clients.index(on_b) == placed
+        assert [worker_a._clients.index(client) for client in later_on_a] == [placed, placed, placed]
+
+    async def test_a_least_loaded_rollout_returns_to_its_placement_after_failover(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        clock = [1000.0]
+        monkeypatch.setattr("responses_api_models.vllm_model.app.monotonic", lambda: clock[0])
+        server = self._setup_least_loaded_server(
+            monkeypatch,
+            str(tmp_path / "state.sqlite"),
+            route_around_failing_endpoints=True,
+            endpoint_failure_threshold=1,
+            endpoint_retry_after_s=60.0,
+        )
+        request = self._request_for_session("session-a")
+        with rollout_context("task-1-0"):
+            placed = await server._resolve_client_for_call(request)
+            server._note_endpoint_failure(placed)
+            moved = await server._resolve_client_for_call(request)
+            assert moved is not placed
+            clock[0] += 60.0
+            # The failed endpoint's retry interval has run out: the rollout tries its placement again.
+            assert await server._resolve_client_for_call(request) is placed
 
     @staticmethod
     def _served_completion(content: str) -> dict:
