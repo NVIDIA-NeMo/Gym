@@ -12,7 +12,7 @@ Required fields:
 - `expected_answer` (required): The gold letter (single character). Must be one of the letters present in `options`
 
 Optional fields:
-- `grading_mode`: Answer extraction method (either `"lenient"` or `"strict"`. `"strict"` mode only allows one letter in the solution block. default: `"strict"`)
+- `grading_mode`: Answer extraction method (either `"lenient"` or `"strict"`. `"strict"` mode only allows one letter in the solution block. default: `"lenient"`)
 - `instance_id`: Unique identifier for the underlying instance
 - `dataset_name`: Identifier for the dataset
 - `dataset_split`: Split name (e.g., `train`)
@@ -22,11 +22,12 @@ Notes:
 - Letters are validated against the keys present in `options`
 
 ### Grading modes
-- `strict` (default)
+- `lenient` (default)
+  - Accepts more words or other characters inside the solution box. Reads the last solution box and takes its first standalone letter (one that is not part of a word); if that letter is not among the options, no answer is extracted.
+  - Example it accepts: `<solution>Answer: C</solution>`
+- `strict`
   - Requires exactly one letter inside a solution box.
   - Example it accepts: `<solution>C</solution>`
-- `lenient`
-  - Accepts more words or other characters inside the solution box. Takes the first non-word character that is among the options.
 
 ### Example dataset row (standard format)
 ```json
