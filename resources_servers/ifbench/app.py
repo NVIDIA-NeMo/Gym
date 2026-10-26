@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import logging
+from pathlib import Path
 from typing import List, Literal
 
 # Pre-import packages that nltk pulls in during its init so they are already in
@@ -48,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 class IFBenchResourcesServerConfig(BaseResourcesServerConfig):
     num_processes: int = 32
+    ifbench_source_dir: Path | None = None
 
 
 class IFBenchRunRequest(BaseRunRequest):
@@ -97,7 +99,7 @@ class IFBenchResourcesServer(SimpleResourcesServer):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        ensure_ifbench()
+        ensure_ifbench(source_dir=self.config.ifbench_source_dir)
         import instructions_registry
 
         self._instructions_registry = instructions_registry
