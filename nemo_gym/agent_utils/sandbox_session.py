@@ -7,6 +7,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from shlex import quote
 from time import monotonic
 from typing import cast
@@ -29,6 +30,9 @@ from nemo_gym.sandbox.utils import read_text
 
 
 LOG = logging.getLogger(__name__)
+# Shared runner uploaded by adapters; reads the bash source written by shell_assignments().
+HARNESS_RUNNER_FILE = "harness_runner.sh"
+HARNESS_RUNNER_SCRIPT = Path(__file__).with_name(HARNESS_RUNNER_FILE)
 _SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
