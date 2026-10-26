@@ -16,10 +16,8 @@ rubric below. `role=engineer` applies the rubric as written;
 automation, identity and authority boundaries, idempotency, and retry and
 failure paths.
 
-This rubric accepts the invocation's default RESET, collection scope,
-coverage, and funnel policy; omit `review_policy` in the result. These are
-parameters of the formal review service; leaving `review_policy` out keeps
-the service defaults rather than overriding them for Gym.
+Omit `review_policy` in the result so the formal review service's default
+RESET, collection scope, coverage, and funnel policy apply.
 
 ## Formal review execution
 
@@ -301,6 +299,10 @@ Return the structured verdict from the most severe finding:
 - any BLOCKER → `request_changes` (HOLD);
 - any RISK and no BLOCKER → `comment` (SHIP WITH CARE);
 - only NOTEs, or no findings → `approve` (SHIP).
+
+Missing evidence that this rubric or AGENTS.md requires (reward-profiling
+evidence, representative smoke rollouts) is at least a RISK, even when you
+phrase the request as a question.
 
 The review service decides whether the verdict is published as given or as a
 comment; grade findings the same way either way.
