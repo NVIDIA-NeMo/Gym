@@ -233,6 +233,24 @@ async def test_deadline_during_staging_never_launches(session, receipt_reader):
     await session.close(timeout=1)
 
 
+async def test_deadline_shorter_than_supervisor_resolution_never_launches(session, receipt_reader):
+    from time import monotonic
+
+    collect = AsyncMock()
+    with pytest.raises(TimeoutError, match="expired before launch"):
+        await session.execute(
+            stage_activation=AsyncMock(return_value=SandboxCommand(argv=["true"])),
+            collect=collect,
+            timeout=0.004,
+            close_timeout=1,
+            deadline=monotonic() + 10,
+        )
+    assert not session.launch_started
+    session.sandbox.exec.assert_not_awaited()
+    collect.assert_not_awaited()
+    await session.close(timeout=1)
+
+
 async def test_close_during_input_preparation_prevents_launch(session, receipt_reader):
     preparing = asyncio.Event()
 

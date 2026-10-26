@@ -184,7 +184,8 @@ class SandboxSession[Artifacts]:
                 raise RuntimeError(f"{self.harness} sandbox session closed before launch")
             if deadline is not None:
                 timeout = min(timeout, deadline - monotonic())
-            if timeout <= 0:
+            # The supervisor counts whole centiseconds; less than one cannot run the harness.
+            if timeout < 0.01:
                 raise TimeoutError(f"{self.harness} activation deadline expired before launch")
             cleanup_timeout, provider_timeout = supervision_timeouts(timeout=timeout, close_timeout=close_timeout)
             launch = supervised_launch_command(

@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -130,6 +131,21 @@ async def test_stop_wins_claim_and_fences_delayed_launch(session, caplog):
     assert not (session_dir / "started").exists()
     # A fenced launch is safe to close, without claiming a successful harness exit.
     assert receipt["return_code"] is None
+
+
+@pytest.mark.parametrize("seconds", [5e-05, 0.004, 1e16])
+async def test_launch_renders_seconds_the_supervisor_accepts(session, seconds):
+    # Python renders tiny and huge floats with exponents, which the supervisor would reject after the claim.
+    sandbox, session_dir = session
+    shutil.copyfile(SUPERVISOR_SCRIPT, session_dir / SUPERVISOR_FILE)
+    (session_dir / STOP_REQUEST_FILE).touch()
+    command = supervised_launch_command(
+        session_dir=str(session_dir), command=["true"], timeout=seconds, cleanup_timeout=seconds
+    )
+    rendered = re.search(r"--timeout (\S+) --cleanup-timeout (\S+) ", command).groups()
+    assert all(re.fullmatch(r"[0-9]+\.[0-9]+", value) for value in rendered), rendered
+    assert (await sandbox.exec(command)).return_code == 0
+    assert json.loads((session_dir / CLEANUP_RECEIPT_FILE).read_text())["cleanup_confirmed"] is True
 
 
 async def test_missing_receipt_after_launch_is_not_cleanup_confirmation(session):

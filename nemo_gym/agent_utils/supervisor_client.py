@@ -120,6 +120,11 @@ def supervision_timeouts(*, timeout: float, close_timeout: float) -> tuple[float
     return cleanup_timeout, exec_timeout(timeout=timeout, cleanup_timeout=cleanup_timeout)
 
 
+def _seconds(value: float) -> str:
+    """Seconds as the supervisor parses them: fixed-point, at least one centisecond."""
+    return str(value) if 0.01 <= value < 1e16 else f"{max(value, 0.01):.2f}"
+
+
 def supervised_launch_command(
     *,
     session_dir: str,
@@ -143,7 +148,7 @@ def supervised_launch_command(
         f"ln -s launch {claim_path} 2>/dev/null || exit 0; "
         f"echo $$ > {quote(f'{session_dir}/{SUPERVISOR_PID_FILE}')} && "
         f"exec bash {supervisor} "
-        f"--timeout {timeout} --cleanup-timeout {cleanup_timeout} "
+        f"--timeout {_seconds(timeout)} --cleanup-timeout {_seconds(cleanup_timeout)} "
         f"--stop-file {quote(f'{session_dir}/{STOP_REQUEST_FILE}')} "
         f"--receipt {quote(f'{session_dir}/{CLEANUP_RECEIPT_FILE}')} -- {join(command)} "
         f">{quote(f'{session_dir}/{OUTPUT_LOG_FILE}')} 2>&1"

@@ -4,6 +4,7 @@
 """Exercise the uploaded bash supervisor as the sandbox runs it, without Gym imports."""
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -57,6 +58,39 @@ def test_supervisor_requires_a_command_before_writing_a_receipt(tmp_path: Path) 
     assert result.returncode == 2
     assert "usage:" in result.stderr
     assert not (tmp_path / "cleanup.json").exists()
+
+
+@pytest.mark.parametrize("missing", ["a value", "the separator"])
+def test_malformed_arguments_neither_hang_nor_run_part_of_the_command(tmp_path: Path, missing: str) -> None:
+    options = ["--timeout", "1", "--cleanup-timeout", "1", "--receipt", "cleanup.json", "--stop-file", "stop"]
+    arguments = [*options, "--receipt"] if missing == "a value" else [*options, "touch", "ran"]
+    result = subprocess.run(["bash", SUPERVISOR, *arguments], capture_output=True, text=True, timeout=10, cwd=tmp_path)
+    assert result.returncode == 2, result.stderr
+    assert not (tmp_path / "ran").exists() and not (tmp_path / "cleanup.json").exists()
+
+
+@linux_only
+def test_process_names_are_never_evaluated(tmp_path: Path) -> None:
+    # The kernel prints names unescaped. A bystander named like an arithmetic expression must not run
+    # code through the supervisor's /proc scan.
+    (tmp_path / "p").write_text(f"#!/bin/sh\ntouch {tmp_path}/evaluated\n")
+    (tmp_path / "p").chmod(0o755)
+    name = repr(b") a b c[$(p)]\n")
+    bystander = subprocess.Popen(
+        [sys.executable, "-c", f"import ctypes,time; ctypes.CDLL(None).prctl(15, {name}, 0, 0, 0); time.sleep(30)"]
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while Path(f"/proc/{bystander.pid}/comm").read_text().strip() != ") a b c[$(p)]":
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        result = _supervise(tmp_path, "true", env=os.environ | {"PATH": f"{tmp_path}:{os.environ['PATH']}"})
+        assert result.returncode == 0, result.stderr
+        assert _receipt(tmp_path)["cleanup_confirmed"] is True
+        assert not (tmp_path / "evaluated").exists()
+    finally:
+        bystander.kill()
+        bystander.wait()
 
 
 @linux_only
@@ -252,24 +286,27 @@ finally:
 
 
 @linux_only
+@pytest.mark.parametrize("detached", [False, True])
 @pytest.mark.parametrize("cooperative", [True, False])
 @pytest.mark.parametrize("ending", ["timeout", "cancel"])
 def test_foreground_tool_cannot_mutate_task_after_confirmed_receipt(
-    tmp_path: Path, cooperative: bool, ending: str
+    tmp_path: Path, cooperative: bool, ending: str, detached: bool
 ) -> None:
     # A separate owner reaps any escaped process even when this regression fails.
     driver = r"""
 import ctypes, json, os, pathlib, signal, subprocess, sys, time
 assert ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
 supervisor, root, cooperative, ending = sys.argv[1], pathlib.Path(sys.argv[2]), sys.argv[3] == 'True', sys.argv[4]
+detached = sys.argv[5] == 'True'
 writer = "import pathlib,time\nwhile not pathlib.Path('release').exists(): time.sleep(.01)\npathlib.Path('mutated').touch()"
-# The writer is orphaned when the tool dies, but stays in the harness group.
+# The writer is orphaned when the tool dies. It stays in the harness group, or in the group of a
+# tool the CLI started in its own session, as OpenCode and Codex do.
 tool = ("import pathlib,subprocess,sys,time\n"
         "child=subprocess.Popen([sys.executable,'-c'," + repr(writer) + "])\n"
         "pathlib.Path('writer.pid').write_text(str(child.pid))\nchild.wait()\n")
 cli = ("import pathlib,signal,subprocess,sys\n"
        + ("" if cooperative else "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n")
-       + "child=subprocess.Popen([sys.executable,'-c'," + repr(tool) + "])\n"
+       + "child=subprocess.Popen([sys.executable,'-c'," + repr(tool) + "], start_new_session=" + str(detached) + ")\n"
        + "pathlib.Path('tool.pid').write_text(str(child.pid))\nchild.wait()\n")
 process = None
 try:
@@ -303,7 +340,7 @@ finally:
     except ChildProcessError: pass
 """
     result = subprocess.run(
-        [sys.executable, "-I", "-c", driver, SUPERVISOR, str(tmp_path), str(cooperative), ending],
+        [sys.executable, "-I", "-c", driver, SUPERVISOR, str(tmp_path), str(cooperative), ending, str(detached)],
         capture_output=True,
         text=True,
         errors="replace",
