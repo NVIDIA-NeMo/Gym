@@ -93,13 +93,12 @@ task checks whether the model follows its instructions, graded against versioned
     with equal weight.
   - Also `if_partial`, the passed fraction of IF items.
   - `coverage/*` counts masked rollouts.
-- **Reference score:** 56.00 on `pass@1[avg-of-3]/all_if_pass`, tolerance ±7.1 points (95%), on dataset 2.1.4,
-  measured while the benchmark fixed top_p at 1.0; it is being re-measured with the sampling below.
+- **Reference score:** 57.33 on `pass@1[avg-of-3]/all_if_pass`, tolerance ±9.5 points (95%), on dataset 2.1.4.
   - Policy: GLM 5.3 (`nvidia/zai-org/glm-5.3`) at its standard sampling, set on the model server: temperature
     1.0 and top_p 0.95, maximum reasoning effort, 262,144 output tokens, 16 rollouts in parallel.
   - Judge: the default GPT-6 Sol (`azure/openai/gpt-6-sol`).
-  - The tolerance is t(0.975, 6) × the pooled `std_dev_across_runs` (3.53) × √(2/3). Two more runs with the same
-    judge scored 56.00 and 53.33.
+  - The tolerance is t(0.975, 6) × the pooled `std_dev_across_runs` (4.74) × √(2/3). Two more runs with the same
+    judge scored 53.33 and 56.00.
 - **Cross-check:** 50.67, with 0 masked rows, from regrading a different saved GLM 5.3 run (dataset 2.1.0, whose
   actor inputs match 2.1.4) with the 2.1.4 rubrics and GPT-6 Sol through a different gateway route.
 - **History:** dataset 2.1.0 scored 61.33 with GLM 5.3 as both the policy and the judge.
