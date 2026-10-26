@@ -460,6 +460,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             # Only Claude Code takes an MCP config file. The session token in it is per rollout.
             if self.config.agent != "claude_code":
                 raise ValueError(f"forward_mcp_tools supports agent claude_code, not {self.config.agent}")
+            if agent_config.get("mcp_config"):
+                raise ValueError("forward_mcp_tools would replace agent_kwargs.mcp_config; set only one of them")
             files["/work/mcp.json"] = json.dumps({"mcpServers": mcp})
             agent_config["mcp_config"] = "__WORK_DIR__/mcp.json"
         files["/work/agent_config.json"] = json.dumps(agent_config)

@@ -300,6 +300,8 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
             )
         try:
             reply = await worker.ask({"op": "score"})
+        except Exception as exc:  # a scoring call that times out or finds the worker dead says nothing about the model
+            reply = {"ok": False, "error": f"scoring failed: {type(exc).__name__}: {exc}"}
         finally:
             await worker.close()
         if not reply["ok"]:

@@ -138,6 +138,10 @@ def generate_mutate(inp: MutateIn) -> dict:
     }
 
 
+GRNADE_MAX_N = 5000
+GRNADE_MAX_BATCH = 512
+
+
 @dataclass
 class GRNAdeIn:
     target: str = field("Campaign target name")
@@ -220,6 +224,12 @@ def generate_grnade(inp: GRNAdeIn) -> dict:
         raise ValueError(f"seed must be in [0, 2**32), got {inp.seed}")
     if inp.n < 1 or inp.batch_size < 1:
         raise ValueError(f"n and batch_size must be at least 1, got n={inp.n} and batch_size={inp.batch_size}")
+    # A request too large to finish would be masked as a machine fault, so the model's request size is capped.
+    if inp.n > GRNADE_MAX_N or min(inp.batch_size, inp.n) > GRNADE_MAX_BATCH:
+        raise ValueError(
+            f"one call draws at most n={GRNADE_MAX_N} with batch_size<={GRNADE_MAX_BATCH}, "
+            f"got n={inp.n} and batch_size={inp.batch_size}"
+        )
     if not 0 < inp.temperature_min <= inp.temperature_max:
         raise ValueError(
             f"temperatures need 0 < temperature_min <= temperature_max, got {inp.temperature_min} and {inp.temperature_max}"
@@ -327,14 +337,21 @@ def generate_grnade(inp: GRNAdeIn) -> dict:
     env.setdefault("X3DNA", str(work))
     env.setdefault("ETERNAFOLD", os.environ.get("RDS_ETERNAFOLD", "/opt/EternaFold"))
 
-    result = subprocess.run(
-        [sys.executable, "design.py", "--config", str(config_path)],
-        cwd=str(mirror),
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=min(inp.timeout_s, float(os.environ.get("RDS_TOOL_TIMEOUT_S", inp.timeout_s))),
-    )
+    limit = min(inp.timeout_s, float(os.environ.get("RDS_TOOL_TIMEOUT_S", inp.timeout_s)))
+    try:
+        result = subprocess.run(
+            [sys.executable, "design.py", "--config", str(config_path)],
+            cwd=str(mirror),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=limit,
+        )
+    except subprocess.TimeoutExpired:
+        # The model sized this request, so a run that outlasts the limit is its failed call, not a masked fault.
+        raise ValueError(
+            f"gRNAde did not finish within {limit:.0f} s for n={inp.n}, batch_size={inp.batch_size}; ask for fewer"
+        ) from None
     produced = sorted((work / "designs").glob("designs_*.csv"))
     if result.returncode != 0 or not produced:
         raise EnvironmentFault(

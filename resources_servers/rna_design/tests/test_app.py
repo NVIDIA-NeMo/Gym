@@ -422,6 +422,61 @@ def test_a_worker_that_fails_to_open_leaves_nothing_running(tmp_path: Path, monk
     assert server.workers == {} and list((tmp_path / "tmp" / "rna_design").iterdir()) == []
 
 
+def test_a_scoring_call_that_times_out_is_masked_not_a_server_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import resources_servers.rna_design.app as app_module
+
+    real_ask = app_module.ToolWorker.ask
+
+    async def ask(self, request):
+        if request["op"] == "score":
+            raise TimeoutError
+        return await real_ask(self, request)
+
+    monkeypatch.setattr(app_module.ToolWorker, "ask", ask)
+    server = _server(tmp_path)
+    with _client(tmp_path, server) as client:
+        _seed(client)
+        (worker,) = server.workers.values()
+        verified = _verify(client)
+    assert verified["reward"] == 0.0 and verified["mask_sample"] is True
+    assert "scoring failed" in verified["failure_reason"] and worker.proc.returncode is not None
+
+
+def test_a_tool_that_prints_to_stdout_does_not_break_the_replies(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    worker_path = Path(__file__).resolve().parents[1] / "tool_worker.py"
+    script = f"""
+import os, runpy, sys
+sys.argv = [{str(worker_path)!r}]
+module = runpy.run_path({str(worker_path)!r}, run_name="tool_worker")
+class Noisy:
+    def __init__(self, *args):
+        self.objective, self.allowed = "o", set()
+    def score(self):
+        print("a stray print from a tool")
+        os.write(1, b"native output without a newline")
+        return {{"solved": False}}
+module["Campaign"] = Noisy
+module["main"].__globals__["Campaign"] = Noisy
+module["main"]()
+"""
+    requests = "\n".join(
+        [
+            '{{"op": "open", "suite_path": "s", "target_name": "t", "run_dir": "r", "id": 1}}'.format(),
+            '{{"op": "score", "id": 2}}'.format(),
+        ]
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", script], input=requests + "\n", capture_output=True, text=True, timeout=120
+    )
+    replies = [json.loads(line) for line in done.stdout.splitlines()]
+    assert [r["id"] for r in replies] == [1, 2] and replies[1] == {"ok": True, "result": {"solved": False}, "id": 2}
+
+
 def test_stopping_the_server_closes_its_workers(tmp_path: Path) -> None:
     server = _server(tmp_path)
     with _client(tmp_path, server) as client:

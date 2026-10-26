@@ -339,9 +339,33 @@ class TestReviewFixes:
             ({"seed": 1.5}, "whole numbers"),
             ({"seed": -1}, "seed must be in"),
             ({"seed": 2**40}, "seed must be in"),
+            ({"n": 5001}, "at most"),
+            ({"n": 2000, "batch_size": 1000}, "at most"),
         ):
             with pytest.raises(ValueError, match=says):
                 registry.dispatch("generate.grnade", {"target": "review_hairpin", **bad})
+
+    def test_a_grnade_run_that_outlasts_its_limit_is_the_models_failed_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+
+        from responses_api_agents.rna_design_agent.rds import registry
+
+        self._campaign(tmp_path)
+        repo = tmp_path / "grnade"
+        repo.mkdir()
+        monkeypatch.setenv("GRNADE_REPO", str(repo))
+        real_run = subprocess.run
+
+        def run(cmd, *args, **kwargs):
+            if "design.py" in cmd:
+                raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+            return real_run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", run)
+        with pytest.raises(ValueError, match="did not finish"):
+            registry.dispatch("generate.grnade", {"target": "review_hairpin", "mode": "2d", "n": 8})
 
     def test_a_backbone_the_task_names_but_the_machine_lacks_fails_instead_of_running_2d(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

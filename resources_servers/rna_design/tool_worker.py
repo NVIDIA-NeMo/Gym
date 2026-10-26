@@ -102,6 +102,10 @@ class Campaign:
 
 
 def main() -> None:
+    # Replies go out on a private copy of stdout. Anything a tool prints, from Python or native code, goes to stderr.
+    replies = os.fdopen(os.dup(1), "w")
+    os.dup2(2, 1)
+    sys.stdout = sys.stderr
     campaign = None
     for line in sys.stdin:
         request = json.loads(line)
@@ -117,8 +121,8 @@ def main() -> None:
                 reply = {"ok": True, "result": campaign.score()}
         except Exception as exc:  # a failed tool is an answer for the model, not a crash of the rollout
             reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        sys.stdout.write(json.dumps({**reply, "id": request.get("id")}, default=str) + "\n")
-        sys.stdout.flush()
+        replies.write(json.dumps({**reply, "id": request.get("id")}, default=str) + "\n")
+        replies.flush()
 
 
 if __name__ == "__main__":
