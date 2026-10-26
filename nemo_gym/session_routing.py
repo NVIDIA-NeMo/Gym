@@ -34,13 +34,13 @@ Where the session ID comes from:
 | --- | --- |
 | Any request to a resources server | The session cookie's ``session_id`` |
 | A resources tool call over MCP, or a request with an MCP session token and no cookie | The token's ``sid`` |
-| A typed resources ``/seed_session`` or ``/close_session`` | The body's ``resources_session_id`` |
+| An episode session's resources ``/seed_session`` or ``/close_session`` | The body's ``resources_session_id`` |
 | Any request to an agent server | The session cookie's ``agent_session_id`` |
 | An agent session seed or close | The body's ``agent_session_id`` |
 
 The body is read only on the seed and close routes, where it names the session before any cookie exists.
 If the cookie and the body name different sessions, the reply is 409.
-A typed resources session uses its ``resources_session_id`` as its cookie's ``session_id`` too,
+An episode's resources session uses its ``resources_session_id`` as its cookie's ``session_id`` too,
 so the seed, its close and every request in between name the session by the same ID.
 A resources request with no session ID gets a new ID, which this router mints.
 A session start, such as a seed, claims it before its handler runs, since its reply's cookie names the session.
@@ -56,9 +56,9 @@ all reach the worker that saw the ID first.
 A claim ends once its session's last record on the claimant is gone:
 
 - an agent session's claim ends when the agent drops the session's last record,
-  which is its close receipt or failed seed, ``session_close_retry_window_seconds`` after it was written;
+  which is its fence or failed seed, ``session_close_retry_window_seconds`` after it was written;
 - a resources session's claim lasts while the session is open, from a successful seed until its close or ``/verify``,
-  and ends ``session_close_retry_window_seconds`` after the last request for it otherwise.
+  and expires ``session_close_retry_window_seconds`` after the last request for it otherwise.
   A ``/verify`` that says a close follows, as an environment server's does, leaves the session open for that close.
 
 The claims of a worker that exited stay until the server exits, so its sessions keep getting a 410.
@@ -114,7 +114,7 @@ SESSION_SOCKET_DIR_ENV = "NEMO_GYM_SESSION_SOCKET_DIR"
 #: Subdirectory of the socket directory that holds the session claims.
 SESSION_CLAIMS_DIR = "session-claims"
 #: Scope key with the session ID the router chose for a request whose cookie has none:
-#: a typed seed's or close's ID, or a new one. The session middleware gives the cookie session this ID.
+#: an episode seed's or close's ID, or a new one. The session middleware gives the cookie session this ID.
 SESSION_ID_SCOPE_KEY = "nemo_gym.session_id"
 #: Scope key with a callable that claims the request's unclaimed session ID for this worker, and says whether it could:
 #: a new ID, or one a cookie names whose claim ended.
@@ -163,7 +163,7 @@ class SessionKind:
     seed_path: str
     close_path: str
     #: Whether the session ID is the cookie session's own ID, as on a resources server:
-    #: a typed seed's ID becomes it, and a request without one gets a new ID,
+    #: an episode seed's ID becomes it, and a request without one gets a new ID,
     #: claimed if the request starts a session or its handler uses the session.
     #: An agent session is named by a key of its own in the cookie instead.
     cookie_session: bool
@@ -427,24 +427,24 @@ class ResourcesSessionLifetimes:
       opens the session: its claim lasts until the session ends.
     - A successful ``/close_session`` or ``/verify``, or ``SimpleResourcesServer.checkpoint_session_ended``,
       ends it, unless the request says a close follows, as an environment server's ``/verify`` does.
-    - A session that is not open keeps its claim ``window_seconds`` after the last request for it.
+    - A session that is not open keeps its claim ``close_retry_window_seconds`` after the last request for it.
       The caller's retried or cleanup close reaches the claimant within that window.
-      A delayed seed after a close reaches it too, where the server refuses it while it remembers the close.
+      A delayed seed after a close reaches it too, where the server refuses it while the session is fenced.
     - A failed seed or close of an open session leaves it open.
 
-    So a claim outlives the session's last request by at most the window, except for a session never closed,
+    So a claim outlives the session's last request by at most the close retry window, except for a session never closed,
     which keeps its claim as long as the server keeps the session.
     """
 
     def __init__(
         self,
-        window_seconds: float,
+        close_retry_window_seconds: float,
         *,
         starts: tuple[str, ...],
         ends: tuple[str, ...],
         close_follows_header: Optional[str] = None,
     ) -> None:
-        self.window_seconds = window_seconds
+        self.close_retry_window_seconds = close_retry_window_seconds
         self._starts = _paths(starts)
         self._ends = _paths(ends)
         self._close_follows = close_follows_header.lower().encode("latin-1") if close_follows_header else None
@@ -454,7 +454,7 @@ class ResourcesSessionLifetimes:
         # An entry can be earlier than its session's time, which moved on; the sweep then queues it again.
         self._expiries: list[tuple[float, str]] = []
         self._queued: set[str] = set()
-        # Sessions a checkpoint retire freed, whose claims last until ``ended`` whatever requests for them do.
+        # Sessions a checkpoint retire released, whose claims last until ``ended`` whatever requests for them do.
         self._retained: set[str] = set()
 
     def holds(self, session_id: str) -> bool:
@@ -488,7 +488,7 @@ class ResourcesSessionLifetimes:
             self._expire_after_window(session_id)
 
     def retain(self, session_id: str) -> None:
-        """Keep the claim on a session a checkpoint retire freed until ``ended``, when the retire's refusal ends.
+        """Keep the claim on a session a checkpoint retire released until ``ended``, when the retire's refusal ends.
 
         Until then a late request that carries only the session's cookie reaches this worker, which refuses it.
         """
@@ -504,7 +504,7 @@ class ResourcesSessionLifetimes:
         self._retained.discard(session_id)
 
     def _expire_after_window(self, session_id: str) -> None:
-        until = monotonic() + self.window_seconds
+        until = monotonic() + self.close_retry_window_seconds
         self._until[session_id] = until
         if session_id not in self._queued:
             self._queued.add(session_id)
@@ -543,7 +543,7 @@ class AgentSessionHolder(Protocol):
         ...
 
     def expire_agent_session_records(self) -> None:
-        """Drop the close receipts and failed seeds whose window has passed, releasing their claims."""
+        """Drop the fences and failed seeds that expired, releasing their claims."""
         ...
 
 
@@ -578,7 +578,7 @@ class SessionRoutingMiddleware:
 
     With one worker there are no claims, and it only reads the session ID of seeds and closes:
     it refuses a request whose cookie and body name different sessions,
-    and gives a typed resources session its ID in the cookie.
+    and gives an episode's resources session its ID in the cookie.
     """
 
     def __init__(
@@ -939,7 +939,7 @@ def install_session_routing(
     mcp_token_header: Optional[str] = None,
     mcp_token_serializer: Optional[itsdangerous.URLSafeSerializer] = None,
     agent_sessions: Optional[AgentSessionHolder] = None,
-    close_window_seconds: Optional[float] = None,
+    close_retry_window_seconds: Optional[float] = None,
     session_starts: tuple[str, ...] = (),
     session_ends: tuple[str, ...] = (),
     close_follows_header: Optional[str] = None,
@@ -951,7 +951,7 @@ def install_session_routing(
     Without a ``socket_dir`` (one worker), it only reads the session ID of seeds and closes, and claims nothing.
     With one, it claims sessions in it and returns this worker's ID, also stored in ``app.state.nemo_gym_routing_id``.
     Pass the agent for an agent server, whose own records decide its claims' lifetimes,
-    or the close window and the session start and end routes for a resources server (see ``ResourcesSessionLifetimes``).
+    or the close retry window and the session start and end routes for a resources server (see ``ResourcesSessionLifetimes``).
     """
     route_by = dict(
         kind=kind,
@@ -972,18 +972,20 @@ def install_session_routing(
     if agent_sessions is not None:
         lifetimes: SessionLifetimes = _AgentSessionLifetimes(agent_sessions)
         window = None
-    elif close_window_seconds is not None:
+    elif close_retry_window_seconds is not None:
         resources_lifetimes = ResourcesSessionLifetimes(
-            close_window_seconds,
+            close_retry_window_seconds,
             starts=(kind.seed_path, *session_starts),
             ends=(kind.close_path, *session_ends),
             close_follows_header=close_follows_header,
         )
         app.state.nemo_gym_resources_session_lifetimes = resources_lifetimes
         lifetimes = resources_lifetimes
-        window = close_window_seconds
+        window = close_retry_window_seconds
     else:
-        raise ValueError("install_session_routing needs agent_sessions or close_window_seconds with a socket_dir")
+        raise ValueError(
+            "install_session_routing needs agent_sessions or close_retry_window_seconds with a socket_dir"
+        )
     claims = SessionClaims(socket_dir, routing_id, lifetimes.holds)
     app.state.nemo_gym_session_claims = claims
     if agent_sessions is not None:

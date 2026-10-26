@@ -101,7 +101,7 @@ The CLI must exit before
 SQLite observations are captured; services must use task-owned files rather than the
 agent session directory, which close removes. Capture requires confirmed termination.
 Missing evidence remains retryable; a final negative receipt skips capture and verification
-but permits connection release. Successful close receipts are retained for `session_close_retry_window_seconds` (default 300).
+but permits connection release. A successful close fences the session and keeps its saved reply for `session_close_retry_window_seconds` (default 300).
 Session state lives in the worker that seeded the session.
 With several agent workers, session routing sends each session's requests to the worker that seeded it.
 Provider TTL and the episode owner handle abandoned sessions. Process cleanup is not a hostile-code security boundary.

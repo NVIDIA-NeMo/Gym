@@ -126,7 +126,7 @@ class StoreRequest(BaseModel):
 
 
 class StateServer(SimpleResourcesServer):
-    """Keeps a value per cookie session, and typed sessions per resources_session_id."""
+    """Keeps a value per cookie session, and episode sessions per resources_session_id."""
 
     label: str = ""
     fail_seed: bool = False
@@ -206,7 +206,7 @@ class Worker:
         socket_dir: Optional[str],
         *,
         mcp: bool = False,
-        close_window_seconds: float = 300,
+        close_retry_window_seconds: float = 300,
         server_class: type[StateServer] = StateServer,
     ) -> None:
         config = BaseResourcesServerConfig(
@@ -215,7 +215,7 @@ class Worker:
             entrypoint="",
             name="state",
             expose_tools_over_mcp=mcp,
-            session_close_retry_window_seconds=close_window_seconds,
+            session_close_retry_window_seconds=close_retry_window_seconds,
         )
         self.server = server_class(config=config, server_client=MagicMock(spec=ServerClient), label=label)
         self.app = self.server.setup_webserver()
@@ -344,14 +344,14 @@ class _SessionAgent(SimpleResponsesAPIAgent):
 class AgentWorker:
     """One worker of an agent server, wired as run_webserver wires it; no socket directory means one worker."""
 
-    def __init__(self, label: str, socket_dir: Optional[str], *, close_window_seconds: float = 300) -> None:
+    def __init__(self, label: str, socket_dir: Optional[str], *, close_retry_window_seconds: float = 300) -> None:
         config = BaseResponsesAPIAgentConfig(
             host="",
             port=0,
             entrypoint="",
             name="agent",
             num_workers=2 if socket_dir is not None else 1,
-            session_close_retry_window_seconds=close_window_seconds,
+            session_close_retry_window_seconds=close_retry_window_seconds,
         )
         self.agent = _SessionAgent(config=config, server_client=MagicMock(spec=ServerClient), label=label)
         self.app = self.agent.setup_webserver()
@@ -456,8 +456,8 @@ class TestTheSessionIdSources:
 
         assert closed.status_code == 200, closed.text
         assert closed.json()["agent_session_id"] == "s@a"
-        assert "s" in a.agent._closed_session_records
-        assert not b.agent._session_records and not b.agent._closed_session_records
+        assert "s" in a.agent._fenced_session_records
+        assert not b.agent._session_records and not b.agent._fenced_session_records
 
     def test_a_typed_seed_gives_the_cookie_its_resources_session_id(self, workers) -> None:
         a, b = workers
@@ -477,7 +477,7 @@ class TestClaimCreation:
     @pytest.mark.parametrize(
         "create",
         [
-            pytest.param(lambda w: w.seed("s"), id="typed seed"),
+            pytest.param(lambda w: w.seed("s"), id="episode seed"),
             pytest.param(lambda w: w.close("s"), id="close of an unknown id"),
         ],
     )
@@ -543,8 +543,8 @@ class TestClaimCreation:
         assert taken.json() == {"worker": "a", "value": 3}
 
     def test_a_cookie_whose_claim_ended_is_claimed_again_by_the_worker_that_uses_it(self, socket_dir: str) -> None:
-        a = Worker("a", socket_dir, close_window_seconds=0.1)
-        b = Worker("b", socket_dir, close_window_seconds=0.1)
+        a = Worker("a", socket_dir, close_retry_window_seconds=0.1)
+        b = Worker("b", socket_dir, close_retry_window_seconds=0.1)
         with a.client, b.client:
             stored = a.post("/store", json={"value": 7})
             cookie = stored.cookies[a.cookie_name]
@@ -648,8 +648,8 @@ class TestClaimLifetime:
     def test_a_typed_session_keeps_its_claim_while_open_and_releases_it_a_window_after_its_close(
         self, socket_dir: str
     ) -> None:
-        a = Worker("a", socket_dir, close_window_seconds=0.2)
-        b = Worker("b", socket_dir, close_window_seconds=0.2)
+        a = Worker("a", socket_dir, close_retry_window_seconds=0.2)
+        b = Worker("b", socket_dir, close_retry_window_seconds=0.2)
         with a.client, b.client:
             assert b.seed().status_code == 200
             time.sleep(0.4)
@@ -663,8 +663,8 @@ class TestClaimLifetime:
         assert not b.app.state.nemo_gym_session_claims._mine
 
     def test_a_new_session_keeps_its_claim_until_verify_and_a_window_after(self, socket_dir: str) -> None:
-        a = Worker("a", socket_dir, close_window_seconds=0.2)
-        b = Worker("b", socket_dir, close_window_seconds=0.2)
+        a = Worker("a", socket_dir, close_retry_window_seconds=0.2)
+        b = Worker("b", socket_dir, close_retry_window_seconds=0.2)
         with a.client, b.client:
             seeded = b.post("/seed_session", json={})
             session_id = b.session(seeded)[SESSION_ID_KEY]
@@ -679,8 +679,8 @@ class TestClaimLifetime:
         assert claimed_after_verify == b.routing_id
 
     def test_a_verify_that_says_a_close_follows_keeps_the_session_open_until_the_close(self, socket_dir: str) -> None:
-        a = Worker("a", socket_dir, close_window_seconds=0.2)
-        b = Worker("b", socket_dir, close_window_seconds=0.2)
+        a = Worker("a", socket_dir, close_retry_window_seconds=0.2)
+        b = Worker("b", socket_dir, close_retry_window_seconds=0.2)
         with a.client, b.client:
             cookie = b.seed().cookies[b.cookie_name]
             # An environment server verifies, then closes in its final cleanup, which can come much later.
@@ -696,8 +696,8 @@ class TestClaimLifetime:
         assert claimed_before_close == b.routing_id and b.server.closes == ["s"] and a.server.closes == []
 
     def test_a_session_ended_under_another_route_releases_its_claim(self, socket_dir: str) -> None:
-        a = Worker("a", socket_dir, close_window_seconds=0.2)
-        b = Worker("b", socket_dir, close_window_seconds=0.2)
+        a = Worker("a", socket_dir, close_retry_window_seconds=0.2)
+        b = Worker("b", socket_dir, close_retry_window_seconds=0.2)
         with a.client, b.client:
             seeded = b.post("/seed_session", json={})
             session_id = b.session(seeded)[SESSION_ID_KEY]
@@ -707,8 +707,8 @@ class TestClaimLifetime:
     def test_a_session_started_by_another_request_keeps_its_claim_a_window_after_each_request(
         self, socket_dir: str
     ) -> None:
-        a = Worker("a", socket_dir, close_window_seconds=0.3)
-        b = Worker("b", socket_dir, close_window_seconds=0.3)
+        a = Worker("a", socket_dir, close_retry_window_seconds=0.3)
+        b = Worker("b", socket_dir, close_retry_window_seconds=0.3)
         with a.client, b.client:
             stored = b.post("/store", json={"value": 1})
             session_id = b.session(stored)[SESSION_ID_KEY]
@@ -722,8 +722,8 @@ class TestClaimLifetime:
         assert still_claimed == b.routing_id
 
     def test_a_failed_typed_seed_keeps_its_claim_for_the_cleanup_close_then_releases_it(self, socket_dir: str) -> None:
-        a = Worker("a", socket_dir, close_window_seconds=0.3)
-        b = Worker("b", socket_dir, close_window_seconds=0.3)
+        a = Worker("a", socket_dir, close_retry_window_seconds=0.3)
+        b = Worker("b", socket_dir, close_retry_window_seconds=0.3)
         with a.client, b.client:
             a.server.fail_seed = True
             failed = a.seed()
@@ -761,8 +761,8 @@ class TestClaimLifetime:
         assert lifetimes.sweep() == ["s"] and not lifetimes._expiries and len(lifetimes) == 0
 
     def test_an_agent_claim_is_released_once_the_owner_drops_the_closed_record(self, socket_dir: str) -> None:
-        a = AgentWorker("a", socket_dir, close_window_seconds=0.1)
-        b = AgentWorker("b", socket_dir, close_window_seconds=0.1)
+        a = AgentWorker("a", socket_dir, close_retry_window_seconds=0.1)
+        b = AgentWorker("b", socket_dir, close_retry_window_seconds=0.1)
         with a.client, b.client:
             assert a.seed().status_code == 200
             assert b.close().json()["agent_session_id"] == "s@a"
@@ -776,8 +776,8 @@ class TestClaimLifetime:
         assert b.agent.seeds == ["s"] and a.agent.seeds == ["s"]
 
     def test_an_agent_failed_seed_that_nobody_closes_is_released_after_the_window(self, socket_dir: str) -> None:
-        a = AgentWorker("a", socket_dir, close_window_seconds=0.1)
-        b = AgentWorker("b", socket_dir, close_window_seconds=0.1)
+        a = AgentWorker("a", socket_dir, close_retry_window_seconds=0.1)
+        b = AgentWorker("b", socket_dir, close_retry_window_seconds=0.1)
         with a.client, b.client:
             a.agent.fail_seed = True
             assert a.seed().status_code == 500
@@ -1097,8 +1097,8 @@ class TestRaces:
     def test_a_claim_released_while_a_request_is_forwarded_is_handled_by_the_former_claimant(
         self, socket_dir: str
     ) -> None:
-        a = Worker("a", socket_dir, close_window_seconds=0.1)
-        b = Worker("b", socket_dir, close_window_seconds=0.1)
+        a = Worker("a", socket_dir, close_retry_window_seconds=0.1)
+        b = Worker("b", socket_dir, close_retry_window_seconds=0.1)
         with a.client, b.client:
             stored = a.post("/store", json={"value": 7})
             session_id = a.session(stored)[SESSION_ID_KEY]
@@ -1131,7 +1131,7 @@ class TestCheckpointRestores:
         assert taken.json() == {"worker": "b", "value": 7}
 
     def test_a_release_after_a_restore_moved_the_claim_leaves_the_new_claim(self, socket_dir: str) -> None:
-        a = Worker("a", socket_dir, close_window_seconds=0.1)
+        a = Worker("a", socket_dir, close_retry_window_seconds=0.1)
         b = Worker("b", socket_dir)
         with a.client, b.client:
             stored = a.post("/store", json={"value": 7})
@@ -1266,8 +1266,8 @@ class TestBodies:
     def test_a_seed_without_a_valid_typed_id_is_served_where_it_lands(
         self, socket_dir: str, body: bytes, status: int
     ) -> None:
-        a = Worker("a", socket_dir, close_window_seconds=0.1)
-        b = Worker("b", socket_dir, close_window_seconds=0.1)
+        a = Worker("a", socket_dir, close_retry_window_seconds=0.1)
+        b = Worker("b", socket_dir, close_retry_window_seconds=0.1)
         with a.client, b.client:
             response = b.post("/seed_session", content=body, headers={"content-type": "application/json"})
             assert response.status_code == status
@@ -1357,7 +1357,7 @@ class TestPrivateSocketBacklog:
             socket_dir=socket_dir,
             session_cookie="c",
             secret_key="c",
-            close_window_seconds=1.0,
+            close_retry_window_seconds=1.0,
             backlog=1234,
         )
 

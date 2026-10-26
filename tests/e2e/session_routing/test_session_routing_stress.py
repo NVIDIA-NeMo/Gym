@@ -28,7 +28,7 @@ The tests run in order, and each one prints its numbers:
   a delayed seed after a close) never create a session twice or leave one behind;
 - MCP tool calls that carry only the session token reach their session;
 - routing's added latency against one worker, next to the cost of a claim lookup alone;
-- once the run is over and the close window has passed, no claim is left;
+- once the run is over and the close retry window has passed, no claim is left;
 - killing a worker gives its sessions a 410, other sessions carry on, and its claims go with the server.
 
 NEMO_GYM_STRESS_EPISODES (default 4000) sets the episodes per route, and NEMO_GYM_STRESS_SESSIONS (default 1000)
@@ -568,11 +568,11 @@ def test_mcp_tool_calls_with_only_the_session_token(deployment: StressDeployment
     assert all(correct) and not twice
 
 
-def test_untyped_seeds_that_never_read_the_session_keep_their_session_on_one_worker(
+def test_legacy_run_seeds_that_never_read_the_session_keep_their_session_on_one_worker(
     deployment: StressDeployment, sampler: ClaimSampler
 ) -> None:
     """An agent's own /run seeds without a session ID, and only the later tool calls read the session."""
-    sampler.mark("untyped seeds start")
+    sampler.mark("legacy run seeds start")
     url = deployment.url("resources")
     calls = 5
 
@@ -596,7 +596,7 @@ def test_untyped_seeds_that_never_read_the_session_keep_their_session_on_one_wor
     split = [session_id for session_id, n in created.items() if n > 1]
     left = sum(len(report["plain_live"]) for report in stats.values())
     _report(
-        "untyped_seeds",
+        "legacy_run_seeds",
         {
             "sessions": SESSIONS,
             "calls_per_session": calls + 1,
@@ -605,7 +605,7 @@ def test_untyped_seeds_that_never_read_the_session_keep_their_session_on_one_wor
             "sessions_left": left,
         },
     )
-    sampler.mark("untyped seeds end")
+    sampler.mark("legacy run seeds end")
     assert all(correct) and not split and not left
 
 

@@ -533,7 +533,7 @@ async def test_closed_ids_are_remembered_for_the_close_retry_window(tmp_path, pl
     assert [client.post("/seed_session", json=seed).status_code for seed in (closed, retired)] == [409, 409]
     # No record outlives the routing claim on its ID, so with several workers every worker then treats it as new.
     clock[0] = 10.0
-    assert len(resource._closed) == 0
+    assert len(resource._fences) == 0
     assert [client.post("/seed_session", json=seed).status_code for seed in (closed, retired)] == [200, 200]
 
 

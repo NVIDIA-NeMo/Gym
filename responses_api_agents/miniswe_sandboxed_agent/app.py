@@ -523,7 +523,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _record_observations(state: MiniSWESession, result: AgentExecutionResult) -> None:
-        """Keep the harness's observations for the close receipt, whichever of the turn or close sees them first."""
+        """Keep the harness's observations for the close response, whichever of the turn or close sees them first."""
         observations = result.harness_metadata.get("ng_agent_observations") if result.harness_metadata else None
         if observations:
             state.observations = AgentObservationBundle.model_validate(observations)

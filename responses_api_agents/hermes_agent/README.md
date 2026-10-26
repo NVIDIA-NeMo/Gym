@@ -112,7 +112,7 @@ hermes_agent:
 | `sandbox_config` | `{}` | `SandboxSpec` fields used with `sandbox_provider`; ignored when Resources supplies a sandbox |
 | `sandbox_runner_timeout_seconds` | `21600` | bounds one sandbox activation; the episode deadline still applies |
 | `system_prompt` | `null` | joined with request `instructions` and the first input system message, in that order; appended to Hermes' built-in prompt |
-| `session_close_retry_window_seconds` | `300` | session close receipt retention from successful cleanup; retries do not extend expiry |
+| `session_close_retry_window_seconds` | `300` | how long a successful close's fence and saved reply last; retries do not extend it |
 | `checkpoints_enabled` | `false` | turns on Hermes' own checkpoints (`checkpoints.enabled` in its config); unrelated to Gym's partial-rollout checkpoints, which this agent joins as restart-only |
 
 The model-server url is resolved at request time and passed to `AIAgent(base_url=..., api_key="gym")`. <!-- pragma: allowlist secret -->

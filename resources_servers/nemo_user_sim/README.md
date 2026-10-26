@@ -75,7 +75,7 @@ seconds by default, matching the episode plus cleanup windows).
 
 The Environment Server registers cleanup before every seed request and closes
 participant and Resources sessions on every outcome. Closing is idempotent, and
-a short-lived tombstone prevents a delayed seed from recreating closed state.
+a fence that expires after the close retry window prevents a delayed seed from recreating closed state.
 A verify for an unknown or closed Resources session returns a masked sample
 with `failure_kind` `session_lost`, and one whose seed outlived
 `session_ttl_seconds` a masked sample with `session_expired`.

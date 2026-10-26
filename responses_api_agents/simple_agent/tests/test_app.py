@@ -2725,7 +2725,7 @@ async def test_a_retire_that_frees_a_session_while_its_close_waits_leaves_no_rec
 
     assert retiring.done() and retiring.exception() is None
     assert isinstance(closing.exception(), StaleAttemptError)
-    assert _SESSION_ID not in server._session_records and _SESSION_ID not in server._closed_session_records
+    assert _SESSION_ID not in server._session_records and _SESSION_ID not in server._fenced_session_records
     assert seeded.agent_session_id == "other-session"
 
 

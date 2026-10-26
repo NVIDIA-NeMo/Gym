@@ -26,14 +26,14 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
-    ResourcesSessionFence,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
     ResourcesSessionLostError,
     ReverifyMode,
     SimpleResourcesServer,
@@ -233,54 +233,65 @@ class TestFailureKindOnTheContract:
 EPISODE = EpisodeId(rollout_id="rollout", attempt=0)
 
 
-class TestResourcesSessionFence:
-    def test_a_closed_session_is_refused_until_its_record_expires(self, monkeypatch) -> None:
+class TestResourcesSessionFences:
+    def test_a_closed_session_is_refused_until_its_fence_expires(self, monkeypatch) -> None:
         clock = [100.0]
         monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
-        fence = ResourcesSessionFence(window_seconds=10.0)
-        fence.mark_closed("closed", EPISODE)
+        fence = ResourcesSessionFences[EpisodeId](10.0)
+        fence.fence("closed", EPISODE)
 
-        assert fence.closed_episode("closed") == EPISODE
+        assert fence.get("closed") == EPISODE
         with pytest.raises(HTTPException) as refused:
-            fence.raise_if_closed("closed")
+            fence.raise_if_fenced("closed")
         assert refused.value.status_code == 409
-        fence.raise_if_closed("open")
+        fence.raise_if_fenced("open")
 
         clock[0] += 10.0
-        assert fence.closed_episode("closed") is None
-        fence.raise_if_closed("closed")
+        assert fence.get("closed") is None
+        fence.raise_if_fenced("closed")
 
-    def test_records_stay_bounded_by_the_window(self, monkeypatch) -> None:
+    def test_fences_stay_bounded_by_the_close_retry_window(self, monkeypatch) -> None:
         clock = [0.0]
         monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
-        fence = ResourcesSessionFence(window_seconds=5.0)
+        fence = ResourcesSessionFences[EpisodeId](5.0)
         for index in range(1000):
-            fence.mark_closed(f"session-{index}", EPISODE)
+            fence.fence(f"session-{index}", EPISODE)
             clock[0] += 1.0
 
-        # Only the sessions closed within the last five seconds are still remembered.
-        assert fence.closed_episode("session-995") is None
-        assert fence.closed_episode("session-996") == EPISODE
-        assert len(fence._closed) == 4
+        # Only the sessions closed within the last five seconds are still fenced.
+        assert fence.get("session-995") is None
+        assert fence.get("session-996") == EPISODE
+        assert len(fence) == 4
 
     def test_a_retried_close_keeps_the_first_episode_and_expiry(self, monkeypatch) -> None:
         clock = [0.0]
         monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
-        fence = ResourcesSessionFence(window_seconds=10.0)
-        fence.mark_closed("session", EPISODE)
+        fence = ResourcesSessionFences[EpisodeId](10.0)
+        fence.fence("session", EPISODE)
         clock[0] = 8.0
-        fence.mark_closed("session", EpisodeId(rollout_id="another-rollout", attempt=0))
+        fence.fence("session", EpisodeId(rollout_id="another-rollout", attempt=0))
 
-        assert fence.closed_episode("session") == EPISODE
+        assert fence.get("session") == EPISODE
         clock[0] = 10.0
-        assert fence.closed_episode("session") is None
+        assert fence.get("session") is None
 
+    def test_clear_deletes_every_fence(self) -> None:
+        fence = ResourcesSessionFences[EpisodeId](300.0)
+        fence.fence("closed", EPISODE)
+
+        fence.clear()
+
+        assert fence.get("closed") is None
+        fence.raise_if_fenced("closed")
+
+
+class TestResourcesSessionLocks:
     def test_the_lock_serializes_one_session_and_is_dropped_when_unused(self) -> None:
-        fence = ResourcesSessionFence(window_seconds=300.0)
+        locks = ResourcesSessionLocks()
         order: list[str] = []
 
         async def hold(name: str) -> None:
-            async with fence.locked("session"):
+            async with locks.locked("session"):
                 order.append(f"{name} in")
                 await asyncio.sleep(0)
                 order.append(f"{name} out")
@@ -291,17 +302,17 @@ class TestResourcesSessionFence:
         asyncio.run(main())
 
         assert order == ["seed in", "seed out", "close in", "close out"]
-        assert fence._locks == {}
+        assert locks._locks == {}
 
     def test_the_lock_does_not_block_another_session(self) -> None:
-        fence = ResourcesSessionFence(window_seconds=300.0)
+        locks = ResourcesSessionLocks()
 
         async def main() -> None:
             release = asyncio.Event()
             entered: list[str] = []
 
             async def hold() -> None:
-                async with fence.locked("slow-seed"):
+                async with locks.locked("slow-seed"):
                     entered.append("slow-seed")
                     await release.wait()
 
@@ -309,7 +320,7 @@ class TestResourcesSessionFence:
             await asyncio.sleep(0)
             # Another session's close must not wait for the slow seed.
             async with asyncio.timeout(1):
-                async with fence.locked("other"):
+                async with locks.locked("other"):
                     entered.append("other")
             release.set()
             await holder
@@ -317,23 +328,14 @@ class TestResourcesSessionFence:
 
         asyncio.run(main())
 
-        assert fence._locks == {}
-
-    def test_clear_forgets_closed_sessions(self) -> None:
-        fence = ResourcesSessionFence(window_seconds=300.0)
-        fence.mark_closed("closed", EPISODE)
-
-        fence.clear()
-
-        assert fence.closed_episode("closed") is None
-        fence.raise_if_closed("closed")
+        assert locks._locks == {}
 
     def test_a_cancelled_waiter_releases_its_lock_entry(self) -> None:
-        fence = ResourcesSessionFence(window_seconds=300.0)
+        locks = ResourcesSessionLocks()
 
         async def main() -> None:
-            async with fence.locked("session"):
-                waiter = asyncio.create_task(fence.locked("session").__aenter__())
+            async with locks.locked("session"):
+                waiter = asyncio.create_task(locks.locked("session").__aenter__())
                 await asyncio.sleep(0)
                 waiter.cancel()
                 with pytest.raises(asyncio.CancelledError):
@@ -341,13 +343,13 @@ class TestResourcesSessionFence:
 
         asyncio.run(main())
 
-        assert fence._locks == {}
+        assert locks._locks == {}
 
 
 def _cookie_keyed_server(
     *,
     releases_by_resources_session_id: bool = True,
-    conflict_is_final: bool = True,
+    conflict_is_terminal: bool = True,
     masks_lost_session: bool = True,
     fences_close: bool = True,
 ) -> SimpleResourcesServer:
@@ -355,8 +357,9 @@ def _cookie_keyed_server(
     config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="")
 
     class CookieKeyedResourcesServer(SimpleResourcesServer):
-        _fence: ResourcesSessionFence = PrivateAttr(
-            default_factory=lambda: ResourcesSessionFence(window_seconds=300.0)
+        _locks: ResourcesSessionLocks = PrivateAttr(default_factory=ResourcesSessionLocks)
+        _fences: ResourcesSessionFences[EpisodeId] = PrivateAttr(
+            default_factory=lambda: ResourcesSessionFences[EpisodeId](300.0)
         )
         _held: dict[str, str] = PrivateAttr(default_factory=dict)
         _episodes: dict[str, EpisodeId] = PrivateAttr(default_factory=dict)
@@ -371,11 +374,11 @@ def _cookie_keyed_server(
         async def seed_session(
             self, request: Request, body: ResourcesSeedSessionRequest
         ) -> ResourcesSeedSessionResponse:
-            async with self._fence.locked(body.resources_session_id):
-                self._fence.raise_if_closed(body.resources_session_id)
+            async with self._locks.locked(body.resources_session_id):
+                self._fences.raise_if_fenced(body.resources_session_id)
                 bound = self._episodes.setdefault(body.resources_session_id, body.episode_id)
                 if bound != body.episode_id:
-                    if conflict_is_final:
+                    if conflict_is_terminal:
                         raise ResourcesSessionConflictError("resources_session_id is bound to another episode")
                     raise ValueError("resources_session_id is bound to another episode")
                 self._held[request.session[SESSION_ID_KEY]] = body.resources_session_id
@@ -384,9 +387,9 @@ def _cookie_keyed_server(
         async def close_resources_session(
             self, request: Request, body: ResourcesCloseSessionRequest
         ) -> ResourcesCloseSessionResponse:
-            async with self._fence.locked(body.resources_session_id):
-                closed_episode = self._fence.closed_episode(body.resources_session_id)
-                if fences_close and closed_episode not in (None, body.episode_id):
+            async with self._locks.locked(body.resources_session_id):
+                fenced_episode = self._fences.get(body.resources_session_id)
+                if fences_close and fenced_episode not in (None, body.episode_id):
                     raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
                 if releases_by_resources_session_id:
                     for key in [key for key, held in self._held.items() if held == body.resources_session_id]:
@@ -394,7 +397,7 @@ def _cookie_keyed_server(
                 else:
                     self._held.pop(request.session[SESSION_ID_KEY], None)
                 self._episodes.pop(body.resources_session_id, None)
-                self._fence.mark_closed(body.resources_session_id, body.episode_id)
+                self._fences.fence(body.resources_session_id, body.episode_id)
             return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
     return CookieKeyedResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
@@ -444,20 +447,20 @@ class TestLostSeedReplyConformance:
             holds_state=lambda resources_session_id: resources_session_id in server._held.values(),
         )
 
-    def test_a_conflicting_seed_must_be_refused_as_final(self) -> None:
-        server = _cookie_keyed_server(conflict_is_final=False)
+    def test_a_conflicting_seed_must_be_refused_as_terminal(self) -> None:
+        server = _cookie_keyed_server(conflict_is_terminal=False)
 
         with pytest.raises(AssertionError, match="to another episode must get 409, got 500"):
             check_resources_session_contract(server.setup_webserver(), self.SEED, keeps_state=True)
 
     def test_a_late_seed_must_be_refused_with_409_not_500(self) -> None:
-        class ValueErrorFence(ResourcesSessionFence):
-            def raise_if_closed(self, resources_session_id: str) -> None:
-                if self.closed_episode(resources_session_id) is not None:
+        class ValueErrorFences(ResourcesSessionFences[EpisodeId]):
+            def raise_if_fenced(self, resources_session_id: str) -> None:
+                if resources_session_id in self:
                     raise ValueError(f"Resources session is already closed: {resources_session_id}")
 
         server = _cookie_keyed_server()
-        server._fence = ValueErrorFence(window_seconds=300.0)
+        server._fences = ValueErrorFences(300.0)
 
         with pytest.raises(AssertionError, match="seed after close must get 409 for contract-session, got 500"):
             check_resources_session_contract(server.setup_webserver(), self.SEED, keeps_state=True)
@@ -499,16 +502,16 @@ class TestRefusalsAndLostSessions:
         ("error", "status"),
         [(ResourcesSeedRejectedError("bad task_data"), 422), (ResourcesSessionConflictError("bound"), 409)],
     )
-    def test_refusals_are_final_4xx_and_still_value_errors(self, error: HTTPException, status: int) -> None:
+    def test_refusals_are_terminal_4xx_and_still_value_errors(self, error: HTTPException, status: int) -> None:
         assert error.status_code == status
         assert isinstance(error, ValueError)
 
     def test_a_closed_session_is_refused_as_a_conflict(self) -> None:
-        fence = ResourcesSessionFence(window_seconds=300.0)
-        fence.mark_closed("closed", EPISODE)
+        fence = ResourcesSessionFences[EpisodeId](300.0)
+        fence.fence("closed", EPISODE)
 
         with pytest.raises(ResourcesSessionConflictError, match="already closed: closed"):
-            fence.raise_if_closed("closed")
+            fence.raise_if_fenced("closed")
 
     def test_a_lost_session_tool_call_names_its_failure_kind(self) -> None:
         lost = ResourcesSessionLostError("browser is gone")
@@ -567,7 +570,7 @@ class TestRefusalsAndLostSessions:
         assert [(result["failure_kind"], result["reward"]) for result in masked] == [(SESSION_LOST, 0.0)]
         assert coverage
 
-    def test_refusals_reach_the_wire_as_final_4xx_through_the_server_middleware(self) -> None:
+    def test_refusals_reach_the_wire_as_terminal_4xx_through_the_server_middleware(self) -> None:
         config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="")
 
         class RefusingResourcesServer(SimpleResourcesServer):
@@ -599,52 +602,52 @@ class TestRefusalsAndLostSessions:
         )
 
 
-class TestClosedResourcesSessionRecords:
-    def test_a_record_lasts_the_window_after_the_first_close(self, monkeypatch) -> None:
+class TestResourcesSessionFenceLapse:
+    def test_a_fence_lasts_the_window_after_the_first_close(self, monkeypatch) -> None:
         clock = [100.0]
         monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
-        records = ClosedResourcesSessionRecords[str](window_seconds=10)
+        fences = ResourcesSessionFences[str](10)
 
-        records.remember("a", "first close")
+        fences.fence("a", "first close")
         clock[0] = 105.0
-        records.remember("a", "retried close")
-        records.remember("b", "close")
-        assert records.get("a") == "first close"
-        assert "a" in records and len(records) == 2
+        fences.fence("a", "retried close")
+        fences.fence("b", "close")
+        assert fences.get("a") == "first close"
+        assert "a" in fences and len(fences) == 2
 
-        # A retried close does not extend the record, so it ends 10 seconds after the first close.
+        # A retried close does not extend the fence, so it expires 10 seconds after the first close.
         clock[0] = 110.0
-        assert records.get("a") is None and "a" not in records
-        assert records.get("b") == "close"
+        assert fences.get("a") is None and "a" not in fences
+        assert fences.get("b") == "close"
         clock[0] = 115.0
-        assert len(records) == 0
-        assert records.get("never closed") is None
+        assert len(fences) == 0
+        assert fences.get("never closed") is None
 
-    def test_a_record_never_outlives_the_routing_claim(self, monkeypatch) -> None:
+    def test_a_fence_never_outlives_the_routing_claim(self, monkeypatch) -> None:
         clock = [0.0]
         monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
         monkeypatch.setattr("nemo_gym.session_routing.monotonic", lambda: clock[0])
         window = 300.0
-        records = ClosedResourcesSessionRecords[bool](window_seconds=window)
+        fences = ResourcesSessionFences[bool](window)
         claims = ResourcesSessionLifetimes(window, starts=("/seed_session",), ends=("/close_session",))
 
         claims.served("id", {"path": "/seed_session", "headers": []}, 200)
-        # The server records the close before the router sees its reply, and the caller retries it later.
-        records.remember("id", True)
+        # The server fences the session before the router sees the close's reply, and the caller retries the close later.
+        fences.fence("id", True)
         clock[0] = 0.5
         claims.served("id", {"path": "/close_session", "headers": []}, 200)
         clock[0] = 120.0
-        records.remember("id", True)
+        fences.fence("id", True)
         clock[0] = 120.25
         claims.served("id", {"path": "/close_session", "headers": []}, 200)
 
         for step in range(0, 4400):
             clock[0] = step / 10
-            if "id" in records:
-                assert claims.holds("id"), f"the record outlived the claim at {clock[0]}"
-        assert "id" not in records and not claims.holds("id")
+            if "id" in fences:
+                assert claims.holds("id"), f"the fence outlived the claim at {clock[0]}"
+        assert "id" not in fences and not claims.holds("id")
 
     def test_a_window_that_is_not_positive_is_refused(self) -> None:
         for window in (0, -1.0, float("nan")):
-            with pytest.raises(ValueError, match="window_seconds must be positive"):
-                ClosedResourcesSessionRecords[str](window_seconds=window)
+            with pytest.raises(ValueError, match="close_retry_window_seconds must be positive"):
+                ResourcesSessionFences[str](window)

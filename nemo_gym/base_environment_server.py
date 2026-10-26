@@ -144,7 +144,7 @@ _RETRYABLE_CLIENT_ERROR_STATUSES = frozenset({408, 425, 429})
 def is_retryable_dependency_status(status: int) -> bool:
     """Return whether an HTTP error status from another server is worth another episode attempt.
 
-    408, 425, 429 and every 5xx are retried; every other 4xx is final.
+    408, 425, 429 and every 5xx are retried; every other 4xx is terminal.
     """
     return status in _RETRYABLE_CLIENT_ERROR_STATUSES or status >= 500
 

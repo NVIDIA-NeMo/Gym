@@ -189,7 +189,7 @@ service. Detach its process group and standard streams, for example with
 in task-owned log files. Check that the service is reachable before finishing.
 A file-producing smoke does not validate this service-dependent behavior.
 
-Resources retains completed close receipts for `session_close_retry_window_seconds`
+The resources server fences each closed session for `session_close_retry_window_seconds`
 (default 300 seconds); retries do not extend the window. Pending setup or failed stops
 retain their handles. Close fences an in-progress setup before waiting for its lock,
 so setup finishing after a close timeout attempts its own bounded teardown. If that

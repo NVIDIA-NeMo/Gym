@@ -1122,7 +1122,7 @@ async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypat
     with pytest.raises(HTTPException) as error:
         await agent.close_agent_session(request, close)
     assert error.value.status_code == 409
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
     with pytest.raises(HTTPException) as stale_seed:
         await agent.seed_agent_session(request, seed())
     assert stale_seed.value.status_code == 409
@@ -1184,7 +1184,7 @@ async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
     clock[0] += agent.config.session_close_retry_window_seconds
     request.session.clear()
     await agent.seed_agent_session(request, seed().model_copy(update={"agent_session_id": "fresh-session"}))
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
 
 
 @pytest.mark.parametrize("window", [0, -1, float("inf")])
@@ -1462,7 +1462,7 @@ async def test_cookie_less_close_cleans_lost_seed_response(setup):
     sandbox.disconnect.assert_awaited_once()
 
 
-async def test_close_before_seed_leaves_bounded_tombstone(setup, monkeypatch):
+async def test_close_before_seed_leaves_a_fence_that_expires(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
@@ -1479,7 +1479,7 @@ async def test_close_before_seed_leaves_bounded_tombstone(setup, monkeypatch):
         await agent.close_agent_session(stale, close)
     with pytest.raises(HTTPException, match="expired"):
         await agent.seed_agent_session(stale, body)
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
 
 
 async def test_close_waits_for_racing_seed_and_removes_completed_setup(setup):

@@ -3184,7 +3184,7 @@ async def test_a_retired_session_s_cookie_is_refused_on_every_worker_until_forge
         cookie = dict(seeded.cookies)
         [session_id] = deployment.counters[0].session_id_to_counter
         await deployment.coordinator.controller.retire(RetireRequest(**control(episode_ids=[{"rollout_id": "r"}])))
-        # Well past the close window and the sweeps after it.
+        # Well past the close retry window and the sweeps after it.
         await asyncio.sleep(0.6)
         claimed_after_retire = claimant(deployment._routing_dir, session_id)
         async with http(other) as worker:
@@ -3197,7 +3197,7 @@ async def test_a_retired_session_s_cookie_is_refused_on_every_worker_until_forge
 
     assert claimed_after_retire == holder.state.nemo_gym_routing_id
     assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_stale_attempt"
-    # The forget ends the claim's life, one close window later; nothing of the session is left on either worker.
+    # The forget ends the claim's life, one close retry window later; nothing of the session is left on either worker.
     assert claimed_after_forget is None and left == [{}, {}]
 
 

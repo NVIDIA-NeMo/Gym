@@ -9,7 +9,7 @@ held by whichever resources worker created it, while the agent holds each rollou
 After a kill of every Gym process, the servers restart with other worker counts, the checkpoint is restored,
 and each rollout continues as its next attempt.
 Every rollout must either have finished before the checkpoint or continue and score 1.0,
-and once the sessions' close window has passed, no server may keep a claim or a session.
+and once the sessions' close retry window has passed, no server may keep a claim or a session.
 
 Opt in with ``NEMO_GYM_CHECKPOINT_MULTIWORKER_STRESS`` set to the number of rollouts in flight;
 ``NEMO_GYM_CHECKPOINT_STRESS_REPORT`` names a JSON file for the numbers.
