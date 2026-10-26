@@ -29,7 +29,7 @@ from typing import Any, NamedTuple, TypedDict
 from pydantic import Field, ValidationError
 
 from nemo_gym._checkpoint.agent import Activation
-from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest, AgentSessionState
+from nemo_gym.base_responses_api_agent import AgentCloseSessionResponse, AgentSeedSessionRequest, AgentSessionState
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -518,6 +518,11 @@ class AgenticTurnSimulationAgent(SimpleAgent):
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
         """Environment Server agent sessions are refused: the tool calls need the session ``/seed_session`` opens on
         the resources server."""
+        raise NotImplementedError("agentic_turn_simulation_agent supports only the legacy /run route")
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        """Refused with the seed: no agent session is ever bound here, so Simple Agent's close has nothing to
+        release."""
         raise NotImplementedError("agentic_turn_simulation_agent supports only the legacy /run route")
 
 
