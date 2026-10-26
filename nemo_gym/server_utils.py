@@ -133,6 +133,8 @@ _GLOBAL_AIOHTTP_CLIENT_CONFIG: Optional["GlobalAIOHTTPAsyncClientConfig"] = None
 _GLOBAL_AIOHTTP_CONTROL_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY: bool = False
+# Longest status line or header value the global client reads.
+GLOBAL_AIOHTTP_MAX_HEADER_BYTES = 65536
 _UPSTREAM_ERROR_LOG_BODY_CHARS = 2000
 # Bound both the raw request prefix and its escaped representation to 4 KiB.
 _VALIDATION_ERROR_LOG_BODY_CHARS = 4096
@@ -456,6 +458,10 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         connector=connector,
         timeout=ClientTimeout(),
         cookie_jar=DummyCookieJar(),
+        # github.com now sends a Content-Security-Policy header longer than aiohttp's 8190-byte
+        # default, which fails every release download (the mini-SWE and uv bootstraps).
+        max_line_size=GLOBAL_AIOHTTP_MAX_HEADER_BYTES,
+        max_field_size=GLOBAL_AIOHTTP_MAX_HEADER_BYTES,
     )
 
     global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_CONFIG
