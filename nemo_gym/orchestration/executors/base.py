@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
@@ -26,6 +27,9 @@ from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, Ben
 
 class UnsupportedOperationError(RuntimeError):
     """The executor does not implement this operation."""
+
+
+logger = logging.getLogger(__name__)
 
 
 class BaseExecutor(ABC):
@@ -81,6 +85,17 @@ class BaseExecutor(ABC):
         The jobs are queued by the time this runs, so a failure has to name them
         or they are stranded with no record anywhere.
         """
+        from nemo_gym.provenance import build_provenance
+
+        # Capture submission-time settings; materialized input hashes are added by each run. The resolved
+        # config is left out here because it is written once, beside the manifest, below.
+        try:
+            record.provenance = build_provenance(
+                config.model_dump(mode="json", context={HOST_ENV_REFS: True})
+            ).model_dump(mode="json", exclude={"resolved_config"})
+        except Exception as error:
+            logger.warning("Submission provenance unavailable (%s).", type(error).__name__)
+            record.provenance = {}
 
         def write_resolved_config() -> None:
             # `host:` values are written as their references, so the record is safe for other readers
