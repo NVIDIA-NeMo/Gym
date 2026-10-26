@@ -272,7 +272,7 @@ def _atif_trajectories(output: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         try:
             trajectories.append(json.loads(Path(artifact["path"]).read_text(encoding="utf-8")))
-        except (OSError, json.JSONDecodeError) as error:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             LOG.warning("Could not read Relay ATIF trajectory %s (%s)", artifact["path"], type(error).__name__)
     return trajectories
 

@@ -27,6 +27,7 @@ from responses_api_agents.nemo_fabric_agent.app import (
     NeMoFabricAgentConfig,
     NeMoFabricAgentRunRequest,
     _atif_output_items,
+    _atif_trajectories,
     _content_text,
     _extract_request_input,
     _fabric_output_items,
@@ -804,3 +805,16 @@ def test_fabric_runs_python_adapters_on_the_agent_interpreter(preset: str | None
             asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="question")))
 
     assert seen == [preset or sys.executable]
+
+
+def test_atif_trajectories_skips_partial_or_undecodable_artifacts(tmp_path: Path) -> None:
+    # Relay can leave a partial ATIF file, cut inside a multi-byte character or mid-JSON. Each one is skipped with a
+    # warning so the rollout falls back to Fabric's own output, and a readable file is still returned.
+    cut_utf8 = tmp_path / "cut_utf8.json"
+    cut_utf8.write_bytes(b'{"steps": [{"source": "agent", "message": "\xe2\x82')
+    truncated = tmp_path / "truncated.json"
+    truncated.write_text('{"steps": [{"source": "agent"')
+    whole = tmp_path / "whole.json"
+    whole.write_text(json.dumps({"steps": []}))
+    artifacts = [{"kind": "atif", "path": str(p)} for p in (cut_utf8, truncated, whole)]
+    assert _atif_trajectories({"relay_artifacts": artifacts}) == [{"steps": []}]
