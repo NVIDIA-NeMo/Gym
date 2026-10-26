@@ -1457,7 +1457,7 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def drop_litellm_provider_specific_fields(cls, value: Any) -> Any:
+    def drop_harness_message_hints(cls, value: Any) -> Any:
         """Drop ``provider_specific_fields`` and ``cache_control`` from message history.
 
         litellm's ``Message.model_dump()`` emits ``provider_specific_fields`` on every
