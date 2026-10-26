@@ -276,7 +276,7 @@ async def test_commit_resolves_its_intent(ledger):
         replay=summarize_replay(replay_context([{"role": "user", "content": "hello"}], render_digest="a" * 64)),
     )
     await ledger.record(
-        CaptureLedgerCommit(rollout_id="rollout-1", record=CallRecord(**fields), request_items=[], response_items=[])
+        CaptureLedgerCommit(capture_key="rollout-1", record=CallRecord(**fields), request_items=[], response_items=[])
     )
     assert not (await ledger.manifest("rollout-1"))["pending_call_ids"]
     await ledger.begin_call("rollout-1", "c2")

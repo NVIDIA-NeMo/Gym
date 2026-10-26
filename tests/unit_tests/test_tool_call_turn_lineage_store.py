@@ -69,7 +69,7 @@ def _commit(call_id: str, output: list[dict], tokens: list[int], version: int) -
         fingerprint_version=version,
     )
     return CaptureLedgerCommit(
-        rollout_id="r", record=record, request_items=CONTEXT, response_items=output, staging_chain=(f"r/{call_id}",)
+        capture_key="r", record=record, request_items=CONTEXT, response_items=output, staging_chain=(f"r/{call_id}",)
     )
 
 

@@ -291,7 +291,7 @@ async def resolve_parent(request_messages: list | None) -> None:
         # except path below poisons the call (fail closed).
         try:
             context.capture_admission = CaptureAdmission(
-                rollout_id=context.rollout_id,
+                capture_key=context.rollout_id,
                 model_call_id=context.model_call_id,
                 parent_call_id=match.model_call_id,
                 prev_len=match.prev_len,
@@ -328,7 +328,7 @@ async def resolve_parent(request_messages: list | None) -> None:
         return
     if is_root or not has_rows:
         context.capture_admission = CaptureAdmission(
-            rollout_id=context.rollout_id,
+            capture_key=context.rollout_id,
             model_call_id=context.model_call_id,
             mode="text",
         )
@@ -426,7 +426,7 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
         chain.reverse()
     context.parent_staging_chain = chain
     context.capture_admission = CaptureAdmission(
-        rollout_id=context.rollout_id,
+        capture_key=context.rollout_id,
         model_call_id=context.model_call_id,
         mode="candidate" if predecessor is not None else "text",
         parent_call_id=predecessor.model_call_id if predecessor is not None else None,

@@ -129,7 +129,7 @@ def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[s
         "finish_reason": record.finish_reason,
         "last_output_item": record.last_output_item,
         "root_reason": record.root_reason,
-        "capture_key": record.capture_key,
+        "source_capture_key": record.source_capture_key,
     }
 
 
@@ -216,13 +216,13 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     last_output_item=row.get("last_output_item"),
                     root_reason=row.get("root_reason"),
                     # Set on rows a checkpoint restore carried over from an earlier attempt.
-                    capture_key=row.get("capture_key"),
+                    source_capture_key=row.get("source_capture_key"),
                     # A row written before the column existed reads as an unstated reason.
                     finish_reason=row.get("finish_reason") or None,
                 )
             )
     manifest = RolloutManifest(
-        rollout_id=rollout_id,
+        capture_key=rollout_id,
         records=records,
         failures=failures,
         attempted_call_ids=attempted,
@@ -578,10 +578,10 @@ class InMemoryLineageStore:
         # hash covers continuity, so the index keeps tokens only for
         # lineage-only local-capture rows that inject prompt prefixes.
         record = commit.record
-        if commit.rollout_id in self._retired:
-            _log_late_write_dropped(commit.rollout_id, record.model_call_id, record.staging_key)
+        if commit.capture_key in self._retired:
+            _log_late_write_dropped(commit.capture_key, record.model_call_id, record.staging_key)
             return
-        rows = self._ledgers.setdefault(commit.rollout_id, [])
+        rows = self._ledgers.setdefault(commit.capture_key, [])
         row = {"model_call_id": record.model_call_id, **_custody_columns(record, commit.staging_chain)}
         # Write-once per model call (CaptureLedger contract): an identical
         # replay is a no-op, any differing field is a conflict. Checked on the
@@ -594,7 +594,7 @@ class InMemoryLineageStore:
                 raise ValueError(f"conflicting lineage record for model call {record.model_call_id}")
             return
         if record.fingerprint_version == FINGERPRINT_VERSION:
-            self.index.for_rollout(commit.rollout_id).record(
+            self.index.for_rollout(commit.capture_key).record(
                 record.model_call_id,
                 list(commit.request_items) + list(commit.response_items),
                 [],
@@ -1162,10 +1162,10 @@ class FileLineageStore(IncrementalLineageStore):
             "digest": commit.record.cumulative_hash,
             **_custody_columns(commit.record, commit.staging_chain),
         }
-        with self._locked(commit.rollout_id):
-            records = self._read(commit.rollout_id)
-            if not records and self._is_retired(commit.rollout_id):
-                _log_late_write_dropped(commit.rollout_id, model_call_id, commit.record.staging_key)
+        with self._locked(commit.capture_key):
+            records = self._read(commit.capture_key)
+            if not records and self._is_retired(commit.capture_key):
+                _log_late_write_dropped(commit.capture_key, model_call_id, commit.record.staging_key)
                 return
             matches = [
                 existing
@@ -1184,7 +1184,7 @@ class FileLineageStore(IncrementalLineageStore):
                 if existing != comparable:
                     raise ValueError(f"conflicting lineage record for model call {model_call_id}")
                 return
-            self._append(commit.rollout_id, record, records)
+            self._append(commit.capture_key, record, records)
 
     async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
         await asyncio.to_thread(self._record_failure, rollout_id, model_call_id, reason)

@@ -44,7 +44,7 @@ def _root_context(store: InMemoryLineageStore) -> CaptureContext:
         external_staging=True,
         request_items=[{"role": "user", "content": "go"}],
         capture_admission=CaptureAdmission(
-            rollout_id="rollout-1",
+            capture_key="rollout-1",
             model_call_id="c1",
             mode="text",
         ),
@@ -208,7 +208,7 @@ def test_megatron_handler_admits_multimodal_requests(content_part: dict[str, Any
 def _staged_coords(**overrides: Any) -> dict[str, Any]:
     """Return a valid ``staged`` acknowledgement for the ``_root_context`` call, with overrides."""
     kwargs: dict[str, Any] = {
-        "rollout_id": "rollout-1",
+        "capture_key": "rollout-1",
         "model_call_id": "c1",
         "prev_len": 0,
         "weight_version": 7,
@@ -294,7 +294,7 @@ _FINALIZE_CASES = {
     ),
     "capture-failed": _FinalizeCase(
         coords_payload=CommitCoords(
-            rollout_id="rollout-1",
+            capture_key="rollout-1",
             model_call_id="c1",
             prev_len=0,
             weight_version=7,
@@ -309,11 +309,11 @@ _FINALIZE_CASES = {
         expected_failure=INVALID_COMMIT_COORDS_REASON,
     ),
     "malformed-missing-fields": _FinalizeCase(
-        coords_payload={"rollout_id": "rollout-1", "model_call_id": "c1"},
+        coords_payload={"capture_key": "rollout-1", "model_call_id": "c1"},
         expected_failure=INVALID_COMMIT_COORDS_REASON,
     ),
     "mismatched-rollout-id": _FinalizeCase(
-        coords_payload=_staged_coords(rollout_id="rollout-other"),
+        coords_payload=_staged_coords(capture_key="rollout-other"),
         expected_failure=INVALID_COMMIT_COORDS_REASON,
     ),
     "mismatched-model-call-id": _FinalizeCase(
