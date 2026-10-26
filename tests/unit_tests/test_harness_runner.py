@@ -109,6 +109,28 @@ def test_inherited_runner_names_neither_configure_the_runner_nor_reach_the_cli(t
     assert not (tmp_path / "evaluated").exists()
     assert not (tmp_path / "events.jsonl").exists()
 
+
+def test_events_mode_keeps_runner_descriptors_out_of_the_cli(tmp_path: Path) -> None:
+    script = 'echo \'{"type": "injected"}\' >&4; echo \'{"type": "ok"}\''
+    params = _params(tmp_path, command=["bash", "-c", script], events=str(tmp_path / "events.jsonl"))
+    result = _run(params)
+    assert result.returncode == 0, result.stderr
+    events = [json.loads(line)[1] for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert events == [{"type": "ok"}]
+    assert "Bad file descriptor" in (tmp_path / "stderr.log").read_text()
+
+
+@pytest.mark.skipif(
+    subprocess.run(["bash", "-c", "((BASH_VERSINFO[0] >= 5))"]).returncode != 0, reason="bash 5 restores INT"
+)
+def test_events_mode_cli_keeps_default_interrupt_handling(tmp_path: Path) -> None:
+    code = "import json, signal; print(json.dumps({'int': str(signal.getsignal(signal.SIGINT))}))"
+    params = _params(tmp_path, command=[sys.executable, "-c", code], events=str(tmp_path / "events.jsonl"))
+    result = _run(params)
+    assert result.returncode == 0, result.stderr
+    (event,) = [json.loads(line)[1] for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert "default_int_handler" in event["int"]
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux process semantics")
 def test_events_mode_forwards_term_and_ignores_a_detached_stdout_holder(tmp_path: Path) -> None:
     # A detached tool keeps stdout open; the runner must still finish when the CLI does.

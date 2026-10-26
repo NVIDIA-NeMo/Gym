@@ -32,7 +32,9 @@ cd "$cwd" || exit 1
 # Stamp stdout lines as they appear. A file, unlike a pipe, cannot be held open by a detached tool.
 : >"$stdout"
 exec 3<"$stdout" 4>"$events"
-"${command[@]}" <"$stdin" >>"$stdout" 2>"$stderr" &
+# Without job control an async command ignores INT and QUIT, which its tools would inherit; the
+# runner's own descriptors stay out of the CLI.
+{ trap - INT QUIT; exec "${command[@]}" <"$stdin" >>"$stdout" 2>"$stderr" 3<&- 4>&-; } &
 cli=$!
 trap 'kill -TERM "$cli" 2>/dev/null' TERM
 pending=""
