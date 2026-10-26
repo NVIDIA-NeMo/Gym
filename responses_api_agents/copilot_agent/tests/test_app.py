@@ -114,6 +114,7 @@ class Sandbox:
         self.events = copilot_events()
         self.otel = otel(chat_span("chatcmpl-1", usage=(10, 3)), chat_span("chatcmpl-2", usage=(5, 2)))
         self.compaction_state = False
+        self.stderr = ""
         self.exec = AsyncMock(side_effect=self.execute)
         self.stop = AsyncMock()
         self.disconnect = AsyncMock()
@@ -147,6 +148,7 @@ class Sandbox:
         self.files[f"{directory}/events.jsonl"] = "\n".join(
             json.dumps([float(i), event]) for i, event in enumerate(self.events)
         )
+        self.files[f"{directory}/stderr.log"] = self.stderr
         if self.otel is not None:
             self.files[f"{directory}/otel.jsonl"] = self.otel
         return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
@@ -431,6 +433,32 @@ def test_unexplained_nonzero_exit_is_an_execution_error(setup):
     result, closed = run_session(agent)
     assert result.status_code == 500
     assert closed.status_code == 200
+
+
+@pytest.mark.parametrize("stderr", ["native startup failed", "x" * 5000 + "specific failure"], ids=["short", "long"])
+def test_native_startup_error_preserves_bounded_stderr(setup, stderr):
+    agent, sandbox = setup
+    sandbox.events = []
+    sandbox.otel = None
+    sandbox.stderr = stderr
+    sandbox.result["return_code"] = 1
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200
+        with pytest.raises(RuntimeError, match="Copilot exited with code 1") as error:
+            client.post("/ng-rollout/copilot-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert stderr[-4000:] in str(error.value)
+        assert len(str(error.value)) < 4100
+        closed = client.post(
+            "/v1/agent_sessions/close",
+            json={
+                "agent_session_id": created.json()["agent_session_id"],
+                "episode_id": seed().episode_id.model_dump(),
+            },
+        )
+    assert closed.status_code == 200
+    records = closed.json()["agent_observations"]["records"]
+    assert records[0]["status"] == "failed" and records[0]["model_calls"] == []
 
 
 def test_missing_result_event_is_an_execution_error(setup):

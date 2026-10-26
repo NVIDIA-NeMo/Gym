@@ -723,6 +723,9 @@ class CopilotAgent(SimpleResponsesAPIAgent):
                 execution_error = execution_error or f"Copilot exited with code {cleanup['return_code']}"
             elif transcript.result is None:
                 execution_error = execution_error or "Copilot ended without a result event"
+        if execution_error and artifacts.stderr and artifacts.stderr.strip():
+            # Startup failures may emit no JSON events; preserve the native cause before cleanup.
+            execution_error = f"{execution_error}; stderr: {artifacts.stderr.strip()[-4000:]}"
         status = (
             "failed" if reported_error or execution_error else "incomplete" if cleanup["timed_out"] else "completed"
         )

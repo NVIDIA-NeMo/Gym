@@ -45,6 +45,7 @@ class CopilotArtifacts(BaseModel):
     events: str
     otel: str | None = None
     usage: str | None = None
+    stderr: str | None = None
     compaction_state: bool | None = None
 
 
@@ -156,5 +157,6 @@ class CopilotSandboxSession(AgentSessionState):
             events=events,
             otel=await self.read_optional("otel.jsonl"),
             usage=await self.read_optional("usage.json"),
+            stderr=await self.read_optional("stderr.log"),
             compaction_state=await self.read_compaction_state(),
         )
