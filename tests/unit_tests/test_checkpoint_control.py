@@ -1755,6 +1755,79 @@ async def test_resume_waits_for_an_install_that_outlived_its_restore_and_retries
     assert resumed.json() == {"phase": "idle", "idempotent": False} and participant.accepting
 
 
+async def test_a_prepare_while_an_install_that_outlived_its_restore_runs_is_refused_until_admission_reopens(
+    tmp_path: Path,
+) -> None:
+    write_participant_state(
+        tmp_path,
+        kind="fake",
+        instance="fake-1",
+        checkpoint_id="c1",
+        records=[{"episode_id": {"rollout_id": "r"}, "value": 1}],
+    )
+    release = threading.Event()
+    installing: list[None] = []
+
+    class SlowInstall(FakeParticipant):
+        async def install(self, records, scope) -> None:
+            installing.append(None)
+            await asyncio.to_thread(release.wait, 5)
+            self.restore_records(records)
+
+    participant = SlowInstall()
+    async with make_client(participant) as client:
+        await _past_deadline(
+            client,
+            "restore",
+            lambda: installing,
+            "the install started",
+            checkpoint_id="r1",
+            checkpoint_dir=str(tmp_path),
+            episode_ids=[{"rollout_id": "r"}],
+        )
+        refused = await client.post("/ng-control/v1/checkpoint/prepare", json=body("ckpt-2"))
+        status = (await client.get("/ng-control/v1/checkpoint/status")).json()
+        release.set()
+        # The failed restore's own recovery reopens admission once its install has finished.
+        await _until(lambda: participant.accepting, "admission reopened")
+        prepared = await client.post("/ng-control/v1/checkpoint/prepare", json=body("ckpt-3"))
+
+    # A checkpoint that began now would take over the closed admission, and the recovery would never run.
+    assert refused.status_code == 503 and refused.json()["error"]["code"] == "checkpoint_restore_recovery_pending"
+    assert status["phase"] == "idle" and status["checkpoint_id"] is None
+    assert prepared.json()["phase"] == "prepared"
+
+
+async def test_a_prepare_after_a_failed_restore_could_not_reopen_is_refused_until_a_resume_recovers(
+    tmp_path: Path,
+) -> None:
+    write_participant_state(
+        tmp_path,
+        kind="fake",
+        instance="fake-1",
+        checkpoint_id="c1",
+        records=[{"episode_id": {"rollout_id": "r"}, "value": 1}],
+    )
+    participant = _ClosingThenStuck()
+    restore = body("restore-1", checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "r"}])
+    async with make_client(participant) as client:
+        with pytest.raises(RuntimeError, match="close failed"):
+            await client.post("/ng-control/v1/checkpoint/restore", json=restore)
+        # Closing and reopening work again, but nothing has reopened admission yet.
+        participant.fail_open = False
+        participant.close_admission = FakeParticipant.close_admission.__get__(participant)
+        refused = await client.post("/ng-control/v1/checkpoint/prepare", json=body("ckpt-2"))
+        still_closed = not participant.accepting
+        # The controller resumes after a failed prepare, which finishes the recovery.
+        resumed = await client.post("/ng-control/v1/checkpoint/resume", json=body("ckpt-2"))
+        prepared = await client.post("/ng-control/v1/checkpoint/prepare", json=body("ckpt-3"))
+
+    assert refused.status_code == 503 and refused.json()["error"]["code"] == "checkpoint_restore_recovery_pending"
+    assert still_closed
+    assert resumed.json() == {"phase": "idle", "idempotent": False}
+    assert prepared.json()["phase"] == "prepared"
+
+
 async def test_a_retire_past_its_deadline_still_refuses_its_attempts() -> None:
     participant = FakeParticipant()
     participant.executions["r"] = {"parked": False, "value": 1}
