@@ -300,6 +300,16 @@ same files, and from the run's model-call captures when given `--model-call-capt
 `gym eval aggregate` merges shards, recheck the shards: the merged file holds their rows but not their failure rows.
 It is a report only and changes no score or verdict.
 
+Scope of this section:
+
+- Coverage is partial. Only the components listed below record timeout evidence. A rollout stopped by any other
+  limit, or by a component that records none of these fields, is counted in `failed_without_signal` if it failed, and
+  not at all if it landed.
+- It counts final outcomes. A rollout that timed out and then landed on a retry counts by its landed row, so the
+  earlier timed-out attempt is not counted.
+- Saved observability that keeps every failure event of a rollout, including attempts followed by a successful retry,
+  is follow-up work. These counts report final outcomes only and do not need to match it.
+
 A rollout counts as timed out on one of two kinds of evidence:
 
 1. `typed`: a timeout record in the row's `timeouts` list. The component that enforces a limit attaches it to the

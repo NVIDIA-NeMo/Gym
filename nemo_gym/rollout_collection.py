@@ -4547,7 +4547,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     await raise_for_status(res)
                     result = await get_response_json(res)
                     if run_timing is not None and isinstance(result, Mapping):
-                        run_timing.record_result(result, time.monotonic() - started)
+                        # Classify the record collection saves, as the run health summary does; the raw reply is
+                        # returned unchanged.
+                        episode = _materialized_taskset(row) is not None and _is_episode_response(result)
+                        run_timing.record_result(
+                            _episode_record(result) if episode else result, time.monotonic() - started
+                        )
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time.time() - started_at) * 1000

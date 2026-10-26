@@ -9813,6 +9813,84 @@ class TestEnvironmentServerRouting:
             },
         }
 
+    @pytest.mark.parametrize(
+        "reply, timed_out",
+        [
+            ({"failure": {"failure_reason": "Episode timed out", "terminal": False}}, True),
+            ({"result": {"reward": 0.0, "agent_timed_out": True}}, True),
+            ({"result": {"reward": 1.0}}, False),
+        ],
+        ids=["episode deadline", "timeout inside the result", "completed"],
+    )
+    async def test_the_timing_table_reads_an_episode_reply_as_saved_health_does(
+        self, monkeypatch: pytest.MonkeyPatch, reply: dict, timed_out: bool
+    ) -> None:
+        from nemo_gym.rollout_collection import RunTimingReport, _episode_record
+
+        envelope = {
+            "episode_id": {"rollout_id": "0-0", "attempt": 0},
+            "task_id": {"taskset": "swe_pro", "task_id": "instance"},
+        } | reply
+        client = install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, envelope)))
+        client.global_config_dict = _environment_server_config()
+        materialized = {
+            "task_id": {"taskset": "swe_pro", "task_id": "instance"},
+            "task_input": {"responses_create_params": {"input": "fix it"}, "task_data": {"instance_id": "instance"}},
+        }
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            environment_routing_mode="taskset",
+            environment_server_routes={"swe_pro": "environment"},
+            num_repeats=1,
+        )
+        rows = RolloutCollectionHelper._preprocess_raw_rows(
+            [(0, orjson.dumps(materialized).decode(), materialized)], config
+        )
+        report = RunTimingReport(
+            total=1,
+            start_within_s=1800,
+            start_min_fraction=0.95,
+            all_started_within_s=2700,
+            long_rollout_s=9000,
+            long_rollout_max_fraction=0.10,
+            timed_out_max_fraction=0.05,
+        )
+        (future,) = RolloutCollectionHelper()._run_examples_with_metadata(rows, run_timing=report)
+        completed = await future
+
+        # The raw reply stays as the server sent it; only the table reads the saved record's projection.
+        assert completed.result == envelope
+        saved = _episode_record(completed.result)
+        assert (
+            bool(saved.get("_ng_failure_message") == "Episode timed out" or saved.get("agent_timed_out")) is timed_out
+        )
+        line = next(line for line in report.table().splitlines() if "hit wall-clock limit" in line)
+        assert ("100.0% (1)" if timed_out else "0.0% (0)") in line
+
+    async def test_a_legacy_reply_echoing_episode_identities_is_timed_as_sent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A row that went out without a materialized task is not projected, even if its reply looks like one."""
+        from nemo_gym.rollout_collection import RunTimingReport
+
+        reply = {"episode_id": {"rollout_id": "0-0"}, "task_id": {"task_id": "x"}, "agent_timed_out": True}
+        install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, reply)))
+        report = RunTimingReport(
+            total=1,
+            start_within_s=1800,
+            start_min_fraction=0.95,
+            all_started_within_s=2700,
+            long_rollout_s=9000,
+            long_rollout_max_fraction=0.10,
+            timed_out_max_fraction=0.05,
+        )
+        row = {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "my_agent"}}
+        (future,) = RolloutCollectionHelper()._run_examples_with_metadata([row], run_timing=report)
+        assert (await future).result == reply
+        line = next(line for line in report.table().splitlines() if "hit wall-clock limit" in line)
+        assert "100.0% (1)" in line
+
     def test_taskset_route_requires_a_configured_environment_server(self) -> None:
         row = {
             "task_id": {"taskset": "swe_pro", "task_id": "instance"},
