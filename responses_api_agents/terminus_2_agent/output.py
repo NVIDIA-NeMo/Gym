@@ -119,7 +119,7 @@ def trajectory_to_responses(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
 
         observation = step.get("observation", {})
         results = observation.get("results", [])
-        if len(tool_calls) > 1 and len(results) == 1 and not results[0].get("source_call_id"):
+        if len(tool_calls) > 1 and len(results) == 1:
             tool_calls = [
                 {
                     "tool_call_id": f"call_{agent_step_index}_batch",
@@ -141,7 +141,7 @@ def trajectory_to_responses(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
             output_items.append(fc.model_dump())
 
         for i, result in enumerate(results):
-            call_id = result.get("source_call_id") or (
+            call_id = (
                 tool_calls[i].get("tool_call_id", f"call_{uuid4().hex[:8]}")
                 if i < len(tool_calls)
                 else f"call_{uuid4().hex[:8]}"

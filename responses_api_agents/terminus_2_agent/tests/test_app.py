@@ -145,23 +145,6 @@ class TestTrajectoryOutput:
         assert output[1]["call_id"] == output[2]["call_id"]
         assert output[2]["output"] == "files"
 
-    def test_explicit_observation_source_is_preserved(self) -> None:
-        output = trajectory_to_responses(
-            {
-                "steps": [
-                    {
-                        "source": "agent",
-                        "tool_calls": [
-                            {"tool_call_id": "a", "function_name": "bash_command", "arguments": {}},
-                            {"tool_call_id": "b", "function_name": "bash_command", "arguments": {}},
-                        ],
-                        "observation": {"results": [{"source_call_id": "b", "content": "second"}]},
-                    }
-                ]
-            }
-        )
-        assert output[-1]["call_id"] == "b"
-
     def test_raw_content_preserves_training_fields_and_commands(self) -> None:
         trajectory = {
             "steps": [
