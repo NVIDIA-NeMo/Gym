@@ -411,6 +411,27 @@ async def test_an_agent_without_session_hooks_reports_its_rollouts_as_restarts_t
     assert await agent._restart_only.export(None) == []
 
 
+async def test_status_reports_an_agents_checkpoint_mode() -> None:
+    """A controller can refuse, before any checkpoint, an agent whose rollouts would start over after a crash."""
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "t"}}
+    exported = _SandboxAgent(
+        config=BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name="agent"), server_client=client
+    )
+    _, restart_only_app = _unsupported_agent_app()
+    statuses = {}
+    for mode, app in (("exported", exported.setup_webserver()), ("restart_only", restart_only_app)):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://agent", headers={"Authorization": "Bearer t"}
+        ) as http:
+            statuses[mode] = (await http.get("/ng-control/v1/checkpoint/status")).json()
+
+    # The same key and values a resources server reports, matching the agent's declared checkpoint_mode.
+    assert statuses["exported"]["kind"] == statuses["restart_only"]["kind"] == "agent"
+    assert statuses["exported"]["mode"] == exported.checkpoint_mode == "exported"
+    assert statuses["restart_only"]["mode"] == "restart_only"
+
+
 async def test_an_agent_without_session_hooks_says_on_its_seed_reply_that_the_episode_restarts() -> None:
     agent, app = _unsupported_agent_app()
     seed = {
