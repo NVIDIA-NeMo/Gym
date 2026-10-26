@@ -39,11 +39,11 @@ import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractAsyncContextManager, AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, ClassVar, Optional, TypeVar
+from typing import Annotated, Any, ClassVar, Literal, Optional, Protocol, TypeVar
 
 import orjson
 from fastapi import APIRouter, FastAPI, Header, Request
@@ -67,6 +67,7 @@ from nemo_gym._checkpoint.errors import (
     ExportFailedError,
     InvalidPhaseError,
     RestartInScopeError,
+    RestoreRecoveryPendingError,
     StaleAttemptError,
     StaleCheckpointError,
     UnauthorizedError,
@@ -83,6 +84,13 @@ from nemo_gym.telemetry.gym_metrics import (
 
 
 LOGGER = logging.getLogger(__name__)
+
+# What a server can capture, declared as ``checkpoint_mode`` on agent, resources and environment server classes.
+# ``restart_only``: nothing of the server is in a checkpoint.
+#   Its rollouts start over from their input after a crash.
+# ``stateless``: its sessions hold nothing a continuation needs (resources servers only).
+# ``exported``: it exports and restores its state through the hooks of its kind.
+CheckpointMode = Literal["restart_only", "stateless", "exported"]
 
 CHECKPOINT_ROUTE_PREFIX = "/ng-control/v1/checkpoint"
 CHECKPOINT_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
@@ -302,6 +310,26 @@ class RetiredAttempts:
         return len(self._marks)
 
 
+class ClaimRestored(Protocol):
+    """Takes the restored record under ``key`` from a server's coordinator; see ``ParticipantWorkerLink.claim``.
+
+    If the block it opens raises, the record goes back only once ``teardown`` succeeds.
+    """
+
+    def __call__(
+        self, key: str, *, teardown: Optional[Callable[[], Awaitable[None]]] = None
+    ) -> AbstractAsyncContextManager[Optional[dict[str, Any]]]: ...
+
+
+class SessionFreed(Protocol):
+    """Told of a session a participant freed outside a request.
+
+    ``until_forget`` says the session stays refused until the controller forgets its rollout.
+    """
+
+    def __call__(self, session_id: str, *, until_forget: bool = False) -> None: ...
+
+
 class CheckpointParticipant(ABC):
     """State owner inside one server process.
 
@@ -320,11 +348,23 @@ class CheckpointParticipant(ABC):
         # The control plane clears them when the checkpoint resumes.
         self.carried_restarts: set[str] = set()
         self._changed = asyncio.Condition()
+        # With several workers, each worker's participant also reports its changes to the coordinator.
+        self.on_change: Optional[Callable[[], Awaitable[None]]] = None
+        # With several workers, takes a restored record from the coordinator by the key ``claim_key`` gives it.
+        # The coordinator leases the record to this worker until the block it opens ends.
+        # A failure gives it back, once the teardown it names has freed what the block installed.
+        self.claim_restored: Optional[ClaimRestored] = None
+        # With several workers, told of each session this participant freed outside a request, such as by a retire,
+        # so the session's routing claim ends too.
+        # A retired session's claim lasts until the forget that ends its refusal, which tells this again.
+        self.on_session_freed: Optional[SessionFreed] = None
 
     async def notify(self) -> None:
         """Wake a prepare that waits for this participant to become ready."""
         async with self._changed:
             self._changed.notify_all()
+        if self.on_change is not None:
+            await self.on_change()
 
     async def wait_changed(self, timeout: float) -> None:
         async with self._changed:
@@ -389,6 +429,13 @@ class CheckpointParticipant(ABC):
         """Refuse these attempts from now on, before a retire stops them. Override to tell other processes as well."""
         self.retired.mark(episode_ids)
 
+    def mark_retired_sessions(self, episode_ids: list[EpisodeId]) -> None:
+        """Refuse what these attempts already hold here, as they are marked retired; the default holds nothing apart.
+
+        With several workers, each worker's participant marks its sessions as the coordinator's marks reach it,
+        so a retire that never reaches the worker still leaves those attempts refused.
+        """
+
     def check_forget(self, rollout_ids: list[str]) -> None:
         """Raise if forgetting ``rollout_ids`` now would make retired state live again; ``forget`` checks first.
 
@@ -399,8 +446,8 @@ class CheckpointParticipant(ABC):
         """Stop refusing these rollouts' retired attempts. Override to tell other processes as well."""
         self.retired.forget(rollout_ids)
 
-    async def restored_pending(self) -> list[EpisodeId]:
-        """Restored episodes whose replacement has not started here yet, as the attempts that continue them.
+    async def unclaimed(self) -> list[EpisodeId]:
+        """Unclaimed restored episodes: no next attempt has used them here yet. Each is named by the attempt that continues it.
 
         A commit deletes the ones its scope leaves out: the controller no longer continues them,
         and nothing else would free their restored state.
@@ -429,12 +476,60 @@ class CheckpointParticipant(ABC):
         Override to keep slow I/O off the event loop; the default is synchronous."""
         self.restore_records(records)
 
+    async def discard_failed_restore(self) -> None:
+        """Drop what a failed restore installed that cannot be served, before admission reopens after it.
+
+        Runs once the restore's install has finished, and before another restore installs.
+        Raising keeps admission closed, and the next resume or restore calls this again.
+        The default keeps everything:
+        the controller retires the restored attempts after a failed restore, which frees it.
+        """
+
     def commit_reply(self, records: list[CheckpointRecord]) -> dict[str, Any]:
         """Participant-specific fields the controller needs in the commit reply."""
         return {}
 
     def status_extra(self) -> dict[str, Any]:
         return {}
+
+    async def refresh_status(self) -> None:
+        """Gather what ``status_extra`` and ``status_report`` report from other processes, before a status request."""
+
+    def status_report(self) -> PrepareReport:
+        """The readiness a status request reports."""
+        return self.readiness()
+
+    @staticmethod
+    def record_identity(record: CheckpointRecord) -> Optional[str]:
+        """The state ``record`` holds, of which a commit must export at most one copy; None if no copy can exist.
+
+        With several workers, a restored session can be seeded again on another worker,
+        and both workers then export it.
+        """
+        return None
+
+    def unclaimed_sessions(self) -> list[str]:
+        """The identities of restored state no request has used yet, as ``record_identity`` names them.
+
+        With several workers, the coordinator compares them with every worker's records,
+        and frees a restored copy another worker's live copy replaces with ``delete_unclaimed_session``.
+        """
+        raise NotImplementedError(f"the {self.kind} participant does not report its unclaimed restored state")
+
+    async def delete_unclaimed_session(self, identity: str) -> None:
+        """Free the restored state named by ``identity`` if no request has used it, refusing nothing later."""
+        raise NotImplementedError(f"the {self.kind} participant does not delete unclaimed restored state")
+
+    @staticmethod
+    def claim_key(record: CheckpointRecord) -> Optional[str]:
+        """The key a replacement claims ``record`` by, for state that lives inside one request.
+
+        With several workers,
+        the coordinator holds such a record until the worker that receives the replacement claims it.
+        Records of state that spans requests return None:
+        they are installed on the worker their session's requests are routed to.
+        """
+        return None
 
 
 def next_attempt(episode_id: EpisodeId) -> EpisodeId:
@@ -497,7 +592,7 @@ class ParticipantControlPlane:
             "lease_expires_at": self._lease_expires_at,
             # Rollouts retired and not yet forgotten: each refuses its retired attempts until ``forget``.
             "retired_rollouts": len(self.participant.retired),
-            "report": self.participant.readiness().model_dump(),
+            "report": self.participant.status_report().model_dump(),
             **self.participant.status_extra(),
         }
 
@@ -597,6 +692,13 @@ class ParticipantControlPlane:
                 return recorded
             self._admit(request.checkpoint_id, {CheckpointPhase.IDLE, CheckpointPhase.PREPARING})
             if self.phase == CheckpointPhase.IDLE:
+                if self._reopen_pending:
+                    # A checkpoint that began now would take over the closed admission,
+                    # and its resume would reopen without the failed restore's recovery.
+                    raise RestoreRecoveryPendingError(
+                        "admission is still closed after a failed restore; resume to finish its recovery, "
+                        "then prepare again"
+                    )
                 self.checkpoint_id = request.checkpoint_id
                 self.phase = CheckpointPhase.PREPARING
                 self._renew(request)
@@ -723,6 +825,7 @@ class ParticipantControlPlane:
             LOGGER.exception("reopening admission after a failed restore failed; a resume tries again")
 
     async def _open_pending(self) -> None:
+        await self.participant.discard_failed_restore()
         await self.participant.open_admission()
         self._reopen_pending = False
 
@@ -740,7 +843,7 @@ class ParticipantControlPlane:
         if episode_ids is None:
             return
         scope = set(episode_ids)
-        unscoped = [episode_id for episode_id in await self.participant.restored_pending() if episode_id not in scope]
+        unscoped = [episode_id for episode_id in await self.participant.unclaimed() if episode_id not in scope]
         await _concurrently(self.participant.delete_restored, unscoped)
 
     async def commit(self, request: CommitRequest) -> dict[str, Any]:
@@ -902,6 +1005,9 @@ class ParticipantControlPlane:
                 )
                 span.set(records=len(records), bytes=size)
             await _within(request, self._installed)
+            if self._reopen_pending:
+                # This restore replaces a failed one: drop what that one left that cannot be served before installing.
+                await _within(request, self.participant.discard_failed_restore)
             try:
                 await self.participant.close_admission(request)
                 self._install = asyncio.ensure_future(self.participant.install(records, request.episode_ids))
@@ -929,6 +1035,8 @@ class ParticipantControlPlane:
             )
             self.checkpoint_id = request.checkpoint_id
             self.phase = CheckpointPhase.RESTORED
+            # This restore replaces any failed one before it, so its resume reopens admission as after a restore.
+            self._reopen_pending = False
             self._renew(request)
             result = {
                 "phase": self.phase.value,
@@ -961,13 +1069,15 @@ class ParticipantControlPlane:
     async def _retry_pending_reopen(self, request: CheckpointRequest) -> None:
         """Reopen admission that a failed restore left closed, whichever checkpoint ``request`` names.
 
-        An install that outlived that restore must finish first, within this resume's deadline.
-        Past it, admission stays closed and a later resume tries again.
+        An install that outlived that restore must finish first, and then the recovery, within this resume's deadline.
+        Past it, or if the recovery fails, admission stays closed and a later resume tries again.
         """
         if self._install is not None and not self._install.done():
             await _within(request, self._installed)
         try:
-            await self._open_pending()
+            await _within(request, self._open_pending)
+        except ControlError:
+            raise
         except Exception as error:
             raise ControlError(
                 f"reopening admission after a failed restore failed again ({str(error) or type(error).__name__}); "
@@ -1008,6 +1118,9 @@ class ParticipantControlPlane:
                     raise DeadlineExceededError("restored state is still being deleted; resume again")
             self._write = None
         self.participant.carried_restarts.clear()
+        if self._reopen_pending:
+            # A failed restore's recovery has not finished: what it left that cannot be served goes first.
+            await self.participant.discard_failed_restore()
         await self.participant.open_admission()
         self._reopen_pending = False
         if resume_id is not None:
@@ -1125,6 +1238,7 @@ async def dispatch_control(
     A route passes the request it already validated; a message from another process passes the request as JSON.
     """
     if operation == "status":
+        await controller.participant.refresh_status()
         return controller.status()
     expected = _OPERATION_REQUESTS[operation]
     request = body if isinstance(body, expected) else expected.model_validate(body)

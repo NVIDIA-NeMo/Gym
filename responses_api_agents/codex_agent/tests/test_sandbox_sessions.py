@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -365,6 +366,235 @@ def test_unsupported_seed_rejected_before_connection(setup, option):
     sandbox.exec.assert_not_awaited()
 
 
+def mcp_grant(name="gdpval_resources_server", *, required=True, url="http://resources.example:7000/mcp"):
+    return {
+        "kind": "mcp",
+        "name": name,
+        "required": required,
+        "connection": {"url": url, "headers": {"X-NeMo-Gym-Session-Token": f"token-{name}"}},
+    }
+
+
+def test_mcp_grants_reach_the_sandbox_codex_config(setup):
+    agent, sandbox = setup
+    agent.config = CodexAgentConfig(
+        **(
+            agent.config.model_dump()
+            | {
+                "mcp_tool_timeout_seconds": 300,
+                "tool_accesses": [
+                    mcp_grant("search-tools", required=False, url="http://search.example:7100/mcp"),
+                    # The episode's grant of the same name replaces this one.
+                    mcp_grant(url="http://stale.example:1/mcp"),
+                ],
+            }
+        )
+    )
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [
+        mcp_grant(),
+        # An optional direct HTTP grant stays unused rather than failing the seed.
+        {"kind": "direct_http", "name": "direct.tools", "base_url": "http://resources", "required": False},
+    ]
+    transcript = [json.loads(line) for line in sandbox.events.splitlines()]
+    mcp_call = {"id": "mcp-1", "type": "mcp_tool_call", "server": "gdpval_resources_server", "tool": "finish"}
+    transcript[-2:-2] = [
+        [1.5, {"type": "item.started", "item": mcp_call}],
+        [1.6, {"type": "item.completed", "item": mcp_call | {"status": "completed", "arguments": {}}}],
+    ]
+    sandbox.events = "\n".join(json.dumps(record) for record in transcript)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=body)
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        assert [item["name"] for item in result.json()["output"] if item["type"] == "function_call"] == [
+            "exec_command",
+            "finish",
+        ]
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+        assert config["mcp_servers"] == {
+            "search-tools": {
+                "url": "http://search.example:7100/mcp",
+                "http_headers": {"X-NeMo-Gym-Session-Token": "token-search-tools"},
+                "tool_timeout_sec": 300.0,
+            },
+            "gdpval_resources_server": {
+                "url": "http://resources.example:7000/mcp",
+                "http_headers": {"X-NeMo-Gym-Session-Token": "token-gdpval_resources_server"},
+                "required": True,
+                "tool_timeout_sec": 300.0,
+            },
+        }
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        # The token reaches Codex only through its config, never the command line.
+        assert "token-gdpval_resources_server" not in json.dumps(payload)
+        closed = client.post("/v1/agent_sessions/close", json=close_body(body["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+    tools = {
+        record["tool_call_id"]: record["tool_name"]
+        for record in closed.json()["agent_observations"]["records"]
+        if record["kind"] == "tool_call"
+    }
+    # Observations name an MCP call by its tool, as the response does.
+    assert tools == {"tool-1": "exec_command", "mcp-1": "finish"}
+
+
+@pytest.mark.parametrize(
+    "grant, message",
+    [
+        (
+            {"kind": "direct_http", "name": "resources.direct_http", "base_url": "http://r", "required": True},
+            "supports only MCP tool grants; required grants it cannot use: resources.direct_http",
+        ),
+        (mcp_grant("resources.mcp"), "letters, digits, '-' and '_': resources.mcp"),
+    ],
+)
+def test_unusable_required_tool_grants_are_rejected_before_connection(setup, grant, message):
+    agent, sandbox = setup
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [grant]
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=body)
+    assert response.status_code == 422
+    assert message in response.json()["detail"]
+    sandbox.exec.assert_not_awaited()
+
+
+def test_optional_mcp_grant_with_an_unusable_name_is_left_out(setup):
+    agent, sandbox = setup
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [mcp_grant(), mcp_grant("search.mcp", required=False)]
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=body).json()["agent_session_id"]
+        assert client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"}).status_code == 200
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
+    assert list(config["mcp_servers"]) == ["gdpval_resources_server"]
+    gaps = [(gap["code"], gap["detail"]) for gap in closed["agent_observations"]["gaps"]]
+    assert ("mcp_server_skipped", "search.mcp: its name is not letters, digits, '-' and '_'") in gaps
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), 601])
+def test_mcp_tool_timeout_must_be_positive_and_within_the_run_timeout(setup, value):
+    agent, _ = setup
+    with pytest.raises(ValidationError):
+        CodexAgentConfig(**(agent.config.model_dump() | {"timeout": 600, "mcp_tool_timeout_seconds": value}))
+    CodexAgentConfig(**(agent.config.model_dump() | {"timeout": 600, "mcp_tool_timeout_seconds": 600}))
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_startup_failure_reports_the_codex_stderr_tail(setup, started):
+    agent, sandbox = setup
+    # Codex repeats a failed server's error body, up to 8 KiB, after the line's start that names the server.
+    stderr = (
+        "rmcp worker log line\n" * 300
+        + "Error: required MCP servers failed to initialize: gdpval_resources_server: "
+        + "x" * 9000
+        + " (-32603)"
+    )
+    sandbox.result["return_code"] = 1
+    thread = [{"type": "thread.started", "thread_id": "t"}]
+    if started:
+        thread.append({"type": "turn.started"})
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(thread))
+    publish = sandbox.publish
+
+    def publish_with_stderr():
+        publish()
+        sandbox.files[f"{sandbox.directory}/stderr.log"] = stderr
+
+    sandbox.publish = publish_with_stderr
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
+    assert result.status_code == 502
+    detail = result.json()["detail"]
+    gaps = {gap["code"]: gap["detail"] for gap in closed["agent_observations"]["gaps"]}
+    if started:
+        # A turn started, so the event stream explains the failure; stderr is not appended.
+        assert "stderr:" not in detail
+        assert "agent_startup_failed" not in gaps
+    else:
+        assert "required MCP servers failed to initialize: gdpval_resources_server" in detail
+        assert detail.endswith(" (-32603)")
+        assert len(detail) < 2100, "the stderr tail is bounded"
+        assert "x" * 600 not in detail, "long stderr lines are shortened"
+        # Environment Servers record the observations, not the 502 body.
+        assert gaps["agent_startup_failed"] in detail
+
+
+def test_startup_failure_stderr_hides_the_grant_tokens(setup):
+    agent, sandbox = setup
+    api_key = 'user="alice" api_key=secret-123 note=abcdef'
+    sandbox.result["return_code"] = 1
+    sandbox.events = json.dumps([0.0, {"type": "thread.started", "thread_id": "t"}])
+    publish = sandbox.publish
+
+    def publish_with_stderr():
+        publish()
+        sandbox.files[f"{sandbox.directory}/stderr.log"] = (
+            "MCP error body: X-NeMo-Gym-Session-Token: token-gdpval_resources_server\n"
+            # Codex cuts long error bodies, which can end a token early.
+            "HTTP 401: {'x-nemo-gym-session-token': 'token-gd... (truncated 2048 bytes)\n"
+            "authorization: Digest user=u nonce=s3cret\n"
+            'HTTP 401: x-api-key: user="alice" api_key=secret-123 note=abc... (truncated 2048 bytes)\n'
+            'retry: user="ali,user="alice" api_key=secret-123 note=abcdef\n'
+            # An error body can echo the headers as JSON.
+            f"HTTP 403: {json.dumps({'x-api-key': api_key})}\n"
+            "Error: required MCP servers failed to initialize: gdpval_resources_server"
+        )
+
+    sandbox.publish = publish_with_stderr
+    grant = mcp_grant()
+    grant["connection"]["headers"]["Authorization"] = "Digest user=u nonce=s3cret"
+    # Shares its start with Authorization, so redacting one must not hide the other's start.
+    grant["connection"]["headers"]["Proxy-Authorization"] = "Digest user=bob nonce=beta-secret"
+    grant["connection"]["headers"]["X-Api-Key"] = api_key
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [grant]
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=body).status_code == 200
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        closed = client.post("/v1/agent_sessions/close", json=close_body(body["agent_session_id"])).json()
+    assert result.status_code == 502
+    gap = {gap["code"]: gap["detail"] for gap in closed["agent_observations"]["gaps"]}["agent_startup_failed"]
+    for text in (result.json()["detail"], gap):
+        assert "token-gd" not in text
+        assert "s3cret" not in text
+        assert "secret-123" not in text
+        assert "X-NeMo-Gym-Session-Token: [redacted]" in text
+        assert "'x-nemo-gym-session-token': '[redacted] (truncated" in text
+        assert "x-api-key: [redacted] (truncated" in text
+        assert "retry: [redacted]\n" in text
+        assert 'HTTP 403: {"x-api-key": "[redacted]"}' in text
+        assert "required MCP servers failed to initialize: gdpval_resources_server" in text
+
+
+def test_unreadable_startup_stderr_does_not_hold_the_activation(setup):
+    agent, sandbox = setup
+    sandbox.result["return_code"] = 1
+    sandbox.events = json.dumps([0.0, {"type": "thread.started", "thread_id": "t"}])
+    download = sandbox.download
+
+    async def hanging_stderr_download(source, destination):
+        if source.endswith("/stderr.log"):
+            await asyncio.sleep(10)  # Longer than the 1 s bound, but finite so a regression fails instead of hanging.
+        await download(source, destination)
+
+    sandbox.download = hanging_stderr_download
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
+        started = time.monotonic()
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        elapsed = time.monotonic() - started
+    assert result.status_code == 502
+    assert result.json()["detail"] == "Codex execution failed: Codex exited with code 1"
+    # The read is bounded by session_close_timeout_seconds (1 s in this fixture).
+    assert elapsed < 5
+
+
 def test_several_workers_seed_sessions(setup):
     """Session routing sends a session's later requests to the worker that seeded it."""
     agent, sandbox = setup
@@ -659,6 +889,28 @@ async def test_close_cancels_active_codex_before_detaching(setup):
     assert sandbox.signals == ["SIGTERM"]
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
+
+
+async def test_close_during_the_startup_stderr_read_keeps_the_observations(setup):
+    agent, sandbox = setup
+    sandbox.result["return_code"] = 1
+    sandbox.events = json.dumps([0.0, {"type": "thread.started", "thread_id": "t"}])
+    download = sandbox.download
+    reading = asyncio.Event()
+
+    async def hanging_stderr_download(source, destination):
+        if source.endswith("/stderr.log"):
+            reading.set()
+            await asyncio.sleep(10)  # Bounded so a regression fails instead of hanging.
+        await download(source, destination)
+
+    sandbox.download = hanging_stderr_download
+    request, session_id, task = await activate(agent, sandbox)
+    await asyncio.wait_for(reading.wait(), 5)
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert [record.status for record in closed.agent_observations.records] == ["failed"]
 
 
 async def test_terminal_termination_failure_releases_borrowed_session(setup):

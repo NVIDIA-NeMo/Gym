@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Episode boundaries and in-flight step modes, shared by every owner of an episode protocol.
+"""Episode boundaries and step types, shared by every owner of an episode protocol.
 
 An episode is a sequence of steps.
 After each completed step its owner records a boundary: the next step and the results that step needs.
 A checkpoint can always be taken at a boundary.
-A step that is still running when a checkpoint closes admission has one of two modes:
+A step that is still running when a checkpoint closes admission has one of two step types:
 
 - ``wait`` (the default): the checkpoint waits for the step.
   The owner then records the boundary after it, with the step's result, and parks there.
@@ -45,7 +45,7 @@ from typing import Literal, Optional
 from pydantic import JsonValue
 
 
-StepMode = Literal["wait", "replay"]
+StepType = Literal["wait", "replay"]
 Boundary = dict[str, JsonValue]
 _State = Literal["running", "wait_step", "replay_step", "parked"]
 # States in which a checkpoint must wait for the episode.
@@ -53,12 +53,12 @@ _BLOCKING: frozenset[str] = frozenset({"running", "wait_step"})
 
 
 # A resources server reports on its /seed_session reply whether its /verify may be replayed.
-# Every episode seeds before it verifies, so the caller learns the mode without another request.
+# Every episode seeds before it verifies, so the caller learns the step type without another request.
 CHECKPOINT_VERIFY_HEADER = "x-ng-checkpoint-verify"
 
 
-def seed_verify_mode(headers: Optional[Mapping[str, str]]) -> StepMode:
-    """The mode for a resources server's ``/verify``, from its seed reply; ``wait`` if it reported none."""
+def seed_verify_step_type(headers: Optional[Mapping[str, str]]) -> StepType:
+    """The step type of a resources server's ``/verify``, from its seed reply; ``wait`` if it reported none."""
     return "replay" if (headers or {}).get(CHECKPOINT_VERIFY_HEADER) == "replay" else "wait"
 
 
@@ -221,11 +221,11 @@ class EpisodeSteps:
         self._set_state(episode, "running")
 
     @asynccontextmanager
-    async def step(self, key: str, mode: StepMode) -> AsyncIterator[None]:
-        """Run one step in ``mode``; see the module docstring."""
+    async def step(self, key: str, step_type: StepType) -> AsyncIterator[None]:
+        """Run one step of type ``step_type``; see the module docstring."""
         episode = self._episodes[key]
-        self._set_state(episode, "wait_step" if mode == "wait" else "replay_step")
-        if mode == "replay" and self.closed:
+        self._set_state(episode, "wait_step" if step_type == "wait" else "replay_step")
+        if step_type == "replay" and self.closed:
             episode.suspend_deadline()
         await self._changed()
         completed = False
@@ -234,11 +234,11 @@ class EpisodeSteps:
             completed = True
         finally:
             if self._episodes.get(key) is episode:
-                if mode == "replay" and self.closed and completed:
+                if step_type == "replay" and self.closed and completed:
                     # The checkpoint already counts this episode at the boundary before the step; it stays there,
                     # not a blocker, until its next boundary parks it with the step's result.
                     pass
-                elif mode == "replay" and self.closed:
+                elif step_type == "replay" and self.closed:
                     # The step raised, so the episode is failing, and its cleanup may close its sessions before the
                     # commit.
                     # Continuing it from the boundary before the step would need those sessions, so it is exported

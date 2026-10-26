@@ -28,6 +28,9 @@ one whose end no route reveals, such as a terminal ``/step``, reports it through
 A server declares how its sessions checkpoint:
 
 - ``stateless``: sessions hold nothing a continuation needs.
+  A checkpoint still records which sessions are live, without state,
+  so with several workers a restore places them on a worker that their cookies then reach,
+  and frees them like any other session.
 - ``exported``: the server exports and restores each session's state through ``ResourcesSessionHooks``.
 - ``restart_only``: the default.
   Nothing of the server is in a checkpoint: its requests never hold up prepare,
@@ -54,11 +57,12 @@ import asyncio
 import logging
 from collections import Counter
 from collections.abc import Callable
-from typing import Any, Literal, NamedTuple, Optional, Protocol
+from typing import Any, NamedTuple, Optional, Protocol
 
 from pydantic import JsonValue
 
 from nemo_gym._checkpoint.control import (
+    CheckpointMode,
     CheckpointParticipant,
     CheckpointRecord,
     CheckpointRequest,
@@ -77,7 +81,7 @@ from nemo_gym._checkpoint.steps import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     CHECKPOINT_RESTART_HEADER,
     CHECKPOINT_VERIFY_HEADER,
-    StepMode,
+    StepType,
 )
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.rollout_correlation import current_episode_id
@@ -86,7 +90,6 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 
 LOGGER = logging.getLogger(__name__)
 
-ResourcesCheckpointMode = Literal["stateless", "exported", "restart_only"]
 _SESSION_START = "/seed_session"
 _SESSION_CLOSE = "/close_session"
 _SESSION_ENDS = (_SESSION_CLOSE, "/verify")
@@ -144,16 +147,16 @@ class ResourcesParticipant(CheckpointParticipant):
     record_model = ResourcesSessionRecord
 
     def __init__(
-        self, hooks: ResourcesSessionHooks, mode: ResourcesCheckpointMode, *, verify_mode: StepMode = "wait"
+        self, hooks: ResourcesSessionHooks, mode: CheckpointMode, *, verify_step_type: StepType = "wait"
     ) -> None:
         super().__init__()
         self.hooks = hooks
         self.mode = mode
-        self.verify_mode = verify_mode
+        self.verify_step_type = verify_step_type
         # Requests the checkpoint does not wait for:
         # a verification the server declared replayable does not change checkpointed state.
         # A seed is waited for, so the session matches the environment's boundary.
-        self.replayable_paths = {"/verify"} if verify_mode == "replay" else set()
+        self.replayable_paths = {"/verify"} if verify_step_type == "replay" else set()
         self.accepting = True
         self._open = asyncio.Event()
         self._open.set()
@@ -175,7 +178,7 @@ class ResourcesParticipant(CheckpointParticipant):
         # The requests in flight per session that a checkpoint waits for, the ones ``inflight`` counts.
         self._session_waited: Counter[str] = Counter()
         # Restored sessions no request has used yet; a commit that no longer continues their episode retires them.
-        self._restored_pending: set[str] = set()
+        self._unclaimed: set[str] = set()
 
     def admit(
         self,
@@ -223,7 +226,7 @@ class ResourcesParticipant(CheckpointParticipant):
         # Refusing it would fail that episode; its episode re-runs it after a crash anyway.
         if not self.accepting and path not in self.replayable_paths:
             raise AdmissionClosedError("resources admission is closed for a checkpoint")
-        self._restored_pending.discard(session_id)
+        self._unclaimed.discard(session_id)
 
     async def wait_open(self) -> None:
         """Return once admission is open: after resume, or when a lease expires.
@@ -246,7 +249,7 @@ class ResourcesParticipant(CheckpointParticipant):
         # Recorded in every mode: a stateless session has nothing to export, but a retire still drains and refuses it.
         # A seed of a restored session's ID claims it: a commit must not delete it as unclaimed.
         self._unbind(session_id)
-        self._restored_pending.discard(session_id)
+        self._unclaimed.discard(session_id)
         self._sessions[session_id] = episode_id
         self._rollout_sessions.setdefault(episode_id.rollout_id, set()).add(session_id)
 
@@ -259,7 +262,7 @@ class ResourcesParticipant(CheckpointParticipant):
 
     def ended(self, session_id: str) -> None:
         self._unbind(session_id)
-        self._restored_pending.discard(session_id)
+        self._unclaimed.discard(session_id)
         self._restored_sessions.discard(session_id)
 
     def session_ended_by(self, session_id: str, path: str, *, close_follows: bool = False) -> None:
@@ -353,9 +356,9 @@ class ResourcesParticipant(CheckpointParticipant):
 
     async def mark_retired(self, episode_ids: list[EpisodeId]) -> None:
         await super().mark_retired(episode_ids)
-        self.fence_retired(episode_ids)
+        self.mark_retired_sessions(episode_ids)
 
-    def fence_retired(self, episode_ids: list[EpisodeId]) -> None:
+    def mark_retired_sessions(self, episode_ids: list[EpisodeId]) -> None:
         """Refuse the sessions these attempts and their earlier ones already have, from now on.
 
         It runs as the attempts are marked, before anything awaits,
@@ -363,9 +366,9 @@ class ResourcesParticipant(CheckpointParticipant):
         held up in readiness, and left out of exports until a retried retire frees them.
         """
         for episode_id in episode_ids:
-            self._fence(episode_id)
+            self._mark_sessions(episode_id)
 
-    def _fence(self, episode_id: EpisodeId) -> list[str]:
+    def _mark_sessions(self, episode_id: EpisodeId) -> list[str]:
         """Refuse the tracked sessions of ``episode_id`` and its earlier attempts until forget; return them."""
         retired = [
             session_id
@@ -381,7 +384,7 @@ class ResourcesParticipant(CheckpointParticipant):
     async def retire(self, episode_id: EpisodeId) -> None:
         """Refuse the attempts' sessions, wait for their requests in flight, then release them."""
         # The sessions known now are refused before the first await, whether or not this retire finishes.
-        self._fence(episode_id)
+        self._mark_sessions(episode_id)
         # A seed admitted before the retire marked its attempt registers its session when it finishes; wait for it,
         # so that session is freed here and not left behind.
         while any(
@@ -390,24 +393,50 @@ class ResourcesParticipant(CheckpointParticipant):
         ):
             await self.wait_changed(1.0)
         # Again, for the sessions those seeds created.
-        retired = self._fence(episode_id)
+        retired = self._mark_sessions(episode_id)
         while any(self._session_requests[session_id] for session_id in retired):
             await self.wait_changed(1.0)
         for session_id in retired:
             # The session stays tracked until its state is freed, so a retire cut short leaves it for a retry.
             # Every mode: a late request of a retired session is refused, so nothing else would free it.
             await self.hooks.retire_session_state(session_id)
-            self.ended(session_id)
+            self._freed(session_id)
+
+    def _freed(self, session_id: str) -> None:
+        """Stop tracking a session whose state was freed outside a request, which no route ends.
+
+        A retired session stays refused until the controller forgets its rollout.
+        With several workers its routing claim lasts until then too,
+        so a late request that carries only its cookie still reaches this worker, which refuses it.
+        """
+        self.ended(session_id)
+        if self.on_session_freed is not None:
+            self.on_session_freed(session_id, until_forget=session_id in self._retired_session_rollouts)
 
     def is_open(self, session_id: str) -> bool:
         """Whether ``session_id`` is a live session of an attempt that has not been retired.
 
         A session is open from the seed that starts it, or the restore that installs it,
-        until a ``/close_session`` or ``/verify`` ends it or a retire fences it.
+        until a ``/close_session`` or ``/verify`` ends it or a retire marks it.
         A replayable ``/verify`` whose caller closes the session afterwards leaves it open until that close.
         MCP exposure uses it while checkpointing is on to revoke a session's token once the session is closed.
         """
         return session_id in self._sessions and session_id not in self._retired_session_rollouts
+
+    @staticmethod
+    def record_identity(record: CheckpointRecord) -> Optional[str]:
+        return record.session_id
+
+    def unclaimed_sessions(self) -> list[str]:
+        """Restored sessions no request has used yet."""
+        return sorted(self._unclaimed)
+
+    async def delete_unclaimed_session(self, session_id: str) -> None:
+        """Free a restored session no request has used, without refusing anything later."""
+        if session_id in self._unclaimed:
+            if self.mode == "exported":
+                await self.hooks.retire_session_state(session_id)
+            self._freed(session_id)
 
     async def delete_restored(self, episode_id: EpisodeId) -> None:
         """Free the restored sessions of ``episode_id`` that no request has used, without refusing anything later:
@@ -416,11 +445,11 @@ class ResourcesParticipant(CheckpointParticipant):
         for session_id in [
             key
             for key in self._rollout_sessions.get(episode_id.rollout_id, ())
-            if key in self._restored_pending and self._sessions[key] == episode_id
+            if key in self._unclaimed and self._sessions[key] == episode_id
         ]:
             if self.mode == "exported":
                 await self.hooks.retire_session_state(session_id)
-            self.ended(session_id)
+            self._freed(session_id)
 
     def check_forget(self, rollout_ids: list[str]) -> None:
         # A seed of a retired attempt still in flight would bind its session as live once the mark is gone.
@@ -431,8 +460,8 @@ class ResourcesParticipant(CheckpointParticipant):
         )
         if seeding:
             raise RetireIncompleteError(f"seeds of retired attempts {seeding[:10]} are still in flight")
-        # Every tracked session of a retired attempt, fenced or not,
-        # so a fence a retire never reached cannot leave a session live once the mark is gone.
+        # Every tracked session of a retired attempt, marked or not,
+        # so a mark a retire never reached cannot leave a session live once the attempt's mark is gone.
         unfreed = sorted(
             session_id
             for rollout_id in rollout_ids
@@ -450,6 +479,9 @@ class ResourcesParticipant(CheckpointParticipant):
         for rollout_id in rollout_ids:
             for session_id in self._retired_sessions.pop(rollout_id, ()):
                 self._retired_session_rollouts.pop(session_id, None)
+                if self.on_session_freed is not None and session_id not in self._sessions:
+                    # Its refusal ends here, and so does its routing claim, one close window later.
+                    self.on_session_freed(session_id)
 
     def request_started(self, session_id: Optional[str], *, counted: bool) -> None:
         if session_id is not None:
@@ -469,7 +501,7 @@ class ResourcesParticipant(CheckpointParticipant):
             self.inflight -= 1
 
     async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
-        if self.mode != "exported":
+        if self.mode == "restart_only":
             return []
         # Only sessions within the commit's scope:
         # another participant may report one of these episodes as a restart,
@@ -482,6 +514,12 @@ class ResourcesParticipant(CheckpointParticipant):
             for session_id, episode_id in self._checkpointed_sessions()
             if (scope is None or episode_id in scope) and session_id not in carried
         ]
+        if self.mode == "stateless":
+            # No state, only which sessions continue, so a restore places them where their requests are routed.
+            return [
+                ResourcesSessionRecord(session_id=session_id, episode_id=episode_id, state=None)
+                for session_id, episode_id in sessions
+            ]
         states = await self.hooks.export_session_states([session_id for session_id, _ in sessions])
         records = []
         for session_id, episode_id in sessions:
@@ -489,7 +527,7 @@ class ResourcesParticipant(CheckpointParticipant):
                 # The server already dropped this session, for example when a failed verification cleaned it up.
                 # There is nothing to continue, so stop tracking it rather than fail the commit.
                 LOGGER.warning("resources session %s of %s is gone; not exported", session_id, episode_id.capture_key)
-                self.ended(session_id)
+                self._freed(session_id)
                 continue
             state = states[session_id]
             records.append(ResourcesSessionRecord(session_id=session_id, episode_id=episode_id, state=state))
@@ -508,18 +546,18 @@ class ResourcesParticipant(CheckpointParticipant):
     async def install(self, records: list[CheckpointRecord], scope: list[EpisodeId]) -> None:
         if self._sessions or self.inflight:
             raise ControlError("resources restore requires a process that has not served sessions")
-        if records and self.mode != "exported":
-            raise ControlError(f"a {self.mode} resources server cannot restore session state")
-        if records:
+        if records and self.mode == "restart_only":
+            raise ControlError("a restart_only resources server cannot restore session state")
+        if records and self.mode == "exported":
             await self.hooks.restore_session_states({record.session_id: record.state for record in records})
         for record in records:
             self._bind(record.session_id, next_attempt(record.episode_id))
-            self._restored_pending.add(record.session_id)
+            self._unclaimed.add(record.session_id)
             self._restored_sessions.add(record.session_id)
 
-    async def restored_pending(self) -> list[EpisodeId]:
+    async def unclaimed(self) -> list[EpisodeId]:
         return sorted(
-            {self._sessions[session_id] for session_id in self._restored_pending},
+            {self._sessions[session_id] for session_id in self._unclaimed},
             key=lambda episode_id: episode_id.capture_key,
         )
 
@@ -527,7 +565,11 @@ class ResourcesParticipant(CheckpointParticipant):
         raise NotImplementedError("resources sessions restore through install(), which awaits the server's hooks")
 
     def status_extra(self) -> dict[str, Any]:
-        return {"mode": self.mode, "verify": self.verify_mode, "retired_sessions": len(self._retired_session_rollouts)}
+        return {
+            "mode": self.mode,
+            "verify": self.verify_step_type,
+            "retired_sessions": len(self._retired_session_rollouts),
+        }
 
 
 class ResourcesCheckpointMiddleware:
@@ -536,7 +578,7 @@ class ResourcesCheckpointMiddleware:
     A tool call over MCP is one POST to the MCP endpoint.
     It names its session with a signed token instead of the cookie,
     and the token also names the attempt whose seed minted it.
-    The middleware admits, fences, and counts that request as a whole, so direct MCP dispatch inside it loses nothing.
+    The middleware admits, refuses, and counts that request as a whole, so direct MCP dispatch inside it loses nothing.
     While a checkpoint is open, an MCP call waits for resume instead of being refused:
     MCP clients are third-party agent harnesses that would show a refusal to the model as a tool error.
     A waiting call is not in flight, so it never holds up prepare.
@@ -658,7 +700,7 @@ class ResourcesCheckpointMiddleware:
                 if seed is not None:
                     # Tell the caller, before it ever verifies, whether this server's /verify may be replayed,
                     # and whether its episode must start over after a crash because this server cannot capture it.
-                    headers = [(CHECKPOINT_VERIFY_HEADER.encode(), self.participant.verify_mode.encode())]
+                    headers = [(CHECKPOINT_VERIFY_HEADER.encode(), self.participant.verify_step_type.encode())]
                     if self.participant.mode == "restart_only":
                         headers.append((CHECKPOINT_RESTART_HEADER.encode(), b"1"))
                     message = {**message, "headers": [*message.get("headers", []), *headers]}

@@ -741,7 +741,8 @@ def test_a_lost_worker_loses_only_its_sessions(deployment: StressDeployment, sam
     stats = asyncio.run(deployment.stats("resources"))
     victim = psutil.Process(stats[victim_id]["pid"])
     victim.send_signal(signal.SIGKILL)
-    victim.wait(timeout=10)
+    # Uvicorn may be in its 30-second health check when the worker dies; only its parent can reap it.
+    victim.wait(timeout=60)
     deployment.wait_for_workers("resources")
     results = asyncio.run(finish_all(sessions))
     lost = [r for r in results if owner[r[0]] == victim_id]
