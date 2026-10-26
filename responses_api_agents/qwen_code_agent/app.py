@@ -28,7 +28,7 @@ from time import time
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, model_validator
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -141,6 +141,9 @@ def _text(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
+        kinds = {p.get("type") if isinstance(p, dict) else getattr(p, "type", None) for p in content}
+        if kinds - {"input_text", "text", None}:
+            raise HTTPException(422, "Qwen Code only supports text input")
         return "".join(p.get("text", "") if isinstance(p, dict) else getattr(p, "text", "") for p in content)
     return "" if content is None else json.dumps(content)
 
@@ -275,17 +278,31 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
                 for name, entry in mcp.items()
             },
         }
+        # Request sampling controls (gym eval run's --temperature, --top-p, --max-output-tokens) go to every model call.
+        params = body.responses_create_params
+        sampling = {
+            key: value
+            for key, value in [
+                ("temperature", params.temperature),
+                ("top_p", params.top_p),
+                ("max_tokens", params.max_output_tokens),
+            ]
+            if value is not None
+        }
+        if sampling:
+            settings["model"]["generationConfig"] = {"samplingParams": sampling}
         if self.config.max_parallel_agents:
             settings["agents"] = {"maxParallelAgents": self.config.max_parallel_agents}
         if self.config.agent_team:
             settings["experimental"] = {"agentTeam": True}
         return _deep_merge(settings, deepcopy(self.config.settings))
 
-    def _build_command(self, system_prompt: str | None) -> list[str]:
+    def _build_command(self, system_prompt: str | None, max_tool_calls: int | None = None) -> list[str]:
+        """max_tool_calls is the request's own limit, which wins over the config's."""
         cmd = ["qwen", "--approval-mode", self.config.approval_mode, "-o", "stream-json"]
         for flag, value in [
             ("--max-session-turns", self.config.max_session_turns),
-            ("--max-tool-calls", self.config.max_tool_calls),
+            ("--max-tool-calls", max_tool_calls if max_tool_calls is not None else self.config.max_tool_calls),
             ("--max-subagent-depth", self.config.max_subagent_depth),
         ]:
             if value is not None:
@@ -305,6 +322,9 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
         system, user = [body.instructions] if body.instructions else [], []
         for item in body.input:
             role = getattr(item, "role", None) or (item.get("role") if isinstance(item, dict) else None)
+            if role not in ("system", "developer", "user"):
+                # Assistant turns and tool calls would be silently dropped from the single prompt Qwen Code gets.
+                raise HTTPException(422, "Qwen Code accepts text prompts, not conversation history")
             content = getattr(item, "content", None) if not isinstance(item, dict) else item.get("content")
             if role in ("system", "developer"):
                 system.append(_text(content))
@@ -398,7 +418,7 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
             "QWEN_CODE_SUPPRESS_YOLO_WARNING": "1",
         }
         command = (
-            f"PATH={quote(remote)}/runtime/bin:$PATH {join(self._build_command(system_prompt))}"
+            f"PATH={quote(remote)}/runtime/bin:$PATH {join(self._build_command(system_prompt, params.max_tool_calls))}"
             f" < {quote(remote)}/prompt.txt > {quote(remote)}/stdout.jsonl 2> {quote(remote)}/stderr.log"
         )
         result, error_type = None, None

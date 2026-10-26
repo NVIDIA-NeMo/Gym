@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.qwen_code_agent import app
@@ -280,3 +281,37 @@ def test_solo_and_team_settings():
 def test_invalid_subagent_settings(overrides):
     with pytest.raises(ValueError):
         make_config(**overrides)
+
+
+def test_request_controls_reach_qwen():
+    agent = QwenCodeAgent(config=make_config(max_tool_calls=50), server_client=MagicMock(spec=ServerClient))
+    agent._model_url = lambda server, body: "http://m/v1"
+    body = request_body()
+    body.responses_create_params.temperature = 0.3
+    body.responses_create_params.top_p = 0.9
+    body.responses_create_params.max_output_tokens = 1000
+    settings = agent._build_settings(body, {})
+    assert settings["model"]["generationConfig"] == {
+        "samplingParams": {"temperature": 0.3, "top_p": 0.9, "max_tokens": 1000}
+    }
+    command = agent._build_command(None, max_tool_calls=7)
+    assert command[command.index("--max-tool-calls") + 1] == "7"
+    command = agent._build_command(None)
+    assert command[command.index("--max-tool-calls") + 1] == "50"
+
+
+@pytest.mark.parametrize(
+    "item, message",
+    [
+        ({"role": "assistant", "content": "earlier answer"}, "not conversation history"),
+        ({"type": "function_call_output", "call_id": "c1", "output": "x"}, "not conversation history"),
+        ({"role": "user", "content": [{"type": "input_image", "image_url": "data:,"}]}, "only supports text input"),
+    ],
+)
+def test_history_and_non_text_input_are_rejected(item, message):
+    params = request_body().responses_create_params.model_copy(
+        update={"input": [{"role": "user", "content": "Go"}, item]}
+    )
+    with pytest.raises(HTTPException, match=message) as error:
+        QwenCodeAgent._instruction(params)
+    assert error.value.status_code == 422
