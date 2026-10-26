@@ -200,6 +200,14 @@ def parse_stream(stdout: str) -> tuple[list[Any], dict[str, Any] | None]:
     return items, result
 
 
+def _json_dict(text: str) -> dict[str, Any] | None:
+    try:
+        value = json.loads(text)
+    except (ValueError, RecursionError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def summarize_subagents(sessions_archive: Path) -> dict[str, int]:
     """Count child sessions from the exported ``projects/*/subagents/<session>/*.meta.json`` files."""
     keys = [
@@ -218,14 +226,18 @@ def summarize_subagents(sessions_archive: Path) -> dict[str, int]:
                 continue
             data = archive.extractfile(member).read().decode(errors="replace")
             if name.endswith(".meta.json"):
-                meta = json.loads(data)
+                meta = _json_dict(data)
+                if meta is None:
+                    # A truncated or corrupt meta file loses one child's counts, not the whole /run.
+                    continue
                 stats["qwen_subagents"] += 1
                 stats["qwen_subagents_background"] += bool(meta.get("isBackgrounded"))
                 # depth is 0 for a top-level subagent; report levels.
                 stats["qwen_subagent_max_depth"] = max(stats["qwen_subagent_max_depth"], meta.get("depth", 0) + 1)
             elif name.endswith(".jsonl"):
                 for line in data.splitlines():
-                    usage = json.loads(line).get("usageMetadata") or {}
+                    # A child killed mid-write leaves a partial last line; skip unparseable lines.
+                    usage = (_json_dict(line) or {}).get("usageMetadata") or {}
                     stats["qwen_subagent_input_tokens"] += usage.get("promptTokenCount", 0)
                     stats["qwen_subagent_output_tokens"] += usage.get("candidatesTokenCount", 0)
     return stats

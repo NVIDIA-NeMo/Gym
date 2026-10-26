@@ -193,6 +193,28 @@ def test_summarize_subagents_counts_children_depth_and_tokens(tmp_path):
     }
 
 
+def test_summarize_subagents_skips_truncated_and_corrupt_files(tmp_path):
+    # A child killed mid-write leaves a partial last transcript line or a cut meta file.
+    good = json.dumps({"usageMetadata": {"promptTokenCount": 30, "candidatesTokenCount": 4}})
+    files = {
+        "projects/p/subagents/s1/agent-0.meta.json": json.dumps({"depth": 0}),
+        "projects/p/subagents/s1/agent-1.meta.json": '{"depth": 1, "isBackgr',
+        "projects/p/subagents/s1/agent-0.jsonl": good + "\n" + '{"usageMetadata": {"promptTok' + "\n[1, 2]",
+    }
+    with tarfile.open(tmp_path / "s.tgz", "w:gz") as archive:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data.encode())
+            archive.addfile(info, io.BytesIO(data.encode()))
+    assert summarize_subagents(tmp_path / "s.tgz") == {
+        "qwen_subagents": 1,
+        "qwen_subagents_background": 0,
+        "qwen_subagent_max_depth": 1,
+        "qwen_subagent_input_tokens": 30,
+        "qwen_subagent_output_tokens": 4,
+    }
+
+
 async def test_run_configures_routes_subagents_and_verifies(agent):
     server, sandbox, staged = agent
     result = await server.run(SimpleNamespace(cookies={}), request_body())
