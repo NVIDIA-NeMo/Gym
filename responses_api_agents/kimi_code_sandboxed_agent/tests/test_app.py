@@ -32,6 +32,7 @@ from responses_api_agents.kimi_code_sandboxed_agent.app import (
     KimiCodeSandboxedAgentConfig,
     KimiCodeSandboxedAgentRunRequest,
     max_concurrency,
+    parse_session,
     to_toml,
 )
 
@@ -302,3 +303,38 @@ def test_to_toml_round_trips_nested_tables_and_rule_arrays():
 def test_max_concurrency_counts_overlapping_children():
     children = [{"started": 0, "ended": 10}, {"started": 5, "ended": 6}, {"started": 6, "ended": 7}, {}]
     assert max_concurrency(children) == 2
+
+
+def test_to_toml_rejects_null_in_arrays():
+    with pytest.raises(ValueError, match="disabled holds None"):
+        to_toml({"tools": {"disabled": ["Shell", None]}})
+
+
+def test_unknown_subagent_events_do_not_end_a_child(tmp_path):
+    wire = tmp_path / "agents" / "main" / "wire.jsonl"
+    wire.parent.mkdir(parents=True)
+    events = [
+        {"type": "subagent.spawned", "subagentId": "agent-0", "parentAgentId": "main"},
+        {"type": "subagent.started", "subagentId": "agent-0", "time": 1000},
+        {"type": "subagent.progress", "subagentId": "agent-0", "time": 1500},
+    ]
+    wire.write_text("\n".join(json.dumps(e) for e in events))
+    _, children = parse_session(tmp_path)
+    assert children[0]["status"] == "incomplete" and "ended" not in children[0]
+
+
+def test_restricted_network_needs_a_local_binary(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="needs kimi_binary_path"):
+        make_agent(tmp_path, monkeypatch, network_access="model_only")
+
+
+async def test_local_binary_is_uploaded_and_installed(tmp_path, monkeypatch):
+    binary = tmp_path / "kimi"
+    binary.write_bytes(b"\x7fELF")
+    server, sandbox, staged = make_agent(
+        tmp_path, monkeypatch, kimi_binary_path=str(binary), network_access="model_only"
+    )
+    await server.run(SimpleNamespace(cookies={}), request_body())
+    assert next(v for k, v in staged.items() if k.endswith("/upload/kimi")) == b"\x7fELF"
+    install = sandbox.exec.await_args_list[0].kwargs["command"]
+    assert "install -m 0755" in install and "curl" not in install

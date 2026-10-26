@@ -60,6 +60,7 @@ from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypo
 
 LOG = logging.getLogger(__name__)
 INSTALLER_URL = "https://code.kimi.com/kimi-code/install.sh"
+BINARY_UPLOAD_CONCURRENCY = 4
 
 
 class KimiCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
@@ -133,6 +134,8 @@ def to_toml(data: dict[str, Any], path: tuple[str, ...] = (), header: str | None
             array = ".".join((*path, name))
             tables.extend(to_toml(item, (*path, name), header=f"[[{array}]]") for item in value)
         else:
+            if isinstance(value, list) and any(item is None for item in value):
+                raise ValueError(f"TOML has no null value: {'.'.join((*path, str(key)))} holds None")
             lines.append(f"{name} = {_toml_str(value)}")
     return "\n".join(["\n".join(lines), *tables]).strip() + "\n"
 
@@ -209,7 +212,10 @@ def parse_session(session_dir: Path) -> tuple[NeMoGymResponseUsage | None, list[
                     "background": event.get("runInBackground", False),
                     "status": "incomplete",
                 }
-            elif kind and kind.startswith("subagent.") and event.get("subagentId") in subagents:
+            elif kind in ("subagent.started", "subagent.completed", "subagent.failed") and (
+                event.get("subagentId") in subagents
+            ):
+                # Other subagent.* events (progress and the like) do not end a subagent.
                 child = subagents[event["subagentId"]]
                 if kind == "subagent.started":
                     child["started"] = event.get("time")
@@ -240,7 +246,12 @@ class KimiCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
+        if self.config.network_access != "inherit" and self.config.kimi_binary_path is None:
+            # The installer downloads from the internet, which a restricted sandbox cannot reach.
+            raise ValueError(f"network_access={self.config.network_access!r} needs kimi_binary_path")
         self._sem = Semaphore(self.config.concurrency)
+        # Bounds host memory: each upload of the ~190 MB binary is buffered while it is in flight.
+        self._binary_upload_sem = Semaphore(BINARY_UPLOAD_CONCURRENCY)
 
     def _model_base_url(self, server: ModelServerRef, body: KimiCodeSandboxedAgentRunRequest) -> str:
         reachable = self.config.network_access != "inherit"
@@ -350,7 +361,8 @@ class KimiCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 local.write_text(contents)
                 await sandbox.upload(local, target)
         if self.config.kimi_binary_path is not None:
-            await sandbox.upload(self.config.kimi_binary_path, remote + "/upload/kimi")
+            async with self._binary_upload_sem:
+                await sandbox.upload(self.config.kimi_binary_path, remote + "/upload/kimi")
             install = f"mkdir -p {remote}/bin && install -m 0755 {remote}/upload/kimi {remote}/bin/kimi"
         else:
             install = (
