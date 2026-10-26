@@ -264,6 +264,8 @@ def _masking_step_metrics(agent_name: str, scored: Counter, dropped: Counter) ->
 
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_FAILURE_LEGACY_CLASS_KEY = "_ng_failure_legacy_class"
+# Diagnostic exception path a producer may attach to a failure (#5072); kept on the row, outside the typed record.
+NG_FAILURE_PATH_KEY = "_ng_failure_path"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 # Set only by Gym, on the result it builds for a row the dispatch budget never started.
 NG_DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
@@ -445,6 +447,7 @@ _LEGACY_RESULT_FIELDS = frozenset(
         "_ng_failure_partial_response",
         "_ng_failure_stage",
         "_ng_failure_judge_error",
+        NG_FAILURE_PATH_KEY,
         "_ng_agent_observations",
         "_ng_terminal_model_call_id",
         "_ng_token_capture",
@@ -485,13 +488,18 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError(
                 f"environment server reply for task {task_id!r} carries a non-object failure: {failure!r}"
             )
+        failure_kind = failure.get("failure_kind")
         record: Dict[str, Any] = {
             NG_TASK_ID_KEY: task_id,
-            NG_FAILURE_CLASS_KEY: failure.get("failure_kind") or ENVIRONMENT_SERVER_FAILURE_CLASS,
-            "_ng_failure_kind": failure.get("failure_kind"),
+            NG_FAILURE_CLASS_KEY: failure_kind or ENVIRONMENT_SERVER_FAILURE_CLASS,
+            "_ng_failure_kind": failure_kind,
             NG_TERMINAL_KEY: bool(failure.get("terminal", False)),
             "_ng_failure_message": failure.get("failure_reason"),
         }
+        if failure_kind:
+            # Every Environment Server failure was routed as this class before its kind became the class.
+            # Keep it as the legacy class, so existing selectors such as count_failure_classes_as_zero still match.
+            record[NG_FAILURE_LEGACY_CLASS_KEY] = ENVIRONMENT_SERVER_FAILURE_CLASS
         if failure.get("stage") is not None:
             record["_ng_failure_stage"] = failure["stage"]
         if failure.get("partial_response") is not None:
@@ -501,15 +509,19 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
         if failure.get("trajectory") is not None:
             # The harness's own turns before the failure, in the producer's slot the projection reads first.
             record[NG_TRAJECTORY_KEY] = failure["trajectory"]
+        if failure.get("failure_path") is not None:
+            record[NG_FAILURE_PATH_KEY] = failure["failure_path"]
         return record
     result = response.get("result")
     if not isinstance(result, Mapping):
         raise ValueError(f"environment server reply for task {task_id!r} carries a non-object result: {result!r}")
-    # judge_failsafe is a built-in producer of these two legacy markers.
-    # Accept only its declared failure form; other collector-owned keys remain forbidden.
+    # judge_failsafe is a built-in producer of these legacy markers and of a diagnostic failure path.
+    # Accept them only on its declared failure form: the judge_failed class with a judge kind, which may
+    # name the observed cause (judge_rate_limited, for example). Other collector-owned keys remain forbidden.
+    kind = result.get("failure_kind")
     judge_markers = (
-        {NG_FAILURE_CLASS_KEY, NG_FAILURE_JUDGE_ERROR_KEY}
-        if result.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED and result.get("failure_kind") == JUDGE_FAILED
+        {NG_FAILURE_CLASS_KEY, NG_FAILURE_JUDGE_ERROR_KEY, NG_FAILURE_PATH_KEY}
+        if result.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED and isinstance(kind, str) and kind.startswith("judge_")
         else set()
     )
     reserved = sorted(key for key in result if _is_collector_key(key) and key not in judge_markers)
