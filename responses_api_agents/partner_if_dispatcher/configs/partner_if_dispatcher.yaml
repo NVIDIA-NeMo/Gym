@@ -1,0 +1,37 @@
+# partner_if's two public examples as one benchmark: the text tasks (configs/partner_if.yaml) and the
+# mock-tool tasks (configs/mock_tools.yaml) run in their own environments, and one aggregate covers both.
+config_paths:
+  - resources_servers/partner_if/configs/partner_if.yaml
+  - resources_servers/partner_if/configs/mock_tools.yaml
+
+partner_if_dispatcher:
+  responses_api_agents:
+    partner_if_dispatcher:
+      entrypoint: app.py
+      # Gym aggregates this agent's rows here, so partner_if computes the benchmark metrics.
+      resources_server:
+        type: resources_servers
+        name: partner_if
+      task_routes:
+        synthetic-1: {type: environment_servers, name: partner_if_environment_server}
+        synthetic-2: {type: environment_servers, name: partner_if_environment_server}
+        synthetic-3: {type: environment_servers, name: partner_if_environment_server}
+        synthetic-4: {type: environment_servers, name: partner_if_environment_server}
+        synthetic-5: {type: environment_servers, name: partner_if_environment_server}
+        synthetic-tools-1: {type: environment_servers, name: partner_if_mock_tools_environment_server}
+        synthetic-tools-2: {type: environment_servers, name: partner_if_mock_tools_environment_server}
+      datasets:
+        - name: partner_if_dispatcher_example
+          type: example
+          # data/example.jsonl and data/mock_tools_example.jsonl of resources_servers/partner_if.
+          jsonl_fpath: responses_api_agents/partner_if_dispatcher/data/example.jsonl
+          prompt_config: null
+          license: Apache 2.0
+
+partner_if_dispatcher_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: partner_if_dispatcher
