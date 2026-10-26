@@ -17,6 +17,7 @@
 The exporters open through `setup_exporters`, which logs the config at once; collection decides only later whether the
 reopened run continues or the output starts over (`start_over`)."""
 
+from asyncio import Future
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -29,8 +30,10 @@ from omegaconf import DictConfig
 from pytest import MonkeyPatch
 
 import nemo_gym.exporters.wandb as wandb_module
+import nemo_gym.rollout_collection as collection_module
 import nemo_gym.rollout_reverification as reverification_module
 from nemo_gym.exporters import export_rollouts, get_exporters, setup_exporters, teardown_exporters
+from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.rollout_reverification import OutputPaths
 
 
@@ -391,3 +394,55 @@ class TestBestEffortLimits:
 
 async def _none() -> None:
     return None
+
+
+class TestStringFlags:
+    """The exporters read a string flag, as an `${oc.env:...}` interpolation yields, as the run config does."""
+
+    @pytest.mark.parametrize("flag", ["false", "0", "no"])
+    async def test_a_collection_that_starts_fresh_never_logs_to_the_earlier_run(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch, store: DictConfig, flag: str
+    ) -> None:
+        client, old_run = _first_job(store)
+        before = _snapshot(client, old_run)
+        store["resume_from_cache"] = flag
+        (exporter,) = setup_exporters(store)
+        assert exporter.run_id != old_run and not exporter.reopened
+
+        monkeypatch.setattr(collection_module, "get_global_config_dict", MagicMock(return_value={}))
+        inputs = tmp_path / "input.jsonl"
+        inputs.write_bytes(
+            orjson.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}}) + b"\n"
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result(_CompletedRollout(row=example, result={"reward": 0.0}, rollout_latency_ms=None))
+                    futures.append(future)
+                return futures
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(inputs),
+            output_jsonl_fpath=store["output_jsonl_fpath"],
+            resume_from_cache=flag,
+            disable_aggregation=True,
+        )
+        assert config.resume_from_cache is False
+        await Helper().run_from_config(config)  # collection logs its rollout itself
+        new_run = exporter.run_id
+        teardown_exporters()
+
+        assert new_run != old_run
+        assert _snapshot(client, old_run) == before
+        assert _marker(store).read_text() == new_run
+        assert [row["reward"] for row in _table(client, new_run)] == [0.0]
+
+    @pytest.mark.parametrize("flag", ["true", "1", "yes"])
+    def test_a_string_true_flag_still_reopens_the_recorded_run(self, store: DictConfig, flag: str) -> None:
+        _, old_run = _first_job(store)
+        store["resume_from_cache"] = flag
+        (exporter,) = setup_exporters(store)
+        assert exporter.run_id == old_run and exporter.reopened

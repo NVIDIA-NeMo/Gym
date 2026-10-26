@@ -19,11 +19,14 @@ from pathlib import Path
 from typing import Any, ClassVar, Optional
 
 from omegaconf import DictConfig
+from pydantic import TypeAdapter, ValidationError
 
 from nemo_gym.secret_utils import recursively_hide_secrets
 
 
 logger = logging.getLogger(__name__)
+# Pydantic's boolean parsing, which the run configs that read these flags use.
+_BOOL = TypeAdapter(bool)
 
 
 class BaseExporter(ABC):
@@ -167,16 +170,26 @@ class BaseExporter(ABC):
         anew, so it starts a new tracking run too, as does a resume that finds nothing to resume (`start_over`).
         """
         run_id_fpath = self._run_id_fpath()
-        config = self.global_config_dict
         continues = (
-            config.get("resume_from_cache")
-            or config.get("resubmit")
-            or (config.get("judge_failed_only") and config.get("append"))
+            self._flag("resume_from_cache")
+            or self._flag("resubmit")
+            or (self._flag("judge_failed_only") and self._flag("append"))
         )
         if self._starting_over or run_id_fpath is None or not run_id_fpath.exists() or not continues:
             return None
         self._recorded = run_id_fpath.read_text().strip()
         return self._recorded
+
+    def _flag(self, name: str) -> bool:
+        """A flag of the raw config read as the validated run config reads it, so "false" or "0" (as an
+        `${oc.env:...}` interpolation yields) is false. A value that config would reject does not continue a run."""
+        value = self.global_config_dict.get(name)
+        if value is None:
+            return False
+        try:
+            return _BOOL.validate_python(value)
+        except ValidationError:
+            return False
 
     def _record_run_id(self, run_id: str) -> None:
         run_id_fpath = self._run_id_fpath()
