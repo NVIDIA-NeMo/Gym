@@ -281,6 +281,13 @@ NG_ENVIRONMENT_SERVER_KEY = ENVIRONMENT_SERVER_STAMP_KEY_NAME
 # Implementation name under `environment_servers:`, so readers know which result type a record holds.
 NG_RESULT_TYPE_KEY = "_ng_result_type"
 NG_TASK_ID_KEY = "_ng_task_id"
+# Provenance stamps preparation writes into a materialized row's task_data (the same strings as
+# nemo_gym.tasks.harbor.digest's DIGEST_KEY and DATASET_DIGEST_KEY, which this module does not import).
+# The collector copies only these from a row onto its record: task_data is dataset-controlled, and any
+# other `_ng_*` key there (`_ng_no_persist`, `_ng_failure_class`, ...) would steer the collector.
+NG_DIGEST_KEY = "_ng_digest"
+NG_DATASET_DIGEST_KEY = "_ng_dataset_digest"
+PROVENANCE_KEYS = (NG_DIGEST_KEY, NG_DATASET_DIGEST_KEY)
 _NO_RESULT_FAILURE_CLASSES = frozenset(
     {
         AGENT_REQUEST_FAILED_FAILURE_CLASS,
@@ -469,6 +476,24 @@ def _sanitize_legacy_result(result: Dict) -> None:
             del result[key]
 
 
+def _task_data_provenance(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """The :data:`PROVENANCE_KEYS` of a materialized row's ``task_data``: provenance stamps for the record.
+
+    Preparation writes them (a Harbor row carries the task folder digest as ``_ng_digest`` and the
+    dataset digest as ``_ng_dataset_digest``) so that every results row names the inputs it ran, without
+    the materialized-inputs sidecar. An Environment Server never returns them (``_ng_*`` is the
+    collector's namespace), so the collector copies them from the row onto the record. Only the
+    allowlisted keys are copied: ``task_data`` comes from the dataset, and the collector reads other
+    ``_ng_*`` keys (``_ng_no_persist``, ``_ng_failure_class``, ``_ng_result_type``, ...) that a success
+    record does not carry, so a dataset could otherwise drop, reroute or relabel its own results.
+    """
+    task_input = row.get("task_input")
+    task_data = task_input.get("task_data") if isinstance(task_input, Mapping) else None
+    if not isinstance(task_data, Mapping):
+        return {}
+    return {key: task_data[key] for key in PROVENANCE_KEYS if key in task_data}
+
+
 def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     """Turn a ``BaseEpisodeResponse`` into the rollout record the collector stores.
 
@@ -480,6 +505,9 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     Every Environment Server type is scored the same way: through the result's top-level ``reward``,
     with optional top-level ``reward_components``. A reward nested elsewhere in the result is stored as
     data, and a result without a top-level ``reward`` is unscored.
+
+    A failure's ``failure_kind`` is kept under that name, next to the ``_ng_failure_*`` diagnostics: it is
+    the key ``_record_rollout_outcome`` reads for the metric label and ``_counted_failure_row`` drops.
     """
     task_id = response.get("task_id")
     failure = response.get("failure")
@@ -502,6 +530,8 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             record[NG_FAILURE_LEGACY_CLASS_KEY] = ENVIRONMENT_SERVER_FAILURE_CLASS
         if failure.get("stage") is not None:
             record["_ng_failure_stage"] = failure["stage"]
+        if failure.get("failure_kind") is not None:
+            record["failure_kind"] = failure["failure_kind"]
         if failure.get("partial_response") is not None:
             record["_ng_failure_partial_response"] = failure["partial_response"]
         if failure.get("agent_observations") is not None:
@@ -3813,6 +3843,10 @@ class RolloutCollectionHelper(BaseModel):
                     if diagnostics.get("error"):
                         compatibility.pop("error")
                     result = diagnostics | compatibility
+                if _materialized_taskset(row) is not None and isinstance(result, dict):
+                    # Result or failure, the record names the inputs it ran (task and dataset digests).
+                    for key, value in _task_data_provenance(row).items():
+                        result.setdefault(key, value)
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]

@@ -31,6 +31,7 @@ from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.transfer import exec_as_root, upload_dir
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.cli import ORACLE_AGENT
+from nemo_gym.tasks.harbor.digest import is_ignored
 
 
 LOGGER = logging.getLogger(__name__)
@@ -108,13 +109,19 @@ class HarborSession:
 _ENV_TEMPLATE = re.compile(r"\$\{([^}:]+)(?::-(.*))?\}")
 
 
-def resolve_env_templates(env: dict[str, str]) -> dict[str, str]:
-    """Resolve Harbor's whole-value host templates without changing the stored task."""
+def resolve_env_templates(env: dict[str, str], secrets: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Resolve Harbor's whole-value host templates without changing the stored task.
+
+    ``secrets`` (the server's operator secrets) are consulted before the process environment; they are
+    passed only when resolving the verifier process's environment.
+    """
     resolved: dict[str, str] = {}
     for key, value in env.items():
         match = _ENV_TEMPLATE.fullmatch(value)
         if match is None:
             resolved[key] = value
+        elif secrets and match.group(1) in secrets:
+            resolved[key] = secrets[match.group(1)]
         elif match.group(1) in os.environ:
             resolved[key] = os.environ[match.group(1)]
         elif match.group(2) is not None:
@@ -176,7 +183,7 @@ class HarborSessionMixin:
                 for name in ("Dockerfile", "docker-compose.yaml", "docker-compose.yml")
             )
         ):
-            await upload_dir(sandbox, environment_dir, workdir)
+            await upload_dir(sandbox, environment_dir, workdir, ignore=is_ignored)
         # Harbor mounts /logs into the agent's container; tasks may write to /logs/artifacts during the
         # episode. Best effort: an image that runs as a non-root user without the capability to switch
         # to root cannot create top-level folders, and the agent may still not need them.
@@ -256,7 +263,7 @@ class HarborSessionMixin:
         session.agent_env = resolve_env_templates(task.config.solution.env)
         solution = task.path / "solution"
         if solution.is_dir():
-            await upload_dir(session.sandbox, solution, SOLUTION_DIR, make_readable=True)
+            await upload_dir(session.sandbox, solution, SOLUTION_DIR, make_readable=True, ignore=is_ignored)
 
     async def _sandbox_access(self, session: HarborSession) -> SandboxAccess:
         return SandboxAccess(

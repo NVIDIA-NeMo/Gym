@@ -14,19 +14,23 @@ import pytest
 
 import nemo_gym.tasks.harbor.compose_variables as compose_variables_module
 from nemo_gym.sandbox.compose_config import _compose_literals
+from nemo_gym.sandbox.compose_fields import service_gpus
 from nemo_gym.tasks.harbor import image_configs
 from nemo_gym.tasks.harbor import registry as registry_module
 from nemo_gym.tasks.harbor.compose_variables import compose_variables
-from nemo_gym.tasks.harbor.digest import context_digest
+from nemo_gym.tasks.harbor.digest import content_hash, context_digest, is_covered
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.image_configs import (
+    check_task_compose_fields,
     compose_image_references,
     dockerfile_base_images,
     load_compose_document,
+    plan_task_compose_volumes,
     record_base_images,
     record_compose_images,
+    with_built_images,
 )
-from nemo_gym.tasks.harbor.records import write_json_record
+from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, write_json_record
 from nemo_gym.tasks.harbor.registry import ImageConfigError, RegistryClient, parse_image_ref
 from nemo_gym.tasks.harbor.task import discover_tasks
 
@@ -144,17 +148,24 @@ class FakeRegistry:
                 },
             },
             "sha256:cfg-arm64": {"os": "linux", "architecture": "arm64", "config": {"Cmd": ["python", "server.py"]}},
+            # An amd64/v3 build: the same os/arch in the blob (a configuration blob may omit the variant), another Cmd.
+            "sha256:cfg-amd64-v3": {"os": "linux", "architecture": "amd64", "config": {"Cmd": ["server-v3"]}},
         }
         self.manifests = {
             "sha256:m-amd64": {"mediaType": self.MANIFEST, "config": {"digest": "sha256:cfg-amd64"}},
             "sha256:m-arm64": {"mediaType": self.MANIFEST, "config": {"digest": "sha256:cfg-arm64"}},
             "sha256:m-att": {"mediaType": self.MANIFEST, "config": {"digest": "sha256:cfg-amd64"}},
+            "sha256:m-amd64-v3": {"mediaType": self.MANIFEST, "config": {"digest": "sha256:cfg-amd64-v3"}},
         }
         self.tags = {
+            # The Docker Official Images' shape (ubuntu:24.04, redis, python): the arm64 entry declares variant v8.
             "7-alpine": {
                 "mediaType": self.INDEX,
                 "manifests": [
-                    {"digest": "sha256:m-arm64", "platform": {"os": "linux", "architecture": "arm64"}},
+                    {
+                        "digest": "sha256:m-arm64",
+                        "platform": {"os": "linux", "architecture": "arm64", "variant": "v8"},
+                    },
                     {
                         "digest": "sha256:m-att",
                         "platform": {"os": "unknown", "architecture": "unknown"},
@@ -165,7 +176,33 @@ class FakeRegistry:
             },
             "arm-only": {
                 "mediaType": self.INDEX,
-                "manifests": [{"digest": "sha256:m-arm64", "platform": {"os": "linux", "architecture": "arm64"}}],
+                "manifests": [
+                    {
+                        "digest": "sha256:m-arm64",
+                        "platform": {"os": "linux", "architecture": "arm64", "variant": "v8"},
+                    }
+                ],
+            },
+            # An amd64 entry at micro-architecture level v3 listed before the baseline one: another platform to
+            # containerd's matcher (v2..v4 need CPU features a baseline host may lack), with its own configuration.
+            "amd64-v3": {
+                "mediaType": self.INDEX,
+                "manifests": [
+                    {
+                        "digest": "sha256:m-amd64-v3",
+                        "platform": {"os": "linux", "architecture": "amd64", "variant": "v3"},
+                    },
+                    {"digest": "sha256:m-amd64", "platform": {"os": "linux", "architecture": "amd64"}},
+                ],
+            },
+            "amd64-v3-only": {
+                "mediaType": self.INDEX,
+                "manifests": [
+                    {
+                        "digest": "sha256:m-amd64-v3",
+                        "platform": {"os": "linux", "architecture": "amd64", "variant": "v3"},
+                    }
+                ],
             },
         }
 
@@ -328,6 +365,74 @@ class TestRegistryClient:
         with pytest.raises(ImageConfigError, match="linux/arm64, not linux/amd64"):
             RegistryClient().image_config("redis@sha256:m-arm64")
 
+    def test_resolves_for_the_platform_asked_for(self, registry):
+        """``builds.platform: linux/arm64`` deployments record the arm64 configuration. The pin stays the index,
+        so one pinned reference serves an arm64 pod and an amd64 one, each selecting its own manifest from it.
+        Review (M24): the index's arm64 entry carries ``variant: v8``, as every Docker Official Image's does, and
+        ``linux/arm64`` selects it as ``docker --platform linux/arm64`` does (containerd reads arm64 as arm64/v8);
+        the selection used to refuse any entry with a variant and report that the index had no arm64 manifest."""
+        client = RegistryClient(platform=("linux", "arm64"))
+        entry = client.image_config("redis:7-alpine")
+        assert entry["image"] == "library/redis@sha256:index-of-7-alpine" and entry["architecture"] == "arm64"
+        assert entry["config_digest"] == "sha256:cfg-arm64"
+        assert client.image_config(entry["image"])["config_digest"] == "sha256:cfg-arm64"
+        assert RegistryClient().image_config(entry["image"])["config_digest"] == "sha256:cfg-amd64"
+        assert client.image_config("redis:arm-only")["config_digest"] == "sha256:cfg-arm64"
+        with pytest.raises(ImageConfigError, match="linux/amd64, not linux/arm64"):
+            client.image_config("redis@sha256:m-amd64")
+        # The explicit variant and the architecture alias name the same platform and select the same manifest.
+        for platform in ("linux/arm64", "linux/arm64/v8", "linux/aarch64"):
+            spelled = RegistryClient(platform=registry_module.platform_pair(platform))
+            assert spelled.platform == ("linux", "arm64", "v8")
+            assert spelled.image_config("redis:7-alpine")["config_digest"] == "sha256:cfg-arm64"
+        # Review (M24): an amd64 entry at micro-architecture level v3 is not baseline amd64. containerd's matcher
+        # (the rule `docker --platform linux/amd64` selects by) answers a baseline request with an entry of variant
+        # v1 or none only, since v2..v4 need CPU features a baseline host may lack; the levels used to be folded into
+        # one platform, so the default client recorded v3's configuration whenever v3 was listed first. Baseline is
+        # selected past a v3 entry, a v3 request selects v3, and an index of v3 alone has no linux/amd64 manifest.
+        assert RegistryClient().image_config("redis:amd64-v3")["config_digest"] == "sha256:cfg-amd64"
+        v3 = RegistryClient(platform=("linux", "amd64", "v3"))
+        assert v3.platform == ("linux", "amd64", "v3")
+        assert v3.image_config("redis:amd64-v3")["config_digest"] == "sha256:cfg-amd64-v3"
+        with pytest.raises(ImageConfigError, match="no linux/amd64 manifest"):
+            RegistryClient().image_config("redis:amd64-v3-only")
+        assert RegistryClient(platform=("linux", "amd64", "v1")).platform == ("linux", "amd64", "")
+        # Another variant of a 32-bit arm is another platform, and the message names it.
+        with pytest.raises(ImageConfigError, match="no linux/arm/v6 manifest"):
+            RegistryClient(platform=("linux", "arm", "v6")).image_config("redis:7-alpine")
+
+    def test_record_image_configs_resolves_for_builds_platform(self, tmp_path, monkeypatch):
+        platforms = []
+
+        class Recording:
+            def __init__(self, *args, **kwargs):
+                platforms.append(kwargs.get("platform"))
+
+            def image_config(self, reference):
+                return {"os": "linux", "architecture": "arm64", "image": reference, "config": {}}
+
+        monkeypatch.setattr(image_configs, "RegistryClient", Recording)
+        image_configs.record_image_configs({"redis:7": ["a"]}, tmp_path, platform="linux/arm64/v8")
+        image_configs.record_image_configs({"redis:8": ["a"]}, tmp_path)
+        assert platforms == [("linux", "arm64", "v8"), None], "the default client keeps its own default platform"
+        assert registry_module.platform_pair(None) == registry_module.platform_pair("") == ("linux", "amd64", "")
+        # Normalised as containerd normalises a platform: the variant arm64 defaults to, aliases, amd64's baseline
+        # level v1. A higher amd64 level is another platform, and the records keep os/arch only (reusable_record,
+        # recorded_image_mismatch), so builds.platform cannot ask for one: a v3 record would serve a baseline run.
+        assert registry_module.platform_pair("linux/arm64/v8") == ("linux", "arm64", "v8")
+        assert registry_module.platform_pair("linux/aarch64") == registry_module.platform_pair("linux/arm64")
+        assert registry_module.platform_pair("linux/x86_64") == registry_module.platform_pair("linux/amd64/v1")
+        assert registry_module.platform_pair("linux/amd64/v1") == ("linux", "amd64", "")
+        with pytest.raises(ImageConfigError, match="Unsupported platform: 'linux/amd64/v3'"):
+            registry_module.platform_pair("linux/amd64/v3")
+        assert registry_module.platform_pair("linux/arm") == ("linux", "arm", "v7")
+        assert registry_module.platform_name(registry_module.platform_pair("linux/arm64/v8")) == "linux/arm64"
+        assert registry_module.platform_name(registry_module.platform_pair("linux/arm/v6")) == "linux/arm/v6"
+        with pytest.raises(ImageConfigError, match="Not a platform: 'arm64'"):
+            registry_module.platform_pair("arm64")
+        with pytest.raises(ImageConfigError, match="Not a platform: 'linux/arm64/v8/extra'"):
+            registry_module.platform_pair("linux/arm64/v8/extra")
+
     def test_http_errors_carry_the_repository_and_status(self, registry):
         with pytest.raises(ImageConfigError, match="library/redis: registry returned HTTP 404"):
             RegistryClient().image_config("redis:missing")
@@ -362,11 +467,131 @@ class TestComposeImageReferences:
         (task,) = discover_tasks(tmp_path)
         assert compose_image_references(task) == []
 
-    def test_a_sidecar_that_builds_is_rejected(self, tmp_path):
-        write_task(tmp_path, "ctr", compose="services:\n  api:\n    build: ./api\n")
+    @pytest.mark.parametrize(
+        ("service", "message"),
+        [
+            ("    build: ./api\n", "service 'api' has a build section and prepare recorded no build for it"),
+            (
+                "    image: skillsbench-visual-stability-api\n    build: ./api\n",
+                "service 'api' has a build section and prepare recorded no build for it",
+            ),
+            ("    expose: ['1']\n", "service 'api' names no image and prepare recorded no build for it"),
+        ],
+        ids=["build-only", "image-and-build", "neither"],
+    )
+    def test_a_sidecar_with_a_build_and_no_record_is_refused_naming_it(self, tmp_path, service, message):
+        # Under Compose and Harbor a service with build: is built, never pulled, so its image: (when it has one) is
+        # a local tag: it is not resolved from the registry, and without a record the task is refused by name. A
+        # service with neither key is a different task defect, reported in its own words.
+        write_task(tmp_path, "ctr", compose="services:\n  api:\n" + service)
         (task,) = discover_tasks(tmp_path)
-        with pytest.raises(ImageConfigError, match="service 'api' names no image"):
+        with pytest.raises(ImageConfigError, match=message):
             compose_image_references(task)
+
+    def test_a_recorded_main_is_not_substituted_for_a_task_pinned_to_a_prebuilt_image(self, tmp_path):
+        # The context's main was built (for another task sharing environment/, or before the override) and the
+        # record names it; this task declares a docker_image, so Harbor runs the prebuilt image and so does Gym:
+        # main keeps ${MAIN_IMAGE_NAME} = task.image, and the sidecar is substituted as it always is.
+        compose = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n  db:\n    build: ./db\n"
+        task_dir = write_task(
+            tmp_path, "t", image=None, compose=compose, dockerfile="FROM ubuntu:24.04\nCOPY . /app\n"
+        )
+        (tmp_path / "dataset.toml").write_text('[gym.tasks."t".environment]\ndocker_image = "org/pinned:2"\n')
+        built = "reg.example/r/hb__" + "0" * 32 + "@sha256:" + "d" * 64
+        db = "reg.example/r/hb__" + "0" * 32 + "-db@sha256:" + "e" * 64
+        record = {"image": built, "tasks": ["t"], "services": {"main": {"image": built}, "db": {"image": db}}}
+        (tmp_path / BUILT_IMAGES_FILE).write_text(json.dumps({context_digest(task_dir / "environment"): record}))
+        config = {"os": "linux", "architecture": "amd64", "config": {"WorkingDir": "/app"}, "record_version": 2}
+        (tmp_path / "compose-images.json").write_text(
+            json.dumps({image: {**config, "image": image} for image in (built, db, "org/pinned:2")})
+        )
+        (task,) = discover_tasks(tmp_path)
+        assert task.image == "org/pinned:2" and task.built_image is None
+        assert task.built_images == {"main": built, "db": db}
+        document = load_compose_document(task)
+        assert document["services"]["main"] == {"image": "org/pinned:2"}
+        assert document["services"]["db"] == {"image": db}
+        assert compose_image_references(task) == ["org/pinned:2", db]
+        # The complementary case: the override names another task, so this one runs from its built main.
+        (tmp_path / "dataset.toml").write_text('[gym.tasks."other".environment]\ndocker_image = "org/pinned:2"\n')
+        (task,) = discover_tasks(tmp_path)
+        assert task.built_image == built == task.image
+        assert load_compose_document(task)["services"]["main"] == {"image": built}
+        assert compose_image_references(task) == [built, db]
+
+    def test_a_sidecar_prepare_built_is_listed_by_its_recorded_image_and_not_resolved_again(self, tmp_path):
+        # G2: prepare built `api` from ./api and recorded it under the context digest by service name; the loader
+        # substitutes that image, so the reference is the recorded one and the registry is never asked for it.
+        compose = (
+            "services:\n  main: {}\n  api:\n    build: ./api\n    pull_policy: build\n    expose: ['3080']\n"
+            "  cache:\n    image: redis:7-alpine\n"
+        )
+        task_dir = write_task(tmp_path, "ctr", compose=compose)
+        built = "reg.example/r/hb__" + "0" * 32 + "-api@sha256:" + "e" * 64
+        (tmp_path / BUILT_IMAGES_FILE).write_text(
+            json.dumps(
+                {context_digest(task_dir / "environment"): {"tasks": ["ctr"], "services": {"api": {"image": built}}}}
+            )
+        )
+        (tmp_path / "compose-images.json").write_text(
+            json.dumps(
+                {
+                    built: {
+                        "os": "linux",
+                        "architecture": "amd64",
+                        "image": built,
+                        "config": {"Cmd": ["api"]},
+                        "record_version": 2,
+                    }
+                }
+            )
+        )
+        (task,) = discover_tasks(tmp_path)
+        assert compose_image_references(task) == [MAIN_IMAGE, built, "redis:7-alpine"]
+        document = load_compose_document(task)
+        assert document["services"]["api"] == {"image": built, "expose": ["3080"]}
+        assert document["services"]["main"] == {}
+        client = FakeClient()
+        record_compose_images([task], tmp_path, client=client)
+        assert client.resolved == [MAIN_IMAGE, "redis:7-alpine"]
+        recorded = json.loads((tmp_path / "compose-images.json").read_text())
+        assert recorded[built]["config"] == {"Cmd": ["api"]}
+
+    def test_with_built_images_drops_the_build_and_its_policy_only_on_named_services(self):
+        """A recorded service loses its ``build:`` and a ``pull_policy: build`` (Harbor's template spelling, in any
+        case), the two that describe the build prepare ran. A runtime policy (``always``, ``missing``, ``never``) is
+        not part of the build and stays with the recorded image (review: it was dropped with the build, so a built
+        service's policy never reached the field check or the adapter)."""
+        document = {
+            "services": {
+                "main": {"image": "x", "build": {"context": "."}, "pull_policy": "build", "cpus": 1},
+                "api": {"build": "./api", "pull_policy": "Build ", "expose": ["1"]},
+                "worker": {"build": "./worker", "pull_policy": "always"},
+                "cache": {"image": "local/cache", "build": "./cache", "pull_policy": "never"},
+                "db": {"image": "pg:16", "build": "./db"},
+                "empty": None,
+            }
+        }
+        images = {
+            "main": "reg/hb__d@sha256:1",
+            "api": "reg/hb__d-api@sha256:2",
+            "worker": "reg/hb__d-worker@sha256:4",
+            "cache": "reg/hb__d-cache@sha256:5",
+            "empty": "reg/hb__d-empty@sha256:3",
+            "gone": "reg/x",
+        }
+        assert with_built_images(document, images) == {
+            "services": {
+                "main": {"cpus": 1, "image": "reg/hb__d@sha256:1"},
+                "api": {"expose": ["1"], "image": "reg/hb__d-api@sha256:2"},
+                "worker": {"pull_policy": "always", "image": "reg/hb__d-worker@sha256:4"},
+                "cache": {"pull_policy": "never", "image": "reg/hb__d-cache@sha256:5"},
+                # Not recorded: left as written, so the adapter (or compose_image_references) reports it.
+                "db": {"image": "pg:16", "build": "./db"},
+                "empty": {"image": "reg/hb__d-empty@sha256:3"},
+            }
+        }
+        assert with_built_images({"services": "nope"}, images) == {"services": "nope"}
 
 
 class FakeClient:
@@ -721,6 +946,283 @@ class TestComposeVariablesAndEnvFile:
         assert load_compose_document(task) is None
 
 
+FIXTURES = Path(__file__).parent / "fixtures" / "harbor_compose_volumes"
+
+
+class TestComposeVolumesAtPrepare:
+    """M22: Compose volumes are planned at prepare, from the task folder and the deployment's ``volume_sources``."""
+
+    def write_task_aw(self, root: Path) -> Path:
+        task_dir = write_task(root, "task-aw")
+        for name in ("docker-compose.yaml", "seed.json"):
+            (task_dir / "environment" / name).write_bytes((FIXTURES / "task-aw" / "environment" / name).read_bytes())
+        return task_dir
+
+    def test_task_aw_seed_file_becomes_an_upload_into_the_sidecar(self, tmp_path):
+        self.write_task_aw(tmp_path)
+        (task,) = discover_tasks(tmp_path)
+        document = load_compose_document(task)
+        uploads = plan_task_compose_volumes(task, document)
+        assert uploads == {
+            "api": [{"source": str(task.path / "environment" / "seed.json"), "target": "/app/seed.json"}]
+        }
+        assert document["services"]["api"]["x-sandbox"]["uploads"] == uploads["api"]
+        assert "volumes" not in document["services"]["api"]
+        assert document["services"]["main"]["image"] == MAIN_IMAGE
+
+    def test_record_compose_images_fails_prepare_naming_an_unmapped_external_volume(self, tmp_path):
+        task_dir = write_task(
+            tmp_path,
+            "pg",
+            compose=f"""services:
+  main:
+    image: {MAIN_IMAGE}
+  db:
+    image: {SIDECAR_IMAGE}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:
+    external: true
+""",
+        )
+        (task,) = discover_tasks(tmp_path)
+        with pytest.raises(ImageConfigError, match=r"pg: environment/docker-compose.yaml: external volume 'pgdata'"):
+            record_compose_images([task], tmp_path, client=FakeClient())
+        assert not (tmp_path / "compose-images.json").exists()
+        # Mapped in the deployment's sandbox block, the same dataset prepares.
+        path = record_compose_images([task], tmp_path, client=FakeClient(), volume_sources={"pgdata": "pg/data"})
+        assert sorted(json.loads(path.read_text())) == sorted([MAIN_IMAGE, SIDECAR_IMAGE])
+        assert task_dir.is_dir()
+
+    @pytest.mark.parametrize("service", ["main", "api"])
+    @pytest.mark.parametrize("source", ["/etc/passwd", "OUTSIDE"])
+    def test_a_task_authored_x_sandbox_upload_fails_prepare_naming_the_field(self, tmp_path, service, source):
+        # Review blocker: a hub task's Compose file is untrusted. An ``x-sandbox.uploads`` written there (the
+        # planner's own output form) would have the server copy any readable host file into the sandbox.
+        outside = tmp_path / "outside" / "secret"
+        outside.parent.mkdir()
+        outside.write_text("secret")
+        source = str(outside) if source == "OUTSIDE" else source
+        smuggled = f"    x-sandbox:\n      uploads:\n        - {{source: {source}, target: /tmp/stolen}}\n"
+        compose = f"services:\n  main:\n    image: {MAIN_IMAGE}\n"
+        compose += smuggled if service == "main" else ""
+        compose += f"  api:\n    image: {SIDECAR_IMAGE}\n"
+        compose += smuggled if service == "api" else ""
+        write_task(tmp_path / "ds", "smuggler", compose=compose)
+        (task,) = discover_tasks(tmp_path / "ds")
+        document = load_compose_document(task)
+        with pytest.raises(
+            ImageConfigError,
+            match=f"smuggler: environment/docker-compose.yaml: service {service!r} declares x-sandbox",
+        ):
+            plan_task_compose_volumes(task, document)
+        with pytest.raises(ImageConfigError, match="x-sandbox"):
+            record_compose_images([task], tmp_path / "ds", client=FakeClient())
+        assert not (tmp_path / "ds" / "compose-images.json").exists()
+
+    def test_a_task_that_needs_shared_storage_is_left_out_at_prepare_when_the_block_has_none(self, tmp_path):
+        """M35 D6 (hil-bench's named volume) and D2 (kumo's sidecar bind of ``/logs/verifier``): both need the
+        provider's shared storage; told the block has none, prepare leaves the task out naming the setting instead of
+        every seed failing; told it has it, the kumo task plans the shared logs volume into both services."""
+        hil = write_task(
+            tmp_path / "hil",
+            "hil",
+            compose=f"""services:
+  main:
+    image: {MAIN_IMAGE}
+    volumes:
+      - ask-human-metrics:/harbor_shared
+  ask-human:
+    image: {SIDECAR_IMAGE}
+    volumes:
+      - ask-human-metrics:/harbor_shared
+volumes:
+  ask-human-metrics:
+""",
+        )
+        kumo = write_task(
+            tmp_path / "kumo",
+            "kumo",
+            compose=f"""services:
+  verifier:
+    image: {SIDECAR_IMAGE}
+    volumes:
+      - ${{HOST_VERIFIER_LOGS_PATH}}:${{ENV_VERIFIER_LOGS_PATH}}
+  main:
+    image: {MAIN_IMAGE}
+    volumes:
+      - ${{HOST_VERIFIER_LOGS_PATH}}:${{ENV_VERIFIER_LOGS_PATH}}
+      - ${{HOST_AGENT_LOGS_PATH}}:${{ENV_AGENT_LOGS_PATH}}
+""",
+        )
+        assert hil.is_dir() and kumo.is_dir()
+        for root, message in (
+            (tmp_path / "hil", "mounts 'ask-human-metrics'"),
+            (tmp_path / "kumo", "binds the logs tree '/logs/verifier'"),
+        ):
+            (task,) = discover_tasks(root)
+            skipped: dict[str, str] = {}
+            record_compose_images([task], root, client=FakeClient(), shared_storage=False, skipped=skipped)
+            assert list(skipped) == [task.task_id]
+            assert message in skipped[task.task_id] and "shared_storage.host_path" in skipped[task.task_id]
+            # The images are still recorded, as for any other refused field.
+            assert (root / "compose-images.json").exists()
+            for storage in (True, None):
+                assert record_compose_images([task], root, client=FakeClient(), shared_storage=storage, skipped={})
+        (task,) = discover_tasks(tmp_path / "kumo")
+        document = load_compose_document(task)
+        assert plan_task_compose_volumes(task, document, shared_storage=True) == {}
+        assert document["volumes"] == {"nemo-gym-logs-verifier": {}}
+        for name in ("verifier", "main"):
+            (mount,) = document["services"][name]["volumes"]
+            assert (mount["source"], mount["target"], mount["volume"]) == (
+                "nemo-gym-logs-verifier",
+                "/logs/verifier",
+                {"nocopy": True},
+            )
+        # A GPU-declaring task is answered for the GPU block, where the server seeds it.
+        gpu = write_task(tmp_path / "gpu", "gpu", compose=(hil / "environment" / "docker-compose.yaml").read_text())
+        (gpu / "task.toml").write_text((gpu / "task.toml").read_text() + "gpus = 1\n")
+        (task,) = discover_tasks(tmp_path / "gpu")
+        skipped = {}
+        record_compose_images(
+            [task],
+            tmp_path / "gpu",
+            client=FakeClient(),
+            shared_storage=True,
+            gpu_shared_storage=False,
+            skipped=skipped,
+        )
+        assert "shared_storage.host_path" in skipped[task.task_id]
+        assert record_compose_images(
+            [task], tmp_path / "gpu", client=FakeClient(), shared_storage=False, gpu_shared_storage=True, skipped={}
+        )
+
+    def test_gpu_tasks_are_checked_against_the_gpu_blocks_volume_sources(self, tmp_path):
+        # Review: the server seeds a GPU-declaring task from the ``gpu_sandbox_provider`` block, so prepare checks
+        # its volumes against that block's mapping (empty when the block has none), not the ``sandbox`` block's.
+        compose = f"""services:
+  main:
+    image: {MAIN_IMAGE}
+  db:
+    image: {SIDECAR_IMAGE}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:
+    external: true
+"""
+        for name, gpus in (("cpu", 0), ("gpu", 1)):
+            task_dir = write_task(tmp_path, name, compose=compose)
+            toml = task_dir / "task.toml"
+            toml.write_text(toml.read_text() + f"gpus = {gpus}\n")
+        cpu, gpu = sorted(discover_tasks(tmp_path), key=lambda task: task.task_id)
+        mapped = {"pgdata": "pg/data"}
+        # No GPU block configured: every task is checked against the sandbox block.
+        assert record_compose_images([cpu, gpu], tmp_path, client=FakeClient(), volume_sources=mapped)
+        # A GPU block without the mapping: the GPU task fails at prepare, the CPU task does not.
+        with pytest.raises(ImageConfigError, match="gpu: .*external volume 'pgdata'"):
+            record_compose_images(
+                [cpu, gpu], tmp_path, client=FakeClient(), volume_sources=mapped, gpu_volume_sources={}
+            )
+        assert record_compose_images(
+            [cpu], tmp_path, client=FakeClient(), volume_sources=mapped, gpu_volume_sources={}
+        )
+        # The mirror: mapped under the GPU block only.
+        assert record_compose_images([gpu], tmp_path, client=FakeClient(), gpu_volume_sources=mapped)
+        with pytest.raises(ImageConfigError, match="cpu: .*external volume 'pgdata'"):
+            record_compose_images([cpu], tmp_path, client=FakeClient(), gpu_volume_sources=mapped)
+
+    def test_a_gpu_reserving_sidecar_of_a_cpu_task_is_checked_against_the_gpu_blocks_volume_sources(self, tmp_path):
+        # Review (round 13): the server routes a GPU-reserving sidecar to the GPU block even when the task declares
+        # no GPUs, so its external volume is checked against that block's mapping; main and a plain sidecar stay
+        # on the task's.
+        compose = f"""services:
+  main:
+    image: {MAIN_IMAGE}
+  model:
+    image: {SIDECAR_IMAGE}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+              count: 1
+    volumes:
+      - models:/models
+volumes:
+  models:
+    external: true
+"""
+        write_task(tmp_path, "cpu", compose=compose)
+        (task,) = discover_tasks(tmp_path)
+        skipped: dict[str, str] = {}
+        record_compose_images(
+            [task],
+            tmp_path,
+            client=FakeClient(),
+            volume_sources={},
+            gpu_volume_sources={"models": "gpu/models"},
+            skipped=skipped,
+        )
+        assert skipped == {}
+        # The task's own block mapping it is not enough once a GPU block exists: the sidecar runs there.
+        record_compose_images(
+            [task],
+            tmp_path,
+            client=FakeClient(),
+            volume_sources={"models": "cpu/models"},
+            gpu_volume_sources={},
+            skipped=skipped,
+        )
+        assert "external volume 'models'" in skipped.pop("cpu")
+        # Without a GPU block every service follows the task's block, as before.
+        record_compose_images(
+            [task], tmp_path, client=FakeClient(), volume_sources={"models": "cpu/models"}, skipped=skipped
+        )
+        assert skipped == {}
+
+    def test_a_bind_source_outside_the_digest_fails_prepare_while_the_hash_stays_the_publishers(self, tmp_path):
+        # Review (round 13): <task>/data/seed.json is uploadable but not digested, so an edit changed nothing in the
+        # manifest while the server uploaded the edited bytes. The planner refuses it at prepare; content_hash
+        # stays Harbor's publisher hash (the parity proof is test_archive_hash_is_the_published_hash_without_exclusions).
+        task_dir = write_task(
+            tmp_path,
+            "seeded",
+            compose=f"services:\n  main:\n    image: {MAIN_IMAGE}\n  api:\n    image: {SIDECAR_IMAGE}\n"
+            "    volumes:\n      - ../data/seed.json:/seed.json\n",
+        )
+        (task_dir / "data").mkdir()
+        (task_dir / "data" / "seed.json").write_text("v1")
+        (task,) = discover_tasks(tmp_path)
+        before = content_hash(task.path)
+        (task_dir / "data" / "seed.json").write_text("v2")
+        assert content_hash(task.path) == before  # the edit is invisible to the task's identity
+        assert not is_covered("data/seed.json") and is_covered("environment/seed.json") and is_covered("tests")
+        assert is_covered("task.toml") and not is_covered("environment/__pycache__/x.pyc") and not is_covered(".")
+        document = load_compose_document(task)
+        with pytest.raises(
+            ImageConfigError,
+            match=r"seeded: environment/docker-compose.yaml: service 'api' binds '../data/seed.json', which the task digest does not cover",
+        ):
+            plan_task_compose_volumes(task, document)
+        skipped: dict[str, str] = {}
+        record_compose_images([task], tmp_path, client=FakeClient(), skipped=skipped)
+        assert "../data/seed.json" in skipped["seeded"]
+
+    def test_record_compose_images_fails_prepare_naming_an_unsupported_volume_field(self, tmp_path):
+        write_task(
+            tmp_path,
+            "tmpfs",
+            compose=f"services:\n  main:\n    image: {MAIN_IMAGE}\n    volumes:\n      - type: tmpfs\n        target: /scratch\n",
+        )
+        (task,) = discover_tasks(tmp_path)
+        with pytest.raises(ImageConfigError, match="volume type 'tmpfs' is not supported"):
+            record_compose_images([task], tmp_path, client=FakeClient())
+
+
 class TestRecordComposeImages:
     def test_writes_one_entry_per_image_next_to_the_tasks(self, tmp_path):
         write_task(tmp_path, "ctr", compose=COMPOSE)
@@ -749,6 +1251,14 @@ class TestRecordComposeImages:
         recorded = json.loads((tmp_path / "compose-images.json").read_text())
         assert recorded["redis:7-alpine"] == pinned["redis:7-alpine"]
         assert client.resolved == [MAIN_IMAGE, SIDECAR_IMAGE]
+        # Review (M24): a record is kept for the platform it was recorded for. Asked for the same platform, nothing is
+        # resolved; asked for another, every entry is read again at its pin (the pinned digest, not the tag).
+        client = FakeClient()
+        record_compose_images(discover_tasks(tmp_path), tmp_path, client=client, platform="linux/amd64")
+        assert client.resolved == []
+        client = FakeClient()
+        record_compose_images(discover_tasks(tmp_path), tmp_path, client=client, platform="linux/arm64")
+        assert client.resolved == [MAIN_IMAGE, SIDECAR_IMAGE, "library/redis@sha256:old"]
 
     def test_a_complete_file_means_no_registry_traffic(self, tmp_path):
         write_task(tmp_path, "ctr", compose=COMPOSE)
@@ -757,6 +1267,22 @@ class TestRecordComposeImages:
         client = FakeClient()
         record_compose_images(tasks, tmp_path, client=client)
         assert client.resolved == []
+
+    def test_a_sidecar_with_an_image_and_an_unrecorded_build_is_skipped_per_task_not_resolved(self, tmp_path):
+        write_task(tmp_path, "good", compose=COMPOSE)
+        write_task(
+            tmp_path,
+            "bad",
+            compose="services:\n  main: {}\n  api:\n    image: skillsbench-visual-stability-api\n    build: ./api\n",
+        )
+        client = FakeClient()
+        skipped: dict[str, str] = {}
+        record_compose_images(discover_tasks(tmp_path), tmp_path, client=client, skipped=skipped)
+        # The task lands in the skipped map like the no-image case; its local-only name never reaches the registry.
+        assert skipped == {
+            "bad": "bad: Compose service 'api' has a build section and prepare recorded no build for it"
+        }
+        assert client.resolved == [MAIN_IMAGE, SIDECAR_IMAGE, "redis:7-alpine"]
 
     def test_nothing_is_written_without_compose_tasks(self, tmp_path):
         write_task(tmp_path, "plain")
@@ -881,6 +1407,72 @@ class TestRecordBaseImages:
         record_base_images(tmp_path)
         assert len(registry.requests) == requests
 
+    AMD64_RECORD = {
+        "architecture": "amd64",
+        "config": {
+            "Cmd": ["python", "server.py"],
+            "WorkingDir": "/app",
+            "ExposedPorts": {"5000/tcp": {}},
+            "Env": ["A=1"],
+        },
+        "config_digest": "sha256:cfg-amd64",
+        "image": "library/redis@sha256:index-of-7-alpine",
+        "os": "linux",
+        "record_version": 2,
+    }
+
+    def test_a_record_of_another_platform_is_read_again_at_its_pin_for_the_requested_platform(
+        self, tmp_path, registry
+    ):
+        """Review (M24): ``compose-images.json`` holds a current-version amd64 record, and the dataset is prepared
+        again with ``builds.platform: linux/arm64``. The record used to be kept by ``record_version`` alone, so the
+        registry was never asked and ``resolve_compose`` refused the amd64 record at every seed with "prepare the
+        dataset for that platform", which the user had just done. A record of another platform is now read again at
+        its pin, the multi-arch index: the pin does not move and the configuration is the arm64 manifest's."""
+        write_task(tmp_path, "overlay", image=None, dockerfile="FROM redis:7-alpine\nRUN true\n")
+        (tmp_path / "compose-images.json").write_text(json.dumps({"redis:7-alpine": self.AMD64_RECORD}))
+
+        record_base_images(tmp_path, platform="linux/arm64")
+
+        recorded = json.loads((tmp_path / "compose-images.json").read_text())["redis:7-alpine"]
+        assert recorded["architecture"] == "arm64" and recorded["record_version"] == 2
+        assert recorded["config_digest"] == "sha256:cfg-arm64" and recorded["config"] == {
+            "Cmd": ["python", "server.py"]
+        }
+        assert recorded["image"] == "library/redis@sha256:index-of-7-alpine", "the pin never moves"
+        manifests = [url for url, _ in registry.requests if "/manifests/" in url]
+        assert manifests[0].endswith("/manifests/sha256:index-of-7-alpine"), "read at the pin, not the tag"
+        assert all(
+            url.endswith(("/manifests/sha256:index-of-7-alpine", "/manifests/sha256:m-arm64")) for url in manifests
+        )
+        # Recorded for arm64 now: the next arm64 prepare asks nothing; an amd64 prepare reads the pin back for amd64.
+        requests = len(registry.requests)
+        record_base_images(tmp_path, platform="linux/arm64")
+        assert len(registry.requests) == requests
+        record_base_images(tmp_path)
+        recorded = json.loads((tmp_path / "compose-images.json").read_text())["redis:7-alpine"]
+        assert recorded["architecture"] == "amd64" and recorded["config_digest"] == "sha256:cfg-amd64"
+        assert recorded["image"] == "library/redis@sha256:index-of-7-alpine"
+
+    def test_a_pin_to_a_single_manifest_of_another_platform_fails_the_prepare_with_the_remedy(
+        self, tmp_path, registry
+    ):
+        """A pin that is one amd64 manifest (the reference was a digest, or an older record pinned behind the tag)
+        has no arm64 manifest behind it: preparing for arm64 fails naming the image, the tasks and what to do, instead
+        of keeping a record every arm64 seed refuses. The file is left as it was."""
+        write_task(tmp_path, "overlay", image=None, dockerfile="FROM redis:7-alpine\nRUN true\n")
+        pinned = {"redis:7-alpine": {**self.AMD64_RECORD, "image": "library/redis@sha256:m-amd64"}}
+        (tmp_path / "compose-images.json").write_text(json.dumps(pinned))
+        with pytest.raises(ImageConfigError, match="resolved to linux/amd64, not linux/arm64") as info:
+            record_base_images(tmp_path, platform="linux/arm64")
+        message = str(info.value)
+        assert "Could not record the configuration of base image 'redis:7-alpine' (used by task(s) overlay)" in message
+        assert message.endswith(
+            "library/redis@sha256:m-amd64: resolved to linux/amd64, not linux/arm64; pin a multi-arch tag or an image "
+            "of linux/arm64, or prepare this dataset for linux/amd64"
+        )
+        assert json.loads((tmp_path / "compose-images.json").read_text()) == pinned
+
     def test_a_single_task_folder_records_into_its_parent(self, tmp_path, registry):
         task = write_task(tmp_path, "one", image=None, dockerfile="FROM redis:7-alpine\nRUN true\n")
         assert record_base_images(task) == tmp_path / "compose-images.json"
@@ -929,8 +1521,10 @@ class TestRecordImageConfigsUnderTheLock:
     def test_an_entry_another_process_recorded_during_the_lookup_is_kept(self, tmp_path):
         write_task(tmp_path, "ctr", compose=COMPOSE)
         record_path = tmp_path / "compose-images.json"
+        # Of this run's platform (an entry of another platform would be read again at its pin, see
+        # TestRecordBaseImages), told apart from the FakeClient's records by its config digest.
         competitor = {
-            "architecture": "arm64",
+            "architecture": "amd64",
             "config": {},
             "config_digest": "sha256:other",
             "os": "linux",
@@ -960,3 +1554,190 @@ class TestRecordImageConfigsUnderTheLock:
         (tmp_path / "compose-images.json").write_text('{"redis:7-alpine": {"os": "linux"')
         with pytest.raises(HarborTaskError, match=r"compose-images\.json is not valid JSON \(read twice"):
             record_compose_images(discover_tasks(tmp_path), tmp_path, client=FakeClient())
+
+
+FIELD_FIXTURES = Path(__file__).parent / "fixtures" / "harbor_compose_fields"
+
+
+class TestComposeFields:
+    """M28: service fields get their meaning at prepare, and one the group cannot run fails naming the field."""
+
+    @pytest.mark.parametrize("name", ["ctf", "o11y"])
+    def test_the_example_datasets_prepare_with_nothing_else(self, tmp_path, name):
+        compose = (FIELD_FIXTURES / name / "environment" / "docker-compose.yaml").read_text()
+        write_task(tmp_path, name, compose=compose)
+        client = FakeClient()
+        path = record_compose_images(discover_tasks(tmp_path), tmp_path, client=client, sandbox_provider="opensandbox")
+        assert path == tmp_path / "compose-images.json"
+        assert MAIN_IMAGE in client.resolved
+
+    def test_the_document_the_server_reads_carries_the_normalized_fields(self, tmp_path):
+        compose = (FIELD_FIXTURES / "ctf" / "environment" / "docker-compose.yaml").read_text()
+        write_task(tmp_path, "ctf", compose=compose)
+        (task,) = discover_tasks(tmp_path)
+        document = check_task_compose_fields(task, load_compose_document(task), provider="opensandbox")
+        assert document["services"]["main"]["restart"] == "always"
+        assert document["services"]["main"]["networks"] == {"agent_network": {}}
+        assert document["services"]["target"]["networks"] == {"agent_network": {"aliases": ["challenge"]}}
+
+    def test_a_provider_option_the_deployment_cannot_apply_fails_prepare_naming_field_and_provider(self, tmp_path):
+        compose = f"services:\n  main:\n    image: {MAIN_IMAGE}\n  db:\n    image: redis:7\n    sysctls:\n      net.core.somaxconn: 1024\n"
+        write_task(tmp_path, "ctr", compose=compose)
+        tasks = discover_tasks(tmp_path)
+        with pytest.raises(
+            ImageConfigError,
+            match="ctr: environment/docker-compose.yaml: service 'db' sysctls is not supported by the opensandbox sandbox provider",
+        ):
+            record_compose_images(tasks, tmp_path, client=FakeClient(), sandbox_provider="opensandbox")
+        assert not (tmp_path / "compose-images.json").exists()
+        # Docker applies it as a run flag, so the same task prepares for a Docker deployment.
+        assert record_compose_images(tasks, tmp_path, client=FakeClient(), sandbox_provider="docker") is not None
+        # Without a provider name the check waits for the adapter, which has the live provider.
+        assert record_compose_images(tasks, tmp_path, client=FakeClient()) is not None
+
+    @pytest.mark.parametrize(
+        "snippet, message",
+        [
+            (
+                "    platform: linux/arm64\n",
+                "service 'db' platform 'linux/arm64' does not match the deployment platform linux/amd64",
+            ),
+            ("    restart: maybe\n", "service 'db' restart must be one of"),
+            ("    networks: [backend]\n", "service 'db' networks: 'backend' is not declared"),
+            (
+                "    deploy:\n      resources:\n        limits:\n          pids: 10\n",
+                "service 'db' deploy.resources.limits.pids is not supported",
+            ),
+            (
+                "    extra_hosts: ['host.docker.internal:host-gateway']\n",
+                "service 'db' extra_hosts: host-gateway is not available",
+            ),
+            (
+                "    post_start:\n      - command: id\n        privileged: true\n",
+                "service 'db' post_start\\[0\\].privileged is not supported",
+            ),
+        ],
+    )
+    def test_a_field_the_group_cannot_run_fails_prepare_naming_it(self, tmp_path, snippet, message):
+        compose = f"services:\n  main:\n    image: {MAIN_IMAGE}\n  db:\n    image: redis:7\n{snippet}"
+        write_task(tmp_path, "ctr", compose=compose)
+        with pytest.raises(ImageConfigError, match="ctr: environment/docker-compose.yaml: " + message):
+            record_compose_images(discover_tasks(tmp_path), tmp_path, client=FakeClient(), sandbox_provider="docker")
+
+    def test_a_gpu_sidecar_is_checked_against_the_gpu_block_provider(self, tmp_path):
+        """The server runs a sidecar that reserves GPUs on the gpu_sandbox_provider block, so prepare checks its
+        options against that block's provider; a task that declares GPUs itself runs everything there."""
+        sidecar = (
+            f"services:\n  main:\n    image: {MAIN_IMAGE}\n  model:\n    image: vllm/vllm-openai:v0.6\n"
+            "    tmpfs: [/run]\n    deploy:\n      resources:\n        reservations:\n          devices:\n"
+            "            - capabilities: [gpu]\n              count: 1\n"
+        )
+        write_task(tmp_path, "sidecar", compose=sidecar)
+        tasks = discover_tasks(tmp_path)
+        # Docker task block, OpenSandbox GPU block: the GPU sidecar lands on OpenSandbox, which applies no tmpfs.
+        with pytest.raises(
+            ImageConfigError,
+            match="sidecar: environment/docker-compose.yaml: service 'model' tmpfs is not supported by the opensandbox sandbox provider",
+        ):
+            record_compose_images(
+                tasks, tmp_path, client=FakeClient(), sandbox_provider="docker", gpu_sandbox_provider="opensandbox"
+            )
+        # The reverse pairing runs it: main on OpenSandbox declares nothing, the sidecar on Docker takes tmpfs.
+        assert (
+            record_compose_images(
+                tasks, tmp_path, client=FakeClient(), sandbox_provider="opensandbox", gpu_sandbox_provider="docker"
+            )
+            is not None
+        )
+        # task.toml declares GPUs: its own services run on the GPU block too, main included.
+        gpu_task = tmp_path / "gputask"
+        write_task(tmp_path, "gputask", compose=f"services:\n  main:\n    image: {MAIN_IMAGE}\n    tmpfs: [/run]\n")
+        with (gpu_task / "task.toml").open("a") as handle:
+            handle.write("gpus = 1\n")
+        (task,) = [task for task in discover_tasks(tmp_path) if task.task_id == "gputask"]
+        with pytest.raises(
+            ImageConfigError, match="service 'main' tmpfs is not supported by the opensandbox sandbox provider"
+        ):
+            check_task_compose_fields(task, load_compose_document(task), provider="docker", gpu_provider="opensandbox")
+        assert check_task_compose_fields(task, load_compose_document(task), provider="docker")["services"]["main"][
+            "tmpfs"
+        ]
+
+    def test_a_cpu_sidecar_with_legacy_memory_prepares_with_a_gpu_block_configured(self, tmp_path):
+        """Review: with a GPU block configured prepare asks every sidecar for its GPU count; that read must not size
+        the service, since the legacy `mem_limit: 512M` is only converted to bytes by resolve_compose later. The
+        string used to reach int() and the ValueError, not a field error, escaped the per-task skip and aborted
+        the whole preparation."""
+        compose = (
+            f"services:\n  main:\n    image: {MAIN_IMAGE}\n  db:\n    image: redis:7\n    mem_limit: 512M\n"
+            "  model:\n    image: vllm/vllm-openai:v0.6\n    deploy:\n      resources:\n        reservations:\n"
+            "          devices:\n            - capabilities: [gpu]\n              count: 1\n"
+        )
+        write_task(tmp_path, "mixed", compose=compose)
+        (task,) = discover_tasks(tmp_path)
+        skipped: dict[str, str] = {}
+        path = record_compose_images(
+            [task],
+            tmp_path,
+            client=FakeClient(),
+            sandbox_provider="docker",
+            gpu_sandbox_provider="opensandbox",
+            skipped=skipped,
+        )
+        assert path is not None and skipped == {}
+        assert {"redis:7", "vllm/vllm-openai:v0.6"} <= set(json.loads(path.read_text()))
+        # The same check at seed: the CPU sidecar keeps its string, the GPU sidecar still counts.
+        document = check_task_compose_fields(
+            task, load_compose_document(task), provider="docker", gpu_provider="opensandbox"
+        )
+        assert document["services"]["db"]["mem_limit"] == "512M"
+        assert (service_gpus(document["services"]["db"]), service_gpus(document["services"]["model"])) == (0, 1)
+
+    def test_extra_hosts_on_a_non_root_sidecar_fail_prepare_once_the_image_user_is_known(self, tmp_path):
+        """The group starts a non-root sidecar without host injection, so its extra_hosts would be lost; prepare
+        learns the user from the recorded image configuration and fails there, naming task, file and service."""
+
+        class NonRootClient(FakeClient):
+            def image_config(self, reference):
+                record = super().image_config(reference)
+                if reference.startswith("grafana/"):
+                    record["config"] = {**record["config"], "User": "472"}
+                return record
+
+        compose = (
+            f"services:\n  main:\n    image: {MAIN_IMAGE}\n    extra_hosts: ['metrics.example:10.0.0.9']\n"
+            "  grafana:\n    image: grafana/grafana:11\n    extra_hosts: ['metrics.example:10.0.0.9']\n"
+        )
+        write_task(tmp_path, "o11y", compose=compose)
+        with pytest.raises(
+            ImageConfigError,
+            match="o11y: environment/docker-compose.yaml: service 'grafana' extra_hosts cannot be applied without "
+            "host injection: the image runs as user '472'",
+        ):
+            record_compose_images(
+                discover_tasks(tmp_path), tmp_path, client=NonRootClient(), sandbox_provider="docker"
+            )
+        # The same task with a root grafana image prepares; main takes host entries whatever its user.
+        root = tmp_path / "root"
+        root.mkdir()
+        write_task(root, "o11y", compose=compose)
+        assert record_compose_images(discover_tasks(root), root, client=FakeClient(), sandbox_provider="docker")
+
+    def test_platform_is_the_deployments_at_prepare_as_at_seed(self, tmp_path):
+        compose = (
+            f"services:\n  main:\n    image: {MAIN_IMAGE}\n  db:\n    image: redis:7\n    platform: linux/arm64\n"
+        )
+        write_task(tmp_path, "arm", compose=compose)
+        tasks = discover_tasks(tmp_path)
+        with pytest.raises(ImageConfigError, match="does not match the deployment platform linux/amd64"):
+            record_compose_images(tasks, tmp_path, client=FakeClient())
+        # The deployment's platform (sandbox_provider_options.platform, as the server reads it) admits the task.
+        assert (
+            record_compose_images(tasks, tmp_path, client=FakeClient(), compose_platform="linux/aarch64") is not None
+        )
+        with pytest.raises(
+            ImageConfigError,
+            match="arm: environment/docker-compose.yaml: service 'db' platform 'linux/arm64' does not match the "
+            "deployment platform linux/amd64",
+        ):
+            check_task_compose_fields(tasks[0], load_compose_document(tasks[0]), platform="linux/x86_64")

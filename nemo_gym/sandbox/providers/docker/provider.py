@@ -259,6 +259,8 @@ class DockerProvider:
     """Sandbox provider backed by the local Docker CLI / daemon."""
 
     name = "docker"
+    # Compose service options this provider applies, each as the matching ``docker run`` flag.
+    SERVICE_OPTION_FIELDS = frozenset({"tmpfs", "ulimits", "sysctls", "security_opt"})
 
     def __init__(
         self,
@@ -272,6 +274,37 @@ class DockerProvider:
         self._probe = _coerce_config(probe, DockerProbeConfig)
         self._binary = _require_docker()
         self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
+
+    def service_options(
+        self,
+        *,
+        tmpfs: tuple[str, ...] = (),
+        ulimits: Mapping[str, Any] | None = None,
+        sysctls: Mapping[str, str] | None = None,
+        security_opt: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        """Compose service options as ``run_args``: ``--tmpfs``, ``--ulimit``, ``--sysctl``, ``--security-opt``."""
+        args: list[str] = []
+        for mount in tmpfs:
+            args += ["--tmpfs", str(mount)]
+        for name, limit in (ulimits or {}).items():
+            if isinstance(limit, Mapping):
+                if set(limit) != {"soft", "hard"}:
+                    raise ValueError(f"ulimit {name!r} needs both soft and hard values")
+                args += ["--ulimit", f"{name}={limit['soft']}:{limit['hard']}"]
+            else:
+                args += ["--ulimit", f"{name}={limit}"]
+        for key, value in (sysctls or {}).items():
+            args += ["--sysctl", f"{key}={value}"]
+        for option in security_opt:
+            args += ["--security-opt", str(option)]
+        return {"run_args": args} if args else {}
+
+    def pull_policy_options(self, policy: str) -> dict[str, Any]:
+        """Compose's ``pull_policy`` as ``docker run --pull``; only ``always``, ``missing`` and ``never`` exist."""
+        if policy not in ("always", "missing", "never"):
+            raise ValueError(f"pull policy must be always, missing or never, got {policy!r}")
+        return {"run_args": ["--pull", policy]}
 
     async def _run(
         self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None

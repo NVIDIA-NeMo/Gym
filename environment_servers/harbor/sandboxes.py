@@ -16,29 +16,40 @@ import asyncio
 import json
 import logging
 import math
+import random
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Awaitable
+from typing import Any
 
 import yaml
 
+from environment_servers.harbor.overlay import HarborOverlayError
 from environment_servers.harbor.session import _task_sandbox_env, resolve_env_templates
 from environment_servers.harbor.users import _creation_user
-from environment_servers.harbor.verifier import _verifier_image, _verifier_key
+from environment_servers.harbor.verifier import _verifier_image, _verifier_key, _verifier_runs_task_image
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxSpec, clamp_resource_requests
-from nemo_gym.sandbox.compose_config import adapt_non_root_sidecars, opensandbox_shm_labels, resolve_compose
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S
+from nemo_gym.sandbox.compose_config import (
+    adapt_non_root_sidecars,
+    deployment_platform,
+    document_volume_sources,
+    opensandbox_shm_labels,
+    resolve_compose,
+    sandbox_platform,
+)
+from nemo_gym.sandbox.compose_fields import service_gpus
+from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata, resolve_provider_volume_sources
+from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, SandboxCreateError
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.image_configs import (
+    check_task_compose_fields,
     load_compose_document,
-    without_main_build,
-    without_pull_policy,
+    plan_task_compose_volumes,
+    task_declares_gpus,
     without_restated_main_build,
 )
 from nemo_gym.tasks.harbor.models import HarborEnvironment
@@ -77,8 +88,59 @@ def _sandbox_resources(environment: HarborEnvironment, *, request_gpu_type: bool
 
 
 def _needs_gpu(task: HarborTask) -> bool:
-    verifier_environment = task.config.verifier.environment
-    return bool(task.config.environment.gpus or (verifier_environment is not None and verifier_environment.gpus))
+    # The same predicate prepare routes the Compose capability check by (image_configs.check_task_compose_fields).
+    return task_declares_gpus(task)
+
+
+# Image pull failures the server retries itself before it reports a retryable seed failure.
+IMAGE_PULL_FAILURE_MARKERS = (
+    "errimagepull",
+    "imagepullbackoff",
+    "failed to pull",
+    "error pulling",
+    "image pull",
+    "pulling image",
+)
+# Retried starts queue behind this gate so a registry hiccup cannot turn into a pull storm.
+PULL_RETRY_CONCURRENCY = 4
+PULL_RETRY_BASE_DELAY_S = 5.0
+PULL_RETRY_MAX_DELAY_S = 60.0
+
+
+def _is_image_pull_failure(error: BaseException) -> bool:
+    """Whether a failed sandbox start names an image pull as its cause.
+
+    Walks the cause/context chain and the members of exception groups: a Compose group whose cleanup
+    after a failed pull failed too surfaces as an ``ExceptionGroup`` of the cleanup errors, raised while
+    the pull failure was being handled.
+    """
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        message = str(current).lower()
+        if any(marker in message for marker in IMAGE_PULL_FAILURE_MARKERS):
+            return True
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+        chained = current.__cause__ or current.__context__
+        if chained is not None:
+            pending.append(chained)
+    return False
+
+
+def _pull_retry_delay(attempt: int) -> float:
+    """Exponential backoff with jitter before retrying a failed image pull; ``attempt`` is the one that failed."""
+    base = min(PULL_RETRY_MAX_DELAY_S, PULL_RETRY_BASE_DELAY_S * 2 ** (attempt - 1))
+    return base * random.uniform(0.5, 1.5)
+
+
+def _provider_name(provider_config: Any) -> str | None:
+    """The registry name of a resolved single-key provider config; ``None`` for a provider instance (tests)."""
+    return next(iter(provider_config)) if isinstance(provider_config, Mapping) else None
 
 
 class HarborSandboxMixin:
@@ -118,11 +180,7 @@ class HarborSandboxMixin:
             | {"nemo_gym_environment_server": self.config.name, "harbor_task": task.task_id[:63], "harbor_role": role}
         )
         if ttl is None:
-            ttl = (
-                self.config.default_episode_timeout_seconds
-                + self.config.cleanup_timeout_seconds
-                + self.config.sandbox_ttl_slack_s
-            )
+            ttl = self._episode_budget_s(task) + self.config.cleanup_timeout_seconds + self.config.sandbox_ttl_slack_s
         # The override replaces only the keys it names, so a GPU task routed to the GPU provider keeps `gpu`.
         resources = _sandbox_resources(environment, request_gpu_type=self.config.request_gpu_type) | (
             self.config.sandbox_resources_override or {}
@@ -196,21 +254,25 @@ class HarborSandboxMixin:
         return self.config.sandbox_provider
 
     def _task_provider_name(self, task: HarborTask, global_config_dict: Mapping[str, Any] | None = None) -> str | None:
-        """The registry name of the provider that runs ``task`` (``docker``, ``opensandbox``, ...); ``None`` for a
-        provider instance in place of the config (tests) that names itself no better."""
+        """The registry name of the provider that runs ``task`` (``docker``, ``opensandbox``, ...): :func:`_provider_name`
+        of its resolved config, else the own ``name`` of a provider instance in place of the config (tests), else
+        ``None``."""
         if global_config_dict is None:
             global_config_dict = get_global_config_dict()
         provider_config = resolve_provider_config(self._provider_ref(task), global_config_dict)
-        if isinstance(provider_config, Mapping):
-            return next(iter(provider_config))
-        return getattr(provider_config, "name", None)
+        return _provider_name(provider_config) or getattr(provider_config, "name", None)
 
     async def _create_sandbox(self, task: HarborTask, workdir: str | None, *, episode_key: str) -> AsyncSandbox:
+        """Start the agent's sandbox, with the in-server image pull retries."""
         provider_config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
-        sandbox = AsyncSandbox(provider_config)
-        self._sandboxes[episode_key] = sandbox
-        await sandbox.start(self._sandbox_spec(task, workdir))
-        return sandbox
+        spec = self._sandbox_spec(task, workdir)
+        return await self._start_with_pull_retries(
+            task,
+            key=episode_key,
+            what=repr(task.image),
+            make=lambda: AsyncSandbox(provider_config),
+            start=lambda sandbox: sandbox.start(spec),
+        )
 
     async def _create_sandbox_within_deadline(self, task: HarborTask, episode_key: str) -> AsyncSandbox:
         """The agent's ``_create_sandbox`` under the ready deadline; the timeout is a seed failure, retried.
@@ -258,23 +320,52 @@ class HarborSandboxMixin:
     def _compose_document(self, task: HarborTask) -> dict[str, Any]:
         """The published overlay resolved against recorded image metadata, ready for the Compose adapter."""
         image_configs = self._compose_image_configs(task)
-        # The same reader prepare used: env_file inlined and ${VAR} resolved from the task, not the process.
+        global_config_dict = get_global_config_dict()
+        provider = resolve_provider_config(self._provider_ref(task), global_config_dict)
+        # The same reader prepare used: env_file inlined, ${VAR} resolved from the task, not the process, and the
+        # images prepare built standing in for the sidecars it built (and main when the task runs from its built
+        # image), their build: and a pull_policy: build dropped. The record was read once by load_task: no hashing here.
         document = load_compose_document(task)
-        # The sandbox has no pull step to configure, so ``pull_policy`` is dropped from every service. Prepare
-        # ran the adapter's field check on this same document (``nemo_gym.tasks.harbor.cli``).
-        document = without_pull_policy(document)
-        if task.built_image is not None:
-            # Prepare built main from this file; the recorded image stands in for its build: section.
-            document = without_main_build(document)
-        else:
-            # A pull or overlay task's main build: that only restates Harbor's own build of the Dockerfile is
-            # dropped; a key that would change the image is the task's error, which prepare already reported.
+        if task.built_image is None:
+            # A pull or overlay task's main build: (and the pull_policy: build that goes with it) that only restates
+            # Harbor's own build of the Dockerfile is dropped; a key that would change the image is the task's
+            # error, which prepare already reported. Every other pull_policy stays for the adapter to apply.
             document, reason = without_restated_main_build(task, document)
             if reason is not None:
                 raise HarborTaskError(f"{task.task_id}: {reason}")
-        document = resolve_compose(document, task.image, image_configs)
+        # The same field check prepare ran, with the same inputs: deploy.resources, networks, extra_hosts, post_start
+        # and the rest take their normalized forms, each service is checked against the provider it runs on (a GPU
+        # sidecar against the GPU block's) and `platform` against this deployment's, so a field the deployment cannot
+        # apply fails here, before a sandbox. A provider instance in place of the config (tests) has no registry
+        # name; the adapter checks it live.
+        gpu_provider = (
+            resolve_provider_config(self.config.gpu_sandbox_provider, global_config_dict)
+            if self.config.gpu_sandbox_provider
+            else None
+        )
+        check_task_compose_fields(
+            task,
+            document,
+            provider=_provider_name(provider),
+            gpu_provider=_provider_name(gpu_provider),
+            platform=self._compose_platform(),
+        )
+        # The same planner prepare used: task-file bind mounts become uploads, named volumes stay for shared
+        # storage, external ones resolve through the block each service runs on (a GPU-routed sidecar through the
+        # GPU block's, as `_create_compose` hands the adapter). Sources point into the server's task copy.
+        plan_task_compose_volumes(
+            task,
+            document,
+            volume_sources=self._volume_sources(task),
+            gpu_volume_sources=self._gpu_volume_sources(global_config_dict),
+        )
+        # Every service of the group, GPU-routed or not, starts with the one configured set of provider options,
+        # so the platform they request (OpenSandbox ``platform: {os, arch}``; linux/amd64 when unset) is the one
+        # each recorded image has to be for (and the one `_compose_platform` spelled for the field check above).
+        platform = sandbox_platform(self.config.sandbox_provider_options)
+        document = resolve_compose(document, task.image, image_configs, platform=platform)
+        # A non-root sidecar runs without host injection and so takes no extra_hosts: prepare refused that already.
         adapt_non_root_sidecars(document, image_configs)
-        provider = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
         if "opensandbox" in provider:
             opensandbox_shm_labels(document)
         sidecars = {a.service for a in task.config.artifacts} | {h.service for h in task.config.verifier.collect}
@@ -321,10 +412,6 @@ class HarborSandboxMixin:
         # An overlay task's main service starts without the task workdir, as its single sandbox would (see
         # `_create_sandbox_within_deadline`); the sidecars derive from it and start in their images' own.
         main_spec = self._sandbox_spec(task, None if task.overlay else task.workdir)
-        # Sidecars keep their own image's default user; the task's USER belongs to the main image only.
-        sidecar_spec = replace(
-            main_spec, resources={}, env={}, user=None, provider_options=dict(self.config.sandbox_provider_options)
-        )
         # Harbor's order for main: image ENV (baked in, or the Dockerfile ENV the loader folded into task.env for a
         # pull or overlay task) < the task's Compose file < Harbor's env override file, which holds only the
         # host-resolved [environment].env (harbor 0.22.0 environments/docker/docker.py 363-370, environments/base.py
@@ -340,46 +427,218 @@ class HarborSandboxMixin:
             main_spec,
             env={**main_spec.env, **compose_env, **resolve_env_templates(task.config.environment.env or {})},
         )
-        compose = AsyncSandboxCompose(
-            resolve_provider_config(self._provider_ref(task), get_global_config_dict()),
-            path,
-            service_specs={name: main_spec if name == "main" else sidecar_spec for name in document["services"]},
-            timeout_s=self.config.sandbox_ready_timeout_s,
-        )
-        # Ownership starts before start(): a group that fails half-way is still stopped whole.
-        self._sandboxes[episode_key] = compose
-        await compose.start()
-        return compose
+        global_config_dict = get_global_config_dict()
+        task_ref = self._provider_ref(task)
+        # Sidecars keep their own image's default user; the task's USER belongs to the main image only. A sidecar
+        # that reserves GPUs runs on the GPU block, per service, the way the main service does for the task, and
+        # resolves its external volumes through that block's mapping. Each mapping is narrowed to the names this
+        # document resolves through it, so an ordinary named volume never takes a mapped name's shared path.
+        service_specs: dict[str, SandboxSpec] = {}
+        service_providers: dict[str, Any] = {}
+        service_volume_sources: dict[str, dict[str, str]] = {}
+        for name, service in document["services"].items():
+            if name == "main":
+                service_specs[name] = main_spec
+                continue
+            service_specs[name] = self._sidecar_spec(task, main_spec, service)
+            ref = self._sidecar_provider_ref(task, service)
+            if ref != task_ref:
+                service_providers[name] = resolve_provider_config(ref, global_config_dict)
+                service_volume_sources[name] = document_volume_sources(
+                    document, resolve_provider_volume_sources(ref, global_config_dict)
+                )
+        volume_sources = document_volume_sources(document, self._volume_sources(task))
+        provider_config = resolve_provider_config(task_ref, global_config_dict)
+        platform = self._compose_platform()
+        # An overlay task's Dockerfile RUN lines run inside the group's start, on main once it exists and before
+        # its bind-mount uploads, its command and its healthcheck: Harbor's order (a build, then `compose up` with
+        # the mounts). The overlay keeps its own budget on top of the start's, and the names it resolved wait for
+        # the seed under the episode key.
+        service_setup: dict[str, Callable[[AsyncSandbox], Awaitable[None]]] = {}
+        timeout_s = self.config.sandbox_ready_timeout_s
+        overlay_failure: list[HarborOverlayError] = []
+        if task.overlay:
+            timeout_s += task.config.environment.build_timeout_sec
+
+            async def run_overlay(sandbox: AsyncSandbox) -> None:
+                try:
+                    self._overlay_names[episode_key] = await self._apply_overlay(sandbox, task)
+                except HarborOverlayError as exc:
+                    overlay_failure.append(exc)
+                    raise
+
+            service_setup["main"] = run_overlay
+        # Ownership starts before start(): a group that fails half-way is still stopped whole, and a pull
+        # failure of any service is retried with a fresh group, like a single sandbox's.
+        try:
+            return await self._start_with_pull_retries(
+                task,
+                key=episode_key,
+                what="Compose group",
+                make=lambda: AsyncSandboxCompose(
+                    provider_config,
+                    path,
+                    service_specs=service_specs,
+                    timeout_s=timeout_s,
+                    service_providers=service_providers,
+                    platform=platform,
+                    volume_sources=volume_sources,
+                    service_volume_sources=service_volume_sources,
+                    service_setup=service_setup,
+                    # Upload sources may only come from the server's own copy of the task, the one the planner saw.
+                    upload_root=task.path,
+                ),
+                start=lambda compose: compose.start(),
+            )
+        except ExceptionGroup as exc:
+            # The group's cleanup after a failed overlay failed too: the overlay is still the seed's reason.
+            self._overlay_names.pop(episode_key, None)
+            if overlay_failure:
+                raise overlay_failure[-1] from exc
+            raise
+        except BaseException:
+            self._overlay_names.pop(episode_key, None)
+            raise
 
     async def _create_verifier_sandbox(self, task: HarborTask, *, episode_key: str | None = None) -> AsyncSandbox:
         """A separate verifier runs in its own sandbox, sized by ``[verifier.environment]``.
 
-        Without a ``[verifier.environment]`` the verifier runs in the task's own image, so it is
-        created like the agent's sandbox: the Dockerfile's resolved ``ENV`` under ``task.toml``'s.
+        Without a ``[verifier.environment]`` and a built verifier image the verifier runs in the task's own prebuilt
+        image, so it is created like the agent's sandbox: the Dockerfile's resolved ``ENV`` under ``task.toml``'s.
 
         Its lifetime is the episode-sized default the agent's sandbox gets, not ``timeout_sec`` plus
-        slack: the sandbox also has to come up, run the overlay when it gets one, receive ``/tests``
-        and the artifacts, run ``test.sh`` with its grace and hand back the reward, and a provider's
-        renew interval must fit under it. The default covers the overlay for the agent, so it does
-        for the verifier too.
+        slack: the sandbox also has to come up, receive ``/tests`` and the artifacts, run ``test.sh``
+        with its grace and hand back the reward, and a provider's renew interval must fit under it.
         """
         environment = task.config.verifier.environment
+        if _verifier_runs_task_image(task, True):
+            # The task image keeps the task's working directory, as the agent had it, and the agent's resolved
+            # environment (Dockerfile ENV under task.toml's). An overlay task starts without it, as the agent's
+            # sandbox does: the overlay's WORKDIR step makes the directory owned by the user in effect, where a
+            # provider pre-creating `task.workdir` would hand the USER's RUN lines a root-owned one.
+            workdir = None if task.overlay else task.workdir
+        elif environment is None:
+            # Built from tests/Dockerfile under Harbor's copy of [environment]: that block's settings and
+            # `workdir` (else the image's own WORKDIR), not the agent image's Dockerfile ENV and WORKDIR.
+            environment = task.config.environment
+            workdir = environment.workdir
+        else:
+            # An explicit verifier image starts in its `[verifier.environment].workdir`, else its own WORKDIR.
+            workdir = environment.workdir
         spec = self._sandbox_spec(
-            task,
-            # The task image keeps the task's working directory, as the agent had it; an explicit
-            # verifier image starts in its `[verifier.environment].workdir`, else its own WORKDIR.
-            # An overlay task's verifier starts without the directory, as the agent's sandbox does: the
-            # overlay's WORKDIR step makes it owned by the user in effect, where a provider pre-creating
-            # `task.workdir` would hand the USER's RUN lines a root-owned one.
-            (None if task.overlay else task.workdir) if environment is None else environment.workdir,
-            environment=environment,
-            image=_verifier_image(task),
-            role="verifier",
+            task, workdir, environment=environment, image=_verifier_image(task, True), role="verifier"
         )
         provider_config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
-        sandbox = AsyncSandbox(provider_config)
-        if episode_key is not None:
-            # Owned from before start(), like the agent's sandbox, so a failed or interrupted stop is retried.
-            self._sandboxes[_verifier_key(episode_key)] = sandbox
-        await self._within_ready_deadline(sandbox.start(spec))
-        return sandbox
+        if episode_key is None:
+            sandbox = AsyncSandbox(provider_config)
+            await self._within_ready_deadline(sandbox.start(spec))
+            return sandbox
+        # Owned from before start(), like the agent's sandbox, so a failed or interrupted stop is retried;
+        # a start that failed on an image pull is retried like the agent's, under the same ready deadline.
+        return await self._within_ready_deadline(
+            self._start_with_pull_retries(
+                task,
+                key=_verifier_key(episode_key),
+                what=f"verifier {spec.image!r}",
+                make=lambda: AsyncSandbox(provider_config),
+                start=lambda sandbox: sandbox.start(spec),
+            )
+        )
+
+    async def _start_with_pull_retries(
+        self,
+        task: HarborTask,
+        *,
+        key: str,
+        what: str,
+        make: Callable[[], Any],
+        start: Callable[[Any], Awaitable[None]],
+    ) -> Any:
+        """Start a sandbox or Compose group, retrying a start that failed on an image pull `image_pull_retries` times.
+
+        ``make`` builds a fresh object (neither accepts a second ``start``), owned under ``key`` from before
+        ``start`` so that a failed or half-started one is stopped whole. Only pull failures are retried here
+        (a provider that rejects the request, or a sandbox that never becomes ready, is reported at once);
+        the retries back off with jitter and queue behind a per-server gate, so one registry hiccup cannot
+        multiply into a pull storm.
+        """
+        attempts = self.config.image_pull_retries + 1
+        for attempt in range(1, attempts + 1):
+            sandbox = make()
+            self._sandboxes[key] = sandbox
+            try:
+                if attempt == 1:
+                    await start(sandbox)
+                else:
+                    async with self._pull_retry_gate:
+                        await start(sandbox)
+                return sandbox
+            except (SandboxCreateError, RuntimeError, OSError, ExceptionGroup) as exc:
+                # A Compose group whose cleanup failed too raises an ExceptionGroup over the pull failure.
+                if attempt >= attempts or not _is_image_pull_failure(exc):
+                    raise
+                LOGGER.warning(
+                    f"{task.task_id}: image pull failed starting {what} (attempt {attempt}/{attempts}): {exc}"
+                )
+                try:
+                    await self._stop_sandbox(key)
+                except Exception:
+                    # Still owned: shutdown retries the stop. Do not start a second sandbox under the same key.
+                    LOGGER.exception(f"{task.task_id}: could not stop the {what} of a failed image pull")
+                    raise exc from None
+                await asyncio.sleep(_pull_retry_delay(attempt))
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def _sidecar_provider_ref(self, task: HarborTask, service: dict[str, Any]) -> str:
+        """Which sandbox block runs a Compose sidecar: the GPU one when the service reserves GPUs through
+        ``deploy.resources`` and a GPU block is set, as ``_provider_ref`` routes the main service."""
+        if self.config.gpu_sandbox_provider and service_gpus(service):
+            return self.config.gpu_sandbox_provider
+        return self._provider_ref(task)
+
+    def _sidecar_spec(self, task: HarborTask, main_spec: SandboxSpec, service: dict[str, Any]) -> SandboxSpec:
+        """A sidecar's spec: the main spec's deployment settings, no task resources, env or user (the sidecar keeps
+        its own image's defaults; its ``deploy.resources`` are applied by the adapter). A GPU sidecar carries
+        the task's ``gpu_types[0]`` when ``request_gpu_type`` is on, as the main service does, and the GPU
+        block's ``default_metadata``. A sidecar keeps its own image's working directory (the adapter applies the
+        recorded WorkingDir); main's workdir is a path that exists only in main's image."""
+        resources: dict[str, Any] = {}
+        metadata = dict(main_spec.metadata)
+        if service_gpus(service):
+            gpu_types = task.config.environment.gpu_types
+            if gpu_types and self.config.request_gpu_type:
+                resources["gpu_type"] = gpu_types[0]
+            metadata = (
+                resolve_provider_metadata(self._sidecar_provider_ref(task, service), get_global_config_dict())
+                | self.config.sandbox_metadata
+                | {key: metadata[key] for key in ("nemo_gym_environment_server", "harbor_task", "harbor_role")}
+            )
+        return replace(
+            main_spec,
+            resources=resources,
+            env={},
+            user=None,
+            workdir=None,
+            metadata=metadata,
+            provider_options=dict(self.config.sandbox_provider_options),
+        )
+
+    def _compose_platform(self) -> str:
+        """The platform this deployment runs, for a service's ``platform`` to match: the provider options'
+        ``platform`` (OpenSandbox's ``{os, arch}``) when set, else linux/amd64, the one prepare records images for.
+        Prepare reads the same ``sandbox_provider_options`` (``compose_platform_from_overrides``), so both agree."""
+        return deployment_platform(self.config.sandbox_provider_options)
+
+    def _volume_sources(self, task: HarborTask) -> dict[str, str]:
+        """The task's provider block's ``volume_sources``: external volumes and foreign bind sources on shared
+        storage, the whole deployment-wide mapping. The planner checks the document against it; the adapter gets
+        only the entries the planned document resolves through it (:func:`document_volume_sources`, in
+        `_create_compose`), so an ordinary named volume that happens to share a mapped name stays the group's own."""
+        return resolve_provider_volume_sources(self._provider_ref(task), get_global_config_dict())
+
+    def _gpu_volume_sources(self, global_config_dict: dict[str, Any]) -> dict[str, str] | None:
+        """The GPU block's ``volume_sources`` (empty when it has none), or ``None`` without a GPU block: what a
+        GPU-routed service resolves its external volumes through, as `_sidecar_provider_ref` routes it."""
+        if not self.config.gpu_sandbox_provider:
+            return None
+        return resolve_provider_volume_sources(self.config.gpu_sandbox_provider, global_config_dict)

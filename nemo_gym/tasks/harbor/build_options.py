@@ -6,17 +6,19 @@
 BuildOptions carries whether builds are enabled, which tool to use, the repository to push to
 and the platform to build for. It is read from a Hydra config mapping and, before the run
 config exists, from the command line overrides and env.yaml by a side-effect-free Hydra parse.
-The module depends on the build tool list and the repository variable only.
+The module depends on the build tool list, the repository variable and the platform parser only.
 """
 
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.tasks.harbor.build_plan import BUILD_TOOLS, REPOSITORY_ENV
+from nemo_gym.tasks.harbor.registry import ImageConfigError, platform_pair
 
 
 # The top-level configuration block that sets Dockerfile builds up, and the settings it takes.
@@ -52,7 +54,8 @@ class BuildOptions:
 
         ``config`` is the merged global configuration (``env.yaml``, ``--config`` files and
         ``++builds.<setting>=<value>`` overrides) or any dict shaped like it; a missing block keeps
-        every default. Unknown settings and values of the wrong type are refused.
+        every default. Unknown settings, values of the wrong type and a ``platform`` the records could not tell
+        from the baseline (an amd64 micro-architecture level above it, see :func:`_check_platform`) are refused.
         """
         block = (config or {}).get(BUILDS_KEY)
         if block is None:
@@ -70,6 +73,7 @@ class BuildOptions:
         tool = _build_setting(block, "tool")
         if tool is not None and tool not in BUILD_TOOLS:
             raise ValueError(f"`{BUILDS_KEY}.tool` must be one of {', '.join(BUILD_TOOLS)}; got {tool!r}")
+        _check_platform(block)
         return cls(
             enabled=enabled,
             tool=tool,
@@ -87,24 +91,39 @@ def _build_setting(block: Mapping[str, Any], name: str) -> str | None:
     return value
 
 
-def build_options_from_overrides(overrides: list[str]) -> BuildOptions:
-    """Read the ``builds:`` block from the configuration the command line names, before the run config exists.
+def _check_platform(block: Mapping[str, Any]) -> None:
+    """Refuse a ``platform`` setting :func:`~nemo_gym.tasks.harbor.registry.platform_pair` refuses, where it enters.
 
-    Preparation builds images before the run config can be written, so the global configuration is not
-    composed yet. This merges the sources the user controls, in the global config's order (the files
-    the ``+config_paths`` tokens name, from ``--config`` and the asset selectors, then ``env.yaml``, then
-    the ``+``/``++`` overrides), and reads the block from the result. The full global config is still
-    parsed once, at dispatch, with the run config added.
+    An amd64 micro-architecture level above the baseline (``linux/amd64/v3``) is another platform to docker, but
+    the records keep an image's os and architecture only, so a sidecar built for it (of a task whose ``main`` is
+    prebuilt, with no base image to record first) would be pushed and recorded as ``linux/amd64`` and reused by a
+    later baseline run. ``ImageBuilder`` repeats the check for a :class:`BuildOptions` made in code.
+    """
+    platform = _build_setting(block, "platform")
+    if platform is None:
+        return
+    try:
+        platform_pair(platform)
+    except ImageConfigError as exc:
+        raise ValueError(f"`{BUILDS_KEY}.platform`: {exc}") from exc
+
+
+def build_options_from_overrides(overrides: list[str]) -> BuildOptions:
+    """The ``builds:`` block of the configuration the command line names (see :func:`_block_from_overrides`)."""
+    return BuildOptions.from_config({BUILDS_KEY: _block_from_overrides(overrides, BUILDS_KEY)})
+
+
+def _merged_cli_config(overrides: list[str], config_files: Sequence[Path] = ()) -> Any:
+    """The configuration the command line names, merged but unresolved, before the run config exists.
+
+    The sources the user controls, in the global config's order: ``config_files``, then the files the
+    ``+config_paths`` tokens name (from ``--config`` and the asset selectors), then ``env.yaml``, then the
+    ``+``/``++`` overrides. Nothing is resolved here, so a provider block's credentials are not needed to
+    read a sibling key. The full global config is still parsed once, at dispatch, with the run config added.
     """
     from omegaconf import OmegaConf
-    from omegaconf.errors import InterpolationResolutionError
 
-    from nemo_gym.global_config import (
-        CONFIG_PATHS_KEY_NAME,
-        GlobalConfigDictParser,
-        _load_config_yaml,
-        translate_interpolation_error,
-    )
+    from nemo_gym.global_config import CONFIG_PATHS_KEY_NAME, GlobalConfigDictParser, _load_config_yaml
 
     parser = GlobalConfigDictParser()
     saved_argv = sys.argv
@@ -120,10 +139,24 @@ def build_options_from_overrides(overrides: list[str]) -> BuildOptions:
     dotenv = _load_config_yaml(dotenv_path) if dotenv_path.exists() else OmegaConf.create({})
     config_paths = OmegaConf.merge(dotenv, cli).get(CONFIG_PATHS_KEY_NAME) or []
     _, extra_configs = parser.load_extra_config_paths([str(path) for path in config_paths])
-    merged = OmegaConf.merge(*extra_configs, dotenv, cli)
-    block = merged.get(BUILDS_KEY)
+    return OmegaConf.merge(*(_load_config_yaml(path) for path in config_files), *extra_configs, dotenv, cli)
+
+
+def _block_from_overrides(overrides: list[str], key: str, *, config_files: Sequence[Path] = ()) -> Any:
+    """The ``key`` node (dotted) of the configuration the command names, resolved; a scalar as it is, ``None`` when
+    absent. Only that node's own interpolations are evaluated, so a provider block's credentials are not needed
+    to read a sibling key; a node that is configured but does not resolve (``builds: ${missing_profile}``) is
+    reported as a configuration error rather than read as absent. Merged as :func:`_merged_cli_config` does."""
+    from omegaconf import OmegaConf
+    from omegaconf.errors import InterpolationResolutionError
+
+    from nemo_gym.global_config import translate_interpolation_error
+
+    merged = _merged_cli_config(overrides, config_files)
     try:
-        resolved = OmegaConf.to_container(block, resolve=True) if block is not None else None
+        block = OmegaConf.select(merged, key)
+        if not OmegaConf.is_config(block):
+            return block
+        return OmegaConf.to_container(block, resolve=True)
     except InterpolationResolutionError as exc:
         raise translate_interpolation_error(exc) from exc
-    return BuildOptions.from_config({BUILDS_KEY: resolved})
