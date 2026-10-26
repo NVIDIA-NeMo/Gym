@@ -1,0 +1,30 @@
+# FrontierFinance benchmark: 220 investor-research queries with expert rubrics.
+#   gym eval prepare --benchmark frontier_finance   # downloads (needs HF_TOKEN) and builds the dataset
+#   gym eval run --benchmark frontier_finance       # evaluates against it
+config_paths:
+  - resources_servers/frontierfinance/configs/frontierfinance.yaml
+
+frontier_finance_benchmark_resources_server:
+  _inherit_from: frontier_finance_resources_server
+
+frontier_finance_benchmark_agent:
+  _inherit_from: frontier_finance_agent
+  responses_api_agents:
+    finance_agent:
+      resources_server:
+        name: frontier_finance_benchmark_resources_server
+      datasets:
+      - name: frontier_finance
+        type: benchmark
+        jsonl_fpath: benchmarks/frontier_finance/data/frontier_finance_220q.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/frontier_finance/prepare.py
+        num_repeats: 1
+        license: Creative Commons Attribution 4.0 International
+
+frontier_finance_benchmark_environment_server:
+  _inherit_from: frontier_finance_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: frontier_finance_benchmark_agent

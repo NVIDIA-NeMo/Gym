@@ -1,0 +1,8 @@
+-e nemo-gym[dev] @ ../../
+
+# Finance Agent v2 tools; keep these pins identical to resources_servers/finance_agent_v2/requirements.txt.
+model-library==0.1.25
+finance-agent @ git+https://github.com/vals-ai/finance-agent-v2.git@bb460b524472ae0955abdf243bbbac06958dc8c9
+
+# Official FrontierFinance grader (prompt, parsing, majority vote, metrics). Not on PyPI.
+frontier-finance @ git+https://github.com/samaya-ai/frontier-finance.git@3c1134e68b69528cf1afa64839493a9ce1b29fe3

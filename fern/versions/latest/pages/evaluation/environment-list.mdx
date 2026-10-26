@@ -84,6 +84,7 @@ gym list benchmarks --json   # machine-readable output for scripting or CI
 | [tavily_search](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/tavily_search) | Web search tool use (Tavily API) | Execution + optional LLM judge | ✓ |
 | [calendar](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/calendar) | Multi-turn calendar scheduling with constraint satisfaction | Rule-based (constraints) | ✓ |
 | [finance_sec_search](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/finance_sec_search) | SEC EDGAR filing search for financial analysis | LLM judge + execution | ✓ |
+| [frontierfinance](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/frontierfinance) | FrontierFinance investor-research queries on Finance Agent v2 tools, capped at each query's date | Rubric LLM judge panel (3 judges) | ✓ |
 | [xlam_fc](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/xlam_fc) | Function calling from Salesforce xlam-60k | Exact match | ✓ |
 | [single_step_tool_use_with_argument_comparison](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/single_step_tool_use_with_argument_comparison) | Pivot RL for tool use across conversational, SWE, and search domains | Argument comparison | ✓ |
 | [tales](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/tales) | Text-adventure games (AlfWorld, ScienceWorld, Jericho, TextWorld) in Gymnasium API style | Rule-based (task completion) | |

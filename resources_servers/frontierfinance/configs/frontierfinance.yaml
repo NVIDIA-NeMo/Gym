@@ -1,0 +1,117 @@
+# FrontierFinance: Finance Agent v2 tools with every dated tool call capped at the
+# query's as_of_date, graded by the official FrontierFinance judge panel.
+# Run together with a policy model config (e.g. inference_provider.yaml).
+frontier_finance_resources_server:
+  resources_servers:
+    frontierfinance:
+      allowed_agents: [finance_agent]
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: FrontierFinance investor-research queries on the Finance Agent v2 tools, graded by the official rubric judge panel
+      value: Evaluate finance research agents on expert rubrics across six investor use cases
+      # A null key registers that tool as unavailable rather than failing startup,
+      # except sec_api_key in live mode, where startup fails.
+      tavily_api_key: ${oc.select:tavily_api_key,${oc.env:TAVILY_API_KEY,null}}
+      sec_api_key: ${oc.select:sec_api_key,${oc.env:SEC_API_KEY,null}}
+      pricing_data_api_key: ${oc.select:pricing_data_api_key,${oc.env:TIINGO_API_KEY,null}}
+      edgar_search_mode: ${oc.select:edgar_search_mode,live}
+      local_edgar_index_path: ${oc.select:local_edgar_index_path,null}
+      local_edgar_metadata_path: ${oc.select:local_edgar_metadata_path,null}
+      sec_dump_path: ${oc.select:sec_dump_path,null}
+      price_history_mode: ${oc.select:price_history_mode,live}
+      local_pricing_dir: ${oc.select:local_pricing_dir,null}
+      retrieval_model_server:
+        type: responses_api_models
+        name: policy_model
+      retrieval_responses_create_params:
+        input: []
+      retrieval_max_output_tokens: 8192
+      retrieval_system_prompt_fpath: ../finance_agent_v2/prompt_templates/finance_agent_v2_retrieval.yaml
+      rubric_judge_prompt_template_fpath: ../finance_agent_v2/prompt_templates/finance_agent_v2_rubric_judge.yaml
+      # Order matters: on a tied vote the earliest surviving judge wins.
+      judge_panel:
+        - name: claude-sonnet-4-6
+          model_server:
+            type: responses_api_models
+            name: frontier_finance_judge_claude
+        - name: gemini-3.1-pro-preview
+          model_server:
+            type: responses_api_models
+            name: frontier_finance_judge_gemini
+        - name: gpt-5.4
+          model_server:
+            type: responses_api_models
+            name: frontier_finance_judge_gpt
+      max_rubrics_per_call: 30
+      max_json_parse_retries: 1
+      judge_max_output_tokens: 32000
+      judge_call_timeout: 600
+      judge_max_retries: 2
+      max_rollout_time_seconds: 1200
+      use_cache: true
+      cache_dir: ${oc.select:frontier_finance_cache_dir,${oc.env:FRONTIER_FINANCE_CACHE_DIR,null}}
+
+# Judges default to each provider's OpenAI-compatible endpoint. Override base_url,
+# api_key and model per judge, or set frontier_finance_judge_base_url /
+# frontier_finance_judge_api_key once for a router that serves all three.
+frontier_finance_judge_claude:
+  responses_api_models:
+    inference_provider:
+      entrypoint: app.py
+      base_url: ${oc.select:frontier_finance_judge_claude_base_url,${oc.select:frontier_finance_judge_base_url,https://api.anthropic.com/v1/}}
+      api_key: ${oc.select:frontier_finance_judge_claude_api_key,${oc.select:frontier_finance_judge_api_key,${oc.env:ANTHROPIC_API_KEY,unset}}}
+      model: ${oc.select:frontier_finance_judge_claude_model,claude-sonnet-4-6}
+      uses_reasoning_parser: true
+
+frontier_finance_judge_gemini:
+  responses_api_models:
+    inference_provider:
+      entrypoint: app.py
+      base_url: ${oc.select:frontier_finance_judge_gemini_base_url,${oc.select:frontier_finance_judge_base_url,https://generativelanguage.googleapis.com/v1beta/openai/}}
+      api_key: ${oc.select:frontier_finance_judge_gemini_api_key,${oc.select:frontier_finance_judge_api_key,${oc.env:GEMINI_API_KEY,unset}}}
+      model: ${oc.select:frontier_finance_judge_gemini_model,gemini-3.1-pro-preview}
+      uses_reasoning_parser: true
+      extra_body:
+        reasoning_effort: low
+
+frontier_finance_judge_gpt:
+  responses_api_models:
+    inference_provider:
+      entrypoint: app.py
+      base_url: ${oc.select:frontier_finance_judge_gpt_base_url,${oc.select:frontier_finance_judge_base_url,https://api.openai.com/v1}}
+      api_key: ${oc.select:frontier_finance_judge_gpt_api_key,${oc.select:frontier_finance_judge_api_key,${oc.env:OPENAI_API_KEY,unset}}}
+      model: ${oc.select:frontier_finance_judge_gpt_model,gpt-5.4}
+      uses_reasoning_parser: true
+
+frontier_finance_agent:
+  responses_api_agents:
+    finance_agent:
+      entrypoint: app.py
+      no_tool_call_nudge: >-
+        Your last response produced no tool call. Call `submit_final_result` if
+        you have a final result, otherwise continue with the next tool call.
+      max_time_seconds: 3600
+      abort_on_tool_error_types: [RetryExhaustedError]
+      max_steps: 50
+      truncate_on_overflow: true
+      tool_call_timeout: 300
+      resources_server:
+        type: resources_servers
+        name: frontier_finance_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/frontierfinance/data/example.jsonl
+        license: Apache 2.0
+
+frontier_finance_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: frontier_finance_agent
