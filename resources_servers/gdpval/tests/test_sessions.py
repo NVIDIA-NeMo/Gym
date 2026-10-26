@@ -14,9 +14,11 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.failure_kinds import SESSION_LOST
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.session_routing import install_session_routing
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.gdpval import persisted_layout, task_sandbox
 from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig, GDPValVerifyRequest
@@ -353,7 +355,7 @@ def test_a_reference_file_that_cannot_be_fetched_fails_the_seed(server, root, tm
     assert response.status_code == 500
     assert not root.exists(), "no sandbox is started for a task that cannot be staged"
     assert list(references.iterdir()) == []
-    assert client.post("/finish", json={"reason": "done", "paths": []}).status_code == 400
+    assert client.post("/finish", json={"reason": "done", "paths": []}).status_code == 404
 
 
 def test_a_failed_reference_upload_stops_the_sandbox(server, root, tmp_path, monkeypatch, stopped):
@@ -378,17 +380,65 @@ def test_a_seed_for_another_task_than_its_data_is_rejected(server, root, tmp_pat
     seed = _seed(tmp_path)
     seed.task_data["task_id"] = "task-2"
 
-    with pytest.raises(ValueError, match="TaskId does not match"):
-        _post_seed(TestClient(server.setup_webserver()), seed)
+    refused = _post_seed(TestClient(server.setup_webserver()), seed)
+
+    assert refused.status_code == 422, "a task row that no retry can fix is refused as final"
+    assert "TaskId does not match" in refused.json()["detail"]
 
     assert not root.exists()
+
+
+def test_task_data_that_is_not_a_task_is_refused_as_final(server, root, tmp_path):
+    client = TestClient(server.setup_webserver())
+    seed = _seed(tmp_path)
+    del seed.task_data["task_id"]
+
+    refused = _post_seed(client, seed)
+
+    assert refused.status_code == 422, "task_data that no retry can fix is final, not a retried 500"
+    assert "task_data is not a GDPVal task" in refused.json()["detail"]
+    assert not root.exists(), "no sandbox is started for a row that is not a task"
+    assert (server._sessions, server._claimed_directories) == ({}, {})
+    # A refusal does not fence the ID: it was never seeded, so a corrected seed can still use it.
+    assert _post_seed(client, _seed(tmp_path)).status_code == 200
+
+
+def _app(server: GDPValResourcesServer, *, routed: bool):
+    app = server.setup_webserver()
+    if routed:
+        # As run_webserver does, even for one worker: the router names a typed seed's session by its
+        # resources_session_id before the handler runs.
+        key = server.get_session_middleware_key()
+        install_session_routing(
+            app, socket_dir=None, session_cookie=key, secret_key=key, **server.claimed_session_routing()
+        )
+    return app
+
+
+@pytest.mark.parametrize("routed", [False, True], ids=["unrouted", "routed"])
+def test_a_refused_seed_does_not_hand_out_the_cookie_of_the_live_session(server, root, tmp_path, routed):
+    app = _app(server, routed=routed)
+    seed = _seed(tmp_path)
+    assert _post_seed(TestClient(app), seed).status_code == 200
+    intruder = TestClient(app)
+
+    refused = _post_seed(intruder, seed.model_copy(update={"episode_id": EpisodeId(rollout_id="0-2")}))
+
+    assert refused.status_code == 409
+    # The refused caller's cookie does not name the live session, so its tools and verify cannot reach it.
+    assert intruder.post("/abandon_task_finish", json={"reason": "stolen"}).status_code == 404
+    assert server._sessions[seed.resources_session_id].finish_call is None
+    assert _verify(intruder)["failure_kind"] == SESSION_LOST
 
 
 def test_a_seed_whose_rollout_id_names_no_rollout_index_is_rejected(server, root, tmp_path):
     seed = _seed(tmp_path).model_copy(update={"episode_id": EpisodeId(rollout_id="explicit")})
 
-    with pytest.raises(ValueError, match="is not '<task_index>-<rollout_index>' with two integers"):
-        _post_seed(TestClient(server.setup_webserver()), seed)
+    refused = _post_seed(TestClient(server.setup_webserver()), seed)
+
+    # 422, not a retried 500: a retry sends the same rollout_id.
+    assert refused.status_code == 422
+    assert "is not '<task_index>-<rollout_index>' with two integers" in refused.json()["detail"]
 
     assert not root.exists()
 
@@ -461,10 +511,12 @@ def test_a_session_is_bound_to_its_episode_and_task(server, root, tmp_path):
         resources_session_id=seed.resources_session_id, episode_id=other_episode.episode_id
     )
 
-    with pytest.raises(ValueError, match="already bound to another episode or task"):
-        _post_seed(client, other_episode)
-    with pytest.raises(ValueError, match="does not match the seeded resources session"):
-        client.post("/close_session", json=other_close.model_dump(mode="json"))
+    rebound = _post_seed(client, other_episode)
+    assert rebound.status_code == 409
+    assert "already bound to another episode or task" in rebound.json()["detail"]
+    wrong_close = client.post("/close_session", json=other_close.model_dump(mode="json"))
+    assert wrong_close.status_code == 409
+    assert "does not match the seeded resources session" in wrong_close.json()["detail"]
 
 
 def test_close_releases_the_session_and_follows_the_session_contract(server, root, tmp_path, stopped, references):
@@ -478,12 +530,18 @@ def test_close_releases_the_session_and_follows_the_session_contract(server, roo
 
     assert len(stopped) == 1
     assert list(references.iterdir()) == []
-    assert client.post("/finish", json={"reason": "done", "paths": []}).status_code == 400
+    assert client.post("/finish", json={"reason": "done", "paths": []}).status_code == 404
     after_close = _verify(client, deliverables_dir=str(tmp_path / "stored"))
     assert after_close["deliverables_dir"] == str(tmp_path / "stored"), (
         "without a session /verify scores the request's"
     )
-    check_resources_session_contract(app, _seed(tmp_path, session_id="contract"), keeps_state=True)
+    check_resources_session_contract(
+        app,
+        _seed(tmp_path, session_id="contract"),
+        keeps_state=True,
+        holds_state=lambda resources_session_id: resources_session_id in server._sessions,
+        verify_body=_verify_body().model_dump(mode="json"),
+    )
 
 
 def test_shutdown_stops_the_sandboxes_of_open_sessions(server, root, tmp_path, stopped):
@@ -509,26 +567,37 @@ def test_a_session_that_is_gone_is_not_judged_on_the_transcript(server, root, tm
     _post_seed(client, _seed(tmp_path))
     client = _restart(client, tmp_path)
 
-    response = client.post("/verify", json=_verify_body().model_dump(mode="json"))
+    verified = _verify(client)
 
-    assert response.status_code == 409
-    assert "nothing to judge" in response.json()["detail"]
-
-
-def test_a_request_with_no_session_and_no_deliverables_is_refused(server):
-    response = TestClient(server.setup_webserver()).post("/verify", json=_verify_body().model_dump(mode="json"))
-
-    assert response.status_code == 409
+    assert (verified["reward"], verified["mask_sample"], verified["failure_kind"]) == (0.0, True, SESSION_LOST)
+    assert "nothing to judge" in verified["failure_reason"]
 
 
-def test_a_request_with_a_gone_session_and_an_explicit_deliverables_dir_is_judged(server, root, tmp_path):
+def test_a_request_with_no_session_and_no_deliverables_is_masked(server):
+    verified = _verify(TestClient(server.setup_webserver()))
+
+    assert (verified["reward"], verified["mask_sample"], verified["failure_kind"]) == (0.0, True, SESSION_LOST)
+
+
+def test_a_request_with_a_gone_session_and_an_explicit_deliverables_dir_is_judged(server, root, tmp_path, monkeypatch):
+    async def judge(**_kwargs):
+        return 1.0, {"score": 1.0}
+
+    for scorer in ("score_with_rubric", "score_with_rubric_visual"):
+        monkeypatch.setattr(f"resources_servers.gdpval.scoring.{scorer}", judge)
+    monkeypatch.setattr("resources_servers.gdpval.app.get_server_url", lambda name: "http://localhost:9999")
+    stored = tmp_path / "stored"
+    stored.mkdir()
+    (stored / "report.md").write_text("the report")
     client = TestClient(server.setup_webserver())
     _post_seed(client, _seed(tmp_path))
     client = _restart(client, tmp_path)
 
-    verified = _verify(client, deliverables_dir=str(tmp_path / "stored"))
+    verified = _verify(client, deliverables_dir=str(stored), rubric_json=[{"criterion": "clarity", "score": 1}])
 
-    assert verified["deliverables_dir"] == str(tmp_path / "stored")
+    # Only a gone session with nothing to judge is a lost session; stored deliverables are a real measurement.
+    assert verified["deliverables_dir"] == str(stored)
+    assert (verified["reward"], verified["mask_sample"], verified["failure_kind"]) == (1.0, False, None)
 
 
 def test_a_reuse_request_without_a_session_scores_the_persisted_deliverable(server, tmp_path):
@@ -625,8 +694,9 @@ def test_a_closed_session_cannot_be_seeded_again(server, root, tmp_path, referen
     _post_seed(client, seed)
     assert _close(client, seed).status_code == 200
 
-    with pytest.raises(ValueError, match="already closed"):
-        _post_seed(client, seed)
+    late = _post_seed(client, seed)
+    assert late.status_code == 409
+    assert "already closed" in late.json()["detail"]
 
 
 def test_closing_a_closed_session_is_idempotent_only_for_its_own_episode(server, root, tmp_path, stopped, references):
@@ -637,14 +707,16 @@ def test_closing_a_closed_session_is_idempotent_only_for_its_own_episode(server,
 
     assert _close(client, seed).status_code == 200
     assert len(stopped) == 1
-    with pytest.raises(ValueError, match="does not match the closed resources session"):
-        _close(client, seed, episode_id=EpisodeId(rollout_id="0-2"))
+    wrong_close = _close(client, seed, episode_id=EpisodeId(rollout_id="0-2"))
+    assert wrong_close.status_code == 409
+    assert "does not match the closed resources session" in wrong_close.json()["detail"]
 
 
 def test_abandoning_without_a_session_is_refused(server):
     response = TestClient(server.setup_webserver()).post("/abandon_task_finish", json={"reason": "no inputs"})
 
-    assert response.status_code == 400
+    assert response.status_code == 404
+    assert response.json()["detail"]["failure_kind"] == SESSION_LOST
 
 
 def test_a_directory_is_not_a_submittable_file(server, root, tmp_path):

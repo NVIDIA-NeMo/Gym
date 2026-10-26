@@ -5,7 +5,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 
 class DirectSandboxConnection(BaseModel):
@@ -28,3 +28,9 @@ class SandboxAccess(BaseModel):
 
     connection: DirectSandboxConnection
     workdir: str
+    # The user the harness runs every command as (Harbor's ``[agent].user``); ``None`` keeps the sandbox's default.
+    # Both stay off the wire while unset, so a seed for a harness the task declares nothing for reads as before.
+    user: str | int | None = Field(default=None, exclude_if=lambda value: value is None)
+    # Environment the owner resolved for the harness's commands, over the sandbox's own (Harbor's ``[solution].env``
+    # for the oracle, resolved on the owner's host); empty for a harness the task declares nothing for.
+    env: dict[str, str] = Field(default_factory=dict, exclude_if=lambda value: not value)

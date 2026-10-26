@@ -68,7 +68,9 @@ class PhaseSettings(Settings):
 
 
 class EnvironmentSettings(PhaseSettings):
-    docker_image: str
+    # Packages that ship only a Dockerfile (e.g. Terminal-Bench-Science) leave
+    # this unset; the deployment then supplies a prebuilt image per role.
+    docker_image: str | None = None
     build_timeout_sec: float = Field(default=600, gt=0)
     os: Literal["linux"] = "linux"
     cpus: int | None = Field(default=None, gt=0)
@@ -264,7 +266,8 @@ class PackageLoader:
         self._locks = {}
 
     async def load(self, name, ref):
-        if not re.fullmatch(r"terminal-bench/[a-z0-9][a-z0-9-]*", name) or not re.fullmatch(
+        # `org/name` becomes a cache path; the manifest selects which orgs are served.
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*", name) or not re.fullmatch(
             r"sha256:[a-f0-9]{64}", ref
         ):
             raise ValueError("A trusted task name and SHA256 pin are required")

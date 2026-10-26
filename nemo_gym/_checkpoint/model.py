@@ -84,7 +84,7 @@ _ROLLOUT_PREFIX = re.compile(rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<capture_k
 
 # Request fields that compile into a structured decoder.
 # A cut prefix cannot restore that decoder's state,
-# so such a call restarts after a restore instead of continuing its prefix.
+# so such a call regenerates after a restore instead of continuing its prefix.
 _STRUCTURED_GENERATION_FIELDS = (
     "guided_choice",
     "guided_grammar",
@@ -245,8 +245,8 @@ class _Ticket:
     cut: Optional[GenerationCutPrefixAck] = None
     # The durable cut as a record, built once when the worker acknowledges it.
     cut_record: Optional[GenerationCutRecord] = None
-    # Why this call must restart rather than continue a cut prefix (constrained decoding), if it must.
-    cut_restart_reason: Optional[str] = None
+    # Why this call must regenerate rather than continue a cut prefix (constrained decoding), if it must.
+    cut_regenerate_reason: Optional[str] = None
     # A restored cut claimed from another process for this call, and whether the call used it.
     claimed_cut: Optional[GenerationCutRecord] = None
     claimed_cut_used: bool = False
@@ -288,7 +288,7 @@ def attach_capture_context(context: CaptureContext) -> None:
         context.publish_on_delivery = True
 
 
-def generation_cut_restart_reason(body: Mapping[str, Any]) -> Optional[str]:
+def generation_cut_regenerate_reason(body: Mapping[str, Any]) -> Optional[str]:
     """Why a generation request cannot continue a cut prefix: its decoding is constrained."""
     tool_choice = body.get("tool_choice")
     if isinstance(tool_choice, str):
@@ -313,7 +313,7 @@ def note_generation_request(body: Mapping[str, Any]) -> None:
     """Record the request the current policy call sends, so a checkpoint knows whether it may cut it."""
     ticket = _CURRENT_TICKET.get()
     if ticket is not None:
-        ticket.cut_restart_reason = generation_cut_restart_reason(body)
+        ticket.cut_regenerate_reason = generation_cut_regenerate_reason(body)
 
 
 def note_generation_backend(base_url: Any) -> None:
@@ -447,7 +447,7 @@ class PolicyGate:
 
     def admission_hook(self, ticket: _Ticket) -> Callable[[CaptureContext, CaptureAdmission], CaptureAdmission]:
         def continue_restored_cut(context: CaptureContext, admission: CaptureAdmission) -> CaptureAdmission:
-            if ticket.cut_restart_reason is not None:
+            if ticket.cut_regenerate_reason is not None:
                 return admission
             digest = conversation_digest(list(context.request_items or []))
             record = self.restored_cuts.take(ticket, context.rollout_id, digest)
@@ -513,7 +513,7 @@ class PolicyGate:
             held=len(self.tickets) - sum(ticket.response_started for ticket in self.tickets),
             cut=sum(ticket.cut_record is not None for ticket in undelivered),
             cut_failed=sum(ticket.cut is not None and ticket.cut_record is None for ticket in undelivered),
-            cut_skipped=sum(ticket.cut_restart_reason is not None for ticket in undelivered),
+            cut_skipped=sum(ticket.cut_regenerate_reason is not None for ticket in undelivered),
         )
 
     def snapshot(self) -> GateSnapshot:
@@ -533,7 +533,7 @@ class PolicyGate:
             if (
                 ticket.backend is not None
                 and ticket.undelivered_call_id is not None
-                and ticket.cut_restart_reason is None
+                and ticket.cut_regenerate_reason is None
             ):
                 by_backend.setdefault(ticket.backend, []).append(ticket)
         await asyncio.gather(*(self._cut(request, backend, tickets) for backend, tickets in by_backend.items()))
@@ -811,7 +811,7 @@ class PolicyModelParticipant(CheckpointParticipant):
         the controller may still start the rollout over as this attempt.
 
         The ledger stays if another policy server sharing it has started the attempt.
-        The attempt stays pending until the ledger is handled, so a commit retried after a failure deletes again.
+        The attempt stays unclaimed until the ledger is handled, so a commit retried after a failure deletes again.
         """
         key = episode_id.capture_key
         if self.ledger is not None:
@@ -844,7 +844,7 @@ class PolicyModelParticipant(CheckpointParticipant):
         # The restored attempts continue as the next attempt, so their own ledgers are no longer used.
         await retire_ledgers(self.ledger, scope)
 
-    async def restored_pending(self) -> list[EpisodeId]:
+    async def unclaimed(self) -> list[EpisodeId]:
         return [EpisodeId.from_capture_key(key) for key in sorted(self.gate.restored_targets)]
 
     def commit_reply(self, records: list[CheckpointRecord]) -> dict[str, Any]:
@@ -958,7 +958,7 @@ def reject_ungated_ledger_writers(global_config: Any) -> None:
     if not isinstance(global_config, Mapping):
         return
     models = _server_configs(global_config, "responses_api_models")
-    policies = sorted(name for name, config in models.items() if config.get("checkpoint_policy"))
+    policies = sorted(name for name, config in models.items() if (config.get("checkpoint") or {}).get("policy"))
     if not policies:
         return
     for agent, config in sorted(_server_configs(global_config, "responses_api_agents").items()):
@@ -969,7 +969,7 @@ def reject_ungated_ledger_writers(global_config: Any) -> None:
                 f"model server {writer!r} receives training-token capture calls from agent {agent!r} "
                 f"and writes the capture ledger that checkpoint policy server {', '.join(map(repr, policies))} "
                 f"checkpoints, but it is not behind the checkpoint gate; "
-                f"set checkpoint_policy on {writer!r}, or turn off token capture for {agent!r}"
+                f"set checkpoint.policy on {writer!r}, or turn off token capture for {agent!r}"
             )
 
 

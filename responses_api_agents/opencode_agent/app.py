@@ -26,7 +26,7 @@ from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from shlex import quote
 from time import monotonic, time
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -36,6 +36,7 @@ from pydantic import ConfigDict, Field, PrivateAttr
 from nemo_gym.agent_activation_types import (
     AgentContinuationCapabilities,
 )
+from nemo_gym.agent_outcome import AgentOutcome
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -49,6 +50,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import MODEL_CONTEXT_LIMIT, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -90,13 +92,16 @@ from responses_api_agents.opencode_agent.runtime import (
     OPENCODE_VERSION,
     apply_observability_patch,
 )
-from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, format_sandbox_error
+from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, format_error_message
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
 
 
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
+_TESTED_OUTCOME_VERSION = "1.17.11"
+_API_ERROR = "APIError"
+_CONTEXT_OVERFLOW_ERROR = "ContextOverflowError"
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -131,7 +136,7 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
-def _sandbox_prepare_command(workdir: str, directory: str, runtime: str) -> str:
+def _sandbox_prepare_command(workdir: str, directory: str, runtime: str, *, python: str = "python3") -> str:
     # Bootstrap with POSIX sh; the runtime installer itself requires Bash.
     bootstrap = """set -eu
 set --
@@ -158,7 +163,8 @@ fi
         "for root in roots), 'OpenCode runtime/session storage overlaps the task workdir'"
     )
     return (
-        bootstrap + f"python3 -I -c {quote(validate_paths)} {quote(workdir)} "
+        bootstrap.replace("command -v python3", "command -v " + quote(python))
+        + f"{quote(python)} -I -c {quote(validate_paths)} {quote(workdir)} "
         f"{quote(str(PurePosixPath(directory).parent))} {quote(runtime)} && mkdir -p {quote(directory)}"
     )
 
@@ -188,6 +194,15 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     max_output_tokens: int = 131072
     opencode_version: str = OPENCODE_VERSION
 
+    # Optional verified, preinstalled runtime for sandboxes without download egress.
+    sandbox_python_executable: str = "python3"
+    sandbox_path_prefix: list[str] = Field(default_factory=list)
+    sandbox_executable_path: str | None = None
+    sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    # The native model ID affects OpenCode's model-family prompts and tools.
+    # Preserve the existing alias unless a benchmark explicitly qualifies another ID.
+    sandbox_model_id: str = "dummy_model"
+
     # Used only when Resources does not supply a borrowed sandbox.
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
@@ -215,7 +230,47 @@ class OpenCodeAgentVerifyResponse(BaseVerifyResponse):
 class OpenCodeAgent(SimpleResponsesAPIAgent):
     """Run OpenCode locally or in a borrowed or agent-owned sandbox session."""
 
+    @staticmethod
+    def _reported_model_error(native_result: Mapping[str, Any], cleanup: dict | None) -> bool:
+        """Recognize a completed API error or context limit; tested on OpenCode 1.17.11.
+
+        Independent worker failures, cleanup errors and timeouts are not provider reports.
+        """
+        finishes = {_API_ERROR: None, _CONTEXT_OVERFLOW_ERROR: "error"}
+        name = (native_result.get("error") or {}).get("name")
+        return (
+            cleanup is not None
+            and cleanup["return_code"] == 1
+            and not cleanup["timed_out"]
+            and not cleanup["error"]
+            and name in finishes
+            and native_result.get("finish") == finishes[name]
+            and bool(native_result.get("time", {}).get("completed"))
+        )
+
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Read native APIError status or transport retry marker; tested on OpenCode 1.17.11.
+
+        OpenCode marks connection resets, header timeouts, decompression failures and
+        interrupted streams retryable without an HTTP status. Preserve that evidence;
+        the Environment Server still decides whether to retry the episode.
+        """
+        error = native_result.get("error") or {}
+        if error.get("name") == _CONTEXT_OVERFLOW_ERROR:
+            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
+        if error.get("name") != _API_ERROR:
+            return AgentOutcome(failure_kind="unknown")
+        data = error.get("data") or {}
+        status = data.get("statusCode")
+        if type(status) is int and 400 <= status <= 599:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        if status is None and data.get("isRetryable") is True:
+            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        return AgentOutcome(failure_kind="unknown")
+
     config: OpenCodeAgentConfig
+    # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -638,6 +693,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             r"\d+\.\d+\.\d+", self.config.opencode_version
         ):
             raise HTTPException(422, "OpenCode sandbox execution requires an exact opencode_version")
+        if self.config.opencode_version != _TESTED_OUTCOME_VERSION:
+            LOG.warning(
+                "OpenCode %s is untested: error classification is validated on %s",
+                self.config.opencode_version,
+                _TESTED_OUTCOME_VERSION,
+            )
         if self.config.context_window <= 0 or self.config.timeout <= 0:
             raise HTTPException(422, "OpenCode context window and execution timeout must be positive")
         if not 0 < self.config.max_output_tokens <= self.config.context_window:
@@ -669,6 +730,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 sandbox=sandbox, session_dir=directory, workdir=workdir, harness="OpenCode", owns_sandbox=owns_sandbox
             ),
             runtime=runtime,
+            python_executable=self.config.sandbox_python_executable,
             model_ref=self.config.model_server,
         )
         prepared_directory = False
@@ -681,7 +743,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     raise RuntimeError(
                         f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
-            command = _sandbox_prepare_command(workdir, directory, runtime)
+            state.sandbox_id = sandbox.sandbox_id
+            command = _sandbox_prepare_command(
+                workdir, directory, runtime, python=self.config.sandbox_python_executable
+            )
             result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
             prepared_directory = True
@@ -693,6 +758,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     f"{directory}/{installer}",
                     runtime,
                     self.config.opencode_version,
+                    self.config.sandbox_executable_path or "",
+                    self.config.sandbox_executable_sha256 or "",
+                    self.config.sandbox_python_executable,
+                    ":".join(self.config.sandbox_path_prefix),
                 )
             )
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
@@ -968,6 +1037,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         outcome: OpenCodeRunOutcome,
         output: list[NeMoGymResponseOutputItem] | None = None,
         usage: NeMoGymResponseUsage | None = None,
+        error_message: str | None = None,
     ) -> NeMoGymResponse:
         runtime = state.runtime_info
         response = NeMoGymResponse(
@@ -978,6 +1048,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             output=output or [],
             usage=usage,
             status=outcome.status,
+            error={"code": "server_error", "message": error_message} if error_message is not None else None,
             incomplete_details=IncompleteDetails(reason=outcome.incomplete_reason)
             if state.is_continuation and outcome.incomplete_reason
             else None,
@@ -1020,8 +1091,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         previous_session_id = state.harness_session_id
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
         config = {
-            "model": "nemo_gym/dummy_model",
-            "small_model": "nemo_gym/dummy_model",
+            "model": "nemo_gym/" + self.config.sandbox_model_id,
+            "small_model": "nemo_gym/" + self.config.sandbox_model_id,
             "enabled_providers": ["nemo_gym"],
             "autoupdate": False,
             "share": "disabled",
@@ -1034,7 +1105,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         "timeout": False,
                     },  # pragma: allowlist secret
                     "models": {
-                        "dummy_model": {
+                        self.config.sandbox_model_id: {
+                            **(
+                                {"reasoning": self.config.thinking}
+                                if self.config.sandbox_model_id != "dummy_model"
+                                else {}
+                            ),
                             "interleaved": {"field": "reasoning_content"},
                             "limit": {
                                 "context": self.config.context_window,
@@ -1060,6 +1136,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             command.extend(["--session", state.harness_session_id])
         payload = {
             "instructions": system,
+            "path_prefix": self.config.sandbox_path_prefix,
             "directory": state.session.session_dir,
             "cwd": state.session.workdir,
             "command": command,
@@ -1144,6 +1221,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             except Exception as exc:
                 error = error or f"OpenCode output parse failed: {exc}"
         result = state.session.cleanup
+        assistants = [m["info"] for m in export.get("messages", []) if m["info"].get("role") == "assistant"]
+        native_result = assistants[-1] if assistants else {}
+        reported_error = error is None and failure is None and self._reported_model_error(native_result, result)
+        context_limit = reported_error and (native_result.get("error") or {}).get("name") == _CONTEXT_OVERFLOW_ERROR
         runtime = state.runtime_info
         if runtime is None:
             observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
@@ -1158,8 +1239,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             continuation=state.is_continuation,
         )
         error = error or outcome.error
+        if context_limit:
+            outcome = OpenCodeRunOutcome(status="incomplete")
         status = outcome.status
-        if error or failure:
+        if (error or failure) and not context_limit:
             status = "failed"
         # Artifact message completion records a model turn, not the entire invocation.
         for record in observations.records:
@@ -1167,10 +1250,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 record.status = "incomplete" if isinstance(failure, asyncio.CancelledError) else status
                 if state.is_continuation:
                     record.duration_ms = (monotonic() - started) * 1000
-                    record.stop_reason = outcome.error_type
+                    record.stop_reason = "context_limit" if context_limit else outcome.error_type
                 record.error_type = outcome.error_type
                 if isinstance(failure, asyncio.CancelledError):
                     record.error_type = "cancelled"
+                elif context_limit:
+                    record.error_type = "context_limit"
+                elif reported_error:
+                    record.error_type = "provider_error"
                 elif error or failure:
                     record.error_type = "server_error"
         if result is not None:
@@ -1182,13 +1269,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         if state.session.owns_sandbox
                         else state.request.sandbox_access.connection.provider_config_ref
                     ),
-                    sandbox_id=(
-                        None
-                        if state.session.owns_sandbox
-                        else str(state.request.sandbox_access.connection.descriptor.get("sandbox_id", "unknown"))
-                    ),
+                    sandbox_id=state.sandbox_id,
                     outcome="timeout" if result["timed_out"] else "failed" if error or failure else "completed",
                     exit_code=result["return_code"],
+                    error_type="process_exit" if reported_error else None,
                 )
             )
         observations.gaps.append(
@@ -1199,9 +1283,28 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
         if failure is not None:
             raise failure
-        if error:
-            raise HTTPException(502, format_sandbox_error(error, stderr=state.stderr))
-        return self._make_session_response(state, body, timeout=timeout, outcome=outcome, output=output, usage=usage)
+        if error and not reported_error:
+            raise HTTPException(502, format_error_message(error, stderr=state.stderr))
+        reported_message = None
+        if reported_error and not context_limit:
+            error_data = native_result["error"].get("data") or {}
+            reported_message = error_data.get("message")
+            if not isinstance(reported_message, str) or not reported_message:
+                reported_message = "OpenCode provider request failed"
+            upstream_status = error_data.get("statusCode")
+            if type(upstream_status) is int and 400 <= upstream_status <= 599:
+                reported_message = f"HTTP {upstream_status}: {reported_message}"
+            reported_message = format_error_message(reported_message)
+        response = self._make_session_response(
+            state,
+            body,
+            timeout=timeout,
+            outcome=outcome,
+            output=output,
+            usage=usage,
+            error_message=reported_message,
+        )
+        return self.report_outcome(response, native_result)
 
 
 if __name__ == "__main__":

@@ -217,7 +217,7 @@ succeeds. A commit or restore that is retried therefore does not count the same 
 a restore cover the whole records file it reads, while its records are only those it restores.
 
 `gym.checkpoint.control_errors_total` counts each failed call to a participant's checkpoint control routes
-once. The error code is the `code` in the reply, such as `deadline_exceeded`, `invalid_phase`, or
+once. The error code is the `code` in the reply, such as `checkpoint_deadline_exceeded`, `checkpoint_invalid_phase`, or
 `checkpoint_conflict`. A data request refused because of a checkpoint, such as a late request from a retired
 attempt, is not counted.
 

@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from nemo_gym.base_resources_server import ResourcesSeedSessionRequest
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import JUDGE_FAILED, VERIFIER_ERROR
+from nemo_gym.failure_kinds import JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST, VERIFIER_ERROR
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.nemo_user_sim import app as usersim_app
@@ -125,23 +125,24 @@ def _judge_payload(score: int = 4) -> str:
     )
 
 
+def _verify_body(row: dict[str, Any]) -> UserSimVerifyRequest:
+    return UserSimVerifyRequest(
+        episode_id=EpisodeId(rollout_id="0-0", attempt=0),
+        task_id=TaskId(taskset="nemo_user_sim:example", task_id="0"),
+        verification_input=UserSimVerificationInput(
+            resolved_row=row,
+            usersim_result=_usersim_result(str(row["probe_type"])),
+            invocations=[],
+        ),
+    )
+
+
 async def _verify(
     server: UserSimResourcesServer,
     request: SimpleNamespace,
     row: dict[str, Any],
 ) -> Any:
-    return await server.verify(
-        request,
-        UserSimVerifyRequest(
-            episode_id=EpisodeId(rollout_id="0-0", attempt=0),
-            task_id=TaskId(taskset="nemo_user_sim:example", task_id="0"),
-            verification_input=UserSimVerificationInput(
-                resolved_row=row,
-                usersim_result=_usersim_result(str(row["probe_type"])),
-                invocations=[],
-            ),
-        ),
-    )
+    return await server.verify(request, _verify_body(row))
 
 
 def _install_evaluator_scripts(
@@ -523,7 +524,7 @@ async def test_verify_bounds_overall_evaluation_time(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_closed_and_unknown_sessions_return_404() -> None:
+async def test_closed_and_unknown_sessions_verify_as_masked_lost_sessions() -> None:
     server = _server()
     server.session_id_to_seed = {}
     row = _resolved_row()
@@ -535,39 +536,96 @@ async def test_closed_and_unknown_sessions_return_404() -> None:
         SimpleNamespace(resources_session_id=body.resources_session_id, episode_id=body.episode_id),
     )
 
-    with pytest.raises(HTTPException) as error:
-        server._seeded_episode(request)
-    assert error.value.status_code == 404
-
-    with pytest.raises(HTTPException) as error:
-        server._seeded_episode(_request("unknown"))
-    assert error.value.status_code == 404
+    for gone in (request, _request("unknown")):
+        verification = await _verify(server, gone, row)
+        assert (verification.reward, verification.mask_sample, verification.failure_kind) == (0.0, True, SESSION_LOST)
 
 
 def test_resources_session_contract() -> None:
     server = _server()
     server.session_id_to_seed = {}
+    server.resources_session_id_to_session_id = {}
     server.closed_resources_session_ids = {}
 
-    check_resources_session_contract(server.setup_webserver(), _seed_body(_resolved_row()), keeps_state=True)
+    check_resources_session_contract(
+        server.setup_webserver(),
+        _seed_body(_resolved_row()),
+        keeps_state=True,
+        holds_state=lambda resources_session_id: any(
+            seeded.resources_session_id == resources_session_id for seeded in server.session_id_to_seed.values()
+        ),
+        verify_body=_verify_body(_resolved_row()).model_dump(mode="json"),
+    )
 
 
 @pytest.mark.asyncio
-async def test_expired_session_is_removed_and_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_seed_retried_under_a_new_cookie_moves_the_record_and_close_without_it_releases() -> None:
+    server = _server()
+    server.session_id_to_seed = {}
+    server.resources_session_id_to_session_id = {}
+    server.closed_resources_session_ids = {}
+    body = _seed_body(_resolved_row())
+
+    await server.seed_session(_request("lost-reply"), body)
+    retried = _request("retry")
+    await server.seed_session(retried, body)
+
+    assert set(server.session_id_to_seed) == {"retry"}
+    assert server._seeded_episode(retried).resources_session_id == body.resources_session_id
+
+    await server.close_resources_session(
+        _request("no-cookie"),
+        SimpleNamespace(resources_session_id=body.resources_session_id, episode_id=body.episode_id),
+    )
+    assert server.session_id_to_seed == {}
+    assert server.resources_session_id_to_session_id == {}
+
+
+@pytest.mark.asyncio
+async def test_expired_session_is_removed_and_verifies_as_masked(monkeypatch: pytest.MonkeyPatch) -> None:
     now = 100.0
     monkeypatch.setattr(usersim_app, "monotonic", lambda: now)
     server = _server()
     server.config.session_ttl_seconds = 10.0
     server.session_id_to_seed = {}
+    server.resources_session_id_to_session_id = {}
     request = _request("expired")
     await server.seed_session(request, _seed_body(_resolved_row()))
     now = 111.0
 
-    with pytest.raises(HTTPException) as error:
-        server._seeded_episode(request)
+    verification = await _verify(server, request, _resolved_row())
 
-    assert error.value.status_code == 404
+    # The server dropped the seed because its lifetime ran out, which is an expiry, not a lost session.
+    assert (verification.mask_sample, verification.failure_kind) == (True, SESSION_EXPIRED)
     assert "expired" not in server.session_id_to_seed
+    assert server.resources_session_id_to_session_id == {}
+    # The expiry record is bounded like the closed record.
+    now = 122.0
+    verification = await _verify(server, request, _resolved_row())
+    assert verification.failure_kind == SESSION_LOST
+    assert server.expired_session_ids == {}
+
+
+@pytest.mark.asyncio
+async def test_close_finds_the_session_by_id_before_the_cookie() -> None:
+    server = _server()
+    server.session_id_to_seed = {}
+    server.resources_session_id_to_session_id = {}
+    server.closed_resources_session_ids = {}
+    first = _seed_body(_resolved_row())
+    second = first.model_copy(update={"resources_session_id": "resources-session-1"})
+    await server.seed_session(_request("cookie-a"), first)
+    await server.seed_session(_request("cookie-b"), second)
+
+    # The close names the first session but carries the second one's cookie.
+    await server.close_resources_session(
+        _request("cookie-b"),
+        SimpleNamespace(resources_session_id=first.resources_session_id, episode_id=first.episode_id),
+    )
+
+    assert set(server.session_id_to_seed) == {"cookie-b"}
+    assert server.resources_session_id_to_session_id == {"resources-session-1": "cookie-b"}
+    assert first.resources_session_id in server.closed_resources_session_ids
 
 
 def test_health_scorer_only_applies_to_guarded_rows() -> None:

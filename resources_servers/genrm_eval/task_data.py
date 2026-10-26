@@ -21,6 +21,18 @@ class TaskData(BaseModel):
     source: str | None = Field(
         default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
     )
+    category: str | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )
+    subcategory: str | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )
+    task: str | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )
+    response_modality: str | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )
     label: str | None = Field(
         default=None, json_schema_extra={"consumed_by": ["verify", "metrics"], "legacy_location": "verifier_metadata"}
     )

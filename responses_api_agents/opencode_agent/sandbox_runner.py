@@ -23,6 +23,7 @@ class RunnerInput(TypedDict):
     command: list[str]
     cwd: str
     env: dict[str, str]
+    path_prefix: list[str]
     harness_session_id: str | None
     previous_message_ids: list[str]
 
@@ -33,6 +34,8 @@ def run(params: RunnerInput) -> int:
     (directory / "runtime.json").write_text(
         json.dumps({"hostname": os.uname().nodename, "pid": os.getpid(), "python": sys.executable})
     )
+    if params.get("path_prefix"):
+        params["env"]["PATH"] = os.pathsep.join([*params["path_prefix"], os.environ.get("PATH", "")])
     # Never accept an initialization receipt left by an earlier invocation.
     (directory / "task-environment.ready").unlink(missing_ok=True)
     # Save only task-directory variables for the shell.env hook, before CLI overrides.

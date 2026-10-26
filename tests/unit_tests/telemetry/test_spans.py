@@ -25,7 +25,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind, StatusCode
 
-from nemo_gym.telemetry.spans import client_span, linked_root_span
+from nemo_gym.telemetry.spans import client_span, linked_root_span, record_child_span
 from tests.unit_tests.telemetry.conftest import LENS_INSTALLED
 
 
@@ -208,4 +208,22 @@ def test_linked_root_span_detaches_and_records_exceptions(recorder):
 
     (dispatch,) = exporter.get_finished_spans()
     assert dispatch.status.status_code == StatusCode.ERROR
+    assert not trace_current_span().get_span_context().is_valid
+
+
+def test_record_child_span_joins_a_parent_that_has_already_ended(recorder):
+    tracer, exporter = recorder
+
+    with tracer.start_as_current_span("gym.rollout.dispatch") as dispatch:
+        parent = dispatch.get_span_context()
+
+    record_child_span("gym.rollout.health", parent, tracer=tracer, verdict="healthy")
+
+    health = next(s for s in exporter.get_finished_spans() if s.name == "gym.rollout.health")
+    assert health.context.trace_id == parent.trace_id
+    assert health.parent.span_id == parent.span_id
+    if LENS_INSTALLED:
+        assert health.attributes["verdict"] == "healthy"
+    else:
+        assert not health.attributes
     assert not trace_current_span().get_span_context().is_valid

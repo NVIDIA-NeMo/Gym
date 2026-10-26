@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/wmt_translation/configs/wmt_translation.yaml
+
+in22_wmt_translation_resources_server:
+  _inherit_from: wmt_translation
+  resources_servers:
+    wmt_translation:
+      compute_comet: false
+      language_consistency_backend: null
+      strip_reasoning: true
+      metric_profile: in22

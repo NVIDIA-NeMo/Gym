@@ -302,4 +302,7 @@ dedicated stdout stream and native transcripts. The runner keeps `events.jsonl`,
 `stderr.log`, and `runtime.json` separate from supervisor diagnostics. Close returns the observation bundle, disconnects
 borrowed sandboxes, and stops agent-owned sandboxes. The task directory remains
 available to the borrowed sandbox's owner for verification. `timeout` bounds
-harness execution; setup and close use the limits above.
+harness execution; setup and close use the limits above. The close response's
+`cleanup_confirmed` reports whether harness termination was witnessed or an owned
+sandbox was stopped. A false value can accompany successful borrowed-connection
+release; the owner must destroy that sandbox and leave the activation ungraded.

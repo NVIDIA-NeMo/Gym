@@ -67,7 +67,7 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
 
 
 def _model_url_for_rollout(model_url: str, rollout_id: Optional[str]) -> str:
-    return apply_rollout_prefix(model_url, rollout_id) if model_url and rollout_id else model_url
+    return apply_rollout_prefix(model_url, rollout_id) if model_url else model_url
 
 
 def _model_name(params: "AnySweInstanceConfig") -> str:
@@ -171,7 +171,9 @@ def _as_list(value: Any) -> list[str]:
 
 def _r2e_resolved(instance: Dict[str, Any], log: str) -> bool:
     statuses: Dict[str, str] = {}
-    for line in log.splitlines():
+    # pytest can color both the status and parts of the test ID in its summary.
+    plain_log = re.sub(r"\x1b\[[0-9;]*m", "", log)
+    for line in plain_log.splitlines():
         fields = line.strip().replace(" - ", " ").split()
         if len(fields) > 1 and fields[0] in ("PASSED", "FAILED", "ERROR", "XFAIL", "SKIPPED"):
             statuses[fields[1]] = fields[0]
@@ -203,6 +205,8 @@ class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     # Applied to the agent box only; grading boxes keep their network to fetch test deps.
     agent_network_policy: Optional[Dict[str, Any]] = None
     agent_runtime_source: str = "baked"
+    # Seconds allowed to download agent_deps_url into the box.
+    agent_runtime_fetch_timeout_s: int = 600
     swebench_tests_timeout: int = 1800
     swebench_agent_timeout: int = 2700
     concurrency: int = 256
@@ -480,6 +484,23 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         return json.loads(value) if isinstance(value, str) else dict(value)
 
     @staticmethod
+    def _r2e_test_setup_script(repo_path: str = "/testbed", tests_path: str = "/r2e_tests") -> str:
+        """Put R2E-Gym's hidden tests where the image's ``run_tests.sh`` looks for them.
+
+        R2E-Gym images ship the tests at ``/r2e_tests``, while ``/testbed/run_tests.sh`` runs
+        ``.venv/bin/python -m pytest -rA r2e_tests`` from the repository. R2E-Gym's own runtime links the
+        directory into the repository before it runs the tests (``DockerRuntime.setup_env``); without that
+        step pytest stops with "file or directory not found: r2e_tests" and no patch can resolve.
+        Images that already have the tests in the repository are left alone.
+        """
+        repo_tests = shlex.quote(f"{repo_path.rstrip('/')}/r2e_tests")
+        tests = shlex.quote(tests_path)
+        return (
+            f"if [ ! -e {repo_tests} ] && [ -d {tests} ]; then "
+            f"ln -s {tests} {repo_tests} && echo '>>>>> Linked {tests_path} into {repo_path}'; fi\n"
+        )
+
+    @staticmethod
     def _apply_patch_script() -> str:
         return (
             "cd /testbed && "
@@ -553,7 +574,12 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 "elif [ -f /root/run_tests.sh ]; then bash /root/run_tests.sh; "
                 "else echo 'R2E eval script not found'; exit 127; fi"
             )
-        script = 'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"\n' + self._apply_patch_script() + str(eval_script)
+        script = (
+            'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"\n'
+            + self._r2e_test_setup_script()
+            + self._apply_patch_script()
+            + str(eval_script)
+        )
         spec = self._sandbox_spec(params, files={"/tmp/anyswe_eval.sh": script})
         sandbox = AsyncSandbox(params.resolved_sandbox_provider, spec)
         try:
@@ -612,7 +638,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                     "elif command -v python3 >/dev/null 2>&1; then "
                     f"python3 -c {python_fetch}; "
                     "else echo 'runtime download requires curl, wget, or python3' >&2; exit 127; fi",
-                    timeout_s=600,
+                    timeout_s=params.agent_runtime_fetch_timeout_s,
                     user="root",
                 )
                 if fetched.return_code != 0:

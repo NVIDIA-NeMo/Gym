@@ -1,0 +1,30 @@
+config_paths:
+  - resources_servers/genrm_eval/configs/genrm_eval.yaml
+
+judge_mode: genrm
+prepare_script_args:
+  judge_mode: ${judge_mode}
+
+genrm_eval:
+  resources_servers:
+    genrm_eval:
+      scoring_module: resources_servers.genrm_eval.mmrb
+      additional_metric_keys:
+        - overall/accuracy_valid
+        - overall/invalid_judgment_rate
+        - overall/total_pairs
+        - overall/total_judgments
+
+genrm_mmrb1_benchmark_agent:
+  _inherit_from: genrm_eval_simple_agent
+
+responses_create_params:
+  max_output_tokens: 16384
+  stream: false
+
+genrm_mmrb1_environment_server:
+  _inherit_from: genrm_eval_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: genrm_mmrb1_benchmark_agent

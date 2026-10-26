@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 from shlex import quote
 from time import monotonic, time
-from typing import Any
+from typing import Any, ClassVar
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -142,6 +142,8 @@ def trajectory_response(result, body, model, error_type=None):
 
 class HermesSandboxedAgent(SimpleResponsesAPIAgent):
     config: HermesSandboxedAgentConfig
+    # The harness runs inside the task sandbox and calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
 
     def model_post_init(self, context):
         super().model_post_init(context)

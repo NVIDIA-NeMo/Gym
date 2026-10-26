@@ -110,7 +110,7 @@ async def test_new_episodes_are_refused_while_closed_but_restored_ones_start() -
     # Not before the resume that follows the restore; the restored record waits for the replacement.
     with pytest.raises(AdmissionClosedError):
         fresh.begin(EpisodeId(rollout_id="r", attempt=3), TASK, None)
-    assert fresh.status_extra()["restored_pending"] == ["r-a3"]
+    assert fresh.status_extra()["unclaimed"] == ["r-a3"]
     await fresh.open_admission()
     # After that resume, a new checkpoint that closes admission still admits the replacement.
     await fresh.close_admission(CLOSE)
@@ -201,8 +201,8 @@ async def test_commit_restore_round_trip_and_retire_after_restore(tmp_path: Path
     status = controller.status()
     await controller.retire(RetireRequest(**request("cleanup", episode_ids=[{"rollout_id": "r", "attempt": 2}])))
 
-    assert status["restored_pending"] == ["r-a2"]
-    assert controller.status()["restored_pending"] == []
+    assert status["unclaimed"] == ["r-a2"]
+    assert controller.status()["unclaimed"] == []
 
 
 async def test_a_restored_episode_not_yet_restarted_survives_the_next_checkpoint(tmp_path: Path) -> None:
@@ -309,7 +309,7 @@ async def test_a_commit_that_no_longer_continues_a_restored_episode_retires_it(t
 
     # Outside the scope, so not exported, and retired after the write.
     assert committed["episode_ids"] == []
-    assert controller.status()["restored_pending"] == []
+    assert controller.status()["unclaimed"] == []
     # Retired without a lasting refusal, since attempt 1 never ran here: a later /run for it starts from its input.
     restored.begin(EpisodeId(rollout_id="r", attempt=1), TASK, None)
     assert restored.continuation(EpisodeId(rollout_id="r", attempt=1)) is None

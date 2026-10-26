@@ -21,6 +21,9 @@ if TYPE_CHECKING:
 
 
 NG_AGENT_OBSERVATIONS_KEY = "ng_agent_observations"
+# The producer trajectory slot: a harness's own turns, forwarded on a result and replaced by the
+# collector's canonical projection.
+NG_TRAJECTORY_KEY = "ng_trajectory"
 
 
 class ObservationModel(BaseModel):

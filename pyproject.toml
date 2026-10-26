@@ -687,6 +687,10 @@ exclude = [
     "responses_api_agents.swe_agents.swe_swebench_multilingual_setup.*",
     "responses_api_agents.swe_agents.swe_swebench_setup",
     "responses_api_agents.swe_agents.swe_swebench_setup.*",
+    # `gym dataset pull` lands Harbor datasets under environments/harbor/<entry>/ (gitignored); the pulled tasks
+    # ship Python (tests/*.py, task_data.py) that must never be discovered as packages of this distribution. The
+    # committed entry files (README, dataset.toml, YAML) still ship as environments.harbor's package data.
+    "environments.harbor.*",
 ]
 
 ################################################

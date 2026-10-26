@@ -798,13 +798,69 @@ async def test_command_retries_default_to_zero() -> None:
     assert process.calls == 1
 
 
-def test_per_command_user_switching_is_not_supported() -> None:
-    assert daytona_provider.DaytonaProvider._effective_command("whoami", None) == "whoami"
-    assert daytona_provider.DaytonaProvider._effective_command("whoami", "root") == "whoami"
-    assert daytona_provider.DaytonaProvider._effective_command("whoami", 0) == "whoami"
-
+def test_per_command_user_switching_is_not_supported_except_for_the_sandbox_own_user() -> None:
+    provider = daytona_provider.DaytonaProvider()
+    handle = SandboxHandle(sandbox_id="sandbox-1", provider_name="daytona", raw=SimpleNamespace())
+    assert provider._effective_command("whoami", None, handle) == "whoami"
+    assert provider._effective_command("whoami", "root", handle) == "whoami"
+    assert provider._effective_command("whoami", 0, handle) == "whoami"
     with pytest.raises(NotImplementedError, match="per-command user switching"):
-        daytona_provider.DaytonaProvider._effective_command("whoami", "agent")
+        provider._effective_command("whoami", "agent", handle)
+
+    # The user the sandbox already runs as needs no switch: recorded at create, read off a connected sandbox, or
+    # the configured create.os_user.
+    provider._os_users["sandbox-1"] = "agent"
+    assert provider._effective_command("whoami", "agent", handle) == "whoami"
+    connected = SandboxHandle(sandbox_id="sandbox-2", provider_name="daytona", raw=SimpleNamespace(user="app"))
+    assert provider._effective_command("whoami", "app", connected) == "whoami"
+    with pytest.raises(NotImplementedError, match=r"asked for 'agent', the sandbox runs as 'app'"):
+        provider._effective_command("whoami", "agent", connected)
+    configured = daytona_provider.DaytonaProvider(create={"os_user": "app"})
+    assert configured._effective_command("whoami", "app", handle) == "whoami"
+
+
+async def test_spec_user_becomes_the_os_user_and_task_commands_run_without_a_switch(fake_daytona_sdk: None) -> None:
+    """M20's default user reaches Daytona as the creation setting it supports; a conflicting default is refused at
+    create, before any task command."""
+    from nemo_gym.sandbox.api import AsyncSandbox
+
+    commands: list[str] = []
+
+    class FakeProcess:
+        async def exec(self, command: str, **_kwargs: Any) -> Any:
+            commands.append(command)
+            return SimpleNamespace(exit_code=0, result="ok", artifacts=None)
+
+    created: list[Any] = []
+
+    class FakeClient:
+        async def create(self, params: Any, timeout: float) -> Any:
+            created.append(params)
+            return SimpleNamespace(id="sandbox-app", process=FakeProcess())
+
+        async def close(self) -> None:
+            pass
+
+    provider = daytona_provider.DaytonaProvider(probe={"command": None})
+    provider._client = lambda: FakeClient()  # type: ignore[method-assign]
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="python:3.12", user="app"))
+    assert created[0].kwargs["os_user"] == "app" and provider._os_users["sandbox-app"] == "app"
+    # The facade fills in the default user; Daytona sees its own os_user and dispatches the command as is.
+    result = await sandbox.exec("whoami")
+    assert result.return_code == 0 and commands == ["whoami"]
+    await sandbox.exec("id", user="root")
+    assert commands == ["whoami", "id"]
+    with pytest.raises(NotImplementedError, match="per-command user switching"):
+        await sandbox.exec("id", user="other")
+
+    configured = daytona_provider.DaytonaProvider(create={"os_user": "app"}, probe={"command": None})
+    configured._client = lambda: FakeClient()  # type: ignore[method-assign]
+    assert configured._os_user(SandboxSpec(image="python:3.12", user="app")) == "app"
+    assert configured._os_user(SandboxSpec(image="python:3.12")) == "app"
+    with pytest.raises(NotImplementedError, match=r"cannot run commands as 'other'"):
+        await AsyncSandbox(configured).start(SandboxSpec(image="python:3.12", user="other"))
+    assert len(created) == 1  # refused before creation
 
 
 async def test_create_timeout_is_not_retried() -> None:

@@ -55,6 +55,9 @@ class SingleStepToolUseArgumentComparisonVerifyResponse(BaseVerifyResponse):
 
 
 class SingleStepToolUseArgumentComparisonResourcesServer(SimpleResourcesServer):
+    # Verification compares the request's expected and predicted actions only.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: SingleStepToolUseArgumentComparisonResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

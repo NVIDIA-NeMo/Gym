@@ -14,6 +14,35 @@ config and model routing, harness setup, and execution. It neither provisions no
 grades. Retried responses share setup and execution for the same message.
 Retried `/run` calls share one execution and forward the seeded resource cookies.
 
+## Harbor episodes
+
+Harbor tasks run this agent on an episode session instead of `/run`:
+
+```bash
+gym eval run <task folder | harbor:org/name@tag> --agent miniswe_sandboxed_agent --sandbox <provider> ...
+```
+
+The command binds the unbound template in
+[`configs/miniswe_sandboxed_agent.yaml`](configs/miniswe_sandboxed_agent.yaml) to the
+run's model and sandbox provider, and the Harbor environment server drives the session:
+
+1. `/v1/agent_sessions` seeds the session with `sandbox_access` (the sandbox the
+   environment server provisioned and its working directory). The agent connects to it
+   and provisions nothing itself.
+2. `/v1/responses` receives the task instruction as the input. The in-sandbox tool
+   grants (`mcp_servers`, `skills_dir`) come from the `task.json` the environment server
+   left in the sandbox, and are read before the turn is bound, so an overlapping retry
+   of the first request waits for the binding and replays it.
+3. `/v1/agent_sessions/close` releases the transport; the environment server verifies
+   and stops the sandbox.
+
+`resources_server` is optional on this path and is only used by the legacy `/run`
+route, which seeds and verifies against a TB4-style resources server. Two kinds of
+timeout are told apart: a setup failure or a setup timeout (the harness never started,
+the sandbox is untouched) is a `503`, so the environment server masks the episode and
+it is retried, while an execution timeout is the agent's own result, returned with
+`miniswe_termination = "timeout"` and verified like any other answer.
+
 ## Setup and model access
 
 Task images need `bash`, `uname`, `tar`, and `setsid`; preinstalled Python, pip,

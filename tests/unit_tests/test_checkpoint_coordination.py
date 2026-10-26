@@ -178,7 +178,7 @@ async def test_prepare_stops_at_an_unready_stage_until_the_controller_retires_it
     missed = await coordination.prepare(participants, "c1", deadline_ts=deadline(0.2))
     later_stage_untouched = "close res" not in events
     # A straggler is retired after the checkpoint is abandoned, never while it is open.
-    with pytest.raises(CoordinationError, match="invalid_phase"):
+    with pytest.raises(CoordinationError, match="checkpoint_invalid_phase"):
         await coordination.retire(participants, "c1", [EpisodeId(rollout_id="r", attempt=1)], deadline_ts=deadline())
     await coordination.resume(participants, "c1", deadline_ts=deadline())
     await coordination.retire(participants, "retire", [EpisodeId(rollout_id="r", attempt=1)], deadline_ts=deadline())
@@ -239,7 +239,7 @@ async def test_resume_after_a_partial_prepare_fences_the_participants_it_never_r
         client=client, auth_token=TOKEN, members=tuple(m for m in participants.members if m.kind == "resources")
     )
 
-    with pytest.raises(CoordinationError, match="stale_checkpoint"):
+    with pytest.raises(CoordinationError, match="checkpoint_stale"):
         await coordination.prepare(res_only, "c1", deadline_ts=deadline())
 
 

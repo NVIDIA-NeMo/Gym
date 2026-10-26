@@ -404,7 +404,10 @@ async def test_run_stages_private_mcp_config_and_cleans_workspace(tmp_path, with
             returncode=0,
         )
 
-    with patch("responses_api_agents.pi_agent.app.asyncio.create_subprocess_exec", side_effect=launch):
+    with (
+        patch("responses_api_agents.pi_agent.app.ensure_pi"),
+        patch("responses_api_agents.pi_agent.app.asyncio.create_subprocess_exec", side_effect=launch),
+    ):
         items, _, _, _ = await agent._run_pi("task", None)
     assert items[0].content[0].text == "done"
     assert homes and all(not home.exists() for home in homes)

@@ -50,7 +50,10 @@ class AzureOpenAIModelServer(SimpleResponsesAPIModel):
             api_key=self.config.openai_api_key,
             api_version=self.config.default_query.get("api-version"),
         )
-        self._converter = VLLMConverter(return_token_id_information=False)
+        self._converter = VLLMConverter(
+            return_token_id_information=False,
+            custom_tool_strategy=self.config.custom_tool_strategy,
+        )
         self._semaphore: Semaphore = Semaphore(self.config.num_concurrent_requests)
         return super().model_post_init(context)
 

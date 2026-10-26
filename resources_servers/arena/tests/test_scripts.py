@@ -16,10 +16,29 @@
 import json
 
 import numpy as np
-from pytest import raises
+from pytest import mark, raises
 
 from resources_servers.arena.scripts.compute_rollout_scores import load_rollout_tasks
 from resources_servers.arena.scripts.fit_anchored_elo import build_observations
+from resources_servers.arena.scripts.remove_failed_rollouts import is_failed_rollout
+
+
+@mark.parametrize("category", ["vision_arena_v1", "lmarena_v3", "lmarena_v2"])
+@mark.parametrize("reason", [None, "max_output_tokens", "other"])
+def test_cleanup_preserves_deliberate_zero_outputs(category, reason):
+    row = {
+        "category": category,
+        "policy_answer": None,
+        "policy_reasoning": "Reasoning without a final answer",
+        "response": {"incomplete_details": {"reason": reason}} if reason else {"status": "completed"},
+        "games": None,
+    }
+    preserve = category != "lmarena_v2" and reason in (None, "max_output_tokens")
+    assert is_failed_rollout(row) is not preserve
+
+
+def test_cleanup_still_removes_missing_judgments():
+    assert is_failed_rollout({"category": "vision_arena_v1", "policy_answer": "Answer", "games": None})
 
 
 def _write_jsonl(path, rows):

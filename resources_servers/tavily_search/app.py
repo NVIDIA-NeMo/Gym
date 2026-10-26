@@ -13,13 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import logging
 import re
 from asyncio import sleep
 from collections import OrderedDict, defaultdict
 from contextlib import asynccontextmanager
+from fnmatch import fnmatchcase
 from pathlib import Path
 from time import time
-from typing import Any, ClassVar, Dict, List, Literal, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Sequence
 from urllib.parse import unquote, urlparse, urlsplit, urlunsplit
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientTimeout
@@ -47,6 +49,31 @@ from nemo_gym.server_utils import SESSION_ID_KEY, request
 from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 
+logger = logging.getLogger(__name__)
+
+# Tavily's /search rejects more than 150 ``exclude_domains`` with HTTP 400 ("Max 150 domains are allowed";
+# https://docs.tavily.com/documentation/api-reference/endpoint/search, confirmed by direct probes on 2026-10-16:
+# 150 domains accepted, 151 rejected). A longer policy is pre-filtered provider-side with this many domains
+# and enforced in full locally; see ``select_provider_domains``.
+TAVILY_EXCLUDE_DOMAINS_LIMIT = 150
+# Policy domains sent to the provider ahead of the rest when the policy exceeds the limit: dataset hubs,
+# benchmark publishers, code hosts and archive mirrors, the hosts most likely to surface an answer key.
+# Shell-style patterns matched against the policy's normalised hostnames; a bare hostname matches only itself.
+# Patterns are normalised the same way (IDNA, lower-case, trailing dot removed), so their case does not matter.
+DEFAULT_EXCLUDE_DOMAINS_PRIORITY = (
+    "huggingface.co",
+    "hf.co",
+    "lastexam.ai",
+    "agi.safe.ai",
+    "safe.ai",
+    "scale.com",
+    "*.scale.com",
+    "github.com",
+    "githubusercontent.com",
+    "archive.*",
+)
+
+
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     tavily_api_key: str | List[str]
     exclude_domains_file_path: str
@@ -63,6 +90,13 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     max_cached_pages: int = Field(default=128, ge=0)
     max_cached_page_chars: Optional[int] = Field(default=None, ge=1)
     max_scroll_words: Optional[int] = Field(default=None, ge=1)
+    # Provider-side pre-filtering only; 0 or null sends no exclude_domains to Tavily. A value above Tavily's limit
+    # is rejected here because every /search would then fail with HTTP 400. The full domain and url_substring
+    # policy is enforced locally on requested and returned URLs whatever this is set to.
+    tavily_exclude_domains_limit: Optional[int] = Field(
+        default=TAVILY_EXCLUDE_DOMAINS_LIMIT, ge=0, le=TAVILY_EXCLUDE_DOMAINS_LIMIT
+    )
+    tavily_exclude_domains_priority: List[str] = Field(default_factory=lambda: list(DEFAULT_EXCLUDE_DOMAINS_PRIORITY))
 
 
 class TavilySearchRequest(BaseModel):
@@ -196,6 +230,11 @@ class TavilySearchAIOHTTPClient(BaseModel):
         return cls(headers=client.headers, base_url=str(client.base_url), debug=debug, **kwargs)
 
 
+def normalize_hostname(value: str) -> str:
+    """IDNA-encode, lower-case and strip the trailing dot: the one form every hostname comparison here uses."""
+    return value.encode("idna").decode().lower().rstrip(".")
+
+
 class URLExclusionPolicy:
     """Domain and URL-pattern checks shared by search results and page extraction."""
 
@@ -205,7 +244,7 @@ class URLExclusionPolicy:
         for prop in properties:
             if prop["type"] == "domain":
                 try:
-                    self.domains.append(prop["value"].encode("idna").decode().lower().rstrip("."))
+                    self.domains.append(normalize_hostname(prop["value"]))
                 except UnicodeError as exc:
                     raise ValueError(f"Invalid exclusion domain in {path}: {prop['value']!r}") from exc
         self.substrings = [p["value"].lower() for p in properties if p["type"] == "url_substring"]
@@ -224,7 +263,7 @@ class URLExclusionPolicy:
                     or parts.password
                 ):
                     return True
-                host = parts.hostname.encode("idna").decode().lower().rstrip(".")
+                host = normalize_hostname(parts.hostname)
                 canonical = urlunsplit((parts.scheme.lower(), host, parts.path, parts.query, "")).lower()
                 if any(host == domain or host.endswith("." + domain) for domain in self.domains):
                     return True
@@ -237,6 +276,33 @@ class URLExclusionPolicy:
             except (ValueError, UnicodeError):
                 return True
         return True
+
+
+def select_provider_domains(
+    domains: Sequence[str], limit: Optional[int], priority: Sequence[str]
+) -> Optional[List[str]]:
+    """Deterministic subset of a policy's domains for a provider that caps ``exclude_domains``.
+
+    Returns ``None`` when ``limit`` is ``None`` or 0 (no provider-side exclusion). Otherwise the domains matching
+    the ``priority`` patterns come first, in pattern order and then policy order, followed by the remaining
+    domains in policy order, truncated to ``limit``. Patterns are normalised like the policy's hostnames before
+    matching (an invalid pattern raises ``ValueError``). A policy within ``limit`` is sent as the same set of
+    domains in this order with duplicates removed: the set is preserved, the file order is not. Every domain
+    stays enforced locally regardless.
+    """
+    if not limit:
+        return None
+    ordered: List[str] = []
+    for pattern in priority:
+        try:
+            normalized_pattern = normalize_hostname(pattern)
+        except UnicodeError as exc:
+            raise ValueError(f"Invalid tavily_exclude_domains_priority pattern: {pattern!r}") from exc
+        ordered.extend(
+            domain for domain in domains if fnmatchcase(domain, normalized_pattern) and domain not in ordered
+        )
+    ordered.extend(domain for domain in domains if domain not in ordered)
+    return ordered[:limit]
 
 
 class TavilySearchResourcesServer(SimpleResourcesServer):
@@ -268,8 +334,28 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
 
-        self._url_policy = URLExclusionPolicy(_resolve_under_cwd_or_install(self.config.exclude_domains_file_path))
-        self._exclude_domains = self._url_policy.domains
+        policy_path = _resolve_under_cwd_or_install(self.config.exclude_domains_file_path)
+        self._url_policy = URLExclusionPolicy(policy_path)
+        self._provider_exclude_domains = select_provider_domains(
+            self._url_policy.domains,
+            self.config.tavily_exclude_domains_limit,
+            self.config.tavily_exclude_domains_priority,
+        )
+        if self._provider_exclude_domains is not None:
+            sent = set(self._provider_exclude_domains)
+            not_sent = [domain for domain in dict.fromkeys(self._url_policy.domains) if domain not in sent]
+            if not_sent:
+                # Once per server start: the subset is fixed by the policy file and the config.
+                logger.warning(
+                    "Exclusion policy %s has %d domain rules but tavily_exclude_domains_limit is %d: %d domains are "
+                    "not sent to Tavily /search (%s, ...) and are enforced only locally; every domain and "
+                    "url_substring rule is still applied to requested and returned URLs.",
+                    policy_path,
+                    len(sent) + len(not_sent),
+                    self.config.tavily_exclude_domains_limit,
+                    len(not_sent),
+                    ", ".join(not_sent[:5]),
+                )
         self._page_cache: OrderedDict[str, str] = OrderedDict()
         if self.config.debug:
             print("Debug mode enabled")
@@ -324,9 +410,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         results = await async_tavily_client.search(
             body.query,
             max_results=self.config.max_results,
-            exclude_domains=self._exclude_domains,
+            # At most tavily_exclude_domains_limit domains (Tavily rejects longer lists); the full domain and
+            # url_substring policy is applied locally to every returned URL by _postprocess_search_results.
+            exclude_domains=self._provider_exclude_domains,
             search_depth=self.config.search_depth,
-            # Tavily receives domain exclusions, but URL-pattern exclusions are applied locally.
             # Its LLM-generated answer could summarize a page we later discard, so return
             # source results only, including for domain-only policies for consistent behavior.
             include_answer=False,

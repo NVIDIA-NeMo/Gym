@@ -640,6 +640,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         await state.close(self.config.session_close_timeout_seconds)
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
+            cleanup_confirmed=state.session.cleanup_confirmed,
             agent_observations=state.observations
             or AgentObservationBundle(
                 source="claude_code",

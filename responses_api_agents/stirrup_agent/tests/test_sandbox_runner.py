@@ -49,6 +49,7 @@ def _payload(model_url: str, resources_url: str, workdir: Path) -> dict:
         "instructions": None,
         "tools": _TOOLS,
         "finish_tool_names": ["finish", "abandon_task_finish"],
+        "code_exec": True,
         "tool_access": {"base_url": resources_url, "cookies": {"session": "seeded"}, "headers": {}},
         "workdir": str(workdir),
         "max_turns": 10,
@@ -321,6 +322,23 @@ def test_the_model_sees_the_certified_tool_definitions(tmp_path, resources):
     }
     assert [t for t in tools if t["function"]["name"] != "code_exec"] == [
         certified[name] for name in ("finish", "abandon_task_finish", "web_search", "fetch_web_page")
+    ]
+
+
+def test_without_code_exec_the_model_sees_only_the_request_tools(tmp_path, resources):
+    model = _ModelServer([_call("finish", json.dumps({"reason": "done"}))])
+    payload = {**_payload(model.base_url, resources.base_url, tmp_path), "code_exec": False}
+    try:
+        output = asyncio.run(run(payload, tmp_path, Observer()))
+    finally:
+        model.close()
+
+    assert output["observations"]["status"] == "completed"
+    assert [t["function"]["name"] for t in model.requests[0]["tools"]] == [
+        "finish",
+        "abandon_task_finish",
+        "web_search",
+        "fetch_web_page",
     ]
 
 

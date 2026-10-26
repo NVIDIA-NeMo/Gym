@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import json
+import os
+import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import httpx
@@ -26,6 +28,7 @@ from nemo_gym._checkpoint.control import (
     RetireRequest,
 )
 from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, StaleAttemptError
+from nemo_gym._checkpoint.participant_workers import COORDINATOR_SOCKET_ENV
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -202,7 +205,7 @@ async def test_a_restored_run_episode_not_yet_reclaimed_is_still_named_in_the_co
     await controller.resume(CheckpointRequest(**control("r1")))
     replacement = EpisodeId(rollout_id="run", attempt=1)
     # No replacement /run has claimed the session yet.
-    assert await restored.restored_pending() == [replacement]
+    assert await restored.unclaimed() == [replacement]
     await controller.prepare(CheckpointRequest(**control("c2")))
     reply = await controller.commit(
         CommitRequest(**control("c2", checkpoint_dir=str(tmp_path / "second"), episode_ids=[replacement]))
@@ -344,6 +347,28 @@ def _unsupported_agent_app() -> tuple[_UnsupportedAgent, Any]:
     return agent, agent.setup_webserver()
 
 
+@pytest.mark.parametrize(
+    "declarations, error",
+    [
+        ({"checkpoint_mode": "stateless"}, "checkpoint_mode='stateless'"),
+        ({"checkpoint_mode": "exportd"}, "checkpoint_mode='exportd'"),
+    ],
+)
+def test_an_agent_with_an_unknown_checkpoint_declaration_fails_at_startup(
+    declarations: dict[str, Any], error: str
+) -> None:
+    annotations = {name: ClassVar[Any] for name in declarations}
+    agent_type = type("Declared", (_UnsupportedAgent,), {**declarations, "__annotations__": annotations})
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "t"}}
+    agent = agent_type(
+        config=BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name="agent"), server_client=client
+    )
+
+    with pytest.raises(ValueError, match=re.escape(error)):
+        agent.setup_webserver()
+
+
 async def test_an_agent_without_session_hooks_reports_its_rollouts_as_restarts_that_keep_running(
     tmp_path: Path,
 ) -> None:
@@ -379,8 +404,8 @@ async def test_an_agent_without_session_hooks_reports_its_rollouts_as_restarts_t
 
     assert prepared.json()["phase"] == "prepared"
     assert prepared.json()["report"]["restarts"] == ["r"] and prepared.json()["report"]["blockers"] == []
-    assert unattributed.json()["error"]["code"] == "rollout_id_required"
-    assert refused.json()["error"]["code"] == "restart_in_scope"
+    assert unattributed.json()["error"]["code"] == "checkpoint_rollout_id_required"
+    assert refused.json()["error"]["code"] == "checkpoint_restart_in_scope"
     assert committed.status_code == 200
     assert running and stopped
     assert await agent._restart_only.export(None) == []
@@ -463,7 +488,8 @@ async def test_restored_sessions_not_yet_claimed_survive_the_next_checkpoint(tmp
         assert legacy_run.continuation == {"next": "verify"}
 
 
-def test_checkpointing_refuses_several_workers_for_agents_without_session_hooks() -> None:
+def test_with_several_workers_the_main_process_coordinates_an_agent_without_session_hooks(monkeypatch) -> None:
+    monkeypatch.delenv(COORDINATOR_SOCKET_ENV, raising=False)
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "t"}}
     agent = _UnsupportedAgent(
@@ -471,8 +497,21 @@ def test_checkpointing_refuses_several_workers_for_agents_without_session_hooks(
         server_client=client,
     )
 
-    with pytest.raises(ValueError, match="num_workers=1"):
-        agent.setup_webserver()
+    app = agent.setup_webserver()
+    coordinator = app.state.nemo_gym_checkpoint_coordinator
+    socket_path = os.environ[COORDINATOR_SOCKET_ENV]
+    thread = coordinator._thread
+    try:
+        # The main process serves no requests: its workers forward control calls to this coordinator.
+        assert coordinator.socket_path == socket_path
+        assert coordinator.participant.kind == "agent"
+        assert coordinator.participant.expected_workers == 2
+        assert not [route for route in app.routes if getattr(route, "path", "").startswith("/ng-control/")]
+    finally:
+        coordinator.stop()
+
+    # Nothing of the coordinator outlives the test: its thread, its event loop and its socket are gone.
+    assert not thread.is_alive() and not os.path.exists(socket_path)
 
 
 async def test_a_session_woken_by_resume_stays_parked_if_a_new_checkpoint_closes_first() -> None:
@@ -821,7 +860,7 @@ async def test_a_retire_during_a_close_does_not_cancel_the_activation_again() ->
     assert hooks.retired == ["s"] and not participant.has_session("s")
 
 
-async def test_a_restored_legacy_run_claimed_at_verify_is_no_longer_pending_and_survives_a_commit(
+async def test_a_restored_legacy_run_claimed_at_verify_is_no_longer_unclaimed_and_survives_a_commit(
     tmp_path: Path,
 ) -> None:
     hooks = Hooks()
@@ -849,7 +888,7 @@ async def test_a_restored_legacy_run_claimed_at_verify_is_no_longer_pending_and_
 
     task = asyncio.create_task(run())
     await asyncio.wait_for(verifying.wait(), 5)
-    pending = await participant.restored_pending()
+    pending = await participant.unclaimed()
     await controller.prepare(CheckpointRequest(**control("c2")))
     # The controller's scope leaves the rollout out; the claimed /run must not be retired for that.
     await controller.commit(CommitRequest(**control("c2", checkpoint_dir=str(tmp_path), episode_ids=[])))
@@ -911,7 +950,7 @@ async def test_model_calls_and_activations_notify_only_while_a_checkpoint_is_ope
 class _SandboxAgent(SimpleResponsesAPIAgent):
     """An agent whose seed awaits while it builds the session, as one that starts a sandbox does."""
 
-    checkpoint_sessions_supported = True
+    checkpoint_mode = "exported"
     building: Any = None
     release: Any = None
     events: Any = None
@@ -971,7 +1010,7 @@ async def test_a_retire_waits_for_a_seed_in_progress_which_frees_what_it_built()
 
     assert not done
     assert retired.status_code == 200
-    assert seeded.status_code == 409 and seeded.json()["error"]["code"] == "stale_attempt"
+    assert seeded.status_code == 409 and seeded.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert agent.events == ["freed s", "retire replied"]
     assert "s" not in agent._session_records and not participant.has_session("s") and participant.ready()
 
@@ -1014,7 +1053,7 @@ async def test_an_agent_that_builds_its_own_app_still_reports_its_runs_as_restar
 
     assert prepared.json()["phase"] == "prepared"
     assert prepared.json()["report"]["restarts"] == ["r"] and prepared.json()["report"]["blockers"] == []
-    assert unattributed.json()["error"]["code"] == "rollout_id_required"
+    assert unattributed.json()["error"]["code"] == "checkpoint_rollout_id_required"
     assert stopped
 
 
@@ -1084,7 +1123,7 @@ async def test_a_restart_only_seed_that_arrives_after_its_rollout_was_retired_is
         seeded = await http.post("/v1/agent_sessions", json=_SEED)
 
     assert retired.status_code == 200
-    assert seeded.status_code == 409 and seeded.json()["error"]["code"] == "stale_attempt"
+    assert seeded.status_code == 409 and seeded.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert "s" not in agent._session_records
 
 
@@ -1144,7 +1183,7 @@ async def test_a_restart_only_retire_frees_its_rollout_s_sessions_and_waits_for_
     assert live.status_code == other.status_code == 200
     assert not done
     assert retired.status_code == 200
-    assert seeded.status_code == 409 and seeded.json()["error"]["code"] == "stale_attempt"
+    assert seeded.status_code == 409 and seeded.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert sorted(agent.events[:2]) == ["stopped live", "stopped slow"] and agent.events[2:] == ["retire replied"]
     assert set(agent._session_records) == {"other"}
 
@@ -1338,8 +1377,8 @@ async def test_an_episode_the_environment_reports_as_a_restart_does_not_hold_up_
 
     async with resources:
         running = asyncio.create_task(environment_server.run_request(request))
-        # The activation is inside its tool call, which the resources server holds.
-        await until(lambda: resources_server._checkpoint.inflight == 1)
+        # Seeds also count as in flight; wait for the activation's held tool call before checkpointing.
+        await until(lambda: episode_client.tool_calls == 1 and resources_server._checkpoint.inflight == 1)
         participants = await coordination.discover(control_client, auth_token="t")
         prepared = await coordination.prepare(participants, "c1", deadline_ts=time.time() + 2)
         scope = prepared.continued([request.episode_id])

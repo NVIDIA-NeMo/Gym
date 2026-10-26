@@ -15,6 +15,7 @@
 """Provider-neutral public sandbox API."""
 
 import asyncio
+import inspect
 import tempfile
 import threading
 import time
@@ -22,6 +23,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -175,7 +177,7 @@ class SandboxPty:
                 env=env,
                 rows=rows,
                 cols=cols,
-                user=user,
+                user=user if user is not None else sandbox.default_user,
                 pty=pty,
             ),
         )
@@ -387,6 +389,18 @@ def _sandbox_id(handle: Any) -> str | None:
     return getattr(handle, "sandbox_id", None)
 
 
+def _missing_keywords(method: Callable[..., Any], keywords: Mapping[str, Any]) -> list[str]:
+    """The names in ``keywords`` that ``method`` does not take, none when it takes them all or ``**kwargs``."""
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        # No inspectable signature (a builtin or a mock): the call itself decides.
+        return []
+    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return []
+    return [name for name in keywords if name not in parameters]
+
+
 class AsyncSandbox:
     """Async sandbox object backed by a runtime provider.
 
@@ -510,8 +524,8 @@ class AsyncSandbox:
 
         ``preserve_background_services`` selects a provider's service-preserving
         execution when available; other providers use ordinary exec. Services
-        must redirect stdout and stderr. This mode does not accept per-command
-        ``env`` or ``user`` overrides on providers with a service-preserving path.
+        must redirect stdout and stderr. Per-command ``env`` and ``user``
+        overrides apply to the service-preserving execution too.
         """
         if not is_span_group_enabled(GymSpanGroup.SANDBOX):
             return await self._exec_uninstrumented(
@@ -566,13 +580,23 @@ class AsyncSandbox:
         preserve_background_services: bool = False,
     ) -> SandboxExecResult:
         if preserve_background_services and isinstance(self._provider, SupportsSandboxBackgroundServices):
-            if env is not None or user is not None:
-                raise ValueError("Service-preserving execution does not support per-command env or user overrides")
+            overrides = {name: value for name, value in (("env", env), ("user", user)) if value is not None}
+            # Older custom providers implement only cwd and timeout_s. They still serve a command without
+            # overrides; one with them is refused by name here rather than by a TypeError from inside the call.
+            missing = _missing_keywords(self._provider.exec_with_background_services, overrides)
+            if missing:
+                raise TypeError(
+                    f"{type(self._provider).__name__}.exec_with_background_services does not accept "
+                    f"{' or '.join(missing)}, so the per-command {' and '.join(missing)} override of this "
+                    "service-preserving exec cannot be applied. Add the keyword(s) to the provider "
+                    "(SupportsSandboxBackgroundServices takes cwd, env, timeout_s and user)."
+                )
             return await self._provider.exec_with_background_services(
                 self._require_handle(),
                 command,
                 cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
                 timeout_s=timeout_s,
+                **overrides,
             )
         return await self._provider.exec(
             self._require_handle(),
@@ -580,8 +604,22 @@ class AsyncSandbox:
             cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
             env=env,
             timeout_s=timeout_s,
-            user=user,
+            user=user if user is not None else self.default_user,
         )
+
+    @property
+    def default_user(self) -> str | int | None:
+        """The user an exec runs as when it names none: ``SandboxSpec.user``, else the provider's own default."""
+        return self._spec.user if self._spec is not None else None
+
+    def set_default_user(self, user: str | int | None) -> None:
+        """Change the default exec user of a running sandbox.
+
+        A Dockerfile overlay creates the task's user inside the sandbox after it started, so the
+        sandbox is created without one and switches to it once the user exists. ``serialize()``
+        carries the new value, so a harness that reattaches gets the same default.
+        """
+        self._spec = replace(self._spec, user=user) if self._spec is not None else SandboxSpec(user=user)
 
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
         await self._provider.upload_file(self._require_handle(), Path(local_path), remote_path)
@@ -717,6 +755,10 @@ class AsyncSandbox:
         if isinstance(descriptor, dict) and self._spec is not None and self._spec.sidecars:
             sidecars = [{"name": sidecar.name, "image": sidecar.image} for sidecar in self._spec.sidecars]
             descriptor = {**descriptor, "sidecars": sidecars}
+        # Carry the default user too, so a harness that reattaches runs commands as the same user.
+        if isinstance(descriptor, dict) and descriptor.get("user") is None and self._spec is not None:
+            if self._spec.user is not None:
+                descriptor = {**descriptor, "user": self._spec.user}
         return descriptor
 
     @classmethod
@@ -734,8 +776,11 @@ class AsyncSandbox:
         workdir = descriptor.get("workdir") if isinstance(descriptor, Mapping) else None
         ports = descriptor.get("ports", ()) if isinstance(descriptor, Mapping) else ()
         sidecars = descriptor.get("sidecars", ()) if isinstance(descriptor, Mapping) else ()
+        user = descriptor.get("user") if isinstance(descriptor, Mapping) else None
         sandbox = cls(
-            provider, SandboxSpec(workdir=workdir, ports=ports, sidecars=sidecars), owns_provider=owns_provider
+            provider,
+            SandboxSpec(workdir=workdir, ports=ports, sidecars=sidecars, user=user),
+            owns_provider=owns_provider,
         )
         sandbox._handle = handle
         sandbox._stopped = False

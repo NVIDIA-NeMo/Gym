@@ -446,7 +446,8 @@ def test_session_of_an_exited_worker_gets_an_explicit_error(deployment: Deployme
     # uvicorn replaces the worker; the replacement does not hold the killed worker's sessions.
     victim = deployment.resources_worker_of(owners.most_common(1)[0][0])
     victim.send_signal(signal.SIGKILL)
-    victim.wait(timeout=10)
+    # Uvicorn may be in its 30-second health check when the worker dies; only its parent can reap it.
+    victim.wait(timeout=60)
     deployment._wait_for_workers(exclude=victim.pid)
     responses, rewards = asyncio.run(verify_all(sessions))
     lost_owners = {owner_of[_session_id(cookies)] for cookies, r in zip(sessions, responses) if r.status == 410}

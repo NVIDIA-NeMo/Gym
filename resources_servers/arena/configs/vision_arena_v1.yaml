@@ -1,0 +1,101 @@
+# VisionArena-Bench v0.1 benchmark.
+vision_arena_v1:
+  resources_servers:
+    arena:
+      entrypoint: app.py
+      num_workers: null
+      domain: rlhf
+      verified: false
+      description: "VisionArena-Bench v0.1 multimodal preference evaluation"
+      value: Measure image-grounded answer quality against saved baseline responses
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 32768
+        temperature: 0.0
+      max_rollout_failure_rate: 0.05
+      judge_concurrency: 16
+      generation_only: false
+      policy_model_aliases: []
+      verdict_weight: 1
+      score_both_bad_as_tie: true
+      style_control_method: none
+      style_length_ratio_range: null
+      style_short_reference_max_tokens: null
+      style_short_response_max_tokens: null
+      style_norm_mean: null
+      style_norm_std: null
+      style_coefs: null
+      judge_timeout_secs: 1800
+      tokenizer_model: gpt-4o
+      bootstrap_rounds: 100
+      bootstrap_seed: 42
+      judge_prompt_template: |-
+        <|Conversation History|>
+        {question}
+
+        <|The Start of Assistant A's Answer|>
+        {answer_a}
+        <|The End of Assistant A's Answer|>
+
+        <|The Start of Assistant B's Answer|>
+        {answer_b}
+        <|The End of Assistant B's Answer|>
+      judge_system_message: |-
+        Please act as an impartial judge and evaluate the quality of the responses provided by two AI assistants to the user conversation displayed below. You will be given assistant A's answer and assistant B's answer. Your job is to evaluate which assistant's answer is better.
+
+        Begin your evaluation by generating your own last answer to the conversation. You must provide your answers before judging any answers.
+
+        When evaluating the assistants' answers, compare both assistants' answers with your answer. You must identify and correct any mistakes or inaccurate information.
+
+        Then consider if the assistant's answers are helpful, relevant, and concise. Helpful means the answer correctly responds to the prompt or follows the instructions. Note when user prompt has any ambiguity or more than one interpretation, it is more helpful and appropriate to ask for clarifications or more information from the user than providing an answer based on assumptions. Relevant means all parts of the response closely connect or are appropriate to what is being asked. Concise means the response is clear and not verbose or excessive.
+
+        Then consider the creativity and novelty of the assistant's answers when needed. Finally, identify any missing important information in the assistants' answers that would be beneficial to include when responding to the user prompt.
+
+        If neither assistant's answer adequately addresses the user prompt, you should judge both as bad rather than selecting a winner.
+
+        After providing your explanation, you must output only one of the following choices as your final verdict with a label:
+
+        1. Assistant A is better: [[A>>B]]
+        2. Tie, relatively the same: [[A=B]]
+        3. Assistant B is better: [[B>>A]]
+        4. Both assistant answers are bad: [[BB]]
+
+        Example output: "My final verdict is tie: [[A=B]]".
+      judge_system_message_by_category: {}
+
+vision_arena_v1_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: vision_arena_v1
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/arena/data/vision_arena_v1/example.jsonl
+
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: https://inference-api.nvidia.com/v1
+      api_key: YOUR_JUDGE_API_KEY
+      model: gcp/google/gemini-3.7-flash
+      return_token_id_information: false
+      uses_reasoning_parser: false
+
+vision_arena_v1_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: vision_arena_v1_simple_agent

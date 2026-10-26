@@ -102,6 +102,12 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         subject=CheckSubject.TASK,
         reads=frozenset({CheckInput.REPEAT_DIGESTS}),
     ),
+    CheckSpec(
+        id="run_excessive_failures",
+        evaluation_scope=CheckScope.RUN,
+        subject=CheckSubject.RUN,
+        reads=frozenset({CheckInput.RUN_ACCOUNTING}),
+    ),
 )
 
 _ROLLOUT_SPECS = tuple(spec for spec in CHECK_REGISTRY if spec.evaluation_scope == CheckScope.ROLLOUT)

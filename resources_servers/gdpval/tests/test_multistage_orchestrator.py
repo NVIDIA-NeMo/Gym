@@ -29,6 +29,7 @@ from omegaconf import OmegaConf
 
 import nemo_gym.rollout_collection as rollout_collection_module
 import resources_servers.gdpval.multistage_orchestrator as multistage_module
+from nemo_gym.base_resources_server import lost_session_verification
 from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -47,6 +48,7 @@ from nemo_gym.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     NG_TERMINAL_KEY,
     SharedRolloutCollectionConfig,
+    is_terminal_failure,
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from resources_servers.gdpval.multistage_elo import PartialStagePolicy
@@ -346,6 +348,20 @@ class TestRowHelpers:
         assert tagged[0]["expected_final_stage_index"] == 2
         assert tagged[0]["expected_stage_row_count"] == 17
         assert tagged[0]["task_id"] == "t3"
+
+    def test_tag_results_keeps_a_lost_session_a_terminal_verification_failure(self, tmp_path: Path) -> None:
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": "ag"}, "task_id": "t0"}
+
+        tagged = tag_results([(row, lost_session_verification("server restarted"))], stage_index=0)
+
+        # A masked lost session holds no measurement, so it must not count as a judged success.
+        assert tagged[0][NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
+        assert tagged[0]["_ng_failure_stage"] == "verification"
+        assert is_terminal_failure(tagged[0])
+        assert not _is_retryable_failure(tagged[0])
+        output = tmp_path / "rollouts.jsonl"
+        route_stage_rows(output, tagged)
+        assert load_persisted_rows(output) == {}
 
 
 # ---------------------------------------------------------------------------

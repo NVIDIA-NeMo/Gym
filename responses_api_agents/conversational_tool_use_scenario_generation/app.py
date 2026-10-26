@@ -36,8 +36,10 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseUsage,
+    accumulate_response_usage,
 )
-from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.responses_converter import ResponsesConverter, chat_completion_usage_to_response_usage
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.conversational_tool_use_scenario_generation.assets import (
     ScenarioAssets,
@@ -249,11 +251,16 @@ class ConversationalToolUseScenarioGenerationAgent(SimpleResponsesAPIAgent):
         accepted: list[CustomerScenario] = []
         accepted_keys: set[tuple[str, str, str, Optional[str], str]] = set()
         last_artifact_completion: Optional[NeMoGymChatCompletion] = None
+        usage: Optional[NeMoGymResponseUsage] = None
 
         for completion_index, task in enumerate(asyncio.as_completed(tasks)):
             outcome = await task
             trace = outcome.trace
             trace.completion_index = completion_index
+            if outcome.chat_completion is not None:
+                usage = accumulate_response_usage(
+                    usage, chat_completion_usage_to_response_usage(outcome.chat_completion.usage)
+                )
 
             accepted_from_call = 0
             duplicate_from_call = 0
@@ -288,6 +295,8 @@ class ConversationalToolUseScenarioGenerationAgent(SimpleResponsesAPIAgent):
             if last_artifact_completion is not None
             else self._empty_response()
         )
+        # The response text is one artifact call; usage covers every completion the rollout received.
+        response.usage = usage
         return ScenarioGenerationVerifyResponse.model_validate(
             body.model_dump(mode="json")
             | {
@@ -371,7 +380,9 @@ class ConversationalToolUseScenarioGenerationAgent(SimpleResponsesAPIAgent):
                     error_type=type(exc).__name__,
                     error_message=str(exc),
                 ),
-                chat_completion=None,
+                # A completion that came back but failed to parse still spent tokens; it has no scenarios,
+                # so it is never chosen as the response artifact.
+                chat_completion=chat_completion,
             )
 
     def _chat_completion_to_response(

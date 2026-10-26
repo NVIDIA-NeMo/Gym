@@ -29,6 +29,8 @@ wrapper. It is bridged onto the span rather than replaced: one correlation schem
 visible from traces, Gym's own logs, and captured trajectories alike.
 """
 
+import math
+from collections.abc import Mapping
 from functools import wraps
 from typing import Any, Callable, Optional
 
@@ -38,6 +40,7 @@ from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, s
 
 #: Span attribute carrying Gym's existing rollout correlation id.
 ROLLOUT_ID_ATTRIBUTE = "nemo.gym.rollout.id"
+ROLLOUT_REWARD_ATTRIBUTE = "nemo.gym.rollout.reward"
 
 
 def traced_endpoint(
@@ -45,6 +48,8 @@ def traced_endpoint(
     span_name: str,
     handler: Callable,
     static_attributes: Optional[dict] = None,
+    *,
+    result_attributes: Optional[Callable[[Any], dict]] = None,
 ) -> Callable:
     """Wrap an async FastAPI handler in a span-group-gated span.
 
@@ -60,6 +65,8 @@ def traced_endpoint(
         handler: The async handler to wrap.
         static_attributes: Attributes constant for this route, e.g. the server name.
             Evaluated once at wrap time, not per request.
+        result_attributes: Maps the handler's return value to attributes set on the span
+            before it ends.
 
     Returns:
         The wrapped handler.
@@ -80,9 +87,23 @@ def traced_endpoint(
                 if rollout_id:
                     attributes[ROLLOUT_ID_ATTRIBUTE] = rollout_id
                 safe_set_span_attributes(span, attributes)
-            return await handler(*args, **kwargs)
+            result = await handler(*args, **kwargs)
+            if span is not None and result_attributes is not None:
+                safe_set_span_attributes(span, result_attributes(result))
+            return result
 
     return wrapper
+
+
+def _verify_result_attributes(result: Any) -> dict:
+    """The reward of a `/verify` result; nothing for a masked sample or a result without a numeric reward."""
+    if isinstance(result, Mapping):
+        reward, masked = result.get("reward"), result.get("mask_sample")
+    else:
+        reward, masked = getattr(result, "reward", None), getattr(result, "mask_sample", False)
+    if masked or isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward):
+        return {}
+    return {ROLLOUT_REWARD_ATTRIBUTE: float(reward)}
 
 
 def traced_verify_endpoint(handler: Callable, static_attributes: Optional[dict] = None) -> Callable:
@@ -93,13 +114,16 @@ def traced_verify_endpoint(handler: Callable, static_attributes: Optional[dict] 
     application-telemetry metric — see
     `kb/knowledge/concepts/application-vs-experiment-telemetry.md`. A verifier that
     correctly scores an answer as wrong is a success here; a verifier that raises is not.
+    The `gym.verify` span carries the reward as `nemo.gym.rollout.reward`, which a metric label could not.
     """
     import time
 
     from nemo_gym.telemetry.metrics import record_verify
     from nemo_gym.telemetry.span_groups import GymSpanGroup
 
-    traced = traced_endpoint(GymSpanGroup.VERIFY, "gym.verify", handler, static_attributes)
+    traced = traced_endpoint(
+        GymSpanGroup.VERIFY, "gym.verify", handler, static_attributes, result_attributes=_verify_result_attributes
+    )
 
     @wraps(handler)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:

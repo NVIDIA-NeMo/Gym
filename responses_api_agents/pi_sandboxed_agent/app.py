@@ -25,7 +25,7 @@ from pathlib import Path
 from shlex import join, quote
 from tempfile import TemporaryDirectory
 from time import time
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 from uuid import uuid4
 
 from fastapi import Request
@@ -82,6 +82,8 @@ class PiSandboxedAgentVerifyResponse(PiAgentVerifyResponse):
 
 class PiSandboxedAgent(PiAgent):
     config: PiSandboxedAgentConfig
+    # The harness runs inside the task sandbox and calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
 
     def model_post_init(self, __context: Any) -> None:
         # Pi is preinstalled in the sandbox image, never installed on the Gym host.

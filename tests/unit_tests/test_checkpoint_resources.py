@@ -224,7 +224,7 @@ async def test_a_restart_only_session_is_a_restart_that_keeps_running_through_a_
     assert prepared["phase"] == "prepared"
     assert prepared["report"]["restarts"] == ["r-a2"] and prepared["report"]["blockers"] == []
     assert during.status_code == 200
-    assert refused.status_code == 409 and refused.json()["error"]["code"] == "restart_in_scope"
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_restart_in_scope"
     assert committed.status_code == 200 and committed.json()["manifest"]["record_count"] == 0
 
 
@@ -407,7 +407,7 @@ async def test_a_session_start_without_a_rollout_prefix_is_refused_before_its_ha
         refused = await client.post(path, json=SEED)
         status = (await client.get("/ng-control/v1/checkpoint/status", headers=AUTH)).json()
 
-    assert refused.status_code == 400 and refused.json()["error"]["code"] == "rollout_id_required"
+    assert refused.status_code == 400 and refused.json()["error"]["code"] == "checkpoint_rollout_id_required"
     assert server.counters == {}
     assert status["report"]["counts"] == {"inflight": 0, "sessions": 0}
 
@@ -426,7 +426,7 @@ async def test_a_session_end_without_a_rollout_prefix_is_refused_before_its_hand
         refused = await client.post(path, json=_session_end_body(path, "r"))
 
     # Without the prefix, nothing could tell whether the request comes from the attempt that owns the session.
-    assert refused.status_code == 400 and refused.json()["error"]["code"] == "rollout_id_required"
+    assert refused.status_code == 400 and refused.json()["error"]["code"] == "checkpoint_rollout_id_required"
     assert server._checkpoint.readiness().counts["sessions"] == 1
 
 
@@ -527,7 +527,7 @@ class ReplayVerifyServer(CounterServer):
 
 
 @pytest.mark.parametrize("server_type, expected", [(CounterServer, "wait"), (ReplayVerifyServer, "replay")])
-async def test_the_seed_reply_and_status_report_the_verify_mode(
+async def test_the_seed_reply_and_status_report_the_verify_step_type(
     server_type: type[CounterServer], expected: str
 ) -> None:
     _, client = make_server(server_type)
@@ -613,7 +613,7 @@ async def test_a_retire_waits_for_the_sessions_request_in_flight() -> None:
         retired, finished = await retire, await tool
 
     assert waited and retired.status_code == 200 and finished.status_code == 200
-    assert refused.status_code == 409 and refused.json()["error"]["code"] == "stale_attempt"
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert server.counters == {} and server._checkpoint.readiness().counts["sessions"] == 0
 
 
@@ -677,8 +677,8 @@ async def test_late_requests_of_a_retired_attempt_are_refused_until_forget_but_a
         after_forget = await client.post("/ng-rollout/r/seed_session", json=SEED)
 
     assert retired.status_code == 200
-    assert late_tool.status_code == 409 and late_tool.json()["error"]["code"] == "stale_attempt"
-    assert late_seed.status_code == 409 and late_seed.json()["error"]["code"] == "stale_attempt"
+    assert late_tool.status_code == 409 and late_tool.json()["error"]["code"] == "checkpoint_stale_attempt"
+    assert late_seed.status_code == 409 and late_seed.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert next_seed.status_code == 200 and close.status_code == 200
     assert status["retired_sessions"] == 1 and status["retired_rollouts"] == 1
     assert forgotten.status_code == 200 and after_forget.status_code == 200
@@ -726,7 +726,7 @@ async def test_a_session_whose_retire_was_cut_short_stays_until_a_retry_frees_it
         server.release.set()
         retried = await client.post("/ng-control/v1/checkpoint/retire", json=retire, headers=AUTH)
 
-    assert cut_short.json()["error"]["code"] == "deadline_exceeded"
+    assert cut_short.json()["error"]["code"] == "checkpoint_deadline_exceeded"
     assert prepared.json()["phase"] == "preparing" and prepared.json()["report"]["blockers"] == ["r"]
     assert retried.status_code == 200 and server.counters == {}
     assert server._checkpoint.readiness().counts["sessions"] == 0
@@ -836,10 +836,10 @@ async def test_a_seed_that_finishes_after_its_retire_was_cut_short_registers_its
         retried = await client.post("/ng-control/v1/checkpoint/retire", json=retire, headers=AUTH)
         forgotten = await client.post("/ng-control/v1/checkpoint/forget", json=forget, headers=AUTH)
 
-    assert cut_short.json()["error"]["code"] == "deadline_exceeded" and seeded.status_code == 200
-    assert late.status_code == 409 and late.json()["error"]["code"] == "stale_attempt"
+    assert cut_short.json()["error"]["code"] == "checkpoint_deadline_exceeded" and seeded.status_code == 200
+    assert late.status_code == 409 and late.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert exported == []
-    assert refused.status_code == 409 and refused.json()["error"]["code"] == "retire_incomplete"
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_retire_incomplete"
     # The retried retire frees the session the seed created.
     assert retried.status_code == 200 and server.counters == {}
     assert forgotten.status_code == 200 and server._checkpoint.readiness().counts["sessions"] == 0
@@ -859,7 +859,7 @@ class LateFailingSeedServer(CounterServer):
         raise HTTPException(status_code=500, detail="the seed failed")
 
 
-async def test_a_retire_cut_short_while_a_seed_is_in_flight_still_fences_the_attempt_s_existing_session() -> None:
+async def test_a_retire_cut_short_while_a_seed_is_in_flight_still_marks_the_attempt_s_existing_session() -> None:
     server, client = make_server(LateFailingSeedServer)
     retire = control("retire", episode_ids=[{"rollout_id": "r"}])
     forget = control("forget", rollout_ids=["r"])
@@ -881,16 +881,16 @@ async def test_a_retire_cut_short_while_a_seed_is_in_flight_still_fences_the_att
         retried = await client.post("/ng-control/v1/checkpoint/retire", json=retire, headers=AUTH)
         forgotten = await client.post("/ng-control/v1/checkpoint/forget", json=forget, headers=AUTH)
 
-    assert cut_short.json()["error"]["code"] == "deadline_exceeded" and failed.status_code == 500
-    # The session the attempt had before the retire is fenced although the retire never got past the seed.
-    assert late.status_code == 409 and late.json()["error"]["code"] == "stale_attempt"
+    assert cut_short.json()["error"]["code"] == "checkpoint_deadline_exceeded" and failed.status_code == 500
+    # The session the attempt had before the retire is marked although the retire never got past the seed.
+    assert late.status_code == 409 and late.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert not ready
-    assert refused.status_code == 409 and refused.json()["error"]["code"] == "retire_incomplete"
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_retire_incomplete"
     assert retried.status_code == 200 and server.counters == {}
     assert forgotten.status_code == 200 and server._checkpoint.readiness().counts["sessions"] == 0
 
 
-async def test_a_retire_that_arrives_after_its_deadline_still_fences_the_attempt_s_sessions() -> None:
+async def test_a_retire_that_arrives_after_its_deadline_still_marks_the_attempt_s_sessions() -> None:
     server, client = make_server()
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
@@ -905,10 +905,10 @@ async def test_a_retire_that_arrives_after_its_deadline_still_fences_the_attempt
             "/ng-control/v1/checkpoint/forget", json=control("forget", rollout_ids=["r"]), headers=AUTH
         )
 
-    assert late_retire.json()["error"]["code"] == "deadline_exceeded"
-    assert late.status_code == 409 and late.json()["error"]["code"] == "stale_attempt"
+    assert late_retire.json()["error"]["code"] == "checkpoint_deadline_exceeded"
+    assert late.status_code == 409 and late.json()["error"]["code"] == "checkpoint_stale_attempt"
     # Forgetting would lower the mark and leave the attempt's session live.
-    assert refused.status_code == 409 and refused.json()["error"]["code"] == "retire_incomplete"
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_retire_incomplete"
 
 
 async def test_a_session_is_open_from_its_seed_until_a_close_or_a_verify_ends_it() -> None:
@@ -929,7 +929,7 @@ async def test_a_session_is_open_from_its_seed_until_a_close_or_a_verify_ends_it
     assert not participant.is_open("never-seeded")
 
 
-async def test_a_session_is_not_open_once_a_retire_fences_it_even_before_it_is_freed() -> None:
+async def test_a_session_is_not_open_once_a_retire_marks_it_even_before_it_is_freed() -> None:
     server, client = make_server()
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
@@ -976,8 +976,8 @@ async def test_forget_is_refused_while_a_seed_of_a_retired_attempt_is_in_flight(
         late = await client.post("/increment")
 
     # Forgetting now would let the seed bind its session as live once it finishes.
-    assert refused.status_code == 409 and refused.json()["error"]["code"] == "retire_incomplete"
-    assert late.status_code == 409 and late.json()["error"]["code"] == "stale_attempt"
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_retire_incomplete"
+    assert late.status_code == 409 and late.json()["error"]["code"] == "checkpoint_stale_attempt"
 
 
 async def test_forget_is_refused_while_a_retire_has_not_freed_its_sessions() -> None:
@@ -996,8 +996,8 @@ async def test_forget_is_refused_while_a_retire_has_not_freed_its_sessions() -> 
             "/ng-control/v1/checkpoint/forget", json=control(rollout_ids=["r"]), headers=AUTH
         )
 
-    assert refused.status_code == 409 and refused.json()["error"]["code"] == "retire_incomplete"
-    assert late.json()["error"]["code"] == "stale_attempt"
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_retire_incomplete"
+    assert late.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert forgotten.status_code == 200
 
 
@@ -1038,7 +1038,7 @@ async def test_a_stateless_server_drains_and_refuses_a_retired_session() -> None
         # A tool call without a rollout prefix names only its session.
         late = await client.post("/increment")
 
-    assert late.status_code == 409 and late.json()["error"]["code"] == "stale_attempt"
+    assert late.status_code == 409 and late.json()["error"]["code"] == "checkpoint_stale_attempt"
 
 
 async def test_deleting_an_unclaimed_restored_session_refuses_nothing_later(tmp_path: Path) -> None:
@@ -1161,17 +1161,17 @@ async def test_deleting_one_rollout_s_restored_sessions_does_not_scan_every_rest
     participant = server._checkpoint
     for index in range(1000):
         participant.seeded(f"s{index}", EpisodeId(rollout_id=f"r{index}", attempt=1))
-    participant._restored_pending.update(participant._sessions)
+    participant._unclaimed.update(participant._sessions)
 
     class Unscannable(set):
         def __iter__(self):  # noqa: ANN204
             raise AssertionError("deleting a restored episode scanned every restored session")
 
-    participant._restored_pending = Unscannable(participant._restored_pending)
+    participant._unclaimed = Unscannable(participant._unclaimed)
     await participant.delete_restored(EpisodeId(rollout_id="r7", attempt=1))
 
     assert "s7" not in participant._sessions and len(participant._sessions) == 999
-    assert "s7" not in participant._restored_pending and "s8" in participant._restored_pending
+    assert "s7" not in participant._unclaimed and "s8" in participant._unclaimed
 
 
 def test_ready_does_not_list_blockers() -> None:
@@ -1241,7 +1241,7 @@ async def test_a_seed_waiting_out_a_restore_does_not_hold_up_a_retire_of_its_att
         seeded = await seed
 
     assert retired.status_code == 200, retired.text
-    assert seeded.status_code == 409 and seeded.json()["error"]["code"] == "stale_attempt"
+    assert seeded.status_code == 409 and seeded.json()["error"]["code"] == "checkpoint_stale_attempt"
 
 
 class FixedIdSeedServer(CounterServer):
@@ -1267,10 +1267,10 @@ async def test_a_seed_of_a_restored_session_s_id_claims_it(tmp_path: Path) -> No
             headers=AUTH,
         )
         await fresh.post("/ng-control/v1/checkpoint/resume", json=control("r1"), headers=AUTH)
-        pending_before = await restored._checkpoint.restored_pending()
+        pending_before = await restored._checkpoint.unclaimed()
         # The environment continues from before its seed, so it seeds the same session again.
         await fresh.post("/ng-rollout/r-a1/seed_session", json=SEED)
-        pending_after = await restored._checkpoint.restored_pending()
+        pending_after = await restored._checkpoint.unclaimed()
 
     assert pending_before == [EpisodeId(rollout_id="r", attempt=1)]
     # Claimed, so a commit never deletes it as unused restored state.
@@ -1302,7 +1302,7 @@ async def test_after_a_restore_a_late_request_of_the_replaced_attempt_is_refused
         replacement = await fresh_client.post("/ng-rollout/r-a1/increment")
 
     for refused in (late, late_seed):
-        assert refused.status_code == 409 and refused.json()["error"]["code"] == "stale_attempt"
+        assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert replacement.json() == {"count": 1}
 
 
@@ -1339,7 +1339,7 @@ async def test_after_a_restore_a_close_from_the_replaced_attempt_is_refused_and_
         # The replacement owns the session and still closes it.
         own_close = await fresh.post("/ng-rollout/r-a1/close_session", json=own)
 
-    assert stale_close.status_code == 409 and stale_close.json()["error"]["code"] == "stale_attempt"
+    assert stale_close.status_code == 409 and stale_close.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert committed.json()["manifest"]["record_count"] == 1
     assert own_close.status_code == 200 and restored._checkpoint.readiness().counts["sessions"] == 0
 
@@ -1351,7 +1351,7 @@ async def test_a_request_on_a_session_from_another_rollout_is_refused(path: str)
         await client.post("/ng-rollout/r/seed_session", json=SEED)
         refused = await client.post(f"/ng-rollout/q{path}", json=_session_end_body(path, "q"))
 
-    assert refused.status_code == 409 and refused.json()["error"]["code"] == "stale_attempt"
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert server._checkpoint.readiness().counts["sessions"] == 1
 
 
@@ -1474,7 +1474,7 @@ async def test_a_retire_frees_the_sessions_of_a_server_that_does_not_export_them
         late = await client.post("/increment")
 
     assert retired.status_code == 200
-    assert late.json()["error"]["code"] == "stale_attempt"
+    assert late.json()["error"]["code"] == "checkpoint_stale_attempt"
     # Nothing else would free it: the late request that would have ended the session is refused.
     assert server.counters == {}
 
@@ -1589,18 +1589,18 @@ async def test_after_a_restore_only_the_replacement_s_prefixed_calls_reach_the_s
         # A harness of the replaced attempt, with and without its rollout prefix.
         stale = await fresh.post("/ng-rollout/r/increment")
         cookie_only = await fresh.post("/increment")
-        unclaimed = await restored.checkpoint_participant.restored_pending()
+        unclaimed = await restored.checkpoint_participant.unclaimed()
         counts_after_refusals = dict(restored.counters)
         replacement = await fresh.post("/ng-rollout/r-a1/increment")
 
     [session_id] = restored.counters
-    assert stale.status_code == 409 and stale.json()["error"]["code"] == "stale_attempt"
-    assert cookie_only.status_code == 400 and cookie_only.json()["error"]["code"] == "rollout_id_required"
+    assert stale.status_code == 409 and stale.json()["error"]["code"] == "checkpoint_stale_attempt"
+    assert cookie_only.status_code == 400 and cookie_only.json()["error"]["code"] == "checkpoint_rollout_id_required"
     # Neither refused call changed the restored state or claimed the session,
     # so a commit that drops the episode would still delete it.
     assert counts_after_refusals == {session_id: 1} and unclaimed == [EpisodeId(rollout_id="r", attempt=1)]
     assert replacement.json() == {"count": 2}
-    assert await restored.checkpoint_participant.restored_pending() == []
+    assert await restored.checkpoint_participant.unclaimed() == []
 
 
 async def test_stale_and_cookie_only_calls_stay_refused_across_a_second_restore(tmp_path: Path) -> None:
@@ -1648,13 +1648,13 @@ async def test_stale_and_cookie_only_calls_stay_refused_across_a_second_restore(
             await second.post("/ng-rollout/r-a1/increment"),
             await second.post("/increment"),
         ]
-        unclaimed = await restored.checkpoint_participant.restored_pending()
+        unclaimed = await restored.checkpoint_participant.unclaimed()
         replacement = await second.post("/ng-rollout/r-a2/increment")
 
     assert [response.json()["error"]["code"] for response in refused] == [
-        "stale_attempt",
-        "stale_attempt",
-        "rollout_id_required",
+        "checkpoint_stale_attempt",
+        "checkpoint_stale_attempt",
+        "checkpoint_rollout_id_required",
     ]
     assert unclaimed == [EpisodeId(rollout_id="r", attempt=2)]
     assert replacement.json() == {"count": 2}
