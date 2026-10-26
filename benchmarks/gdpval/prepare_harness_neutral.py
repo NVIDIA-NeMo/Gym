@@ -3,8 +3,8 @@
 """Prepare the GDPVal rows for harnesses that get the task tools from the resources server.
 
 The rows match ``prepare.py``'s but carry no tool list, which session harnesses such as Pi and Codex reject in the
-request. Pi reaches finish, abandon_task_finish, web_search and fetch_web_page through the resources server's MCP
-grant. Use these rows with ``prompts/harness-neutral.yaml``.
+request. Pi and Codex reach finish, abandon_task_finish, web_search and fetch_web_page through the resources server's
+MCP grant. Use these rows with ``prompts/harness-neutral.yaml``.
 """
 
 from __future__ import annotations

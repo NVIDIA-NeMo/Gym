@@ -569,6 +569,40 @@ def test_dispatch_span_survives_a_malformed_attempt_index(recorded_spans):
     assert "nemo.gym.rollout.id" not in span.attributes
 
 
+@pytest.mark.parametrize(
+    ("row", "task_id"),
+    [
+        ({"task_id": "terminal-bench/foodstuff", "task_name": "other"}, "terminal-bench/foodstuff"),
+        ({"task_id": {"taskset": "swe_pro", "task_id": "instance"}}, "instance"),
+        ({"instance_id": "django__django-1"}, "django__django-1"),
+        ({"problem_id": 17}, "17"),
+        ({"task_name": "terminal-bench/background-server"}, "terminal-bench/background-server"),
+        ({"task_id": {"taskset": "swe_pro"}}, None),
+        ({"input": "x"}, None),
+    ],
+)
+def test_dispatch_span_names_the_task_and_the_repeat(recorded_spans, row, task_id):
+    from nemo_gym.rollout_collection import _dispatch_span
+
+    with _dispatch_span({**row, "_ng_task_index": 4, "_ng_rollout_index": 2}, "alpha", server_name="s") as context:
+        pass
+
+    (span,) = [s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]
+    assert context == span.context
+    assert span.attributes.get("nemo.gym.task.id") == task_id
+    assert span.attributes["nemo.gym.rollout.repeat"] == 2
+
+
+def test_dispatch_span_omits_a_repeat_that_is_not_an_index(recorded_spans):
+    from nemo_gym.rollout_collection import _dispatch_span
+
+    with _dispatch_span({"_ng_rollout_index": True}, "alpha", server_name="s"):
+        pass
+
+    (span,) = [s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]
+    assert "nemo.gym.rollout.repeat" not in span.attributes
+
+
 # --------------------------------------------------------------------------- #
 # Driver wiring: run_from_config end to end against a fake /run
 # --------------------------------------------------------------------------- #
@@ -749,3 +783,100 @@ async def test_materialized_dispatch_takes_its_id_from_the_row_not_the_episode_b
     (dispatch,) = [s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]
     assert dispatch.attributes["nemo.gym.rollout.id"] == "0-0"
     assert "episode_id" in post.call_args.kwargs["json"]
+
+
+# --------------------------------------------------------------------------- #
+# Rollout health span
+# --------------------------------------------------------------------------- #
+
+
+async def test_each_traced_rollout_gets_a_health_span_under_its_dispatch(
+    tmp_path, monkeypatch, recorded_spans, driver_telemetry
+):
+    """The dispatch span has ended by the time health is evaluated; the health span still joins it."""
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    monkeypatch.setattr(driver_telemetry, "is_metrics_exporter_active", lambda: False)
+    _install_recording_post(monkeypatch)
+    await RolloutCollectionHelper().run_from_config(_collection_config(tmp_path, _write_rollout_input(tmp_path, 2)))
+
+    spans = recorded_spans()
+    dispatches = {s.context.span_id: s for s in spans if s.name == "gym.rollout.dispatch"}
+    healths = [s for s in spans if s.name == "gym.rollout.health"]
+    assert len(dispatches) == len(healths) == 2
+    for health in healths:
+        dispatch = dispatches[health.parent.span_id]
+        assert health.context.trace_id == dispatch.context.trace_id
+        assert health.attributes["nemo.gym.rollout.id"] == dispatch.attributes["nemo.gym.rollout.id"]
+        assert health.attributes["nemo.gym.health.verdict"] in {"healthy", "unhealthy", "unobserved"}
+
+
+async def test_no_health_span_while_traces_are_off(tmp_path, monkeypatch, recorded_spans, driver_telemetry):
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    monkeypatch.setattr(driver_telemetry, "is_trace_exporter_active", lambda: False)
+    _install_recording_post(monkeypatch)
+    await RolloutCollectionHelper().run_from_config(_collection_config(tmp_path, _write_rollout_input(tmp_path, 2)))
+
+    assert [s for s in recorded_spans() if s.name == "gym.rollout.health"] == []
+
+
+def _stub_health_digest(monkeypatch, verdict, checks):
+    from types import SimpleNamespace
+
+    import nemo_gym.rollout_health as rollout_health
+
+    digest = SimpleNamespace(verdict=verdict, findings=[SimpleNamespace(check=check) for check in checks])
+    monkeypatch.setattr(rollout_health, "evaluate_record", lambda result, ignored: digest)
+
+
+def test_health_span_carries_the_verdict_and_the_distinct_flagged_checks(recorded_spans, monkeypatch):
+    from opentelemetry import trace as otel_trace
+
+    from nemo_gym.rollout_collection import _record_rollout_health
+
+    _stub_health_digest(monkeypatch, "unhealthy", ["truncated", "empty_answer", "truncated"])
+    with otel_trace.get_tracer("test").start_as_current_span("gym.rollout.dispatch") as dispatch:
+        parent = dispatch.get_span_context()
+
+    _record_rollout_health({"_ng_task_index": 1, "_ng_rollout_index": 0}, "scored", frozenset(), parent)
+
+    (health,) = [s for s in recorded_spans() if s.name == "gym.rollout.health"]
+    assert health.parent.span_id == parent.span_id
+    assert health.attributes["nemo.gym.health.verdict"] == "unhealthy"
+    assert tuple(health.attributes["nemo.gym.health.checks"]) == ("empty_answer", "truncated")
+    assert health.attributes["nemo.gym.rollout.id"] == "1-0"
+
+
+def test_a_healthy_rollout_has_no_checks_attribute(recorded_spans, monkeypatch):
+    from opentelemetry import trace as otel_trace
+
+    from nemo_gym.rollout_collection import _record_rollout_health
+
+    _stub_health_digest(monkeypatch, "healthy", [])
+    with otel_trace.get_tracer("test").start_as_current_span("gym.rollout.dispatch") as dispatch:
+        parent = dispatch.get_span_context()
+
+    _record_rollout_health({}, "scored", frozenset(), parent)
+
+    (health,) = [s for s in recorded_spans() if s.name == "gym.rollout.health"]
+    assert health.attributes["nemo.gym.health.verdict"] == "healthy"
+    assert "nemo.gym.health.checks" not in health.attributes
+    assert "nemo.gym.rollout.id" not in health.attributes
+
+
+def test_health_metrics_are_recorded_without_a_span(recorded_spans, monkeypatch):
+    import nemo_gym.rollout_collection as rollout_collection
+
+    recorded = []
+    _stub_health_digest(monkeypatch, "unhealthy", ["truncated"])
+    monkeypatch.setattr(
+        rollout_collection,
+        "record_rollout_health",
+        lambda verdict, *, outcome, flagged_checks: recorded.append((verdict, outcome, list(flagged_checks))),
+    )
+
+    rollout_collection._record_rollout_health({}, "failed", frozenset())
+
+    assert recorded == [("unhealthy", "failed", ["truncated"])]
+    assert [s for s in recorded_spans() if s.name == "gym.rollout.health"] == []

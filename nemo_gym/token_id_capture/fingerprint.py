@@ -45,7 +45,9 @@ import orjson
 
 # Increment when fingerprint canonicalization or hash layout changes.
 # Resolvers ignore entries stamped with a different version.
-FINGERPRINT_VERSION = 3
+# 4: custom_tool_call items are assistant-authored tool calls and
+#    custom_tool_call_output items are tool results.
+FINGERPRINT_VERSION = 4
 
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
@@ -151,7 +153,7 @@ def _is_assistant_authored(message: dict) -> bool:
     # A harness need not echo standalone reasoning items.
     # Including reasoning would make fingerprints depend on the dialect and echo behavior.
     # Reasoning-only collisions resolve as ambiguous and fall back.
-    return message.get("type") == "function_call"
+    return message.get("type") in ("function_call", "custom_tool_call")
 
 
 def _content_of(content: Any) -> list[tuple[str, str]]:
@@ -197,21 +199,24 @@ def _tools_of(message: dict) -> list[tuple[str, str, str]]:
 
     Chat stores calls in the message's ``tool_calls`` field.
     Anthropic stores calls in ``tool_use`` content blocks.
-    Responses stores each call as a standalone ``function_call`` item.
+    Responses stores each call as a standalone ``function_call`` item,
+    and a free-form call as a ``custom_tool_call`` item whose payload is
+    its ``input`` string.
     """
     tools: list[tuple[str, str, str]] = []
     # A Responses item is the tool call.
-    if message.get("type") == "function_call":
+    if message.get("type") in ("function_call", "custom_tool_call"):
         name = str(message.get("name", ""))
         if message.get("namespace"):
             # SSE separates these fields; the backend and echoed request sanitizer join them.
             # Preserve the namespace so different tools with the same short name cannot match.
             name = f"{message['namespace']}__{name}"
+        payload = message.get("input") if message.get("type") == "custom_tool_call" else message.get("arguments")
         tools.append(
             (
                 str(message.get("call_id") or message.get("id") or ""),
                 name,
-                canonicalize_tool_arguments(message.get("arguments")),
+                canonicalize_tool_arguments(payload),
             )
         )
     content = message.get("content")
@@ -240,12 +245,13 @@ def _tools_of(message: dict) -> list[tuple[str, str, str]]:
 def _tool_results_of(message: dict) -> list[tuple[str, str]]:
     """Return tool result identities and payloads across dialects.
 
-    Responses stores results in standalone ``function_call_output`` items.
+    Responses stores results in standalone ``function_call_output`` items
+    (``custom_tool_call_output`` for a free-form call, same shape).
     Anthropic stores results in ``tool_result`` content blocks.
     Chat stores results as plain message content.
     """
     parts: list[tuple[str, str]] = []
-    if message.get("type") == "function_call_output":
+    if message.get("type") in ("function_call_output", "custom_tool_call_output"):
         output = message.get("output")
         parts.append(
             (

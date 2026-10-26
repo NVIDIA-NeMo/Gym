@@ -123,7 +123,7 @@ commit or restored, and the bytes of the records file it wrote or read, by ``nem
 A commit counts once its write finishes, and a restore counts once it succeeds, so a retried call counts nothing again.
 
 ``gym.checkpoint.control_errors_total`` (counter): control calls that failed, by ``nemo.gym.checkpoint.error_code``,
-the ``code`` of the error in the reply, such as ``deadline_exceeded``.
+the ``code`` of the error in the reply, such as ``checkpoint_deadline_exceeded``.
 Each failed call to a participant's control routes counts once.
 Data-plane requests refused because of a checkpoint are not counted.
 
@@ -564,6 +564,7 @@ ROLLOUT_HEALTH_VERDICT_INSTRUMENT = "gym.rollout.health_verdict_total"
 ROLLOUT_HEALTH_FLAGGED_INSTRUMENT = "gym.rollout.health_flagged_total"
 HEALTH_VERDICT_ATTRIBUTE = "nemo.gym.health.verdict"
 HEALTH_CHECK_ATTRIBUTE = "nemo.gym.health.check"
+HEALTH_CHECKS_ATTRIBUTE = "nemo.gym.health.checks"
 
 
 def record_rollout_health(verdict: str, *, outcome: str, flagged_checks: Iterable[str]) -> None:
