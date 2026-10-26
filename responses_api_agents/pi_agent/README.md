@@ -82,10 +82,10 @@ task working directory. Without access, configure agent-owned creation as noted 
 Session setup rejects `pi_version: latest`. Pi's `resources_server` setting is required
 only for its compatibility `/run`, not agent sessions.
 
-Supported task images are Linux x86_64/aarch64 glibc or x86_64 musl/Alpine with Python 3.8+,
-bash, tar/gzip, and SHA-256 utilities. Session setup uses POSIX sh to install missing Python/Bash
+Supported task images are Linux x86_64/aarch64 glibc or x86_64 musl/Alpine with
+bash, tar/gzip, and SHA-256 utilities; no Python is needed. Session setup uses POSIX sh to install missing Bash
 with apt-get or apk when running as root, before launching the Bash runtime installer;
-otherwise preinstall them in the image. Setup fails on either a nonzero exit or a provider error.
+otherwise preinstall it in the image. Pi runs under Gym's shared Bash harness runner and process supervisor. Setup fails on either a nonzero exit or a provider error.
 Older Alpine images
 also need patchelf so Pi's Node can use a private, checksum-verified C++ library without
 replacing the task's system library. The pinned Node version has no arm64 musl build.
