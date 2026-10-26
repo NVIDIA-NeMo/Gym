@@ -57,7 +57,7 @@ An adapter supplies the knowledge that is specific to the harness or framework:
 | Component | What it handles |
 | --- | --- |
 | Environment Server (`single_agent_turn`) | The episode order: Resources Server seed, agent session, activation, agent close, verification, and cleanup. |
-| `SimpleResponsesAPIAgent` | The HTTP endpoints, the [agent-session contract](#agent-server-and-environment-server), rollout URL helpers such as `base_url_for_run()`, `resolve_model_base_url()`, and `model_endpoint()`, and the partial-rollout checkpoint hooks. An adapter that does not set `checkpoint_sessions_supported` restarts unfinished rollouts from their input. |
+| `SimpleResponsesAPIAgent` | The HTTP endpoints, the [agent-session contract](#agent-server-and-environment-server), rollout URL helpers such as `base_url_for_run()`, `resolve_model_base_url()`, and `model_endpoint()`, and the partial-rollout checkpoint hooks. An adapter that does not declare `checkpoint_mode = "exported"` restarts unfinished rollouts from their input. |
 | Model Server | Provider normalization, rollout-prefixed routing, [model-call capture](/main/model-server/model-call-capture), and [training-token capture](/main/tutorials/training-tutorials/external-agent-harnesses). |
 | `nemo_gym.sandbox` | Sandbox providers, `AsyncSandbox`, and text file transfer. |
 | `nemo_gym.agent_utils` | Supervised harness execution in a task sandbox: launch, termination, artifact capture, and release. See the `agent_utils` section below. |
