@@ -361,6 +361,21 @@ class TestSetupScriptsExist:
         assert not _has_object(clone, env, fix)
         assert _has_object(source, env, fix)
 
+    def test_sanitize_repo_git_leaves_no_dangling_symref_after_a_plain_clone(self, tmp_path) -> None:
+        # A plain clone writes refs/remotes/origin/HEAD as a symref to origin/main. Deleting it must remove the
+        # symref itself, not only its target, or git fsck reports an invalid pointer.
+        env, source, clone = _git_env(tmp_path), tmp_path / "source", tmp_path / "clone"
+        base, _ = _repo_with_future_fix(source, env)
+        subprocess.run(["git", "clone", "-q", str(source), str(clone)], env=env, check=True)
+        assert _git(clone, env, "symbolic-ref", "refs/remotes/origin/HEAD") == "refs/remotes/origin/main"
+        _git(clone, env, "checkout", "-q", base)
+
+        assert _sanitize(clone, env).returncode == 0
+        assert not (clone / ".git" / "refs" / "remotes" / "origin" / "HEAD").exists()
+        assert _git(clone, env, "for-each-ref", "--format=%(refname)") == ""
+        fsck = subprocess.run(["git", "fsck"], cwd=clone, env=env, capture_output=True, text=True)
+        assert fsck.returncode == 0, fsck.stderr
+
     def test_sanitize_repo_git_fails_when_a_ref_cannot_be_deleted(self, tmp_path) -> None:
         env, repo = _git_env(tmp_path), tmp_path / "repo"
         base, _ = _repo_with_future_fix(repo, env)

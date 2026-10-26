@@ -18,7 +18,7 @@ for repo in "$@"; do
   base=$(git rev-parse --verify -q HEAD)
   branch=$(git symbolic-ref -q HEAD || true)
   refs=$(git for-each-ref --format='%(refname)')
-  for ref in $refs; do git update-ref -d "$ref"; done
+  for ref in $refs; do git update-ref --no-deref -d "$ref"; done
   remotes=$(git remote)
   for remote in $remotes; do git remote remove "$remote"; done
   if [ -n "$branch" ]; then
