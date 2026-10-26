@@ -8,8 +8,8 @@ Copilot reaches the model through its bring-your-own-key (BYOK) provider support
 rollout-prefixed Gym Model Server with `COPILOT_OFFLINE=true`. It needs no GitHub account or token and makes
 no Copilot service calls. Authentication, client telemetry, built-in MCP servers, and auto-update are disabled; task tools can still access the network.
 
-[configs/copilot_agent.yaml](configs/copilot_agent.yaml) is the default agent configuration. This harness is
-implements evaluation and observability with task sandboxes; real-model pairing qualification is pending. Resources tool grants and training-token capture are not supported. Subagent hierarchy and compaction observations are reported as gaps.
+[configs/copilot_agent.yaml](configs/copilot_agent.yaml) is the default agent configuration. This harness
+implements evaluation and observability with task sandboxes. Resources tool grants and training-token capture are not supported. Subagent hierarchy and compaction observations are reported as gaps.
 
 ## Configure and run
 
@@ -104,7 +104,8 @@ the compatibility `/run` are rejected: Copilot never runs on the Agent Server ho
 Responses keep Copilot's reasoning, messages, tool calls, and tool results. Usage comes from Copilot's
 OpenTelemetry chat spans, written locally to the session directory: counts are summed over successful
 model calls, and a count the provider omitted stays unknown rather than zero. Close returns the model-call
-references, harness tool timing, and explicit observation gaps.
+references, harness tool timing, sandbox identity and execution outcome, and explicit observation gaps.
+Observed rejected model calls contribute zero completed-response tokens; missing chat telemetry stays unknown.
 
 A provider error that Copilot reports (`session.error`) returns a failed response with a classified cause:
 an HTTP status becomes `model_request_error`, and an unreachable provider becomes `model_transport_error`.

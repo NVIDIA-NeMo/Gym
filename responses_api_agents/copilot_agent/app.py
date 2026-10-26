@@ -69,6 +69,7 @@ from nemo_gym.rollout_observability import (
     AgentObservationBundle,
     ModelCallRef,
     ObservationGap,
+    SandboxObservation,
     ToolCallObservation,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
@@ -402,6 +403,7 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         directory = f"/tmp/nemo-gym-copilot-sessions/{uuid4().hex}"
         state = CopilotSandboxSession(
             request=body,
+            sandbox_id=sandbox.sandbox_id,
             session=SandboxSession(
                 sandbox=sandbox, session_dir=directory, workdir=workdir, owns_sandbox=owns_sandbox, harness="Copilot"
             ),
@@ -409,6 +411,7 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         try:
             if owns_sandbox:
                 await sandbox.start(spec)
+                state.sandbox_id = sandbox.sandbox_id
                 # Providers need not create SandboxSpec.workdir. Never prepare a borrowed task here.
                 workspace = await sandbox.exec(f"mkdir -p -- {shlex.quote(workdir)}", cwd="/", timeout_s=30)
                 if workspace.return_code != 0 or workspace.error_type:
@@ -571,6 +574,8 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         usage: Optional[CopilotUsage],
         conversation: list[Any],
         status: Literal["completed", "failed", "incomplete", "unknown"],
+        *,
+        failure: BaseException | None = None,
     ) -> AgentObservationBundle:
         invocation_id = state.request.episode_id.capture_key
         response_ids = usage.response_ids if usage is not None and usage.response_ids else transcript.response_ids
@@ -581,6 +586,38 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         ]
         if usage is None:
             gaps.append(ObservationGap(code="model_usage_unavailable", detail="Copilot wrote no OpenTelemetry spans"))
+        cleanup = state.session.cleanup
+        access = state.request.sandbox_access
+        if cleanup is None:
+            gaps.append(ObservationGap(code="sandbox_cleanup_unavailable"))
+        if state.sandbox_id is None:
+            gaps.append(ObservationGap(code="sandbox_identity_unavailable"))
+        for tool in transcript.tools.values():
+            tool.sandbox_id = state.sandbox_id
+        sandbox = SandboxObservation(
+            role="agent",
+            provider=access.connection.provider_config_ref if access else self.config.sandbox_provider,
+            sandbox_id=state.sandbox_id,
+            outcome=(
+                "timeout"
+                if cleanup and cleanup["timed_out"]
+                else "cancelled"
+                if isinstance(failure, asyncio.CancelledError)
+                else "sandbox_error"
+                if failure is not None
+                else "failed"
+                if status == "failed"
+                else "completed"
+                if status == "completed"
+                else "unknown"
+            ),
+            exit_code=cleanup["return_code"] if cleanup else None,
+            error_type=type(failure).__name__
+            if failure is not None
+            else "copilot_error"
+            if status == "failed"
+            else None,
+        )
         return AgentObservationBundle(
             source=SOURCE,
             records=[
@@ -595,6 +632,7 @@ class CopilotAgent(SimpleResponsesAPIAgent):
                     conversation=conversation,
                 ),
                 *transcript.tools.values(),
+                sandbox,
             ],
             gaps=gaps,
         )
@@ -627,6 +665,7 @@ class CopilotAgent(SimpleResponsesAPIAgent):
                     parse_copilot_usage(partial.otel if partial else None),
                     [*conversation, *transcript.output],
                     "incomplete",
+                    failure=failure,
                 )
             except Exception:
                 LOG.exception("failed to build interrupted Copilot observations")

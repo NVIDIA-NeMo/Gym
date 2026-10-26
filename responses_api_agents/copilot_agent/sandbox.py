@@ -61,6 +61,7 @@ class CopilotSandboxSession(AgentSessionState):
 
     session: SandboxSession[CopilotArtifacts]
     runtime: CopilotRuntime | None = None
+    sandbox_id: str | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None

@@ -109,6 +109,7 @@ class Sandbox:
 
     def __init__(self):
         self.files = {}
+        self.sandbox_id = "resources-owned"
         self.result = {"return_code": 0, "timed_out": False, "cleanup_confirmed": True, "error": None}
         self.events = copilot_events()
         self.otel = otel(chat_span("chatcmpl-1", usage=(10, 3)), chat_span("chatcmpl-2", usage=(5, 2)))
@@ -297,6 +298,7 @@ def test_text_parts_and_timeout_metadata_are_accepted(setup):
 
 def test_session_runs_copilot_in_borrowed_sandbox(setup):
     agent, sandbox = setup
+    sandbox.disconnect.side_effect = lambda: setattr(sandbox, "sandbox_id", None)
     result, closed = run_session(agent)
     assert result.status_code == 200, result.text
     body = result.json()
@@ -335,7 +337,10 @@ def test_session_runs_copilot_in_borrowed_sandbox(setup):
     assert closed.status_code == 200, closed.text
     observations = closed.json()["agent_observations"]
     assert observations["source"] == "copilot"
-    invocation, tool = observations["records"]
+    invocation, tool, sandbox_record = observations["records"]
+    assert sandbox_record["sandbox_id"] == tool["sandbox_id"] == "resources-owned"
+    assert sandbox_record["outcome"] == "completed" and sandbox_record["exit_code"] == 0
+    assert sandbox_record["provider"] == "sandbox"
     assert invocation["status"] == "completed" and invocation["harness_session_id"] == "copilot-run-1"
     assert [call["response_id"] for call in invocation["model_calls"]] == ["chatcmpl-1", "chatcmpl-2"]
     assert tool["tool_call_id"] == "call-1" and tool["timing_source"] == "harness"
@@ -374,6 +379,8 @@ def test_reported_provider_error_is_a_classified_failed_response(setup):
     body = result.json()
     assert body["status"] == "failed" and body["error"]["message"] == "400 rejected"
     assert body["usage"]["total_tokens"] == 0
+    record = closed.json()["agent_observations"]["records"][-1]
+    assert (record["outcome"], record["error_type"], record["exit_code"]) == ("failed", "copilot_error", 1)
     outcome = json.loads(body["metadata"][AGENT_OUTCOME_METADATA_KEY])
     assert outcome == {"failure_kind": "model_request_error", "status_code": 400}
     assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
@@ -401,6 +408,8 @@ def test_timeout_returns_gradable_partial_work(setup):
     result, closed = run_session(agent)
     assert result.status_code == 200, result.text
     assert result.json()["status"] == "incomplete"
+    record = closed.json()["agent_observations"]["records"][-1]
+    assert record["outcome"] == "timeout" and record["sandbox_id"] == "resources-owned"
     gaps = {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
     assert "worker_exit_code_unavailable" in gaps
 
@@ -458,6 +467,7 @@ def test_changed_activation_is_rejected_and_identical_retry_joins(setup):
 
 def test_owned_sandbox_is_created_and_stopped(setup):
     agent, sandbox = setup
+    sandbox.stop.side_effect = lambda: setattr(sandbox, "sandbox_id", None)
     agent.config.sandbox_provider = "sandbox"
     sandbox.start = AsyncMock()
     module = "responses_api_agents.copilot_agent.app"
@@ -477,6 +487,8 @@ def test_owned_sandbox_is_created_and_stopped(setup):
     assert spec.ttl_s == agent.config.sandbox_install_timeout_seconds + agent.config.timeout + 600
     assert spec.metadata == {"provider": "test", "harness": "copilot", "agent_session_id": seed().agent_session_id}
     sandbox.stop.assert_awaited_once()
+    assert sandbox.sandbox_id is None
+    assert closed.json()["agent_observations"]["records"][-1]["sandbox_id"] == "resources-owned"
 
 
 def test_interrupted_activation_keeps_observations(setup):
