@@ -7,19 +7,22 @@ import json
 import shutil
 import sys
 from pathlib import Path
+from shlex import quote
 from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.agent_utils import process_supervisor
 from nemo_gym.agent_utils.supervisor_client import (
+    CLEANUP_PHASE_COUNT,
     CLEANUP_RECEIPT_FILE,
     LAUNCH_CLAIM_FILE,
     OUTPUT_LOG_FILE,
     STOP_REQUEST_FILE,
     SUPERVISOR_FILE,
     SUPERVISOR_PID_FILE,
+    SUPERVISOR_SCRIPT,
     HarnessTerminationError,
+    exec_timeout,
     parse_cleanup_receipt,
     stop_and_confirm_cleanup,
     supervised_launch_command,
@@ -120,7 +123,6 @@ async def test_stop_wins_claim_and_fences_delayed_launch(session, caplog):
         command=["touch", str(session_dir / "started")],
         timeout=1,
         cleanup_timeout=1,
-        python=sys.executable,
     )
     assert (await sandbox.exec(command)).return_code == 0
     assert not (session_dir / SUPERVISOR_PID_FILE).exists()
@@ -142,17 +144,9 @@ async def test_missing_receipt_after_launch_is_not_cleanup_confirmation(session)
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
-@pytest.mark.parametrize("private_python", [False, True])
-async def test_launch_supervises_harness_with_selected_or_private_python(session, tmp_path, private_python):
+async def test_launch_supervises_harness_and_shares_its_output_log(session, tmp_path):
     sandbox, session_dir = session
-    runtime = tmp_path / "runtime's files"
-    runtime.mkdir()
-    supervisor = session_dir / SUPERVISOR_FILE
-    shutil.copyfile(process_supervisor.__file__, supervisor)
-    python = Path(sys.executable)
-    if private_python:
-        python = runtime / "python interpreter"
-        python.symlink_to(sys.executable)
+    shutil.copyfile(SUPERVISOR_SCRIPT, session_dir / SUPERVISOR_FILE)
     command = supervised_launch_command(
         session_dir=str(session_dir),
         command=[
@@ -163,7 +157,6 @@ async def test_launch_supervises_harness_with_selected_or_private_python(session
         ],
         timeout=5,
         cleanup_timeout=1,
-        python=str(python),
     )
     launched = await sandbox.exec(command)
     assert launched.return_code == 0, launched.stderr
@@ -172,6 +165,30 @@ async def test_launch_supervises_harness_with_selected_or_private_python(session
     )
     assert receipt == {"cleanup_confirmed": True, "error": None, "return_code": 0, "timed_out": False}
     assert set((session_dir / OUTPUT_LOG_FILE).read_text().splitlines()) == {"$(literal)", "stderr"}
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
+async def test_stop_reaches_running_supervisor_through_the_stop_file(session, tmp_path):
+    # The stop shell sends no signal, so the harness keeps the default TERM disposition and checkpoints.
+    sandbox, session_dir = session
+    shutil.copyfile(SUPERVISOR_SCRIPT, session_dir / SUPERVISOR_FILE)
+    ready = session_dir / "ready"
+    worker = f"trap 'echo saved > checkpoint; exit 0' TERM; touch {quote(str(ready))}; while :; do sleep 0.05; done"
+    command = supervised_launch_command(
+        session_dir=str(session_dir), command=["bash", "-c", worker], timeout=30, cleanup_timeout=2
+    )
+    launch = asyncio.create_task(sandbox.exec(command, cwd=str(session_dir)))
+    try:
+        async with asyncio.timeout(10):
+            while not ready.exists():
+                await asyncio.sleep(0.01)
+        receipt = await stop_and_confirm_cleanup(
+            sandbox, session_dir=str(session_dir), workdir=str(session_dir), timeout=5, harness="test"
+        )
+    finally:
+        await asyncio.wait_for(launch, timeout=10)
+    assert receipt == {"cleanup_confirmed": True, "error": None, "return_code": 0, "timed_out": False}
+    assert (session_dir / "checkpoint").read_text() == "saved\n"
 
 
 @pytest.mark.parametrize("confirmed", [False, "true", 1])
@@ -230,9 +247,9 @@ async def test_stop_surfaces_terminal_negative_receipt_created_after_initial_che
 @pytest.mark.parametrize("timeout,close_timeout", [(1, 0.3), (2700, 30), (21600, 300)])
 def test_supervision_timeouts_reserve_cleanup_and_provider_margin(timeout, close_timeout):
     cleanup_timeout, provider_timeout = supervision_timeouts(timeout=timeout, close_timeout=close_timeout)
-    assert cleanup_timeout * process_supervisor.CLEANUP_PHASE_COUNT == pytest.approx(close_timeout)
+    assert cleanup_timeout * CLEANUP_PHASE_COUNT == pytest.approx(close_timeout)
     assert provider_timeout == pytest.approx(timeout + close_timeout + 30)
-    assert provider_timeout == process_supervisor.exec_timeout(timeout=timeout, cleanup_timeout=cleanup_timeout)
+    assert provider_timeout == exec_timeout(timeout=timeout, cleanup_timeout=cleanup_timeout)
 
 
 @pytest.mark.parametrize(

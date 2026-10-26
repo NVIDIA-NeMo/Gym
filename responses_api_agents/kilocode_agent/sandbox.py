@@ -133,7 +133,6 @@ class KiloSandboxSession(AgentSessionState):
         await upload_text(self.session.sandbox, path=f"{directory}/input.json", text=json.dumps({"command": command}))
         return SandboxCommand(
             argv=["python3", "-I", f"{directory}/sandbox_runner.py", directory, self.session.workdir],
-            python="python3",
         )
 
     async def collect_artifacts(self) -> KiloArtifacts:

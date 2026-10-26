@@ -103,7 +103,6 @@ class OpenClawSandboxSession(AgentSessionState):
         await self.upload_json("home/.openclaw/openclaw.json", payload["config"])
         await self.upload_json("input.json", payload)
         return SandboxCommand(
-            python="python3",
             argv=[
                 "python3",
                 "-I",

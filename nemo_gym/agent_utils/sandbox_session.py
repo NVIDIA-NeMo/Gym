@@ -4,18 +4,19 @@
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Coroutine
+import re
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from shlex import quote
 from time import monotonic
 from typing import cast
 
-from nemo_gym.agent_utils import process_supervisor
-from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
 from nemo_gym.agent_utils.supervisor_client import (
     OUTPUT_LOG_FILE,
     STOP_REQUEST_FILE,
     SUPERVISOR_FILE,
+    SUPERVISOR_SCRIPT,
+    CleanupReceipt,
     HarnessTerminationError,
     remove_session_directory,
     stop_and_confirm_cleanup,
@@ -28,6 +29,7 @@ from nemo_gym.sandbox.utils import read_text
 
 
 LOG = logging.getLogger(__name__)
+_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _reuse_or_start[T](
@@ -40,10 +42,31 @@ def _reuse_or_start[T](
 
 @dataclass(frozen=True, kw_only=True)
 class SandboxCommand:
-    """Harness argv and the installed interpreter used to launch its supervisor."""
+    """Harness argv, run under the bash process supervisor."""
 
     argv: list[str]
-    python: str
+
+
+def shell_assignments(values: Mapping[str, str | Sequence[str] | Mapping[str, str]]) -> str:
+    """Bash source assigning each value, for sandbox runners that cannot parse JSON.
+
+    A string becomes a scalar and a sequence an array. A mapping becomes an array of
+    ``KEY=VALUE`` words, ready for ``export`` or ``env``. Every word is shell-quoted.
+    """
+    lines = []
+    for name, value in values.items():
+        if not _SHELL_NAME.fullmatch(name):
+            raise ValueError(f"Invalid shell variable name: {name!r}")
+        if isinstance(value, str):
+            lines.append(f"{name}={quote(value)}")
+            continue
+        if isinstance(value, Mapping):
+            invalid = [key for key in value if not _SHELL_NAME.fullmatch(key)]
+            if invalid:
+                raise ValueError(f"Invalid environment variable names: {invalid!r}")
+            value = [f"{key}={item}" for key, item in value.items()]
+        lines.append(f"{name}=({' '.join(quote(item) for item in value)})")
+    return "".join(f"{line}\n" for line in lines)
 
 
 @dataclass(kw_only=True)
@@ -130,7 +153,7 @@ class SandboxSession[Artifacts]:
 
     async def _stage(self, stage_activation: Callable[[], Awaitable[SandboxCommand]]) -> SandboxCommand:
         command = await stage_activation()
-        await self.sandbox.upload(Path(process_supervisor.__file__), f"{self.session_dir}/{SUPERVISOR_FILE}")
+        await self.sandbox.upload(SUPERVISOR_SCRIPT, f"{self.session_dir}/{SUPERVISOR_FILE}")
         return command
 
     async def execute(
@@ -168,7 +191,6 @@ class SandboxSession[Artifacts]:
                 command=command.argv,
                 timeout=timeout,
                 cleanup_timeout=cleanup_timeout,
-                python=command.python,
             )
             self.launch_started = True
             self._exec_task = asyncio.create_task(

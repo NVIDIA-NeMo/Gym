@@ -3,17 +3,17 @@
 """Controller-side transport for the shared sandbox process supervisor.
 
 Session ownership and cancellation live in sandbox_session.py; output parsing stays with the adapter.
-Unlike process_supervisor.py, this module is not uploaded to the task sandbox.
+Unlike process_supervisor.sh, this module is not uploaded to the task sandbox.
 
 Session control files (all paths are relative to session_dir):
 
 ===================== ==================== ===========================================
 Filename              Writer               When
 ===================== ==================== ===========================================
-process_supervisor.py Session              Uploaded before launch
+process_supervisor.sh Session              Uploaded before launch
 launch.claim          Launch or stop shell Atomically claims launch or fences it
 supervisor.pid        Launch shell         After claiming launch, before exec
-stop.request          Stop shell           Before signalling the supervisor
+stop.request          Stop shell           Polled by the supervisor to stop the harness
 cleanup.json          Supervisor or stop   After cleanup, or when stop fences launch
 output.log            Launch shell         Captures supervisor and harness diagnostics
 ===================== ==================== ===========================================
@@ -21,22 +21,51 @@ output.log            Launch shell         Captures supervisor and harness diagn
 
 import json
 import logging
+from pathlib import Path
 from shlex import join, quote
+from typing import TypedDict
 from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.agent_utils.process_supervisor import CLEANUP_PHASE_COUNT, CleanupReceipt, exec_timeout
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.utils import read_text
 
 
-SUPERVISOR_FILE = "process_supervisor.py"
+SUPERVISOR_FILE = "process_supervisor.sh"
+SUPERVISOR_SCRIPT = Path(__file__).with_name(SUPERVISOR_FILE)
 LAUNCH_CLAIM_FILE = "launch.claim"
 SUPERVISOR_PID_FILE = "supervisor.pid"
 STOP_REQUEST_FILE = "stop.request"
 CLEANUP_RECEIPT_FILE = "cleanup.json"
 OUTPUT_LOG_FILE = "output.log"
+
+DEFAULT_CLEANUP_TIMEOUT = 10.0
+CLEANUP_PHASE_COUNT = 3
+
+
+class CleanupReceipt(TypedDict):
+    """Outcome after bounded harness termination, as written by process_supervisor.sh.
+
+    ``cleanup_confirmed`` means no live harness-group members remain. Forced
+    stops also drain the harness's descendants. Services orphaned before the stop
+    remain until the owner closes the sandbox; this is not a sandbox-empty check.
+    """
+
+    cleanup_confirmed: bool
+    return_code: int | None
+    error: str | None
+    timed_out: bool
+
+
+def exec_timeout(*, timeout: float, cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT) -> float:
+    """Reserve TERM grace, direct-process reaping, and process-group reaping.
+
+    The extra 30 seconds cover startup, polling, and receipt I/O beyond those
+    bounded cleanup phases. Keep their count shared with the controller budget.
+    """
+    return timeout + CLEANUP_PHASE_COUNT * cleanup_timeout + 30
+
 
 _CLEANUP_RECEIPT = TypeAdapter(CleanupReceipt)
 LOG = logging.getLogger(__name__)
@@ -97,23 +126,23 @@ def supervised_launch_command(
     command: list[str],
     timeout: float,
     cleanup_timeout: float,
-    python: str,
 ) -> str:
     """Fence delayed launches and run a harness command under the shared supervisor.
 
-    The adapter must install or select the interpreter explicitly. Check that it
-    can load the supervisor before claiming a launch: a failed bootstrap cannot
-    write a cleanup receipt. Supervisor and harness diagnostics share output.log.
-    The supervisor stops the harness group; the sandbox owner stops escaped services.
+    The supervisor needs only bash. Check that bash can parse it before claiming a
+    launch: a failed bootstrap cannot write a cleanup receipt. Supervisor and harness
+    diagnostics share output.log. The supervisor stops the harness group; the sandbox
+    owner stops escaped services. Stops reach the supervisor through the stop file,
+    not a signal, so the harness keeps the default TERM disposition.
     """
     supervisor = quote(f"{session_dir}/{SUPERVISOR_FILE}")
     claim_path = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
     return (
         f"[ -d {quote(session_dir)} ] && [ ! -L {claim_path} ] || exit 0; "
-        f"{quote(python)} -I {supervisor} --help >/dev/null || exit $?; "
-        f"trap '' TERM; ln -s launch {claim_path} 2>/dev/null || exit 0; "
+        f"bash -n {supervisor} || exit $?; "
+        f"ln -s launch {claim_path} 2>/dev/null || exit 0; "
         f"echo $$ > {quote(f'{session_dir}/{SUPERVISOR_PID_FILE}')} && "
-        f"exec {quote(python)} -I {supervisor} "
+        f"exec bash {supervisor} "
         f"--timeout {timeout} --cleanup-timeout {cleanup_timeout} "
         f"--stop-file {quote(f'{session_dir}/{STOP_REQUEST_FILE}')} "
         f"--receipt {quote(f'{session_dir}/{CLEANUP_RECEIPT_FILE}')} -- {join(command)} "
@@ -136,7 +165,6 @@ async def stop_and_confirm_cleanup(
         receipt = {}
     _raise_terminal_failure(receipt, harness=harness)
     if not isinstance(receipt, dict) or receipt.get("cleanup_confirmed") is not True:
-        pid_path = quote(f"{session_dir}/{SUPERVISOR_PID_FILE}")
         stop_path = quote(f"{session_dir}/{STOP_REQUEST_FILE}")
         claim_path = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
         temporary = quote(f"{receipt_path}.{uuid4().hex}.tmp")
@@ -149,7 +177,6 @@ async def stop_and_confirm_cleanup(
             f"ln -s stop {claim_path} 2>/dev/null || true; "
             f'if [ "$(readlink {claim_path})" = stop ]; then '
             f"printf '%s' {stopped} > {temporary} && mv {temporary} {quote(receipt_path)}; exit $?; fi; "
-            f'if [ -s {pid_path} ]; then kill -TERM "$(cat {pid_path})" 2>/dev/null || true; fi; '
             f"for _ in $(seq 1 {max(1, int(timeout))}); do "
             f"[ -f {quote(receipt_path)} ] && exit 0; sleep 1; done; exit 1"
         )

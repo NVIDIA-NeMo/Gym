@@ -85,7 +85,6 @@ class PiSandboxSession(AgentSessionState):
         """Stage the invocation and return the Pi worker command."""
         await self.upload_json("input.json", payload)
         return SandboxCommand(
-            python="python3",
             argv=[
                 "python3",
                 "-I",

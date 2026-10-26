@@ -235,7 +235,6 @@ class OpenCodeSandboxSession(AgentSessionState):
             )
         await self.upload_json("input.json", payload)
         return SandboxCommand(
-            python=self.python_executable,
             argv=[
                 self.python_executable,
                 "-I",

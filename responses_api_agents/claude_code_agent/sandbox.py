@@ -167,7 +167,6 @@ class ClaudeCodeSandboxSession(AgentSessionState):
             await self.stage_skills(skills_path)
         await self.upload_json("input.json", payload)
         return SandboxCommand(
-            python="python3",
             argv=[
                 "python3",
                 "-I",
