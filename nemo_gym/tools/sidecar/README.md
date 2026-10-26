@@ -23,8 +23,26 @@ go build -buildvcs=false -trimpath -o h2-ping-sidecar .
 
 Resource limits come from the Go runtime environment: `GOMEMLIMIT` (for example `1GiB`) and `GOMAXPROCS`.
 
-Build and test need Go 1.25 or newer: `go vet ./... && go test ./...`. The tests build the binary and run it against local fake HTTP/2 origins and relays only. They are not run in CI.
+Build and test need Go 1.25 or newer: `go vet ./... && go test ./...`. The tests build the binary and run it against local fake HTTP/2 origins and relays only. CI runs them with `-race`, on the Go version in `go.mod` and on the latest stable Go (the `sidecar-go-tests` job in `.github/workflows/unit-tests.yml`), and checks `gofmt`.
 
-Gym builds this program on first use and caches it under a path that contains a hash of the sources and of the Go version (`go env GOVERSION`), so editing the sources, or upgrading Go (whose `net/http` and `crypto/tls` this proxy mostly is, so security fixes ship as Go releases), triggers a rebuild. The minimum Go version in `go.mod` is owned by whoever changes this directory: raise it only when the code needs it, and note that `pyproject.toml`'s dependency policy covers Python packages only. 1.25 is the practical floor because the Go runtime follows a container's CPU quota automatically from that release.
+Gym's container image (`docker/Dockerfile`) builds this program in a Go stage and installs it at `/opt/nemo-gym/bin/h2-ping-sidecar`, so the image needs no Go at run time. The launcher uses the executable named by `NEMO_GYM_H2_PING_SIDECAR_BINARY` (that path by default) before it builds anything.
+
+To put the sidecar in another image, such as one that vendors Gym as a submodule, build it in a Go stage from the Gym checkout and set the variable:
+
+```dockerfile
+FROM --platform=$BUILDPLATFORM golang:1.27.3 AS sidecar-build
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src
+COPY <path to Gym>/nemo_gym/tools/sidecar/ ./
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOTOOLCHAIN=local \
+    go build -buildvcs=false -trimpath -o /out/h2-ping-sidecar .
+
+# In the final stage:
+COPY --from=sidecar-build --chmod=0755 /out/h2-ping-sidecar /opt/nemo-gym/bin/h2-ping-sidecar
+ENV NEMO_GYM_H2_PING_SIDECAR_BINARY=/opt/nemo-gym/bin/h2-ping-sidecar
+```
+
+Gym builds this program on first use when there is no prebuilt one, and caches it under a path that contains a hash of the sources and of the Go version (`go env GOVERSION`), so editing the sources, or upgrading Go (whose `net/http` and `crypto/tls` this proxy mostly is, so security fixes ship as Go releases), triggers a rebuild. The minimum Go version in `go.mod` is owned by whoever changes this directory: raise it only when the code needs it, and note that `pyproject.toml`'s dependency policy covers Python packages only. 1.25 is the practical floor because the Go runtime follows a container's CPU quota automatically from that release.
 
 Connection lifetime: the load balancer closes a client connection with a GOAWAY once it is about an hour old. By default the sidecar retires its upstream connection after 45-50 minutes (`-max-conn-age`); requests in flight finish on the old connection and new ones use a fresh one. A request still running when the limit is reached can meet the GOAWAY: bodies within `-retry-body-limit` are re-sent on a fresh connection, larger ones are not retried.

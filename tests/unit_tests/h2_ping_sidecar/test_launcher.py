@@ -52,6 +52,7 @@ def _instance(**kwargs) -> launcher.SidecarInstanceConfig:
 
 def _fake_binary(tmp_path: Path, script: str) -> Path:
     path = tmp_path / "h2-ping-sidecar"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("#!/usr/bin/env python3\n" + textwrap.dedent(script))
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return path
@@ -81,6 +82,13 @@ def _fake_go(tmp_path: Path, build_script: str, version: str = "go1.25.0") -> Pa
 
 
 GOOD_BUILD = 'printf "#!/bin/sh\\nexit 0\\n" > "$OUT"; chmod 755 "$OUT"\n'
+
+
+@pytest.fixture(autouse=True)
+def no_prebuilt_binary(monkeypatch, tmp_path):
+    """Gym's container image ships a real sidecar; these tests must not find it."""
+    monkeypatch.delenv(launcher.PREBUILT_BINARY_ENV_NAME, raising=False)
+    monkeypatch.setattr(launcher, "PREBUILT_BINARY_DEFAULT_PATH", tmp_path / "no-image" / "h2-ping-sidecar")
 
 
 class TestConfig:
@@ -332,6 +340,42 @@ class TestBinaryCacheKey:
             (src / "main.go").write_text("package main // not built by anyone\n")
             with pytest.raises(SidecarError, match="`go` is not on PATH"):
                 resolve_binary(_cfg(), gcd)
+
+    def test_prebuilt_binary_needs_no_go_and_is_not_rebuilt(self, tmp_path, monkeypatch):
+        prebuilt = _fake_binary(tmp_path / "image", "pass")
+        monkeypatch.setenv(launcher.PREBUILT_BINARY_ENV_NAME, str(prebuilt))
+        gcd = OmegaConf.create({"cache_dir": str(tmp_path / "cache")})
+        go = _fake_go(tmp_path, 'echo "go must not run" >&2; exit 1\n')
+        with patch.object(launcher.shutil, "which", return_value=str(go)):
+            assert resolve_binary(_cfg(), gcd) == prebuilt
+        assert not (tmp_path / "cache").exists()
+
+    def test_prebuilt_binary_defaults_to_the_image_path(self, tmp_path, monkeypatch):
+        prebuilt = _fake_binary(tmp_path / "image", "pass")
+        monkeypatch.setattr(launcher, "PREBUILT_BINARY_DEFAULT_PATH", prebuilt)
+        with patch.object(launcher.shutil, "which", return_value=None):
+            assert resolve_binary(_cfg(), OmegaConf.create({})) == prebuilt
+
+    def test_configured_binary_beats_the_prebuilt_one(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(launcher.PREBUILT_BINARY_ENV_NAME, str(_fake_binary(tmp_path / "image", "pass")))
+        configured = _fake_binary(tmp_path / "configured", "pass")
+        assert resolve_binary(_cfg(binary=str(configured)), OmegaConf.create({})) == configured
+
+    @pytest.mark.parametrize("state", ["missing", "not_executable", "directory"])
+    def test_unusable_prebuilt_binary_falls_back_to_the_cache(self, tmp_path, monkeypatch, state):
+        path = tmp_path / "image" / "h2-ping-sidecar"
+        path.parent.mkdir()
+        if state == "not_executable":
+            path.write_text("#!/bin/sh\n")
+            path.chmod(0o644)
+        elif state == "directory":
+            path.mkdir()
+        monkeypatch.setenv(launcher.PREBUILT_BINARY_ENV_NAME, str(path))
+        go = _fake_go(tmp_path, GOOD_BUILD)
+        gcd = OmegaConf.create({"cache_dir": str(tmp_path / "cache")})
+        with patch.object(launcher.shutil, "which", return_value=str(go)):
+            built = resolve_binary(_cfg(), gcd)
+        assert built != path and built.is_relative_to((tmp_path / "cache").resolve())
 
     def test_missing_binary_message_names_the_searched_path(self, tmp_path):
         gcd = OmegaConf.create({"cache_dir": str(tmp_path / "cache")})

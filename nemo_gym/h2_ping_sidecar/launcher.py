@@ -53,6 +53,10 @@ from nemo_gym.h2_ping_sidecar.config import (
 
 SIDECAR_SOURCE_DIR = Path(__file__).resolve().parent.parent / "tools" / "sidecar"
 SIDECAR_BINARY_NAME = "h2-ping-sidecar"
+# A binary installed ahead of time, such as the one in Gym's container image (docker/Dockerfile).
+# The environment variable overrides the path, so another image can put the binary elsewhere.
+PREBUILT_BINARY_ENV_NAME = "NEMO_GYM_H2_PING_SIDECAR_BINARY"
+PREBUILT_BINARY_DEFAULT_PATH = Path("/opt/nemo-gym/bin") / SIDECAR_BINARY_NAME
 
 _MODEL_SERVER_TYPE = "responses_api_models"
 _BASE_URL_KEY_SUFFIX = "base_url"
@@ -120,14 +124,26 @@ def _source_digest() -> str:
     return digest.hexdigest()[:12]
 
 
+def prebuilt_binary_path() -> Optional[Path]:
+    """The executable a container image shipped, or ``None`` when there is none."""
+    path = Path(os.environ.get(PREBUILT_BINARY_ENV_NAME) or PREBUILT_BINARY_DEFAULT_PATH)
+    return path if path.is_file() and os.access(path, os.X_OK) else None
+
+
 def default_binary_path(global_config_dict: Any) -> Path:
-    """Where the sidecar built from the current sources lives: ``<cache>/<sources hash>/<go version>/``.
+    """The sidecar to run when ``binary`` is not configured.
+
+    A prebuilt binary (see ``prebuilt_binary_path``) wins, so an image built with one needs no Go at run
+    time. Otherwise it is the one built from the current sources: ``<cache>/<sources hash>/<go version>/``.
 
     The proxy is mostly Go's own ``net/http`` and ``crypto/tls``, whose fixes ship as Go releases, so
     a binary built by a Go that has since been replaced is not reused: with Go on PATH the exact
     version is part of the path. Without Go nothing can be built, so any binary already built from
     these sources is used (the newest one), which lets a node without Go run a prebuilt cache.
     """
+    prebuilt = prebuilt_binary_path()
+    if prebuilt is not None:
+        return prebuilt
     cache_dir = global_config_dict.get(CACHE_DIR_KEY_NAME) or "cache"
     sources = Path(cache_dir).expanduser().resolve() / SIDECAR_BINARY_NAME / _source_digest()
     go_version = re.sub(r"[^A-Za-z0-9._-]", "_", _local_go_version())
