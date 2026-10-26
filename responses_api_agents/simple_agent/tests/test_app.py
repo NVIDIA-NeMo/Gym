@@ -64,7 +64,9 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_observability import TrajectoryRecord
+from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.simple_agent.app import (
     ModelServerRef,
@@ -556,6 +558,52 @@ class TestApp:
 
         with pytest.raises(ValueError, match="does not support required MCP"):
             await server.seed_agent_session(request, body)
+
+    @pytest.mark.parametrize(
+        ("unsupported", "reason"),
+        [
+            (
+                {
+                    "tool_accesses": [
+                        MCPToolAccess(
+                            name="resources",
+                            required=True,
+                            connection=MCPStreamableHTTPConnection(url="http://resources:8000/mcp"),
+                        )
+                    ]
+                },
+                "Simple Agent does not support required MCP tool access: resources",
+            ),
+            (
+                {
+                    "sandbox_access": SandboxAccess(
+                        connection=DirectSandboxConnection(provider_config_ref="runtime", descriptor={}),
+                        workdir="/work",
+                    )
+                },
+                "Simple Agent does not support sandbox access",
+            ),
+            (
+                {
+                    "tool_accesses": [
+                        DirectHTTPToolAccess(name=name, required=True, base_url=f"http://{name}:8000")
+                        for name in ("first", "second")
+                    ]
+                },
+                "Simple Agent supports at most one direct HTTP tool access per session",
+            ),
+        ],
+    )
+    def test_unsupported_seed_is_refused_with_a_final_422(self, unsupported: dict, reason: str) -> None:
+        server, _ = _make_agent(False)
+        body = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+            task_id=TaskId(taskset="example", task_id="0"),
+            **unsupported,
+        )
+
+        assert check_agent_seed_rejected(server.setup_webserver(), body) == reason
 
     async def test_several_workers_seed_sessions(self) -> None:
         """Session routing sends a session's later requests to the worker that seeded it."""
@@ -1787,7 +1835,7 @@ class TestCheckpointContinuation:
         ]
 
     @pytest.mark.parametrize("reported, blocks_while_verifying", [("replay", False), (None, True)])
-    async def test_legacy_verify_mode_comes_from_the_seed_reply(
+    async def test_legacy_resources_verify_step_type_comes_from_the_seed_reply(
         self, reported: str | None, blocks_while_verifying: bool
     ) -> None:
         server, server_client = _make_agent(False)
@@ -2173,9 +2221,9 @@ class TestCheckpointAcrossModelCalls:
         assert first.status_code == again.status_code == 200
         assert again.json() == first.json()
         assert calls_after_again == 1 and unchanged
-        assert ahead.status_code == 409 and ahead.json()["error"]["code"] == "activation_out_of_order"
+        assert ahead.status_code == 409 and ahead.json()["error"]["code"] == "checkpoint_activation_out_of_order"
         assert second.status_code == 200 and second.json()["id"] == "resp-2"
-        assert behind.status_code == 409 and behind.json()["error"]["code"] == "activation_out_of_order"
+        assert behind.status_code == 409 and behind.json()["error"]["code"] == "checkpoint_activation_out_of_order"
         # Without the header every invocation is a new activation, as before.
         assert unnumbered.status_code == 200 and unnumbered.json()["id"] == "resp-3"
 
@@ -2403,7 +2451,7 @@ async def test_an_activation_without_a_rollout_prefix_is_refused_for_the_restore
     request.path_params = {}
     with pytest.raises(RolloutIdRequiredError):
         await server.responses(request, Response(), body)
-    pending_after_unprefixed = [episode.capture_key for episode in await participant.restored_pending()]
+    pending_after_unprefixed = [episode.capture_key for episode in await participant.unclaimed()]
     request.path_params = {"rollout_id": "rollout"}
     with pytest.raises(StaleAttemptError):
         await server.responses(request, Response(), body)
@@ -2415,7 +2463,7 @@ async def test_an_activation_without_a_rollout_prefix_is_refused_for_the_restore
 
     assert pending_after_unprefixed == ["rollout-a1"]
     assert model_calls_after_refusals == 0 and completed_after_refusals == 1
-    assert await participant.restored_pending() == []
+    assert await participant.unclaimed() == []
     if index == 1:
         assert json.loads(reply.body)["id"] == _FINAL_RESPONSE["id"] and server_client.post.await_count == 0
     else:
@@ -2443,7 +2491,7 @@ async def test_an_activation_without_a_rollout_prefix_is_refused_only_with_check
 
     assert prefixed.status_code == 200, prefixed.json()
     if checkpointing:
-        assert unprefixed.status_code == 400 and unprefixed.json()["error"]["code"] == "rollout_id_required"
+        assert unprefixed.status_code == 400 and unprefixed.json()["error"]["code"] == "checkpoint_rollout_id_required"
         # The refused call started nothing, so the prefixed call is still activation 1.
         assert model_calls_after_unprefixed == 0 and server_client.post.await_count == 1
     else:
@@ -2453,7 +2501,7 @@ async def test_an_activation_without_a_rollout_prefix_is_refused_only_with_check
 class _RestartOnlySimpleAgent(SimpleAgent):
     """Simple Agent as an agent without session hooks would be installed: restart-only."""
 
-    checkpoint_sessions_supported = False
+    checkpoint_mode = "restart_only"
 
 
 @pytest.mark.parametrize("agent_type", [SimpleAgent, _RestartOnlySimpleAgent])
@@ -2485,8 +2533,8 @@ async def test_a_direct_responses_call_is_a_restart_and_one_without_a_rollout_is
 
     assert prepared.json()["phase"] == "prepared"
     assert prepared.json()["report"]["restarts"] == ["direct-1"] and prepared.json()["report"]["blockers"] == []
-    assert unattributed.status_code == 400 and unattributed.json()["error"]["code"] == "rollout_id_required"
-    assert refused.json()["error"]["code"] == "restart_in_scope"
+    assert unattributed.status_code == 400 and unattributed.json()["error"]["code"] == "checkpoint_rollout_id_required"
+    assert refused.json()["error"]["code"] == "checkpoint_restart_in_scope"
     assert retired.status_code == 200 and stopped
     assert len(calls) == 1
 
@@ -2516,7 +2564,7 @@ async def test_a_restored_session_answered_with_its_reply_survives_a_commit_that
     request.headers = {AGENT_ACTIVATION_HEADER: "1"}
 
     reply = await server.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="q"))
-    pending = await participant.restored_pending()
+    pending = await participant.unclaimed()
     # Another participant reports the episode as a restart, so the commit leaves it out.
     await controller.prepare(CheckpointRequest(**_checkpoint("c1")))
     await controller.commit(CommitRequest(**_checkpoint("c1", checkpoint_dir=str(tmp_path), episode_ids=[])))
@@ -3001,9 +3049,9 @@ async def test_a_restored_session_s_direct_http_tool_calls_reach_the_restored_re
     assert list(restored_resources.calls.values()) == [2]
 
 
-@pytest.mark.parametrize("verify_mode, closes", [("replay", True), ("wait", False)])
+@pytest.mark.parametrize("resources_verify_step_type, closes", [("replay", True), ("wait", False)])
 async def test_a_legacy_run_closes_its_resources_session_after_a_verification_a_checkpoint_does_not_wait_for(
-    verify_mode: str, closes: bool
+    resources_verify_step_type: str, closes: bool
 ) -> None:
     server, server_client = _make_agent(False)
     server._checkpoint_participant = AgentSessionParticipant(server)
@@ -3013,7 +3061,7 @@ async def test_a_legacy_run_closes_its_resources_session_after_a_verification_a_
         calls.append((url_path, kwargs))
         if url_path == "/seed_session":
             response = _mock_response({})
-            response.headers = {"x-ng-checkpoint-verify": verify_mode}
+            response.headers = {"x-ng-checkpoint-verify": resources_verify_step_type}
             response.cookies = {"session": MagicMock(value="resources-cookie")}
             return response
         if url_path.endswith("/v1/responses"):

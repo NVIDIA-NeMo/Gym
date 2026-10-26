@@ -64,7 +64,7 @@ If `health_check` is not set, it defaults to `/health` on `port`. If it is set w
 
 ### type: vllm_pd
 
-Prefill/decode disaggregated vLLM: two vLLM tiers behind a `vllm-router`. A single `vllm_pd` entry named `X` deploys three services: `X-prefill`, `X-decode`, and the router `X`. Set `driver.policy_model` to `X`. The router's `container` must provide `vllm-router`. See the [how-to](/orchestration/how-to/prefill-decode-disaggregation).
+Prefill/decode disaggregated vLLM: two vLLM tiers behind a `vllm-router`. A single `vllm_pd` entry named `X` deploys three services: `X-prefill`, `X-decode`, and the router `X`. Set `driver.policy_model` to `X`. The router's `container` must provide `vllm-router`. See the [Prefill/Decode Disaggregation how-to](/orchestration/how-to/prefill-decode-disaggregation).
 
 | Field | Default | Description |
 | --- | --- | --- |
@@ -206,7 +206,7 @@ Asking for `resumable` on an executor that does not support it is an error rathe
 
 ## otel
 
-The OpenTelemetry collector that runs beside every benchmark job. It is **enabled by default**, and an enabled collector requires `endpoint`, `service_name`, and the token variable (`token_env`, default `OTEL_TOKEN`) to be set in the submitting shell. Set `enabled: false` to opt out. All fields, and what is exported, are described in [Collector for Submitted Jobs](/observability/eval-submit-collector).
+The OpenTelemetry collector that runs beside every benchmark job. It is **enabled by default**, and always writes local JSONL dumps while enabled. Set `remote_export: false` for local-only collection. Remote export requires `endpoint`, `service_name`, and a token in the submitting shell (`token_env`, default `OTEL_TOKEN`); if the token is missing or empty, Gym warns and sets `remote_export: false`. Set `enabled: false` to opt out. All fields, and what is exported, are described in [Collector for Submitted Jobs](/observability/eval-submit-collector).
 
 ## Cross-field validation
 

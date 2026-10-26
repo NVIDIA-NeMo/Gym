@@ -30,7 +30,7 @@ from fastapi import Request
 from omegaconf import ListConfig
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
@@ -42,6 +42,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxSpec
 from nemo_gym.sandbox.providers.registry import create_provider
@@ -144,9 +145,15 @@ class HarnessAgentConfig(BaseResponsesAPIAgentConfig):
     setup_commands: list[str] = Field(default_factory=list)
     sandbox_python: str = "python3"
     gym_source: str = "auto"
+    # When the resources server serves its tools over MCP, hand them to the in-box agent. The box reaches the
+    # server at its configured host, so Gym must bind a host the sandbox can reach (use_absolute_ip).
+    forward_mcp_tools: bool = False
 
     eval_timeout: int = 1800
     rollout_timeout: int = 2400
+    # Zero the reward of a run that made no tool call, so a direct answer that skips the harness earns nothing.
+    # The verifier's own score stays in harness_pre_gate_reward.
+    require_tool_call: bool = False
 
 
 class HarnessAgentRunRequest(BaseRunRequest):
@@ -280,6 +287,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             }
             token = _RUN_CONTEXT.set(run_context)
             try:
+                if self.config.forward_mcp_tools:
+                    run_context["mcp"] = self._mcp_server_entry(seed)
                 agent_resp = await self.responses(request, body.responses_create_params)
                 agent_resp_json = agent_resp.model_dump(mode="json")
                 verify_resp = await self.server_client.post(
@@ -289,12 +298,37 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                     cookies=cookies,
                 )
                 await raise_for_status(verify_resp)
-                return HarnessAgentVerifyResponse.model_validate(await get_response_json(verify_resp))
+                verify_json = await get_response_json(verify_resp)
+                if self.config.require_tool_call:
+                    verify_json["harness_pre_gate_reward"] = verify_json.get("reward")
+                    if not any(
+                        isinstance(item, dict) and item.get("type") in ("function_call", "custom_tool_call")
+                        for item in agent_resp_json.get("output") or []
+                    ):
+                        verify_json["reward"] = 0.0
+                return HarnessAgentVerifyResponse.model_validate(verify_json)
             except BaseException:
                 await self._close_run_sandbox(run_context)
                 raise
             finally:
                 _RUN_CONTEXT.reset(token)
+
+    def _mcp_server_entry(self, seed: dict) -> dict[str, Any]:
+        """This rollout's MCP server for the in-box agent, from the /seed_session response."""
+        metadata = seed.get(NEMO_GYM_MCP_METADATA_KEY)
+        if not isinstance(metadata, dict) or not metadata.get("headers"):
+            raise ValueError(
+                f"forward_mcp_tools needs {self.config.resources_server.name} to serve its tools over MCP"
+            )
+        url = sandbox_server_url(self.config.resources_server.name, require_reachable=True)
+        name = str(metadata.get("server_name") or self.config.resources_server.name)
+        return {
+            name: {
+                "type": metadata.get("transport") or "http",
+                "url": f"{url}/{str(metadata.get('url_path') or '/mcp').lstrip('/')}",
+                "headers": {str(k): str(v) for k, v in metadata["headers"].items()},
+            }
+        }
 
     async def _grade_in_box(self, handle, grade_spec: dict) -> float:
         return await stage_and_run_eval(
@@ -414,15 +448,24 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         if workdir:
             runner_config["cwd"] = workdir
             if workdir_key := _WORKDIR_KEYS.get(self.config.agent):
-                agent_config[workdir_key] = workdir
+                # An explicit agent_kwargs value wins, e.g. a DeepAgents filesystem root of "/".
+                agent_config.setdefault(workdir_key, workdir)
         model_url = self._sandbox_model_url(request)
         files = {
             "/work/model_url.txt": model_url,
             "/work/request.json": agent_body.model_dump_json(),
-            "/work/agent_config.json": json.dumps(agent_config),
-            "/work/runner_config.json": json.dumps(runner_config),
             "/work/runner.py": runner_script,
         }
+        if mcp := _RUN_CONTEXT.get().get("mcp"):
+            # Only Claude Code takes an MCP config file. The session token in it is per rollout.
+            if self.config.agent != "claude_code":
+                raise ValueError(f"forward_mcp_tools supports agent claude_code, not {self.config.agent}")
+            if agent_config.get("mcp_config"):
+                raise ValueError("forward_mcp_tools would replace agent_kwargs.mcp_config; set only one of them")
+            files["/work/mcp.json"] = json.dumps({"mcpServers": mcp})
+            agent_config["mcp_config"] = "__WORK_DIR__/mcp.json"
+        files["/work/agent_config.json"] = json.dumps(agent_config)
+        files["/work/runner_config.json"] = json.dumps(runner_config)
         handle = await self._provision_box(image, files, model_url)
         try:
             work_dir = self._box_path(handle, "/work")
@@ -432,7 +475,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 if workdir:
                     runner_config["cwd"] = workdir
                     if workdir_key := _WORKDIR_KEYS.get(self.config.agent):
-                        agent_config[workdir_key] = workdir
+                        agent_config.setdefault(workdir_key, workdir)
                     await self._upload_files(
                         handle,
                         {
