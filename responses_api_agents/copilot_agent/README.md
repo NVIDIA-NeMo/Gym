@@ -38,9 +38,16 @@ single_agent_turn:
 
 Supply the `policy_model` Gym Model Server, `policy_model_name`, and the `sandbox` provider as for the
 other harnesses in [the Terminal-Bench 2.1 README](../../benchmarks/terminal_bench_2_1/README.md). The
-sandbox must be able to reach the Model Server. Copilot is not yet in the benchmark's
-`allowed_agents`; use `--allow-unsupported-pairing` during development and qualify the pairing with
-real-model rollouts before adding it to that list.
+sandbox must be able to reach the Model Server. Terminal-Bench 2.1 and SWE-bench Pro declare
+Copilot in `allowed_agents`; other pairings require `--allow-unsupported-pairing` during development
+and real-model qualification before declaration.
+
+For SWE-bench Pro, replace the Resources config import with
+`resources_servers/swebench_pro/configs/swebench_pro.yaml`, bind the `swebench_pro` taskset to
+`single_agent_turn`, and set `resources_server.name: swebench_pro_resources_server`. Keep the same
+Copilot Agent Server and `resources_tool_transports: []`. Prepare its data using
+[the SWE-bench Pro instructions](../../resources_servers/swebench_pro/README.md), and declare
+`taskset: swebench_pro` on that dataset so Gym materializes typed tasks for the route.
 
 ## Runtime and model requirements
 
@@ -106,6 +113,9 @@ OpenTelemetry chat spans, written locally to the session directory: counts are s
 model calls, and a count the provider omitted stays unknown rather than zero. Close returns the model-call
 references, harness tool timing, sandbox identity and execution outcome, and explicit observation gaps.
 Observed rejected model calls contribute zero completed-response tokens; missing chat telemetry stays unknown.
+Copilot 1.0.103 omits compaction calls from its native usage spans. After observed compaction, aggregate
+response usage is unknown and `compaction_model_usage_unavailable` explains the gap. Enable Gym
+Model Server capture to retain the complete per-call token counts, including compaction.
 
 A provider error that Copilot reports (`session.error`) returns a failed response with a classified cause:
 an HTTP status becomes `model_request_error`, and an unreachable provider becomes `model_transport_error`.
