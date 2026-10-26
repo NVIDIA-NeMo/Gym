@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib
 import importlib.metadata
 import sys
 from contextlib import nullcontext as does_not_raise
@@ -1695,13 +1696,40 @@ contested: second_inner
         assert dict_config[key] == expected
         assert dict_config["nested"][key] == expected
 
+    def test_recursively_hide_secrets_masks_every_value_under_a_secret_mapping(self) -> None:
+        """A `secrets:` mapping is keyed by environment variable name: `JUDGE_AUTH` has no secret-shaped
+        substring of its own, and is a secret all the same."""
+        canary = "sk-FAKE-CANARY"  # pragma: allowlist secret
+        dict_config = DictConfig(
+            {
+                "secrets": {"JUDGE_AUTH": canary, "JUDGE_API_KEY": canary, "inner": {"X": canary}, "many": [canary]},
+                "plain": {"JUDGE_AUTH": "kept"},
+            }
+        )
+
+        recursively_hide_secrets(dict_config)
+
+        assert OmegaConf.to_container(dict_config) == {
+            "secrets": {"JUDGE_AUTH": "****", "JUDGE_API_KEY": "****", "inner": {"X": "****"}, "many": ["****"]},
+            "plain": {"JUDGE_AUTH": "kept"},
+        }
+
     def test_hide_secrets_in_overrides_masks_keys_case_insensitively(self) -> None:
-        overrides = ["++DB_PASSWORD=sk-FAKE-CANARY", "+policy.OPENAI_API_KEY=sk-FAKE-CANARY", "++wandb_project=proj"]
+        overrides = [
+            "++DB_PASSWORD=sk-FAKE-CANARY",
+            "+policy.OPENAI_API_KEY=sk-FAKE-CANARY",
+            "++wandb_project=proj",
+            # The documented Harbor override: the secret-shaped segment is the parent, not the leaf.
+            "++harbor_environment_server.environment_servers.harbor.secrets.JUDGE_AUTH=sk-FAKE-CANARY",
+            "++harbor_environment_server.environment_servers.harbor.artifacts_dir=/tmp/out",
+        ]
 
         assert hide_secrets_in_overrides(overrides) == [
             "++DB_PASSWORD=****",
             "+policy.OPENAI_API_KEY=****",
             "++wandb_project=proj",
+            "++harbor_environment_server.environment_servers.harbor.secrets.JUDGE_AUTH=****",
+            "++harbor_environment_server.environment_servers.harbor.artifacts_dir=/tmp/out",
         ]
 
     def test_recursively_replace_keys(self, monkeypatch: MonkeyPatch) -> None:
@@ -3773,3 +3801,16 @@ class TestAbsoluteIpServerTypes:
 
         with raises(ConfigError, match=match):
             GlobalConfigDictParser().parse(_absolute_ip_parse_config({"absolute_ip_server_types": value}))
+
+
+def test_the_cli_parse_leaves_hydras_argument_parser_as_it_found_it(monkeypatch: MonkeyPatch) -> None:
+    """The parser is patched for the call only. Left patched, every parse used to wrap the previous wrapper, one
+    frame deeper each time, until a long test session recursed past the limit inside hydra's parser."""
+    hydra_main_module = importlib.import_module("hydra.main")
+    original = hydra_main_module.get_args_parser
+
+    monkeypatch.setattr(sys, "argv", ["gym"])
+    for _ in range(4):
+        GlobalConfigDictParser().parse_global_config_dict_from_cli()
+
+    assert hydra_main_module.get_args_parser is original

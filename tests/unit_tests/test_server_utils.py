@@ -2175,6 +2175,7 @@ class TestRunWebserverProxyKwargs:
         num_workers: int | None,
         ray_enabled: bool | None = None,
         is_worker: bool = False,
+        routes_sessions: bool = False,
     ) -> dict:
         from fastapi import FastAPI
 
@@ -2207,6 +2208,10 @@ class TestRunWebserverProxyKwargs:
 
         class TestSimpleServer(SimpleServer):
             ray_enabled = ray_setting
+            routes_sessions_to_owner = routes_sessions
+
+            def claimed_session_routing(self) -> dict:
+                return {}
 
             @classmethod
             def load_config_from_global_config(cls):
@@ -2372,6 +2377,33 @@ class TestRunWebserverProxyKwargs:
         assert self.uvicorn_kwargs == {}
         report.assert_not_called()
 
+    @mark.parametrize("num_workers", [1, 4])
+    def test_listen_backlog_defaults_above_uvicorns(self, monkeypatch: MonkeyPatch, num_workers: int) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=num_workers)
+
+        assert 16384 == kwargs["backlog"]
+
+    def test_listen_backlog_comes_from_the_global_config(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_backlog": 4096}, num_workers=4)
+
+        assert 4096 == kwargs["backlog"]
+
+    def test_a_workers_private_socket_gets_the_listen_backlog(self, monkeypatch: MonkeyPatch) -> None:
+        install = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "install_session_routing", install)
+
+        self._capture_uvicorn_kwargs(
+            monkeypatch, {"uvicorn_backlog": 4096}, num_workers=4, is_worker=True, routes_sessions=True
+        )
+
+        assert 4096 == install.call_args.kwargs["backlog"]
+
+    def test_a_listen_backlog_below_one_fails_before_uvicorn_starts(self, monkeypatch: MonkeyPatch) -> None:
+        with raises(ValidationError, match="uvicorn_backlog"):
+            self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_backlog": 0}, num_workers=1)
+
+        assert self.uvicorn_kwargs == {}
+
 
 class TestHeadServerProxyKwargs:
     """The independently launched head server must use the same proxy-header policy."""
@@ -2416,6 +2448,10 @@ class TestHeadServerProxyKwargs:
 
         assert kwargs["proxy_headers"] is True
         assert kwargs["forwarded_allow_ips"] == ["10.0.0.1"]
+
+    def test_listen_backlog_follows_the_global_config(self, monkeypatch: MonkeyPatch) -> None:
+        assert 16384 == self._capture_uvicorn_kwargs(monkeypatch, {})["backlog"]
+        assert 4096 == self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_backlog": 4096})["backlog"]
 
 
 @mark.parametrize("header", [None, b"X-Other-Harness-Reply"])
