@@ -143,13 +143,14 @@ gap. Positive cleanup confirmation remains
 required; the adapter validates the captured terminal events without inventing an exit code.
 
 One shared Linux supervisor per activation fences delayed launches.
-The supervisor stops live harness-group processes and reaps its children. On timeout
-or close it preserves children already adopted before the stop, typically services from
-completed tools, and drains newly adopted children within the cleanup deadline, including
-tools in separate sessions. The sandbox owner stops the preserved services later.
+The supervisor stops live harness-group processes. On timeout or close it first records
+the harness's descendants in other process groups, typically tools in their own sessions,
+then kills the harness group, those descendants and the groups they lead within the cleanup
+deadline. Processes that left the harness before the stop, typically services from completed
+tools, remain for the sandbox owner to stop later.
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
-those processes may still change task files. The stop-time cutoff also has adoption/PID
-races and cannot classify later service forks. It is not a security boundary.
+those processes may still change task files. The stop-time cutoff also has PID races and
+cannot classify later service forks. It is not a security boundary.
 Services must use task-owned files rather than the temporary agent session directory.
 Close confirms the receipt before cancelling provider execution,
 then removes adapter-owned files and disconnects. Missing/negative termination evidence

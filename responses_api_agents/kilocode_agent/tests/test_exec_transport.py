@@ -21,7 +21,7 @@ from responses_api_agents.kilocode_agent.tests.test_observability import databas
 from responses_api_agents.kilocode_agent.tests.test_sandbox import seed
 
 
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux child-subreaper and /proc required")
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc required")
 
 
 class ExecOnlySandbox:
@@ -90,13 +90,14 @@ def activate(state, code, timeout=0.5):
     )
 
 
+@pytest.mark.parametrize("detached", [False, True])
 @pytest.mark.parametrize("ending", ["natural", "timeout", "cancel", "close"])
-async def test_exec_only_supervision_reaps_harness_group(tmp_path, ending):
+async def test_exec_only_supervision_reaps_harness_group(tmp_path, ending, detached):
     state, provider, workdir = make_session(tmp_path)
-    # A tool that stays in Kilo's process group; detached services are left to the sandbox owner.
+    # A tool in Kilo's process group, or in its own session as Kilo starts shell tools.
     code = (
         "import subprocess,sys,time,pathlib; "
-        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+        f"p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session={detached}); "
         "pathlib.Path('child.pid').write_text(str(p.pid)); "
         + ("print('{}')" if ending == "natural" else "time.sleep(60)")
     )
@@ -125,7 +126,8 @@ async def test_exec_only_supervision_reaps_harness_group(tmp_path, ending):
             stat = Path(f"/proc/{(workdir / 'child.pid').read_text()}/stat").read_text()
         except FileNotFoundError:
             stat = ") X"
-        assert stat.rpartition(")")[2].split()[0] in ("Z", "X")
+        # Natural CLI exit has no stop cutoff; the sandbox owner tears down a detached tool.
+        assert (stat.rpartition(")")[2].split()[0] in ("Z", "X")) is not (detached and ending == "natural")
         assert provider.cancelled_launch is False
         assert provider.deadline > deadline + 3 * 1
         await state.close(timeout=3)

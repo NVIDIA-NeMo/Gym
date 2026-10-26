@@ -47,9 +47,12 @@ CLEANUP_PHASE_COUNT = 3
 class CleanupReceipt(TypedDict):
     """Outcome after bounded harness termination, as written by process_supervisor.sh.
 
-    ``cleanup_confirmed`` means no live harness-group members remain. Forced
-    stops also drain the harness's descendants. Services orphaned before the stop
-    remain until the owner closes the sandbox; this is not a sandbox-empty check.
+    ``cleanup_confirmed`` means no live harness-group members remain. Forced stops
+    also kill the harness's descendants that ran in other process groups when the
+    stop began, and the groups they lead. Processes that left the harness before the
+    stop remain until the owner closes the sandbox; this is not a sandbox-empty check.
+    ``return_code`` is the shell status: 128+N for a harness killed by signal N, and
+    126 or 127 when the command could not be run.
     """
 
     cleanup_confirmed: bool

@@ -34,14 +34,16 @@ pytestmark = pytest.mark.sandbox
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
-async def test_supervisor_deadline_finishes_before_provider_hard_timeout(tmp_path: Path) -> None:
+@pytest.mark.parametrize("detached", [False, True])
+async def test_supervisor_deadline_finishes_before_provider_hard_timeout(tmp_path: Path, detached: bool) -> None:
     provider = LocalProvider()
     handle = await provider.create(SandboxSpec(workdir=str(tmp_path)))
     worker = tmp_path / "worker.py"
     worker.write_text(
         "import pathlib, signal, subprocess, sys, time\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+        f"start_new_session={detached})\n"
         "pathlib.Path('child.pid').write_text(str(child.pid))\n"
         "time.sleep(60)\n"
     )
@@ -77,7 +79,9 @@ async def test_supervisor_deadline_finishes_before_provider_hard_timeout(tmp_pat
         assert receipt["return_code"] == 128 + signal.SIGKILL
         assert receipt["error"] is None
         child_pid = int((tmp_path / "child.pid").read_text())
-        assert not Path(f"/proc/{child_pid}").exists(), "in-flight tool survived"
+        # A killed tool may linger as a zombie until init reaps it; it can no longer run.
+        stat = Path(f"/proc/{child_pid}/stat")
+        assert not stat.exists() or stat.read_text().rsplit(")", 1)[1].split()[0] in "ZX", "in-flight tool survived"
     finally:
         if (tmp_path / "child.pid").exists():
             try:

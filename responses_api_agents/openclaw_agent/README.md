@@ -236,13 +236,14 @@ An explicit wall or model-output limit returns partial output as `incomplete`; u
 raise HTTP 502 even when a useful patch exists. Do not infer rollout success from reward alone. Close returns the captured observations,
 including salvaged transcript evidence after cancellation.
 
-The supervisor stops live harness-group processes and reaps its children. On timeout
-or close it preserves children already adopted before the stop, typically services from
-completed tools, and drains newly adopted children within the cleanup deadline, including
-tools in separate sessions. The sandbox owner stops the preserved services later.
+The supervisor stops live harness-group processes. On timeout or close it first records
+the harness's descendants in other process groups, typically tools in their own sessions,
+then kills the harness group, those descendants and the groups they lead within the cleanup
+deadline. Processes that left the harness before the stop, typically services from completed
+tools, remain for the sandbox owner to stop later.
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
-those processes may still change task files. The stop-time cutoff also has adoption/PID
-races and cannot classify later service forks. It is not a security boundary.
+those processes may still change task files. The stop-time cutoff also has PID races and
+cannot classify later service forks. It is not a security boundary.
 The sandbox launcher sets `OPENCLAW_NO_RESPAWN=1` to keep the CLI in the supervised group.
 Services must use task-owned files rather than the temporary agent session directory. Close is serialized and checks the receipt, process handle,
 adapter-owned file removal, and disconnect before succeeding. Unknown launch outcomes and missing

@@ -156,24 +156,23 @@ a successful smoke, and one task does not establish a benchmark baseline.
 
 ## Tasks that start services
 
-The supervisor stops live processes in the harness group and reaps its children before
-capture or verification. On timeout or close, it first records its already adopted
-children. It then stops the harness and repeatedly drains newly adopted children,
-including in-flight tools in separate sessions, within the cleanup deadline. Previously
-adopted children outside the harness group remain for Resources to stop after verification
-or episode failure. This includes unfinished background jobs such as `make &` left by an
+The supervisor stops live processes in the harness group before capture or verification.
+On timeout or close, it first records the harness's descendants in other process groups,
+such as in-flight tools in separate sessions. It then stops the harness and kills the group,
+those descendants and the groups they lead within the cleanup deadline. Processes that left
+the harness before the stop remain for Resources to stop after verification or episode
+failure. This includes unfinished background jobs such as `make &` left by an
 earlier tool call, as well as services; either can continue writing during verification.
 
-To survive this forced-stop cleanup, a service must be outside the harness group and,
-before the stop, adopted by the supervisor or descended from a process that was. In the
-usual tool-launch path, let the process that launched it exit before the harness deadline
-or stop so that adoption can occur. A service still parented by an in-flight tool is
-adopted when that tool exits or is killed during the stop, and is drained with the
-in-flight tools.
+To survive this forced-stop cleanup, a service must be outside the harness group and no
+longer descend from the harness when the stop begins. In the usual tool-launch path, let the
+process that launched it exit before the harness deadline or stop. A service still parented
+by an in-flight tool descends from the harness at the stop and is killed with the in-flight
+tools.
 
 Natural CLI exit has no such cutoff: unfinished tools in separate sessions cannot be
-distinguished from services and may still change task files. Adoption races, PID reuse,
-and a preserved service orphaning more children during cleanup also limit this rule.
+distinguished from services and may still change task files. PID reuse and a tool
+that starts a new session after the stop is recorded also limit this rule.
 A confirmed receipt is not a guarantee that the sandbox is idle or a security boundary.
 Unconfirmed termination blocks verification; a final failure receipt still lets agent
 close release its connection for owner teardown.
