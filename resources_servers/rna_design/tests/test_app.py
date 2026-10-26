@@ -18,6 +18,7 @@ The calls run the real tools and the real scorer. Tests that fold need EternaFol
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -289,6 +290,9 @@ def test_closing_a_worker_stops_the_processes_it_started(tmp_path: Path) -> None
             os.kill(child, 0)
         except ProcessLookupError:
             return
+        # Killed but not yet reaped, as where PID 1 does not reap orphans.
+        if subprocess.run(["ps", "-o", "stat=", "-p", str(child)], capture_output=True, text=True).stdout.startswith("Z"):
+            return
         time.sleep(0.1)
     raise AssertionError(f"process {child} outlived its tool worker")
 
@@ -353,6 +357,31 @@ def test_a_session_that_never_reached_verify_is_closed_by_the_next(tmp_path: Pat
         assert abandoned.proc.returncode is not None
         assert len(server.workers) == 1 and abandoned not in server.workers.values()
         _verify(client)
+
+
+def test_a_worker_that_fails_to_open_leaves_nothing_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import tempfile
+
+    import resources_servers.rna_design.app as app_module
+
+    async def stuck(self, request):
+        raise TimeoutError
+
+    monkeypatch.setattr(app_module.ToolWorker, "ask", stuck)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
+    (tmp_path / "tmp").mkdir()
+    server = _server(tmp_path, work_dir="")
+    with _client(tmp_path, server) as client, pytest.raises(TimeoutError):
+        client.post("/seed_session", json=SEED)
+    assert server.workers == {} and list((tmp_path / "tmp" / "rna_design").iterdir()) == []
+
+
+def test_stopping_the_server_closes_its_workers(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    with _client(tmp_path, server) as client:
+        assert client.post("/seed_session", json=SEED).status_code == 200
+        (worker,) = server.workers.values()
+    assert worker.proc.returncode is not None and server.workers == {}
 
 
 def test_an_unknown_suite_starts_no_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

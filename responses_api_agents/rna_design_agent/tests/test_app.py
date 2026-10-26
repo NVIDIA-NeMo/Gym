@@ -19,6 +19,7 @@ EternaFold. Tests that need EternaFold skip when ``arnie`` is not configured."""
 
 import importlib.util
 import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -322,6 +323,43 @@ class TestReviewFixes:
         assert failures == ["score.constraints: changed nothing — same arguments will waste the next round too"]
         state.close()
 
+    def test_grnade_arguments_design_py_would_reject_are_the_models_mistake(self, tmp_path: Path) -> None:
+        from responses_api_agents.rna_design_agent.rds import registry
+
+        self._campaign(tmp_path)
+        for bad in ({"mode": "4d"}, {"filter_metric": "unknown_score"}):
+            with pytest.raises(ValueError, match="this tool takes"):
+                registry.dispatch("generate.grnade", {"target": "review_hairpin", **bad})
+
+    def test_a_missing_structure_the_model_named_fails_instead_of_running_in_2d(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from responses_api_agents.rna_design_agent.rds import registry
+
+        self._campaign(tmp_path)
+        monkeypatch.setenv("GRNADE_REPO", str(tmp_path))
+        monkeypatch.setenv("RDS_RUN_DIR", str(tmp_path / "run"))
+        with pytest.raises(ValueError, match="target structure not found"):
+            registry.dispatch("generate.grnade", {"target": "review_hairpin", "structure": "/no/such.pdb"})
+        # Its work directory sits in the run directory, which goes when the run does.
+        assert list((tmp_path / "run").glob("grnade_*"))
+
+    def test_code_call_runs_only_a_saved_tool_by_name(self, tmp_path: Path) -> None:
+        from responses_api_agents.rna_design_agent.rds import registry
+
+        outside = tmp_path / "outside.py"
+        outside.write_text("open(__file__ + '.ran', 'w')\n")
+        for name in (str(tmp_path / "outside"), "../outside"):
+            with pytest.raises(ValueError, match="no saved tool named"):
+                registry.dispatch("code.call", {"name": name})
+        assert not (tmp_path / "outside.py.ran").exists()
+
+    def test_ruleset_notes_are_checked_for_target_specific_content(self) -> None:
+        from responses_api_agents.rna_design_agent.rds.rules import Ruleset, target_specific
+
+        assert target_specific(Ruleset.from_dict({"rules": [], "notes": "eterna100_v1_57: GGGGAAACCCCA"}))
+        assert not target_specific(Ruleset.from_dict({"rules": [], "notes": "GC-rich stems hold the fold."}))
+
     def test_final_scoring_applies_each_gates_declared_rule(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from responses_api_agents.rna_design_agent.rds import evaluate
         from responses_api_agents.rna_design_agent.rds.campaign import Campaign, Scoring
@@ -375,15 +413,20 @@ class TestReviewFixes:
         )
         monkeypatch.setattr(agent_app, "_WORKER", script)
         started = time.monotonic()
-        out = await _agent(tmp_path, rollout_timeout_s=1)._run_worker({})
+        # Long enough for the worker to start its child on a loaded machine, short against the child's 60 s.
+        out = await _agent(tmp_path, rollout_timeout_s=3)._run_worker({})
         # A survivor holding the worker's pipes would also hold the rollout open until it exits.
-        assert out["error_type"] == "Timeout" and time.monotonic() - started < 10
+        assert out["error_type"] == "Timeout" and time.monotonic() - started < 15
         child = int(pid_file.read_text())
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             try:
                 os.kill(child, 0)
             except ProcessLookupError:
+                return
+            # Killed but not yet reaped, as where PID 1 does not reap orphans.
+            ps = subprocess.run(["ps", "-o", "stat=", "-p", str(child)], capture_output=True, text=True)
+            if ps.stdout.startswith("Z"):
                 return
             time.sleep(0.1)
         raise AssertionError(f"process {child} outlived its timed-out worker")
@@ -421,6 +464,16 @@ class TestRun:
         assert out.protocol and out.metric == "score.fold_match.match.f1"
         assert out.tool_failures == 0
         assert out.code
+
+    @needs_eternafold
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("arm", ["fixed_deep", "generator"])
+    async def test_the_other_model_free_arms_solve_an_easy_target(self, tmp_path: Path, arm: str) -> None:
+        agent = _agent(tmp_path, arm=arm)
+        out = await agent.run(MagicMock(cookies={}), _request("rnainvbench_eterna100_v1", "eterna100_v1_57"))
+
+        assert out.mask_sample is False
+        assert out.reward == 1.0 and out.solved is True
 
     @needs_eternafold
     @pytest.mark.asyncio

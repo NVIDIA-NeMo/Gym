@@ -254,14 +254,13 @@ SEQUENCE_FRAGMENT = re.compile(r"\b[ACGU]{7,}\b")
 
 
 def target_specific(ruleset: Ruleset) -> str:
-    """What in this ruleset would not survive being moved to another target."""
-    for rule in ruleset.rules:
-        for text in (rule.statement, rule.rationale):
-            found = SEQUENCE_FRAGMENT.search(text.upper())
-            if found:
-                return f"sequence fragment {found.group()!r}"
-            if "eterna" in text.lower() or "openknot" in text.lower():
-                return "a target or suite name"
+    """What in this ruleset would not survive being moved to another target. The notes travel with it too."""
+    for text in [ruleset.notes] + [t for rule in ruleset.rules for t in (rule.statement, rule.rationale)]:
+        found = SEQUENCE_FRAGMENT.search(text.upper())
+        if found:
+            return f"sequence fragment {found.group()!r}"
+        if "eterna" in text.lower() or "openknot" in text.lower():
+            return "a target or suite name"
     return ""
 
 

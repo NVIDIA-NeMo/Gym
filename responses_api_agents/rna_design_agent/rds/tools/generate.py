@@ -172,6 +172,10 @@ class GRNAdeIn:
     timeout_s: int = field("Abort a run that exceeds this", default=7200, operator=True)
 
 
+#: gRNAde's own filters, as design.py names them.
+FILTER_METRICS = ("openknot_score", "sc_score_ribonanzanet", "sc_score_ribonanzanet_ss")
+
+
 def partial_sequence(target) -> str:
     """gRNAde's hard-constraint string: fixed letters, '_' where it may design, enforced during sampling."""
     out = ["_"] * target.length
@@ -204,6 +208,11 @@ def generate_grnade(inp: GRNAdeIn) -> dict:
     if inp.target not in TARGETS:
         raise ValueError(f"unknown target {inp.target!r} (have: {', '.join(sorted(TARGETS))})")
     target = TARGETS[inp.target]
+    # Arguments design.py would reject are the model's mistake, not the machine's, so refuse them here.
+    if inp.mode not in ("", "2d", "3d"):
+        raise ValueError(f"unknown mode {inp.mode!r}; this tool takes: '2d', '3d' or empty")
+    if inp.filter_metric not in FILTER_METRICS:
+        raise ValueError(f"unknown filter_metric {inp.filter_metric!r}; this tool takes: {', '.join(FILTER_METRICS)}")
     # design.py loops range(total_samples // n_samples), so a batch larger than n samples nothing.
     # Clamp it to n.
     notes = []
@@ -214,7 +223,7 @@ def generate_grnade(inp: GRNAdeIn) -> dict:
     repo = Path(os.environ.get("GRNADE_REPO", "/opt/geometric-rna-design"))
     if not repo.exists():
         raise EnvironmentFault(f"gRNAde repo not found at {repo}; set GRNADE_REPO")
-    work = Path(tempfile.mkdtemp(prefix="grnade_"))
+    work = Path(tempfile.mkdtemp(prefix="grnade_", dir=os.environ.get("RDS_RUN_DIR") or None))  # goes with the run
     # Use a backbone only when the task supplies one. An explicit structure argument still wins.
     # Test the string, not the path: Path("") is ".", which exists.
     disclosed = "backbone_3d" in getattr(target, "provides", frozenset())
@@ -224,7 +233,7 @@ def generate_grnade(inp: GRNAdeIn) -> dict:
     structure = Path(given) if given else Path("")
     mode = inp.mode or ("3d" if given and structure.exists() else "2d")
     if not given or not structure.exists():
-        if mode != "2d":
+        if mode != "2d" or inp.structure:
             missing = (
                 f"target structure not found at {structure!r}; pass --structure, set RDS_GRNADE_PDB, or use mode='2d'"
             )
@@ -311,7 +320,7 @@ def generate_grnade(inp: GRNAdeIn) -> dict:
         capture_output=True,
         text=True,
         env=env,
-        timeout=inp.timeout_s,
+        timeout=min(inp.timeout_s, float(os.environ.get("RDS_TOOL_TIMEOUT_S", inp.timeout_s))),
     )
     produced = sorted((work / "designs").glob("designs_*.csv"))
     if result.returncode != 0 or not produced:

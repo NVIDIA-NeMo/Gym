@@ -305,7 +305,7 @@ class RunCodeIn:
 def code_run(inp: RunCodeIn) -> dict:
     if not inp.code.strip():
         raise ValueError("no code to run")
-    work = Path(tempfile.mkdtemp(prefix="agent_code_"))
+    work = Path(tempfile.mkdtemp(prefix="agent_code_", dir=os.environ.get("RDS_RUN_DIR") or None))  # goes with the run
     script = work / "design.py"
     script.write_text(PREAMBLE + inp.code)
     _write_target(work)
@@ -352,7 +352,9 @@ class CallCodeIn:
 )
 def code_call(inp: CallCodeIn) -> dict:
     saved = _toolbox() / f"{inp.name}.py"
-    if not saved.is_file():
+    # The same names code.run saves under, so a path cannot reach a file outside the toolbox.
+    named = bool(inp.name) and all(c.isalnum() or c in "_-" for c in inp.name)
+    if not named or not saved.is_file():
         have = sorted(p.stem for p in _toolbox().glob("*.py"))
         raise ValueError(
             f"no saved tool named {inp.name!r}"
@@ -364,7 +366,7 @@ def code_call(inp: CallCodeIn) -> dict:
         )
     # Staged into its own work directory, as code.run does: a harness inside a container cannot mount the toolbox
     # path, and a script should not read the other saved tools.
-    work = Path(tempfile.mkdtemp(prefix="agent_code_"))
+    work = Path(tempfile.mkdtemp(prefix="agent_code_", dir=os.environ.get("RDS_RUN_DIR") or None))
     script = work / saved.name
     body = saved.read_text()
     script.write_text(body)

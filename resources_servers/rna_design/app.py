@@ -29,6 +29,7 @@ import signal
 import sys
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 
@@ -154,6 +155,18 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
         app.post("/campaign_state")(self.campaign_state)
         app.post("/{path}")(self.call_tool)
+        serve = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def close_workers_on_exit(app):
+            # Workers run in their own process groups, so they would outlive this server.
+            async with serve(app) as state:
+                yield state
+            for worker in self.workers.values():
+                await worker.close()
+            self.workers.clear()
+
+        app.router.lifespan_context = close_workers_on_exit
         return app
 
     def mcp_tools(self, harvested, catchall):
@@ -208,19 +221,24 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
             stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True,
             limit=2**26,  # one reply is one JSON line, and a transcript can pass asyncio's 64 KiB default
+            # A tool that outlives the call limit would answer the next call instead, so tools stop a minute short.
+            env={**os.environ, "RDS_TOOL_TIMEOUT_S": str(max(self.config.call_timeout_s - 60, 60))},
         )
         worker = ToolWorker(proc, self.config.call_timeout_s, scratch=None if self.config.work_dir else run_dir)
-        opened = await worker.ask(
-            {
-                "op": "open",
-                "suite_path": str(suite_path),
-                "target_name": str(body.target.get("name", "")),
-                "run_dir": str(run_dir),
-            }
-        )
-        if not opened["ok"]:
-            await worker.close()
-            raise RuntimeError(opened["error"])
+        try:
+            opened = await worker.ask(
+                {
+                    "op": "open",
+                    "suite_path": str(suite_path),
+                    "target_name": str(body.target.get("name", "")),
+                    "run_dir": str(run_dir),
+                }
+            )
+            if not opened["ok"]:
+                raise RuntimeError(opened["error"])
+        except BaseException:
+            await worker.close()  # whatever failed, the process and its run directory go with it
+            raise
         self.workers[session_id] = worker
         return BaseSeedSessionResponse()
 

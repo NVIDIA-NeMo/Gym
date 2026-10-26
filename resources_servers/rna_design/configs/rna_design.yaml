@@ -12,6 +12,9 @@ rna_design:
       verified: false
       expose_tools_over_mcp: true
       worker_python: ${oc.env:RNA_WORKER_PYTHON,null}
+      # Just above the harness's rollout_timeout: no live session is older, and a rollout that died before /verify
+      # leaves its worker for no longer than this.
+      session_ttl_s: 4200
       description: "RNA inverse folding: the design tools served over MCP to a harness such as Claude Code."
 
 rna_design_claude_code_agent:
