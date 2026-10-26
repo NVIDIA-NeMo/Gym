@@ -506,4 +506,6 @@ def test_startup_logs_the_deprecation_notice(agent: HarborAgent, caplog: pytest.
     assert len(notices) == 1
     (notice,) = notices
     assert "responses_api_agents/harbor_agent_general is deprecated" in notice
-    assert "https://github.com/NVIDIA-NeMo/Gym/pull/3674" in notice
+    assert (
+        "environment_servers/harbor" in notice and "https://docs.nvidia.com/nemo/gym/main/data/harbor-tasks" in notice
+    )

@@ -226,9 +226,9 @@ class HarborAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
         LOGGER.warning(
-            "responses_api_agents/harbor_agent is deprecated and will be removed soon. "
-            "New work should run Harbor tasks through the Harbor environment server "
-            "(PR stack from https://github.com/NVIDIA-NeMo/Gym/pull/3674)."
+            "responses_api_agents/harbor_agent is deprecated: new work should run Harbor tasks through the "
+            "harbor environment server (environment_servers/harbor, https://docs.nvidia.com/nemo/gym/main/data/harbor-tasks). "
+            "It is removed once the benchmarks still using it have moved to the Harbor task format."
         )
 
     def setup_webserver(self) -> FastAPI:

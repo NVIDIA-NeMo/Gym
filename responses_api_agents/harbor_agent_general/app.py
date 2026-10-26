@@ -246,9 +246,9 @@ class HarborAgent(SimpleResponsesAPIAgent):
         self._sem = asyncio.Semaphore(global_config.get(NUM_SAMPLES_IN_PARALLEL_KEY_NAME) or 1)
         self._worker_http_config = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config)
         logger.warning(
-            "responses_api_agents/harbor_agent_general is deprecated and will be removed soon. "
-            "New work should run Harbor tasks through the Harbor environment server "
-            "(PR stack from https://github.com/NVIDIA-NeMo/Gym/pull/3674)."
+            "responses_api_agents/harbor_agent_general is deprecated: new work should run Harbor tasks through the "
+            "harbor environment server (environment_servers/harbor, https://docs.nvidia.com/nemo/gym/main/data/harbor-tasks). "
+            "It is removed once the benchmarks still using it have moved to the Harbor task format."
         )
 
     def _configure_job_for_run(self, job_config: JobConfig, body: HarborRunRequest) -> None:
