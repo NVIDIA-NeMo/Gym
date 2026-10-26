@@ -90,7 +90,7 @@ def _config(
     if use_agent_sessions:
         # The verifier only reads retained output, so the agent can own this local sandbox.
         agent.update(sandbox_provider="probe_sandbox", sandbox_config={"workdir": str(directory / "workspace")})
-    if harness in ("opencode", "pi"):
+    if harness in ("opencode", "pi", "copilot"):
         agent["timeout"] = timeout
         if not use_agent_sessions:
             agent["workspace_root"] = str(directory / "workspace")
