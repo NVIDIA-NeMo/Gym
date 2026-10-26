@@ -3428,8 +3428,9 @@ class TestRolloutCollection:
 
         assert mock_server_client.post.await_args.kwargs["server_name"] == "my_environment_server"
 
+    @pytest.mark.parametrize("tracing", [False, True])
     async def test_run_examples_with_metadata_carries_rollout_latency_alongside_result(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tracing: bool
     ) -> None:
         """Internal callers get the timing via _CompletedRollout, never through the result dict."""
         row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
@@ -3452,12 +3453,20 @@ class TestRolloutCollection:
         monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
         monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"response": {}}))
 
-        completed = await next(RolloutCollectionHelper()._run_examples_with_metadata([row]))
+        span_context = object()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_span_group_enabled", lambda _: tracing)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_trace_exporter_active", lambda: tracing)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "_dispatch_span", lambda *args, **kwargs: nullcontext(span_context)
+        )
+        completed = await next(RolloutCollectionHelper()._run_examples_with_metadata([row], retry_requests=False))
 
         assert completed.row is row
         assert completed.result == {"response": {}}
         assert isinstance(completed.rollout_latency_ms, float)
         assert completed.rollout_latency_ms >= 0
+        assert completed.dispatch_span_context is (span_context if tracing else None)
+        assert mock_server_client.post.call_args.kwargs["_resend_after_disconnect"] is False
 
     async def test_run_from_config_does_not_route_failures_unless_asked(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
