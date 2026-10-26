@@ -29,6 +29,12 @@ def did_you_mean(value: str, candidates: Iterable[str]) -> str:
     return f" Did you mean `{matches[0]}`?" if matches else ""
 
 
+def listed_names(names: list[str], *, limit: int = 10) -> str:
+    """Quote and join names for an error message, showing at most ``limit`` of them."""
+    shown = ", ".join(repr(name) for name in names[:limit])
+    return f"{shown} and {len(names) - limit} more" if len(names) > limit else shown
+
+
 def exit_unknown_component(name: str, candidates: Iterable[str], type_label: str) -> None:
     """Print an `unknown <type> '<name>'` error (with a did-you-mean hint) and exit nonzero."""
     import rich

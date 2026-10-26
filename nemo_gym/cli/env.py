@@ -356,9 +356,10 @@ def _resolve_server_dir(rel_path: Path) -> Path:
     directory counts as a server only if it ships an install marker for one of our two venv setups. This
     lets ``gym env test`` find and run built-in (and plugin) servers from any cwd, not just a repo checkout.
 
-    A directory at a higher-priority root that contains server code but no install marker is refused rather
-    than skipped, so a local server is never silently replaced by an installed server of the same name. A
-    directory without code, such as a local copy of a server's data, is still skipped.
+    A directory at a higher-priority root that holds a server entrypoint (``app.py``) but no install marker is
+    refused rather than skipped, so a local server is never silently replaced by an installed server of the same
+    name. A directory without an entrypoint, such as a local copy of a server's data with its helper scripts, is
+    still skipped.
     """
 
     def has_install_marker(d: Path) -> bool:
@@ -370,11 +371,11 @@ def _resolve_server_dir(rel_path: Path) -> Path:
             candidate = root / rel_path
             if candidate == resolved:
                 break
-            if candidate.is_dir() and any(candidate.glob("*.py")):
+            if (candidate / "app.py").is_file():
                 raise ConfigError(
                     f"Server directory {candidate} contains server code but no requirements.txt or pyproject.toml, "
-                    f"so Gym would use {resolved} instead. Add one of them to {candidate} (it lists the server's "
-                    "dependencies, including nemo-gym), or rename the directory to use the installed server."
+                    f"so Gym would use {resolved} instead. Add a requirements.txt or pyproject.toml listing the "
+                    f"server's dependencies to {candidate}, or move it aside to use {resolved}."
                 )
     return resolved
 
@@ -1237,6 +1238,7 @@ def _setup_single(test_config: TestConfig, global_config_dict: DictConfig) -> Po
     return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
 
 
+@exit_cleanly_on_config_error
 def test():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_config = TestConfig.model_validate(global_config_dict)
@@ -1348,6 +1350,7 @@ Server venv setup failed {_format_pct(len(setup_failed), len(dir_paths))}:{_disp
         exit(1)
 
 
+@exit_cleanly_on_config_error
 def test_all():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_all_config = TestAllConfig.model_validate(global_config_dict)
