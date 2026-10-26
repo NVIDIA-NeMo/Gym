@@ -26,6 +26,7 @@ from datasets import Dataset
 from omegaconf import OmegaConf
 
 import benchmarks.hle_diamond.prepare as prepare_module
+import benchmarks.hle_diamond.prepare_opencode as prepare_opencode_module
 import benchmarks.hle_diamond.prepare_text as prepare_text_module
 from nemo_gym.benchmarks import BENCHMARKS_DIR, BenchmarkConfig, _benchmark_config_name, _benchmark_config_paths
 from nemo_gym.config_types import ModelServerRef, is_almost_server, maybe_get_server_instance_config
@@ -149,6 +150,9 @@ def prepared_env(monkeypatch, tmp_path):
     monkeypatch.setattr(prepare_module, "EXPECTED_CORPUS", FIXTURE_EXPECTATION)
     monkeypatch.setattr(prepare_module, "OUTPUT_FPATH", tmp_path / "hle_diamond_benchmark.jsonl")
     monkeypatch.setattr(prepare_module, "OUTPUT_TEXT_FPATH", tmp_path / "hle_diamond_benchmark_text.jsonl")
+    monkeypatch.setattr(
+        prepare_module, "OUTPUT_OPENCODE_FPATH", tmp_path / "hle_diamond_benchmark_opencode_full.jsonl"
+    )
     return state, calls
 
 
@@ -198,6 +202,43 @@ class TestPrepare:
             assert leaked not in serialized
         assert serialized.count(IMAGE_DATA_URI) == 1
         assert "Wrote 4 problems" in capsys.readouterr().out
+
+    def test_opencode_prompt_keeps_every_row_in_one_user_turn_with_the_image_block(self, prepared_env, capsys):
+        """The OpenCode adapter forwards only the user turn, so the full set for opencode_full.yaml folds the
+        instruction after the question (prompts/opencode.yaml) and carries the image in that same turn."""
+        output = prepare_opencode_module.prepare()
+
+        assert output == prepare_module.OUTPUT_OPENCODE_FPATH
+        rows = _read_rows(output)
+        assert [row["uuid"] for row in rows] == [row["id"] for row in _source_rows()]
+        assert [list(row) for row in rows] == [ROW_FIELDS + ["responses_create_params"]] * 4
+        for row in rows:
+            (user,) = row["responses_create_params"]["input"]
+            assert user["role"] == "user"
+        by_id = {row["uuid"]: row for row in rows}
+        folded = by_id["q-reasoning-image"]["question"] + "\n\n" + UPSTREAM_SYSTEM_PROMPT
+        assert by_id["q-reasoning-image"]["responses_create_params"]["input"] == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": folded},
+                    {"type": "input_image", "image_url": IMAGE_DATA_URI, "detail": "high"},
+                ],
+            }
+        ]
+        assert by_id["q-knowledge-mc"]["responses_create_params"]["input"] == [
+            {"role": "user", "content": by_id["q-knowledge-mc"]["question"] + "\n\n" + UPSTREAM_SYSTEM_PROMPT}
+        ]
+        written = capsys.readouterr().out
+        assert "Wrote 4 problems" in written and "(1 with an image)" in written
+        assert prepare_module.OUTPUT_FPATH.exists() is False  # the default file is not touched
+
+        assert [row["uuid"] for row in _read_rows(prepare_opencode_module.main(["--limit", "1"]))] == [
+            "q-reasoning-text"
+        ]
+        with pytest.raises(SystemExit):
+            prepare_opencode_module.main(["--prompt", "opencode"])
+        assert "unrecognized arguments: --prompt" in capsys.readouterr().err
 
     def test_text_only_drops_image_rows_and_keeps_raw_fields(self, prepared_env):
         output = prepare_text_module.prepare()
@@ -281,6 +322,8 @@ class TestPrepare:
         monkeypatch.setattr("datasets.load_dataset", refuse)
         with pytest.raises(ValueError, match="positive integer"):
             prepare_module.prepare(limit=limit)
+        with pytest.raises(ValueError, match="prompt must be one of"):
+            prepare_module.prepare(prompt="pi")
 
     @pytest.mark.parametrize("argv", [["--limit", "0"], ["--limit", "-1"], ["--limit", "abc"], ["--limit", "1.5"]])
     def test_cli_rejects_non_positive_limit_at_parse_time(self, argv, capsys):
@@ -288,9 +331,10 @@ class TestPrepare:
             prepare_module.build_parser().parse_args(argv)
         assert "positive integer" in capsys.readouterr().err
 
-    def test_cli_accepts_text_only_and_limit(self):
+    def test_cli_accepts_text_only_prompt_and_limit(self):
         args = prepare_module.build_parser().parse_args(["--text-only", "--limit", "3"])
-        assert (args.text_only, args.limit) == (True, 3)
+        assert (args.text_only, args.limit, args.prompt) == (True, 3, "default")
+        assert prepare_module.build_parser().parse_args(["--prompt", "opencode"]).prompt == "opencode"
         assert prepare_module.build_parser().parse_args([]).limit is None
 
 
@@ -340,6 +384,15 @@ LISTED_BENCHMARKS = {
         "benchmarks/hle_diamond/prompts/opencode.yaml",
     ),
     "hle_diamond/pi": ("hle_diamond_text", "hle_diamond_pi_agent", "benchmarks/hle_diamond/prompts/opencode.yaml"),
+    "hle_diamond/opencode_full": ("hle_diamond_opencode_full", "hle_diamond_opencode_agent", None),
+}
+FULL_OPENCODE_DATASET = {
+    "name": "hle_diamond_opencode_full",
+    "type": "benchmark",
+    "jsonl_fpath": "benchmarks/hle_diamond/data/hle_diamond_benchmark_opencode_full.jsonl",
+    "prompt_config": None,
+    "prepare_script": "benchmarks/hle_diamond/prepare_opencode.py",
+    "num_repeats": 1,
 }
 JUDGE_SERVER = "hle_diamond_equivalence_llm_judge_resources_server"
 
@@ -385,8 +438,45 @@ class TestConfigs:
         assert tavily["exclude_domains_file_path"] == "benchmarks/hle_diamond/search_exclusions.json"
 
     @pytest.mark.parametrize(
+        ("config_file", "with_search"), [("opencode_full.yaml", False), ("opencode_search_full.yaml", True)]
+    )
+    def test_full_presets_swap_only_the_dataset_of_the_opencode_agent(self, config_file, with_search):
+        """The 1000-row variants carry the composed preset's agent (effort, tools, network policy) over the
+        OpenCode-prompted full set with no rollout-time prompt; only opencode_full declares the dataset."""
+        resolved = _resolve(config_file)
+        agent = get_first_server_config_dict(resolved, "hle_diamond_opencode_agent")
+
+        assert [dict(dataset) for dataset in agent["datasets"]] == [FULL_OPENCODE_DATASET]
+        assert agent["opencode_config"]["provider"]["nemo_gym"]["models"]["dummy_model"]["options"] == {
+            "reasoningEffort": "high"
+        }
+        if with_search:
+            assert [server["name"] for server in agent["tool_servers"]] == ["tavily"]
+            assert agent["network_access"] == "model_and_tools"
+            assert "Tavily" in agent["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]
+            tavily = get_first_server_config_dict(resolved, "tavily")
+            assert tavily["exclude_domains_file_path"] == "benchmarks/hle_diamond/search_exclusions.json"
+        else:
+            assert "tool_servers" not in agent and agent["network_access"] == "model_only"
+        benchmark = BenchmarkConfig.from_config_path(HLE_DIAMOND_DIR / config_file, strict=False)
+        assert (benchmark.name, benchmark.agent_name, benchmark.dataset.prompt_config) == (
+            "hle_diamond_opencode_full",
+            "hle_diamond_opencode_agent",
+            None,
+        )
+
+    @pytest.mark.parametrize(
         "config_file",
-        ["config.yaml", "text.yaml", "opencode.yaml", "opencode_search.yaml", "pi.yaml", "pi_search.yaml"],
+        [
+            "config.yaml",
+            "text.yaml",
+            "opencode.yaml",
+            "opencode_search.yaml",
+            "opencode_full.yaml",
+            "opencode_search_full.yaml",
+            "pi.yaml",
+            "pi_search.yaml",
+        ],
     )
     def test_every_preset_shares_the_hle_judge_prompt_labels_and_partition_slices(self, config_file):
         judge = get_first_server_config_dict(_resolve(config_file), JUDGE_SERVER)
@@ -485,6 +575,8 @@ class TestLocalDockerOverride:
         [
             ("opencode.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
             ("opencode_search.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
+            ("opencode_full.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
+            ("opencode_search_full.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
             ("pi.yaml", "hle_diamond_pi_agent", "hle_diamond_opencode_agent"),
             ("pi_search.yaml", "hle_diamond_pi_agent", "hle_diamond_opencode_agent"),
         ],
@@ -535,7 +627,7 @@ class TestLocalDockerOverride:
         assert "datasets" not in json.dumps(yaml.safe_load(text))
 
         discovered = {p.name for p in _benchmark_config_paths(BENCHMARKS_DIR) if p.is_relative_to(HLE_DIAMOND_DIR)}
-        assert discovered == {"config.yaml", "text.yaml", "opencode.yaml", "pi.yaml"}
+        assert discovered == {"config.yaml", "text.yaml", "opencode.yaml", "opencode_full.yaml", "pi.yaml"}
 
 
 README = HLE_DIAMOND_DIR / "README.md"

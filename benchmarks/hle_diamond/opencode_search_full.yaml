@@ -1,0 +1,6 @@
+# OpenCode preset with Tavily search on all 1000 HLE-Diamond questions, image questions included:
+# opencode_search.yaml's tools and network policy over opencode_full.yaml's dataset. Declares no dataset of
+# its own, so like opencode_search.yaml it is selectable with --benchmark but not listed.
+config_paths:
+- benchmarks/hle_diamond/opencode_search.yaml
+- benchmarks/hle_diamond/opencode_full.yaml
