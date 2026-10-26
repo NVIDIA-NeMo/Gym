@@ -1457,6 +1457,29 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def drop_null_assistant_annotations(cls, value: Any) -> Any:
+        """Accept response history replayed by Copilot without a response-only null field.
+
+        The SDK serializes absent Chat Completion annotations as null. Copilot replays
+        the entire message; annotations are not a Chat request field. Non-null values
+        still fail strict validation instead of silently losing citation information.
+        """
+        if not isinstance(value, dict) or not isinstance(value.get("messages"), list):
+            return value
+        return {
+            **value,
+            "messages": [
+                {key: item for key, item in message.items() if key != "annotations"}
+                if isinstance(message, dict)
+                and message.get("role") == "assistant"
+                and message.get("annotations") is None
+                else message
+                for message in value["messages"]
+            ],
+        }
+
+    @model_validator(mode="before")
+    @classmethod
     def drop_litellm_provider_specific_fields(cls, value: Any) -> Any:
         """Drop ``provider_specific_fields`` from replayed assistant history.
 

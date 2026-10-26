@@ -1292,6 +1292,30 @@ class TestDiscriminatedResponseItems:
 
 
 class TestNeMoGymChatCompletionSchemas:
+    def test_copilot_replays_chat_response_with_null_annotations(self) -> None:
+        message = openai_utils_module.NeMoGymChatCompletionMessage(
+            role="assistant",
+            content=None,
+            tool_calls=[
+                {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": '{"command":"pwd"}'}}
+            ],
+        ).model_dump(mode="json")
+        assert message["annotations"] is None
+        original = deepcopy(message)
+        params = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[message, {"role": "tool", "tool_call_id": "call_1", "content": "/app"}]
+        )
+        replayed = params.model_dump(exclude_unset=True)["messages"]
+        assert replayed[0] == {key: value for key, value in original.items() if key != "annotations"}
+        assert replayed[1] == {"role": "tool", "tool_call_id": "call_1", "content": "/app"}
+        assert message == original
+
+    def test_nonempty_response_annotations_are_not_silently_discarded(self) -> None:
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming(
+                messages=[{"role": "assistant", "content": "answer", "annotations": [{"type": "url_citation"}]}]
+            )
+
     def test_assistant_reasoning_content_round_trips_between_tool_calls(self) -> None:
         payload = {
             "messages": [
