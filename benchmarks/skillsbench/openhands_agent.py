@@ -13,6 +13,7 @@ import json
 import shlex
 import threading
 import uuid
+from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
@@ -50,12 +51,13 @@ _EXECUTORS: dict[str, "OpenSandboxTerminalExecutor"] = {}
 class _RunControl:
     def __init__(self) -> None:
         self.cancelled = threading.Event()
+        self.sandbox_discarded = threading.Event()
         self.conversation: LocalConversation | None = None
         self.lock = threading.Lock()
         self.active_commands: dict[str, Future[Any]] = {}
-        # An exited shell can leave detached descendants. Without sandbox-wide
-        # process ownership, its completion cannot authorize deadline grading.
-        self.completed_commands = False
+        # Neither wrapper exit nor process-group exit proves that descendants
+        # which detached into other sessions have stopped.
+        self.command_started = False
 
 
 class OpenSandboxTerminalExecutor(ToolExecutor):
@@ -87,18 +89,13 @@ class OpenSandboxTerminalExecutor(ToolExecutor):
 
         command_id = uuid.uuid4().hex
         marker = f"__OPENHANDS_CWD_{command_id}__"
-        pidfile = f"/tmp/skillsbench-openhands-{command_id}.pid"
         action_command = (
             f'{action.command}\n__openhands_status=$?\nprintf \'\\n{marker}%s\\n\' "$PWD"\nexit "$__openhands_status"'
         )
-        inner_command = (
-            f"printf '%s\\n' \"$$\" > {shlex.quote(pidfile)}\n"
-            f"trap 'rm -f {shlex.quote(pidfile)}' EXIT\n"
-            f"bash -ic {shlex.quote(action_command)}"
-        )
-        # The command gets its own process group. On an agent timeout we can
-        # signal the entire tree without killing the sandbox needed by Harbor's
-        # verifier. The PID marker is written before any task command runs.
+        # Keep the shell session independent of the provider's exec wrapper so
+        # background services survive between actions. This is not a guarantee
+        # that all descendants remain in this process group.
+        inner_command = f"bash -ic {shlex.quote(action_command)}"
         command = f"setsid -w bash -c {shlex.quote(inner_command)}"
         timeout = min(600, max(1, int(action.timeout or 180)))
         future: Future[Any] | None = None
@@ -114,7 +111,8 @@ class OpenSandboxTerminalExecutor(ToolExecutor):
                 future = asyncio.run_coroutine_threadsafe(
                     self.environment.exec(command, cwd=self.cwd, timeout_sec=timeout), self.loop
                 )
-                self.control.active_commands[pidfile] = future
+                self.control.command_started = True
+                self.control.active_commands[command_id] = future
             result = future.result(timeout=timeout + 30)
         except FutureTimeoutError:
             # A provider can exceed its own command deadline. Do not leave
@@ -143,6 +141,19 @@ class OpenSandboxTerminalExecutor(ToolExecutor):
                 command=action.command,
                 exit_code=1,
             )
+        except FutureCancelledError:
+            # Cleanup cancels client waits only after sandbox deletion succeeds.
+            # Provider-side cancellation is not itself proof of remote exit.
+            if not self.control.sandbox_discarded.is_set():
+                stop = asyncio.run_coroutine_threadsafe(self.environment.stop(delete=True), self.loop)
+                stop.result(timeout=30)
+                self.control.sandbox_discarded.set()
+            return TerminalObservation.from_text(
+                "The task sandbox was discarded after the deadline.",
+                is_error=True,
+                command=action.command,
+                exit_code=1,
+            )
         except Exception as exc:
             if future is not None:
                 # An exec transport error can arrive after the remote command
@@ -157,9 +168,8 @@ class OpenSandboxTerminalExecutor(ToolExecutor):
             )
         finally:
             with self.control.lock:
-                if future is not None and self.control.active_commands.get(pidfile) is future and future.done():
-                    self.control.completed_commands = True
-                    self.control.active_commands.pop(pidfile, None)
+                if future is not None and future.done():
+                    self.control.active_commands.pop(command_id, None)
 
         output = result.stdout or ""
         if marker in output:
@@ -264,51 +274,19 @@ class SkillsBenchOpenHands(BaseAgent):
     @staticmethod
     async def _terminate_active_commands(environment: BaseEnvironment, control: _RunControl) -> None:
         with control.lock:
-            if control.completed_commands:
-                raise RuntimeError("Completed terminal commands may have surviving descendants; discard the sandbox")
-            active = list(control.active_commands.items())
-        for pidfile, future in active:
-            if future.done():
-                raise RuntimeError("Terminal command completed before termination could be confirmed")
-            # The remote exec may still be starting. Check for its marker
-            # before signaling; a missing marker while it is active is unsafe.
-            for _ in range(20):
-                if future.done():
-                    break
-                found = await environment.exec(f"test -s {shlex.quote(pidfile)}", timeout_sec=5)
-                if found.return_code == 0:
-                    break
-                await asyncio.sleep(0.1)
-            else:
-                raise RuntimeError(f"Could not locate active OpenHands command {pidfile}")
-            if future.done():
-                raise RuntimeError("Terminal command completed before termination could be confirmed")
-            # Interactive shell startup can emit warnings into stdout. Frame
-            # the PID so those diagnostics cannot be mistaken for its value.
-            pid_marker = "__OPENHANDS_PGID__"
-            pid_result = await environment.exec(
-                f"pgid=$(cat {shlex.quote(pidfile)}) && printf '\\n{pid_marker}%s\\n' \"$pgid\"",
-                timeout_sec=5,
-            )
-            if pid_result.return_code != 0:
-                raise RuntimeError(f"Could not read active OpenHands command {pidfile}")
-            pid_values = [
-                line.removeprefix(pid_marker)
-                for line in (pid_result.stdout or "").splitlines()
-                if line.startswith(pid_marker)
-            ]
-            if len(pid_values) != 1 or not pid_values[0].isascii() or not pid_values[0].isdecimal():
-                raise RuntimeError("Invalid OpenHands process group response")
-            pgid = int(pid_values[0])
-            if pgid <= 1:
-                raise RuntimeError(f"Invalid OpenHands process group: {pgid}")
-            # Interactive Bash ignores TERM: killing its current child can
-            # make it advance to the next command and write a late answer.
-            # At the deadline, stop the whole isolated group immediately.
-            kill_result = await environment.exec(f"kill -KILL -- -{pgid}", timeout_sec=5)
-            if kill_result.return_code != 0 and not future.done():
-                raise RuntimeError(f"Could not kill active OpenHands process group {pgid}")
-            await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout=15)
+            command_started = control.command_started
+            active = list(control.active_commands.values())
+        if not command_started:
+            return
+        # The adapters expose no sandbox-wide descendant ownership contract.
+        # Killing a process group misses setsid children even while the wrapper
+        # is active. Only sandbox deletion establishes the required boundary.
+        await environment.stop(delete=True)
+        control.sandbox_discarded.set()
+        # A provider may keep waiting on an exec after deletion. Release those
+        # client waits only after deletion is confirmed, then run() joins the SDK.
+        for future in active:
+            future.cancel()
 
     async def run(self, instruction: str, environment: BaseEnvironment, context: HarborAgentContext) -> None:
         cwd_result = await environment.exec("pwd", timeout_sec=30)
@@ -333,7 +311,7 @@ class SkillsBenchOpenHands(BaseAgent):
             except BaseException:
                 # Fail closed: Harbor must not verify a sandbox that might
                 # still contain a command running past the agent deadline.
-                await environment.stop(delete=True)
+                await SkillsBenchOpenHands._terminate_active_commands(environment, control)
                 raise
             finally:
                 if control.conversation is not None:

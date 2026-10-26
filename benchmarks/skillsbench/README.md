@@ -40,12 +40,13 @@ skill locations. Set `SKILLSBENCH_SKILL_MODE=no-skill` to skip installation.
 Prepare and run the conditions separately; preparation replaces the previous
 generated task tree.
 
-Background processes remain available between terminal actions. At an agent
-deadline, an active command's process group is terminated before verification.
-If an earlier terminal action has already completed, its detached descendants
-cannot be reliably attributed or ruled out: the sandbox is discarded instead
-of grading potentially late writes. Such deadline failures must not be treated
-as verified task scores.
+Background processes remain available between terminal actions. If an agent or
+terminal command reaches its deadline after a terminal action has started, the
+sandbox is discarded before verification. The adapters cannot confirm complete
+process ownership across detached sessions: terminating a wrapper or its process
+group is not sufficient, even for an action that appears to be foreground-only.
+Cancellation before any terminal action starts can retain the sandbox. Discarded
+sandboxes must not be treated as verified task scores.
 
 Per-rollout `temperature`, `top_p`, and `max_output_tokens` overrides reach
 OpenHands; omitted values retain the profile defaults. These overrides do not

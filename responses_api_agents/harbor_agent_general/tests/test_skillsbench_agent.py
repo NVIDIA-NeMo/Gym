@@ -3,6 +3,8 @@
 """Behavioral checks for the OpenHands adapter used by SkillsBench."""
 
 import asyncio
+import shutil
+import subprocess
 import threading
 import time
 from concurrent.futures import Future
@@ -10,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from harbor.models.task.config import EnvironmentConfig
 from openhands.tools.terminal.definition import TerminalAction
 
 from benchmarks.skillsbench import openhands_agent
@@ -120,7 +123,7 @@ async def test_deadline_discards_completed_command_descendants_and_joins_worker(
     assert [observation.exit_code for observation in observations] == [0, 0]
     assert not stopped.is_set()
     task.cancel()
-    with pytest.raises(RuntimeError, match="surviving descendants"):
+    with pytest.raises(asyncio.CancelledError):
         await task
     assert stopped.is_set()
     assert worker_finished.is_set()
@@ -133,9 +136,10 @@ async def test_deadline_does_not_signal_completed_command_with_stale_pid():
     future.set_result(SimpleNamespace(return_code=0))
     # Completion can race with cleanup before the executor updates bookkeeping.
     control.active_commands["/tmp/skillsbench-openhands-stale.pid"] = future
-    environment = SimpleNamespace(exec=AsyncMock())
-    with pytest.raises(RuntimeError, match="completed before termination"):
-        await SkillsBenchOpenHands._terminate_active_commands(environment, control)
+    control.command_started = True
+    environment = SimpleNamespace(exec=AsyncMock(), stop=AsyncMock())
+    await SkillsBenchOpenHands._terminate_active_commands(environment, control)
+    environment.stop.assert_awaited_once_with(delete=True)
     environment.exec.assert_not_awaited()
 
 
@@ -210,47 +214,38 @@ async def test_frozen_terminal_tool_describes_stateless_shell_and_keeps_executor
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("shell_noise", ["", "bash: no job control in this shell\n"])
-async def test_timeout_terminates_active_sandbox_command_before_verification(shell_noise: str) -> None:
+@pytest.mark.parametrize("detached", [False, True])
+async def test_deadline_discards_active_command_and_joins_worker(detached):
     started = asyncio.Event()
-    terminated = asyncio.Event()
     worker_finished = threading.Event()
-    late_write = False
     stopped = False
+    exec_cancelled = False
+    observed = []
 
     async def sandbox_exec(command, **_kwargs):
-        nonlocal late_write
+        nonlocal exec_cancelled
         if command == "pwd":
             return SimpleNamespace(return_code=0, stdout="/workspace\n")
-        if command.startswith("test -s "):
-            return SimpleNamespace(return_code=0, stdout="")
-        if command.startswith("cat /tmp/skillsbench-openhands-"):
-            return SimpleNamespace(return_code=0, stdout=shell_noise + "12345\n")
-        if command.startswith("pgid=$(cat /tmp/skillsbench-openhands-"):
-            return SimpleNamespace(return_code=0, stdout=shell_noise + "\n__OPENHANDS_PGID__12345\n")
-        if command.startswith("kill -TERM -- -"):
-            # Interactive Bash ignores TERM and advances after its child dies.
-            late_write = True
-            terminated.set()
-            return SimpleNamespace(return_code=0, stdout="")
-        if command.startswith("kill -KILL -- -"):
-            terminated.set()
-            return SimpleNamespace(return_code=0, stdout="")
-        assert command.startswith("setsid -w bash -c ")
+        observed.append(command)
         started.set()
         try:
-            await asyncio.wait_for(terminated.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            late_write = True
-        return SimpleNamespace(return_code=143, stdout="", stderr="terminated")
+            await asyncio.Event().wait()
+        finally:
+            # A client-side cancellation is safe only after sandbox disposal.
+            assert stopped
+            exec_cancelled = True
 
     async def sandbox_stop(**_kwargs):
         nonlocal stopped
         stopped = True
 
     def run_openhands(_instruction, _environment, _context, instance_id, _cwd, _control):
+        command = "sleep 600; touch answer"
+        if detached:
+            command = "setsid bash -c 'sleep 10; touch answer' </dev/null >/tmp/bg.log 2>&1 & sleep 600"
         try:
-            _EXECUTORS[instance_id](SimpleNamespace(command="sleep 600; touch answer", is_input=False, timeout=600))
+            observation = _EXECUTORS[instance_id](TerminalAction(command=command, timeout=600))
+            assert observation.is_error
         finally:
             worker_finished.set()
 
@@ -261,29 +256,96 @@ async def test_timeout_terminates_active_sandbox_command_before_verification(she
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert terminated.is_set()
+    assert stopped
     assert worker_finished.is_set()
-    assert not late_write
-    assert not stopped
+    assert exec_cancelled
+    # No PID inspection or group signal can prove detached descendants exited.
+    assert len(observed) == 1
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "response",
-    ["12345\n", "__OPENHANDS_PGID__1\n", "__OPENHANDS_PGID__-42\n", "__OPENHANDS_PGID__42\n__OPENHANDS_PGID__43\n"],
-)
-async def test_timeout_refuses_unsafe_or_ambiguous_process_group(response: str) -> None:
+async def test_failed_disposal_does_not_release_active_exec_as_if_terminated():
     control = _RunControl()
-    control.active_commands["/tmp/skillsbench-openhands-test.pid"] = Future()
-    environment = SimpleNamespace(
-        exec=AsyncMock(
-            side_effect=[
-                SimpleNamespace(return_code=0, stdout=""),
-                SimpleNamespace(return_code=0, stdout=response),
-            ]
-        )
-    )
-    with pytest.raises(RuntimeError, match="Invalid OpenHands process group"):
+    control.command_started = True
+    future = Future()
+    control.active_commands["command"] = future
+    environment = SimpleNamespace(exec=AsyncMock(), stop=AsyncMock(side_effect=RuntimeError("delete failed")))
+    with pytest.raises(RuntimeError, match="delete failed"):
         await SkillsBenchOpenHands._terminate_active_commands(environment, control)
-    assert environment.exec.await_count == 2
-    assert all("kill " not in call.args[0] for call in environment.exec.await_args_list)
+    assert not future.done()
+    environment.exec.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_provider_cancellation_discards_sandbox_before_returning():
+    environment = SimpleNamespace(exec=AsyncMock(side_effect=asyncio.CancelledError), stop=AsyncMock())
+    control = _RunControl()
+    executor = OpenSandboxTerminalExecutor(environment, asyncio.get_running_loop(), "/tmp", control)
+    observation = await asyncio.to_thread(executor, TerminalAction(command="sleep 600"))
+    assert observation.is_error
+    environment.stop.assert_awaited_once_with(delete=True)
+    assert control.sandbox_discarded.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(shutil.which("docker") is None, reason="Docker CLI is unavailable")
+@pytest.mark.parametrize("completed", [False, True])
+async def test_docker_deadline_discards_detached_processes(tmp_path, completed):
+    available = subprocess.run(["docker", "info"], capture_output=True, timeout=15)
+    if available.returncode:
+        pytest.skip("Docker daemon is unavailable")
+    environment = _make_environment(
+        tmp_path,
+        sandbox_provider={"docker": {}},
+        task_env_config=EnvironmentConfig(docker_image="ubuntu:24.04", cpus=1, memory_mb=512),
+    )
+    finished = threading.Event()
+    waiting = threading.Event()
+    observations = []
+
+    def run_openhands(_instruction, _environment, _context, instance_id, _cwd, control):
+        command = (
+            "setsid bash -c 'echo ready >/tmp/service-ready; sleep 3; touch /tmp/answer' "
+            "</dev/null >/tmp/bg.log 2>&1 &"
+        )
+        if not completed:
+            command += " sleep 600"
+        try:
+            observations.append(_EXECUTORS[instance_id](TerminalAction(command=command, timeout=600)))
+            if completed:
+                waiting.set()
+                assert control.cancelled.wait(timeout=15)
+        finally:
+            finished.set()
+
+    task = None
+    try:
+        await environment.start(force_build=False)
+        task = asyncio.create_task(
+            SkillsBenchOpenHands.run(SimpleNamespace(_run_openhands=run_openhands), "Task", environment, None)
+        )
+        for _ in range(20):
+            probe = await environment.exec("test -f /tmp/service-ready && test ! -f /tmp/answer")
+            if probe.return_code == 0:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail("Background service was not observable before the write deadline")
+        if completed:
+            assert await asyncio.to_thread(waiting.wait, 5)
+            assert observations[0].exit_code == 0
+        else:
+            assert not observations  # The first exec is still blocked on sleep.
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert finished.is_set()
+        assert environment._sandbox is None
+        await asyncio.sleep(3.1)
+        with pytest.raises(RuntimeError):
+            await environment.exec("test -f /tmp/answer")
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await environment.stop(delete=True)
