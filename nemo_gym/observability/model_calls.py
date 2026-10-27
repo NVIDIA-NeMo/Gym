@@ -247,9 +247,27 @@ class ModelCallRecord(BaseModel):
     latency_ttft_ms: Optional[float] = None
 
 
+def _parse_cancelled_call_body(exchange: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Parse the raw body of a cancelled call that already has a 2xx status and a complete JSON body."""
+    if exchange.get("error_category") != "cancelled" or isinstance(exchange.get("response"), dict):
+        return None
+    status = exchange.get("status_code")
+    if type(status) is not int or not 200 <= status < 300:
+        return None
+    raw_text = exchange.get("response_raw")
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        return None
+    try:
+        parsed = json.loads(raw_text)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> ModelCallRecord:
     """Map one captured exchange and its transport metadata into an observability record."""
-    raw_response = exchange.get("response")
+    cancelled_call_response = _parse_cancelled_call_body(exchange)
+    raw_response = cancelled_call_response if cancelled_call_response is not None else exchange.get("response")
     response = raw_response if isinstance(raw_response, dict) else {}
     tokens = extract_token_stats(response.get("usage"))
     cache_hit, cached_tokens = _cache_signal(response.get("usage"))
@@ -301,7 +319,11 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
         request=raw_request if isinstance(raw_request, dict) else None,
         response=raw_response if isinstance(raw_response, dict) else None,
         request_raw=exchange.get("request_raw") if isinstance(exchange.get("request_raw"), str) else None,
-        response_raw=exchange.get("response_raw") if isinstance(exchange.get("response_raw"), str) else None,
+        response_raw=(
+            exchange.get("response_raw")
+            if cancelled_call_response is None and isinstance(exchange.get("response_raw"), str)
+            else None
+        ),
         tool_calls=tool_calls,
         reasoning_content=reasoning_content,
         cache_hit=cache_hit,
