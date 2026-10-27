@@ -79,7 +79,8 @@ and system messages are rejected, as are request-level sampling controls and the
 `max_output_tokens` budget. `metadata.agent_timeout_sec` is applied, capped by `timeout`.
 
 - `context_window`: prompt-token limit, passed as `COPILOT_PROVIDER_MAX_PROMPT_TOKENS`. Unset uses
-  Copilot's built-in default for an unrecognized model.
+  Copilot's built-in default for an unrecognized model. Leave room for the output: set it to the model's
+  context length minus `max_output_tokens`.
 - `max_output_tokens`: per-model-call output limit, sent as `max_tokens`. Unset sends none.
 - `reasoning_effort`: passed to `--reasoning-effort`.
 
