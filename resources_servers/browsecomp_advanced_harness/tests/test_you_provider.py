@@ -264,6 +264,36 @@ class TestYouSearch:
         call = server._session_id_to_metrics["test_session_id"].async_tavily_calls[0]
         assert (call.num_results_offered, call.num_results_returned) == (2, 2)
 
+    async def test_snippet_is_cut_to_the_per_query_budget_when_many_queries_share_it(self) -> None:
+        # Regression: a fixed 5000-char cap still exceeded a query's slice once enough queries
+        # split the budget (6000 // 6 = 1000), so the first hit ended the loop and every query
+        # came back empty although You.com offered hits.
+        server = _server()
+        server._you_clients = [_mock_client([_hit("Huge", highlights=["z" * 20000])])]
+
+        resp = await server.search(
+            _req(), app_module.TavilySearchRequest(queries=[f"q{i}" for i in range(6)], max_total_length=6000)
+        )
+
+        blocks = resp.results_string.split("\n\n[Search Query]")
+        assert len(blocks) == 6
+        for block in blocks:
+            assert "[Title]: Huge" in block
+            assert "... [truncated]" in block
+            assert len(block) <= 1000
+        calls = server._session_id_to_metrics["test_session_id"].async_tavily_calls
+        assert all((c.num_results_offered, c.num_results_returned) == (1, 1) for c in calls)
+
+    async def test_hit_is_not_shown_when_too_little_budget_is_left_to_be_useful(self) -> None:
+        server = _server()
+        server._you_clients = [_mock_client([_hit("Huge", highlights=["z" * 20000])])]
+
+        resp = await server.search(_req(), app_module.TavilySearchRequest(queries=["q"], max_total_length=150))
+
+        assert "[Title]" not in resp.results_string
+        call = server._session_id_to_metrics["test_session_id"].async_tavily_calls[0]
+        assert (call.num_results_offered, call.num_results_returned) == (1, 0)
+
     async def test_terminal_mode_page_keeps_full_highlights_when_inline_is_truncated(self, tmp_path) -> None:
         server = _server(workspace="per_session", workspace_root=str(tmp_path))
         server._you_clients = [_mock_client([_hit("Huge", highlights=["z" * 20000])])]

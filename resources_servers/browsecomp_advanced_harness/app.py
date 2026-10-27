@@ -576,10 +576,14 @@ class ExaAIOHTTPClient(BaseModel):
         return await self._post("/contents", body)
 
 
-# Cap on one You.com hit's inline snippet. Without it a single hit's highlights (up to ~15k
-# chars measured) can exceed a query's budget slice on its own, so the budget loop breaks on the
-# first hit and the model sees an empty result although You.com returned several.
+# Inline snippet limits for one You.com hit. A hit's highlights can run to ~15k chars, more than a
+# query's budget slice (search_max_total_length // len(queries)) on its own, so an uncapped hit
+# ends the budget loop on the first entry and the model sees an empty result although You.com
+# returned several. The snippet is cut to the lesser of the max and what is left of the slice; a
+# hit that cannot keep at least the min is not shown.
 _YOU_MAX_SNIPPET_CHARS = 5000
+_YOU_MIN_SNIPPET_CHARS = 200
+_YOU_TRUNCATED = "\n... [truncated]"
 
 
 class YouAIOHTTPClient(BaseModel):
@@ -1396,12 +1400,17 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             title = result.get("title", "") or ""
             url = result.get("url", "") or ""
             body = self._you_result_body(result)
-            snippet = body
-            if len(snippet) > _YOU_MAX_SNIPPET_CHARS:
-                snippet = snippet[:_YOU_MAX_SNIPPET_CHARS] + "\n... [truncated]"
-            entry = f"[Title]: {title}\n[URL]: {url}\n[Snippet]: {snippet}\n"
-            if running_len + len(entry) > max_length:
-                break
+            header = f"[Title]: {title}\n[URL]: {url}\n[Snippet]: "
+            # 2 = the entry's trailing newline + the "\n" that joins it to the previous block
+            room = max_length - running_len - len(header) - 2
+            if len(body) <= min(_YOU_MAX_SNIPPET_CHARS, room):
+                snippet = body
+            else:
+                keep = min(_YOU_MAX_SNIPPET_CHARS, room - len(_YOU_TRUNCATED))
+                if keep < _YOU_MIN_SNIPPET_CHARS:
+                    break
+                snippet = body[:keep] + _YOU_TRUNCATED
+            entry = f"{header}{snippet}\n"
             if page_writer is not None and body:
                 # Written only once the entry is known to fit, so no page lands in pages/
                 # without a [Saved to] line ever shown to the model. The page keeps the full
@@ -1410,7 +1419,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 saved = page_writer.write_search_result(query, ri, title, url, content)
                 entry += f"[Saved to]: {saved} ({len(content)} bytes)\n"
             blocks.append(entry)
-            running_len += len(entry)
+            running_len += len(entry) + 1  # +1 for the "\n" that joins it to the previous block
             returned += 1
         results_string = "\n".join(blocks)
         self._record_call(
