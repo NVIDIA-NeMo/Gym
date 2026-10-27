@@ -100,8 +100,8 @@ session, and then calls `/verify`. The agent's side of that contract:
 - **`execute_tools: false`** is rejected when the config loads: the graph always runs its own tools.
 - **Checkpointing** restarts an unfinished rollout from its input. The graph's state lives inside one
   `ainvoke()` call and cannot be exported.
-- **`skip_verification`** does not apply on this path yet: the Environment Server always calls `/verify`, so a
-  generation-only run gets verifier rewards (and the Tavily config calls its judge).
+- **`skip_verification: true`** skips `/verify` on the session path, including the Tavily judge. Set it on the
+  Environment Server, or on the agent when the Environment Server leaves it unset.
 
 ## Tool ownership: agent vs. resources server
 

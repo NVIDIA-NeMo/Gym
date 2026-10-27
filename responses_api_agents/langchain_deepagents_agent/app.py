@@ -29,7 +29,7 @@ and named to match how `deepagents`' own docs/examples name the object `create_d
 
 from abc import abstractmethod
 from collections.abc import Mapping
-from typing import Any, ClassVar
+from typing import Any
 
 from fastapi import Body, Request, Response
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -92,7 +92,7 @@ class DeepAgentsAgent(SimpleAgent):
 
     # The graph's state lives inside one ainvoke() call, which a checkpoint cannot export. Checkpointing
     # therefore restarts an unfinished rollout from its input instead of resuming it (GYMINT-357).
-    checkpoint_sessions_supported: ClassVar[bool] = False
+    checkpoint_mode = "restart_only"
 
     config: DeepAgentsAgentConfig
     agent: Any = Field(default=None, exclude=True)
