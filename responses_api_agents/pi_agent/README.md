@@ -164,11 +164,12 @@ configuration must not replace the agent's cap with a larger value. Enforcement 
 7. Environment Server asks Resources to verify and close the task session. The benchmark
    owns its verification procedure and sandbox teardown.
 
-The supervisor stops live harness-group processes. On timeout or close it first records
-the harness's descendants in other process groups, typically tools in their own sessions,
-then kills the harness group, those descendants and the groups they lead within the cleanup
-deadline. Processes that left the harness before the stop, typically services from completed
-tools, remain for the sandbox owner to stop later.
+The supervisor stops live harness-group processes. On timeout or close it also kills, within
+the cleanup deadline, the harness's descendants in other process groups (typically tools in
+their own sessions) and processes that inherited the harness's `NEMO_GYM_SUPERVISOR`
+environment marker, such as services a tool daemonizes during the stop. Processes that left
+the harness before the stop, typically services from completed tools, remain for the sandbox
+owner to stop later.
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
 those processes may still change task files. The stop-time cutoff also has PID races and
 cannot classify later service forks. It is not a security boundary.

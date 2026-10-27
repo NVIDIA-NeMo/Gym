@@ -157,10 +157,10 @@ a successful smoke, and one task does not establish a benchmark baseline.
 ## Tasks that start services
 
 The supervisor stops live processes in the harness group before capture or verification.
-On timeout or close, it first records the harness's descendants in other process groups,
-such as in-flight tools in separate sessions. It then stops the harness and kills the group,
-those descendants and the groups they lead within the cleanup deadline. Processes that left
-the harness before the stop remain for Resources to stop after verification or episode
+On timeout or close, it stops the harness, then kills within the cleanup deadline the group,
+the harness's descendants in other process groups (such as in-flight tools in separate
+sessions) and processes that inherited the harness's `NEMO_GYM_SUPERVISOR` environment
+marker. Processes that left the harness before the stop remain for Resources to stop after verification or episode
 failure. This includes unfinished background jobs such as `make &` left by an
 earlier tool call, as well as services; either can continue writing during verification.
 

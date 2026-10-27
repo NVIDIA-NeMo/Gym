@@ -13,7 +13,7 @@ Filename              Writer               When
 process_supervisor.sh Session              Uploaded before launch
 bin/gym-runner        Launch shell         Interpreter link for a standard-library runner
 launch.claim          Launch or stop shell Atomically claims launch or fences it
-supervisor.pid        Launch shell         After claiming launch, before exec
+supervisor.pid        Launch shell         After claiming launch, before exec (see below)
 stop.request          Stop shell           Polled by the supervisor to stop the harness
 cleanup.json          Supervisor or stop   After cleanup, or when stop fences launch
 output.log            Launch shell         Captures supervisor and harness diagnostics
@@ -27,6 +27,10 @@ interpreter link with a neutral name, from a file without a ``.py`` suffix, so n
 process name nor the supervisor's command line mentions python; a harness argv that keeps
 its own python (Hermes, Stirrup) still appears in the supervisor's command line. Gym stops
 the supervisor through the stop file, which does not depend on these names.
+
+``supervisor.pid`` holds the PID that executes the supervisor. When the provider did not
+make the launch shell a process group leader, that process starts the supervisor in a new
+group, passes TERM on to it and exits with its status.
 """
 
 import json
@@ -58,12 +62,15 @@ CLEANUP_PHASE_COUNT = 3
 class CleanupReceipt(TypedDict):
     """Outcome after bounded harness termination, as written by process_supervisor.sh.
 
-    ``cleanup_confirmed`` means no live harness-group members remain. Forced stops
-    also kill the harness's descendants that ran in other process groups when the
-    stop began, and the groups they lead. Processes that left the harness before the
-    stop remain until the owner closes the sandbox; this is not a sandbox-empty check.
-    ``return_code`` is the shell status: 128+N for a harness killed by signal N, and
-    126 or 127 when the command could not be run.
+    ``cleanup_confirmed`` means no live harness-group members remain. After a forced
+    stop it also means that no process the stop reached still runs: the harness's
+    descendants, including tools in their own sessions, and processes that inherited
+    the harness's ``NEMO_GYM_SUPERVISOR`` marker without having left the harness
+    before the stop. Processes that left the harness before the stop, and a process
+    that left between two scans without the marker, remain until the owner closes the
+    sandbox; this is not a sandbox-empty check. ``return_code`` is the shell status:
+    128+N for a harness killed by signal N, and 126 or 127 when the command could not
+    be run.
     """
 
     cleanup_confirmed: bool
@@ -159,9 +166,11 @@ def supervised_launch_command(
 
     The supervisor needs only bash. Check that bash can parse it before claiming a
     launch: a failed bootstrap cannot write a cleanup receipt. Supervisor and harness
-    diagnostics share output.log. The supervisor stops the harness group; the sandbox
-    owner stops escaped services. Stops reach the supervisor through the stop file,
-    not a signal, so the harness keeps the default TERM disposition.
+    diagnostics share output.log. The supervisor leaves the provider's process group and
+    stops the harness group, and after a forced stop the processes it reached; the
+    sandbox owner stops services that left the harness earlier. Stops reach the
+    supervisor through the stop file, not a signal, so the harness keeps the default
+    TERM disposition.
 
     With ``stdlib_runner``, the harness argv starts with a Python interpreter, and the
     runner runs through ``bin/gym-runner``, a link to the binary behind that interpreter,

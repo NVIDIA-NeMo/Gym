@@ -6,6 +6,7 @@
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -126,6 +127,113 @@ def test_runs_with_only_bash_and_core_utilities_on_path(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     receipt = _receipt(work)
     assert receipt["cleanup_confirmed"] is True and receipt["timed_out"] is True, receipt
+
+
+def _running(pid: int) -> bool:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] not in "ZX"
+    except FileNotFoundError:
+        return False
+
+
+@linux_only
+@pytest.mark.parametrize("escape", ["term_handler", "forking_tool"])
+def test_forced_stop_reaches_processes_that_leave_the_harness_during_the_stop(tmp_path: Path, escape: str) -> None:
+    # Each daemon starts its own session while its parent exits or is killed, so neither the harness
+    # group nor a scan of the harness's descendants finds it; the inherited marker does.
+    (tmp_path / "daemon.py").write_text("import os, time\nos.setsid()\ntime.sleep(30)\n")
+    spawn = f'"{sys.executable}" daemon.py & echo $! >> daemons'
+    worker = {
+        "term_handler": f"trap '{spawn}; exit 0' TERM; touch ready; while :; do sleep 0.05; done",
+        "forking_tool": f"trap '' TERM; touch ready; while :; do {spawn}; sleep 0.02; done",
+    }[escape]
+    (tmp_path / "worker.sh").write_text(worker)
+    try:
+        result = _supervise(tmp_path, "bash", "worker.sh", timeout="1", cwd=tmp_path)
+        assert result.returncode == 0, result.stderr
+        receipt = _receipt(tmp_path)
+        assert receipt["cleanup_confirmed"] is True and receipt["timed_out"] is True, receipt
+        daemons = [int(pid) for pid in (tmp_path / "daemons").read_text().split()]
+        assert daemons
+        assert not [pid for pid in daemons if _running(pid)]
+    finally:
+        for pid in (tmp_path / "daemons").read_text().split() if (tmp_path / "daemons").exists() else []:
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@linux_only
+@pytest.mark.parametrize("kind", ["process", "group"])
+@pytest.mark.parametrize("reused", [False, True])
+def test_reused_ids_are_neither_awaited_nor_killed(tmp_path: Path, kind: str, reused: bool) -> None:
+    # A recorded PID or process group ID now held by a process with another start time was reused.
+    bystander = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        start = int(Path(f"/proc/{bystander.pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+        record = {"process": "tracked", "group": "groups"}[kind]
+        script = f'source "$1"; {record}[$2]=$3; reached_alive && echo alive || echo gone; kill_reached'
+        result = subprocess.run(
+            ["bash", "-c", script, "_", SUPERVISOR, str(bystander.pid), str(start + 1 if reused else start)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.stdout == ("gone\n" if reused else "alive\n"), result.stderr
+        if reused:
+            assert bystander.poll() is None
+        else:
+            assert bystander.wait(timeout=5) == -signal.SIGKILL
+    finally:
+        bystander.kill()
+        bystander.wait()
+
+
+@linux_only
+def test_provider_group_kill_leaves_supervisor_alive_to_stop_the_harness(tmp_path: Path) -> None:
+    # The shell stays the provider group leader; the supervisor must leave that group.
+    worker = (
+        "import json, os, pathlib, time; pathlib.Path('pids.tmp').write_text(json.dumps([os.getppid(), os.getpid()]));"
+        " os.replace('pids.tmp', 'pids.json'); time.sleep(60)"
+    )
+    with (tmp_path / "output.log").open("wb") as output:
+        process = subprocess.Popen(
+            ["sh", "-c", '"$@" & wait', "provider", "bash", SUPERVISOR, "--timeout", "60", "--cleanup-timeout", "0.2"]
+            + ["--receipt", str(tmp_path / "cleanup.json"), "--stop-file", str(tmp_path / "stop.request")]
+            + ["--", sys.executable, "-c", worker],
+            cwd=tmp_path,
+            start_new_session=True,
+            stdout=output,
+            stderr=output,
+        )
+    pids = []
+    try:
+        deadline = time.monotonic() + 30
+        while not (tmp_path / "pids.json").exists():
+            assert time.monotonic() < deadline, (tmp_path / "output.log").read_text()
+            time.sleep(0.01)
+        pids = json.loads((tmp_path / "pids.json").read_text())
+        supervisor_pid, worker_pid = pids
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
+        assert _running(supervisor_pid)
+        (tmp_path / "stop.request").touch()
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "cleanup.json").exists():
+            assert time.monotonic() < deadline, (tmp_path / "output.log").read_text()
+            time.sleep(0.01)
+        assert _receipt(tmp_path) == {"cleanup_confirmed": True, "return_code": 143, "error": None, "timed_out": False}
+        assert not _running(worker_pid)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+        for pid in reversed(pids):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 @linux_only

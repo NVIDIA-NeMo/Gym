@@ -110,10 +110,10 @@ Completed parser reports follow Pro's required-pass rule, including empty report
 execution failures or unusable parser output remain inconclusive.
 The agent inherits Gym's standard aggregation; Slurm reporting includes coverage.
 
-The supervisor stops live harness-group processes. At the harness timeout it first records
-the harness's descendants in other process groups, including tools in separate sessions, then
-kills the harness group, those descendants and the groups they lead within the cleanup
-deadline. This runner never requests an early stop, so it does not request this cleanup on
+The supervisor stops live harness-group processes. At the harness timeout it also kills,
+within the cleanup deadline, the harness's descendants in other process groups, including
+tools in separate sessions, and processes that inherited the harness's `NEMO_GYM_SUPERVISOR`
+environment marker. This runner never requests an early stop, so it does not request this cleanup on
 close. Processes that left the harness before the stop remain for the sandbox owner.
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
 those processes may still change task files. The stop-time cutoff also has PID races and
