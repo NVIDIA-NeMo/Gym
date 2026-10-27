@@ -7,7 +7,6 @@ import logging
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
-from shlex import quote
 from time import monotonic
 from typing import cast
 
@@ -27,7 +26,7 @@ from nemo_gym.agent_utils.supervisor_client import (
 )
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.sandbox.utils import read_text
+from nemo_gym.sandbox.utils import read_text, upload_text
 
 
 LOG = logging.getLogger(__name__)
@@ -291,13 +290,18 @@ class SandboxSession[Artifacts]:
         return True
 
     async def _request_expiry(self, *, timeout: float) -> None:
-        result = await self.sandbox.exec(
-            f"[ -d {quote(self.session_dir)} ] && touch {quote(f'{self.session_dir}/{EXPIRE_REQUEST_FILE}')}",
-            cwd=self.workdir,
-            timeout_s=timeout,
-        )
-        if result.return_code != 0 or result.error_type:
-            raise RuntimeError(f"Could not request {self.harness} expiry: {result.error_type or result.stderr}")
+        """Write the marker the supervisor watches, within ``timeout`` including any wait for the provider.
+
+        A file write, not an exec: a provider that bounds its concurrent execs (Local) counts the harness's
+        own launch against that bound for as long as it runs, and a stop must not wait for the harness to end.
+        """
+        try:
+            async with asyncio.timeout(timeout):
+                await upload_text(self.sandbox, path=f"{self.session_dir}/{EXPIRE_REQUEST_FILE}", text="")
+        except TimeoutError as error:
+            raise RuntimeError(f"Could not request {self.harness} expiry within {timeout:g} s") from error
+        except Exception as error:
+            raise RuntimeError(f"Could not request {self.harness} expiry: {error}") from error
 
     async def stop_harness(self, *, timeout: float) -> None:
         """Confirm harness termination before capture and transport release."""
