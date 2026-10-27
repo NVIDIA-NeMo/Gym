@@ -88,12 +88,19 @@ register_provider(PROVIDER_NAME, FakeProvider, override=True)
 
 @pytest.fixture(autouse=True)
 def _reset_fake_provider():
+    register_provider(PROVIDER_NAME, FakeProvider, override=True)
     FakeProvider.instances.clear()
     yield
     FakeProvider.instances.clear()
 
 
-def _make_environment(tmp_path: Path, *, task_env_config: Optional[TaskEnvironmentConfig] = None, **kwargs):
+def _make_environment(
+    tmp_path: Path,
+    *,
+    task_env_config: Optional[TaskEnvironmentConfig] = None,
+    environment_class=NemoGymSandboxEnvironment,
+    **kwargs,
+):
     trial_dir = tmp_path / "trial"
     trial_dir.mkdir(parents=True, exist_ok=True)
     defaults = dict(
@@ -103,7 +110,7 @@ def _make_environment(tmp_path: Path, *, task_env_config: Optional[TaskEnvironme
         exec_shell=None,
     )
     defaults.update(kwargs)
-    return NemoGymSandboxEnvironment(
+    return environment_class(
         environment_dir=tmp_path / "task" / "environment",
         environment_name="example-task",
         session_id="example-task__trial-1",
@@ -120,6 +127,15 @@ def _provider() -> FakeProvider:
 
 
 class TestValidation:
+    def test_named_provider_resolves_credentials_only_inside_environment(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.environment.get_global_config_dict",
+            lambda: {"sandbox": {PROVIDER_NAME: {"api_key": "test-secret"}}},
+        )
+        env = _make_environment(tmp_path, sandbox_provider="sandbox")
+        assert env._sandbox_provider == "sandbox"
+        assert env._provider_config() == {PROVIDER_NAME: {"api_key": "test-secret"}}
+
     def test_requires_sandbox_provider(self, tmp_path):
         with pytest.raises(ValueError, match="sandbox_provider"):
             _make_environment(tmp_path, sandbox_provider=None)
@@ -137,6 +153,37 @@ class TestValidation:
         config = TaskEnvironmentConfig(docker_image="example/task:1.0", allow_internet=False)
         env = _make_environment(tmp_path, task_env_config=config, allow_unenforced_internet_isolation=True)
         assert env.can_disable_internet is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type,exception", [("timeout", TimeoutError), ("transport", RuntimeError)])
+async def test_exec_runtime_failure_is_not_a_process_exit(tmp_path, error_type, exception):
+    env = _make_environment(tmp_path)
+    await env.start(force_build=False)
+    try:
+        _provider().queue_exec_result(
+            SandboxExecResult(return_code=125, error_type=error_type, stdout=None, stderr="deadline")
+        )
+        with pytest.raises(exception, match="deadline"):
+            await env.exec("sleep 2; touch /tmp/answer", timeout_sec=1)
+    finally:
+        await env.stop(delete=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("return_code", [124, 125])
+async def test_exec_preserves_actual_process_exit_codes(tmp_path, return_code):
+    env = _make_environment(tmp_path)
+    await env.start(force_build=False)
+    try:
+        _provider().queue_exec_result(
+            SandboxExecResult(return_code=return_code, error_type=None, stdout=None, stderr=None)
+        )
+        result = await env.exec(f"exit {return_code}")
+        assert result.return_code == return_code
+        assert _provider().closed_handles == []
+    finally:
+        await env.stop(delete=True)
 
 
 class TestStartStop:
@@ -200,15 +247,12 @@ class TestStartStop:
         provider = _provider()
         assert provider.closed_handles == ["sbx-123"]
         assert provider.provider_closed is True
-        # Idempotent.
         await env.stop(delete=True)
         assert provider.closed_handles == ["sbx-123"]
 
     @pytest.mark.asyncio
     async def test_start_failure_on_log_dir_creation(self, tmp_path):
         env = _make_environment(tmp_path)
-        # The provider instance is created inside start(); prime the failure on
-        # the class so the first exec (the mkdir) fails.
         original_init = FakeProvider.__init__
 
         def _init_with_failure(self, **kwargs):
@@ -219,11 +263,22 @@ class TestStartStop:
         try:
             with pytest.raises(RuntimeError, match="disk full"):
                 await env.start(force_build=False)
+            assert _provider().closed_handles == ["sbx-123"]
         finally:
             FakeProvider.__init__ = original_init
 
 
 class TestExec:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("user, expected", [(None, "verifier"), ("root", "root"), (1000, 1000)])
+    async def test_exec_forwards_explicit_and_default_users(self, tmp_path, user, expected):
+        env = _make_environment(tmp_path)
+        env.default_user = "verifier"
+        await env.start(force_build=False)
+        await env.exec("id", user=user)
+        assert _provider().exec_calls[-1]["user"] == expected
+        await env.stop(delete=True)
+
     @pytest.mark.asyncio
     async def test_exec_passthrough_and_result_mapping(self, tmp_path):
         env = _make_environment(tmp_path)
@@ -290,8 +345,8 @@ class TestExec:
 
     @pytest.mark.asyncio
     async def test_exec_cpu_pin_width_tracks_task_cpu_default(self, tmp_path):
-        # Harbor defaults EnvironmentConfig.cpus to 1, so a task without an
-        # explicit cpu count pins with width 1 (matching its cgroup limit).
+        # Honor the installed Harbor default: older versions use one CPU,
+        # newer versions leave it unset. Do not invent an affinity when unset.
         env = _make_environment(
             tmp_path,
             exec_shell=None,
@@ -301,8 +356,12 @@ class TestExec:
         await env.start(force_build=False)
         await env.exec("true")
         command = _provider().exec_calls[-1]["command"]
-        assert command.startswith("__osb_w=1; ")
-        assert command.endswith("$__osb_pin true")
+        width = env.task_env_config.cpus
+        if width:
+            assert command.startswith(f"__osb_w={width}; ")
+            assert command.endswith("$__osb_pin true")
+        else:
+            assert command == "true"
 
     def test_cpu_pin_prefix_is_valid_posix_sh(self):
         import shutil
