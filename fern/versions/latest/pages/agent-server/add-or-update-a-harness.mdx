@@ -268,6 +268,31 @@ When a tool belongs to the task, prefer a Resources Server tool grant over a bui
 
 Document the supported tool sources, the model API, and the rejected options in the adapter's README.
 
+#### MCP grant integration
+
+With `resources_tool_transports: [mcp]`, an episode's `tool_accesses` can contain a grant like this:
+
+```json
+{
+  "kind": "mcp",
+  "name": "task_tools",
+  "required": true,
+  "connection": {
+    "transport": "streamable_http",
+    "url": "http://resources:8080/mcp",
+    "headers": {"Authorization": "Bearer <episode-tool-token>"}
+  }
+}
+```
+
+Map the grant from `effective_tool_accesses(body)` into the pinned harness's remote MCP client configuration. Preserve the supplied URL and headers: they carry the episode's tool access, so a static URL or interactive login is not a substitute. Keep credentials out of diagnostics and check server/tool-name collisions after any normalization the harness applies, including collisions with static MCP configuration.
+
+Accepting the seed or writing that configuration does not prove the harness consumes the grant. Use the runtime's required-server startup check if it blocks inference on connection failure. If the runtime only logs an MCP failure and continues, add a supervised connection/discovery check without inference, such as a seed preflight. When enforcement depends on a plugin that the runtime can silently skip, require a positive readiness receipt before accepting the rollout. Check whether the runtime's MCP timeout also limits tool execution before reusing the setup timeout.
+
+MCP access and sandbox access are separate capabilities. Resources can grant MCP tools without returning `sandbox_access`. An adapter that needs a sandbox must then use a configured agent-owned provider or reject the unsupported seed explicitly. Adding a provider does not add MCP or `direct_http` support. Close disconnects MCP clients; it stops an agent-owned sandbox and leaves a borrowed sandbox to its owner.
+
+Validate grant support with an authenticated MCP fixture and a real harness run: confirm tool discovery, an actual tool call, and the tool result reaching the model. Also test unavailable required servers (no inference or gradable answer), optional-server failure, name collisions, cleanup, and a missing enforcement hook if one is used. For a sandboxed adapter, exercise both borrowed and agent-owned sandboxes when both are supported. State which transports the adapter consumes; a successful sandbox-only rollout with `resources_tool_transports: []` does not establish MCP support.
+
 ## Configure the adapter
 
 ### Adapter configuration
