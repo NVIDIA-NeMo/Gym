@@ -22,11 +22,17 @@ The worker file defines `run(payload: dict) -> dict`. The returned dict may hold
 whatever the exporter's SDK prints cannot corrupt it.
 """
 
-import importlib.util
-import json
 import os
 import sys
-import traceback
+
+
+# Running this file puts its directory first on sys.path, where the modules that sit beside it (`mlflow.py`,
+# `wandb.py`) would shadow the SDKs of the same name installed in this environment.
+sys.path[:] = [path for path in sys.path if path != os.path.dirname(os.path.abspath(__file__))]
+
+import importlib.util  # noqa: E402
+import json  # noqa: E402
+import traceback  # noqa: E402
 
 
 def _load_worker(worker_fpath: str):

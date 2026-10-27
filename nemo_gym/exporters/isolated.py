@@ -21,7 +21,7 @@ import sys
 import tempfile
 from abc import abstractmethod
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Optional
 
 from omegaconf import DictConfig
 
@@ -101,6 +101,14 @@ class IsolatedExporter(Exporter):
         config = cls.config_model.model_validate(global_config_dict)
         return cls(config, venv_root=Path(global_config_dict.get(UV_VENV_DIR_KEY_NAME) or WORKING_DIR))
 
+    def worker_timeout_s(self, payload: dict[str, Any]) -> Optional[float]:
+        """Seconds the worker may run before it is killed and the export fails; None for no limit.
+
+        A backend SDK can hang (a stalled upload, a retry loop), and an export that runs in a job script would
+        hold the job's allocation until then.
+        """
+        return None
+
     @abstractmethod
     def build_payload(self, artifacts: RunArtifacts, workdir: Path) -> dict[str, Any]:
         """The JSON-serializable input for the worker. Files it stages go under `workdir`, removed afterwards.
@@ -127,8 +135,11 @@ class IsolatedExporter(Exporter):
                 input=json.dumps(payload).encode(),
                 cwd=workdir,
                 env=_worker_environment(python),
+                timeout=self.worker_timeout_s(payload),
                 check=False,
             )
+        except subprocess.TimeoutExpired as exc:
+            return ExportResult.failed(f"The {self.name} exporter worker was killed after {exc.timeout:g}s.")
         except OSError as exc:
             return ExportResult.failed(f"Could not launch the {self.name} exporter worker: {exc}")
         if not result_fpath.is_file():

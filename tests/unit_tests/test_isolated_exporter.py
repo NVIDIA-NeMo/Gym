@@ -51,6 +51,12 @@ class Upload:
 def run(payload):
     print("noise from the SDK")
     mode = payload["mode"]
+    if mode == "paths":
+        return {"detail": {"sys_path": sys.path}}
+    if mode == "hang":
+        import time
+
+        time.sleep(60)
     if mode == "crash":
         os._exit(3)
     if mode == "exit_after_result":
@@ -158,6 +164,27 @@ class TestRealEnvironment:
         assert detail["prefix"] != sys.prefix
         assert detail["can_import_gym"] is False
         assert detail["pythonpath"] is None
+
+    def test_the_harnesss_own_directory_is_not_on_the_workers_path(
+        self, fake_exporter: FakeExporter, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(FakeExporter, "mode", "paths")
+
+        result = fake_exporter.export(RunArtifacts(tmp_path / "run.jsonl"))
+
+        assert result.state is ExportState.SUCCEEDED, result.error
+        assert str(Path(isolated.WORKER_HARNESS_FPATH).parent) not in result.detail["sys_path"]
+
+    def test_a_worker_that_outlives_its_time_limit_is_killed_and_fails(
+        self, fake_exporter: FakeExporter, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(FakeExporter, "mode", "hang")
+        monkeypatch.setattr(FakeExporter, "worker_timeout_s", lambda self, payload: 1.0)
+
+        result = fake_exporter.export(RunArtifacts(tmp_path / "run.jsonl"))
+
+        assert result.state is ExportState.FAILED
+        assert result.error == "The fake exporter worker was killed after 1s."
 
     def test_a_ready_environment_is_reused(self, fake_exporter: FakeExporter, tmp_path: Path) -> None:
         artifacts = RunArtifacts(tmp_path / "run.jsonl")
