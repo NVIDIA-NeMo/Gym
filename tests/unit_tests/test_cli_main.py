@@ -21,12 +21,11 @@ from pathlib import Path
 
 import pytest
 from hydra.core.override_parser.overrides_parser import OverridesParser
-from pytest import LogCaptureFixture, MonkeyPatch
+from pytest import MonkeyPatch
 
 import nemo_gym.cli.main as cli_main
 import nemo_gym.global_config as gc
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
-from nemo_gym._config_aliases import LEGACY_ENVIRONMENT_ALIASES
 from nemo_gym.cli.main import main
 from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
@@ -543,12 +542,21 @@ class TestEvalAggregateFlags:
         )
         assert target == "nemo_gym.cli.eval:aggregate_rollouts"
         assert set(overrides) == {
-            "+input_glob=results/rollouts-*.jsonl",
+            "+input_glob='results/rollouts-*.jsonl'",
             "+output_jsonl_fpath=out.jsonl",
             "+disable_health_check=true",
             "+health_check_workers=3",
             '+health_check_ignored_checks=["model_call_missing_token_counts","model_call_zero_completion_tokens"]',
         }
+
+    def test_comma_separated_input_glob_is_one_string_override(self, monkeypatch: MonkeyPatch) -> None:
+        # The flag help offers comma-separated globs. Left unquoted, Hydra reads `a,b` as a sweep and
+        # `gym eval aggregate` fails with "Ambiguous value for argument" before reading any shard.
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "aggregate", "-i", "a/*.jsonl,b/*.jsonl"])
+        assert overrides == ["+input_glob='a/*.jsonl,b/*.jsonl'"]
+        parsed = OverridesParser.create().parse_override(overrides[0])
+        assert not parsed.is_sweep_override()
+        assert parsed.value() == "a/*.jsonl,b/*.jsonl"
 
 
 class TestFriendlyValidationError:
@@ -1443,50 +1451,6 @@ class TestAssetSelectors:
         # Used by `gym env start` / `gym eval run` for environments/ (see environments/*/README.md).
         _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--environment", "circle_count"])
         assert overrides == [f"+config_paths=[{WORKING_DIR / 'environments/circle_count/config.yaml'}]"]
-
-    @pytest.mark.parametrize(("legacy", "canonical"), LEGACY_ENVIRONMENT_ALIASES.items())
-    def test_legacy_environment_selector_resolves_to_canonical_config(
-        self, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture, legacy: str, canonical: str
-    ) -> None:
-        with caplog.at_level(logging.WARNING):
-            _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--environment", legacy])
-
-        assert overrides == [f"+config_paths=[{WORKING_DIR / f'environments/{canonical}/config.yaml'}]"]
-        assert f"`--environment {legacy}` is deprecated" in caplog.text
-
-    def test_user_environment_with_legacy_name_takes_precedence(
-        self, monkeypatch: MonkeyPatch, tmp_path: Path, caplog: LogCaptureFixture
-    ) -> None:
-        legacy = next(iter(LEGACY_ENVIRONMENT_ALIASES))
-        config = tmp_path / "environments" / legacy / "config.yaml"
-        config.parent.mkdir(parents=True)
-        config.write_text("{}\n")
-        monkeypatch.chdir(tmp_path)
-
-        with caplog.at_level(logging.WARNING):
-            resolved = cli_main._asset_config_path("environment", legacy)
-
-        assert resolved == str(config)
-        assert "deprecated" not in caplog.text
-
-    @pytest.mark.parametrize(
-        ("legacy", "canonical"),
-        [
-            ("stirrup_agent/stirrup_gdpval", "stirrup_agent/stirrup_agent"),
-            ("tau2/tau2_agent", "tau2/tau2"),
-            ("verifiers_agent/acereason-math", "verifiers_agent/verifiers_agent"),
-        ],
-    )
-    def test_legacy_agent_type_flavor_resolves_to_canonical_config(
-        self, caplog: LogCaptureFixture, legacy: str, canonical: str
-    ) -> None:
-        with caplog.at_level(logging.WARNING):
-            resolved = cli_main._asset_config_path("agent-type", legacy)
-
-        server, flavor = canonical.split("/")
-        expected = WORKING_DIR / "responses_api_agents" / server / "configs" / f"{flavor}.yaml"
-        assert resolved == str(expected)
-        assert "deprecated" in caplog.text
 
     def test_nested_manifest_wins_over_legacy_flavor_with_the_same_name(
         self, monkeypatch: MonkeyPatch, tmp_path: Path

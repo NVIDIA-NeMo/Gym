@@ -224,6 +224,7 @@ class TestSanity:
         commands = [call.args[0] for call in sandbox.exec.await_args_list]
         install = [command for command in commands if "pip install" in command]
         assert len(install) == 1 and "rm -rf" in install[0]
+        assert "mcp>=1.28.1,<2" in install[0]
         # The import is checked before installing and again after.
         assert sum("import run_agent" in command for command in commands) == 2
         assert sandbox.upload.await_args_list[0].args[0] == Path("/usr/bin/uv")
@@ -492,7 +493,7 @@ class TestSanity:
         response = await hermes.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="fix bug"))
 
         runner_input = json.loads(sandbox.uploaded["/session/input.json"])
-        assert "/session/process_supervisor.py" in sandbox.uploaded
+        assert "/session/process_supervisor" in sandbox.uploaded
         assert runner_input["model_base_url"] == f"http://model-server:1/ng-rollout/{seed.episode_id.capture_key}/v1"
         assert runner_input["user_message"] == "fix bug"
         assert response.metadata["harness_execution"] == "sandbox"
