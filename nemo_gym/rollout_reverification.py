@@ -63,6 +63,7 @@ from nemo_gym.rollout_collection import (
     _get_max_rollout_attempts,
     _rollout_for_export,
     _rollout_request_debug_summary,
+    is_omitted_rollout_row,
     is_terminal_failure,
 )
 from nemo_gym.server_utils import (
@@ -468,8 +469,11 @@ def summarize_cache_usage(cache: CacheKeysByStatus, all_payloads: List[Dict], fi
 
 
 def _is_judge_failure(row: Dict[str, Any]) -> bool:
-    """Whether a failures-sidecar row is a judge failure, the class `--judge-failed-only` recovers."""
-    return row.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED_FAILURE_CLASS
+    """Whether a failures-sidecar row is a judge failure, the class `--judge-failed-only` recovers.
+
+    A ``record_omitted_rollouts`` row records a rollout that produced no result, so there is nothing to judge.
+    """
+    return row.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED_FAILURE_CLASS and not is_omitted_rollout_row(row)
 
 
 def _recovery_rollout_predicate(
@@ -511,7 +515,9 @@ def _reject_multistage_recovery_source(rollouts_jsonl_fpath: Path) -> None:
         for line in f:
             if not line.strip():
                 continue
-            if "stage_index" in orjson.loads(line):
+            row = orjson.loads(line)
+            # A rollout that produced no result has nothing to recover, so its row cannot lose stage identity.
+            if "stage_index" in row and not is_omitted_rollout_row(row):
                 raise ConfigError(
                     "--judge-failed-only does not support multi-stage rows; resume the multi-stage rollout "
                     "collection so stage identity and adaptive references are preserved"

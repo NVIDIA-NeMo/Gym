@@ -5,9 +5,12 @@
 
 ``task.toml`` is the task author's file and, once fetched, read-only. What a dataset needs on top
 of it goes here, as data: the facts Harbor has no field for (``license`` and ``type``, which say
-which split the rows may enter), defaults that scale every task, and per-task overrides expressed
-with Harbor's own ``[environment]`` fields. The loader applies the task-shaping settings before
-anything else sees a task, so servers, agents and rows only ever see the effective ``task.toml``.
+which split the rows may enter; ``allowed_agents``, the harnesses admitted to run it; ``domain`` and
+``verified``, catalog metadata), defaults that scale every task or set how many rollouts an
+evaluation takes per task, and per-task overrides expressed with Harbor's own ``[environment]``
+fields. The loader applies the task-shaping settings before anything else sees a task, so servers,
+agents and rows only ever see the effective ``task.toml``; the other keys flow into the generated
+run config's ``datasets:`` entry (:func:`nemo_gym.tasks.harbor.materialize.run_config`).
 Harbor's own tables in the same file (``[dataset]`` and friends) are left to Harbor.
 
 Deployment settings (which sandbox provider, registry credentials, image mirrors) do not belong
@@ -19,9 +22,9 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
-from nemo_gym.config_types import DatasetLicense
+from nemo_gym.config_types import DatasetLicense, Domain
 from nemo_gym.tasks.harbor.models import HarborArtifact, HarborEnvironment, HarborTaskConfig, HarborVerifier
 
 
@@ -44,6 +47,9 @@ class GymDatasetDefaults(BaseModel):
     timeout_multiplier: float = Field(default=1.0, gt=0)
     # Scales cpus, memory_mb and storage_mb of the agent's and the verifier's environments.
     resource_multiplier: float = Field(default=1.0, gt=0)
+    # Rollouts per task for an evaluation of the dataset. The generated run config starts from it and a
+    # `+num_repeats=` on the command line replaces it. A run fact, not a task fact: it never enters a task's digest.
+    num_repeats: int = Field(default=1, ge=1, strict=True)
 
 
 class GymTaskOverride(BaseModel):
@@ -72,10 +78,43 @@ class GymDatasetConfig(BaseModel):
     license: DatasetLicense | None = None
     # Which split the rows enter. Unset means `validation` when a license is set, else `benchmark`.
     type: DatasetSplit | None = None
+    # The harnesses admitted to run the dataset, by implementation name (`responses_api_agents/<name>`, what
+    # `--agent` selects); unset admits any. `gym eval run` with another agent is refused before any image is
+    # built or any server started. The oracle (`gym dataset validate`) runs the reference solution, not a
+    # model, and is always admitted.
+    allowed_agents: list[str] | None = None
+    # Catalog metadata, carried into the generated `datasets:` entry: the capability the dataset evaluates
+    # (one of Gym's domain values) and whether its rewards were baselined and reviewed.
+    domain: Domain | None = None
+    verified: bool = Field(default=False, strict=True)
     defaults: GymDatasetDefaults = Field(default_factory=GymDatasetDefaults)
     tasks: dict[str, GymTaskOverride] = Field(default_factory=dict)
     # The dataset.toml this table was read from, so that errors in applying it name the file.
     _path: Path | None = PrivateAttr(default=None)
+
+    @field_validator("allowed_agents")
+    @classmethod
+    def _allowed_agents_name_distinct_agents(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return value
+        if not value:
+            raise ValueError("allowed_agents names no agent; drop the key to admit any harness")
+        for name in value:
+            if not name.strip() or name != name.strip():
+                raise ValueError(f"allowed_agents entry {name!r} is not an agent name")
+        duplicates = sorted({name for name in value if value.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"allowed_agents lists {', '.join(duplicates)} more than once")
+        return value
+
+    @field_validator("domain", mode="before")
+    @classmethod
+    def _domain_is_one_of_gyms(cls, value: Any) -> Any:
+        """Refuse a domain outside Gym's values with the values named: the entry's ``domain`` is the same enum."""
+        allowed = [member.value for member in Domain]
+        if value is None or isinstance(value, Domain) or (isinstance(value, str) and value in allowed):
+            return value
+        raise ValueError(f"domain must be one of Gym's domain values ({', '.join(allowed)}), not {value!r}")
 
     @model_validator(mode="after")
     def _training_splits_need_a_license(self) -> "GymDatasetConfig":
@@ -90,14 +129,33 @@ class GymDatasetConfig(BaseModel):
             return self.type
         return "validation" if self.license is not None else "benchmark"
 
+    def admits(self, agent: str) -> bool:
+        """Whether ``agent`` (an implementation name) may run the dataset: any when ``allowed_agents`` is unset."""
+        return self.allowed_agents is None or agent in self.allowed_agents
+
     @property
     def shapes_tasks(self) -> bool:
-        """Whether any setting changes the effective ``task.toml`` (identity fields never do)."""
-        return bool(self.tasks) or self.defaults != GymDatasetDefaults()
+        """Whether any setting changes the effective ``task.toml`` (identity and run fields never do)."""
+        return bool(self.tasks) or self.defaults.model_dump(
+            exclude={"num_repeats"}
+        ) != GymDatasetDefaults().model_dump(exclude={"num_repeats"})
 
     @property
     def is_empty(self) -> bool:
-        return not self.shapes_tasks and self.license is None and self.type is None
+        """Whether the ``[gym]`` table says nothing at all: every key at its default.
+
+        What a scaffolded ``dataset.toml`` reads as (its keys are comments). Nothing branches on it: a task's
+        digest folds the table in by :attr:`shapes_tasks`, and the entry and run defaults read each key.
+        """
+        return (
+            not self.shapes_tasks
+            and self.defaults.num_repeats == 1
+            and self.license is None
+            and self.type is None
+            and self.allowed_agents is None
+            and self.domain is None
+            and not self.verified
+        )
 
     @property
     def path(self) -> Path | None:
@@ -227,8 +285,36 @@ def apply_dataset_config(config: HarborTaskConfig, task_id: str, dataset: GymDat
     if verifier_update:
         verifier = verifier.model_copy(update=verifier_update)
     agent = config.agent
+    steps = config.steps
     if defaults.timeout_multiplier != 1:
         agent = agent.model_copy(update={"timeout_sec": agent.timeout_sec * defaults.timeout_multiplier})
-    return config.model_copy(
-        update={"environment": environment, "agent": agent, "verifier": verifier, "artifacts": artifacts}
+        # A step's own `[steps.agent]` and `[steps.verifier]` budgets are authored against Harbor's runtime like
+        # the task's, so they scale once here. A budget a step does not name stays unnamed, so the step keeps
+        # inheriting it through the config's step accessors: the task's scaled agent budget, and for the verifier
+        # the default `step_verifier_timeout_sec` reads, scaled by the multiplier the effective config carries, as
+        # Harbor grades such a step within its step default times the multiplier (multi_step.py's
+        # `_step_verifier_timeout_sec` through `_resolve_timeout_sec`).
+        steps = [_scale_step_timeouts(step, defaults.timeout_multiplier) for step in config.steps]
+    effective = config.model_copy(
+        update={
+            "environment": environment,
+            "agent": agent,
+            "verifier": verifier,
+            "artifacts": artifacts,
+            "steps": steps,
+        }
     )
+    effective._timeout_multiplier = defaults.timeout_multiplier
+    return effective
+
+
+def _scale_step_timeouts(step: Any, multiplier: float) -> Any:
+    """One ``[[steps]]`` entry with its own ``[steps.agent].timeout_sec`` and ``[steps.verifier].timeout_sec`` scaled
+    once; a budget the step does not name stays ``None``, inherited through :class:`HarborTaskConfig`'s step accessors
+    (the loader's hint about steps graded within the step default keys on that)."""
+    update: dict[str, Any] = {}
+    if step.agent.timeout_sec is not None:
+        update["agent"] = step.agent.model_copy(update={"timeout_sec": step.agent.timeout_sec * multiplier})
+    if step.verifier.timeout_sec is not None:
+        update["verifier"] = step.verifier.model_copy(update={"timeout_sec": step.verifier.timeout_sec * multiplier})
+    return step.model_copy(update=update) if update else step

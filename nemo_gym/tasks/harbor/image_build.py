@@ -104,7 +104,12 @@ from pathlib import Path
 from typing import Callable
 
 from nemo_gym.tasks.harbor.build_plan import BuildConflict, BuildPlanEntry, BuildResult, plan_builds
-from nemo_gym.tasks.harbor.build_records import build_inputs_mismatch, record_built_image, recorded_image_mismatch
+from nemo_gym.tasks.harbor.build_records import (
+    build_inputs_mismatch,
+    record_built_image,
+    record_forced_tasks,
+    recorded_image_mismatch,
+)
 from nemo_gym.tasks.harbor.build_tools import ImageBuilder
 from nemo_gym.tasks.harbor.records import (
     read_built_images,
@@ -124,6 +129,7 @@ def build_images(
     select: Callable[[str], bool] | None = None,
     contexts: Collection[str] | None = None,
     log: Callable[[str], None] = print,
+    force: bool = False,
 ) -> list[BuildResult]:
     """Build and record every service of every context under ``folder`` that needs it and has no usable record.
 
@@ -135,7 +141,8 @@ def build_images(
     and of the requested platform, and built from the inputs the context holds now
     (:func:`build_inputs_mismatch`). Otherwise it is rebuilt and its record replaced, and the reason
     is logged. A context is keyed by its content hash, so a changed build context is a new build;
-    deleting a context's entry from ``built-images.json`` forces one for an unchanged context. The services of
+    deleting a context's entry from ``built-images.json`` forces one for an unchanged context. ``force`` also builds
+    the Dockerfiles of tasks that declare an image (see :func:`plan_builds`). The services of
     one context are built together (:meth:`ImageBuilder.build_many`), the ones with a fitting record left out,
     and each is recorded as soon as it is done, so a prepare interrupted after a context's first service
     resumes at its second. Returns the images built by this call. Raises :class:`BuildError` on the first failure,
@@ -144,7 +151,7 @@ def build_images(
     folder = Path(folder).resolve()
     parent = folder.parent if is_task_folder(folder) else folder
     conflicts: dict[str, BuildConflict] = {}
-    plan = plan_builds(folder, select=select, conflicts=conflicts)
+    plan = plan_builds(folder, select=select, conflicts=conflicts, force=force)
     for conflict in conflicts.values():
         # A folder with another task's Harbor hash and other build inputs: in no entry (prepare leaves the task out
         # with this reason), the entry built for the task whose folder it holds.
@@ -177,6 +184,9 @@ def build_images(
                 )
                 if why is None:
                     log(f"Built image recorded for {who}: {images[entry.service]}")
+                    if entry.forced_tasks:
+                        # Reused under builds.force for tasks that declare an image: the record says so for the loader.
+                        record_forced_tasks(parent, digest, entry.forced_tasks)
                     continue
                 log(f"Rebuilding {images[entry.service]} for {who}: {why}")
             pending.append(entry)

@@ -17,7 +17,7 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from nemo_gym.tasks.harbor.build_compose import (
     build_section,
@@ -35,6 +35,7 @@ from nemo_gym.tasks.harbor.records import (
     read_built_images,
     read_image_configs,
     record_lock,
+    recorded_forced_tasks,
     recorded_service_records,
     write_json_record,
 )
@@ -211,6 +212,24 @@ def recorded_image_mismatch(
     return None
 
 
+def record_forced_tasks(folder: Path, digest: str, tasks: Iterable[str]) -> None:
+    """Add ``tasks`` to the ``forced_tasks`` of the context ``digest``'s entry in ``built-images.json``: the tasks
+    whose declared ``docker_image`` a prepare under ``builds.force`` built over, when the context's ``main`` was
+    already recorded and is reused (a fresh build records them through :func:`record_built_image`). No entry, no
+    write."""
+    built_path = Path(folder) / BUILT_IMAGES_FILE
+    with record_lock(built_path):
+        built = read_built_images(folder)
+        entry = built.get(digest)
+        if not isinstance(entry, dict):
+            return
+        forced = sorted(set(tasks) | recorded_forced_tasks(entry))
+        if forced == sorted(recorded_forced_tasks(entry)):
+            return
+        built[digest] = {**entry, "forced_tasks": forced}
+        write_json_record(built_path, built)
+
+
 def record_built_image(folder: Path, result: BuildResult, *, overwrite: bool = False) -> Path:
     """Record one built image next to the task folders: under its context digest and service in
     ``built-images.json`` and by image in ``compose-images.json``. Existing entries are kept unless ``overwrite``.
@@ -247,6 +266,9 @@ def record_built_image(folder: Path, result: BuildResult, *, overwrite: bool = F
             "pushed": lead.get("pushed", result.pushed),
             "services": services,
         }
+        forced = sorted(set(result.forced_tasks) | recorded_forced_tasks(existing))
+        if forced:
+            entry["forced_tasks"] = forced
         if MAIN_SERVICE in services:
             entry["image"] = services[MAIN_SERVICE]["image"]
         built[result.digest] = entry

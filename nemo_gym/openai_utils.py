@@ -1766,6 +1766,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         if self._permanent_trip is not None:
             self._raise_permanent_error()
         request_headers = request_kwargs.pop("headers", {})
+        connection_retries = self.max_connection_retries
+        if connection_retries is None and request_kwargs.get("_resend_after_disconnect") is False:
+            connection_retries = MAX_NUM_TRIES
         headers = self.default_headers | request_headers | {"Authorization": f"Bearer {self.api_key}"}
         request_id = _rollout_request_id(headers)
         if request_id is not None:
@@ -1774,7 +1777,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             "headers": headers,
             "_internal": self.internal,
             "_max_num_tries": self.max_num_tries,
-            "_max_connection_retries": self.max_connection_retries,
+            "_max_connection_retries": connection_retries,
         }
         if self.request_timeout_seconds is not None:
             request_kwargs["timeout"] = ClientTimeout(
@@ -1786,7 +1789,10 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
         if self._permanent_trip is not None:
             self._raise_permanent_error()
-        max_num_tries = self.max_num_tries or self.max_http_attempts
+        resend = request_kwargs.get("_resend_after_disconnect", True)
+        # A status response may follow generation too. Keep permanent-error detection,
+        # but do not resend it; safe connection setup retries remain in the transport.
+        max_num_tries = (self.max_num_tries or self.max_http_attempts) if resend else 1
         tries = 0
         waited = 0.0
         while tries < max_num_tries:
@@ -1814,10 +1820,11 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             # out until max_rate_limit_wait_seconds is spent: a positive budget ends the
             # request even when max_http_attempts allows more tries, and 0 leaves 429
             # and 503 on the max_http_attempts count.
-            if self.max_num_tries is None and response.status in RATE_LIMIT_ERROR_CODES and self.internal:
+            if resend and self.max_num_tries is None and response.status in RATE_LIMIT_ERROR_CODES and self.internal:
                 max_num_tries += 1
             elif (
-                self.max_num_tries is None
+                resend
+                and self.max_num_tries is None
                 and response.status in WAIT_OUT_ERROR_CODES
                 and self.max_rate_limit_wait_seconds > 0
             ):
@@ -1853,11 +1860,13 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         await self._raise_for_status(response, request_kwargs)
         return await get_response_json(response)
 
-    async def create_chat_completion(self, **kwargs):
+    async def create_chat_completion(self, *, _resend_after_disconnect: bool = True, **kwargs) -> Dict[str, Any]:
         request_kwargs = dict(
             url=f"{self.base_url}/chat/completions",
             json=kwargs,
         )
+        if not _resend_after_disconnect:
+            request_kwargs["_resend_after_disconnect"] = False
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)

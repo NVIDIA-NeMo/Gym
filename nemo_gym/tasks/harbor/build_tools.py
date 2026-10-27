@@ -492,6 +492,7 @@ class ImageBuilder:
             pushed=self.push,
             record=record,
             service=entry.service,
+            forced_tasks=entry.forced_tasks,
         )
 
     def _ensure_compose_plugin(self) -> None:

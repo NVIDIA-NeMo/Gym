@@ -14,9 +14,10 @@ import hashlib
 import os
 import warnings
 from collections import Counter, defaultdict
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,7 @@ from nemo_gym.health.checks import (
     _transcript_tokens,
     normalize_ignored_checks,
 )
+from nemo_gym.health.timeouts import read_rollout_timing, summarize_timeouts
 from nemo_gym.health.types import (
     CALL_BINDING_INPUTS,
     QUALITY_SUMMARY_FILENAME,
@@ -274,6 +276,7 @@ def evaluate_record(
         transcript_completion_tokens=transcript_completion,
         capture_prompt_tokens=sum(_token_count(call, "tokens_in") for call in calls),
         capture_completion_tokens=sum(_token_count(call, "tokens_out") for call in calls),
+        timing=read_rollout_timing(record),
     )
 
 
@@ -486,9 +489,56 @@ def _jsonl_rows(path: Path) -> Iterator[dict[str, Any]]:
                 yield row
 
 
+@dataclass(frozen=True)
+class _Failures:
+    """The rollouts that failed and never landed, and the rollouts the run owed."""
+
+    # Each such rollout's last failed attempt, by (input index, task index, rollout index).
+    rows: dict[tuple[Any, ...], dict[str, Any]]
+    # None when an input has no `_materialized_inputs.jsonl` inventory.
+    owed: set[tuple[Any, ...]] | None
+    any_sidecar: bool
+
+
+def _read_failures(landed: set[tuple[Any, ...]], paths: Sequence[Path]) -> _Failures:
+    """Read every input's failures sidecar and inventory.
+
+    The last attempt of a rollout stands, and a rollout that later landed is not failed. With an inventory, only
+    owed rollouts count: an unreadable record or a sidecar row outside the inventory is not one.
+    """
+    # Lazy: rollout_collection imports this module.
+    from nemo_gym.rollout_collection import is_omitted_rollout_row, is_unstarted_rollout_row
+
+    failed: dict[tuple[Any, ...], dict[str, Any]] = {}
+    any_sidecar = False
+    owed: set[tuple[Any, ...]] | None = set()
+    for source_index, path in enumerate(paths):
+        if failures_path_for(path).is_file():
+            any_sidecar = True
+            for row in _jsonl_rows(failures_path_for(path)):
+                # Main's rule: a row the dispatch budget never started is no attempt and selects nothing.
+                if is_unstarted_rollout_row(row):
+                    continue
+                failed[(source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))] = row
+        if not materialized_path_for(path).is_file():
+            owed = None
+        elif owed is not None:
+            owed.update(
+                (source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))
+                for row in _jsonl_rows(materialized_path_for(path))
+            )
+    # Main's rule: a rollout whose latest attempt recorded no result is missing, not failed.
+    failed = {key: row for key, row in failed.items() if not is_omitted_rollout_row(row)}
+    for key in landed:
+        failed.pop(key, None)
+    if owed is not None:
+        failed = {key: row for key, row in failed.items() if key in owed}
+    return _Failures(rows=failed, owed=owed, any_sidecar=any_sidecar)
+
+
 def _rollout_accounting(
     landed: set[tuple[Any, ...]],
-    paths: Sequence[Path],
+    failures: _Failures,
     *,
     limits: RunHealthLimits,
     limits_source: LimitsSource | Mapping[str, LimitsSource],
@@ -498,7 +548,9 @@ def _rollout_accounting(
 
     ``landed`` holds ``(input index, task index, rollout index)`` of every persisted record. Failures come
     from each input's ``_failures.jsonl`` sidecar, where the last attempt of a rollout stands; one that
-    later landed is not failed. ``is_terminal_failure`` splits them into
+    later landed is not failed. A ``record_omitted_rollouts`` row records no result: an interrupted attempt is the
+    rollout's latest execution and leaves it missing, and a row never started is skipped.
+    ``is_terminal_failure`` splits them into
     final ones, which are not retried, and not final ones, which are; the split says nothing of the cause. ``failed`` is null when no input has a sidecar.
     ``expected``, ``missing`` and ``healthy`` need the ``_materialized_inputs.jsonl`` inventory and
     are null when an input has none. A run is healthy when nothing is missing, no rollout is
@@ -506,28 +558,12 @@ def _rollout_accounting(
     The limits are off (None) by default, so failures alone never make a run unhealthy unless configured.
     """
     # Lazy: rollout_collection imports this module, and health workers need none of its dependencies.
-    from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, is_terminal_failure
+    from nemo_gym.rollout_collection import (
+        NG_FAILURE_CLASS_KEY,
+        is_terminal_failure,
+    )
 
-    failed: dict[tuple[Any, ...], dict[str, Any]] = {}
-    any_sidecar = False
-    owed: set[tuple[Any, ...]] | None = set()
-    for source_index, path in enumerate(paths):
-        if failures_path_for(path).is_file():
-            any_sidecar = True
-            for row in _jsonl_rows(failures_path_for(path)):
-                failed[(source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))] = row
-        if not materialized_path_for(path).is_file():
-            owed = None
-        elif owed is not None:
-            owed.update(
-                (source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))
-                for row in _jsonl_rows(materialized_path_for(path))
-            )
-    for key in landed:
-        failed.pop(key, None)
-    if owed is not None:
-        # Only owed rollouts count: an unreadable record or a sidecar row outside the inventory is not one.
-        failed = {key: row for key, row in failed.items() if key in owed}
+    failed, owed, any_sidecar = failures.rows, failures.owed, failures.any_sidecar
     expected = None if owed is None else len(owed)
     missing = None if owed is None else len(owed - landed - failed.keys())
     final = sum(is_terminal_failure(row) for row in failed.values())
@@ -641,6 +677,72 @@ def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output
     return summary_path, verdicts_path
 
 
+def capture_dirs_for_health(global_config_dict: Any) -> list[Path]:
+    """The run's model-call capture directories for ``run_health_checks``; none when capture is off or misconfigured,
+    so a capture setting never stops the health check."""
+    from nemo_gym.observability.model_calls import model_call_capture_dirs_from_config
+
+    try:
+        return model_call_capture_dirs_from_config(global_config_dict)
+    except ValueError:
+        return []
+
+
+def _with_captured_calls(rows: Iterable[dict[str, Any]], capture_dirs: Sequence[Path]) -> Iterator[dict[str, Any]]:
+    """Failed rollouts' rows, each with the model calls captured under its rollout id, read with the collector's
+    key and reader.
+
+    Collection joins captures only into a rollout that produced a result, so a row that failed without one (an
+    episode cut by its deadline, say) has none, although the model server captured its calls. Each capture dir is
+    listed once, never created. A row comes back as it is, its time unmeasured, when it carries its own capture
+    (so no call counts twice), when its capture is missing or partial (a write still claimed, a failed write, an
+    unreadable record), or when its identity or its capture cannot be read.
+    """
+    if not capture_dirs:
+        yield from rows
+        return
+    # Lazy: the capture store pulls in the model-server stack, which health workers do not need.
+    from nemo_gym.base_responses_api_model import _PENDING_SUFFIX, CaptureStore
+    from nemo_gym.observability.model_calls import read_available_model_call_records
+    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+
+    listings = []
+    for directory in capture_dirs:
+        try:
+            names = set(os.listdir(directory))
+        except OSError as exc:
+            warnings.warn(
+                f"Cannot list the model-call capture dir {directory} ({exc}); failed rollouts stay unmeasured.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            continue
+        # A claimed write is named `<rollout id>.<call token>.capture.pending`; the token has no dot.
+        pending = {
+            name.removesuffix(_PENDING_SUFFIX).rsplit(".", 1)[0] for name in names if name.endswith(_PENDING_SUFFIX)
+        }
+        listings.append((CaptureStore(directory, create=False), names, pending))
+    for row in rows:
+        calls = None
+        if "ng_model_call_capture" not in row:
+            try:
+                rollout_id = maybe_rollout_id_from_run_body(row)
+                for store, names, pending in listings:
+                    if rollout_id in pending or store.incomplete_path_for(rollout_id).name in names:
+                        break
+                    if store.path_for(rollout_id).name in names:
+                        records, unreadable = read_available_model_call_records(store, rollout_id)
+                        if not unreadable:
+                            calls = [
+                                record.model_dump(exclude={"request", "response", "request_raw", "response_raw"})
+                                for record in records
+                            ]
+                        break
+            except (OSError, TypeError, ValueError):
+                pass  # A malformed identity or an unreadable capture names no calls; the record checks report the row.
+        yield row if calls is None else {**row, "ng_model_call_capture": {"calls": calls}}
+
+
 def run_health_checks(
     rollout_paths: Path | Sequence[Path],
     *,
@@ -649,8 +751,13 @@ def run_health_checks(
     ignored_checks: Sequence[str] = (),
     limits: RunHealthLimits = RunHealthLimits(),
     limits_source: LimitsSource | Mapping[str, LimitsSource] = "config",
+    model_call_capture_dirs: Sequence[Path] = (),
 ) -> HealthCheckResult:
-    """Run the RFC's map/group/reduce pipeline and write both reports."""
+    """Run the RFC's map/group/reduce pipeline and write both reports.
+
+    ``model_call_capture_dirs`` are the run's model-call capture directories. A failed rollout's row carries no
+    capture, so its timing in ``run.stats.timeouts`` is read from these instead.
+    """
     ignored = frozenset(normalize_ignored_checks(ignored_checks))
     paths = [rollout_paths] if isinstance(rollout_paths, Path) else list(rollout_paths)
     if not paths:
@@ -705,15 +812,28 @@ def run_health_checks(
     _mark_duplicate_identities(digests, lines, ignored)
     summary = _reduce(digests, ignored)
     artifacts = summary["run"]["artifacts"]
+    landed = {(line.source_index, d.task_index, d.rollout_index) for d, line in zip(digests, lines, strict=True)}
+    failures = _read_failures(landed, paths)
     artifacts.update(
         _rollout_accounting(
-            {(line.source_index, d.task_index, d.rollout_index) for d, line in zip(digests, lines, strict=True)},
-            paths,
+            landed,
+            failures,
             limits=limits,
             limits_source=limits_source,
             duplicated=summary["run"]["issues"]["rollout_duplicate_identity"],
         )
     )
+    # Every rollout's final record: its saved row, or the last failed attempt of one that never landed.
+    timings = [digest.timing for digest in digests if digest.timing is not None]
+    timings += map(read_rollout_timing, _with_captured_calls(failures.rows.values(), model_call_capture_dirs))
+    # Every failed attempt in the sidecars, so a limit or enforcer that only an earlier attempt named is sent as 0.
+    attempts = (
+        read_rollout_timing(row)
+        for path in paths
+        if failures_path_for(path).is_file()
+        for row in _jsonl_rows(failures_path_for(path))
+    )
+    summary["run"]["stats"]["timeouts"] = summarize_timeouts(timings, attempts).model_dump(mode="json")
     run_findings, run_coverage = _run_excessive_failures(artifacts, limits, ignored)
     _judge_run(artifacts, run_findings, run_coverage)
     summary["run"]["issues"][_RUN_FAILURES_CHECK] = len(run_findings)
@@ -742,9 +862,10 @@ def write_provisional_summary(
     Duplicates come from the per-record pass, so ``healthy`` is false when the accounting already has a reason
     and null otherwise. ``gym eval health-check`` on the run dir writes the full summary.
     """
+    landed_keys = {(0, task, rollout) for task, rollout in landed}
     artifacts = _rollout_accounting(
-        {(0, task, rollout) for task, rollout in landed},
-        [rollout_path],
+        landed_keys,
+        _read_failures(landed_keys, [rollout_path]),
         limits=limits,
         limits_source="config",
         duplicated=0,
@@ -893,13 +1014,17 @@ def health_check_run_dir(
     ignored_checks: Sequence[str] = (),
     limits: RunHealthLimits | None = None,
     json_output: bool = False,
+    model_call_capture_dir: str | Path | None = None,
 ) -> HealthCheckResult:
     """Recheck a run directory. The run's own persisted limits judge it, so the verdict of the same artifacts
     does not change. Each limit set explicitly on ``limits`` overrides only that persisted limit and is recorded
     as an override; set to ``None`` it removes the limit. A limit not set keeps its persisted value.
 
     A directory ``gym eval aggregate`` merged shards into is rechecked from those shards, with the failures and
-    inventories beside them, as the aggregation checked them. An explicit ``rollout_file`` is checked alone."""
+    inventories beside them, as the aggregation checked them. An explicit ``rollout_file`` is checked alone.
+
+    ``model_call_capture_dir`` is the run's ``model_call_capture_dir``; with it, failed rollouts' captured calls
+    count in the timeouts section's time split."""
     path = Path(run_dir)
     shards = _aggregated_shards(path) if rollout_file is None else None
     rollout_paths = shards if shards is not None else _resolve_rollout_path(path, rollout_file)
@@ -913,7 +1038,18 @@ def health_check_run_dir(
         ignored_checks=ignored_checks,
         limits=limits,
         limits_source=limits_source,
+        model_call_capture_dirs=[Path(model_call_capture_dir)] if model_call_capture_dir is not None else [],
     )
+    # The run dir does not record its capture dir, so a recheck without one cannot time a failed rollout.
+    timeouts, failed = result.summary["run"]["stats"]["timeouts"], result.summary["run"]["artifacts"]["failed"]
+    unsplit = timeouts["timed_out"] - timeouts["time_split"]["rollouts_with_captures"]
+    if model_call_capture_dir is None and failed and failed["total"] and unsplit:
+        warnings.warn(
+            "run.stats.timeouts.time_split times a rollout that failed without a row only from the run's model-call "
+            "captures: pass --model-call-capture-dir <the run's model_call_capture_dir>.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     if json_output:
         print(orjson.dumps(result.summary).decode())
     else:
