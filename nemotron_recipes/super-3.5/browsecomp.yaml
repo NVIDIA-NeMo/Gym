@@ -47,11 +47,8 @@ judge_model:
 browsecomp_benchmark_resources_server:
   resources_servers:
     browsecomp_advanced_harness:
-      # The published run used Exa; BrowseComp's default provider is You.com.
-      search_provider: exa
-      exa_api_key: ${oc.select:exa_api_key,null}
-      # Exa's multi-step research search, as the published run used (Gym's default is auto).
-      exa_search_type: deep
+      search_provider: ydc
+      ydc_api_key: ${oc.select:ydc_api_key,null}
       # Domains search skips, as in the published run; a different list changes search
       # coverage and so the results. The path comes from browsecomp.setup.sh.
       exclude_domains_file_path: ${oc.env:BROWSECOMP_EXCLUDE_DOMAINS}

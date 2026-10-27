@@ -71,9 +71,9 @@ _EXA_DEEP_ANSWER_MAX_FRACTION = 0.5
 
 
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
-    # Search/browse backend. "you" (default), "tavily" or "exa". The chosen provider's
+    # Search/browse backend. "ydc" (default), "tavily" or "exa". The chosen provider's
     # key must be present (validated below). exclude_domains are honored by all three.
-    search_provider: str = "you"
+    search_provider: str = "ydc"
     tavily_api_key: str | List[str] | None = None
     exa_api_key: str | List[str] | None = None
     ydc_api_key: str | List[str] | None = None
@@ -129,14 +129,14 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
 
     @model_validator(mode="after")
     def _check_provider_key(self) -> "TavilySearchResourcesServerConfig":
-        if self.search_provider == "you" and not self.ydc_api_key:
-            raise ValueError("ydc_api_key is required when search_provider='you'")
+        if self.search_provider == "ydc" and not self.ydc_api_key:
+            raise ValueError("ydc_api_key is required when search_provider='ydc'")
         if self.search_provider == "tavily" and not self.tavily_api_key:
             raise ValueError("tavily_api_key is required when search_provider='tavily'")
         if self.search_provider == "exa" and not self.exa_api_key:
             raise ValueError("exa_api_key is required when search_provider='exa'")
-        if self.search_provider not in ("you", "tavily", "exa"):
-            raise ValueError(f"search_provider must be 'you', 'tavily' or 'exa', got {self.search_provider!r}")
+        if self.search_provider not in ("ydc", "tavily", "exa"):
+            raise ValueError(f"search_provider must be 'ydc', 'tavily' or 'exa', got {self.search_provider!r}")
         if self.exa_search_type not in _EXA_SEARCH_TYPES:
             raise ValueError(
                 f"exa_search_type must be one of {sorted(_EXA_SEARCH_TYPES)}, got {self.exa_search_type!r}"
@@ -617,7 +617,7 @@ class YouAIOHTTPClient(BaseModel):
             response = await request(**request_kwargs)
 
             if response.status in (401, 403):
-                _abort_on_invalid_api_key("you", response.status, (await response.content.read()).decode())
+                _abort_on_invalid_api_key("ydc", response.status, (await response.content.read()).decode())
 
             if response.status in RETRY_ERROR_CODES:
                 rate_limited = response.status in RATE_LIMIT_ERROR_CODES
@@ -1072,7 +1072,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 )
                 for k in ydc_api_keys
             ]
-            print(f"Search provider: you ({len(self._you_clients)} key(s))")
+            print(f"Search provider: ydc ({len(self._you_clients)} key(s))")
 
         self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
 
@@ -1383,7 +1383,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 query, num_results=self.config.max_results, exclude_domains=self._exclude_domains
             )
         except Exception as e:
-            self._record_call(metrics, "search", "you", "error", call_start)
+            self._record_call(metrics, "search", "ydc", "error", call_start)
             print(f"[browsecomp][tool_fail][you_search] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
         # Client-side exclusion covers registries longer than the API's exclude_domains cap.
@@ -1392,7 +1392,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         ]
         # Contamination guard: applied above the pages/ write so a contaminated hit is
         # never written to disk (see _exa_search_one).
-        offered, _ = _filter_results(web, "search", "you")
+        offered, _ = _filter_results(web, "search", "ydc")
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
         returned = 0
@@ -1425,7 +1425,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self._record_call(
             metrics,
             "search",
-            "you",
+            "ydc",
             "success",
             call_start,
             num_results_offered=len(offered),
@@ -1434,12 +1434,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         )
         if returned < len(offered):
             print(
-                f"[browsecomp][search_truncated][you] query={query[:120]!r} "
+                f"[browsecomp][search_truncated][ydc] query={query[:120]!r} "
                 f"returned={returned}/{len(offered)} budget={max_length}",
                 flush=True,
             )
         elif not offered:
-            print(f"[browsecomp][search_empty][you] query={query[:120]!r} provider returned 0 results", flush=True)
+            print(f"[browsecomp][search_empty][ydc] query={query[:120]!r} provider returned 0 results", flush=True)
         return results_string
 
     @staticmethod
@@ -1559,7 +1559,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             body.max_total_length if body.max_total_length is not None else self.config.search_max_total_length
         )
         max_per_query_length = total_length // len(body.queries)
-        if self.config.search_provider == "you":
+        if self.config.search_provider == "ydc":
             # You.com: highlight snippets inline; in terminal mode also written to pages/.
             you_page_writer = self._get_page_writer(sid)
             results = await asyncio.gather(
@@ -1606,16 +1606,16 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         # fetch full page content (provider-specific); normalize to a list of
         # {url, raw_content} so the shared disk/inline formatting below is provider-agnostic.
         start_time = time()
-        if self.config.search_provider == "you":
+        if self.config.search_provider == "ydc":
             you_client = self._select_you_client()
             print(f"[you_call_begin function=browse n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]", flush=True)
             try:
                 raw = await you_client.get_contents(urls=urls, crawl_timeout=self.config.you_crawl_timeout)
             except Exception as e:
-                self._record_call(metrics, "browse", "you", "error", start_time)
+                self._record_call(metrics, "browse", "ydc", "error", start_time)
                 print(f"[browsecomp][tool_fail][you_contents] urls={urls} error={e}", flush=True)
                 return BrowseResponse(results_string=f"Failed to extract content: {e}")
-            self._record_call(metrics, "browse", "you", "success", start_time)
+            self._record_call(metrics, "browse", "ydc", "success", start_time)
             result_list = self._normalize_you_contents(raw, urls)
         elif self.config.search_provider == "exa":
             exa_client = self._select_exa_client()

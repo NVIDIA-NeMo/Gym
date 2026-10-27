@@ -10,8 +10,8 @@ This resources server provides two browsing tools backed by a configurable searc
 - **`search`** — parallel web search returning top results with content snippets
 - **`browse`** — full-page content extraction from given URLs
 
-Select the provider with `search_provider`: `you` ([You.com](https://you.com/), default), `exa`, or `tavily`.
-For `you`, `search` calls `/v1/search` with highlights extraction and `browse` calls `/v1/contents`
+Select the provider with `search_provider`: `ydc` ([You.com](https://you.com/), default), `exa`, or `tavily`.
+For `ydc`, `search` calls `/v1/search` with highlights extraction and `browse` calls `/v1/contents`
 for full-page markdown.
 
 Reward is computed via an LLM judge that compares the model's final answer against the ground truth.

@@ -84,7 +84,7 @@ def _mock_client(web=None, **kwargs) -> MagicMock:
 
 class TestYouConfig:
     def test_you_is_default_provider(self) -> None:
-        assert _config().search_provider == "you"
+        assert _config().search_provider == "ydc"
 
     def test_requires_you_key(self) -> None:
         with pytest.raises(ValueError, match="ydc_api_key"):
@@ -324,7 +324,7 @@ class TestYouSearch:
 
         assert "Search failed: you boom" in resp.results_string
         call = server._session_id_to_metrics["test_session_id"].async_tavily_calls[0]
-        assert (call.provider, call.function, call.status) == ("you", "search", "error")
+        assert (call.provider, call.function, call.status) == ("ydc", "search", "error")
 
     async def test_metering_records_yield(self) -> None:
         server = _server()
@@ -334,7 +334,7 @@ class TestYouSearch:
 
         calls = server._session_id_to_metrics["test_session_id"].async_tavily_calls
         assert len(calls) == 2
-        assert all(c.provider == "you" and c.status == "success" for c in calls)
+        assert all(c.provider == "ydc" and c.status == "success" for c in calls)
         assert all(c.num_results_offered == 2 and c.num_results_returned == 2 for c in calls)
 
     async def test_terminal_mode_writes_highlights_to_pages(self, tmp_path) -> None:
@@ -418,7 +418,7 @@ class TestYouBrowse:
 
         assert "Failed to extract content: you boom" in resp.results_string
         call = server._session_id_to_metrics["test_session_id"].async_tavily_calls[0]
-        assert (call.provider, call.function, call.status) == ("you", "browse", "error")
+        assert (call.provider, call.function, call.status) == ("ydc", "browse", "error")
 
     async def test_excluded_urls_are_never_fetched(self) -> None:
         server = _server()
