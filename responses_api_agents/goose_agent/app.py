@@ -15,6 +15,7 @@
 
 import json
 import logging
+import re
 import sqlite3
 import tarfile
 from asyncio import Semaphore, to_thread
@@ -69,6 +70,10 @@ GOOSE_ARCHIVE_SHA256 = {
     "aarch64": "baeb3e1b188fce75b444af35b5955f255e68fde87f60a5ba01f032227618a4ed",  # pragma: allowlist secret
 }
 GOOSE_RELEASE_URL = f"https://github.com/aaif-goose/goose/releases/download/v{GOOSE_VERSION}"
+# Goose takes the system prompt only as one argv value, which Linux caps at 128 KiB (MAX_ARG_STRLEN).
+MAX_SYSTEM_PROMPT_BYTES = 128 * 1024
+# Goose's MAX_TURNS_MESSAGE, streamed when --max-turns is reached.
+GOOSE_MAX_TURNS_NOTICE = "I've reached the maximum number of actions I can do without user input"
 
 
 def goose_archive_name(arch: str) -> str:
@@ -134,9 +139,16 @@ def read_goose_sessions(db_path: Path) -> list[dict[str, Any]]:
         sessions = [dict(row) for row in con.execute("select * from sessions order by created_at, id")]
         for session in sessions:
             session["messages"] = [
-                {"role": row["role"], "content": json.loads(row["content_json"]), "created": row["created_timestamp"]}
+                {
+                    "role": row["role"],
+                    "content": json.loads(row["content_json"]),
+                    "created": row["created_timestamp"],
+                    "message_id": row["message_id"],
+                    "user_visible": (json.loads(row["metadata_json"] or "{}") or {}).get("userVisible", True),
+                }
                 for row in con.execute(
-                    "select role, content_json, created_timestamp from messages where session_id = ? order by id",
+                    "select message_id, role, content_json, created_timestamp, metadata_json from messages "
+                    "where session_id = ? order by id",
                     (session["id"],),
                 )
             ]
@@ -158,10 +170,13 @@ def goose_messages_to_output(messages: list[dict[str, Any]]) -> list[Any]:
     Goose stores one assistant message per tool call of a turn and repeats the turn's thinking in each, so
     a thinking block equal to the previous one of the same turn is dropped. A user message that is not a
     tool response starts a new turn, so identical thinking there is kept. User text (the task and injected
-    turn context) is input, not output.
+    turn context) is input, not output. Messages Goose writes for itself (userVisible false, such as the
+    compaction notice) are not policy output either.
     """
     output, last_thinking = [], None
     for message in messages:
+        if not message.get("user_visible", True):
+            continue
         if message["role"] == "user" and not any(b.get("type") == "toolResponse" for b in message["content"]):
             last_thinking = None
         for block in message["content"]:
@@ -199,6 +214,28 @@ def goose_messages_to_output(messages: list[dict[str, Any]]) -> list[Any]:
                     NeMoGymFunctionCallOutput(call_id=block["id"], output=text or str(result.get("error", "")))
                 )
     return output
+
+
+def goose_stop_reason(stdout: str, sessions: list[dict[str, Any]]) -> str | None:
+    """Why Goose stopped early, or None.
+
+    When a model call fails past its retries or --max-turns is reached, Goose streams a notice of its own as the
+    last assistant message, never persists it, and still exits 0. Every message from the model is persisted
+    under the id it was streamed with.
+    """
+    last = {}
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # Goose prints a startup banner before the JSON events.
+        if isinstance(event, dict) and event.get("type") == "message":
+            if (event.get("message") or {}).get("role") == "assistant":
+                last = event["message"]
+    if not last.get("id") or last["id"] in {m["message_id"] for s in sessions for m in s["messages"]}:
+        return None
+    text = "".join(b.get("text", "") for b in last.get("content") or [] if b.get("type") == "text")
+    return "max_turns" if text.startswith(GOOSE_MAX_TURNS_NOTICE) else "model_error"
 
 
 def max_concurrent(intervals: list[tuple[int, int]]) -> int:
@@ -311,6 +348,8 @@ class GooseAgent(SimpleResponsesAPIAgent):
             (system if item.get("role") in ("system", "developer") else prompt).append(text)
         if not prompt:
             raise ValueError("Goose needs a user message")
+        if len("\n\n".join(system).encode()) >= MAX_SYSTEM_PROMPT_BYTES:
+            raise ValueError(f"Goose system prompt exceeds the {MAX_SYSTEM_PROMPT_BYTES} byte argument limit")
 
         remote = "/tmp/nemo-gym-goose-" + uuid4().hex
         await self._install_goose(sandbox, remote)
@@ -345,33 +384,50 @@ class GooseAgent(SimpleResponsesAPIAgent):
         if params.temperature is not None:
             env["GOOSE_TEMPERATURE"] = str(params.temperature)
         env |= self.config.env
-        system_arg = f'--system "$(cat {quote(remote)}/system.txt)"' if system else ""
-        # Sessions are archived even when Goose fails, so partial transcripts stay inspectable.
+        # `--system=` keeps a prompt that starts with "-" from being parsed as an option.
+        system_arg = f'--system="$(cat {quote(remote)}/system.txt)"' if system else ""
+        # Sessions are archived even when Goose fails, so partial transcripts stay inspectable. The exit code
+        # file records that Goose finished, whatever the provider reports afterwards.
         command = (
             f"{quote(remote)}/goose run --name gym -i {quote(remote)}/prompt.txt --max-turns {self.config.max_turns} "
             f"--output-format stream-json {system_arg} > {quote(remote)}/stdout.jsonl 2> {quote(remote)}/stderr.log; "
-            f"code=$?; tar czf {quote(remote)}/sessions.tgz -C {quote(remote)}/root/data sessions; exit $code"
+            f"code=$?; tar czf {quote(remote)}/sessions.tgz -C {quote(remote)}/root/data sessions; "
+            f"echo $code > {quote(remote)}/exit_code; exit $code"
         )
-        result, error_type = None, None
+        result, fault = None, None
         try:
             result = await sandbox.exec(command=command, env=env, timeout_s=self.config.timeout)
         except Exception as exc:
-            error_type = type(exc).__name__
+            fault = exc
             LOG.exception("Goose sandbox execution failed")
-        # The Docker provider returns a timeout as a result (error_type="timeout") instead of raising it.
-        error_type = error_type or getattr(result, "error_type", None)
-        if error_type and "timeout" in error_type.lower():
-            # The run was cut off before archiving its sessions.
-            await sandbox.exec(
-                command=f"tar czf {quote(remote)}/sessions.tgz -C {quote(remote)}/root/data sessions", timeout_s=300
-            )
+        error_type, return_code = getattr(result, "error_type", None), getattr(result, "return_code", None)
+        if fault or error_type or return_code == 124:
+            recorded = await sandbox.exec(command=f"cat {quote(remote)}/exit_code", timeout_s=60)
+            if (recorded.stdout or "").strip().isdigit():
+                # Goose finished and only the provider lost its outcome.
+                error_type, return_code = None, int(recorded.stdout)
+            elif not fault and ("timeout" in (error_type or "").lower() or (not error_type and return_code == 124)):
+                # Providers return a timeout (Docker: error_type "timeout", OpenSandbox and ECS: exit 124) instead
+                # of raising it. The run was cut off before archiving its sessions.
+                error_type = error_type or "timeout"
+                await sandbox.exec(
+                    command=f"tar czf {quote(remote)}/sessions.tgz -C {quote(remote)}/root/data sessions",
+                    timeout_s=300,
+                )
+            else:
+                # A sandbox or transport fault is not the policy's failure: retry the request instead of scoring it.
+                raise RuntimeError(f"Goose sandbox execution failed: {error_type or type(fault).__name__}") from fault
         # Export failures propagate, so retrying such a request cannot become a scored zero.
         for name in ("stdout.jsonl", "stderr.log", "sessions.tgz"):
             await sandbox.download(f"{remote}/{name}", root / name)
+        # Goose continues without an extension that fails to start and still exits 0.
+        failed = re.findall(r"Failed to start extension '([^']+)'", (root / "stderr.log").read_text(errors="replace"))
+        if failed:
+            raise RuntimeError(f"Goose extensions could not be initialized: {', '.join(sorted(set(failed)))}")
         with tarfile.open(root / "sessions.tgz") as archive:
             archive.extractall(root, filter="data")
         sessions = await to_thread(read_goose_sessions, root / "sessions" / "sessions.db")
-        return_code = getattr(result, "return_code", None)
+        error_type = error_type or goose_stop_reason((root / "stdout.jsonl").read_text(errors="replace"), sessions)
         return {
             "sessions": sessions,
             "goose_failed": bool(error_type or return_code != 0),
@@ -435,6 +491,8 @@ class GooseAgent(SimpleResponsesAPIAgent):
             root = Path(self.config.artifacts_dir) / sha256(rollout_id.encode()).hexdigest()
             root.mkdir(parents=True, exist_ok=True)
             sandbox = await self._start_sandbox(seed)
+            # A resource-owned sandbox is graded in place from its state, so a failed run there is scored as it stands.
+            graded_in_place = bool(seed.get("sandbox_descriptor") or seed.get("sandbox_handle"))
             try:
                 execution = await self._run_goose(sandbox, body, mcp, root)
                 sessions = execution.pop("sessions")
@@ -456,7 +514,9 @@ class GooseAgent(SimpleResponsesAPIAgent):
                     body,
                     response,
                     cookies,
-                    force_zero_reward=execution["goose_failed"] and self.config.execution_failure_reward_zero,
+                    force_zero_reward=execution["goose_failed"]
+                    and self.config.execution_failure_reward_zero
+                    and not graded_in_place,
                 )
                 return GooseAgentVerifyResponse.model_validate(result | execution)
             finally:

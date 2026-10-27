@@ -32,6 +32,7 @@ from responses_api_agents.goose_agent.app import (
     GooseAgentRunRequest,
     goose_archive_name,
     goose_messages_to_output,
+    goose_stop_reason,
     max_concurrent,
 )
 
@@ -64,8 +65,8 @@ def write_sessions_archive(path: Path) -> None:
         "create table sessions (id text primary key, session_type text, parent_session_id text, created_at timestamp)"
     )
     con.execute(
-        "create table messages (id integer primary key autoincrement, session_id text, role text, "
-        "content_json text, created_timestamp integer)"
+        "create table messages (id integer primary key autoincrement, message_id text, session_id text, role text, "
+        "content_json text, created_timestamp integer, metadata_json text)"
     )
     con.execute(
         "create table usage_ledger (id integer primary key autoincrement, session_id text, input_tokens integer, "
@@ -94,8 +95,8 @@ def write_sessions_archive(path: Path) -> None:
         ("s1", "assistant", [{"type": "text", "text": "Paris and Tokyo are sunny."}], 110),
     ]
     con.executemany(
-        "insert into messages (session_id, role, content_json, created_timestamp) values (?, ?, ?, ?)",
-        [(s, r, json.dumps(c), t) for s, r, c, t in messages],
+        "insert into messages (message_id, session_id, role, content_json, created_timestamp) values (?, ?, ?, ?, ?)",
+        [(f"m{i}", s, r, json.dumps(c), t) for i, (s, r, c, t) in enumerate(messages)],
     )
     con.executemany(
         "insert into usage_ledger (session_id, input_tokens, output_tokens, cache_read_tokens) values (?, ?, ?, ?)",
@@ -244,7 +245,7 @@ async def test_local_archive_is_uploaded_instead_of_downloaded(agent, tmp_path):
     assert not any("curl" in c.kwargs["command"] for c in sandbox.exec.await_args_list)
 
 
-@pytest.mark.parametrize("failure", ["exit", "timeout", "returned_timeout"])
+@pytest.mark.parametrize("failure", ["exit", "returned_timeout", "server_timeout"])
 async def test_execution_failure_scores_zero_and_keeps_transcript(agent, failure):
     server, sandbox, _ = agent
     run_exec = sandbox.exec.side_effect
@@ -252,17 +253,18 @@ async def test_execution_failure_scores_zero_and_keeps_transcript(agent, failure
     async def failing(command, **kwargs):
         if "goose run" not in command:
             return await run_exec(command, **kwargs)
-        if failure == "timeout":
-            raise TimeoutError()
         if failure == "returned_timeout":
             # The Docker provider returns its timeout instead of raising it.
             return SimpleNamespace(return_code=125, error_type="timeout", stdout="")
+        if failure == "server_timeout":
+            # OpenSandbox enforces the timeout server-side and reports exit 124, before the wrapper's own tar.
+            return SimpleNamespace(return_code=124, error_type=None, stdout="")
         return SimpleNamespace(return_code=1, error_type=None, stdout="")
 
     sandbox.exec.side_effect = failing
     result = await server.run(SimpleNamespace(cookies={}), run_body())
     assert result.reward == 0 and result.goose_failed
-    assert result.goose_error_type == {"timeout": "TimeoutError", "returned_timeout": "timeout"}.get(failure)
+    assert result.goose_error_type == (None if failure == "exit" else "timeout")
     assert server.server_client.post.await_args.kwargs["json"]["response"]["output"] == []
     assert result.response.output  # The original generation is retained for inspection.
     if failure != "exit":
@@ -273,7 +275,7 @@ async def test_execution_failure_scores_zero_and_keeps_transcript(agent, failure
     sandbox.stop.assert_awaited_once()
 
 
-@pytest.mark.parametrize("failure", ["install", "cancel"])
+@pytest.mark.parametrize("failure", ["install", "cancel", "disconnect", "poll_timeout", "lost_status"])
 async def test_infrastructure_failures_propagate_and_stop_sandbox(agent, failure):
     server, sandbox, _ = agent
     run_exec = sandbox.exec.side_effect
@@ -281,8 +283,16 @@ async def test_infrastructure_failures_propagate_and_stop_sandbox(agent, failure
     async def failing(command, **kwargs):
         if failure == "install" and "sha256sum" in command:
             return SimpleNamespace(return_code=1, error_type=None, stdout="", stderr="checksum mismatch")
-        if failure == "cancel" and "goose run" in command:
-            raise asyncio.CancelledError()
+        if "goose run" in command:
+            if failure == "cancel":
+                raise asyncio.CancelledError()
+            if failure == "disconnect":
+                raise ConnectionResetError()
+            if failure == "poll_timeout":
+                # A status poll that keeps timing out raises, while Goose may still be running.
+                raise TimeoutError()
+            if failure == "lost_status":
+                return SimpleNamespace(return_code=125, error_type="sandbox", stdout="")
         return await run_exec(command, **kwargs)
 
     sandbox.exec.side_effect = failing
@@ -372,3 +382,129 @@ def test_thinking_dedup_is_per_turn():
 
     items = goose_messages_to_output([user("task"), assistant("a"), assistant("b"), user("next"), assistant("c")])
     assert [item.type for item in items] == ["reasoning", "message", "message", "reasoning", "message"]
+
+
+@pytest.mark.parametrize("fault", ["lost_status", "disconnect"])
+async def test_recorded_exit_code_wins_over_a_provider_fault(agent, fault):
+    server, sandbox, _ = agent
+    run_exec = sandbox.exec.side_effect
+
+    async def exec_(command, **kwargs):
+        if "goose run" in command:
+            if fault == "disconnect":
+                raise ConnectionResetError()
+            return SimpleNamespace(return_code=125, error_type="sandbox", stdout="")
+        if command.startswith("cat ") and command.endswith("/exit_code"):
+            return SimpleNamespace(return_code=0, error_type=None, stdout="0\n")  # Goose finished
+        return await run_exec(command, **kwargs)
+
+    sandbox.exec.side_effect = exec_
+    result = await server.run(SimpleNamespace(cookies={}), run_body())
+    assert result.reward == 1 and not result.goose_failed
+    assert result.goose_exit_code == 0 and result.goose_error_type is None
+
+
+@pytest.mark.parametrize("reason", ["model_error", "max_turns"])
+async def test_goose_stopping_early_with_exit_zero_is_a_failure(agent, reason):
+    server, sandbox, _ = agent
+    download = sandbox.download.side_effect
+    notice = {
+        "model_error": "Network error: Could not connect to 127.0.0.1:9.\n\nPlease resend your message to try again.",
+        "max_turns": "I've reached the maximum number of actions I can do without user input. Continue?",
+    }[reason]
+
+    def stream(last_id: str, text: str) -> str:
+        # A banner precedes the stream-json events. Model messages are persisted under their streamed id
+        # (m10 is the root's final message in the fixture store), Goose's own notice is not.
+        events = [
+            {"type": "message", "message": {"id": i, "role": "assistant", "content": [{"type": "text", "text": t}]}}
+            for i, t in (("m10", "Paris and Tokyo are sunny."), (last_id, text))
+        ]
+        return "    goose is ready\n" + "\n".join(json.dumps(e) for e in events + [{"type": "complete"}])
+
+    async def download_(remote, local):
+        if remote.endswith("stdout.jsonl"):
+            Path(local).write_text(stream("msg_notice", notice))
+        else:
+            await download(remote, local)
+
+    sandbox.download.side_effect = download_
+    result = await server.run(SimpleNamespace(cookies={}), run_body())
+    assert result.goose_exit_code == 0 and result.goose_failed and result.goose_error_type == reason
+    assert result.reward == 0
+    assert (
+        goose_stop_reason(stream("m10", "Paris and Tokyo are sunny."), [{"messages": [{"message_id": "m10"}]}]) is None
+    )
+
+
+async def test_extension_that_fails_to_start_is_an_infrastructure_failure(agent):
+    server, sandbox, _ = agent
+    download = sandbox.download.side_effect
+
+    async def download_(remote, local):
+        if remote.endswith("stderr.log"):
+            Path(local).write_text(
+                "  Failed to start extension 'weather' (connection refused), continuing without it\n"
+            )
+        else:
+            await download(remote, local)
+
+    sandbox.download.side_effect = download_
+    with pytest.raises(RuntimeError, match="weather"):
+        await server.run(SimpleNamespace(cookies={}), run_body())
+    assert not any(c.kwargs["url_path"] == "/verify" for c in server.server_client.post.await_args_list)
+    sandbox.stop.assert_awaited_once()
+
+
+async def test_failed_run_in_a_resource_owned_sandbox_is_graded_in_place(agent):
+    server, sandbox, _ = agent
+    run_exec = sandbox.exec.side_effect
+
+    async def exec_(command, **kwargs):
+        if "goose run" in command:
+            return SimpleNamespace(return_code=1, error_type=None, stdout="")
+        return await run_exec(command, **kwargs)
+
+    async def post(**kwargs):
+        if kwargs["url_path"] == "/seed_session":
+            return response({"sandbox_handle": "sb-1"})
+        # The grader scores the patch left in the sandbox, whatever the response holds.
+        return response(kwargs["json"] | {"reward": 1.0})
+
+    sandbox.exec.side_effect = exec_
+    server.server_client.post.side_effect = post
+    result = await server.run(SimpleNamespace(cookies={}), run_body())
+    assert result.goose_failed and result.reward == 1
+    assert server.server_client.post.await_args.kwargs["json"]["response"]["output"]
+
+
+@pytest.mark.parametrize("system", ["- Answer in one line.", "x" * (128 * 1024)])
+async def test_system_prompt_is_passed_as_one_option_value(agent, system):
+    server, sandbox, _ = agent
+    server.config.system_prompt = system
+    if len(system) >= 128 * 1024:
+        # Linux caps a single argv value at 128 KiB, so Goose could never start.
+        with pytest.raises(ValueError, match="argument limit"):
+            await server.run(SimpleNamespace(cookies={}), run_body())
+        assert not any("goose run" in c.kwargs["command"] for c in sandbox.exec.await_args_list)
+        return
+    await server.run(SimpleNamespace(cookies={}), run_body())
+    run = next(c.kwargs["command"] for c in sandbox.exec.await_args_list if "goose run" in c.kwargs["command"])
+    assert '--system="$(cat ' in run
+
+
+def test_goose_only_messages_are_not_output():
+    def text(role, value, visible=True):
+        return {"role": role, "content": [{"type": "text", "text": value}], "user_visible": visible}
+
+    # Compaction hides earlier messages from the agent but keeps them visible, and adds Goose-only ones.
+    messages = [
+        {"role": "assistant", "content": [_call("c1", "shell", {"command": "ls"})], "user_visible": True},
+        {"role": "user", "content": [_result("c1", "a.txt")], "user_visible": True},
+        text("user", "SUMMARY", visible=False),
+        text("assistant", "Your context was compacted.", visible=False),
+        text("assistant", "Done."),
+    ]
+    items = goose_messages_to_output(messages)
+    assert [item.type for item in items] == ["function_call", "function_call_output", "message"]
+    assert items[-1].content[0].text == "Done."
