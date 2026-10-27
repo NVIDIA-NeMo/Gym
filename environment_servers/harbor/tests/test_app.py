@@ -398,7 +398,7 @@ class TestEpisode:
 
     @pytest.mark.parametrize("status", [401, 403, 500, None])
     async def test_sandbox_credentials_refused_at_seed_are_named(self, tmp_path, monkeypatch, status):
-        """A 401 or 403 from the sandbox provider sets the kind; the reply is the one any setup failure gets."""
+        """Provider credentials are classified on the cause, without reclassifying the environment outcome."""
         server, task, _, _ = make_server(tmp_path, monkeypatch)
 
         class SandboxApiException(Exception):  # the provider SDK's error, with its integer status_code
@@ -413,8 +413,11 @@ class TestEpisode:
         assert "Could not set up sandbox for 'hello'" in failure.failure_reason
         events = list((failure.failure_events or {}).values())
         hops = [(event.exception_type or event.type).rsplit(".", 1)[-1] for event in events]
+        outer = failure.failure_events[failure.failure_id]
+        assert outer.type == "EnvServerFailure"
+        assert outer.failure_kind is None and failure.failure_kind is None
         if status in (401, 403):
-            assert failure.failure_kind == "provider_credentials_rejected"
+            assert events[-2].failure_kind == "provider_credentials_rejected"
             assert hops[-2:] == ["SandboxCredentialsRejected", "SandboxApiException"]
             assert events[-2].operation == "sandbox.setup"
             assert events[-1].http_status == status
