@@ -46,7 +46,12 @@ _EXPORTERS: list[BaseExporter] = []
 
 
 def load_run_exporter_class(name: str) -> type[Exporter]:
-    """The post-run exporter class registered as `name`; raises `ConfigError` naming the valid choices."""
+    """The post-run exporter class registered as `name`; raises `ConfigError` naming the valid choices.
+
+    Only `gym eval export` uses this. A live run builds its exporters in `setup_exporters`, which treats a missing
+    SDK or a backend that won't start as a warning and carries on. Here the user asked for this exporter, so a
+    missing SDK is an error that says how to install it.
+    """
     if name not in RUN_EXPORTERS:
         raise ConfigError(f"Unknown exporter {name!r}. Available exporters: {', '.join(RUN_EXPORTERS)}.")
     module_name, class_name = RUN_EXPORTERS[name].split(":")

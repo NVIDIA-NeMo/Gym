@@ -142,11 +142,23 @@ class BaseExporter(Exporter):
         self._recorded: Optional[str] = None
         # A reopened run's config, masked: logged once the run continues, dropped if the output starts over.
         self._pending_config: Optional[DictConfig] = None
+        # Set only while `export()` is running, which is how the run-id hooks below tell a post-run export from a
+        # live run (where it stays None). While it is set, the marker path comes from these artifacts instead of
+        # `output_jsonl_fpath`, a recorded run id is not reused to resume, and the run id is held back in
+        # `_pending_run_id` rather than written to the marker.
         self._exported_artifacts: Optional[RunArtifacts] = None
+        # The backend run id reported during a post-run export. `export()` writes it to the marker once the whole
+        # run has been sent.
         self._pending_run_id: Optional[str] = None
 
     @classmethod
     def from_global_config(cls, global_config_dict: DictConfig) -> "BaseExporter":
+        """Build the exporter from the whole resolved config.
+
+        This overrides `Exporter.from_global_config` because these exporters have always been built from the full
+        config (a live run has no settings model of its own) instead of from a validated model. So only the shared
+        settings are validated here, and each backend validates its own in its constructor.
+        """
         cls.config_model.model_validate(global_config_dict)
         return cls(global_config_dict)
 
@@ -382,6 +394,9 @@ class BaseExporter(Exporter):
             return None
         from nemo_gym.rollout_collection import NG_DISPATCH_DRAINED_KEY, _rollout_for_export
 
+        # Rows flagged as drained stand for tasks the dispatch budget never started, so there is nothing to upload,
+        # and a live run leaves them out of its upload too. `_rollout_for_export` drops the bulky trajectory and
+        # raw model-call payloads, the same trimming a live run applies.
         with artifacts.rollouts_jsonl_fpath.open("rb") as f:
             rows = (orjson.loads(line) for line in f if line.strip())
             return [_rollout_for_export(row) for row in rows if not row.get(NG_DISPATCH_DRAINED_KEY)]
