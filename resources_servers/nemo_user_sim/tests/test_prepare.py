@@ -51,6 +51,12 @@ def test_environment_config_declares_generated_validation_split() -> None:
     assert validation.taskset == "nemo_user_sim:validation"
 
 
+def test_user_model_has_no_default_endpoint() -> None:
+    resources_config = OmegaConf.load(REPOSITORY_ROOT / "resources_servers/nemo_user_sim/configs/nemo_user_sim.yaml")
+    for key in ("user_model_base_url", "user_model_api_key", "user_model_name"):
+        assert OmegaConf.is_missing(resources_config, key), key
+
+
 def test_usersim_revision_pins_are_aligned() -> None:
     requirement_paths = (
         prepare_module.PREPARE_REQUIREMENTS_FPATH,

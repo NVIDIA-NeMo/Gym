@@ -444,13 +444,15 @@ async def _collect_usage(usages, problem_id="1", n_steps=None, response_override
     """Exercise the step loop and capture the payload sent to verification."""
     agent = _agent()
     responses = iter(usages)
+    overrides = iter(response_overrides) if isinstance(response_overrides, list) else None
 
     def _post(server_name, url_path, json, cookies):
         if url_path == "/v1/responses":
             usage = next(responses)
             if isinstance(usage, Exception):
                 raise usage
-            return _Resp({**_model_json("x = 1"), "usage": usage, **(response_overrides or {})})
+            extra = next(overrides) if overrides is not None else (response_overrides or {})
+            return _Resp({**_model_json("x = 1"), "usage": usage, **extra})
         return _Resp({**json, "reward": 0.0})
 
     agent.server_client.post = AsyncMock(side_effect=_post)
@@ -472,7 +474,7 @@ class TestTokenAccounting:
         row = await _collect_usage([_usage(100), _usage(300, input_tokens=20)])
         assert row["token_usage_version"] == TOKEN_USAGE_VERSION
         assert row["response"]["usage"] == _usage(400, input_tokens=30, cached_tokens=4, reasoning_tokens=6)
-        assert row["step_usage"] == [
+        assert [{k: s[k] for k in ("step_number", "status", "usage")} for s in row["step_usage"]] == [
             {"step_number": "1.1", "status": "generated", "usage": _usage(100)},
             {"step_number": "1.2", "status": "generated", "usage": _usage(300, input_tokens=20)},
         ]
@@ -522,6 +524,30 @@ class TestTokenAccounting:
         assert metrics["generation_coverage"] == 1 / 3
         assert metrics["token_usage_complete"] is True
         assert result.agent_metrics["num_subproblems"] == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("context_rejected", [False, True])
+    async def test_local_context_rejection_is_distinct_from_zero_token_truncation(self, context_rejected):
+        zero = _usage(0, input_tokens=0, cached_tokens=0, reasoning_tokens=0)
+        row = await _collect_usage(
+            [_usage(100), zero],
+            n_steps=3 if context_rejected else 2,
+            response_overrides=[
+                {},
+                {
+                    "output": [],
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "metadata": {"nemo_gym_context_window_exceeded": "true"} if context_rejected else {},
+                },
+            ],
+        )
+        assert row["step_usage"][1]["status"] == ("context_window_exceeded" if context_rejected else "generated")
+        if context_rejected:
+            assert row["step_usage"][2]["status"] == "skipped"
+        assert row["response"]["usage"]["input_tokens_details"]["cached_tokens"] == 2
+        assert row["response"]["usage"]["output_tokens_details"]["reasoning_tokens"] == 3
+        assert row["response"]["usage"]["output_tokens"] == 100
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("missing_index", [0, 1])
@@ -701,3 +727,108 @@ async def test_collector_builds_perf_from_generated_substeps(prefilled):
     _attach_ng_perf(result, observability_enabled=True)
     assert result["ng_perf"]["token_observability_coverage"] == (expected - 1) / expected
     assert result["ng_perf"]["completion_tokens"] == (expected - 1) * 20
+
+
+class TestHeadlineRepeatIntervals:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("agent_name", ["scicode", "scicode_verified_with_background_agent"])
+    async def test_endpoint_exports_weighted_subtask_and_problem_intervals(self, agent_name):
+        rows = [
+            {
+                **_repeat(repeat, passed, total),
+                "_ng_task_index": task,
+                "agent_ref": {"name": agent_name},
+                "reward": float(passed == total),
+            }
+            for task, total, values in [(0, 2, [2, 1, 0]), (1, 4, [3, 4, 3])]
+            for repeat, passed in enumerate(values)
+        ]
+        result = await _agent().aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+        for metric, mean, sem in [("subtask_accuracy", 13 / 18, 1 / 9), ("mean/problem_accuracy", 1 / 3, 1 / 6)]:
+            assert result.key_metrics[f"mean_across_repeats/{metric}"] == pytest.approx(mean)
+            assert result.key_metrics[f"ci_low_95_across_repeats/{metric}"] == pytest.approx(
+                mean - 4.30265272975 * sem
+            )
+            assert result.key_metrics[f"ci_high_95_across_repeats/{metric}"] == pytest.approx(
+                mean + 4.30265272975 * sem
+            )
+        assert result.key_metrics["subtask_accuracy"] == pytest.approx(13 / 18)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("agent_name", ["scicode", "scicode_verified_with_background_agent"])
+    async def test_single_repeat_has_no_headline_interval(self, agent_name):
+        rows = [{**_repeat(0, 1, 2), "_ng_task_index": 0, "agent_ref": {"name": agent_name}, "reward": 0.0}]
+        result = await _agent().aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+        assert not any(key.startswith("ci_low_95_across_repeats/") for key in result.key_metrics)
+
+    @pytest.mark.asyncio
+    async def test_verified_eight_repeat_intervals_match_independent_estimates(self):
+        passed_by_problem = [(2, [2, 1, 0, 2, 0, 1, 2, 1]), (4, [4, 4, 3, 2, 4, 0, 4, 3])]
+        rows = [
+            {
+                **_repeat(repeat, passed, total),
+                "_ng_task_index": task,
+                "agent_ref": {"name": "scicode_verified_with_background_agent"},
+                "reward": float(passed == total),
+            }
+            for task, (total, passed_values) in enumerate(passed_by_problem)
+            for repeat, passed in enumerate(passed_values)
+        ]
+        result = await _agent().aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+        subtask_means = [(left + right) / 6 for left, right in zip(*[values for _, values in passed_by_problem])]
+        problem_means = [
+            (float(left == 2) + float(right == 4)) / 2
+            for left, right in zip(*[values for _, values in passed_by_problem])
+        ]
+        # Student-t critical value for seven degrees of freedom, independent of Gym's helper.
+        for metric, values in (("subtask_accuracy", subtask_means), ("mean/problem_accuracy", problem_means)):
+            mean = statistics.mean(values)
+            half_width = 2.3646242515927844 * statistics.stdev(values) / 8**0.5
+            assert result.key_metrics[f"mean_across_repeats/{metric}"] == pytest.approx(mean)
+            assert result.key_metrics[f"ci_low_95_across_repeats/{metric}"] == pytest.approx(mean - half_width)
+            assert result.key_metrics[f"ci_high_95_across_repeats/{metric}"] == pytest.approx(mean + half_width)
+
+
+class TestStepStopMetadata:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "first",
+        [
+            {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
+            {"status": "completed"},
+            {"status": "failed", "error": {"code": "server_error", "message": "failed"}},
+            {},
+        ],
+    )
+    async def test_earlier_stop_evidence_survives_completed_final_step(self, first):
+        row = await _collect_usage(
+            [_usage(100), _usage(200)],
+            response_overrides=[{"id": "first", **first}, {"id": "last", "status": "completed"}],
+        )
+        assert row["response"]["status"] == "completed"
+        assert row["response"]["id"] == "last"
+        assert row["response"]["usage"]["output_tokens"] == 300
+        step = row["step_usage"][0]
+        assert step["response_id"] == "first"
+        assert step["response_status"] == first.get("status")
+        assert step["incomplete_details"] == first.get("incomplete_details")
+        assert step["error"] == first.get("error")
+        assert row["step_usage"][1]["response_status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_non_generated_steps_have_no_response_metadata(self):
+        row = await _collect_usage(
+            [_usage(100), Exception("exceeds maximum input length")],
+            problem_id="62",
+            n_steps=4,
+            response_overrides={"status": "completed"},
+        )
+        assert [step["status"] for step in row["step_usage"]] == [
+            "prefilled",
+            "generated",
+            "context_window_exceeded",
+            "skipped",
+        ]
+        for i in (0, 2, 3):
+            assert "response_status" not in row["step_usage"][i]
+            assert "response_id" not in row["step_usage"][i]

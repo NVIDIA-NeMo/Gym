@@ -138,7 +138,7 @@ class Deployment:
     """One participant of each kind, each behind its own control routes, reached by name like real servers."""
 
     def __init__(self) -> None:
-        self.environment = EnvironmentParticipant()
+        self.environment = EnvironmentParticipant(mode="exported")
         self.agent_hooks = AgentHooks()
         self.agent = AgentSessionParticipant(self.agent_hooks)
         self.resources_states = SessionStates()
