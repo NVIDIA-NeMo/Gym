@@ -68,6 +68,8 @@ def assistant_text(response: NeMoGymResponse) -> str:
 class MimoMusicResourcesServer(SimpleResourcesServer):
     """Run the CPU scorer in cancellable, concurrency-bounded process groups."""
 
+    ray_enabled = False
+
     config: MimoMusicResourcesServerConfig
     _semaphore: asyncio.Semaphore = PrivateAttr()
     _abc2midi: str = PrivateAttr()

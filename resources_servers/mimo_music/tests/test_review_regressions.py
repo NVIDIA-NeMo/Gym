@@ -10,7 +10,14 @@ import pytest
 from omegaconf import OmegaConf
 
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.server_utils import entrypoint_ray_enabled
+from resources_servers.mimo_music.app import MimoMusicResourcesServer
 from resources_servers.mimo_music.tests.test_app import ABC, request, server
+
+
+def test_music_server_does_not_require_ray() -> None:
+    assert MimoMusicResourcesServer.ray_enabled is False
+    assert entrypoint_ray_enabled(Path(__file__).resolve().parents[1] / "app.py") is False
 
 
 def test_config_resolves_with_environment_server() -> None:

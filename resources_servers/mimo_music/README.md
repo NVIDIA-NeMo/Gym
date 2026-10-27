@@ -16,6 +16,7 @@ follows the prompt's requested key, mood, instrumentation, or length.
 - Environment Server: the existing `legacy_agent` relay routes rollout requests
   to `mimo_music_simple_agent`, as required by current Gym config composition.
 - Verifier: this resources server's `/verify` endpoint; no session state.
+  Scoring uses local subprocesses and explicitly opts out of Ray initialization.
 - Model: any compatible Gym model server. Thinking models are supported:
   reasoning items and inline `<think>` / `<thinking>` blocks are not scored.
 
@@ -98,6 +99,12 @@ or filtered copy of the released dataset. The full public music subset is in
 Use external data preparation to put task messages under
 `responses_create_params.input`; no reference answer is required by this scorer.
 Do not commit training datasets or provider credentials.
+
+`task_data.py` declares optional string `task_id` and `source` provenance fields.
+Gym validates them whether the row uses legacy `verifier_metadata`, flat fields,
+or the `task_data` container. Neither field affects the reward, and both may be
+omitted. Additional metadata is preserved and reported as undeclared by Gym's
+data validator rather than silently discarded.
 
 ```bash
 gym dataset collate \

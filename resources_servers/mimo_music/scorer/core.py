@@ -1,4 +1,7 @@
 # Modifications: formatting for NeMo Gym.
+# Source: https://github.com/XiaomiMiMo/verl
+# Revision: a2ad9f6160b03ff2d47e59832bfb6b289f37c917 (Apache-2.0)
+# Original file: recipes/design/music/scorer/core.py
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Bytedance Ltd. and/or its affiliates
