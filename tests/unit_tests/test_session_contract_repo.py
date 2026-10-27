@@ -57,7 +57,20 @@ def test_agents_serve_sessions_through_the_base_hooks() -> None:
 def test_resources_servers_close_through_the_base_route() -> None:
     """The base serves /close_session before subclass routes, so a server's own registration never runs."""
     violations = []
-    for path in _sources("resources_servers"):
+    sources = list(_sources("resources_servers"))
+    classes = [cls for path in sources for cls in _classes(path)]
+    # Resource families may share an implementation in an intermediate base.
+    close_implementations = {cls.name for cls in classes if "close_resources_session" in _methods(cls)}
+    while True:
+        inherited = {
+            cls.name
+            for cls in classes
+            if any(isinstance(base, ast.Name) and base.id in close_implementations for base in cls.bases)
+        }
+        if inherited <= close_implementations:
+            break
+        close_implementations.update(inherited)
+    for path in sources:
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if (
@@ -75,7 +88,7 @@ def test_resources_servers_close_through_the_base_route() -> None:
             if (
                 seed is not None
                 and "ResourcesSeedSessionRequest" in ast.unparse(seed)
-                and "close_resources_session" not in methods
+                and cls.name not in close_implementations
             ):
                 violations.append(
                     f"{_location(path, cls)} accepts a typed seed but does not override close_resources_session"

@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from nemo_gym.agent_activation_types import AgentContinuationRequirements
 from nemo_gym.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AgentCloseSessionRequest
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.testing.rollout_correlation import assert_model_sampling
 from responses_api_agents.opencode_agent.continuation import classify_opencode_run
 from responses_api_agents.opencode_agent.sandbox_runner import snapshot
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
@@ -385,6 +386,40 @@ def test_plain_http_delta_replay_and_cumulative_close(setup, tmp_path):
         assert close(client, request) == receipt
         assert activate(client, 3).status_code == 409
     assert sandbox.disconnect.await_count == 1 and sandbox.stop.await_count == 0
+
+
+def test_continuation_keeps_sampling_bound_to_each_activation(setup, tmp_path):
+    agent, sandbox = setup
+    payloads = install_artifact_runner(sandbox, tmp_path)
+    agent.config.max_output_tokens = 64
+    original_config = agent.config.model_dump()
+    settings = [
+        {"temperature": 0.0, "top_p": 0.9, "max_output_tokens": 128},
+        {"temperature": 0.7, "top_p": 0.8, "max_output_tokens": 256},
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        for index, controls in enumerate(settings, 1):
+            headers = {AGENT_ACTIVATION_HEADER: str(index)}
+            body = {"input": f"Correction {index}", **controls}
+            response = client.post("/v1/responses", headers=headers, json=body)
+            assert response.status_code == 200, response.text
+            assert client.post("/v1/responses", headers=headers, json=body).json() == response.json()
+            assert client.post("/v1/responses", headers=headers, json=body | {"top_p": 0.6}).status_code == 409
+            assert sandbox.launch.await_count == index
+
+        assert payloads[1]["command"][-2:] == ["--session", "opencode-session"]
+        assert payloads[0]["env"]["HOME"] == payloads[1]["env"]["HOME"]
+        for payload, controls in zip(payloads, settings):
+            config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+            provider = config["provider"]["nemo_gym"]
+            assert_model_sampling(
+                provider["options"]["baseURL"], controls, routed_base_path="/ng-rollout/opencode-smoke-a2/v1"
+            )
+            assert provider["models"]["dummy_model"]["limit"]["output"] == controls["max_output_tokens"]
+            assert payload["env"]["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == str(controls["max_output_tokens"])
+        assert len(close(client, request)["trajectory"]["turns"]) == 2
+    assert agent.config.model_dump() == original_config
 
 
 def test_invalid_delta_and_instructions_leave_activation_available(setup, tmp_path):
