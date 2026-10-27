@@ -157,9 +157,7 @@ async def test_supervisor_and_runner_run_under_neutral_names(tmp_path):
     """A task agent's `pkill -f python3` or `killall python3` must not match the processes above OpenClaw."""
     state, provider, workdir = make_session(tmp_path)
     code = "import pathlib,time; pathlib.Path('ready').touch(); time.sleep(60)"
-    task = state.task = asyncio.create_task(
-        state.execute(payload(state, code, timeout=60), timeout=60, close_timeout=3)
-    )
+    task = state.task = asyncio.create_task(state.execute(payload(state, code), timeout=60, close_timeout=3))
     try:
         async with asyncio.timeout(5):
             while not (workdir / "ready").exists():

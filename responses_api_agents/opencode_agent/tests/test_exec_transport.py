@@ -189,9 +189,7 @@ async def test_supervisor_and_runner_run_under_neutral_names(tmp_path):
         f"pathlib.Path({state.session.session_dir!r},'task-environment.ready').write_text('ready\\n'); "
         "pathlib.Path('ready').touch(); time.sleep(60)"
     )
-    task = state.task = asyncio.create_task(
-        state.execute(payload(state, code, timeout=60), timeout=60, close_timeout=3)
-    )
+    task = state.task = asyncio.create_task(state.execute(payload(state, code), timeout=60, close_timeout=3))
     try:
         async with asyncio.timeout(5):
             while not (workdir / "ready").exists():
