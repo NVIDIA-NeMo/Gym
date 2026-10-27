@@ -74,13 +74,17 @@ GOOSE_RELEASE_URL = f"https://github.com/aaif-goose/goose/releases/download/v{GO
 MAX_SYSTEM_PROMPT_BYTES = 128 * 1024
 # Goose's MAX_TURNS_MESSAGE, streamed when --max-turns is reached.
 GOOSE_MAX_TURNS_NOTICE = "I've reached the maximum number of actions I can do without user input"
-# Goose 1.54.0's notices for a model call that failed in transport (connection refused or reset, 5xx, rate limit). The model
-# server failed, not the policy, so the request fails and is retried.
-GOOSE_TRANSPORT_NOTICES = (
+# Goose 1.54.0's notices for a model call that failed at the model server: unreachable, 5xx, rate limit, rejected credentials
+# or a missing model. The model server or the configuration failed, not the policy, so the request fails and is retried.
+GOOSE_MODEL_SERVER_NOTICES = (
     "Network error:",
     "Ran into this error: Server error",
     "Ran into this error: Rate limit exceeded",
+    "Ran into this error: Authentication error",
+    "Ran into this error: Request failed: Resource not found",
 )
+# Any other provider error Goose ends a run with (a failed compaction, for one) is the policy's failure.
+GOOSE_ERROR_NOTICE = "Ran into this error"
 # Exit statuses of `timeout`: 124 when the deadline ended Goose, 137 when it had to be killed.
 TIMEOUT_EXIT_CODES = (124, 137)
 
@@ -228,9 +232,11 @@ def goose_messages_to_output(messages: list[dict[str, Any]]) -> list[Any]:
 def goose_stop_reason(stdout: str, sessions: list[dict[str, Any]]) -> str | None:
     """Why Goose stopped early, or None.
 
-    When a model call fails past its retries or --max-turns is reached, Goose streams a notice of its own as the
-    last assistant message, never persists it, and still exits 0. Every message from the model is persisted
-    under the id it was streamed with. "transport" marks a notice for a model server that failed, not the policy.
+    When a model call fails past its retries or --max-turns is reached, Goose ends the run with a notice of its own as
+    the last assistant message: plain text that it does not persist and exits 0 on, or an error block that it persists
+    and exits 1 on (rejected credentials). Every message from the model is persisted under the id it was streamed with,
+    so an unpersisted last message is a notice too. "model_server" marks a notice for a model server that failed, not
+    the policy.
     """
     last = {}
     for line in stdout.splitlines():
@@ -241,12 +247,21 @@ def goose_stop_reason(stdout: str, sessions: list[dict[str, Any]]) -> str | None
         if isinstance(event, dict) and event.get("type") == "message":
             if (event.get("message") or {}).get("role") == "assistant":
                 last = event["message"]
-    if not last.get("id") or last["id"] in {m["message_id"] for s in sessions for m in s["messages"]}:
+    if not last:
         return None
-    text = "".join(b.get("text", "") for b in last.get("content") or [] if b.get("type") == "text")
-    if text.startswith(GOOSE_TRANSPORT_NOTICES):
-        return "transport"
-    return "max_turns" if text.startswith(GOOSE_MAX_TURNS_NOTICE) else "model_error"
+    text = "".join(
+        block.get("text") or block.get("message") or ""
+        for block in last.get("content") or []
+        if block.get("type") in ("text", "error")
+    )
+    if text.startswith(GOOSE_MODEL_SERVER_NOTICES):
+        return "model_server"
+    if text.startswith(GOOSE_MAX_TURNS_NOTICE):
+        return "max_turns"
+    persisted = {m["message_id"] for s in sessions for m in s["messages"]}
+    if text.startswith(GOOSE_ERROR_NOTICE) or (last.get("id") and last["id"] not in persisted):
+        return "model_error"
+    return None
 
 
 def max_concurrent(intervals: list[tuple[int, int]]) -> int:
@@ -445,8 +460,11 @@ class GooseAgent(SimpleResponsesAPIAgent):
         sessions = await to_thread(read_goose_sessions, root / "sessions" / "sessions.db")
         if not error_type:
             error_type = goose_stop_reason((root / "stdout.jsonl").read_text(errors="replace"), sessions)
-            if error_type == "transport":
-                raise RuntimeError("Goose's model calls failed in transport (model server unreachable or failing)")
+            if error_type == "model_server":
+                raise RuntimeError(
+                    "Goose's model calls failed at the model server (unreachable, failing, rejecting credentials or "
+                    "missing the model)"
+                )
         return {
             "sessions": sessions,
             "goose_failed": bool(error_type or return_code != 0),
