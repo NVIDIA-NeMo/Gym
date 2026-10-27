@@ -1327,6 +1327,15 @@ class TestNeMoGymChatCompletionSchemas:
         assert replayed[1] == {"role": "tool", "tool_call_id": "call_1", "content": "/app"}
         assert message == original
 
+    def test_copilot_replays_chat_response_with_empty_annotations(self) -> None:
+        # A provider may return "annotations": []; the Model Server passes the message through unchanged.
+        message = openai_utils_module.NeMoGymChatCompletionMessage(
+            role="assistant", content="done", annotations=[]
+        ).model_dump(mode="json")
+        assert message["annotations"] == []
+        params = NeMoGymChatCompletionCreateParamsNonStreaming(messages=[{"role": "user", "content": "x"}, message])
+        assert "annotations" not in params.model_dump(exclude_unset=True)["messages"][1]
+
     @pytest.mark.parametrize(
         "content",
         ["Build finished\n<shellId: 30 completed with exit code 0>", [{"type": "text", "text": "Build finished"}]],
