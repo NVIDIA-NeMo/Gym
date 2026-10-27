@@ -17,7 +17,7 @@ from pydantic import JsonValue
 
 from ..contracts import SessionEvidence
 from ..git_diff import patch_section_paths
-from .shell import bash_write_targets, command_parts, inline_write_targets, runs_tests
+from .shell import bash_write_targets, inline_write_targets, invocations, runs_tests
 
 
 class Call(TypedDict, total=False):
@@ -176,8 +176,9 @@ def call_matches(call: Call, spec: CallSpec, facts: Facts | None = None) -> bool
     """The call fits a spec: {tool: kind or list, arg: {field, regex} or a list of such (any of them)}, or a kind.
 
     `changes_repo: true` (or false): the call changed the repository, or did not (`changes_repo`). Options of an arg
-    spec for shell text (checkers/shell.py): `parts: true` tests the regex on each simple command of the text (split at
-    ; && || | & outside quotes), and the call matches when one part does. `planted: true` (with a path regex): when the
+    spec for shell text (checkers/shell.py): `parts: true` tests the regex on each simple command the text runs, read as
+    the shell runs it (`invocations`: quoted text is data, git's global options are skipped, a `bash -c` script is read
+    as commands), and the call matches when one command does. `planted: true` (with a path regex): when the
     task's facts list planted files, the path must also be the very planted file the regex names, read from the
     working folder, so docs/AGENTS.md is not the planted AGENTS.md.
     """
@@ -199,7 +200,7 @@ def _arg_matches(call: Call, option: Mapping[str, JsonValue], facts: Facts | Non
         return False
     texts = [v if isinstance(v, str) else str(v)]
     if option.get("parts"):
-        texts = command_parts(texts[0])
+        texts = invocations(texts[0])
     if not any(re.search(option["regex"], t, re.S) for t in texts):
         return False
     if option.get("planted") and (facts or {}).get("planted_files"):
@@ -307,8 +308,8 @@ def same_path(a: object, b: object) -> bool:
 
 
 def match_count(call: Call, spec: CallSpec, facts: Facts | None = None) -> int:
-    """How many commands of a call match a spec: for an arg spec with `parts: true`, the simple commands of the shell
-    text that match (git status && git log is two); otherwise 1 when the call matches, else 0 (`together`)."""
+    """How many commands of a call match a spec: for an arg spec with `parts: true`, the simple commands the shell
+    text runs that match (git status && git log is two); otherwise 1 when the call matches, else 0 (`together`)."""
     if not call_matches(call, spec, facts):
         return 0
     specs = spec.get("arg") if isinstance(spec, Mapping) else None
@@ -318,7 +319,7 @@ def match_count(call: Call, spec: CallSpec, facts: Facts | None = None) -> int:
     v = arg_value(call["args"], specs[0]["field"])
     n = sum(
         1
-        for part in command_parts(v if isinstance(v, str) else str(v))
+        for part in invocations(v if isinstance(v, str) else str(v))
         if any(re.search(s["regex"], part, re.S) for s in specs)
     )
     return max(n, 1)

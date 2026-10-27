@@ -44,6 +44,37 @@ def test_must_and_never_count_matching_calls():
     assert grade_calls(quoted, {"mode": "never", **commit}) == [(True, "no matching call")]
 
 
+@pytest.mark.parametrize(
+    "command,commits",
+    [
+        ("grep 'git commit' CONTRIBUTING.md", False),
+        ('echo "git commit" > notes.txt', False),
+        ("git log --grep 'git commit'", False),
+        ("git -c user.name=Agent commit -m fix", True),
+        ("git -C /app --no-pager commit -am fix", True),
+        ("GIT_AUTHOR_NAME=Agent git commit -m fix", True),
+        ('git add -A && git commit -m "fix: a && b"', True),
+        ("bash -lc 'git commit -m fix'", True),
+    ],
+)
+def test_a_command_pattern_matches_the_git_invocation_not_quoted_text(command, commits):
+    # The example rows' no-commit rule: a quoted mention is no commit, and git's global options are read past.
+    never = {"mode": "never", "tool": "bash", "arg": {"field": "command", "regex": r"\bgit\s+commit\b", "parts": True}}
+    assert grade_calls([message(call("bash", command=command))], never)[0][0] is not commits
+
+
+def test_invocations_read_each_command_as_the_shell_runs_it():
+    assert shell.invocations("git -c user.name=A commit -m 'a b' 2>/dev/null | tee log") == [
+        "git commit -m ",
+        "tee log",
+    ]
+    assert shell.invocations("sudo env X=1 git status") == ["git status"]
+    assert shell.invocations("sh -c 'cd src && git commit -m x'") == ["sh -c ", "cd src", "git commit -m x"]
+    chained = call("bash", command="git -c color.ui=never status && echo 'git log' && git log -3")
+    status_or_log = {"tool": "bash", "arg": {"field": "command", "regex": "^git (status|log)", "parts": True}}
+    assert run.match_count(chained, status_or_log) == 2
+
+
 def test_only_max_per_message_max_and_together():
     two_reads = [message(call("read", "a", path="a.py"), call("read", "b", path="b.py"))]
     apart = [message(call("read", "a", path="a.py")), message(call("read", "b", path="b.py"))]

@@ -524,3 +524,37 @@ def _after_git_options(words: list[str]) -> list[str]:
     while i < len(words) and words[i].startswith("-"):
         i += 2 if words[i] in ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path") else 1
     return words[i:]
+
+
+SHELLS = {"sh", "bash", "dash", "zsh", "ksh"}
+
+
+def invocations(command: str) -> list[str]:
+    """The simple commands a shell command runs, each as its words, for a pattern over commands rather than text.
+
+    A quoted string reads as an empty word, so `grep 'git commit' CONTRIBUTING.md` runs no git commit. Redirections,
+    leading variable settings and prefixes such as sudo or env are left out, and so are git's global options:
+    `git -c user.name=A commit -m fix` reads as `git commit -m `. The script of `bash -c` (sh, zsh ...) is read as
+    commands of its own, since the shell runs it.
+    """
+    out = []
+    for part in command_parts(command):
+        words = _plain_words(unquoted(part))
+        if words and posixpath.basename(words[0]) == "git":
+            words = [words[0], *_after_git_options(words[1:])]
+        out.append(" ".join(words) if words else unquoted(part))
+        script = _shell_script(part)
+        if script is not None:
+            out += invocations(script)
+    return out
+
+
+def _shell_script(part: str) -> str | None:
+    """The script of `bash -c SCRIPT` (also -lc, -ec ..., and sh, zsh ...); None for any other command."""
+    words = _plain_words(part)
+    if not words or posixpath.basename(words[0]) not in SHELLS:
+        return None
+    for k in range(1, len(words) - 1):
+        if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", words[k]):
+            return words[k + 1]
+    return None
