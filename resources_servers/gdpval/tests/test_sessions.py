@@ -552,9 +552,14 @@ def test_shutdown_stops_the_sandboxes_of_open_sessions(server, root, tmp_path, s
     assert len(stopped) == 1
 
 
-def test_sessions_require_a_single_worker(tmp_path):
-    with pytest.raises(ValueError, match="num_workers=1"):
-        _server(tmp_path, num_workers=2)
+def test_sessions_require_a_single_worker(tmp_path, monkeypatch):
+    def install(*args, **kwargs):
+        raise AssertionError("LibreOffice was set up before the worker count was refused")
+
+    monkeypatch.setattr("resources_servers.gdpval.setup_libreoffice.ensure_libreoffice", install)
+    # The refusal comes before dependency setup, as a dry run with several workers would see it.
+    with pytest.raises(ValueError, match="needs num_workers=1: a seed claims the persisted deliverables directory"):
+        _server(tmp_path, num_workers=2, libreoffice_command=["soffice"])
 
 
 def _restart(client: TestClient, tmp_path: Path) -> TestClient:

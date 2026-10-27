@@ -567,7 +567,7 @@ def test_an_oversized_artifact_is_a_capture_error_for_the_items_that_need_it(ser
 def test_episodes_live_in_one_worker_and_the_server_never_joins_ray(tmp_path, plugin):
     for workers in (None, 1):
         make_server(tmp_path, num_workers=workers)
-    with pytest.raises(ValueError, match="num_workers=1"):
+    with pytest.raises(ValueError, match="needs num_workers=1: mock-tool episodes live in the server's memory"):
         make_server(tmp_path, num_workers=2)
     # Declared on the class the entrypoint runs, where Gym reads it before it decides whether to start Ray.
     assert api.MockToolsResourcesServer.ray_enabled is False

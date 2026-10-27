@@ -73,7 +73,7 @@ from nemo_gym.failure_kinds import AGENT_TIMEOUT, JUDGE_FAILED, SESSION_EXPIRED,
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.server_utils import SESSION_ID_KEY, get_server_url
+from nemo_gym.server_utils import SESSION_ID_KEY, get_server_url, refuse_unsupported_num_workers
 from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
@@ -613,12 +613,20 @@ class _TaskSession:
 class GDPValResourcesServer(SimpleResourcesServer):
     config: GDPValResourcesServerConfig
 
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        return (
+            "a seed claims the persisted deliverables directory of its task and repeat in this process's memory, "
+            "keyed by the task ID and rollout ID in the request body, "
+            "so sessions on different workers could write the same directory"
+        )
+
     def model_post_init(self, context: Any) -> None:
+        # Refuse several workers before installing LibreOffice and the other task dependencies,
+        # so the worker-count error is the one reported.
+        refuse_unsupported_num_workers(self)
         self._judge_prompt_fpath: str = self.config.judge_prompt_template_fpath or _DEFAULT_JUDGE_PROMPT_FPATH
         self._judge_telemetry = JudgeTelemetrySink(self.config.judge_telemetry_output_dir)
         self._tavily = TavilySearch(api_keys=self.config.tavily_api_key, max_sweeps=self.config.tavily_max_sweeps)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("GDPVal sessions are process-local and require num_workers=1")
         self._sessions: Dict[str, _TaskSession] = {}
         # (task_id, repeat) of the persisted directory each live session will write, to the session holding it.
         self._claimed_directories: Dict[Tuple[str, int], str] = {}

@@ -41,6 +41,13 @@ class OSWorldResourcesServer(SimpleResourcesServer):
     config: OSWorldResourcesServerConfig
     _manager: OSWorldSessionManager = PrivateAttr()
 
+    def multiple_workers_unsupported_reason(self) -> str | None:
+        return (
+            "remote Docker worker capacity, startup cleanup of orphaned containers and the sessions.json state file "
+            "are each owned by one process, so several workers would overfill the Docker hosts, "
+            "remove each other's containers and overwrite each other's state file"
+        )
+
     def model_post_init(self, _context) -> None:
         self._manager = OSWorldSessionManager(self.config)
 

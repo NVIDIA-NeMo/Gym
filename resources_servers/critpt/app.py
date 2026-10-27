@@ -205,6 +205,12 @@ class CritPtVerifyResponse(BaseVerifyResponse):
 class CritPtResourcesServer(SimpleResourcesServer):
     config: CritPtResourcesServerConfig
 
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        return (
+            "verify calls are pooled in this process's memory into batches of distinct problems that are submitted together, "
+            "and the batches, submission counters and API key rotation must be shared by every request"
+        )
+
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         self._lock = asyncio.Lock()

@@ -14,7 +14,9 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
-from nemo_gym.server_utils import ServerClient
+import pytest
+
+from nemo_gym.server_utils import ServerClient, refuse_unsupported_num_workers
 from resources_servers.vlm_eval_kit.app import VlmEvalKitResourcesServer, VlmEvalKitResourcesServerConfig
 
 
@@ -27,3 +29,9 @@ class TestApp:
             name="",
         )
         VlmEvalKitResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_several_workers_are_refused(self) -> None:
+        config = VlmEvalKitResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="", num_workers=2)
+        server = VlmEvalKitResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        with pytest.raises(ValueError, match="needs num_workers=1: MMBench scoring waits"):
+            refuse_unsupported_num_workers(server)

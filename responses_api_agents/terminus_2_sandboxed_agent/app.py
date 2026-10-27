@@ -618,14 +618,17 @@ class NeMoGymTerminus2(Terminus2):
 class Terminus2Agent(SimpleResponsesAPIAgent):
     config: Terminus2AgentConfig
 
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        # A deployment without a resources server exists only to serve episode sessions,
+        # so a hand-written config with several workers fails at `gym env start` rather than on every seed.
+        # A benchmark composition keeps the legacy /run route, where workers are independent.
+        if self.config.resources_server is not None:
+            return None
+        return "Terminus 2 episode sessions are process-local"
+
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._session_sandboxes: dict[str, AsyncSandbox] = {}
-        # Episode sessions are process-local. A deployment without a resources server exists only to serve
-        # sessions, so a hand-written config with several workers fails at `gym env start` rather than on
-        # every seed; a benchmark composition keeps the legacy /run route, where workers are independent.
-        if self.config.resources_server is None and self.config.num_workers not in (None, 1):
-            raise ValueError("Process-local Terminus 2 episode sessions require num_workers=1")
 
         if not self.config.debug:
             harbor_logger.setLevel(logging.WARNING)

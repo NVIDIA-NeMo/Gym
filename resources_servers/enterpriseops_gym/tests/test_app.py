@@ -16,7 +16,7 @@ from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, Resourc
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, SandboxEndpoint
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import ServerClient, refuse_unsupported_num_workers
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.enterpriseops_gym import app as app_module
 from resources_servers.enterpriseops_gym.app import (
@@ -565,5 +565,5 @@ def test_shutdown_logs_a_sandbox_it_cannot_stop(archive, gyms, sandboxes, caplog
 
 
 def test_sessions_live_in_one_worker(archive):
-    with pytest.raises(ValueError, match="num_workers=1"):
-        _server(archive, num_workers=2)
+    with pytest.raises(ValueError, match="needs num_workers=1: EnterpriseOps-Gym sessions are process-local"):
+        refuse_unsupported_num_workers(_server(archive, num_workers=2))

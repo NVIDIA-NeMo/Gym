@@ -10,7 +10,7 @@ import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import ClassVar
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -47,7 +47,6 @@ BENCHMARK = REPOSITORY / "benchmarks" / "terminal_bench_4"
 
 
 class TerminalBench4Config(BaseResourcesServerConfig):
-    num_workers: Literal[1] = 1
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
     manifest_path: Path = BENCHMARK / "manifest.json"
     artifacts_dir: Path = Path("results/terminal_bench_4/resources")
@@ -86,6 +85,13 @@ def _scored_verifier_failure(diagnostics) -> str | None:
 
 class TerminalBench4ResourcesServer(SimpleResourcesServer):
     config: TerminalBench4Config
+
+    def multiple_workers_unsupported_reason(self) -> str | None:
+        return (
+            "seeds are deduplicated in this process's memory by the client_session_id and rollout_id "
+            "in the request body, which session routing does not route, "
+            "so a retried seed without the session cookie can reach another worker and provision a second sandbox"
+        )
 
     def model_post_init(self, context):
         super().model_post_init(context)

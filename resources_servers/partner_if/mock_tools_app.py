@@ -37,7 +37,12 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.mcp_auto_exposure import MCPTool
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.server_utils import (
+    SESSION_ID_KEY,
+    ServerClient,
+    is_nemo_gym_fastapi_entrypoint,
+    refuse_unsupported_num_workers,
+)
 from nemo_gym.verifier_fixture import VerifierFixture
 from resources_servers.partner_if.app import (
     NoAnswer,
@@ -186,10 +191,14 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
     _session_locks: dict[str | None, asyncio.Lock] = PrivateAttr(default_factory=dict)
     _closed: ClosedResourcesSessionRecords[EpisodeId | None] = PrivateAttr()
 
+    def multiple_workers_unsupported_reason(self) -> str | None:
+        return "mock-tool episodes live in the server's memory"
+
     def model_post_init(self, context: object) -> None:
+        # Refuse several workers before loading the tool backend and the task file,
+        # so the worker-count error is the one reported.
+        refuse_unsupported_num_workers(self)
         super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("Mock-tool episodes live in the server's memory, so it requires num_workers=1")
         self._closed = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
         if self.config.backend is not None:
             self._backend = load_backend(self.config.backend)(self.config.fixture_path)
