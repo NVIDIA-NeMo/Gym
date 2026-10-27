@@ -926,6 +926,127 @@ def test_a_harness_with_its_own_relay_lets_the_benchmark_switch(
     }
 
 
+def test_a_harness_can_override_a_relay_without_changing_its_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, child = _parent_and_child(tmp_path)
+    variant = tmp_path / "variant.yaml"
+    harness = (
+        HARNESS_OVERRIDE.format(base=child)
+        .split("my_simple_agent: null\n")[0]
+        .replace("name: my_resources", "name: child_resources")
+    )
+    relay = _server_fronting("my_harness_agent", name="child_environment_server", server_type="legacy_agent")
+    relay = relay.replace("  environment_servers:\n", "  _delete_key: _inherit_from\n  environment_servers:\n")
+    relay = relay.replace("    legacy_agent:\n", "    _delete_key: single_agent_turn_legacy\n    legacy_agent:\n")
+    variant.write_text(harness + "my_simple_agent: null\nchild_agent: null\nmy_environment_server: null\n" + relay)
+    monkeypatch.setattr(migration, "repo_config_files", lambda: [variant])
+    before = variant.read_text()
+    routing = {"my_harness_agent": ["child_environment_server"]}
+    assert _environment_servers_by_agent(_parse(variant, strict=True)) == routing
+
+    assert migration.main(["--switch-simple-agent", str(base), str(child), str(variant)]) == 0
+
+    assert variant.read_text() == before
+    benchmark = _parse(child, strict=True)
+    assert list(benchmark["child_environment_server"]["environment_servers"]) == ["single_agent_turn_legacy"]
+    parsed = _parse(variant, strict=True)
+    assert _environment_servers_by_agent(parsed) == routing
+    assert list(parsed["child_environment_server"]["environment_servers"]) == ["legacy_agent"]
+
+
+@pytest.mark.parametrize("present_before_inheritance", [False, True])
+def test_resolved_instances_matches_gym_deletion_order(present_before_inheritance: bool) -> None:
+    document = {
+        "base": {"setting": "inherited", "retained": True},
+        "child": {"_inherit_from": "base", "_delete_key": "setting"},
+    }
+    if present_before_inheritance:
+        document["child"]["setting"] = "overridden"
+    runtime = OmegaConf.create(document)
+    GlobalConfigDictParser()._recursively_swap_keys(runtime)
+
+    expected = {"retained": True}
+    if present_before_inheritance:
+        # Gym removes the local setting first, so inheritance supplies it again.
+        expected["setting"] = "inherited"
+    assert OmegaConf.to_container(runtime.child) == expected
+    assert migration.resolved_instances([document])["child"] == expected
+
+
+def test_resolved_instances_deletes_after_all_overlays_merge() -> None:
+    documents = [
+        {"instance": {"_delete_key": "obsolete", "retained": True}},
+        {"instance": {"obsolete": {"setting": "later overlay"}}},
+    ]
+    runtime = OmegaConf.merge(*documents)
+    GlobalConfigDictParser()._recursively_swap_keys(runtime)
+
+    assert OmegaConf.to_container(runtime.instance) == {"retained": True}
+    assert migration.resolved_instances(documents)["instance"] == {"retained": True}
+
+
+@pytest.mark.parametrize(
+    ("benchmark", "recipe", "resources"),
+    [
+        ("hle", "pi", "equivalence_llm_judge"),
+        ("hle", "opencode", "equivalence_llm_judge"),
+        ("hle", "pi_search", "equivalence_llm_judge"),
+        ("hle", "opencode_search", "equivalence_llm_judge"),
+        ("apex_shortlist", "pi", "math_with_judge"),
+        ("apex_shortlist", "opencode", "math_with_judge"),
+    ],
+)
+def test_harness_recipes_preserve_routing_and_bindings_across_the_switch(
+    benchmark: str, recipe: str, resources: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for variable in ("PI_SANDBOX_IMAGE", "OPENCODE_SANDBOX_IMAGE", "OPENSANDBOX_API_KEY", "TAVILY_API_KEY"):
+        monkeypatch.setenv(variable, "test-only")
+    parser = GlobalConfigDictParser()
+    _, documents = parser.load_extra_config_paths([f"benchmarks/{benchmark}/{recipe}.yaml"])
+    agent_name = f"{benchmark}_{recipe.removesuffix('_search')}_agent"
+    server_name = f"{benchmark}_{resources}_environment_server"
+    resources_name = f"{benchmark}_{resources}_resources_server"
+    resolved = []
+    for switched in (False, True):
+        if switched:
+            for document in documents:
+                for name, instance in list(document.items_ex(resolve=False)):
+                    if not isinstance(instance, DictConfig):
+                        continue
+                    relay = (instance.get("environment_servers") or {}).get("legacy_agent")
+                    agent = (relay.get("agent_server") or {}).get("name", "") if relay else ""
+                    if agent.endswith("_simple_agent"):
+                        document[name] = OmegaConf.create(
+                            migration.stanza(name, agent, instance.get("_inherit_from"))
+                        )[name]
+        parsed = parser.parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.merge(
+                    GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                    *documents,
+                    {"config_paths": [], "error_on_agent_without_environment_server": True},
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+        assert _environment_servers_by_agent(parsed) == {agent_name: [server_name]}
+        assert list(parsed[server_name].environment_servers) == ["legacy_agent"]
+        agent = next(iter(parsed[agent_name].responses_api_agents.values()))
+        assert agent.resources_server.name == resources_name
+        assert agent.datasets[0].name == benchmark
+        if recipe.endswith("_search"):
+            assert agent.tool_servers == [{"type": "resources_servers", "name": "tavily"}]
+        participants = {}
+        for server in parser.filter_for_server_instance_configs(parsed):
+            config = OmegaConf.to_container(server.get_inner_run_server_config_dict(), resolve=True)
+            participants[server.name] = {key: value for key, value in config.items() if key not in {"host", "port"}}
+        resolved.append(participants)
+    assert resolved[0] == resolved[1]
+
+
 def test_switch_keeps_a_relay_inheriting_one_that_stays(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # The child has no environment_servers of its own, so only the merged run shows it is a relay.
     base = tmp_path / "base.yaml"

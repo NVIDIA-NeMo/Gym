@@ -365,6 +365,19 @@ def run_documents(path: Path, loaded: dict[Path, dict | None]) -> list[tuple[Pat
     return order
 
 
+def _without_deleted_keys(instance: dict) -> tuple[dict, set[str]]:
+    """Remove merged keys before inheritance; return absent targets for deletion after inheritance."""
+    body = dict(instance)
+    deleted = {key.strip() for key in body.pop("_delete_key", "").split(",") if key.strip()}
+    deferred = deleted - body.keys()
+    for key in deleted:
+        body.pop(key, None)
+    for key, value in body.items():
+        if isinstance(value, dict):
+            body[key] = _without_deleted_keys(value)[0]
+    return body, deferred
+
+
 def resolved_instances(documents: list[dict]) -> dict[str, dict]:
     """Map each top-level instance of one run to its body, merged across files and through `_inherit_from`."""
     raw: dict[str, dict] = {}
@@ -381,11 +394,16 @@ def resolved_instances(documents: list[dict]) -> dict[str, dict]:
     def resolve(name: str, seen: tuple[str, ...] = ()) -> dict:
         if name in resolved:
             return resolved[name]
-        instance = raw.get(name, {})
+        # Gym applies deletions after all files merge, before following inheritance. In particular,
+        # deleting _inherit_from detaches a same-name harness override from the benchmark template.
+        instance, deferred = _without_deleted_keys(raw.get(name, {}))
         source = instance.get("_inherit_from")
         own = {key: value for key, value in instance.items() if key != "_inherit_from"}
         base = resolve(source, (*seen, name)) if isinstance(source, str) and source not in seen else {}
         resolved[name] = _merged(base, own)
+        if isinstance(source, str):
+            for key in deferred:
+                resolved[name].pop(key)
         return resolved[name]
 
     for name in raw:
