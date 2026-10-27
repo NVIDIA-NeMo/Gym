@@ -44,7 +44,7 @@ class AcmeExporter(IsolatedExporter):
         return (self.config.requirement,)
 
     def build_payload(self, artifacts: RunArtifacts, workdir: Path) -> dict[str, Any]:
-        problem = unexportable_reason(artifacts)
+        problem = unexportable_reason(artifacts, rollouts_required=False)
         if problem is not None:
             raise ExportPreparationError(problem)
 

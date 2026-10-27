@@ -23,7 +23,7 @@ An exporter takes a finished run, the rollouts file and the files `gym eval run`
 | `config_model` | A pydantic model of the exporter's settings. It extends `RunExportConfig`, which already holds `rollouts_jsonl_fpath` and `result_json_fpath`. |
 | `export(artifacts) -> ExportResult` | Does the export. |
 
-**The run.** `RunArtifacts` derives the files of a run from the rollouts path, without checking that they exist: `rollouts_jsonl_fpath`, `failures_jsonl_fpath`, `materialized_inputs_jsonl_fpath`, `aggregate_metrics_json_fpath` and `resolved_config_yaml_fpath` (the run's saved configuration, with secrets masked). Each exporter decides which it needs. `unexportable_reason(artifacts)` returns what is missing for a faithful export of the whole run (rollouts, fresh aggregate metrics, saved config), or `None`.
+**The run.** `RunArtifacts` derives the files of a run from the rollouts path, without checking that they exist: `rollouts_jsonl_fpath`, `failures_jsonl_fpath`, `materialized_inputs_jsonl_fpath`, `aggregate_metrics_json_fpath` and `resolved_config_yaml_fpath` (the run's saved configuration, with secrets masked). Each exporter decides which it needs. `unexportable_reason(artifacts)` returns what is missing for a faithful export of the whole run (rollouts, fresh aggregate metrics, saved config), or `None`. If your exporter doesn't read the rollouts file, as the Acme example below doesn't, pass `rollouts_required=False`.
 
 **The result.** Report an expected failure, such as a missing file or a refused upload, in the result and raise only for a bug:
 
@@ -164,7 +164,7 @@ class AcmeExporter(IsolatedExporter):
         return (self.config.requirement,)
 
     def build_payload(self, artifacts: RunArtifacts, workdir: Path) -> dict[str, Any]:
-        problem = unexportable_reason(artifacts)
+        problem = unexportable_reason(artifacts, rollouts_required=False)
         if problem is not None:
             raise ExportPreparationError(problem)
 

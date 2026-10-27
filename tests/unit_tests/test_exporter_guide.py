@@ -209,6 +209,16 @@ class TestAcmeExporter:
         assert (result.state, result.exit_code) == (ExportState.FAILED, 4)
         assert result.error == "Acme refused the upload: project is archived"
 
+    def test_an_exporter_that_does_not_read_the_rollouts_does_not_need_their_file(
+        self, tmp_path: Path, fake_acme_sdk: dict[str, Any]
+    ) -> None:
+        acme = _load_example("acme_exporter")
+        artifacts = _make_run(tmp_path)
+        artifacts.rollouts_jsonl_fpath.unlink()
+        exporter = acme.AcmeExporter.from_global_config(_settings(artifacts, tmp_path, project="demo"))
+
+        assert exporter.export(artifacts).state is ExportState.SUCCEEDED
+
     def test_a_staging_copy_that_fails_is_a_failed_result_before_an_environment_is_built(
         self, tmp_path: Path, fake_acme_sdk: dict[str, Any], monkeypatch: MonkeyPatch
     ) -> None:
