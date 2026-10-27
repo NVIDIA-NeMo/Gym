@@ -337,7 +337,25 @@ Sandbox create failures use provider-neutral exception classes:
 - `SandboxCreateError` for sandbox allocation or readiness failures.
 - `SandboxCreateVerificationError` when a created sandbox fails Gym readiness verification.
 
-In resources servers and agents, catch these errors close to the sandbox operation and return a meaningful verifier or rollout error. Do not let one bad sandbox allocation crash a long-running server.
+Command process exits, including nonzero exits, return `SandboxExecResult`. A provider may instead raise these
+provider-neutral runtime errors when it cannot return a trustworthy command result:
+
+| Error | Contract |
+| --- | --- |
+| `SandboxLostError` | Common base for the runtime errors below. It is a `RuntimeError`, not a command timeout. |
+| `SandboxBackendUnreachableError` | The command backend stopped responding during submission or execution; the command outcome is unconfirmed. |
+| `SandboxCommandStatusTimeoutError` | An already-submitted command's status remained unavailable after bounded recovery. This is distinct from `TimeoutError`, which means the command exceeded its execution budget. |
+| `SandboxIOTimeoutError` | A provider request or file transfer timed out before a trustworthy outcome was available. The command or transfer outcome is unconfirmed. |
+| `SandboxOOMKilledError` | The provider confirmed an OOM kill of the current sandbox. It carries `sandbox_id` when available. Exit code 137, a generic failed state, historical container state, or a sidecar OOM alone is insufficient evidence. |
+
+OpenSandbox currently raises these typed runtime errors for the corresponding failures. Docker, Daytona, and E2B
+do not currently raise them. Callers that turn an execution timeout into a score should catch `TimeoutError`
+specifically and allow these runtime errors to propagate as ungraded infrastructure failures unless a benchmark
+explicitly defines another policy.
+
+In resources servers and agents, handle sandbox creation errors at the task boundary and preserve the cause in
+the rollout error. An uncertain command outcome should remain an ungraded runtime failure unless the benchmark
+explicitly defines a scoring policy for it.
 
 ```python
 from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError
