@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -64,3 +67,32 @@ def test_read_persisted_compaction_state(tmp_path, contents, expected):
     )
     assert finished.returncode == 0, finished.stderr
     assert json.loads(finished.stdout) is expected
+
+
+def test_detached_tool_holding_stdout_does_not_block_the_runner(tmp_path):
+    fake = tmp_path / "copilot.py"
+    child_pid = tmp_path / "tool.pid"
+    fake.write_text(
+        "import json, subprocess, sys\n"
+        "tool = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(child_pid)!r}, 'w').write(str(tool.pid))\n"
+        # The final event has no trailing newline.
+        "sys.stdout.write(json.dumps({'type': 'result', 'sessionId': 's'}))\n"
+        "sys.stdout.flush()\n"
+    )
+    params = {"directory": str(tmp_path), "command": [sys.executable, str(fake)], "cwd": str(tmp_path), "env": {}}
+    (tmp_path / "input.json").write_text(json.dumps(params))
+    started = time.monotonic()
+    try:
+        finished = subprocess.run([sys.executable, "-I", str(RUNNER), str(tmp_path / "input.json")], timeout=30)
+        elapsed = time.monotonic() - started
+    finally:
+        if child_pid.exists():
+            try:
+                os.kill(int(child_pid.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    assert finished.returncode == 0
+    assert elapsed < 20, f"runner waited {elapsed:.1f}s for a detached tool's stdout"
+    captured = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert [(event["type"], event["sessionId"]) for _, event in captured] == [("result", "s")]
