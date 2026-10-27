@@ -12,6 +12,8 @@ description: >
 
 # Add Benchmark to NeMo-Gym
 
+The Gym page [Add a benchmark](../../../fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx) is the current command reference. When it and this skill disagree, the page wins. This skill adds the order of work and the checks a benchmark must pass before it merges (Step 7).
+
 ## Determine Integration Type
 
 Before starting, determine which type of benchmark you're adding:
@@ -115,6 +117,7 @@ For code execution benchmarks, see `references/patterns.md` § "Subprocess Execu
 Critical rules:
 - Return `reward` as 0.0 or 1.0 (binary)
 - Handle empty/missing model output gracefully — return 0.0, don't crash
+- For an environment failure (sandbox down, judge unreachable), do not score 0.0. Return `mask_sample`, `failure_kind` (as `<server>:<kind>`) and `failure_reason` so the row leaves the aggregate. Add one test case that masks a row
 - Must handle 4k-65k concurrent requests without crashing
 - Use `asyncio.Semaphore` for subprocess concurrency control
 - For Ray remote tasks: `result = await future` (Ray futures are directly awaitable). Never call `ray.get()` in async context.
@@ -122,6 +125,13 @@ Critical rules:
 - Strip `<think>`/`<thinking>` blocks before parsing model output (thinking models emit these)
 - Tests should `pytest.mark.skipif` when external tools aren't installed
 - If the benchmark auto-installs its tool (see Step 3b), add a `pytest_configure` hook in `conftest.py` to run the install before test collection — `skipif` evaluates at import time, before fixtures run
+
+If the server keeps state per session (a sandbox handle, a connection, a session dict):
+- Set `num_workers: 1` and enforce it in `model_post_init` (raise `ValueError` otherwise). The framework checks this for agent servers, not for resources servers
+- Override `close_resources_session()`; do not add your own `/close_session` route. It must succeed for a session that is already closed or never seeded, must not let a later seed recreate the session, and must raise if the release fails
+- Hold a per-session `asyncio.Lock` around the session dict, so a close racing a seed cannot leak a sandbox
+- If seed fails after allocating a resource, free it before re-raising
+- Export `VERIFIER_FIXTURE` (`gym env test` needs it). Set `REVERIFY_MODE = ReverifyMode.STATELESS` on the config only when `verify()` uses just the request payload
 
 ### Step 3b: Auto-install external tools (if applicable)
 
@@ -194,37 +204,22 @@ gym eval run --no-serve \
 # Inspect results
 ```
 
-### Step 7: Baseline (reward profiling)
+### Step 7: Exit checks
 
-Run against multiple models to validate correctness. Recommended suite:
-- Your policy model of interest
-- At least one open-source instruct model (e.g. Qwen 3 30B A3B Instruct)
-- At least one open-source thinking model (e.g. Qwen 3 30B A3B Thinking)
-- At least one closed-source model (e.g. GPT-5 Nano or GPT-5)
+A benchmark merges only when it passes these checks. Put the evidence in the PR.
 
-```bash
-# Collect rollouts
-gym eval run --no-serve \
-  --agent my_benchmark_simple_agent \
-  --input resources_servers/my_benchmark/data/my_dataset.jsonl \
-  --output results/rollouts.jsonl \
-  --num-repeats 5 \
-  --max-output-tokens 16384 \
-  --temperature 1.0
+| Check | What it asks | How to check |
+|---|---|---|
+| Health | Very few rollouts are unhealthy. | `gym eval run` writes `quality_summary.json` into the run folder. `gym eval health-check <run_dir>` reruns the checks. Read the counts: it does not fail the run for you. `unobserved` means Gym has no model-call record to judge by. It is not unhealthy. |
+| Evidence | Every rollout passes the `gym-p0/v1` evidence gate. Harness work only. | `python scripts/inspect_harness_conformance.py --bundle <run_dir>/rollouts.jsonl --output <dir>`. Exit 0 pass, 1 evidence failure, 2 checker error. |
+| Score | The score matches the reference score, inside the tolerance, on one current frontier model. | `gym eval compare` |
+| Config | The resolved Gym config is saved with the result. | `resolved-config.yaml` is in the run folder. |
 
-# Compute per-task pass rates
-gym eval profile --inputs resources_servers/my_benchmark/data/my_dataset.jsonl \
-  --rollouts results/rollouts.jsonl
+Run on one benchmark and harness pair. Read the rollouts, not the exit code: an exit of 0, an empty failures file and a rising rollout count prove nothing. List every health check you ignore (`--health-check-ignore`) in the PR, with the reason.
 
-# Aggregate metrics (pass@1 = avg_reward, pass@k from max_reward)
-python scripts/print_aggregate_results.py +jsonl_fpath=results/profiled.jsonl
-```
+Reward profiling for training environments is a separate skill: `nemo-gym-reward-profiling`.
 
-Increase `num_repeats` until variance < 1% across runs on the same model.
-
-Closed-source models should score at or above open-source models. If not, investigate for bugs. Inspect actual failure cases in the rollout JSONL, not just aggregate numbers.
-
-For external benchmarks: reproduce the original repo's published numbers first. Then reproduce after Gym integration. Scores should match.
+For an external benchmark: reproduce the original repo's published numbers first, then again after the Gym integration. The scores should match.
 
 ### Step 8: Pre-commit and PR
 
@@ -234,7 +229,7 @@ pre-commit run --all-files
 
 First run may fail as hooks auto-modify files (`verified: false` flag, README table). Stage changes and run again.
 
-Set `verified: true` in YAML config after successful baselining. Include W&B links and screenshots of results in the PR description.
+Set `verified: true` in YAML config after the exit checks pass. Link the run folder and its `quality_summary.json` in the PR description.
 
 To avoid committing unrelated auto-fixes from other servers, scope pre-commit to your files:
 ```bash
@@ -244,6 +239,11 @@ If hooks modify files in other directories, discard those changes:
 ```bash
 git checkout -- resources_servers/other_server/
 ```
+
+
+## Adding a harness instead
+
+Follow [Harness conformance](../../../fern/versions/latest/pages/observability/harness-conformance.mdx) and [Integrate existing agents](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx). Register the harness, run `python scripts/run_harness_conformance.py --harness <name> --output <new dir>`, fix each failing evidence row, then regenerate the [capability matrix](../../../fern/versions/latest/pages/reference/trajectory-capabilities.mdx) with `python -m scripts.harness_conformance.table --commit <40-char sha> --output <abs dir>`. Add `inspect_harness_conformance.py` to the harness's CI. The health and evidence checks above apply too, on live rollouts: the probes use scripted replies and no real sandbox.
 
 ## Constraints
 

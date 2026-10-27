@@ -32,19 +32,29 @@ on:
     tags:
       - 'docs/v*'
   workflow_dispatch: {}
+  workflow_run:
+    workflows: [CICD NeMo Gym]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: read
-
-concurrency:
-  group: fern-publish
-  cancel-in-progress: true
+  actions: read
 
 env:
   FERN_NO_VERSION_REDIRECTION: "true"
 
 jobs:
   publish:
+    # A red P0 report is a valid measurement. PR/mirror runs never publish docs.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.head_repository.full_name == github.repository &&
+       (github.event.workflow_run.event == 'schedule' ||
+        github.event.workflow_run.event == 'workflow_dispatch'))
+    concurrency:
+      group: fern-publish
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -54,6 +64,28 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '22'
+
+      - name: Checkout current table publishing helper
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          path: publisher-source
+          persist-credentials: false
+
+      - name: Insert rendered harness measurements
+        working-directory: ./publisher-source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        # Keep the helper on main so older release refs can still publish.
+        # Artifact outages warn on ordinary publishes; periodic updates fail closed.
+        run: |
+          ARGS=(--repo "$GITHUB_REPOSITORY" --page "$GITHUB_WORKSPACE/fern/versions/latest/pages/reference/trajectory-capabilities.mdx")
+          if [[ "$GITHUB_EVENT_NAME" == 'workflow_run' ]]; then
+            ARGS+=(--run-id "$SOURCE_RUN_ID" --run-attempt "$SOURCE_RUN_ATTEMPT" --strict)
+          fi
+          python3 -m scripts.harness_conformance.publish "${ARGS[@]}"
 
       - name: Generate library reference
         env:

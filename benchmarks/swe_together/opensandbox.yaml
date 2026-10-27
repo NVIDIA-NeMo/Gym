@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Supply OPENSANDBOX_DOMAIN/API_KEY and this deployment's shared storage root.
+# Model routes must be role-scoped, credential-free endpoints reachable from sandboxes.
+config_paths:
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+sandbox:
+  opensandbox:
+    create:
+      renew_interval_s: 3600
+    shared_storage:
+      host_path: ${oc.env:OPENSANDBOX_SHARED_STORAGE_PATH}
+
+swe_together:
+  environment_servers:
+    swe_together:
+      dependency_proxy_url: ${oc.env:SWE_TOGETHER_DEPENDENCY_PROXY_URL}
+      # SWET adds the dedicated dependency proxy target per sandbox. Registry
+      # domains must not be allowed directly: their request paths are filtered.
+      sandbox_config:
+        provider_options:
+          network_policy:
+            defaultAction: deny
+            egress:
+              - action: allow
+                target: ${oc.env:SWE_TOGETHER_POLICY_EGRESS_TARGET}
+      judge_sandbox_config:
+        provider_options:
+          network_policy:
+            defaultAction: deny
+            egress:
+              - action: allow
+                target: ${oc.env:SWE_TOGETHER_JUDGE_EGRESS_TARGET}

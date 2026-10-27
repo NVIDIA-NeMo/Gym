@@ -263,3 +263,30 @@ async def test_port_forwarding_setup_failure_does_not_launch_relay(monkeypatch):
         await provider.forward_ports(handle, "10.1.2.3", (5432,), ready_file="/tmp/ready")
     assert execute.await_count == 2
     assert execute.call_args.kwargs["timeout_s"] is None
+
+
+def test_pull_policy_maps_to_the_per_sandbox_extension_and_service_options_are_not_available():
+    """M28: Compose's pull_policy becomes the per-create image pull policy; tmpfs and friends have no pod mapping."""
+    from nemo_gym.sandbox.providers import SupportsSandboxServiceOptions, provider_service_option_fields
+    from nemo_gym.sandbox.providers.opensandbox.provider import (
+        IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY,
+        IMAGE_PULL_POLICY_EXTENSION_KEY,
+    )
+
+    provider = OpenSandboxProvider()
+    assert provider.pull_policy_options("missing") == {
+        "extensions": {
+            IMAGE_PULL_POLICY_EXTENSION_KEY: "IfNotPresent",
+            IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY: "IfNotPresent",
+        }
+    }
+    assert provider.pull_policy_options("never")["extensions"][IMAGE_PULL_POLICY_EXTENSION_KEY] == "Never"
+    with pytest.raises(ValueError, match="always, missing or never"):
+        provider.pull_policy_options("build")
+    # The per-sandbox value wins over the deployment default in the create extensions.
+    resolved = OpenSandboxProvider(create={"image_pull_policy": "Always"})._resolve_extensions(
+        provider.pull_policy_options("missing")["extensions"]
+    )
+    assert resolved[IMAGE_PULL_POLICY_EXTENSION_KEY] == "IfNotPresent"
+    assert not isinstance(provider, SupportsSandboxServiceOptions)
+    assert provider_service_option_fields("opensandbox") == frozenset()

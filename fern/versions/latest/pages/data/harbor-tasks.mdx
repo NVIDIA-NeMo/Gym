@@ -1,0 +1,208 @@
+---
+title: "Harbor Tasks"
+description: "Run, validate and scaffold datasets written in the Harbor task format"
+position: 5
+---
+
+# Harbor Tasks
+
+NeMo Gym runs datasets written in the [Harbor](https://github.com/harbor-framework/harbor) task format directly: a
+folder of task folders is both the dataset and the input to `gym eval run`. Harbor is the input format; Gym owns
+execution (sandboxes, agents, verification). This page covers the dataset layout, the dataset-level settings Gym
+reads, and the three commands that work on such a dataset.
+
+## Dataset layout
+
+```
+my-dataset/
+├── dataset.toml          # Harbor's dataset file; Gym's settings live in its [gym] table
+├── compose-images.json   # written by Gym at prepare: recorded image configurations (do not edit)
+└── hello/                # one task folder per task; the folder name is the task id
+    ├── task.toml
+    ├── instruction.md
+    ├── environment/      # Dockerfile or docker-compose.yaml, plus files the task needs
+    ├── tests/test.sh     # the verifier; writes /logs/verifier/reward.txt or reward.json
+    └── solution/solve.sh # the reference solution `gym dataset validate` runs (optional)
+```
+
+`task.toml` belongs to the task author and is read-only once fetched. A task runs in a sandbox when it declares
+`[environment].docker_image`, or a Dockerfile Gym can run without a build (`FROM` plus `WORKDIR`, `ENV`, `USER`,
+`LABEL`, and `RUN` lines that Gym applies in the pulled base image at seed). Each task's rows are materialized
+with a digest of the task folder plus the dataset settings applied to it, and the environment server refuses a
+task whose digest no longer matches, so edits after materialization are caught rather than silently run.
+
+## `dataset.toml` and the `[gym]` table
+
+Harbor's own tables (`[dataset]`) are left to Harbor. What a dataset needs on top of its tasks goes in a `[gym]`
+table, as data: the facts Harbor has no field for (which split the rows enter and under which license, which
+harnesses may run them, catalog metadata), defaults that scale every task or set how often an evaluation plays
+each one, and per-task overrides written with Harbor's own `[environment]` fields.
+
+```toml
+[dataset]
+name = "local/my-dataset"   # Harbor requires org/name here
+version = "0.1.0"
+
+[gym]
+# The split the rows enter: train, validation, example or benchmark. Unset means validation with a license,
+# else benchmark, which needs no license and never enters a training split. A license (one of Gym's dataset
+# license values) is required for train and validation.
+type = "validation"
+license = "Apache 2.0"
+# The harnesses admitted to run the dataset, by implementation name (responses_api_agents/<name>, what --agent
+# resolves to). Unset admits any. The oracle of `gym dataset validate` is always admitted.
+allowed_agents = ["terminus_2_sandboxed_agent", "hermes_agent"]
+# Catalog metadata, carried into the generated run config: one of Gym's domain values (any other value is refused
+# with the values named), and whether the rewards were baselined and reviewed (false unless declared).
+domain = "coding"
+verified = false
+
+[gym.defaults]
+# Rollouts per task for an evaluation. `+num_repeats=` on the command line replaces it; it never enters a task's digest.
+num_repeats = 1
+# Scales every task's [agent] and [verifier] timeout_sec.
+timeout_multiplier = 1.0
+# Scales cpus, memory_mb and storage_mb of the agent's and the verifier's environments. GPUs never scale.
+resource_multiplier = 1.0
+
+# Per-task overrides, keyed by the task folder name. `env` merges over the task's own; every other field
+# replaces the task's value. Harbor's legacy spellings (`memory = "4G"`, `allow_internet = false`) are accepted
+# and normalized. A key that names no task folder, or an unknown field, fails `gym eval run` and
+# `gym dataset validate` with the file and table named.
+[gym.tasks."hello".environment]
+env = { EXAMPLE = "1" }
+memory_mb = 4096
+```
+
+The generated run config's `datasets:` entry carries `type`, `license`, `domain`, `verified` and `allowed_agents`
+as declared, its top-level `num_repeats` is `[gym.defaults].num_repeats`, and `gym eval run` starts from that split
+and repeat count (`+split=` and `+num_repeats=` on the command line replace them); `gym dataset validate` plays each
+reference solution once unless `+num_repeats=` says otherwise. None of these keys enters a task's `_ng_digest`; only
+`[gym.defaults]` scaling and `[gym.tasks]` overrides do. Every materialized row carries
+`task_source` (the dataset folder's name: the parent's for a single task folder target inside a dataset, one whose
+parent holds a `dataset.toml` or a `manifest.toml`; a standalone task folder is labelled by its own name) and
+`_ng_digest` (the task
+folder's digest), and every results row carries them too, with `reward` and, when the verifier's `reward.json`
+named no `reward` key, `reward_components`:
+the keys that sum to the reward. That mapping is Harbor's optional, task-specific reading of the file, not the shared
+multi-reward contract of `BaseMultiRewardVerifyResponse` (a required mapping with the same objective keys on every
+task): tasks of one dataset may name different keys and a measured row may name none, so a trainer reads it row by
+row and takes the scalar `reward` alone where a row has none; a dataset meant for a fixed-objective trainer such as
+GDPO must have every task write the same keys without a `reward` key, which Gym does not pad or check across tasks.
+`gym eval run` with a harness outside `allowed_agents` fails before any image is
+recorded or built or any server started, naming the harness and the admitted list, and a run config edited to
+another harness afterwards is refused at dispatch by the collector's pairing guard. An `example` dataset is not
+runnable: that type marks committed smoke-test samples, and both commands refuse it at the same early point, before
+any image is recorded or built. `domain`, `verified` and `allowed_agents` stay out of the
+metrics sidecar Gym writes beside the rows. The rows' metrics sidecar and the collated split's are removed and
+rewritten on every fresh run, because the rows are regenerated from the task folder each time: growing or narrowing
+the selection or editing `type` or `license` between two runs of one taskset and harness never fails data
+preparation, and `overwrite_metrics_conflicts` is never needed. A `--resume` run keeps the collated metrics, as its
+rows are unchanged.
+
+Deployment settings (which sandbox provider, registry credentials, image mirrors) do not belong here: a dataset
+must run unchanged on every deployment. Those live in the sandbox provider block of the run configuration. See
+[OpenSandbox](/main/infrastructure/sandbox/opensandbox) for the provider's `images` and `setup` blocks.
+
+<Note>
+**Harbor round trip.** `harbor add`, `harbor remove` and `harbor sync` rewrite `dataset.toml` from Harbor's
+manifest model, which serializes only Harbor's own tables. The `[gym]` table is dropped, so a round trip resets
+the multipliers and per-task overrides to their defaults without an error. Keep the dataset in git and restore the
+table from there after running one of these commands.
+</Note>
+
+## `gym dataset init`
+
+Scaffolds a dataset in exactly the shape the loader accepts: `dataset.toml` with a `[gym]` table and one task
+(`hello`) with an instruction, a verifier and a reference solution. Harbor requires `org/name` in the manifest,
+so a bare name is written as `local/<name>` (and the task as `local/hello`); give `org/name` to choose the org.
+The folder is the name without the org, as `harbor task init` does for a task.
+
+```bash
+gym dataset init my-dataset                  # ./my-dataset, named local/my-dataset
+gym dataset init acme/my-dataset --root ~/work --image ubuntu:24.04   # ~/work/my-dataset, named acme/my-dataset
+```
+
+| Option | Description |
+| --- | --- |
+| `NAME` | Dataset name as `org/name`, or a bare name that becomes `local/<name>`. The folder must not exist yet. |
+| `--root DIR` | Where to create the folder (default: current directory). |
+| `--image IMAGE` | The task's prebuilt image (default: `python:3.12-slim`). |
+
+## `gym dataset validate`
+
+Runs each task's reference solution (`solution/solve.sh`) through the task's verifier with an oracle harness and
+reports the rewards. Every solution must score 1; the command exits non-zero otherwise. Tasks without a
+solution are listed as unvalidated. Validation outputs never share inputs, configs or cached results with an
+evaluation run.
+
+```bash
+gym dataset validate my-dataset --sandbox opensandbox
+gym dataset validate harbor:terminal-bench/terminal-bench@4.0.0 --sandbox opensandbox --only-tasks 'hello-*'
+```
+
+| Option | Description |
+| --- | --- |
+| `TARGET` | A task folder, a folder of task folders, or a `harbor:<dataset>[@<version>]` hub reference. |
+| `--sandbox PROVIDER` | Sandbox provider for the task containers (for example `opensandbox`, `docker`). |
+| `--config PATH` | Extra config file to load. Repeatable. |
+| `--only-tasks PATTERNS` | Comma-separated task names or globs; only matching tasks are validated. |
+| `--exclude-tasks PATTERNS` | Comma-separated task names or globs to leave out. |
+| `--limit N` | Maximum number of tasks to validate. |
+| `--concurrency N` | Maximum number of concurrent tasks. |
+| `--output`, `-o` | Output rollouts JSONL file. |
+
+## `gym eval run` with a task target
+
+`gym eval run` takes the same targets in place of a benchmark name. Gym prepares the dataset (recording the base
+images the Dockerfiles resolve against, loading every task, writing the rows and the per-taskset environment
+server configuration), then starts the servers and collects rollouts as for any benchmark.
+
+```bash
+gym eval run my-dataset --agent hermes_agent --sandbox opensandbox \
+  --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
+
+gym eval run harbor:terminal-bench/terminal-bench@4.0.0 --agent hermes_agent --sandbox opensandbox \
+  --exclude-tasks 'gpu-*' --model-type openai_model --model <model> --model-url <url>
+```
+
+| Option | Description |
+| --- | --- |
+| `TARGET` | A task folder, a folder of task folders, or `harbor:<dataset>[@<version>]`. `harbor:<org>/<name>[@<tag>]` fetches a package-store dataset. Fetched datasets land in `$NEMO_GYM_DATASETS_DIR` (default `environments/harbor/` in the Gym checkout); the fetch stages its clone in a hidden `.nemo-gym-harbor-*` directory there, which discovery skips. An unhidden `nemo-gym-harbor-*` directory left by a fetch interrupted under a `main` build from before this change is refused as a duplicate task ID: delete it once. |
+| `--agent`, `-a` | The harness that works in the task sandbox. It must accept `sandbox_access` in its session seed, and the dataset's `[gym] allowed_agents`, when set, must name it; otherwise the run stops before any image is built or server started. |
+| `--sandbox PROVIDER` | Sandbox provider for the task containers. |
+| `--only-tasks`, `--exclude-tasks` | Select tasks by name or glob. Left-out tasks are listed on stdout. |
+| `--skip-unloadable` | Run the loadable subset when some tasks do not load. Without it the run lists them and stops. |
+
+A task folder that does not load is left out of the prepared rows and recorded in `skipped.json` next to them
+with the reason; the rest of the dataset still prepares. By default `gym eval run` then lists every task left
+out and stops before starting servers. Pass `--skip-unloadable` to run the loadable subset instead; the omitted
+tasks stay listed in `skipped.json`. Tasks that declare GPUs run on the environment server's `gpu_sandbox_provider`
+block when one is configured. The run's rows, generated configuration and outputs are the same artifacts every
+other `gym eval run` produces, so `gym eval aggregate`, `gym eval export` and the health check apply unchanged.
+
+### Run summary and verbosity
+
+Both commands leave a per-run summary beside the rollouts, `rollouts_run_summary.json` (`<stem>_run_summary.json`
+when `--output` names another file). It records the command, target, taskset and agent, the dataset's folder,
+source and digests, the run's `task_source` (the dataset label the rows were materialized with, beside the one the
+result rows carry as `rows_task_source`), the files of the run (rollouts and sidecars, the health check's
+reports, the rows and the data processor's files beside them, the collated collector input, run config,
+`skipped.json`, `images.json`, the verifier root; `null` for one the run did not write, for the aggregate
+metrics when an older file by that name predates this run's rollouts, for the health reports unless the quality
+summary records this rollouts file as the one it was computed from (their names are shared by every `--output`
+stem in the folder), and for rollouts,
+failures and materialized inputs a fresh start never got to clear, such as after servers that failed to start;
+such files are named under `stale_files` instead, and their rows are not this run's), and one entry per
+selected task and repeat: its status,
+reward and `failure_kind`, the verifier's mode, wall time and return code, the relative paths of its verifier log
+folder (`test-stdout.txt`, `trajectory.json`, collected `artifacts/`), and the input the row carried (task and
+dataset digests, `agent_timeout_sec`, the step for a multi-step task). A path a row names that is missing on
+disk is listed under `missing_paths`. The file is written whatever the run did, a validate that found no task
+with a `solution/` included (beside the requested `--output`): the tasks a validate left out for want of one are
+named under `unvalidated` with the reason (`no reference solution`), beside the tasks that did not load under
+`skipped`, so a selection that ran nothing explains why. Start from this file when a score needs checking.
+
+`gym dataset validate ... -v` (or `--verbose`, the `verbose` config key) raises the log level to DEBUG in the CLI
+and in the spun-up servers: the Harbor environment server then traces every episode's seed, verifier exit and
+score, and the oracle agent its `solve.sh` run.

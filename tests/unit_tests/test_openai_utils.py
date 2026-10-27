@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import re
 from copy import deepcopy
 from types import SimpleNamespace, UnionType
 from typing import (
@@ -30,8 +31,11 @@ from typing import (
 from unittest.mock import AsyncMock, call
 
 import openai
+import orjson
 import pytest
-from aiohttp import ClientResponseError
+from aiohttp import ClientResponseError, ClientTimeout
+from openai.types.chat import ChatCompletionToolChoiceOptionParam
+from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.completion_create_params import CompletionCreateParamsNonStreaming
 from openai.types.responses import (
     EasyInputMessage,
@@ -46,7 +50,8 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseReasoningItem,
 )
-from openai.types.responses.response_create_params import ResponseCreateParamsBase
+from openai.types.responses.response import Response
+from openai.types.responses.response_create_params import ResponseCreateParamsBase, ToolChoice, ToolParam
 from openai.types.responses.response_input_item import (
     AdditionalTools as InputAdditionalTools,
 )
@@ -69,7 +74,9 @@ from openai.types.responses.response_output_item import (
 )
 from pydantic import ValidationError
 
+from nemo_gym import openai_utils as openai_utils_module
 from nemo_gym.openai_utils import (
+    CHAT_REQUEST_IGNORED_CLIENT_FIELDS,
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     MAX_NUM_TRIES,
     RESPONSES_TO_TRAIN,
@@ -115,6 +122,7 @@ from nemo_gym.responses_converter import (
     _RESPONSE_NON_BOUNDARY_TYPES,
     _RESPONSE_OUTPUT_BOUNDARY_TYPES,
 )
+from nemo_gym.rollout_correlation import rollout_context
 
 
 def _response_with_output(output: list) -> dict:
@@ -130,6 +138,11 @@ def _response_with_output(output: list) -> dict:
     }
 
 
+@pytest.fixture(autouse=True)
+def _jitter_at_its_upper_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("nemo_gym.openai_utils.random.uniform", lambda low, high: high)
+
+
 class TestOpenAIUtils:
     def test_invalid_retry_configuration_rejected(self):
         with pytest.raises(ValidationError):
@@ -137,6 +150,170 @@ class TestOpenAIUtils:
 
     async def test_NeMoGymAsyncOpenAI(self) -> None:
         NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+
+    @pytest.mark.parametrize("debug_enabled", [True, False])
+    async def test_failed_response_logs_request_only_when_request_debug_is_enabled(
+        self, monkeypatch, capsys, debug_enabled: bool
+    ) -> None:
+        import nemo_gym.server_utils
+
+        # set_global_aiohttp_client sets the flag on server_utils at startup, after openai_utils was imported.
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", debug_enabled)
+        monkeypatch.setattr(openai_utils_module, "raise_for_status", AsyncMock())
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+        request_kwargs = {"url": "https://example.com/v1/chat/completions", "json": {"model": "m"}}
+
+        await client._raise_for_status(SimpleNamespace(ok=False), request_kwargs)
+
+        logged = "Request kwargs:" in capsys.readouterr().out
+        assert logged is debug_enabled
+
+    async def test_create_embeddings_posts_to_embeddings_url(self, monkeypatch) -> None:
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+        response = SimpleNamespace(ok=True)
+        request = AsyncMock(return_value=response)
+        monkeypatch.setattr(client, "_request", request)
+        monkeypatch.setattr(client, "_raise_for_status", AsyncMock())
+        monkeypatch.setattr(openai_utils_module, "get_response_json", AsyncMock(return_value={"data": []}))
+
+        result = await client.create_embeddings(model="m", input="hi")
+
+        assert result == {"data": []}
+        request.assert_awaited_once_with(
+            method="POST", url="https://example.com/v1/embeddings", json={"model": "m", "input": "hi"}
+        )
+
+    async def test_explicit_attempt_cap_reaches_low_level_transport(
+        self,
+        monkeypatch,
+    ) -> None:
+        captured = {}
+        response = SimpleNamespace(status=200)
+
+        async def fake_request(**kwargs):
+            captured.update(kwargs)
+            return response
+
+        monkeypatch.setattr(openai_utils_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://api.openai.com/v1",
+            max_num_tries=1,
+            max_connection_retries=2,
+            request_timeout_seconds=300,
+            connect_timeout_seconds=60,
+        )
+
+        assert await client._request(method="POST", url="https://example.test") is response
+        assert captured["_max_num_tries"] == 1
+        assert captured["_max_connection_retries"] == 2
+        assert isinstance(captured["timeout"], ClientTimeout)
+        assert captured["timeout"].total == 300
+        assert captured["timeout"].connect == 60
+
+    async def test_request_id_names_the_rollout_inside_a_rollout_context(self, monkeypatch) -> None:
+        captured = {}
+
+        async def fake_request(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_utils_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+        with rollout_context("3-0"):
+            await client._request(method="POST", url="https://example.test")
+        first = captured["headers"]["X-Request-Id"]
+        assert re.fullmatch(r"3-0-[0-9a-f]{8}", first)
+        with rollout_context("3-0"):
+            await client._request(method="POST", url="https://example.test")
+        assert captured["headers"]["X-Request-Id"] != first
+
+    async def test_request_id_is_absent_outside_a_rollout_and_never_overrides_the_callers(self, monkeypatch) -> None:
+        captured = {}
+
+        async def fake_request(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_utils_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+        await client._request(method="POST", url="https://example.test")
+        assert "X-Request-Id" not in captured["headers"]
+        with rollout_context("3-0"):
+            await client._request(method="POST", url="https://example.test", headers={"x-request-id": "mine"})
+        assert captured["headers"]["x-request-id"] == "mine"
+        assert "X-Request-Id" not in captured["headers"]
+
+    @pytest.mark.parametrize("internal", [False, True])
+    @pytest.mark.parametrize("status", [429, 500, 503, 504])
+    @pytest.mark.parametrize("captured", [False, True])
+    async def test_explicit_attempt_cap_has_no_exhausted_status_sleep(
+        self,
+        monkeypatch,
+        internal,
+        status,
+        captured,
+    ) -> None:
+        sleeps = []
+        calls = 0
+
+        class Body:
+            async def read(self):
+                return b"rate limited"
+
+        response = SimpleNamespace(status=status, content=Body())
+
+        async def fake_request(**kwargs):
+            nonlocal calls
+            del kwargs
+            calls += 1
+            return response
+
+        async def fake_raise_for_status(actual_response, content=None):
+            assert actual_response is response
+            raise RuntimeError("rate limited")
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(openai_utils_module, "request", fake_request)
+        monkeypatch.setattr(
+            openai_utils_module,
+            "raise_for_status",
+            fake_raise_for_status,
+        )
+        monkeypatch.setattr(openai_utils_module, "sleep", fake_sleep)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://api.openai.com/v1",
+            max_num_tries=None if captured else 1,
+            internal=internal,
+        )
+
+        with pytest.raises(RuntimeError, match="rate limited"):
+            await client._request(method="POST", url="https://example.test", _resend_after_disconnect=not captured)
+
+        assert calls == 1
+        assert sleeps == []
+
+    def test_explicit_attempt_cap_only_supports_disabling_inner_retries(self) -> None:
+        with pytest.raises(ValidationError, match="Input should be 1"):
+            NeMoGymAsyncOpenAI(
+                api_key="abc",
+                base_url="https://api.openai.com/v1",
+                max_num_tries=2,
+            )
+
+    def test_connect_timeout_requires_request_timeout(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match="connect_timeout_seconds requires request_timeout_seconds",
+        ):
+            NeMoGymAsyncOpenAI(
+                api_key="abc",
+                base_url="https://api.openai.com/v1",
+                connect_timeout_seconds=60,
+            )
 
     async def test_external_endpoint_retries_are_bounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         response = SimpleNamespace(status=504, content=SimpleNamespace(read=AsyncMock(return_value=b"")))
@@ -156,7 +333,7 @@ class TestOpenAIUtils:
         assert request.await_count == MAX_NUM_TRIES
 
     @pytest.mark.parametrize("status", [404, 408])
-    async def test_retry_reuses_request_with_fixed_delay(self, monkeypatch, status):
+    async def test_retry_reuses_request_with_growing_delay(self, monkeypatch, status):
         failure = SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=b"temporary")))
         success = SimpleNamespace(status=200)
         request = AsyncMock(side_effect=[failure, failure, success])
@@ -173,7 +350,7 @@ class TestOpenAIUtils:
         assert request.await_count == 3
         assert all(c.kwargs["json"] == original for c in request.await_args_list)
         assert payload == original
-        assert sleep.await_args_list == [call(0.5), call(0.5)]
+        assert sleep.await_args_list == [call(1.0), call(2.0)]
 
     async def test_non_retryable_http_errors_are_returned_once(self, monkeypatch):
         response = SimpleNamespace(status=400)
@@ -215,7 +392,7 @@ class TestOpenAIUtils:
         with pytest.raises(RuntimeError, match="terminal error"):
             await client._request_with_retry()
         assert request.await_count == attempts
-        assert sleep.await_args_list == [call(0.5)] * (attempts - 1)
+        assert sleep.await_args_list == [call(2.0**i) for i in range(attempts - 1)]
 
     @pytest.mark.parametrize(
         "body,expected",
@@ -223,6 +400,8 @@ class TestOpenAIUtils:
             (b'{"error":{"code":"budget_exceeded"}}', True),
             (b'{"error":{"type":"insufficient_quota"}}', True),
             (b'{"error":{"code":"rate_limit_exceeded"}}', False),
+            (b'{"detail":{"error":{"type":"insufficient_quota"}}}', True),
+            (b'{"detail":{"error":{"code":"rate_limit_exceeded"}}}', False),
             (b"Quota exceeded for quota metric requests per minute. Retry in 30 seconds.", False),
             (b'{"error":{"message":"quota exceeded"}}', False),
             (b"budget_exceeded", False),
@@ -236,6 +415,7 @@ class TestOpenAIUtils:
         [
             (b'{"error":{"code":"invalid_api_key"}}', True),
             (b'{"error":{"type":"authentication_error"}}', True),
+            (b'{"detail":{"error":{"code":"invalid_api_key"}}}', True),
             (b"Incorrect API key provided", True),
             (b'{"error":"unauthorized"}', False),
             (b'{"error":{"message":"model not available"}}', False),
@@ -290,7 +470,7 @@ class TestOpenAIUtils:
 
         assert result is success
         assert request.await_count == 2
-        sleep.assert_awaited_once_with(0.5)
+        sleep.assert_awaited_once_with(1.0)
 
     async def test_transient_429_still_retries(self, monkeypatch):
         failure = SimpleNamespace(
@@ -308,7 +488,7 @@ class TestOpenAIUtils:
 
         assert result is success
         assert request.await_count == 2
-        sleep.assert_awaited_once_with(0.5)
+        sleep.assert_awaited_once_with(1.0)
 
     async def test_exhausted_transient_429_raises_without_tripping(self, monkeypatch):
         replies = [
@@ -330,7 +510,7 @@ class TestOpenAIUtils:
             raise RuntimeError("terminal 429")
 
         monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
-        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", max_rate_limit_wait_seconds=0)
 
         with pytest.raises(RuntimeError, match="terminal 429"):
             await client._request_with_retry(url="https://example.com/v1/responses")
@@ -427,6 +607,144 @@ class TestOpenAIUtils:
         assert exc_info.value.response_content == body
 
 
+def _busy(status: int = 429, retry_after: str | None = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        status=status,
+        headers={"Retry-After": retry_after} if retry_after is not None else {},
+        content=SimpleNamespace(read=AsyncMock(return_value=b'{"error":"rate_limit_exceeded"}')),
+    )
+
+
+class TestProviderBackoff:
+    """How the client waits on a provider that is busy: growing jittered waits, Retry-After, a time budget."""
+
+    def test_waits_are_jittered_across_the_whole_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        windows = []
+        monkeypatch.setattr(
+            "nemo_gym.openai_utils.random.uniform", lambda low, high: windows.append((low, high)) or low
+        )
+        assert openai_utils_module._retry_wait_seconds(3, _busy()) == 0.0
+        assert windows == [(0, 4.0)]
+
+    @pytest.mark.parametrize(
+        ("retry_after", "expected"), [("7", 7.0), ("0.5", 0.5), ("3600", 60.0), ("soon", 1.0), ("0", 1.0), ("-5", 1.0)]
+    )
+    def test_retry_after_seconds_is_honoured_within_the_cap(self, retry_after: str, expected: float) -> None:
+        assert openai_utils_module._retry_wait_seconds(1, _busy(retry_after=retry_after)) == expected
+
+    def test_retry_after_date_is_honoured(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from datetime import datetime, timezone
+
+        class _Now(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 10, 19, 12, 0, 0, tzinfo=timezone.utc)
+
+        monkeypatch.setattr("nemo_gym.openai_utils.datetime", _Now)
+        for retry_after in ("Mon, 19 Oct 2026 12:00:20 GMT", "Mon, 19 Oct 2026 12:00:20 -0000"):
+            assert openai_utils_module._retry_wait_seconds(1, _busy(retry_after=retry_after)) == 20.0
+
+    @pytest.mark.parametrize("status", [429, 503])
+    async def test_a_busy_provider_is_waited_out_until_the_budget_is_spent(
+        self, monkeypatch: pytest.MonkeyPatch, status: int
+    ) -> None:
+        request = AsyncMock(return_value=_busy(status))
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+
+        async def raise_status(response, content=None):
+            raise RuntimeError("still busy")
+
+        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", max_rate_limit_wait_seconds=200)
+
+        with pytest.raises(RuntimeError, match="still busy"):
+            await client._request_with_retry(url="https://example.com/v1/responses")
+
+        # 1 + 2 + 4 + ... + 64 would pass 200 s, so the 8th answer is the last: 1+2+4+8+16+32+60+60 = 183 s.
+        assert [c.args[0] for c in sleep.await_args_list] == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
+        assert request.await_count == 9
+
+    @pytest.mark.parametrize("tries", [7, 1025, 100000])
+    def test_the_backoff_window_stays_capped_for_any_attempt(
+        self, monkeypatch: pytest.MonkeyPatch, tries: int
+    ) -> None:
+        windows = []
+        monkeypatch.setattr(
+            "nemo_gym.openai_utils.random.uniform", lambda low, high: windows.append((low, high)) or low
+        )
+        openai_utils_module._retry_wait_seconds(tries, _busy())
+        assert windows == [(0, 60.0)]
+
+    async def test_an_internal_client_keeps_retrying_a_busy_server_past_a_thousand_tries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        success = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[_busy(429)] * 1025 + [success])
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="http://127.0.0.1:8000/v1", internal=True)
+
+        assert await client._request_with_retry(url="http://127.0.0.1:8000/v1/responses") is success
+        assert request.await_count == 1026
+
+    @pytest.mark.parametrize("status", [429, 503])
+    async def test_a_positive_budget_ends_the_request_before_max_http_attempts_does(
+        self, monkeypatch: pytest.MonkeyPatch, status: int
+    ) -> None:
+        request = AsyncMock(return_value=_busy(status, retry_after="1"))
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+
+        async def raise_status(response, content=None):
+            raise RuntimeError("still busy")
+
+        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="https://example.com/v1", max_http_attempts=36, max_rate_limit_wait_seconds=2
+        )
+
+        with pytest.raises(RuntimeError, match="still busy"):
+            await client._request_with_retry(url="https://example.com/v1/responses")
+
+        assert [c.args[0] for c in sleep.await_args_list] == [1.0, 1.0]
+        assert request.await_count == 3
+
+    async def test_a_zero_budget_keeps_busy_answers_on_the_attempt_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        request = AsyncMock(return_value=_busy(503))
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.openai_utils.random.uniform", lambda low, high: 0.0)
+
+        async def raise_status(response, content=None):
+            raise RuntimeError("still busy")
+
+        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="https://example.com/v1", max_http_attempts=3, max_rate_limit_wait_seconds=0
+        )
+
+        with pytest.raises(RuntimeError, match="still busy"):
+            await client._request_with_retry(url="https://example.com/v1/responses")
+
+        assert request.await_count == 3
+
+    async def test_a_429_with_retry_after_waits_that_long_then_succeeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        success = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[_busy(retry_after="3"), success])
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        assert await client._request_with_retry(url="https://example.com/v1/responses") is success
+        sleep.assert_awaited_once_with(3.0)
+
+
 class TestNeMoGymResponseCreateParamsNonStreaming:
     def test_seed_rejected_at_top_level(self) -> None:
         """seed is not part of the OpenAI Responses schema; it must be passed via metadata.extra_body."""
@@ -499,6 +817,249 @@ class TestNeMoGymResponseCreateParamsNonStreaming:
             InputComputerCallOutput.model_validate(replay_dump).model_dump(mode="json", exclude_unset=True)
             == replay_dump
         )
+
+    @pytest.mark.parametrize(
+        "tool_type",
+        [
+            "web_search",
+            "web_search_2025_08_26",
+            "web_search_preview",
+            "web_search_preview_2025_03_11",
+        ],
+    )
+    def test_web_search_tool_variants_validate(self, tool_type: str) -> None:
+        params = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+            {
+                "input": "Find the current documentation.",
+                "tools": [{"type": tool_type}],
+            }
+        )
+
+        assert params.model_dump(mode="json")["tools"] == [{"type": tool_type}]
+
+
+class TestNeMoGymResponse:
+    def test_web_search_call_round_trip(self) -> None:
+        response_payload = {
+            "id": "resp_123",
+            "created_at": 1_725_000_000,
+            "model": "gpt-5-mini-2025-08-07",
+            "object": "response",
+            "output": [
+                {
+                    "id": "rs_123",
+                    "type": "reasoning",
+                    "summary": [],
+                },
+                {
+                    "id": "ws_123",
+                    "type": "web_search_call",
+                    "status": "completed",
+                    "action": {
+                        "type": "search",
+                        "query": "Python package documentation",
+                        "provider_trace": "forward-compatible",
+                        "sources": [
+                            {
+                                "type": "url",
+                                "url": "https://docs.python.org/3/",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "id": "msg_123",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "The Python documentation is available.",
+                            "annotations": [],
+                        }
+                    ],
+                },
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+
+        response = NeMoGymResponse.model_validate(response_payload)
+
+        web_search_call = response.output[1]
+        assert isinstance(web_search_call, NeMoGymResponseFunctionWebSearch)
+        assert web_search_call.status == "completed"
+        assert web_search_call.model_dump(mode="json")["action"] == response_payload["output"][1]["action"]
+
+        serialized = response.model_dump(mode="json")
+        assert serialized["output"][1] == response_payload["output"][1]
+        assert NeMoGymResponse.model_validate(serialized).model_dump(mode="json") == serialized
+
+    @pytest.mark.parametrize(
+        "action",
+        [
+            {
+                "type": "search",
+                "queries": ["Python package documentation", "Python package API"],
+                "provider_trace": "queries-only",
+            },
+            {
+                "type": "open_page",
+                "url": None,
+                "provider_trace": "nullable-url",
+            },
+            {
+                "type": "find_in_page",
+                "url": "https://docs.python.org/3/",
+                "pattern": "socket",
+                "provider_trace": "current-action-name",
+            },
+            {
+                "type": "browse",
+                "url": "https://example.com",
+                "provider_trace": "future-action",
+            },
+        ],
+    )
+    def test_web_search_call_accepts_current_action_shapes_and_preserves_payload(
+        self,
+        action: dict,
+    ) -> None:
+        payload = {
+            "id": "ws_123",
+            "type": "web_search_call",
+            "status": "completed",
+            "action": action,
+        }
+
+        web_search_call = NeMoGymResponseFunctionWebSearch.model_validate(payload)
+
+        assert web_search_call.model_dump(mode="json")["action"] == action
+        assert web_search_call.model_dump(mode="json") == payload
+        assert (
+            NeMoGymResponseFunctionWebSearch.model_validate(web_search_call.model_dump(mode="json")).model_dump(
+                mode="json"
+            )
+            == payload
+        )
+
+    def test_web_search_call_can_be_replayed_as_input(self) -> None:
+        payload = {
+            "id": "ws_123",
+            "type": "web_search_call",
+            "status": "completed",
+            "action": {
+                "type": "search",
+                "query": "provider bookkeeping",
+            },
+        }
+
+        params = NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": [payload]})
+
+        assert isinstance(params.input, list)
+        assert isinstance(params.input[0], NeMoGymResponseFunctionWebSearch)
+        assert params.input[0].model_dump(mode="json") == payload
+
+    def test_output_text_logprobs_replay_as_input_and_serialize_repeatedly(self) -> None:
+        """A next-turn request that replays assistant logprobs encodes completely on every serialization."""
+        logprobs = [
+            {
+                "token": "hi",
+                "bytes": [104, 105],
+                "logprob": -0.1,
+                "top_logprobs": [{"token": "hi", "bytes": [104, 105], "logprob": -0.1}],
+            }
+        ]
+        response = NeMoGymResponse.model_validate(
+            {
+                "id": "resp_1",
+                "created_at": 0,
+                "model": "m",
+                "object": "response",
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+                "output": [
+                    {
+                        "type": "message",
+                        "id": "msg_1",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "hi", "annotations": [], "logprobs": logprobs}],
+                    },
+                    {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "name": "lookup",
+                        "arguments": "{}",
+                        "status": "completed",
+                    },
+                ],
+            }
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": [{"role": "user", "content": "q"}]})
+        # This follows simple_agent, which deep-copies the body and then appends the model output and the tool result.
+        body = body.model_copy(deep=True)
+        new_body = body.model_copy(
+            update={"input": [*body.input, *response.output, NeMoGymFunctionCallOutput(call_id="call_1", output="ok")]}
+        )
+
+        for _ in range(2):
+            encoded = orjson.loads(orjson.dumps(new_body.model_dump(exclude_unset=True)))
+            assert encoded["input"][1]["content"][0]["logprobs"] == logprobs
+            assert encoded["input"][2]["type"] == "function_call"
+            assert encoded["input"][3] == {"call_id": "call_1", "output": "ok"}
+            assert response.model_dump(mode="json")["output"][0]["content"][0]["logprobs"] == logprobs
+
+    def test_web_search_call_keeps_typed_sdk_actions(self) -> None:
+        from openai.types.responses.response_function_web_search import (
+            ActionOpenPage,
+            ActionSearch,
+            ResponseFunctionWebSearch,
+        )
+
+        payload = {
+            "id": "ws_1",
+            "type": "web_search_call",
+            "status": "completed",
+            "action": {"type": "search", "query": "q"},
+        }
+        web_search_call = NeMoGymResponseFunctionWebSearch.model_validate(payload)
+        assert isinstance(web_search_call.action, ActionSearch)
+        assert web_search_call.action.query == "q"
+        assert web_search_call.model_dump(mode="json") == payload
+
+        built = NeMoGymResponseFunctionWebSearch(
+            id="ws_2", type="web_search_call", status="completed", action=ActionSearch(type="search", query="q")
+        )
+        assert built.model_dump(mode="json")["action"] == {"type": "search", "query": "q"}
+
+        sdk_item = ResponseFunctionWebSearch(
+            id="ws_3",
+            type="web_search_call",
+            status="completed",
+            action=ActionOpenPage(type="open_page", url="https://a"),
+        )
+        converted = NeMoGymResponseFunctionWebSearch.model_validate(sdk_item, from_attributes=True)
+        assert isinstance(converted.action, ActionOpenPage)
+
+        unknown = {"id": "ws_4", "type": "web_search_call", "status": "completed", "action": {"type": "future-action"}}
+        assert NeMoGymResponseFunctionWebSearch.model_validate(unknown).action == {"type": "future-action"}
+
+    def test_web_search_call_accepts_missing_action_and_preserves_omission(self) -> None:
+        payload = {
+            "id": "ws_123",
+            "type": "web_search_call",
+            "status": "completed",
+        }
+
+        web_search_call = NeMoGymResponseFunctionWebSearch.model_validate(payload)
+
+        assert web_search_call.action is None
+        assert web_search_call.model_dump(mode="json") == payload
 
 
 class TestTokenMetadataValidation:
@@ -831,6 +1392,76 @@ class TestNeMoGymChatCompletionSchemas:
             with pytest.raises(ValidationError):
                 NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": [], field: "not-a-mapping"})
 
+    @pytest.mark.parametrize("field", sorted(CHAT_REQUEST_IGNORED_CLIENT_FIELDS))
+    @pytest.mark.parametrize("value", [None, "us-east-1", 123, {"ignored": ["value"]}])
+    def test_ignored_client_fields_are_accepted_but_not_forwarded(self, field: str, value: object) -> None:
+        # The pinned OpenHands direct client includes aws_region_name even when unset (null).
+        # Every ignored field must be excluded regardless of its value or serialization mode.
+        assert NeMoGymChatCompletionCreateParamsNonStreaming.model_fields[field].exclude is True
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+            {"messages": [{"role": "user", "content": "hi"}], field: value}
+        )
+
+        assert field in params.model_fields_set
+        assert params.model_dump(exclude_unset=True) == {"messages": [{"role": "user", "content": "hi"}]}
+        assert field not in params.model_dump()
+        assert field not in orjson.loads(params.model_dump_json())
+        assert field not in orjson.loads(params.model_dump_json(exclude_unset=True))
+
+    def test_tool_message_accepts_openhands_name(self) -> None:
+        # OpenHands' Message serializer includes name on tool-result messages.
+        messages = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "ls", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "c1", "name": "ls", "content": "ok"},
+        ]
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": messages})
+
+        assert params.model_dump(exclude_unset=True)["messages"][2] == messages[2]
+
+    def test_tool_message_accepts_image_parts(self) -> None:
+        # A vision tool may return the image it loaded inside its result for a vision-capable model to see.
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": [
+                {"type": "text", "text": "Image loaded."},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "auto"}},
+            ],
+        }
+        messages = [
+            {"role": "user", "content": "What color is the image?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "load_image", "arguments": "{}"}}
+                ],
+            },
+            tool_message,
+        ]
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": messages})
+
+        assert params.model_dump(exclude_unset=True)["messages"][2] == tool_message
+
+    @pytest.mark.parametrize(
+        "part",
+        [
+            {"type": "input_audio", "input_audio": {"data": "YWJj", "format": "wav"}},
+            {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,YWJj"}},
+        ],
+        ids=["audio", "video"],
+    )
+    def test_tool_message_refuses_other_media_parts(self, part: dict) -> None:
+        tool_message = {"role": "tool", "tool_call_id": "c1", "content": [{"type": "text", "text": "x"}, part]}
+
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": [tool_message]})
+
     def test_custom_tool_and_training_tool_call_round_trip(self) -> None:
         payload = {
             "messages": [
@@ -1016,6 +1647,34 @@ class TestNeMoGymChatCompletionSchemas:
 
         assert round_tripped == completion
         assert isinstance(completion.choices[0].message.tool_calls[0], NeMoGymChatCompletionMessageCustomToolCall)
+
+    def test_accepts_provider_specific_service_tier(self) -> None:
+        """Third-party providers return tier strings outside the SDK's fixed enum.
+
+        The SDK ``ChatCompletion.service_tier`` is a closed ``Literal``, so a
+        non-OpenAI value would otherwise fail validation and turn the model
+        server response into a 500.
+        """
+        payload = {
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-test",
+            "service_tier": "on-demand",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "hi"},
+                }
+            ],
+        }
+        with pytest.raises(ValidationError):
+            ChatCompletion.model_validate(payload)
+
+        completion = NeMoGymChatCompletion.model_validate(payload)
+
+        assert completion.service_tier == "on-demand"
 
 
 class TestNeMoGymFunctionCallOutput:
@@ -1939,7 +2598,7 @@ def test_duplicate_type_tags_are_documented() -> None:
     They also make an unrecognized item report errors from every union member.
     """
     duplicates = {tag for tag, owners in GYM_INPUT_TAG_OWNERS.items() if len(owners) > 1}
-    assert duplicates == {"message", "function_call", "reasoning"}, (
+    assert duplicates == {"message", "function_call", "custom_tool_call", "reasoning"}, (
         f"duplicate type tags changed: {sorted(duplicates)}. Each duplicate widens the error "
         f"report for an unrecognised item; update this test if the change is intended."
     )
@@ -1967,7 +2626,11 @@ def test_chat_request_field_set_matches_sdk_without_deprecated_fields() -> None:
     Deprecated fields remain disabled.
     """
     sdk_fields = set(get_type_hints(CompletionCreateParamsNonStreaming, include_extras=True))
-    expected = (sdk_fields - {"function_call", "functions"}) | CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
+    expected = (
+        (sdk_fields - {"function_call", "functions"})
+        | CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
+        | CHAT_REQUEST_IGNORED_CLIENT_FIELDS
+    )
     actual = set(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields)
     assert actual == expected, (
         f"openai {openai.__version__} Chat request fields changed: "
@@ -1997,6 +2660,7 @@ def test_response_field_set_is_pinned() -> None:
         "max_output_tokens",
         "max_tool_calls",
         "metadata",
+        "metrics",  # Gym extension: provider metrics preserved by the converter.
         "model",
         "moderation",
         "object",
@@ -2027,3 +2691,209 @@ def test_response_field_set_is_pinned() -> None:
         f"openai {openai.__version__} changed Response's field set: added={added} removed={removed}.\n"
         f"Decide what Gym does with each, then update this list."
     )
+
+
+_PUBLIC_WIRE_MODELS = [
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponse,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymChatCompletion,
+]
+
+
+def _generator_schema_paths(schema: Any, path: str, definitions: Dict[str, Any], seen: frozenset[str]) -> List[str]:
+    """Return the field path of every ``generator`` schema reachable from ``schema``."""
+    if isinstance(schema, list):
+        return [found for item in schema for found in _generator_schema_paths(item, path, definitions, seen)]
+    if not isinstance(schema, dict):
+        return []
+    schema_type = schema.get("type")
+    if schema_type == "generator":
+        return [path]
+    if schema_type == "definitions":
+        definitions = {**definitions, **{item["ref"]: item for item in schema["definitions"]}}
+        return _generator_schema_paths(schema["schema"], path, definitions, seen)
+    if schema_type == "definition-ref":
+        ref = schema["schema_ref"]
+        if ref in seen:
+            return []
+        return _generator_schema_paths(definitions[ref], path, definitions, seen | {ref})
+    if schema_type in ("model-fields", "typed-dict"):
+        owner = f"{schema['cls'].__name__}:" if schema_type == "typed-dict" else ""
+        return [
+            found
+            for name, field in schema["fields"].items()
+            for found in _generator_schema_paths(field, f"{path}.{owner}{name}", definitions, seen)
+        ]
+    return [
+        found
+        for value in schema.values()
+        if isinstance(value, (dict, list))
+        for found in _generator_schema_paths(value, path, definitions, seen)
+    ]
+
+
+@pytest.mark.parametrize("model", _PUBLIC_WIRE_MODELS, ids=lambda m: m.__name__)
+def test_public_wire_models_have_no_lazy_iterable_fields(model: type) -> None:
+    """Pydantic validates an ``Iterable`` field into an iterator that can be read only once.
+
+    orjson cannot encode it, ``model_copy(deep=True)`` cannot pickle it,
+    and a second ``model_dump`` returns an empty list.
+    """
+    paths = _generator_schema_paths(model.__pydantic_core_schema__, model.__name__, {}, frozenset())
+    assert not paths, (
+        f"{paths} validate into lazy iterators.\n"
+        f"Fix: add a Gym copy of the SDK type that declares the field as a List."
+    )
+
+
+@pytest.mark.parametrize(
+    "gym_union, sdk_union",
+    [
+        (openai_utils_module.NeMoGymToolParam, ToolParam),
+        (openai_utils_module.NeMoGymToolChoice, ToolChoice),
+        (openai_utils_module.NeMoGymChatCompletionToolChoiceOptionParam, ChatCompletionToolChoiceOptionParam),
+    ],
+    ids=["ToolParam", "ToolChoice", "ChatCompletionToolChoiceOptionParam"],
+)
+def test_list_copies_of_sdk_unions_keep_every_member_in_order(gym_union: Any, sdk_union: Any) -> None:
+    """Each Gym union member is the SDK member or a subclass of it, so no SDK shape is dropped or reordered."""
+    gym_members = get_args(gym_union)
+    sdk_members = get_args(sdk_union)
+    assert len(gym_members) == len(sdk_members), (
+        f"openai {openai.__version__} changed the members of {sdk_union}.\nFix: mirror the change in {gym_union}."
+    )
+    for gym_member, sdk_member in zip(gym_members, sdk_members):
+        # A TypedDict subclass records its SDK base in __orig_bases__ rather than __mro__.
+        assert gym_member == sdk_member or sdk_member in getattr(gym_member, "__orig_bases__", ())
+
+
+@pytest.mark.parametrize(
+    "model, payload",
+    [
+        (
+            NeMoGymResponseCreateParamsNonStreaming,
+            {
+                "input": "q",
+                "tools": [
+                    {
+                        "type": "namespace",
+                        "name": "ns",
+                        "description": "d",
+                        "tools": [{"type": "function", "name": "f", "parameters": {}}],
+                    }
+                ],
+            },
+        ),
+        (
+            NeMoGymResponseCreateParamsNonStreaming,
+            {
+                "input": "q",
+                "tool_choice": {"type": "allowed_tools", "mode": "auto", "tools": [{"type": "function", "name": "f"}]},
+            },
+        ),
+        (
+            NeMoGymResponseCreateParamsNonStreaming,
+            {
+                "input": "q",
+                "tools": [
+                    {
+                        "type": "file_search",
+                        "vector_store_ids": ["vs_1"],
+                        "filters": {
+                            "type": "and",
+                            "filters": [
+                                {"type": "eq", "key": "a", "value": "x"},
+                                {"type": "or", "filters": [{"type": "eq", "key": "b", "value": "y"}]},
+                            ],
+                        },
+                    }
+                ],
+            },
+        ),
+        (
+            NeMoGymResponseCreateParamsNonStreaming,
+            {
+                "input": "q",
+                "tools": [
+                    {
+                        "type": "shell",
+                        "environment": {
+                            "type": "container_auto",
+                            "network_policy": {
+                                "type": "allowlist",
+                                "allowed_domains": ["example.com"],
+                                "domain_secrets": [{"domain": "example.com", "name": "TOKEN", "value": "v"}],
+                            },
+                            "skills": [{"type": "skill_reference", "skill_id": "skill_1"}],
+                        },
+                    },
+                    {
+                        "type": "shell",
+                        "environment": {"type": "local", "skills": [{"name": "n", "description": "d", "path": "/p"}]},
+                    },
+                ],
+            },
+        ),
+        (
+            NeMoGymChatCompletionCreateParamsNonStreaming,
+            {
+                "messages": [{"role": "user", "content": "q"}],
+                "prediction": {"type": "content", "content": [{"type": "text", "text": "p"}]},
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "allowed_tools": {"mode": "auto", "tools": [{"type": "function", "function": {"name": "f"}}]},
+                },
+            },
+        ),
+    ],
+    ids=["namespace_tools", "allowed_tool_choice", "compound_filter", "shell_skills", "chat_prediction_tool_choice"],
+)
+def test_requests_with_sdk_iterable_fields_encode_copy_and_dump_repeatedly(model: type, payload: dict) -> None:
+    """``ServerClient.request`` encodes a python-mode dump with orjson; agents deep-copy and re-send request bodies."""
+    params = model.model_validate(payload)
+
+    for _ in range(2):
+        assert orjson.loads(orjson.dumps(params.model_dump(exclude_unset=True))) == payload
+        assert params.model_dump(mode="json", exclude_unset=True) == payload
+    assert orjson.loads(orjson.dumps(params.model_copy(deep=True).model_dump(exclude_unset=True))) == payload
+
+
+def test_response_accepts_provider_specific_service_tier() -> None:
+    """Third-party providers return tier strings outside the SDK's fixed enum.
+
+    The SDK ``Response.service_tier`` is a closed ``Literal``, so a
+    non-OpenAI value would otherwise fail validation and turn the model
+    server response into a 500.
+    """
+    payload = _response_with_output([]) | {"service_tier": "on-demand"}
+
+    with pytest.raises(ValidationError):
+        Response.model_validate(payload)
+
+    response = NeMoGymResponse.model_validate(payload)
+
+    assert response.service_tier == "on-demand"
+
+
+def test_chat_request_drops_litellm_provider_specific_fields_from_history() -> None:
+    from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+
+    params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+        {
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+                    ],
+                    "provider_specific_fields": {"refusal": None},
+                },
+            ]
+        }
+    )
+
+    assert "provider_specific_fields" not in params.messages[1]
+    assert params.messages[1]["tool_calls"][0]["function"]["name"] == "bash"

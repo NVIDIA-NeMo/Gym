@@ -263,7 +263,6 @@ def _label_to_bool(label: Optional[str]) -> Optional[bool]:
 
 
 class MathProofJudgementResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: MathProofJudgementConfig
 
     # --- verify ------------------------------------------------------------

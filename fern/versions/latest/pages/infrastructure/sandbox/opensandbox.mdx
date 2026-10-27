@@ -90,6 +90,7 @@ sandbox:
     create:
       request_timeout_s: 1200
       timeout_s: 1500
+      fail_fast_on_pending: false
       connect_attempt_timeout_s: 1500
       skip_health_check: false
       retries: 10
@@ -109,8 +110,23 @@ sandbox:
 ```
 
 Keep `create.skip_health_check: false` to avoid commands racing sandbox readiness.
-Keep `create.timeout_s` above the task's `ready_timeout_s`: the shipped mini-SWE
-values are 1500 and 1200 seconds respectively. Adjust them together.
+
+Three create settings work against the task's `ready_timeout_s`:
+
+- `create.request_timeout_s` (else `connection.request_timeout_s`) is capped at `ready_timeout_s` for the
+  create request, which blocks while the pod is allocated, so a pod the cluster cannot place fails within one
+  ready timeout. When neither is configured the SDK's own default (30 s) applies and stays on the handle.
+- `create.timeout_s` bounds one create attempt as configured: the request plus the SDK's readiness wait,
+  which starts only once the request returns. Unset, it defaults to the capped request timeout plus
+  `ready_timeout_s` plus 30 s. A configured value below that sum is respected and logged once.
+- `create.fail_fast_on_pending` (default `false`): a create whose sandbox is still `Pending` at the timeout
+  is deleted and retried like any other timeout, with the pending reason in the log, because `Pending` also
+  covers a full cluster and an image still pulling. Set it to `true` to report it once instead, when every
+  spec is known to be placeable and a pod still `Pending` at the ready timeout means a request above a limit.
+
+A `resource_requests` entry above the sandbox's limit is clamped to the limit with a warning; a spec that
+declares no `resources` is held to the SDK's default limits (1 CPU, 2048 MiB), since those are what the
+server applies.
 
 Run an agent with the provider config by passing it alongside the agent and model configs:
 
@@ -129,6 +145,35 @@ The provider constructor accepts four optional config sections:
 | `create` | Sandbox create timeout, retry, image pull policy, and health-check behavior. |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
 | `operations` | Retry and timeout behavior for SDK operations after create, including command retries, close timeout, background command polling, and the dedicated `status_poll_timeout_s` budget for background status polls. |
+
+## Image policy and setup commands
+
+Two blocks belong to the deployment, not to any task or server. `images.rewrites` is an ordered list of
+`{from, to}` prefix rules applied to every image a sandbox asks for, for a mirror or a derived image that adds
+what the platform needs. `images.auth` maps an image prefix to `{username, password}`; the longest matching
+prefix is sent with the pull, unless the spec carries its own `image_auth`. `setup.commands` run as root in
+every new sandbox after it is ready and before it is handed out, within `setup.timeout_s` each; a failing
+command fails the create and is not retried. A sandbox whose image runs as a non-root user on a cell that drops
+`CAP_SETUID` refuses the switch to root before the command runs; the command then runs as the image's own user
+(logged for each such command), so one written to no-op where it does not apply still does, and one that needs root
+there fails the create on its own result. `setup.env` is set in every sandbox under the spec's own
+variables, for platform knobs such as the exec daemon's grace period. Keep task-specific settings out of these
+blocks: they apply to everything the provider creates. That includes Compose sidecars and the provider's own
+helper containers (an Alpine image with neither Python nor `apt-get`), so a command must no-op where it does
+not apply, as the example below does.
+
+```yaml
+sandbox:
+  opensandbox:
+    images:
+      rewrites:
+        - {from: "harborframework/", to: "registry.example/mirror/"}
+      auth:
+        "registry.example/": {username: ${registry_username}, password: ${registry_password}}
+    setup:
+      commands:
+        - "command -v python3 >/dev/null || ! command -v apt-get >/dev/null || (apt-get update && apt-get install -y --no-install-recommends python3)"
+```
 
 ## SandboxSpec Provider Options
 
@@ -153,6 +198,7 @@ Supported options are:
 | Option | Purpose |
 | --- | --- |
 | `image_auth` | Registry username and password passed to the OpenSandbox SDK for private image pulls. |
+| `network_policy` | The sandbox's egress policy, passed to the OpenSandbox SDK `NetworkPolicy` at create (see Network Policy). |
 | `platform` | Mapping passed to the OpenSandbox SDK `PlatformSpec`, such as `os` and `arch`. |
 | `snapshot_id` | OpenSandbox snapshot ID to create from instead of only an image. |
 | `volumes` | List of mappings passed to the OpenSandbox SDK `Volume` model. |
@@ -160,6 +206,28 @@ Supported options are:
 | `extensions` | String map passed to OpenSandbox create extensions. |
 
 Unknown provider option keys raise `ValueError`; values with the wrong type raise `TypeError`. This catches config drift before a sandbox allocation is attempted.
+
+## Network Policy
+
+`provider_options.network_policy` is the sandbox's egress policy: a `defaultAction` (`allow` or `deny`) and ordered `egress` rules of `{action, target}`, where a target is a host name, a `*.domain` wildcard or an IP literal. `restricted_network_policy` in `nemo_gym.sandbox.agent_tools` builds one from endpoint URLs; the Harbor environment server's `phase_network_policy` (`environment_servers/harbor/network_policy.py`) builds one from a Harbor phase's `network_mode` and `allowed_hosts`.
+
+```yaml
+sandbox_spec:
+  provider_options:
+    network_policy:
+      defaultAction: deny
+      egress:
+        - { action: allow, target: pypi.org }
+        - { action: allow, target: "*.nvidia.com" }
+```
+
+What the control plane does with it, verified live with the OpenSandbox 0.1.15 SDK against an OpenSandbox deployment (October 2026). The probes read neither the control plane's own version nor its egress enforcement mode, `dns` or `dns+nft`, which is a server setting (see [OpenSandbox Best Practices](/infrastructure/sandbox/opensandbox-best-practices)). Confirm that setting separately; a connection timeout alone does not identify the enforcement layer:
+
+- A sandbox created without a `network_policy` has no egress sidecar: it is unrestricted, and its policy can neither be read nor changed afterwards (the egress endpoints answer 502).
+- A sandbox created with a policy keeps its `defaultAction` for life. The SDK's `patch_egress_rules` and `delete_egress_rules` change the rules of a running sandbox and the change is enforced within seconds, but no call changes `defaultAction`, and `*` is not a catch-all target: a `deny *` rule under `defaultAction: allow` blocks nothing, and an `allow *` rule under `deny` opens nothing.
+- Under `defaultAction: deny`, name resolution failed and a connection to a raw IP timed out on the deployment probed. The probes did not establish which layer caused the timeout: `dns` filters name resolution only, so a hard-coded IP bypasses the policy and a `no-network` phase is weaker there, while `dns+nft` additionally enforces at the IP layer; confirm which mode your cluster runs before relying on it. An `allow` rule for a host name, a `*.domain` wildcard or an IP literal opened exactly that target.
+
+A public sandbox therefore cannot be switched to a restricted policy once it runs. A workload with a restricted phase creates that phase's sandbox restricted: the Harbor environment server applies a task's `[verifier].network_mode` to the separate verifier's own sandbox at creation (see the Harbor environment server README), which restricts that sandbox for its whole life, image entrypoint and artifact staging included, where Harbor restricts only the verify call itself; and a harness that needs a restricted agent sandbox passes the policy at create as the sandboxed agents do.
 
 ## Relevant SandboxSpec Fields
 
@@ -173,7 +241,7 @@ Unknown provider option keys raise `ValueError`; values with the wrong type rais
 | `metadata` | Passed to OpenSandbox create after provider-specific normalization. |
 | `resources` | Mapped to OpenSandbox resource quantities. |
 | `entrypoint` | Passed to OpenSandbox create when set. |
-| `provider_options` | Per-sandbox OpenSandbox options such as `image_auth`, `platform`, `snapshot_id`, `volumes`, `skip_health_check`, and `extensions`. |
+| `provider_options` | Per-sandbox OpenSandbox options such as `image_auth`, `network_policy`, `platform`, `snapshot_id`, `volumes`, `skip_health_check`, and `extensions`. |
 
 ## Resource Mapping
 

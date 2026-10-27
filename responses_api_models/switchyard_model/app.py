@@ -200,7 +200,6 @@ class SwitchyardModelConfig(BaseResponsesAPIModelConfig):
 
 
 class SwitchyardModel(SimpleResponsesAPIModel):
-    ray_enabled = False
     config: SwitchyardModelConfig
 
     def model_post_init(self, context: Any) -> None:

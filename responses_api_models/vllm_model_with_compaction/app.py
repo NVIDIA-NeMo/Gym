@@ -16,7 +16,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.responses_streaming import sanitize_streaming_responses_body
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.app import VLLMModel
 
@@ -47,8 +46,6 @@ def _validate_context_compaction_params(body: Dict[str, Any]) -> VLLMContextComp
 
 class VLLMModelWithCompaction(VLLMModel):
     """Dedicated vLLM adapter for context-compacted generation."""
-
-    ray_enabled = False
 
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset({("POST", "/tokenize")})
     _TOKENIZE_CHAT_FIELDS = (*VLLMModel._TOKENIZE_CHAT_FIELDS, "required_prefix_token_ids")
@@ -85,7 +82,7 @@ class VLLMModelWithCompaction(VLLMModel):
             await self._finalize_served_response(response)
             return dispatched
 
-        cleaned, namespace_map = sanitize_streaming_responses_body(body)
+        cleaned, namespace_map = self._sanitize_streaming_responses_body(body)
         params = _validate_context_compaction_params(cleaned)
         return await self._stream_responses(request, params, namespace_map)
 
@@ -118,7 +115,9 @@ class VLLMModelWithCompaction(VLLMModel):
         standard_body = NeMoGymResponseCreateParamsNonStreaming.model_validate(
             body.model_dump(exclude={"required_prefix_token_ids"})
         )
-        standard_chat_params = self._converter.responses_to_chat_completion_create_params(standard_body)
+        standard_chat_params = self._converter.responses_to_chat_completion_create_params(
+            standard_body, drop_unrepresentable_request_fields=self.config.drop_unrepresentable_request_fields
+        )
         chat_params = VLLMContextCompactionChatCompletionCreateParams.model_validate(
             standard_chat_params.model_dump(exclude_unset=True)
             | {"required_prefix_token_ids": required_prefix_token_ids}

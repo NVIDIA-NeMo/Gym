@@ -13,12 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
+from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar, Optional
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import orjson
 import pytest
+from mlflow.exceptions import MlflowException
+from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
 from mlflow.utils.validation import (
     MAX_ENTITY_KEY_LENGTH,
     MAX_PARAM_VAL_LENGTH,
@@ -42,6 +46,8 @@ from nemo_gym.exporters import (
 from nemo_gym.exporters.base import BaseExporter
 from nemo_gym.exporters.mlflow import MLflowExporter, _flatten_config, _sanitize_key
 from nemo_gym.exporters.wandb import WandbExporter
+from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.secret_utils import recursively_hide_secrets
 
 
 class RecordingConfig(ExporterConfig):
@@ -117,7 +123,9 @@ def mlflow_config() -> DictConfig:
 def _register_recording(monkeypatch: MonkeyPatch) -> MagicMock:
     """Point the registry at RecordingExporter and hand back the (spied) lazy loader."""
     loader = MagicMock(return_value=RecordingExporter)
-    monkeypatch.setattr(exporters_module, "EXPORTER_REGISTRY", {"recording": (RecordingConfig, "recording")})
+    monkeypatch.setattr(
+        exporters_module, "EXPORTER_REGISTRY", {"recording": (RecordingConfig, "recording", "recording")}
+    )
     monkeypatch.setattr(exporters_module, "_load_exporter_class", loader)
     return loader
 
@@ -126,10 +134,71 @@ def _open_mlflow_exporter(monkeypatch: MonkeyPatch, config: DictConfig) -> tuple
     client = MagicMock()
     client.get_experiment_by_name.return_value = MagicMock(experiment_id="exp-1")
     client.create_run.return_value = MagicMock(info=MagicMock(run_id="run-1"))
+    client.get_run.return_value.info.lifecycle_stage = "active"
     monkeypatch.setattr(mlflow_module, "MlflowClient", MagicMock(return_value=client))
     exporter = MLflowExporter(config)
     exporter.setup()
     return exporter, client
+
+
+class FakeMlflowClient:
+    """An in-memory tracking server that, like MLflow's, refuses to change a logged param."""
+
+    def __init__(self) -> None:
+        self.params: dict[str, str] = {}
+        self.tags: dict[str, str] = {}
+        self.artifacts: dict[str, Any] = {}
+        self.logged_param_batches: list[list[str]] = []
+
+    def get_experiment_by_name(self, name: str) -> SimpleNamespace:
+        return SimpleNamespace(experiment_id="exp-1")
+
+    def create_run(self, experiment_id: str, run_name: str, tags: Optional[dict[str, str]]) -> SimpleNamespace:
+        return SimpleNamespace(info=SimpleNamespace(run_id="run-1"))
+
+    def update_run(self, run_id: str, status: str) -> None:
+        pass
+
+    def set_terminated(self, run_id: str, status: str) -> None:
+        pass
+
+    def get_run(self, run_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            info=SimpleNamespace(lifecycle_stage="active", status="FINISHED"),
+            data=SimpleNamespace(params=dict(self.params), tags=dict(self.tags)),
+        )
+
+    def set_tag(self, run_id: str, key: str, value: str) -> None:
+        self.tags[key] = value
+
+    def log_dict(self, run_id: str, dictionary: dict[str, Any], artifact_file: str) -> None:
+        self.artifacts[artifact_file] = deepcopy(dictionary)
+
+    def log_batch(self, run_id: str, params: tuple = ()) -> None:
+        for param in params:
+            if self.params.get(param.key, param.value) != param.value:
+                raise MlflowException(
+                    f"Changing param values is not allowed. Param with key='{param.key}' was already logged",
+                    error_code=INVALID_PARAMETER_VALUE,
+                )
+        self.params.update({param.key: param.value for param in params})
+        self.logged_param_batches.append([param.key for param in params])
+
+
+def _segment_config(mlflow_config: DictConfig, tmp_path: Path, *, host: str, port: int) -> DictConfig:
+    config = deepcopy(mlflow_config)
+    config["output_jsonl_fpath"] = str(tmp_path / "rollouts.jsonl")
+    config["resume_from_cache"] = True
+    config["policy_model"] = {"vllm_model": {"host": host, "port": port, "model": "qwen"}}
+    config["seed"] = 7
+    return config
+
+
+def _run_segment(monkeypatch: MonkeyPatch, client: FakeMlflowClient, config: DictConfig) -> None:
+    """One job of an eval: open the exporter, log the config through the guarded call sites use, close."""
+    monkeypatch.setattr(mlflow_module, "MlflowClient", MagicMock(return_value=client))
+    with MLflowExporter(config) as exporter:
+        exporter.export_config()
 
 
 class TestRegistry:
@@ -167,6 +236,24 @@ class TestRegistry:
         # The masking must not have mutated the config the exporter authenticates with.
         assert wandb_config["wandb_api_key"] == "secret-key"  # pragma: allowlist secret
 
+    def test_exported_config_masks_every_value_of_a_secrets_mapping(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
+    ) -> None:
+        """The Harbor server's `secrets` are keyed by environment variable name: one without a secret-shaped
+        substring (`JUDGE_AUTH`) must still never reach a tracking backend."""
+        _register_recording(monkeypatch)
+        canary = "sk-FAKE-CANARY"  # pragma: allowlist secret
+        wandb_config["harbor_environment_server"] = {
+            "environment_servers": {"harbor": {"secrets": {"JUDGE_AUTH": canary, "JUDGE_API_KEY": canary}}}
+        }
+
+        exporter = setup_exporters(wandb_config)[0]
+
+        logged = exporter.configs[0]["harbor_environment_server"]["environment_servers"]["harbor"]["secrets"]
+        assert dict(logged) == {"JUDGE_AUTH": "****", "JUDGE_API_KEY": "****"}
+        live = wandb_config["harbor_environment_server"]["environment_servers"]["harbor"]["secrets"]
+        assert live["JUDGE_AUTH"] == canary
+
     def test_setup_failure_is_skipped_rather_than_raised(
         self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
     ) -> None:
@@ -175,6 +262,24 @@ class TestRegistry:
 
         assert setup_exporters(wandb_config) == []
         assert get_exporters() == []
+
+    def test_missing_sdk_is_skipped_with_an_actionable_install_hint(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setattr(
+            exporters_module, "EXPORTER_REGISTRY", {"recording": (RecordingConfig, "recording", "recording")}
+        )
+        monkeypatch.setattr(
+            exporters_module,
+            "_load_exporter_class",
+            MagicMock(side_effect=ImportError("No module named 'recording_sdk'")),
+        )
+
+        with caplog.at_level("WARNING"):
+            assert setup_exporters(wandb_config) == []
+
+        assert get_exporters() == []
+        assert "pip install nemo-gym[recording]" in caplog.text
 
     def test_setup_replaces_previously_opened_exporters(
         self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
@@ -258,6 +363,15 @@ class TestWandbConfigAvailability:
     def test_a_masked_key_does_not_count_as_configured(self) -> None:
         assert not WANDBConfig(wandb_project="proj", wandb_name="run", wandb_api_key="****").is_available
 
+    def test_a_config_masked_for_display_is_not_available(self, wandb_config: DictConfig) -> None:
+        # `gym env resolve` masks the live config before setting up exporters, so masking must switch the
+        # exporter off through the key alone and leave the run's name readable.
+        recursively_hide_secrets(wandb_config)
+        masked = WANDBConfig.model_validate(wandb_config)
+
+        assert (masked.wandb_project, masked.wandb_name) == ("proj", "run")
+        assert not masked.is_available
+
 
 class TestWandbExporter:
     def test_setup_initializes_a_run_under_the_results_dir(
@@ -272,6 +386,93 @@ class TestWandbExporter:
 
         init.assert_called_once_with(project="proj", name="run", dir=str(Path("/tmp/results") / "wandb"))
         assert wandb_module.environ["WANDB_API_KEY"] == "secret-key"  # pragma: allowlist secret
+
+    @pytest.mark.parametrize(
+        "resumes",
+        [
+            {"resume_from_cache": True},
+            {"resubmit": True, "resume_from_cache": True},
+            {"judge_failed_only": True, "append": True, "resume_from_cache": False},
+        ],
+        ids=["resume", "normalized resubmit", "append recovery"],
+    )
+    def test_a_resumed_run_resumes_the_wandb_run_recorded_next_to_its_output(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig, tmp_path, resumes: dict
+    ) -> None:
+        """A resubmit continues its output, so it continues the tracking run too."""
+        wandb_config["output_jsonl_fpath"] = str(tmp_path / "rollouts.jsonl")
+        for key, value in resumes.items():
+            wandb_config[key] = value
+        init = MagicMock(return_value=MagicMock(id="run-1"))
+        monkeypatch.setattr(wandb_module.wandb, "init", init)
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+
+        WandbExporter(wandb_config).setup()
+        WandbExporter(wandb_config).setup()
+
+        assert (tmp_path / "rollouts_wandb_run_id").read_text() == "run-1"
+        first, second = init.call_args_list
+        assert "id" not in first.kwargs
+        assert (second.kwargs["id"], second.kwargs["resume"]) == ("run-1", "allow")
+
+    @pytest.mark.parametrize("fresh", [{}, {"judge_failed_only": True}], ids=["fresh run", "fresh recovery"])
+    def test_a_fresh_run_into_the_same_output_starts_a_new_wandb_run(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig, tmp_path, fresh: dict
+    ) -> None:
+        wandb_config["output_jsonl_fpath"] = str(tmp_path / "rollouts.jsonl")
+        for key, value in fresh.items():
+            wandb_config[key] = value
+        (tmp_path / "rollouts_wandb_run_id").write_text("old-run")
+        init = MagicMock(return_value=MagicMock(id="new-run"))
+        monkeypatch.setattr(wandb_module.wandb, "init", init)
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+
+        WandbExporter(wandb_config).setup()
+
+        assert "id" not in init.call_args.kwargs
+        assert (tmp_path / "rollouts_wandb_run_id").read_text() == "new-run"
+
+    def test_a_resume_that_starts_over_tracks_a_new_wandb_run(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig, tmp_path
+    ) -> None:
+        wandb_config["output_jsonl_fpath"] = str(tmp_path / "rollouts.jsonl")
+        wandb_config["resume_from_cache"] = True
+        (tmp_path / "rollouts_wandb_run_id").write_text("old-run")
+        old, new = MagicMock(id="old-run"), MagicMock(id="new-run")
+        init = MagicMock(side_effect=[old, new])
+        monkeypatch.setattr(wandb_module.wandb, "init", init)
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+
+        exporter = WandbExporter(wandb_config)
+        exporter.setup()
+        exporter.start_over()
+
+        reopen, fresh = init.call_args_list
+        assert reopen.kwargs["id"] == "old-run" and "id" not in fresh.kwargs
+        old.finish.assert_called_once_with()
+        new.config.update.assert_called_once()
+        assert (exporter.run, exporter.reopened) == (new, False)
+        assert (tmp_path / "rollouts_wandb_run_id").read_text() == "new-run"
+
+    def test_a_resume_that_starts_over_opens_a_new_wandb_run_when_finishing_the_old_one_fails(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig, tmp_path, caplog
+    ) -> None:
+        wandb_config["output_jsonl_fpath"] = str(tmp_path / "rollouts.jsonl")
+        wandb_config["resume_from_cache"] = True
+        (tmp_path / "rollouts_wandb_run_id").write_text("old-run")
+        old, new = MagicMock(id="old-run"), MagicMock(id="new-run")
+        old.finish.side_effect = RuntimeError("service unavailable")
+        monkeypatch.setattr(wandb_module.wandb, "init", MagicMock(side_effect=[old, new]))
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+
+        exporter = WandbExporter(wandb_config)
+        exporter.setup()
+        exporter.start_over()
+
+        assert "could not restore the reopened run" in caplog.text
+        assert (exporter.run, exporter.reopened) == (new, False)
+        new.config.update.assert_called_once()
+        assert (tmp_path / "rollouts_wandb_run_id").read_text() == "new-run"
 
     def test_logging_before_setup_raises(self, wandb_config: DictConfig) -> None:
         with pytest.raises(RuntimeError, match="not open"):
@@ -405,6 +606,14 @@ class TestMLflowConfigAvailability:
 
         assert not masked.is_available
 
+    def test_a_config_masked_for_display_is_not_available(self, mlflow_config: DictConfig) -> None:
+        recursively_hide_secrets(mlflow_config)
+        masked = MLFlowConfig.model_validate(mlflow_config)
+
+        assert masked.mlflow_tracking_uri == "https://tracking.example"
+        assert (masked.mlflow_experiment_name, masked.mlflow_run_name) == ("gym", "run")
+        assert not masked.is_available
+
 
 class TestMLflowExporter:
     def test_setup_creates_a_run_in_the_named_experiment(
@@ -416,9 +625,45 @@ class TestMLflowExporter:
 
         mlflow_module.MlflowClient.assert_called_once_with(tracking_uri="https://tracking.example")
         client.create_experiment.assert_not_called()
-        client.create_run.assert_called_once_with("exp-1", run_name="run")
+        client.create_run.assert_called_once_with("exp-1", run_name="run", tags=None)
         assert exporter.run_id == "run-1"
         assert mlflow_module.environ["MLFLOW_TRACKING_TOKEN"] == "secret-token"  # pragma: allowlist secret
+
+    def test_a_resumed_run_reopens_the_mlflow_run_recorded_next_to_its_output(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig, tmp_path
+    ) -> None:
+        mlflow_config["output_jsonl_fpath"] = str(tmp_path / "rollouts.jsonl")
+        mlflow_config["resume_from_cache"] = True
+
+        first, _ = _open_mlflow_exporter(monkeypatch, mlflow_config)
+        second, client = _open_mlflow_exporter(monkeypatch, mlflow_config)
+
+        assert (tmp_path / "rollouts_mlflow_run_id").read_text() == "run-1"
+        assert (first.run_id, second.run_id) == ("run-1", "run-1")
+        client.create_run.assert_not_called()
+        client.update_run.assert_called_once_with("run-1", status="RUNNING")
+
+    def test_each_reopen_counts_one_more_resume(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig, tmp_path
+    ) -> None:
+        mlflow_config["output_jsonl_fpath"] = str(tmp_path / "rollouts.jsonl")
+        mlflow_config["resume_from_cache"] = True
+        first, created = _open_mlflow_exporter(monkeypatch, mlflow_config)
+        created.set_tag.assert_not_called()
+
+        client = MagicMock()
+        client.get_run.return_value = MagicMock(info=MagicMock(lifecycle_stage="active"), data=MagicMock(tags={}))
+        monkeypatch.setattr(mlflow_module, "MlflowClient", MagicMock(return_value=client))
+        MLflowExporter(mlflow_config).setup()
+        client.get_run.return_value = MagicMock(
+            info=MagicMock(lifecycle_stage="active"), data=MagicMock(tags={"gym_resume_count": "1"})
+        )
+        MLflowExporter(mlflow_config).setup()
+
+        assert client.set_tag.call_args_list == [
+            call("run-1", "gym_resume_count", "1"),
+            call("run-1", "gym_resume_count", "2"),
+        ]
 
     def test_setup_without_a_token_leaves_the_env_var_unset(
         self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig
@@ -442,7 +687,20 @@ class TestMLflowExporter:
         MLflowExporter(mlflow_config).setup()
 
         client.create_experiment.assert_called_once_with("gym")
-        client.create_run.assert_called_once_with("exp-new", run_name="run")
+        client.create_run.assert_called_once_with("exp-new", run_name="run", tags=None)
+
+    def test_setup_passes_run_tags_and_description_as_one_tag_dict(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig
+    ) -> None:
+        mlflow_config["mlflow_run_tags"] = {"model": "m", "benchmark": "b"}
+        mlflow_config["mlflow_run_description"] = "m on b"
+
+        _, client = _open_mlflow_exporter(monkeypatch, mlflow_config)
+
+        # create_run only accepts a dict; the description is MLflow's mlflow.note.content tag.
+        client.create_run.assert_called_once_with(
+            "exp-1", run_name="run", tags={"model": "m", "benchmark": "b", "mlflow.note.content": "m on b"}
+        )
 
     def test_logging_before_setup_raises(self, mlflow_config: DictConfig) -> None:
         with pytest.raises(RuntimeError, match="not open"):
@@ -539,3 +797,273 @@ class TestMLflowExporter:
 
     def test_teardown_without_setup_is_a_noop(self, mlflow_config: DictConfig) -> None:
         MLflowExporter(mlflow_config).teardown()
+
+
+class TestMLflowResumedRunConfig:
+    FIRST_PARAMS: ClassVar[dict[str, str]] = {
+        "policy_model.vllm_model.host": "node-a",
+        "policy_model.vllm_model.port": "8000",
+        "policy_model.vllm_model.model": "qwen",
+        "seed": "7",
+    }
+
+    def test_a_first_segment_logs_its_config_and_every_param(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig, tmp_path: Path
+    ) -> None:
+        client = FakeMlflowClient()
+        first = _segment_config(mlflow_config, tmp_path, host="node-a", port=8000)
+
+        _run_segment(monkeypatch, client, first)
+
+        assert list(client.artifacts) == ["global_config.json"]
+        assert client.artifacts["global_config.json"]["policy_model"]["vllm_model"]["host"] == "node-a"
+        assert self.FIRST_PARAMS.items() <= client.params.items()
+
+    def test_a_resumed_segment_with_a_moved_server_logs_no_error_or_warning(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        client = FakeMlflowClient()
+        _run_segment(monkeypatch, client, _segment_config(mlflow_config, tmp_path, host="node-a", port=8000))
+
+        with caplog.at_level("WARNING"):
+            _run_segment(monkeypatch, client, _segment_config(mlflow_config, tmp_path, host="node-b", port=9000))
+
+        assert [record for record in caplog.records if record.levelname in ("WARNING", "ERROR")] == []
+
+    def test_a_resumed_segment_records_its_changed_config_in_an_artifact_of_its_own(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig, tmp_path: Path
+    ) -> None:
+        client = FakeMlflowClient()
+        _run_segment(monkeypatch, client, _segment_config(mlflow_config, tmp_path, host="node-a", port=8000))
+
+        _run_segment(monkeypatch, client, _segment_config(mlflow_config, tmp_path, host="node-b", port=9000))
+
+        (segment_file,) = [path for path in client.artifacts if path.startswith("config/segment_")]
+        assert segment_file.endswith(".json")
+        assert client.artifacts[segment_file]["policy_model"]["vllm_model"] == {
+            "host": "node-b",
+            "port": 9000,
+            "model": "qwen",
+        }
+        # The first segment's record is kept, not overwritten.
+        assert client.artifacts["global_config.json"]["policy_model"]["vllm_model"]["host"] == "node-a"
+        assert self.FIRST_PARAMS.items() <= client.params.items()
+
+    def test_each_resumed_segment_gets_its_own_config_artifact(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig, tmp_path: Path
+    ) -> None:
+        client = FakeMlflowClient()
+        _run_segment(monkeypatch, client, _segment_config(mlflow_config, tmp_path, host="node-a", port=8000))
+
+        _run_segment(monkeypatch, client, _segment_config(mlflow_config, tmp_path, host="node-b", port=9000))
+        _run_segment(monkeypatch, client, _segment_config(mlflow_config, tmp_path, host="node-c", port=9100))
+
+        hosts = sorted(
+            config["policy_model"]["vllm_model"]["host"]
+            for path, config in client.artifacts.items()
+            if path.startswith("config/segment_")
+        )
+        assert hosts == ["node-b", "node-c"]
+
+    def test_a_resumed_segment_logs_only_params_that_are_not_logged_yet(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig, tmp_path: Path
+    ) -> None:
+        client = FakeMlflowClient()
+        _run_segment(monkeypatch, client, _segment_config(mlflow_config, tmp_path, host="node-a", port=8000))
+        first_segment_batches = len(client.logged_param_batches)
+        second = _segment_config(mlflow_config, tmp_path, host="node-b", port=9000)
+        second["num_repeats"] = 4
+
+        _run_segment(monkeypatch, client, second)
+
+        resumed_keys = [key for batch in client.logged_param_batches[first_segment_batches:] for key in batch]
+        assert resumed_keys == ["num_repeats"]
+        assert client.params["num_repeats"] == "4"
+
+
+@pytest.fixture
+def mlflow_store(tmp_path: Path, monkeypatch: MonkeyPatch, mlflow_config: DictConfig) -> DictConfig:
+    """A run writing `tmp_path / "rollouts.jsonl"` that resumes its output, tracked in a real local MLflow store."""
+    monkeypatch.setenv("MLFLOW_ALLOW_FILE_STORE", "true")
+    config = deepcopy(mlflow_config)
+    config["mlflow_tracking_uri"] = f"file://{tmp_path / 'mlruns'}"
+    config["mlflow_tracking_token"] = None
+    config["output_jsonl_fpath"] = str(tmp_path / "rollouts.jsonl")
+    config["resume_from_cache"] = True
+    return config
+
+
+def _rollout(task: int) -> dict[str, Any]:
+    return {"_ng_task_index": task, "_ng_rollout_index": 0, "reward": 1.0}
+
+
+def _failed_attempt(task: int) -> dict[str, Any]:
+    return {"_ng_task_index": task, "_ng_rollout_index": 0, NG_FAILURE_CLASS_KEY: "agent_run_error"}
+
+
+def _table(client: Any, run_id: str) -> list[dict[str, Any]]:
+    table = orjson.loads(Path(client.download_artifacts(run_id, "rollouts.json")).read_bytes())
+    return [orjson.loads(row[table["columns"].index("Rollout")]) for row in table["data"]]
+
+
+class TestMLflowReopenAgainstARealStore:
+    """The real MLflow client: `log_table` appends to an existing table, and a deleted run cannot be reopened."""
+
+    @pytest.mark.parametrize(
+        "resumes",
+        [
+            {"resume_from_cache": True},
+            {"resubmit": True, "resume_from_cache": True},
+            {"judge_failed_only": True, "append": True, "resume_from_cache": False},
+        ],
+        ids=["resume", "normalized resubmit", "append recovery"],
+    )
+    def test_a_resumed_run_logs_each_landed_rollout_once(self, mlflow_store: DictConfig, resumes: dict) -> None:
+        first = MLflowExporter(mlflow_store)
+        first.setup()
+        first_run = first.run_id
+        first.export_rollouts([_rollout(0), _rollout(1), _failed_attempt(2)])
+        first.teardown()
+        for key, value in resumes.items():
+            mlflow_store[key] = value
+
+        # A resumed job is handed every rollout that landed in its output, the earlier ones too, and its own
+        # attempts: task 2 lands after its failed attempt, and task 3 fails.
+        second = MLflowExporter(mlflow_store)
+        second.setup()
+        second.export_rollouts([_rollout(0), _rollout(1), _rollout(2), _failed_attempt(3)])
+        table = orjson.loads(Path(second.client.download_artifacts(second.run_id, "rollouts.json")).read_bytes())
+        second_run = second.run_id
+        second.teardown()
+
+        assert second_run == first_run
+
+        rows = [orjson.loads(row[table["columns"].index("Rollout")]) for row in table["data"]]
+        assert [(row["_ng_task_index"], NG_FAILURE_CLASS_KEY in row) for row in rows] == [
+            (0, False),
+            (1, False),
+            (2, True),
+            (2, False),
+            (3, True),
+        ]
+
+    @pytest.mark.parametrize("fresh", [{}, {"judge_failed_only": True}], ids=["fresh run", "fresh recovery"])
+    def test_a_fresh_run_into_the_same_output_starts_a_new_run(self, mlflow_store: DictConfig, fresh: dict) -> None:
+        first = MLflowExporter(mlflow_store)
+        first.setup()
+        first_run = first.run_id
+        first.teardown()
+
+        mlflow_store["resume_from_cache"] = False
+        for key, value in fresh.items():
+            mlflow_store[key] = value
+        fresh = MLflowExporter(mlflow_store)
+        fresh.setup()
+        fresh_run = fresh.run_id
+        fresh.teardown()
+
+        assert fresh_run != first_run
+        assert Path(mlflow_store["output_jsonl_fpath"]).with_name("rollouts_mlflow_run_id").read_text() == fresh_run
+
+    @pytest.mark.parametrize("failure_class", ["absent", None], ids=["no failure class", "null failure class"])
+    def test_a_no_persist_attempt_does_not_hide_the_rollout_that_lands(
+        self, mlflow_store: DictConfig, failure_class: Optional[str]
+    ) -> None:
+        """Collection writes a no-persist attempt nowhere but still uploads it, so it is no landed rollout."""
+        attempt = {"_ng_task_index": 2, "_ng_rollout_index": 0, NG_NO_PERSIST_KEY: True, "reward": 0.0}
+        if failure_class is None:
+            attempt[NG_FAILURE_CLASS_KEY] = None
+        first = MLflowExporter(mlflow_store)
+        first.setup()
+        first.export_rollouts([_rollout(0), attempt])
+        first.teardown()
+
+        second = MLflowExporter(mlflow_store)
+        second.setup()
+        second.export_rollouts([_rollout(0), _rollout(2)])
+        rows = _table(second.client, second.run_id)
+        second.teardown()
+
+        assert [(row["_ng_task_index"], NG_NO_PERSIST_KEY in row) for row in rows] == [
+            (0, False),
+            (2, True),
+            (2, False),
+        ]
+
+    def test_a_resume_that_starts_over_tracks_a_new_run_and_leaves_the_old_one(self, mlflow_store: DictConfig) -> None:
+        first = MLflowExporter(mlflow_store)
+        first.setup()
+        old_run = first.run_id
+        first.export_rollouts([_rollout(0)])
+        first.teardown()
+
+        # Collection finds nothing to resume and starts the output anew, where task 0 now scores 0.
+        second = MLflowExporter(mlflow_store)
+        second.setup()
+        assert second.run_id == old_run
+        second.start_over()
+        second.export_rollouts([{**_rollout(0), "reward": 0.0}])
+        client, new_run = second.client, second.run_id
+        second.teardown()
+
+        assert new_run != old_run
+        assert Path(mlflow_store["output_jsonl_fpath"]).with_name("rollouts_mlflow_run_id").read_text() == new_run
+        assert [row["reward"] for row in _table(client, new_run)] == [0.0]
+        assert [row["reward"] for row in _table(client, old_run)] == [1.0]
+        old = client.get_run(old_run)
+        assert (old.info.status, old.data.tags.get("gym_resume_count")) == ("FINISHED", None)
+        assert client.get_run(new_run).data.params["output_jsonl_fpath"] == mlflow_store["output_jsonl_fpath"]
+
+    @pytest.mark.parametrize("failing", ["delete_tag", "set_tag"])
+    def test_a_resume_that_starts_over_leaves_the_old_run_when_restoring_it_fails(
+        self, mlflow_store: DictConfig, monkeypatch: MonkeyPatch, caplog, failing: str
+    ) -> None:
+        """Restoring the old run is best effort: the fresh rollouts and metrics reach only the new run."""
+        first = MLflowExporter(mlflow_store)
+        first.setup()
+        old_run = first.run_id
+        first.export_rollouts([_rollout(0)])
+        first.teardown()
+        if failing == "set_tag":
+            # A run reopened before has a resume count, which starting over sets back with `set_tag`.
+            reopened = MLflowExporter(mlflow_store)
+            reopened.setup()
+            reopened.teardown()
+
+        second = MLflowExporter(mlflow_store)
+        second.setup()
+        monkeypatch.setattr(second.client, failing, MagicMock(side_effect=MlflowException("tracking server refused")))
+        second.start_over()
+        second.export_rollouts([{**_rollout(0), "reward": 0.0}])
+        second.export_metrics({"reward": 0.0})
+        client, new_run = second.client, second.run_id
+        second.teardown()
+
+        assert new_run != old_run
+        assert "could not restore the reopened run" in caplog.text
+        assert Path(mlflow_store["output_jsonl_fpath"]).with_name("rollouts_mlflow_run_id").read_text() == new_run
+        assert [row["reward"] for row in _table(client, new_run)] == [0.0]
+        assert [row["reward"] for row in _table(client, old_run)] == [1.0]
+        assert (
+            "reward" in client.get_run(new_run).data.metrics,
+            "reward" in client.get_run(old_run).data.metrics,
+        ) == (
+            True,
+            False,
+        )
+
+    def test_a_deleted_run_is_replaced_by_a_new_one(self, mlflow_store: DictConfig) -> None:
+        first = MLflowExporter(mlflow_store)
+        first.setup()
+        deleted = first.run_id
+        first.teardown()
+        mlflow_module.MlflowClient(tracking_uri=mlflow_store["mlflow_tracking_uri"]).delete_run(deleted)
+
+        resumed = MLflowExporter(mlflow_store)
+        resumed.setup()
+        resumed.export_rollouts([_rollout(0)])
+        replacement = resumed.run_id
+        resumed.teardown()
+
+        assert replacement != deleted
+        assert Path(mlflow_store["output_jsonl_fpath"]).with_name("rollouts_mlflow_run_id").read_text() == replacement

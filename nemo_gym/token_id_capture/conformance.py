@@ -27,11 +27,19 @@ This module avoids FastAPI, Ray, Torch, and aiohttp imports.
 
 from __future__ import annotations
 
+import warnings
 from typing import Awaitable, Callable
 
 from nemo_gym.token_id_capture.lineage import stamp_continuation
-from nemo_gym.token_id_capture.protocols import LineageResolver, TokenSink, TokenSource
+from nemo_gym.token_id_capture.protocols import (
+    LineageResolver,
+    TokenCaptureFrozenError,
+    TokenCaptureRetiredError,
+    TokenSink,
+    TokenSource,
+)
 from nemo_gym.token_id_capture.records import (
+    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
     ParentResolutionStatus,
     TokenEntry,
     cumulative_tokens,
@@ -41,6 +49,19 @@ from nemo_gym.token_id_capture.records import (
 
 class ConformanceError(AssertionError):
     """One named contract check failed."""
+
+    def __init__(self, check_name: str, detail: str) -> None:
+        self.check_name = check_name
+        self.detail = detail
+        super().__init__(f"{check_name}: {detail}")
+
+
+class ConformanceWarning(UserWarning):
+    """One named contract check was skipped, and the gap has a consequence at run time.
+
+    ``run_conformance`` issues it through ``warnings.warn`` after every check that ran passed, so
+    the transport conforms and the caller still sees what the missing extension costs.
+    """
 
     def __init__(self, check_name: str, detail: str) -> None:
         self.check_name = check_name
@@ -72,6 +93,9 @@ def _make_entry(
         generation_log_probs=[-0.1] * len(generation),
         output_items=[{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}],
         token_item_index=0,
+        # A non-default value, so the round trip proves a store persists the field that
+        # decides the rebuilt response's truncation verdict.
+        finish_reason="length",
         # Fixed so an idempotent retry can resend byte-identical payloads.
         created_at=1700000000.0,
     )
@@ -99,7 +123,10 @@ async def run_conformance(
 
     Raise ``ConformanceError`` on the first failure.
     Lineage checks are skipped without a ``lineage_factory``.
-    The ``begin_call`` check is skipped when the sink lacks the extension.
+    The ``begin_call`` and ``record_engine_refusal`` checks are skipped when the sink lacks the extension.
+    A sink that implements ``begin_call`` without ``record_engine_refusal`` passes with a
+    ``ConformanceWarning`` for the skipped check: a call the engine refuses then leaves its
+    pre-dispatch intent dangling, and the rollout is masked.
     """
     passed: list[str] = []
     closables: list = []
@@ -128,6 +155,8 @@ async def run_conformance(
         ("freeze_idempotency", lambda r: _check_freeze_idempotency(sink(), source, r)),
         ("post_freeze_write_safety", lambda r: _check_post_freeze_write(sink(), source(), r)),
         ("conditional_retirement", lambda r: _check_conditional_retirement(sink(), source(), r)),
+        ("unconditional_retirement", lambda r: _check_unconditional_retirement(sink(), source(), r)),
+        ("delete_clears_retirement", lambda r: _check_delete_clears_retirement(sink(), source(), r)),
     ]
     if lineage_factory is not None:
         checks.append(
@@ -140,8 +169,12 @@ async def run_conformance(
             )
         )
     probe_sink = sink()
-    if getattr(probe_sink, "begin_call", None) is not None:
+    registers_intents = getattr(probe_sink, "begin_call", None) is not None
+    records_refusals = getattr(probe_sink, "record_engine_refusal", None) is not None
+    if registers_intents:
         checks.append(("begin_call_custody", lambda r: _check_begin_call_custody(sink(), source(), r)))
+    if records_refusals:
+        checks.append(("engine_refusal_resolution", lambda r: _check_refuse_call_resolution(sink(), source(), r)))
 
     try:
         for name, check in checks:
@@ -155,6 +188,18 @@ async def run_conformance(
     finally:
         for closable in closables:
             await closable.close()
+    if registers_intents and not records_refusals:
+        # Nothing can resolve the intent of a call the engine refuses, so such a rollout freezes
+        # incomplete as if the call were lost and is masked by default. The extension is optional, so
+        # the kit reports the gap and passes.
+        warnings.warn(
+            ConformanceWarning(
+                "engine_refusal_resolution",
+                f"{type(probe_sink).__name__} implements begin_call but not record_engine_refusal, so the check "
+                "is skipped; a call the engine refuses leaves its pre-dispatch intent dangling, and the rollout "
+                "is masked by default (mask_incomplete_when_attributed: false keeps a delivered chain)",
+            )
+        )
     return passed
 
 
@@ -263,6 +308,70 @@ async def _check_conditional_retirement(sink: TokenSink, src: TokenSource, rollo
     _require(retired, name, "retiring the exact consumed snapshot failed")
 
 
+async def _visible_entries(src: TokenSource, rollout_id: str) -> int:
+    """Entries a consumer could build from; a retired rollout may refuse to freeze instead."""
+    try:
+        return len((await src.freeze(rollout_id)).entries)
+    except TokenCaptureRetiredError:
+        return 0
+
+
+async def _require_fenced(name: str, call: Awaitable[object], what: str) -> None:
+    """A write to a retired rollout must fail with ``TokenCaptureRetiredError``, as ``TokenSource.retire`` requires.
+
+    The capture sink treats that error as a late write; any other error would be reported as a capture failure.
+    """
+    try:
+        await call
+    except TokenCaptureRetiredError:
+        return
+    except Exception as error:  # noqa: BLE001 - any other error is reported as a capture failure.
+        raise ConformanceError(
+            name, f"{what} after retirement raised {type(error).__name__}, not TokenCaptureRetiredError"
+        ) from error
+    raise ConformanceError(name, f"{what} after retirement was accepted")
+
+
+async def _check_unconditional_retirement(sink: TokenSink, src: TokenSource, rollout_id: str) -> None:
+    name = "unconditional_retirement"
+    entry = _make_entry(rollout_id, "call-1", prompt=[11, 12], generation=[13, 14], request_items=_REQUEST, text="a")
+    await sink.put(entry)
+    # No freeze first: retire works whatever the rollout's state.
+    first = await src.retire([rollout_id])
+    _require(first.get("removed") == [rollout_id], name, f"retire did not report the rollout as removed: {first}")
+    late = _make_entry(
+        rollout_id, "call-2", prompt=[11, 12, 13, 14], generation=[15], request_items=_REQUEST, text="b"
+    )
+    await _require_fenced(name, sink.put(late), "a late put")
+    mark = getattr(sink, "mark_incomplete", None)
+    if mark is not None:
+        await _require_fenced(name, mark(rollout_id, "call-3"), "a late mark_incomplete")
+    begin = getattr(sink, "begin_call", None)
+    if begin is not None:
+        await _require_fenced(name, begin(rollout_id, "call-4"), "a late begin_call")
+    refuse = getattr(sink, "record_engine_refusal", None)
+    if refuse is not None:
+        await _require_fenced(
+            name,
+            refuse(rollout_id, model_call_id="call-5", code=CONTEXT_LENGTH_EXCEEDED_ERROR_CODE),
+            "a late record_engine_refusal",
+        )
+    _require(await _visible_entries(src, rollout_id) == 0, name, "a write after retirement became visible")
+    again = await src.retire([rollout_id])
+    _require(again.get("absent") == [rollout_id], name, f"retiring again was not a no-op: {again}")
+
+
+async def _check_delete_clears_retirement(sink: TokenSink, src: TokenSource, rollout_id: str) -> None:
+    name = "delete_clears_retirement"
+    entry = _make_entry(rollout_id, "call-1", prompt=[11, 12], generation=[13, 14], request_items=_REQUEST, text="a")
+    await sink.put(entry)
+    await src.retire([rollout_id])
+    await src.delete([rollout_id])
+    # The rollout ID is reusable: a new execution starts empty and its writes are visible.
+    await sink.put(entry)
+    _require(await _visible_entries(src, rollout_id) == 1, name, "a write after delete was not visible")
+
+
 async def _check_lineage_visibility(
     sink: TokenSink,
     lineage_factory: Callable[[], LineageResolver],
@@ -319,3 +428,48 @@ async def _check_begin_call_custody(sink: TokenSink, src: TokenSource, rollout_i
     await sink.begin_call(rollout_id, "call-lost")  # type: ignore[attr-defined]
     snapshot = await src.freeze(rollout_id)
     _require(snapshot.incomplete, name, "a dangling pre-dispatch intent did not mask the rollout")
+
+
+async def _check_refuse_call_resolution(sink: TokenSink, src: TokenSource, rollout_id: str) -> None:
+    name = "engine_refusal_resolution"
+    entry = _make_entry(rollout_id, "call-1", prompt=[11, 12], generation=[13, 14], request_items=_REQUEST, text="a")
+    await sink.put(entry)
+    begin = getattr(sink, "begin_call", None)
+    if begin is not None:
+        await begin(rollout_id, "call-2")
+    await sink.record_engine_refusal(  # type: ignore[attr-defined]
+        rollout_id,
+        model_call_id="call-2",
+        code=CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+        parent_call_id="call-1",
+        parent_resolution=ParentResolutionStatus.RESOLVED,
+    )
+    snapshot = await src.freeze(rollout_id)
+    _require(not snapshot.incomplete, name, "a refused call's intent still masked the rollout")
+    _require(
+        [
+            (record.model_call_id, record.code, record.parent_call_id, record.parent_resolution)
+            for record in snapshot.engine_refusals
+        ]
+        == [("call-2", CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, "call-1", ParentResolutionStatus.RESOLVED)],
+        name,
+        f"the frozen snapshot does not report the refusal with its lineage: {snapshot.engine_refusals!r}",
+    )
+    try:
+        await sink.record_engine_refusal(  # type: ignore[attr-defined]
+            rollout_id, model_call_id="call-3", code=CONTEXT_LENGTH_EXCEEDED_ERROR_CODE
+        )
+    except TokenCaptureFrozenError:
+        return  # The hard fence the protocol names.
+    # A sink that accepts the late refusal must leave the frozen snapshot unchanged: the refusal
+    # cannot change the sample that was already delivered, so a second freeze reports the same
+    # snapshot, version and refusals, and the consumed snapshot's retirement is not staled.
+    again = await src.freeze(rollout_id)
+    _require(
+        (again.snapshot_id, again.version, again.engine_refusals)
+        == (snapshot.snapshot_id, snapshot.version, snapshot.engine_refusals),
+        name,
+        "a refusal after freeze changed the frozen snapshot",
+    )
+    retired = await src.drop(rollout_id, snapshot_id=snapshot.snapshot_id, version=snapshot.version)
+    _require(retired, name, "a refusal after freeze changed the version and staled the consumed snapshot")

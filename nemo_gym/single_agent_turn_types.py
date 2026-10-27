@@ -3,9 +3,9 @@
 
 """Wire contracts for the built-in single-agent-turn protocol."""
 
-from typing import Literal
+from collections.abc import Mapping
 
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from nemo_gym.base_resources_server import BaseVerifyResponse
 from nemo_gym.episode_types import (
@@ -14,7 +14,7 @@ from nemo_gym.episode_types import (
     EpisodeFailure,
 )
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 
 
 class SingleAgentTurnTaskInput(BaseModel):
@@ -24,6 +24,25 @@ class SingleAgentTurnTaskInput(BaseModel):
 
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     task_data: dict[str, JsonValue]
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_flat_task_input(cls, value: object) -> object:
+        """Accept flat task input while preserving the canonical ``task_data`` container.
+
+        ``task_data`` is reserved for that container; non-conflicting flat fields are merged into it.
+        """
+        if not isinstance(value, Mapping):
+            return value
+        fields = dict(value)
+        response_params = fields.pop("responses_create_params", None)
+        task_data = fields.pop("task_data", {})
+        if not isinstance(task_data, Mapping):
+            return value  # Let the field validator report the malformed canonical container.
+        for key in fields.keys() & task_data.keys():
+            if fields[key] != task_data[key]:
+                raise ValueError(f"Conflicting task field {key!r} inside and outside task_data")
+        return {"responses_create_params": response_params, "task_data": dict(task_data) | fields}
 
 
 class SingleAgentTurnResult(BaseVerifyResponse):
@@ -37,13 +56,19 @@ class SingleAgentTurnResult(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
     ng_agent_observations: AgentObservationBundle | None = None
+    # The harness's own turns from its session close. Rollout collection takes them over rebuilding turns from
+    # the captured model calls; absent, the key stays out of the result as before.
+    ng_trajectory: TrajectoryRecord | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class SingleAgentTurnFailure(EpisodeFailure):
-    """Add the failing protocol stage and any usable agent response."""
+    """Extend the shared failure with any usable agent response and agent evidence for diagnostics."""
 
-    stage: Literal["seed", "agent", "verification", "cleanup"] | None = None
     partial_response: NeMoGymResponse | None = None
+    agent_observations: AgentObservationBundle | None = None
+    # The harness's own turns from its session close, when the run failed after taking some: rollout collection
+    # keeps them on the failure row as it does on a result, instead of rebuilding turns from the captured calls.
+    trajectory: TrajectoryRecord | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class SingleAgentTurnRequest(BaseEpisodeRequest[SingleAgentTurnTaskInput]):

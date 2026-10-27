@@ -28,7 +28,7 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseUsage,
+    accumulate_response_usage,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.image_tools import (
@@ -135,22 +135,6 @@ def _extract_image_refs(params: NeMoGymResponseCreateParamsNonStreaming) -> list
     return image_refs
 
 
-def _response_usage_add(
-    running: Optional[NeMoGymResponseUsage],
-    latest: Optional[NeMoGymResponseUsage],
-) -> Optional[NeMoGymResponseUsage]:
-    if latest is None:
-        return running
-    if running is None:
-        return latest
-    running.input_tokens += latest.input_tokens
-    running.output_tokens += latest.output_tokens
-    running.total_tokens += latest.total_tokens
-    running.input_tokens_details.cached_tokens = 0
-    running.output_tokens_details.reasoning_tokens = 0
-    return running
-
-
 def _final_assistant_response(response: NeMoGymResponse) -> NeMoGymResponse:
     for output_item in reversed(response.output):
         if getattr(output_item, "type", None) == "message" and getattr(output_item, "role", None) == "assistant":
@@ -159,7 +143,6 @@ def _final_assistant_response(response: NeMoGymResponse) -> NeMoGymResponse:
 
 
 class ImageToolsAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: ImageToolsAgentConfig
     _logic: ImageToolsGymToolLogic = PrivateAttr()
 
@@ -225,10 +208,11 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
         cookies: Any,
+        model_url_path: str,
     ):
         response = await self.server_client.post(
             server_name=self.config.model_server.name,
-            url_path="/v1/responses",
+            url_path=model_url_path,
             json=body,
             cookies=cookies,
         )
@@ -245,6 +229,7 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
             body=body,
             row_metadata={},
             initial_cookies=request.cookies,
+            model_url_path=self.url_path_for_request("/v1/responses", request),
         )
         for key, value in model_cookies.items():
             response.set_cookie(key, value)
@@ -255,6 +240,7 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         row_metadata: dict[str, Any],
         initial_cookies: Any,
+        model_url_path: str = "/v1/responses",
     ) -> tuple[NeMoGymResponse, Any, dict[str, Any]]:
         body = body.model_copy(deep=True)
         if body.max_output_tokens is None and self.config.max_output_tokens is not None:
@@ -301,9 +287,9 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
                 metadata_extra["extra_body"] = json.dumps(current_extra)
                 model_body.metadata = metadata_extra
 
-            model_response, model_cookies = await self._call_model(model_body, model_cookies)
+            model_response, model_cookies = await self._call_model(model_body, model_cookies, model_url_path)
             new_outputs.extend(model_response.output)
-            usage = _response_usage_add(usage, model_response.usage)
+            usage = accumulate_response_usage(usage, model_response.usage)
             final_response = model_response
 
             assistant_text = _extract_text_from_response(model_response)
@@ -367,6 +353,7 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
             body=body.responses_create_params,
             row_metadata=body.model_dump(exclude={"responses_create_params", "response"}),
             initial_cookies=cookies,
+            model_url_path=self.url_path_for_run("/v1/responses", body),
         )
 
         verify_request_body = body.model_dump()

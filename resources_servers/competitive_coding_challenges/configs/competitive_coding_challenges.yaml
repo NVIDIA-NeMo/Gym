@@ -9,9 +9,36 @@ competitive_coding_challenges_resources_server:
       test_batch_size: 32
       num_parallel_requests: 16
       time_scale: 2.0
-      shared_dir: ${oc.env:SHARED_TEMP_DIR,/tmp}
-      local_compile_dir: ${oc.env:LOCAL_COMPILE_DIR,/tmp/nemo-gym-compile}
+      shared_dir: ${oc.env:CCC_SHARED_TEMP_DIR,${oc.env:SHARED_TEMP_DIR,/tmp}}
+      local_compile_dir: ${oc.env:CCC_LOCAL_COMPILE_DIR,${oc.env:LOCAL_COMPILE_DIR,/tmp/nemo-gym-compile}}
       reward_mode: binary
+      # Benchmarks set both to grade every subtask with partial credit, as IOI and NeMo Skills do.
+      grade_all_subtasks: false
+      partial_credit: false
+      # Set to `sandbox` (with a provider config such as
+      # nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml) to compile and run each
+      # submission in a fresh sandbox instead of the NeMo Skills sandbox. num_parallel_requests then
+      # caps concurrent sandboxes, and test_batch_size must not exceed sandbox_config.resources.cpu.
+      # See the README ("Running in a provider sandbox") for a complete example config.
+      sandbox_provider: null
+      sandbox_config:
+        image: ${oc.env:CCC_SANDBOX_IMAGE,null}
+        # Read-only problem data from split_problem_metadata.py, mounted or baked into the image.
+        problem_data_dir: /data/ccc
+        # Whole verification (compiles plus every test run); exceeding it masks the sample.
+        exec_timeout_s: 3600
+        resources:
+          cpu: 8
+          memory_mib: 16384
+        metadata:
+          benchmark: competitive-coding
+        provider_options:
+          # Submissions need no network, and must not fetch answers. OpenSandbox enforces this;
+          # Docker ignores it (set its `network: none` instead), and Daytona, E2B and OpenShell reject
+          # the key, so remove it for them.
+          network_policy:
+            defaultAction: deny
+            egress: []
       verified: false
 competitive_coding_challenges_simple_agent:
   responses_api_agents:

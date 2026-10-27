@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Shared names for why a rollout failed.
+"""Shared failure names and episode execution stages.
 
 Gym describes failures with free text and component-local labels, so the same failure
 arrives at a collector, a log line and a metric under three different names and cannot be
@@ -36,9 +36,17 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import Literal
 
 
 logger = logging.getLogger(__name__)
+
+
+# Where an episode failed, independently of its kind and retry policy.
+# Admission precedes seed. Collector-observed transport failures leave the stage
+# unset: delivery evidence and failure_kind describe the observation without
+# claiming to know where execution stopped inside the Environment Server.
+FailureStage = Literal["admission", "seed", "agent", "verification", "cleanup"]
 
 
 # ``<domain>_<condition>``. The domain says which layer observed the failure, so a reader
@@ -65,6 +73,15 @@ AGENT_RUN_ERROR = "agent_run_error"
 AGENT_REQUEST_FAILED = "agent_request_failed"
 AGENT_TIMEOUT = "agent_timeout"
 AGENT_COMMAND_NOT_ALLOWED = "agent_command_not_allowed"
+AGENT_LIMIT = "agent_limit"
+AGENT_INVALID_OUTPUT = "agent_invalid_output"
+
+# --- model: requests made to a model endpoint ---------------------------------------- #
+# Preserve the upstream HTTP status separately; it is not a retry policy.
+MODEL_REQUEST_ERROR = "model_request_error"
+MODEL_TRANSPORT_ERROR = "model_transport_error"
+# Explicit evidence that the model's context window was exceeded, not an HTTP status alone.
+MODEL_CONTEXT_LIMIT = "model_context_limit"
 
 # --- verifier and judge --------------------------------------------------------------- #
 # ``judge_failed`` is produced today by judge_failsafe and by reverification.
@@ -104,6 +121,11 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         AGENT_REQUEST_FAILED,
         AGENT_TIMEOUT,
         AGENT_COMMAND_NOT_ALLOWED,
+        AGENT_LIMIT,
+        AGENT_INVALID_OUTPUT,
+        MODEL_REQUEST_ERROR,
+        MODEL_TRANSPORT_ERROR,
+        MODEL_CONTEXT_LIMIT,
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
         VERIFIER_ERROR,
