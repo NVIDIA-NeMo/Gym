@@ -96,6 +96,8 @@ class Sandbox:
             "pid": 123,
         }
         self.events = events()
+        # False: the worker ends before it opens its transcript, so it leaves no events.jsonl.
+        self.writes_events = True
         self.blocked = False
         self.started = asyncio.Event()
         self.exited = asyncio.Event()
@@ -110,6 +112,10 @@ class Sandbox:
 
     async def upload(self, source, destination):
         self.files[destination] = Path(source).read_text()
+        if destination.endswith("/expire.request"):
+            # The supervisor ends the harness as at its deadline; before launch, it never starts it.
+            self.result.update(timed_out=True, return_code=-signal.SIGTERM if hasattr(self, "directory") else None)
+            self.exited.set()
 
     async def download(self, source, destination):
         Path(destination).write_text(self.files[source])
@@ -121,16 +127,12 @@ class Sandbox:
         self.files[f"{self.directory}/runtime.json"] = json.dumps(
             {key: self.result[key] for key in ("hostname", "pid")}
         )
-        self.files[f"{self.directory}/events.jsonl"] = self.events
+        if self.writes_events:
+            self.files[f"{self.directory}/events.jsonl"] = self.events
 
     async def execute(self, command, **kwargs):
         if "--receipt" in command and "process_supervisor" in command:
             return await self.launch(command=command, **kwargs)
-        if "touch " in command and "expire.request" in command:
-            # The supervisor ends the harness as at its deadline; before launch, it never starts it.
-            self.result.update(timed_out=True, return_code=-signal.SIGTERM if hasattr(self, "directory") else None)
-            self.exited.set()
-            return self.exec.return_value
         if "touch " in command and "stop.request" in command:
             self.signals.append("SIGTERM")
             if hasattr(self, "directory"):
@@ -926,6 +928,23 @@ async def test_rollout_stop_before_activation_never_starts_codex(setup):
     launch = next(call.kwargs["command"] for call in sandbox.launch.await_args_list)
     assert "--expire-file" in launch
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+async def test_rollout_stop_before_the_worker_writes_events_is_an_empty_timeout(setup):
+    agent, sandbox = setup
+    sandbox.blocked = True
+    sandbox.writes_events = False
+    request, session_id, task = await activate(agent, sandbox)
+    assert (await agent.stop_rollout(seed().episode_id.capture_key, RolloutStopRequest(reason="budget"))).stopped
+    response = await task
+    # The launch ran and the supervisor ended it at the stop, with no transcript: graded like the timeout it is.
+    assert response.status == "incomplete" and response.error is None and response.output == []
+    assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "budget"}
+    assert "ng_agent_outcome" not in response.metadata
+    state = agent._session_records[session_id].state
+    assert state.session.expired and not state.session.expired_before_launch
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    sandbox.disconnect.assert_awaited_once()
 
 
 async def test_close_cancels_active_codex_before_detaching(setup):

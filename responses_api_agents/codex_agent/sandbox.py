@@ -109,6 +109,12 @@ class CodexSandboxSession(AgentSessionState):
         try:
             events = await self.read_text("events.jsonl")
         except Exception as error:
+            if self.session.expired:
+                # A rollout stop can end the worker after launch but before it opens its transcript.
+                LOG.warning(
+                    "Codex events unavailable after a rollout stop; keeping an empty transcript", exc_info=True
+                )
+                return ""
             logs = await self.session.read_output_log()
             raise RuntimeError(f"Codex sandbox runner returned no valid result: {logs}") from error
         try:
