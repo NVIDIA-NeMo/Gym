@@ -299,8 +299,8 @@ def assert_cohort_indices_match(server):
         if not any(c.group_id == group and c.phase in ("collecting", "evaluating") for c in cohorts.values())
     }
     # Records kept for open sessions, and restore marks, end with the record they belong to.
-    assert set(server._held_cohorts) <= set(server._terminal_cohorts)
-    assert set(server._held_groups) <= set(server._idle_groups)
+    assert set(server._kept_cohorts) <= set(server._terminal_cohorts)
+    assert set(server._kept_groups) <= set(server._idle_groups)
     assert server._restored_watermarks <= set(server._latest_group_attempts)
 
 
@@ -424,7 +424,7 @@ async def test_new_attempt_supersedes_cohorts_whose_key_extends_the_group_key(se
 
 @pytest.mark.parametrize("conversion,existing_peer", [("response", False), ("history", False), ("response", True)])
 async def test_conversion_failure_fails_identified_group_and_releases_peers(
-    server, monkeypatch, conversion, existing_peer
+    server, monkeypatch, caplog, conversion, existing_peer
 ):
     peer = asyncio.create_task(server.verify(request_with_session(), member(0))) if existing_peer else None
     if peer is not None:
@@ -440,6 +440,9 @@ async def test_conversion_failure_fails_identified_group_and_releases_peers(
     with pytest.raises(HTTPException) as error:
         await server.verify(request_with_session(), member(1 if existing_peer else 0))
     assert error.value.status_code == 503 and "bad request conversion" in error.value.detail
+    # The traceback of a malformed direct Python input is logged.
+    [record] = [r for r in caplog.records if "input conversion failed for" in r.getMessage()]
+    assert record.exc_info is not None and "bad request conversion" in str(record.exc_info[1])
     if peer is not None:
         with pytest.raises(HTTPException) as error:
             await asyncio.wait_for(peer, 0.5)

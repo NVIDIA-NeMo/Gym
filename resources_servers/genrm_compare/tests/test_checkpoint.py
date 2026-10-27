@@ -433,20 +433,20 @@ async def test_a_member_saved_under_the_previous_digest_scheme_is_compared_under
     saved_bytes = json.dumps(
         answers[1].response.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=True
     )
-    legacy_digest = hashlib.sha256(saved_bytes.encode("utf-8")).hexdigest()
+    previous_digest = hashlib.sha256(saved_bytes.encode("utf-8")).hexdigest()
     # Non-ASCII text serializes differently under the two schemes, so a comparison under the wrong one refuses.
-    assert legacy_digest != record.state["response_digest"]
-    legacy_state = {
+    assert previous_digest != record.state["response_digest"]
+    previous_state = {
         **record.state,
-        "response_digest": legacy_digest,
-        "response_digest_scheme": genrm.LEGACY_RESPONSE_DIGEST_SCHEME,
+        "response_digest": previous_digest,
+        "response_digest_scheme": genrm.PREVIOUS_RESPONSE_DIGEST_SCHEME,
     }
-    records = [record.model_copy(update={"state": legacy_state})]
+    records = [record.model_copy(update={"state": previous_state})]
     for _ in range(checkpoints - 1):
         restored, restored_participant = await restore(config, records)
         # Another checkpoint lands before the member replays.
         records = await restored_participant.export(None)
-        assert [saved.state for saved in records] == [legacy_state]
+        assert [saved.state for saved in records] == [previous_state]
         await restored.aclose()
 
     restored, restored_participant = await restore(config, records)
@@ -456,7 +456,7 @@ async def test_a_member_saved_under_the_previous_digest_scheme_is_compared_under
     replayed = await asyncio.wait_for(verify_as(restored, SESSIONS[1], answers[1]), timeout=0.5)
     assert replayed.reward == outcomes[1].reward
     # The replayed member still exports its saved scheme until its caller closes the session.
-    assert [saved.state for saved in await restored_participant.export(None)] == [legacy_state]
+    assert [saved.state for saved in await restored_participant.export(None)] == [previous_state]
     restored._run_single_comparison.assert_not_awaited()
     await restored.aclose()
 
@@ -636,7 +636,7 @@ async def test_an_outcome_kept_for_an_open_session_does_not_evict_another_groups
     # Once a1 closes its session, group a counts toward the limit again.
     participant.ended("a1")
     server._prune_terminal_cohorts()
-    assert not server._held_cohorts and not server._held_groups
+    assert not server._kept_cohorts and not server._kept_groups
     assert len(server._verify_cohorts) == len(server._latest_group_attempts) == 1
     await server.aclose()
 
@@ -654,8 +654,8 @@ async def kept_groups(config, monkeypatch, groups: list[str]):
         participant.ended(f"{group}0")
     now[0] = 111.0
     server._prune_terminal_cohorts()
-    assert set(server._held_cohorts) == {server._group_cohort_key(group, 0) for group in groups}
-    assert set(server._held_groups) == set(groups)
+    assert set(server._kept_cohorts) == {server._group_cohort_key(group, 0) for group in groups}
+    assert set(server._kept_groups) == set(groups)
     return server, participant, now
 
 
@@ -675,7 +675,7 @@ async def test_kept_records_end_with_their_group(config, monkeypatch, released_b
         pending.cancel()
         await asyncio.gather(pending, return_exceptions=True)
         await server.aclose()
-    assert not server._held_cohorts and not server._held_groups
+    assert not server._kept_cohorts and not server._kept_groups
 
 
 async def test_kept_records_behind_the_first_are_evicted_once_their_sessions_close(config, monkeypatch):
