@@ -50,7 +50,7 @@ Before moving on, confirm each of these in the code:
 - [ ] A sandbox failure never falls back to running on the host.
 - [ ] Controls the harness does not support are rejected or documented, not silently dropped.
 - [ ] The harness's own files (configuration, history, caches) stay out of the task repository. Where the harness has no setting to move them, the README says what it writes under the task's home.
-- [ ] A sandbox runner that needs only the standard library sets `stdlib_runner=True` and is uploaded as `RUNNER_FILE` from `nemo_gym.agent_utils.sandbox_session`, as `codex_agent` does, so a `pkill -f python3` in the task cannot stop it.
+- [ ] A sandbox runner that needs only the standard library is uploaded as `RUNNER_FILE` from `nemo_gym.agent_utils.sandbox_session` and launched by a `SandboxCommand` with `stdlib_runner=True`, as `codex_agent` does. It then runs under a neutral process name with no `.py` in its command line, so a `pkill python3` or `pkill -f '\.py'` in the task cannot stop it.
 - [ ] Only an error that ends the harness's run fails the response, by the harness's own rule at the pinned version. See [Convert outputs without silent loss](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#convert-outputs-without-silent-loss).
 - [ ] Usage is reported only when every model call has a usage record, with call references collected from every record the harness writes. Otherwise usage stays unknown, with a gap.
 
@@ -59,7 +59,7 @@ Before moving on, confirm each of these in the code:
 Cover the behaviors in [Runtime and compatibility](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#runtime-and-compatibility) that apply to your execution model. At minimum:
 
 - Each unsupported seed returns a final 422. Use `nemo_gym.testing.agent_session_conformance.check_agent_seed_rejected`, as `responses_api_agents/hermes_agent/tests/test_app.py` does.
-- For MCP support, cover authenticated discovery and tool calls, required-server failure before inference, optional-server failure, name collisions, and cleanup. If enforcement uses hooks, test a missing hook too. Test each supported sandbox ownership path; a sandbox-only smoke does not validate MCP grants.
+- For MCP support, cover authenticated discovery and tool calls, required-server failure before inference, optional-server failure, name collisions, and cleanup. If enforcement depends on a plugin or hook, test a run where it does not load. Test each supported sandbox ownership path; a sandbox-only smoke does not validate MCP grants.
 - An activation runs the harness once. An activation for an unknown or closed session returns 409; a request with no session cookie takes the host path, if the adapter has one.
 - Close returns observations or gaps, and returns `resources_cookies` only when the session holds a Resources cookie jar.
 - Retries, cancellation, and termination, with every wait bounded. For a sandboxed harness, include a tool command that leaves a background process holding stdout open: the activation must still finish.
@@ -135,7 +135,7 @@ Read the rollouts, not the exit code:
 - Reward, response, and failures sidecar for each task.
 - The agent closed before verification, and the sandbox owner cleaned up.
 - [Rollout health](../../../fern/versions/latest/pages/evaluation/rollout-health.mdx) counts: `unhealthy` is a finding; `unobserved` means a check lacked the evidence it reads. At the Evaluation level the turn checks are unobserved by design. At any level, name what each unobserved check was missing, for example a response without `usage` leaves the token-count check unobserved.
-- A 422 from the Model Server on a later model call usually means the harness sends back a field from an earlier response, which Gym's strict Chat request validation rejects. Normalize that field in the request model in `nemo_gym/openai_utils.py`, with a unit test. Drop only values that carry nothing, and cover each form the Model Servers return: one can return `annotations: null` where another returns `[]`. Keep other values strict.
+- A 422 from the Model Server on a later model call usually means the harness sends back a field from an earlier response, which Gym's strict request validation rejects. Normalize that field in the request model in `nemo_gym/openai_utils.py`, with a unit test. Drop only values that carry nothing, and cover each empty form the harness can send back: its SDK can write `annotations: null` where the provider returned `[]`. Keep other values strict.
 
 For a new harness or an upgrade that claims Terminal-Bench 2.1 support, complete the [TB 2.1 full evaluation](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#terminal-bench-21-full-evaluation) before merge. Run every task with 8 repeats at a pinned benchmark revision with a real model, and link the full results in the PR. This applies at every capability level; the small smoke run above and scripted probes do not satisfy it.
 
@@ -171,7 +171,7 @@ pytest tests/unit_tests/test_session_contract_repo.py
 ```
 
 - `test_session_contract_repo.py` checks every adapter's source for the session hooks; a search for your adapter's name does not find it.
-- `tests/unit_tests/test_add_legacy_agent_environment_servers.py` checks every repository config for a missing Environment Server. When the adapter's default config leaves `resources_server: null` for composition, or the adapter has no `/run`, add its type to the matching check in `scripts/add_legacy_agent_environment_servers.py`, so the script does not add a legacy relay beside the session Environment Server. Add a test like `test_default_pi_composes_with_exactly_one_session_environment`.
+- `tests/unit_tests/test_add_legacy_agent_environment_servers.py` checks every repository config for a missing Environment Server. In `scripts/add_legacy_agent_environment_servers.py`, add the adapter's type to the unbound session templates in `needs_environment_server` when its default config sets `resources_server: null` for composition, or to the `stirrup_agent` check when the adapter has no `/run`. Otherwise the script adds a legacy relay beside the session Environment Server. Add a test like `test_default_pi_composes_with_exactly_one_session_environment`.
 - Merge current `main` before the final checks and rerun the adapter's tests and conformance. The sandbox helpers an adapter calls change often, and a long-lived branch can pass on its old base and fail after the merge.
 - Search `tests/` for every config file you changed (`grep -rn <config or agent name> tests/`) and run those tests too. Core tests can assert a config's shape, and they are not part of the adapter's own suite.
 - Use a Conventional Commit title such as `feat(<harness>): add the <harness> harness adapter`, and DCO sign-off (`git commit -s`).
