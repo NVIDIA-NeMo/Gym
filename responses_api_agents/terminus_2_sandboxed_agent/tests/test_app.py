@@ -266,10 +266,7 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output(reasoning
 @pytest.mark.parametrize("dump_trajectory", [False, True])
 @pytest.mark.parametrize("debug", [False, True])
 @pytest.mark.parametrize("interleaved_thinking", [False, True])
-@pytest.mark.parametrize("terminal_hidden_mounts", [[], ["/mnt/s3-data", "/mnt/.s3-gate"]])
-async def test_execute_runs_terminus_in_seeded_sandbox(
-    monkeypatch, dump_trajectory, debug, interleaved_thinking, terminal_hidden_mounts
-):
+async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_trajectory, debug, interleaved_thinking):
     config = Terminus2AgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -287,7 +284,6 @@ async def test_execute_runs_terminus_in_seeded_sandbox(
         model_context_limit=32_000,
         model_output_limit=4_000,
         interleaved_thinking=interleaved_thinking,
-        terminal_hidden_mounts=terminal_hidden_mounts,
         llm_request_timeout=60,
         sandbox_provider="opensandbox",
         sandbox_timeout=10,
@@ -324,7 +320,6 @@ async def test_execute_runs_terminus_in_seeded_sandbox(
             assert instruction == "solve this"
             assert self.kwargs["dump_trajectory"] is dump_trajectory
             assert self.kwargs["interleaved_thinking"] is interleaved_thinking
-            assert self.kwargs["terminal_hidden_mounts"] == terminal_hidden_mounts
             await environment.exec("tmux run")
             self.kwargs["llm"]._times_spent.extend([2.0, 4.0])
             self.kwargs["llm"]._num_compactions = 2
@@ -414,7 +409,6 @@ def _run_fixture(monkeypatch, *, failure: str | None):
         model_context_limit=32_000,
         model_output_limit=4_000,
         interleaved_thinking=True,
-        terminal_hidden_mounts=["/mnt/s3-data", "/mnt/.s3-gate"],
         llm_request_timeout=60,
         sandbox_provider="opensandbox",
         sandbox_timeout=10,
@@ -438,7 +432,7 @@ def _run_fixture(monkeypatch, *, failure: str | None):
 
         async def setup(self, environment):
             if failure == "setup":
-                raise RuntimeError("Private terminal mount bootstrap failed: Private terminal requires tmux")
+                raise RuntimeError("tmux session failed to start")
 
         async def run(self, instruction, environment, context):
             context.n_input_tokens = 1
@@ -474,7 +468,7 @@ def _run_fixture(monkeypatch, *, failure: str | None):
 async def test_run_releases_sandbox_and_session_reference_when_a_step_before_grading_fails(monkeypatch, failure):
     server, server_client, sandbox, request, body = _run_fixture(monkeypatch, failure=failure)
 
-    expected = "Private terminal requires tmux" if failure == "setup" else "verifier unavailable"
+    expected = "tmux session failed to start" if failure == "setup" else "verifier unavailable"
     with pytest.raises(RuntimeError, match=expected):
         await server.run(request, body)
 

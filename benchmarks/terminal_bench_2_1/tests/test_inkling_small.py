@@ -185,8 +185,7 @@ def test_profile_preserves_evaluation_settings_and_adds_deployment_from_sandbox_
     model = config["policy_model"]["responses_api_models"]["vllm_model"]
     assert agent["entrypoint"] == "app.py"
     assert agent["interleaved_thinking"] is model["uses_interleaved_reasoning"] is True
-    # The S3 mounts are removed from the sandbox, so the terminal hides nothing and tmux is not copied from S3.
-    assert agent["terminal_hidden_mounts"] == []
+    # The S3 mounts are removed from the sandbox, so tmux is not copied from S3.
     assert agent["remote_tmux_binary_path"] is None
     assert agent["model_context_limit"] == 1048576
     assert agent["sandbox_timeout"] == 10800
