@@ -73,6 +73,11 @@ GOOSE_ARCHIVE_SHA256 = {
 GOOSE_RELEASE_URL = f"https://github.com/aaif-goose/goose/releases/download/v{GOOSE_VERSION}"
 # Goose takes the system prompt only as one argv value, which Linux caps at 128 KiB (MAX_ARG_STRLEN).
 MAX_SYSTEM_PROMPT_BYTES = 128 * 1024
+# Goose's own text when the model returned empty completions until it gave up (persisted, exit 0).
+GOOSE_EMPTY_RESPONSE_NOTICE = "The model returned an empty response. Please resend your message to continue."
+# summon's wrapper around an async delegate's result in load's tool response.
+GOOSE_TASK_RESULT_HEADER = "# Background Task Result"
+GOOSE_TASK_OUTPUT = "\n## Output\n\n"
 # Goose's MAX_TURNS_MESSAGE, streamed when --max-turns is reached.
 GOOSE_MAX_TURNS_NOTICE = "I've reached the maximum number of actions I can do without user input"
 # Goose 1.54.0's provider errors for a model call that failed at the model server: unreachable, 5xx, rate limit, rejected
@@ -252,6 +257,8 @@ def goose_stop_reason(stdout: str, sessions: list[dict[str, Any]]) -> str | None
         # The output or context limit cut the last completion (the vLLM model server returns an empty one).
         return "length"
     blocks = [block for block in last.get("content") or [] if block.get("type") in ("text", "error")]
+    if "".join(block.get("text") or "" for block in blocks).strip() == GOOSE_EMPTY_RESPONSE_NOTICE:
+        return "empty_response"
     persisted = {m["message_id"] for s in sessions for m in s["messages"]}
     # Goose's own notice is never persisted, or is persisted as an error block (rejected credentials). Persisted text is
     # the policy's own answer, whatever its wording.
@@ -274,23 +281,37 @@ def delegate_model_server_failure(sessions: list[dict[str, Any]]) -> bool:
     """Whether a delegate's model calls failed at the model server.
 
     A delegate that hits a provider error ends with Goose's notice as its last message, which it does not persist, and
-    summon returns that text to the parent as the delegate tool's result. The parent carries on and Goose exits 0.
+    summon returns that text to the parent: as the delegate tool's result, or for an async delegate inside load's
+    "# Background Task Result" under "## Output". The parent carries on and Goose exits 0. Text a delegate persisted is
+    its own answer, whatever its wording.
     """
+    persisted = {
+        "\n".join(block.get("text", "") for block in message["content"] if block.get("type") == "text")
+        for session in sessions
+        if session.get("parent_session_id")
+        for message in session["messages"]
+        if message["role"] == "assistant"
+    }
     for session in sessions:
-        delegates = {
-            block["id"]
+        calls = {
+            block["id"]: name
             for message in session["messages"]
             for block in message["content"]
             if block.get("type") == "toolRequest"
-            and ((block.get("toolCall") or {}).get("value") or {}).get("name") == "delegate"
+            and (name := ((block.get("toolCall") or {}).get("value") or {}).get("name")) in ("delegate", "load")
         }
         for message in session["messages"]:
             for block in message["content"]:
-                if block.get("type") == "toolResponse" and block.get("id") in delegates:
-                    content = ((block.get("toolResult") or {}).get("value") or {}).get("content") or []
-                    text = "\n".join(part.get("text", "") for part in content if part.get("type") == "text")
-                    if _model_server_error(text):
-                        return True
+                if block.get("type") != "toolResponse" or block.get("id") not in calls:
+                    continue
+                content = ((block.get("toolResult") or {}).get("value") or {}).get("content") or []
+                text = "\n".join(part.get("text", "") for part in content if part.get("type") == "text")
+                if calls[block["id"]] == "load":
+                    if not text.startswith(GOOSE_TASK_RESULT_HEADER) or GOOSE_TASK_OUTPUT not in text:
+                        continue
+                    text = text.split(GOOSE_TASK_OUTPUT, 1)[1]
+                if text not in persisted and _model_server_error(text):
+                    return True
     return False
 
 

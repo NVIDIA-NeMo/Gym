@@ -692,3 +692,81 @@ def test_system_prompt_limit_counts_the_option_and_nul(agent):
     server.config.system_prompt = fits
     with pytest.raises(AttributeError):  # Past the limit check, at the first use of the (absent) sandbox.
         asyncio.run(server._run_goose(None, body, {}, Path("/nonexistent")))
+
+
+def _rewrite_archive(sandbox, tmp_path, statements, stdout=b""):
+    archive = tmp_path / "rewritten" / "sessions.tgz"
+    archive.parent.mkdir()
+    write_sessions_archive(archive)
+    db = archive.parent / "sessions" / "sessions.db"
+    con = sqlite3.connect(db)
+    for sql, args in statements:
+        con.execute(sql, args)
+    con.commit()
+    con.close()
+    archive.unlink()
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(db.parent, arcname="sessions")
+
+    async def download(remote, local):
+        if remote.endswith(".tgz"):
+            Path(local).write_bytes(archive.read_bytes())
+        else:
+            Path(local).write_bytes(stdout if remote.endswith("stdout.jsonl") else b"")
+
+    sandbox.download.side_effect = download
+
+
+UPDATE = "update messages set content_json = ? where message_id = ?"
+
+
+async def test_async_delegate_model_server_failure_fails_the_request(agent, tmp_path):
+    # delegate(async) answers "started in background"; load returns the child's last message under "## Output".
+    server, sandbox, _ = agent
+    notice = "Ran into this error: Server error: Server error (503 Service Unavailable) at http://m/v1: refit."
+    loaded = f"# Background Task Result: s2\n\n**Task:** Paris\n**Status:** Completed\n\n## Output\n\n{notice}"
+    _rewrite_archive(
+        sandbox,
+        tmp_path,
+        [
+            (UPDATE, (json.dumps([_result("c1", "Task s2 started in background")]), "m3")),
+            (UPDATE, (json.dumps([_call("c2", "load", {"source": "s2"})]), "m4")),
+            (UPDATE, (json.dumps([_result("c2", loaded)]), "m5")),
+            ("delete from messages where message_id = ?", ("m8",)),  # the child's notice is never persisted
+        ],
+    )
+    with pytest.raises(RuntimeError, match="model server"):
+        await server.run(SimpleNamespace(cookies={}), run_body())
+
+
+async def test_delegate_answer_that_reads_like_a_notice_is_scored(agent, tmp_path):
+    # The delegate persisted this text as its own answer, so it is the policy's text.
+    server, sandbox, _ = agent
+    answer = "Network error: could not reach pypi.org from the sandbox, so the package was not installed."
+    _rewrite_archive(
+        sandbox,
+        tmp_path,
+        [
+            (UPDATE, (json.dumps([_result("c1", answer)]), "m3")),
+            (UPDATE, (json.dumps([{"type": "text", "text": answer}]), "m8")),
+        ],
+    )
+    result = await server.run(SimpleNamespace(cookies={}), run_body())
+    assert not result.goose_failed and result.reward == 1
+
+
+async def test_empty_response_give_up_is_a_failed_run(agent, tmp_path):
+    # Goose 1.54.0 persists this text and exits 0 after the model keeps returning empty completions.
+    server, sandbox, _ = agent
+    give_up = "The model returned an empty response. Please resend your message to continue."
+    stdout = json.dumps(
+        {
+            "type": "message",
+            "message": {"id": "m10", "role": "assistant", "content": [{"type": "text", "text": give_up}]},
+        }
+    )
+    _rewrite_archive(
+        sandbox, tmp_path, [(UPDATE, (json.dumps([{"type": "text", "text": give_up}]), "m10"))], stdout.encode()
+    )
+    result = await server.run(SimpleNamespace(cookies={}), run_body())
+    assert result.goose_failed and result.goose_error_type == "empty_response" and result.reward == 0
