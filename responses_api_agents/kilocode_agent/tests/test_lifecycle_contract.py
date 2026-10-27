@@ -28,7 +28,7 @@ class Sandbox:
         self.disconnect = AsyncMock()
 
     async def run_exec(self, command, **kwargs):
-        if "--receipt" in command and "process_supervisor.py" in command:
+        if "--receipt" in command and "process_supervisor" in command:
             self.events.append("launch")
             self.files[f"{DIRECTORY}/stdout.jsonl"] = '{"type":"text","part":{"text":"done"}}\n'
             self.files[f"{DIRECTORY}/stderr.log"] = ""

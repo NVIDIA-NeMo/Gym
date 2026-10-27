@@ -2814,3 +2814,108 @@ async def test_log_paths_are_prepared_when_the_provider_returns_no_stdout(tmp_pa
             await make_compose(NoStdoutShellProvider(), document, poll_interval_s=0.01).start()
     finally:
         adapter.LOGS_TREE = original
+
+
+@pytest.mark.asyncio
+async def test_an_unhealthy_service_failure_carries_the_tail_of_its_command_log(tmp_path):
+    """G7 round 24: a sidecar whose process died at start (a WebShop catalog that did not fit its memory) failed
+    the group as `Compose service 'mcp-server' unhealthy: exit status 1`, the healthcheck's own words, and the
+    adapter kept nothing of what the service had printed, so the cause had to be inferred from the next attempt.
+    The failure now carries a bounded tail of the service's command log (stdout and stderr of its command), as the
+    failure of a service that exited does; a service whose command printed nothing says so."""
+    provider = ShellProvider()
+    chatty = {
+        "image": "image",
+        "command": ["sh", "-c", "echo loading catalog; echo 'MemoryError: cannot allocate 7 GiB' >&2; sleep 5"],
+        "healthcheck": {"test": ["CMD", "false"], "retries": 1, "interval": "1ms"},
+    }
+    group = make_compose(
+        provider,
+        {
+            "services": {
+                "mcp-server": chatty,
+                "main": {"image": "image", "depends_on": {"mcp-server": {"condition": "service_healthy"}}},
+            }
+        },
+        default_command=["sleep", "5"],
+        poll_interval_s=0.01,
+    )
+    with pytest.raises(RuntimeError, match="unhealthy") as failure:
+        async with group:
+            pass
+    message = str(failure.value)
+    assert message.startswith("Compose service 'mcp-server' unhealthy: ")
+    assert "last output of its command: loading catalog\nMemoryError: cannot allocate 7 GiB" in message
+
+    quiet = {**chatty, "command": ["sleep", "5"]}
+    group = make_compose(
+        provider,
+        {
+            "services": {
+                "mcp-server": quiet,
+                "main": {"image": "image", "depends_on": {"mcp-server": {"condition": "service_healthy"}}},
+            }
+        },
+        default_command=["sleep", "5"],
+        poll_interval_s=0.01,
+    )
+    with pytest.raises(RuntimeError, match="unhealthy: .*; its command wrote no output$"):
+        async with group:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_the_verdict_survives_a_service_whose_sandbox_ended_before_its_log_could_be_read(tmp_path):
+    """Round 24 (G11 review 2): the log tail is a second exec after the verdict, and the service's sandbox can be
+    gone by then (OpenSandbox ended an OOM-killed sidecar's pod between the final healthcheck and the read). The
+    provider's exception must not replace the `Compose service 'mcp-server' unhealthy: ...` verdict that names the
+    service; it travels in the message instead. The same holds for a service that exited."""
+
+    class EndingProvider(ShellProvider):
+        async def exec(self, handle, command, **kwargs):
+            if command.startswith("tail -c 4096 "):
+                raise RuntimeError("Sandbox 89472b25 has ended (OOMKilled)")
+            return await super().exec(handle, command, **kwargs)
+
+    unhealthy = {
+        "image": "image",
+        "command": ["sh", "-c", "echo loading catalog; sleep 5"],
+        "healthcheck": {"test": ["CMD", "false"], "retries": 1, "interval": "1ms"},
+    }
+    group = make_compose(
+        EndingProvider(),
+        {
+            "services": {
+                "mcp-server": unhealthy,
+                "main": {"image": "image", "depends_on": {"mcp-server": {"condition": "service_healthy"}}},
+            }
+        },
+        default_command=["sleep", "5"],
+        poll_interval_s=0.01,
+    )
+    with pytest.raises(RuntimeError) as failure:
+        async with group:
+            pass
+    assert str(failure.value).startswith("Compose service 'mcp-server' unhealthy: ")
+    assert str(failure.value).endswith(
+        "; its command log could not be read (RuntimeError: Sandbox 89472b25 has ended (OOMKilled))"
+    )
+
+    group = make_compose(
+        EndingProvider(),
+        {
+            "services": {
+                "seed": {"image": "image", "command": ["sh", "-c", "exit 7"]},
+                "main": {"image": "image", "depends_on": {"seed": {"condition": "service_completed_successfully"}}},
+            }
+        },
+        default_command=["sleep", "5"],
+        poll_interval_s=0.01,
+    )
+    with pytest.raises(RuntimeError) as failure:
+        async with group:
+            pass
+    assert str(failure.value) == (
+        "Compose service 'seed' exited (7); its command log could not be read "
+        "(RuntimeError: Sandbox 89472b25 has ended (OOMKilled))"
+    )

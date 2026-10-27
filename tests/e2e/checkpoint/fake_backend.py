@@ -49,7 +49,7 @@ class FakeTransferQueue:
         self.cuts: dict[str, StagedCallRecord] = {}
 
     def stage(self, record: Any, *, attachments: Any = None) -> StageResult:
-        key = f"{record.rollout_id}/{record.model_call_id}"
+        key = f"{record.capture_key}/{record.model_call_id}"
         self.rows[key] = record
         return StageResult(ok=True, staging_key=key)
 
@@ -203,7 +203,7 @@ async def chat(request: Request) -> dict:
     admission_payload = body.get("ng_capture")
     call = {"index": index, "n_messages": len(messages), "admission": admission_payload, "t": time.time()}
     STATE["calls"].append(call)
-    rollout_id = (admission_payload or {}).get("rollout_id")
+    rollout_id = (admission_payload or {}).get("capture_key")
     rollout_index = STATE["rollout_calls"][rollout_id]
     STATE["rollout_calls"][rollout_id] += 1
 
