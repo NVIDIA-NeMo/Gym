@@ -999,8 +999,9 @@ gym eval export atif \
 `mlflow` and `wandb` log what a live run would have logged: the run's saved config (`<stem>_resolved_config.yaml`),
 its aggregate metrics, and its rollouts. They need `<stem>_aggregate_metrics.json` (newer than the rollouts file) and the
 saved config next to the rollouts, so they cannot export a run that predates the saved config. Backend settings and
-credentials (`mlflow_tracking_uri`, `wandb_api_key`, ...) come from the export command itself (arguments, `.env.yaml` or
-environment), never from the run's saved config, which masks them. Rollouts are uploaded unless the run's saved
+credentials (`mlflow_tracking_uri`, `wandb_api_key`, ...) come from the export command itself (arguments or `env.yaml`),
+never from the run's saved config, which masks them. A backend SDK's own environment variables, such as
+`WANDB_API_KEY`, are also used when the command sets no key. Rollouts are uploaded unless the run's saved
 `upload_rollouts` is false; pass `+upload_rollouts=true|false` to override.
 
 Once a run is exported, `<stem>_<exporter>_run_id` is written next to the rollouts and later exports of the same run

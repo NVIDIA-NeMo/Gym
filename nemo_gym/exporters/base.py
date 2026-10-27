@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import os
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -24,7 +25,7 @@ import orjson
 from omegaconf import DictConfig, OmegaConf
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.config_types import RunExportConfig, UploadRolloutsConfigMixin
+from nemo_gym.config_types import DEPRECATED_UPLOAD_ROLLOUTS_KEY, RunExportConfig, UploadRolloutsConfigMixin
 from nemo_gym.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.path_utils import exporter_run_id_path_for
 from nemo_gym.run_artifacts import RunArtifacts
@@ -87,6 +88,32 @@ class Exporter(ABC):
     @abstractmethod
     def export(self, artifacts: RunArtifacts) -> ExportResult:
         """Export the run. Report an expected failure in the result; raise only for a bug."""
+
+
+def _write_marker_atomically(marker: Path, run_id: str) -> None:
+    """Publish the already-exported marker only once it is fully written, so a failed write leaves none."""
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    temporary = marker.with_name(f".{marker.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(run_id)
+        temporary.replace(marker)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _upload_intent(config: DictConfig) -> UploadRolloutsConfigMixin:
+    """The upload settings in `config`, resolving only those values.
+
+    A saved run config keeps its `${...}` interpolations unresolved, and resolving all of it would need the
+    environment the run had. The canonical key wins over the deprecated one, as in the settings model, so a
+    deprecated value that loses is never evaluated.
+    """
+    values = OmegaConf.to_container(config, resolve=False)
+    for key in ("upload_rollouts", DEPRECATED_UPLOAD_ROLLOUTS_KEY):
+        if key in values:
+            values[key] = config[key]
+            break
+    return UploadRolloutsConfigMixin.model_validate(values)
 
 
 class BaseExporter(Exporter):
@@ -292,8 +319,7 @@ class BaseExporter(Exporter):
                 if rollouts is not None:
                     self._log_rollouts(rollouts)
             run_id = self._pending_run_id or ""
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text(run_id)
+            _write_marker_atomically(marker, run_id)
         except Exception as exc:
             logger.warning(f"Exporter {self.name} failed to export {artifacts.rollouts_jsonl_fpath}", exc_info=True)
             return ExportResult.failed(f"{type(exc).__name__}: {exc}")
@@ -317,6 +343,29 @@ class BaseExporter(Exporter):
                 f"Saved run config not found: {artifacts.resolved_config_yaml_fpath}. "
                 "The run predates saving it; re-run it, or export it live."
             )
+        return BaseExporter._aggregation_failure(aggregate_metrics)
+
+    @staticmethod
+    def _aggregation_failure(aggregate_metrics: Path) -> Optional[str]:
+        """Why the aggregate metrics file is not a complete result, or None.
+
+        A failed `/aggregate_metrics` request leaves an `aggregation_error` entry beside the healthy agents'
+        metrics. A live run keeps those partial metrics and reports the failure, but an export marks the run
+        done, so it must not send a partial result.
+        """
+        from nemo_gym.batch_status import AGGREGATION_ERROR_KEY
+
+        try:
+            entries = orjson.loads(aggregate_metrics.read_bytes())
+        except orjson.JSONDecodeError as exc:
+            return f"Aggregate metrics {aggregate_metrics} are not valid JSON ({exc}). Run `gym eval aggregate` again."
+        failed = sorted(
+            str((entry.get("agent_ref") or {}).get("name", "<unknown>"))
+            for entry in entries
+            if isinstance(entry, dict) and AGGREGATION_ERROR_KEY in entry
+        )
+        if failed:
+            return f"Aggregation failed for agents: {', '.join(failed)}. Run `gym eval aggregate` again."
         return None
 
     def _rollouts_to_upload(self, artifacts: RunArtifacts, saved_config: DictConfig) -> Optional[list[dict[str, Any]]]:
@@ -324,11 +373,11 @@ class BaseExporter(Exporter):
 
         An explicit `upload_rollouts=` on the export command wins; otherwise the run's own saved setting does.
         """
-        explicit = UploadRolloutsConfigMixin.model_validate(OmegaConf.to_container(self.global_config_dict))
+        explicit = _upload_intent(self.global_config_dict)
         if "upload_rollouts" in explicit.model_fields_set:
             upload = explicit.upload_rollouts
         else:
-            upload = UploadRolloutsConfigMixin.model_validate(OmegaConf.to_container(saved_config)).upload_rollouts
+            upload = _upload_intent(saved_config).upload_rollouts
         if not upload:
             return None
         from nemo_gym.rollout_collection import NG_DISPATCH_DRAINED_KEY, _rollout_for_export

@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import errno
 import os
 from pathlib import Path
 from typing import Any, ClassVar, Optional
@@ -183,6 +184,29 @@ class TestExport:
         assert (tmp_path / "live_recording_run_id").read_text() == "backend-run-7"
         assert backend._recorded_run_id() == "backend-run-7"
 
+    def test_a_marker_write_that_fails_midway_leaves_no_marker_and_a_retry_succeeds(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        artifacts = _make_run(tmp_path)
+        real_write_text = Path.write_text
+
+        def disk_full(self: Path, text: str, *args: Any, **kwargs: Any) -> int:
+            if self.name.endswith(".tmp") and "_run_id" in self.name:
+                real_write_text(self, text[:1], *args, **kwargs)
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_write_text(self, text, *args, **kwargs)
+
+        with monkeypatch.context() as patched:
+            patched.setattr(Path, "write_text", disk_full)
+            result = _backend(artifacts).export(artifacts)
+
+        assert result.state is ExportState.FAILED
+        assert "No space left on device" in result.error
+        assert not artifacts.exporter_run_id_fpath("recording").exists()
+        assert not list(tmp_path.glob(".*.tmp"))
+        assert _backend(artifacts).export(artifacts).state is ExportState.SUCCEEDED
+        assert artifacts.exporter_run_id_fpath("recording").read_text() == "backend-run-7"
+
 
 class TestRunMustBeExportable:
     def test_missing_aggregate_metrics(self, tmp_path: Path) -> None:
@@ -228,6 +252,47 @@ class TestRunMustBeExportable:
 
         assert backend.events == []
 
+    def test_an_aggregate_file_with_a_failed_agent_is_refused_until_it_is_repaired(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+        healthy = {"agent_ref": {"name": "good"}, "agent_metrics": {"mean/reward": 1.0}, "key_metrics": {}}
+        failed = {"agent_ref": {"name": "bad"}, "agent_metrics": {}, "key_metrics": {}, "aggregation_error": {"x": 1}}
+        artifacts.aggregate_metrics_json_fpath.write_bytes(orjson.dumps([healthy, failed]))
+        os.utime(artifacts.aggregate_metrics_json_fpath, (os.stat(artifacts.rollouts_jsonl_fpath).st_mtime + 10,) * 2)
+        backend = _backend(artifacts)
+
+        result = backend.export(artifacts)
+
+        assert result.state is ExportState.FAILED
+        assert result.error == "Aggregation failed for agents: bad. Run `gym eval aggregate` again."
+        assert backend.events == []
+        assert not artifacts.exporter_run_id_fpath("recording").exists()
+
+        repaired = {"agent_ref": {"name": "bad"}, "agent_metrics": {"mean/reward": 0.5}, "key_metrics": {}}
+        artifacts.aggregate_metrics_json_fpath.write_bytes(orjson.dumps([healthy, repaired]))
+        os.utime(artifacts.aggregate_metrics_json_fpath, (os.stat(artifacts.rollouts_jsonl_fpath).st_mtime + 20,) * 2)
+        retry = _backend(artifacts)
+        assert retry.export(artifacts).state is ExportState.SUCCEEDED
+        assert retry.metrics == [{"good/mean/reward": 1.0, "bad/mean/reward": 0.5}]
+        assert _backend(artifacts).export(artifacts).state is ExportState.SKIPPED
+
+    def test_every_failed_agent_is_named(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+        entries = [{"agent_ref": {"name": name}, "aggregation_error": {}} for name in ("b", "a")]
+        artifacts.aggregate_metrics_json_fpath.write_bytes(orjson.dumps(entries))
+        os.utime(artifacts.aggregate_metrics_json_fpath, (os.stat(artifacts.rollouts_jsonl_fpath).st_mtime + 10,) * 2)
+
+        assert "agents: a, b." in _backend(artifacts).export(artifacts).error
+
+    def test_aggregate_metrics_that_are_not_json(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+        artifacts.aggregate_metrics_json_fpath.write_text("{not json")
+        os.utime(artifacts.aggregate_metrics_json_fpath, (os.stat(artifacts.rollouts_jsonl_fpath).st_mtime + 10,) * 2)
+
+        result = _backend(artifacts).export(artifacts)
+
+        assert result.state is ExportState.FAILED
+        assert "are not valid JSON" in result.error
+
 
 class TestUploadIntent:
     def test_the_runs_saved_setting_decides_by_default(self, tmp_path: Path) -> None:
@@ -251,6 +316,43 @@ class TestUploadIntent:
         backend = _backend(artifacts, upload_rollouts=False)
 
         assert backend.export(artifacts).detail["uploaded_rollouts"] is False
+
+    @pytest.mark.parametrize("send_rows", [False, True])
+    def test_an_interpolated_setting_in_the_saved_config_is_resolved(self, tmp_path: Path, send_rows: bool) -> None:
+        artifacts = _make_run(tmp_path, saved_config={"send_rows": send_rows, "upload_rollouts": "${send_rows}"})
+        backend = _backend(artifacts)
+
+        result = backend.export(artifacts)
+
+        assert result.state is ExportState.SUCCEEDED, result.error
+        assert result.detail["uploaded_rollouts"] is send_rows
+        assert bool(backend.rollouts) is send_rows
+
+    @pytest.mark.parametrize("send_rows", [False, True])
+    def test_an_interpolated_setting_on_the_export_command_is_resolved(self, tmp_path: Path, send_rows: bool) -> None:
+        artifacts = _make_run(tmp_path, saved_config={"upload_rollouts": not send_rows})
+        backend = _backend(artifacts, send_rows=send_rows, upload_rollouts="${send_rows}")
+
+        result = backend.export(artifacts)
+
+        assert result.detail["uploaded_rollouts"] is send_rows
+
+    def test_the_rest_of_the_saved_config_stays_unresolved(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.delenv("UNSET_VAR_FOR_TEST", raising=False)
+        artifacts = _make_run(
+            tmp_path, saved_config={"upload_rollouts": False, "other": "${oc.env:UNSET_VAR_FOR_TEST}"}
+        )
+        backend = _backend(artifacts)
+
+        assert backend.export(artifacts).state is ExportState.SUCCEEDED
+        assert OmegaConf.to_container(backend.configs[0])["other"] == "${oc.env:UNSET_VAR_FOR_TEST}"
+
+    def test_a_losing_deprecated_value_is_never_evaluated(self, tmp_path: Path) -> None:
+        artifacts = _make_run(
+            tmp_path, saved_config={"upload_rollouts": False, "upload_rollouts_to_wandb": "${nowhere}"}
+        )
+
+        assert _backend(artifacts).export(artifacts).state is ExportState.SUCCEEDED
 
 
 class TestRegisteredBackends:
@@ -339,3 +441,40 @@ def test_skip_exporters_leaves_live_exporters_unopened(monkeypatch: MonkeyPatch)
         )
         global_config.GlobalConfigDictParser().parse(config)
         assert opened.called is (not skip)
+
+
+class TestWandbCredentials:
+    @staticmethod
+    def _export(tmp_path: Path, monkeypatch: MonkeyPatch, **settings: Any) -> tuple[Any, RunArtifacts]:
+        artifacts = _make_run(tmp_path, saved_config={"wandb_api_key": "****", "model": "m"})
+        run = MagicMock(id="wandb-run-1")
+        monkeypatch.setattr(wandb_module.wandb, "init", MagicMock(return_value=run))
+        config = OmegaConf.create(
+            {
+                "rollouts_jsonl_fpath": str(artifacts.rollouts_jsonl_fpath),
+                "results_dir": str(tmp_path / "results"),
+                "wandb_project": "proj",
+                "wandb_name": "nightly",
+                **settings,
+            }
+        )
+        return WandbExporter.from_global_config(config).export(artifacts), artifacts
+
+    def test_a_key_from_the_environment_is_used_when_the_command_sets_none(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("WANDB_API_KEY", "env-key")  # pragma: allowlist secret
+
+        result, artifacts = self._export(tmp_path, monkeypatch)
+
+        assert result.state is ExportState.SUCCEEDED, result.error
+        assert os.environ["WANDB_API_KEY"] == "env-key"  # pragma: allowlist secret
+        assert artifacts.exporter_run_id_fpath("wandb").read_text() == "wandb-run-1"
+
+    def test_a_key_on_the_command_overrides_the_environment(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setenv("WANDB_API_KEY", "env-key")  # pragma: allowlist secret
+
+        result, _ = self._export(tmp_path, monkeypatch, wandb_api_key="command-key")  # pragma: allowlist secret
+
+        assert result.state is ExportState.SUCCEEDED, result.error
+        assert os.environ["WANDB_API_KEY"] == "command-key"  # pragma: allowlist secret
