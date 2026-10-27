@@ -245,8 +245,10 @@ async def test_kills_by_interpreter_name_miss_the_supervisor_and_stdlib_runner(s
             while not tool_pid_file.exists() or not tool_pid_file.read_text():
                 await asyncio.sleep(0.01)
         supervisor_pid = int((session_dir / SUPERVISOR_PID_FILE).read_text())
-        (runner_pid,) = map(int, Path(f"/proc/{supervisor_pid}/task/{supervisor_pid}/children").read_text().split())
         tool_pid = int(tool_pid_file.read_text())
+        # The bash supervisor's polling sleeps are children too; the runner is the tool's parent.
+        runner_pid = int(Path(f"/proc/{tool_pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+        assert str(runner_pid) in Path(f"/proc/{supervisor_pid}/task/{supervisor_pid}/children").read_text().split()
         # The supervisor is bash; the runner runs through a link to the base interpreter.
         for pid, name in ((supervisor_pid, "bash"), (runner_pid, "gym-runner")):
             assert Path(f"/proc/{pid}/comm").read_text().strip() == name
