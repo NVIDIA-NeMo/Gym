@@ -543,7 +543,8 @@ async def test_recovered_model_transport_failure_reaches_collection(monkeypatch,
     import nemo_gym.server_utils as server_utils
 
     success = SimpleNamespace(status=200, headers={})
-    wire = SimpleNamespace(request=AsyncMock(side_effect=[error_type("sensitive connection text"), success]))
+    error = error_type("sensitive connection text")
+    wire = SimpleNamespace(request=AsyncMock(side_effect=[error, success]))
     monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
     monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
     monkeypatch.setattr(server_utils.asyncio, "sleep", AsyncMock())
@@ -557,11 +558,15 @@ async def test_recovered_model_transport_failure_reaches_collection(monkeypatch,
     reply = _app(route).post("/run")
     assert reply.status_code == 200 and reply.json() == {"reward": 1.0}
     assert wire.request.await_count == 2
-    (event,) = _events_row_fields(reply.headers)["_ng_failure_events"].values()
+    records = _events_row_fields(reply.headers)["_ng_failure_events"]
+    (event,) = (record for record in records.values() if record["type"] == "ModelFailure")
     assert event["type"] == "ModelFailure" and event["failure_kind"] == MODEL_REQUEST_ERROR
     assert event.get("http_status") is None
-    assert error_type.__name__ in event["failure_reason"]
-    assert "sensitive" not in json.dumps(event)
+    cause = records[event["cause_id"]]
+    assert cause["event_id"] == error._ng_failure_event_id
+    assert cause["exception_type"] == f"{error_type.__module__}.{error_type.__qualname__}"
+    assert cause["type"] == "untyped" and cause["failure_reason"] == ""
+    assert "sensitive" not in json.dumps(records)
     assert event["attempt_id"].startswith(event["operation_id"])
 
 
@@ -622,8 +627,10 @@ async def test_terminal_model_transport_attempt_is_observed_without_an_extra_ret
         with pytest.raises(error_type) as caught:
             await model._request(method="POST", url="http://model.test/responses")
     assert caught.value is error and wire.request.await_count == 1
-    assert len(events) == 1
-    assert next(iter(events.values())).type == "ModelFailure"
+    assert len(events) == 2
+    root = next(event for event in events.values() if event.type == "ModelFailure")
+    assert root.cause_id == error._ng_failure_event_id
+    assert events[root.cause_id].failure_reason == ""
 
 
 async def test_model_cancellation_is_neither_retried_nor_observed(monkeypatch):

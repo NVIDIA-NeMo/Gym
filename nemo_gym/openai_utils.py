@@ -1784,16 +1784,16 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         def observe_transport_failure(error: Exception) -> None:
             nonlocal transport_failures
             transport_failures += 1
-            # Exception text can contain request data; record only its class and the owned operation.
-            observe_failure(
-                ModelFailure(
-                    MODEL_REQUEST_ERROR,
-                    f"{type(error).__name__} during the model request",
-                    operation="model_request",
-                    operation_id=operation_id,
-                    attempt_id=f"{operation_id}-transport-{transport_failures}",
-                )
+            failure = ModelFailure(
+                MODEL_REQUEST_ERROR,
+                "Model request transport failed",
+                operation="model_request",
+                operation_id=operation_id,
+                attempt_id=f"{operation_id}-transport-{transport_failures}",
             )
+            # The foreign-cause serializer retains type/status/identity, never its sensitive exception text.
+            failure.__cause__ = error
+            observe_failure(failure)
 
         while tries < max_num_tries:
             if self._permanent_trip is not None:

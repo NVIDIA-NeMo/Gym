@@ -574,7 +574,10 @@ async def request(
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
 
-    The private transport-failure observer runs before retry decisions and must not raise. It is not\n    forwarded to aiohttp; cancellation bypasses it.\n\n    This is the only place Gym talks to another server, so it is also the only place
+    The private transport-failure observer runs before retry decisions and must not raise. It is not
+    forwarded to aiohttp; cancellation bypasses it.
+
+    This is the only place Gym talks to another server, so it is also the only place
     trace context has to be injected: every agent -> model and agent -> resources hop goes
     through here. `CLAUDE.md` bans httpx precisely to keep it that way.
 
