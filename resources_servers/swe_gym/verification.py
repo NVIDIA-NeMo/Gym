@@ -187,9 +187,16 @@ set +e
 
 {reset_tests}
 {apply_test_patch}
+# Runners such as jest report on stderr, which a provider may return apart from stdout, so both
+# streams go inside the markers. Each is captured whole: an interleaved stream can split a result
+# line, as when a subprocess's stderr lands between `test x ... ok` and its newline. The subshell
+# keeps a test command's own `exit` or `exec` from skipping the replay below.
 echo "{TEST_OUTPUT_BEGIN}"
+(
 {run_tests}
+) >/tmp/nemo_gym_test_stdout.log 2>/tmp/nemo_gym_test_stderr.log
 __test_exit=$?
+cat /tmp/nemo_gym_test_stdout.log; echo; cat /tmp/nemo_gym_test_stderr.log
 echo "{TEST_OUTPUT_END}"
 {reset_tests}
 exit $__test_exit
@@ -261,6 +268,18 @@ async def run_verification(
                 pass
 
         await asyncio.to_thread(_persist_log)
+
+    if result.error_type is not None:
+        # The sandbox reported no exit for the eval script (a dropped stream, a timeout, a provider error), so the
+        # partial log cannot grade the run: report it inconclusive so it is retried, never as a zero.
+        return VerificationResult(
+            completed=False,
+            resolved=False,
+            patch_applied=False,
+            test_results=None,
+            test_output=output,
+            error=f"test run did not finish ({result.error_type}): {(result.stderr or '')[-500:]}",
+        )
 
     if result.return_code == EXIT_NO_REPO:
         return VerificationResult(False, False, False, None, output, f"{REPO_DIRECTORY} is not present in the image")

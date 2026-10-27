@@ -275,8 +275,8 @@ class TestDropTestPatchFiles:
 
 
 class _FakeSandbox:
-    def __init__(self, stdout: str, return_code: int = 0, stderr: str = "") -> None:
-        self.result = SimpleNamespace(stdout=stdout, stderr=stderr, return_code=return_code)
+    def __init__(self, stdout: str, return_code: int = 0, stderr: str = "", error_type: str | None = None) -> None:
+        self.result = SimpleNamespace(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
         self.commands: list[str] = []
 
     async def exec(self, command: str, timeout_s=None, cwd=None):
@@ -285,6 +285,14 @@ class _FakeSandbox:
 
 
 class TestRunVerification:
+    @pytest.mark.asyncio
+    async def test_a_dropped_test_run_is_incomplete_not_a_zero(self) -> None:
+        """A dropped exec stream leaves no test results; grading that log would score every test as failing."""
+        result = await run_verification(sandbox=_FakeSandbox("", error_type="sandbox"), inputs=_inputs())
+        assert result.completed is False
+        assert result.resolved is False
+        assert result.error.startswith("test run did not finish (sandbox)")
+
     @pytest.mark.asyncio
     async def test_grades_a_passing_run(self) -> None:
         log = (
