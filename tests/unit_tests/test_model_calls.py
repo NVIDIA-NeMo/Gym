@@ -819,3 +819,102 @@ def test_merge_capture_binds_a_cancelled_call_with_a_complete_body_to_its_agent_
     [joined_ref] = record["ng_agent_observations"]["records"][0]["model_calls"]
     assert joined_ref["model_call_id"] == "call-cancelled"
     assert record["ng_agent_observations"]["gaps"] == []
+
+
+def _covered_record():
+    return {
+        "ng_model_call_capture": {
+            "rollout_id": "0-0",
+            "metrics": {},
+            "calls": [{"model_call_id": "c1"}, {"model_call_id": "c2"}],
+        },
+        "ng_trajectory": {
+            "model_calls": [
+                {"model_call_id": "c1", "request": {"input": "hi"}, "response": {"id": "r1"}},
+                # A raw body kept as text still counts as a response.
+                {"model_call_id": "c2", "request": {"input": "again"}, "response": '{"id": "r2"'},
+            ],
+            "gaps": [],
+        },
+    }
+
+
+def test_uncovered_reasons_is_empty_when_every_call_has_its_payload():
+    from nemo_gym.observability.model_calls import model_call_capture_uncovered_reasons
+
+    assert model_call_capture_uncovered_reasons(_covered_record()) == []
+
+
+@pytest.mark.parametrize(
+    "mutate, expected",
+    [
+        pytest.param(lambda r: r.pop("ng_model_call_capture"), ["no_capture_attachment"], id="no capture attachment"),
+        pytest.param(
+            lambda r: r["ng_model_call_capture"].update(gaps=[{"code": "model_call_capture_pending"}]),
+            ["capture_gap:model_call_capture_pending"],
+            id="capture gap",
+        ),
+        pytest.param(lambda r: r.pop("ng_trajectory"), ["no_trajectory"], id="no trajectory"),
+        pytest.param(
+            lambda r: r["ng_trajectory"]["gaps"].append({"code": "multimodal_history_redacted"}),
+            ["payload_gap:multimodal_history_redacted"],
+            id="redacted history in the trajectory",
+        ),
+        pytest.param(
+            lambda r: r.update(ng_agent_observations={"gaps": [{"code": "multimodal_history_redacted"}]}),
+            ["payload_gap:multimodal_history_redacted"],
+            id="redacted history in the agent observations",
+        ),
+        pytest.param(
+            lambda r: r["ng_trajectory"]["model_calls"].pop(),
+            ["call_without_payload:c2"],
+            id="call missing from the trajectory",
+        ),
+        pytest.param(
+            lambda r: r["ng_trajectory"]["model_calls"][0].update(response=None),
+            ["call_without_payload:c1"],
+            id="call without a response",
+        ),
+        pytest.param(
+            lambda r: r["ng_trajectory"]["model_calls"][1].update(request=None),
+            ["call_without_payload:c2"],
+            id="call without a request",
+        ),
+        pytest.param(
+            lambda r: r["ng_model_call_capture"]["calls"].append({"model_call_id": None}),
+            ["call_without_id"],
+            id="call without an id",
+        ),
+    ],
+)
+def test_uncovered_reasons_names_what_the_rollout_lacks(mutate, expected):
+    from nemo_gym.observability.model_calls import model_call_capture_uncovered_reasons
+
+    record = _covered_record()
+    mutate(record)
+
+    assert model_call_capture_uncovered_reasons(record) == expected
+
+
+def test_uncovered_reasons_covers_a_merged_capture_once_the_trajectory_is_attached(tmp_path):
+    from nemo_gym.observability.model_calls import (
+        merge_model_call_capture_into_record,
+        model_call_capture_uncovered_reasons,
+    )
+    from nemo_gym.rollout_collection import _attach_trajectory_record
+
+    row = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+    store = CaptureStore(tmp_path)
+    store.record("0-0", _cancelled_exchange(orjson.dumps(_COMPLETE_RESPONSES_BODY).decode()))
+    record = dict(row)
+    merge_model_call_capture_into_record(record, [tmp_path], include_payloads=True)
+    _attach_trajectory_record(row, record)
+
+    assert model_call_capture_uncovered_reasons(record) == []
+
+    store.mark_pending("0-0", "call-late")
+    pending = dict(row)
+    merge_model_call_capture_into_record(pending, [tmp_path], include_payloads=True)
+    _attach_trajectory_record(row, pending)
+
+    assert model_call_capture_uncovered_reasons(pending) == ["capture_gap:model_call_capture_pending"]

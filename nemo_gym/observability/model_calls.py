@@ -556,6 +556,43 @@ def merge_model_call_capture_into_record(
     return record
 
 
+_PAYLOAD_OMISSION_GAPS = frozenset({"multimodal_history_redacted", "trajectory_projection_failed"})
+
+
+def model_call_capture_uncovered_reasons(result: Mapping[str, Any]) -> list[str]:
+    """Return why a rollout record does not fully cover its capture file; empty when it does.
+
+    A record covers its capture file when collection read the file without a gap and every captured
+    call has its request and response in ``ng_trajectory.model_calls``.
+    """
+    capture = result.get("ng_model_call_capture")
+    if not isinstance(capture, Mapping):
+        return ["no_capture_attachment"]
+    reasons = [f"capture_gap:{gap.get('code')}" for gap in capture.get("gaps") or [] if isinstance(gap, Mapping)]
+
+    trajectory = result.get("ng_trajectory")
+    if not isinstance(trajectory, Mapping):
+        return [*reasons, "no_trajectory"]
+    for source in (trajectory, result.get(NG_AGENT_OBSERVATIONS_KEY)):
+        gaps = source.get("gaps") if isinstance(source, Mapping) else None
+        for gap in gaps or []:
+            if isinstance(gap, Mapping) and gap.get("code") in _PAYLOAD_OMISSION_GAPS:
+                reasons.append(f"payload_gap:{gap['code']}")
+
+    with_payload = {
+        call.get("model_call_id")
+        for call in trajectory.get("model_calls") or []
+        if isinstance(call, Mapping) and call.get("request") is not None and call.get("response") is not None
+    }
+    for call in capture.get("calls") or []:
+        call_id = call.get("model_call_id") if isinstance(call, Mapping) else None
+        if call_id is None:
+            reasons.append("call_without_id")
+        elif call_id not in with_payload:
+            reasons.append(f"call_without_payload:{call_id}")
+    return reasons
+
+
 def _prompt_size(usage: Mapping[str, Any]) -> Optional[int]:
     """Return the whole prompt size, with cached tokens counted exactly once.
 
