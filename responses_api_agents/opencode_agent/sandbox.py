@@ -112,6 +112,7 @@ class OpenCodeSandboxSession(AgentSessionState):
     runtime: str
     sandbox_id: str | None = None
     model_ref: ModelServerRef | None = None
+    provider_name: str | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None

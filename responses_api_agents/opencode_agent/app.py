@@ -65,6 +65,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.rollout_observability import (
+    NG_AGENT_SANDBOX_OBSERVATION_KEY,
     AgentEpisode,
     AgentInvocation,
     AgentObservationBundle,
@@ -72,7 +73,7 @@ from nemo_gym.rollout_observability import (
     SandboxObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxOOMKilledError, SandboxSpec, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import (
@@ -217,6 +218,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    report_agent_sandbox_oom: bool = False
 
     @property
     def command_parts(self) -> list[str]:
@@ -740,6 +742,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             ),
             runtime=runtime,
             model_ref=self.config.model_server,
+            provider_name=provider.name,
         )
         prepared_directory = False
         try:
@@ -752,6 +755,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
             state.sandbox_id = sandbox.sandbox_id
+            if state.sandbox_id is None:
+                raise RuntimeError("OpenCode sandbox provider did not return a sandbox_id")
+            state.session.sandbox_id = state.sandbox_id
             command = _sandbox_prepare_command(workdir, directory, runtime)
             result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
@@ -1182,8 +1188,24 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             failure = exc
         observations = state.activation_observations if state.is_continuation else state.observations
         if observations is None:
+            confirmed_oom = isinstance(failure, SandboxOOMKilledError) and state.session.execution_oom is failure
+            invocation_id = state.invocation_prefix if state.is_continuation else state.request.episode_id.capture_key
+            if state.is_continuation and state.harness_session_id is not None:
+                invocation_id += f":{state.harness_session_id}"
             observations = AgentObservationBundle(
-                source="opencode", gaps=[ObservationGap(code="observation_capture_failed")]
+                source="opencode",
+                records=(
+                    [
+                        AgentInvocation(
+                            invocation_id=invocation_id,
+                            activation_id=state.activation_id if state.is_continuation else None,
+                            harness_session_id=state.harness_session_id if state.is_continuation else None,
+                        )
+                    ]
+                    if confirmed_oom
+                    else []
+                ),
+                gaps=[ObservationGap(code="observation_capture_failed")],
             )
         if state.is_continuation:
             state.activation_observations = observations
@@ -1276,12 +1298,39 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     error_type="process_exit" if reported_error else None,
                 )
             )
+        execution_oom = (
+            failure
+            if self.config.report_agent_sandbox_oom
+            and isinstance(failure, SandboxOOMKilledError)
+            and state.session.execution_oom is failure
+            else None
+        )
+        if execution_oom is not None:
+            observation = SandboxObservation(
+                role="agent",
+                provider=state.provider_name,
+                sandbox_id=execution_oom.sandbox_id,
+                outcome="oom",
+                phase="agent_execution",
+                error_type=type(execution_oom).__name__,
+                error_message=str(execution_oom),
+            )
+            observations.records.append(observation)
         observations.gaps.append(
             ObservationGap(
                 code="model_usage_reconciliation_unavailable",
                 detail="Usage comes from OpenCode persisted assistant messages; compare against captured Gym model calls.",
             )
         )
+        if execution_oom is not None:
+            response = self._make_session_response(
+                state,
+                body,
+                timeout=timeout,
+                outcome=OpenCodeRunOutcome(status="failed", error_type="server_error"),
+            )
+            response.metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY] = observation.model_dump_json(exclude_none=True)
+            return response
         if failure is not None:
             raise failure
         if error and not reported_error:
