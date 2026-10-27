@@ -1779,11 +1779,27 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         waited = 0.0
         # One logical model call; each HTTP attempt of it is observed under its own attempt id.
         operation_id = uuid.uuid4().hex
+        transport_failures = 0
+
+        def observe_transport_failure(error: Exception) -> None:
+            nonlocal transport_failures
+            transport_failures += 1
+            # Exception text can contain request data; record only its class and the owned operation.
+            observe_failure(
+                ModelFailure(
+                    MODEL_REQUEST_ERROR,
+                    f"{type(error).__name__} during the model request",
+                    operation="model_request",
+                    operation_id=operation_id,
+                    attempt_id=f"{operation_id}-transport-{transport_failures}",
+                )
+            )
+
         while tries < max_num_tries:
             if self._permanent_trip is not None:
                 self._raise_permanent_error()
             tries += 1
-            response = await request(**request_kwargs)
+            response = await request(_on_transport_failure=observe_transport_failure, **request_kwargs)
 
             if response.status in (401, 403):
                 content = await response.content.read()

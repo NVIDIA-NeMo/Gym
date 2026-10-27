@@ -266,7 +266,7 @@ def failure_event_map(error: BaseException | None) -> dict[str, FailureEventReco
     """``error`` and its explicit causes as failure events keyed by id; empty without a typed boundary or explicit cause.
 
     Each typed failure keeps its own type, kind, reason and ``event_id``. A cause that is not a typed failure is
-    recorded by type only (its text may hold request data), under an id derived from its parent's. The chain is
+    recorded by type only (its text may hold request data), with its own stable local id. The chain is
     cut at ``MAX_FAILURE_CAUSE_DEPTH``. Never raises.
     """
     try:
@@ -285,7 +285,7 @@ def failure_event_map(error: BaseException | None) -> dict[str, FailureEventReco
                     data["cause_truncated"] = True
                     cause = None
                 else:
-                    data["cause_id"] = cause.event_id if _is_typed(cause) else f"{event_id}.cause"
+                    data["cause_id"] = _local_event_id(cause)
             else:
                 cause = None
             if cause is None and getattr(current, "cause_truncated", None):

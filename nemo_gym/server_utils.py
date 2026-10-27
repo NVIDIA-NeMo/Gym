@@ -25,6 +25,7 @@ import time
 import warnings
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from functools import partial
 from importlib import import_module
@@ -568,11 +569,12 @@ async def request(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    _on_transport_failure: Callable[[Exception], None] | None = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
 
-    This is the only place Gym talks to another server, so it is also the only place
+    The private transport-failure observer runs before retry decisions and must not raise. It is not\n    forwarded to aiohttp; cancellation bypasses it.\n\n    This is the only place Gym talks to another server, so it is also the only place
     trace context has to be injected: every agent -> model and agent -> resources hop goes
     through here. `CLAUDE.md` bans httpx precisely to keep it that way.
 
@@ -613,6 +615,7 @@ async def request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _on_transport_failure=_on_transport_failure,
             **kwargs,
         )
     # While metrics are exporting, count calls still waiting for their response, which ends when the headers arrive.
@@ -627,6 +630,7 @@ async def request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _on_transport_failure=_on_transport_failure,
             **kwargs,
         )
     finally:
@@ -642,6 +646,7 @@ async def _traced_request(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    _on_transport_failure: Callable[[Exception], None] | None = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -685,6 +690,7 @@ async def _traced_request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _on_transport_failure=_on_transport_failure,
             **kwargs,
         )
 
@@ -753,6 +759,7 @@ async def _request_with_retries(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    _on_transport_failure: Callable[[Exception], None] | None = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_control_client() if _control else get_global_aiohttp_client()
@@ -768,7 +775,9 @@ async def _request_with_retries(
                 explicit_tries += 1
             try:
                 return await client.request(method=method, url=url, **kwargs)
-            except ServerDisconnectedError:
+            except ServerDisconnectedError as error:
+                if _on_transport_failure is not None:
+                    _on_transport_failure(error)
                 if not _resend_after_disconnect:
                     raise
                 global _NUM_SERVER_DISCONNECTED_ERROR
@@ -789,6 +798,8 @@ async def _request_with_retries(
 
                 await asyncio.sleep(0.5)
             except ClientOSError as error:
+                if _on_transport_failure is not None:
+                    _on_transport_failure(error)
                 if not _resend_after_disconnect and not isinstance(error, ClientConnectorError):
                     raise
                 global _NUM_CLIENT_OS_ERROR
@@ -808,6 +819,8 @@ async def _request_with_retries(
 
                 await asyncio.sleep(0.5)
             except Exception as e:
+                if _on_transport_failure is not None:
+                    _on_transport_failure(e)
                 if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                     print_exc()
                 if not _resend_after_disconnect:

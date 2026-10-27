@@ -28,7 +28,7 @@ from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, Epis
 from nemo_gym.failure_kinds import FailureStage
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SimpleServer, format_exception_with_response_body
-from nemo_gym.typed_exceptions import attach_failure_events
+from nemo_gym.typed_exceptions import EnvServerFailure, attach_failure_events
 
 
 LOGGER = logging.getLogger(__name__)
@@ -129,11 +129,16 @@ class CleanupContext:
                 LOGGER.exception(f"Episode cleanup failed: {entry.name}")
 
 
-class HandledEpisodeError(Exception):
+class HandledEpisodeError(EnvServerFailure):
     """Carry a failure that belongs in the episode response."""
 
     def __init__(self, failure: EpisodeFailure) -> None:
-        super().__init__(failure.failure_reason)
+        super().__init__(
+            failure.failure_kind,
+            failure.failure_reason,
+            operation="episode",
+            stage=failure.stage,
+        )
         self.failure = failure
 
 

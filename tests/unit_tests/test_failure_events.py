@@ -508,3 +508,135 @@ def test_middleware_validates_and_bounds_relayed_ascii_failure_headers(mode):
         assert decoded.failure_id == inner.failure_id and decoded.failure_events == inner.failure_events
     else:
         assert decoded.failure_id != inner.failure_id
+
+
+def test_foreign_cause_keeps_identity_across_wrappers_and_wire_roundtrip():
+    from nemo_gym.typed_exceptions import merge_failure_events
+
+    inner = ModelFailure(MODEL_REQUEST_ERROR, "failed", event_id="model")
+    foreign = RuntimeError("sensitive request content")
+    foreign.__cause__ = inner
+    first = failure_event_map(foreign)
+    foreign_id = next(key for key, event in first.items() if event.type == "untyped")
+    wrappers = [EnvServerFailure(SESSION_LOST, "lost"), ResServerFailure(VERIFIER_ERROR, "failed")]
+    merged = first
+    for wrapper in wrappers:
+        wrapper.__cause__ = foreign
+        events = failure_event_map(wrapper)
+        assert events[wrapper.event_id].cause_id == foreign_id
+        merged = merge_failure_events(merged, events)
+        envelope = EpisodeFailure(
+            failure_reason="failed", terminal=False, failure_id=wrapper.event_id, failure_events=events
+        )
+        decoded = decode_header({FAILURE_EVENT_HEADER: encode_header(envelope)})
+        rebuilt = reconstruct_failure(decoded.failure_id, decoded.failure_events)
+        assert failure_event_map(rebuilt) == events
+    assert len(merged) == 4
+    assert sum(event.type == "untyped" for event in merged.values()) == 1
+    assert "sensitive" not in json.dumps({key: event.model_dump() for key, event in merged.items()})
+
+
+@pytest.mark.parametrize("error_type", [aiohttp.ServerDisconnectedError, aiohttp.ClientOSError])
+async def test_recovered_model_transport_failure_reaches_collection(monkeypatch, error_type):
+    from unittest.mock import AsyncMock
+
+    import nemo_gym.server_utils as server_utils
+
+    success = SimpleNamespace(status=200, headers={})
+    wire = SimpleNamespace(request=AsyncMock(side_effect=[error_type("sensitive connection text"), success]))
+    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+    monkeypatch.setattr(server_utils.asyncio, "sleep", AsyncMock())
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test", max_connection_retries=3)
+
+    async def route():
+        response = await model._request(method="POST", url="http://model.test/responses")
+        assert response is success
+        return {"reward": 1.0}
+
+    reply = _app(route).post("/run")
+    assert reply.status_code == 200 and reply.json() == {"reward": 1.0}
+    assert wire.request.await_count == 2
+    (event,) = _events_row_fields(reply.headers)["_ng_failure_events"].values()
+    assert event["type"] == "ModelFailure" and event["failure_kind"] == MODEL_REQUEST_ERROR
+    assert event.get("http_status") is None
+    assert error_type.__name__ in event["failure_reason"]
+    assert "sensitive" not in json.dumps(event)
+    assert event["attempt_id"].startswith(event["operation_id"])
+
+
+@pytest.mark.parametrize("kind", [None, SESSION_LOST])
+async def test_dependency_failure_wraps_resource_http_without_borrowing_its_kind(kind):
+    from nemo_gym.base_environment_server import HandledEpisodeError, dependency_failure
+    from nemo_gym.typed_exceptions import attach_failure_events
+
+    inner = ResServerFailure(VERIFIER_ERROR, "resource verification failed", event_id="resource-original")
+
+    async def verify(_request):
+        return web.Response(status=503, text="unavailable", headers=safe_failure_header(inner, server="res"))
+
+    app = web.Application()
+    app.router.add_post("/verify", verify)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        async with session.post(server.make_url("/verify")) as response:
+            with pytest.raises(aiohttp.ClientResponseError) as caught:
+                await raise_for_status(response)
+    handled = dependency_failure(caught.value, failure_model=EpisodeFailure, stage="verification", failure_kind=kind)
+    assert isinstance(handled, HandledEpisodeError) and isinstance(handled, EnvServerFailure)
+    failure = attach_failure_events(handled.failure, handled)
+    assert failure.terminal is False and failure.failure_kind == kind
+    from tests.unit_tests.test_environment_server import _environment_server, _EnvironmentServer, _request
+
+    class FailedEnvironment(_EnvironmentServer):
+        async def run(self, request, cleanup):
+            raise handled
+
+    template = _environment_server()
+    env = FailedEnvironment(config=template.config, server_client=template.server_client)
+    reply = TestClient(env.setup_webserver()).post("/run", json=_request().model_dump(mode="json"))
+    assert reply.status_code == 200 and reply.json()["result"] is None
+    parsed = EpisodeFailure.model_validate(reply.json()["failure"])
+    assert parsed.terminal is False and parsed.failure_kind == kind
+    outer = parsed.failure_events[parsed.failure_id]
+    assert outer.type == "EnvServerFailure" and outer.failure_kind == kind
+    assert outer.stage == "verification"
+    assert parsed.failure_events[inner.event_id].failure_kind == VERIFIER_ERROR
+    assert parsed.failure_events[inner.event_id].failure_reason == inner.failure_reason
+    rebuilt = reconstruct_failure(parsed.failure_id, parsed.failure_events)
+    assert isinstance(rebuilt, EnvServerFailure)
+    assert rebuilt.__cause__.__cause__.event_id == inner.event_id
+
+
+@pytest.mark.parametrize("error_type", [aiohttp.ServerDisconnectedError, aiohttp.ClientOSError, TimeoutError])
+async def test_terminal_model_transport_attempt_is_observed_without_an_extra_retry(monkeypatch, error_type):
+    from unittest.mock import AsyncMock
+
+    import nemo_gym.server_utils as server_utils
+
+    error = error_type("private request")
+    wire = SimpleNamespace(request=AsyncMock(side_effect=error))
+    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test", max_num_tries=1)
+    with observing_failures() as events:
+        with pytest.raises(error_type) as caught:
+            await model._request(method="POST", url="http://model.test/responses")
+    assert caught.value is error and wire.request.await_count == 1
+    assert len(events) == 1
+    assert next(iter(events.values())).type == "ModelFailure"
+
+
+async def test_model_cancellation_is_neither_retried_nor_observed(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    import nemo_gym.server_utils as server_utils
+
+    wire = SimpleNamespace(request=AsyncMock(side_effect=asyncio.CancelledError()))
+    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test")
+    with observing_failures() as events:
+        with pytest.raises(asyncio.CancelledError):
+            await model._request(method="POST", url="http://model.test/responses")
+    assert wire.request.await_count == 1 and not events
