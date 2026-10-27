@@ -115,6 +115,8 @@ OpenTelemetry chat spans, written locally to the session directory: counts are s
 model calls, and a count the provider omitted stays unknown rather than zero. Close returns the model-call
 references, harness tool timing, sandbox identity and execution outcome, and explicit observation gaps.
 Observed rejected model calls contribute zero completed-response tokens; missing chat telemetry stays unknown.
+A call that Copilot's events report but that has no chat span also makes aggregate usage unknown
+(`model_usage_spans_missing`); its model-call reference comes from the events.
 Copilot 1.0.103 omits compaction calls from its native usage spans. The adapter also checks its persisted
 session events, including late background compaction attempts with no subsequent chat span. Aggregate
 response usage stays unknown after observed compaction (`compaction_model_usage_unavailable`) or when

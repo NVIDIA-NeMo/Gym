@@ -588,7 +588,9 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         failure: BaseException | None = None,
     ) -> AgentObservationBundle:
         invocation_id = state.request.episode_id.capture_key
-        response_ids = usage.response_ids if usage is not None and usage.response_ids else transcript.response_ids
+        # Spans lead with failed attempts; events add calls whose span the exporter never wrote.
+        span_ids = usage.response_ids if usage is not None else []
+        response_ids = [*span_ids, *(id_ for id_ in transcript.response_ids if id_ not in span_ids)]
         gaps = [
             ObservationGap(code="subagent_hierarchy_unavailable", invocation_id=invocation_id),
             ObservationGap(code="compaction_observations_unavailable", invocation_id=invocation_id),
@@ -739,7 +741,14 @@ class CopilotAgent(SimpleResponsesAPIAgent):
                     type="message",
                 )
             )
-        known = usage is not None and usage.input_tokens is not None and usage.output_tokens is not None
+        # A span lost before the exporter flushed would make the sum a silent subtotal.
+        missing_spans = [id_ for id_ in transcript.response_ids if usage is not None and id_ not in usage.response_ids]
+        known = (
+            usage is not None
+            and not missing_spans
+            and usage.input_tokens is not None
+            and usage.output_tokens is not None
+        )
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
@@ -788,7 +797,14 @@ class CopilotAgent(SimpleResponsesAPIAgent):
                 source=SOURCE, gaps=[ObservationGap(code="observation_parse_failed")]
             )
         gaps = state.observations.gaps
-        if usage is not None and not known:
+        if missing_spans:
+            gaps.append(
+                ObservationGap(
+                    code="model_usage_spans_missing",
+                    detail="Copilot wrote no OpenTelemetry span for " + ", ".join(missing_spans),
+                )
+            )
+        elif usage is not None and not known:
             gaps.append(
                 ObservationGap(code="partial_model_usage_unavailable", detail="a model call reported no usage")
             )

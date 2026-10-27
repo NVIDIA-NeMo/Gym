@@ -385,6 +385,19 @@ def test_omitted_provider_usage_stays_unknown(setup):
     assert "partial_model_usage_unavailable" in {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
 
 
+def test_missing_span_for_a_reported_call_keeps_usage_unknown(setup):
+    agent, sandbox = setup
+    # Events name chatcmpl-2, but its span never reached the file exporter.
+    sandbox.otel = otel(chat_span("chatcmpl-1", usage=(10, 3)))
+    result, closed = run_session(agent)
+    assert result.json()["status"] == "completed" and result.json()["usage"] is None
+    observations = closed.json()["agent_observations"]
+    assert [call["response_id"] for call in observations["records"][0]["model_calls"]] == ["chatcmpl-1", "chatcmpl-2"]
+    gaps = {gap["code"]: gap["detail"] for gap in observations["gaps"]}
+    assert "chatcmpl-2" in gaps["model_usage_spans_missing"]
+    assert "partial_model_usage_unavailable" not in gaps
+
+
 @pytest.mark.parametrize("compacted", [False, True])
 def test_compaction_does_not_publish_partial_token_totals(setup, compacted):
     agent, sandbox = setup
@@ -424,13 +437,14 @@ def test_late_or_unobserved_compaction_does_not_publish_partial_totals(setup, co
 def test_reported_provider_error_is_a_classified_failed_response(setup):
     agent, sandbox = setup
     sandbox.events = copilot_events(error={"errorType": "query", "message": "400 rejected", "statusCode": 400})
-    sandbox.otel = otel(chat_span("rejected", usage=None, status=2))
+    # The first call succeeded; the rejected attempt adds no completed-response tokens.
+    sandbox.otel = otel(chat_span("chatcmpl-1", usage=(10, 3)), chat_span("rejected", usage=None, status=2))
     sandbox.result["return_code"] = 1
     result, closed = run_session(agent)
     assert result.status_code == 200, result.text
     body = result.json()
     assert body["status"] == "failed" and body["error"]["message"] == "400 rejected"
-    assert body["usage"]["total_tokens"] == 0
+    assert body["usage"]["total_tokens"] == 13
     record = closed.json()["agent_observations"]["records"][-1]
     assert (record["outcome"], record["error_type"], record["exit_code"]) == ("failed", "copilot_error", 1)
     outcome = json.loads(body["metadata"][AGENT_OUTCOME_METADATA_KEY])
