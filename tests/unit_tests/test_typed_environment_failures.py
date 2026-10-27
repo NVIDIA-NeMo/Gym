@@ -250,3 +250,51 @@ async def test_an_exhausted_model_call_is_the_environments_own_agent_stage_failu
     assert chain[-1] == observed[-1].event.event_id  # The explicit chain ends at the final attempt's own ModelFailure.
     # The earlier attempt is a sibling observation: it travels in the reply's observations, not in the chain.
     assert observed[0].event.event_id not in chain and observed[0].event.event_id in relayed
+
+
+@pytest.mark.parametrize("typed_cause", [False, True])
+def test_an_unhandled_environment_error_owns_its_report_without_borrowing_the_causes_kind(typed_cause: bool) -> None:
+    from fastapi.testclient import TestClient
+
+    from nemo_gym.episode_types import EpisodeFailure, FailureBoundary, FailureEvent
+    from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
+    from nemo_gym.typed_exceptions import BoundaryFailure
+    from tests.unit_tests.test_environment_server import _environment_server, _EnvironmentServer, _request
+
+    provider = RuntimeError("unexpected dependency failure")
+    model = BoundaryFailure(
+        FailureEvent(
+            boundary=FailureBoundary.MODEL,
+            failure_kind=MODEL_REQUEST_ERROR,
+            failure_reason="model request failed",
+            http_status=503,
+        )
+    )
+
+    class FailedEnvironment(_EnvironmentServer):
+        async def run(self, request, cleanup):
+            if typed_cause:
+                raise model from provider
+            raise provider
+
+    template = _environment_server()
+    server = FailedEnvironment(config=template.config, server_client=template.server_client)
+    with TestClient(server.setup_webserver()) as client:
+        reply = client.post("/run", json=_request().model_dump(mode="json"))
+
+    assert reply.status_code == 200 and reply.json()["result"] is None
+    failure = EpisodeFailure.model_validate(reply.json()["failure"])
+    assert failure.terminal is True and failure.failure_kind is None
+    own = failure.failure_events[failure.failure_id]
+    assert own.boundary is FailureBoundary.ENVIRONMENT and own.failure_kind is None
+    assert own.failure_reason == failure.failure_reason
+    cause = failure.failure_events[own.cause_id]
+    if typed_cause:
+        assert (cause.event_id, cause.boundary, cause.failure_kind, cause.http_status) == (
+            model.event.event_id,
+            FailureBoundary.MODEL,
+            MODEL_REQUEST_ERROR,
+            503,
+        )
+        cause = failure.failure_events[cause.cause_id]
+    assert cause.exception_type == "RuntimeError" and cause.boundary is None and cause.failure_reason == ""

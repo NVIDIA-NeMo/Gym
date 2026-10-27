@@ -434,16 +434,10 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
     def _unhandled_failure_response(self, request: EpisodeRequestT, error: Exception) -> EpisodeResponseT:
         LOGGER.exception(f"Unhandled environment server error: episode_id={request.episode_id}")
         failure_reason = f"Unhandled environment server error: {type(error).__name__}: {error}"
-        return self.failure_response(
-            request,
-            with_failure_report(
-                EpisodeFailure(
-                    failure_reason=failure_reason[:2000],
-                    terminal=True,
-                ),
-                error,
-            ),
-        )
+        failure = EpisodeFailure(failure_reason=failure_reason[:2000], terminal=True)
+        reported = HandledEpisodeError(failure)
+        reported.__cause__ = error
+        return self.failure_response(request, with_failure_report(failure, reported))
 
     def failure_response(self, request: EpisodeRequestT, failure: EpisodeFailure) -> EpisodeResponseT:
         return self.response_model.model_validate(

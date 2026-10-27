@@ -250,14 +250,15 @@ def test_outer_503_keeps_the_inner_sdk_401_below_the_credentials_failure() -> No
     assert [event.boundary for event in report.events.values()] == ["environment", None, "environment", None]
 
 
-def test_an_episode_failure_takes_the_report_and_kind_but_keeps_its_own_fields() -> None:
+def test_an_episode_failure_keeps_its_own_classification_when_attaching_a_report() -> None:
     error = _chained(_model(failure_kind="model_request_error"), TimeoutError())
     failure = with_failure_report(EpisodeFailure(failure_reason="Episode timed out", terminal=False), error)
     assert (failure.failure_reason, failure.terminal, failure.failure_kind) == (
         "Episode timed out",
         False,
-        "model_request_error",
+        None,
     )
+    assert failure.failure_events[error.event.event_id].failure_kind == "model_request_error"
     assert EpisodeFailure.model_validate_json(failure.model_dump_json()) == failure
     plain = EpisodeFailure(failure_reason="x", terminal=True)
     assert with_failure_report(plain, KeyError("no boundary")) is plain
