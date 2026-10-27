@@ -1,0 +1,7 @@
+*train.jsonl
+*validation.jsonl
+*_prepare.jsonl
+*rollouts*.jsonl
+*metrics*.json
+!example_metrics.json
+!example_rollouts.jsonl

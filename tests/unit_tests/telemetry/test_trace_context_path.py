@@ -312,3 +312,29 @@ def test_agent_hand_off_urls_carry_the_current_span(traces):  # noqa: F811
     segment = f"/ng-trace/00-{context.trace_id:032x}-{context.span_id:016x}-{int(context.trace_flags):02x}"
     assert for_run == f"http://m:8000/ng-rollout/3-0{segment}"
     assert resolved == f"http://m:8000/ng-rollout/3-0{segment}/v1"
+
+
+def test_every_agent_that_hands_a_model_url_to_a_sandbox_builds_it_with_the_helpers():
+    """`sandbox_model_base_url` marks an agent that gives a model URL to a process outside Gym.
+
+    Such a URL must come from the shared helpers (or inherit the opencode builder), or the harness's
+    model calls arrive with no parent. Add the helper, not an exception here, when this fails.
+    """
+    from pathlib import Path
+
+    import nemo_gym
+
+    agents_dir = Path(nemo_gym.__file__).resolve().parents[1] / "responses_api_agents"
+    helpers = (
+        "base_url_for_run(",
+        "resolve_model_base_url(",
+        "apply_rollout_prefix(",
+        "trace_context_path_segment(",
+        "_create_opencode_config(",  # vibench rewrites the host of the URL opencode's builder made
+    )
+    missing = []
+    for app in sorted(agents_dir.glob("*/app.py")):
+        source = app.read_text()
+        if "sandbox_model_base_url" in source and not any(h in source for h in helpers):
+            missing.append(app.parent.name)
+    assert missing == [], f"model URL handed to a sandbox without the trace-context helpers: {missing}"

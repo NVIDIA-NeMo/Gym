@@ -39,6 +39,7 @@ from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.environment_type import EnvironmentType
 from harbor.models.trial.paths import EnvironmentPaths
 
+from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxSpec,
@@ -117,7 +118,7 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
     def __init__(
         self,
         *args,
-        sandbox_provider: Optional[Mapping[str, Any]] = None,
+        sandbox_provider: Optional[str | Mapping[str, Any]] = None,
         sandbox_metadata: Optional[Mapping[str, Any]] = None,
         sandbox_provider_options: Optional[Mapping[str, Any]] = None,
         sandbox_env: Optional[Mapping[str, str]] = None,
@@ -148,6 +149,8 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
         self._sandbox: Optional[AsyncSandbox] = None
 
         super().__init__(*args, **kwargs)
+        # Newer Harbor validates runtime NetworkPolicy instead of this legacy task flag.
+        self._validate_internet_config()
 
     @staticmethod
     def type() -> EnvironmentType:
@@ -174,7 +177,7 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
                 "({provider_name: kwargs})."
             )
         # Fails fast on malformed provider blocks (e.g. multiple provider keys).
-        resolve_provider_config(self._sandbox_provider)
+        self._provider_config()
         if not self.task_env_config.docker_image:
             raise ValueError(
                 f"Task {self.environment_name!r} does not define environment.docker_image; "
@@ -182,7 +185,7 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
             )
 
     def _validate_internet_config(self):
-        if not self.task_env_config.allow_internet and not self.can_disable_internet:
+        if self.task_env_config.allow_internet is False and not self.can_disable_internet:
             raise ValueError(
                 f"Task {self.environment_name!r} requires allow_internet=false, which "
                 "NemoGymSandboxEnvironment cannot enforce. Set "
@@ -193,6 +196,14 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
     @property
     def _resolved_image(self) -> str:
         return rewrite_image(self.task_env_config.docker_image, self._image_rewrites)
+
+    def _provider_config(self) -> dict[str, Any]:
+        named_configs = get_global_config_dict() if isinstance(self._sandbox_provider, str) else None
+        return resolve_provider_config(self._sandbox_provider, named_configs)
+
+    def _provider_metadata(self) -> dict[str, Any]:
+        named_configs = get_global_config_dict() if isinstance(self._sandbox_provider, str) else None
+        return resolve_provider_metadata(self._sandbox_provider, named_configs)
 
     def _build_spec(self) -> SandboxSpec:
         config = self.task_env_config
@@ -209,7 +220,7 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
         metadata = {
             "harbor-session": self.session_id,
             "harbor-task": self.environment_name,
-            **resolve_provider_metadata(self._sandbox_provider),
+            **self._provider_metadata(),
             **self._sandbox_metadata,
         }
 
@@ -230,7 +241,7 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
                 "force_build is not supported by NemoGymSandboxEnvironment; using the task's prebuilt image %r.",
                 self._resolved_image,
             )
-        if not self.task_env_config.allow_internet:
+        if self.task_env_config.allow_internet is False:
             self.logger.warning(
                 "Task %r requests allow_internet=false but NemoGymSandboxEnvironment does "
                 "not enforce network isolation; the sandbox keeps cluster-default egress.",
@@ -238,20 +249,25 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
             )
 
         sandbox = AsyncSandbox(
-            resolve_provider_config(self._sandbox_provider),
+            self._provider_config(),
             self._build_spec(),
         )
         await sandbox.start()
         self._sandbox = sandbox
 
-        # Bind mounts in Harbor's Docker backend, so they must be created here
-        # for the agent and verifier to have somewhere to write.
-        log_dirs = f"{EnvironmentPaths.agent_dir} {EnvironmentPaths.verifier_dir}"
-        result = await self._sandbox.exec(f"mkdir -p {log_dirs}", timeout_s=60)
-        if result.return_code != 0:
-            raise RuntimeError(
-                f"Failed to create log directories in sandbox: {result.stderr or result.stdout or '<no output>'}"
-            )
+        try:
+            # Bind mounts in Harbor's Docker backend, so they must be created
+            # here for the agent and verifier to have somewhere to write.
+            log_dirs = f"{EnvironmentPaths.agent_dir} {EnvironmentPaths.verifier_dir}"
+            result = await sandbox.exec(f"mkdir -p {log_dirs}", timeout_s=60)
+            if result.error_type is not None or result.return_code != 0:
+                raise RuntimeError(
+                    "Failed to create log directories in sandbox: "
+                    f"{result.error_type or result.stderr or result.stdout or '<no output>'}"
+                )
+        except BaseException:
+            await self.stop(delete=True)
+            raise
 
     def _require_sandbox(self) -> AsyncSandbox:
         if self._sandbox is None:
@@ -267,8 +283,9 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
             self.logger.debug(
                 "delete=False is ignored by NemoGymSandboxEnvironment; the sandbox is always terminated on stop()."
             )
-        sandbox, self._sandbox = self._sandbox, None
+        sandbox = self._sandbox
         await sandbox.stop()
+        self._sandbox = None
 
     async def exec(
         self,
@@ -276,6 +293,7 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_sec: int | None = None,
+        user: str | int | None = None,
     ) -> ExecResult:
         timeout_s = timeout_sec if timeout_sec is not None else self._default_exec_timeout_s
         # Harbor's docker/daytona backends use an interactive bash, so
@@ -291,7 +309,16 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
             cwd=cwd,
             env=env,
             timeout_s=timeout_s,
+            user=user if user is not None else getattr(self, "default_user", None),
         )
+        # Runtime failures do not prove that the remote process exited. Harbor
+        # ExecResult cannot represent that distinction, so preserve it by raising.
+        if result.error_type == "timeout":
+            raise TimeoutError(result.stderr or "Sandbox command timed out")
+        if result.error_type is not None:
+            raise RuntimeError(
+                f"Sandbox exec failed ({result.error_type}): {result.stderr or result.stdout or '<no output>'}"
+            )
         return ExecResult(
             stdout=result.stdout,
             stderr=result.stderr,

@@ -73,7 +73,7 @@ class FaultyEnvironment(EnvironmentParticipant):
     """An environment participant whose next close of admission can be made to fail after it closed."""
 
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(mode="exported")
         self.fail_next_close = False
 
     async def close_admission(self, request: CheckpointRequest) -> None:

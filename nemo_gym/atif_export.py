@@ -21,6 +21,7 @@ import json
 import math
 import os
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -423,6 +424,55 @@ def _parse_arguments(call: NeMoGymResponseFunctionToolCall, *, path: str) -> dic
     if not isinstance(arguments, dict):
         raise _path_error(f"{path}.arguments", "expected a JSON object")
     return arguments
+
+
+def _live_reasoning_text(items: list[NeMoGymResponseReasoningItem], *, path: str, reasons: set[str]) -> str | None:
+    """The live profile's reading of a step's reasoning items: lossy where a model is, never failing on it.
+
+    Empty and encrypted reasoning (OpenAI reasoning models answer with ``summary: []`` unless a summary
+    is requested) export without ``reasoning_content``; several segments, from several items or one
+    item's summary list (one ``<think>`` block each), join with newlines. Each departure from the strict
+    mapping is named in ``reasons``, so the trajectory says it is partial. Only a segment without text
+    (a converter defect) still raises.
+    """
+    segments: list[str] = []
+    for item_index, item in enumerate(items):
+        raw = item.model_dump(mode="json", exclude_none=True)
+        content = raw.get("content") or []
+        summary = raw.get("summary") or []
+        if raw.get("encrypted_content") is not None:
+            reasons.add("encrypted_reasoning")
+        if content and summary:
+            reasons.add("reasoning_summary_dropped")
+        source = content if content else summary
+        if not source and raw.get("encrypted_content") is None:
+            reasons.add("empty_reasoning")
+        for segment_index, segment in enumerate(source):
+            text = segment.get("text") if isinstance(segment, dict) else None
+            if not isinstance(text, str):
+                raise _path_error(f"{path}[{item_index}][{segment_index}]", "reasoning segment does not contain text")
+            segments.append(text)
+    if len(segments) > 1:
+        reasons.add("joined_reasoning_segments")
+    return "\n".join(segments) if segments else None
+
+
+def _live_arguments(
+    call: NeMoGymResponseFunctionToolCall, *, reasons: set[str]
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """The live profile's tool arguments: a string that is not a JSON object becomes ``{}``, kept verbatim.
+
+    A harness that survives a malformed call (it hands the model a tool error and goes on) produced a
+    gradable episode; the original string travels in the call's ``extra`` and the trajectory is partial.
+    """
+    try:
+        arguments = _strict_json_loads(call.arguments)
+    except (TypeError, json.JSONDecodeError, ValueError):
+        arguments = None
+    if isinstance(arguments, dict):
+        return arguments, None
+    reasons.add("unparsable_arguments")
+    return {}, {"raw_arguments": call.arguments}
 
 
 def _tool_record_extra(record: Any, *, source_item_id: str | None = None) -> dict[str, Any] | None:
@@ -1054,3 +1104,280 @@ def export_rollouts_to_atif(config: ExportAtifConfig) -> AtifExportResult:
         trajectory_count=len(manifest_lines),
         manifest_fpath=output / "manifest.jsonl",
     )
+
+
+# -- live transcripts -----------------------------------------------------------------------------
+#
+# The strict converter above reads the collector's ``ng_trajectory`` record after a run. The
+# ``harbor`` environment server needs a trajectory *during* the episode: Harbor verifiers may read
+# ``/logs/agent/trajectory.json`` before ``test.sh`` scores the turn, so the export below works
+# from what the server has at that moment, the Responses API transcript (the task's input items
+# and the agent's output items). It is complete for the shapes Gym's harnesses produce:
+#
+# - Responses-native harnesses (Hermes, miniSWE) emit reasoning, function calls and their outputs;
+#   each call group with its outputs is one ``agent`` step with an ``observation``;
+# - Terminus-style harnesses feed the terminal's output back as ``user`` turns. ATIF has no later
+#   user turns, so a user message that follows agent output becomes the observation of the
+#   agent step before it (the "Terminus extension"; the step says so under ``extra``).
+#
+# Anything the mapping cannot represent raises :class:`AtifExportError`; the caller masks the
+# turn, so a converter defect can never appear as a reward.
+
+TRANSCRIPT_EXPORT_PROFILE = "ng-transcript-to-atif-v1"
+_TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text"})
+
+
+def _transcript_text(value: Any, *, path: str, reasons: set[str] | None = None) -> AtifContent:
+    """Text content of a message or tool output; images and other parts are not representable.
+
+    With ``reasons`` (the model's own output), a ``refusal`` part exports as its text and is noted there:
+    the model refused, the harness went on, and the episode is still graded, as Harbor grades a refused
+    Terminus turn (Harbor keeps an empty step; the text is kept here). Without it, a refusal is rejected
+    like any other non-text part.
+    """
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        raise _path_error(path, "expected text or a list of text parts")
+    parts: list[AtifContentPart] = []
+    for index, part in enumerate(value):
+        raw = _json_value(part)
+        if not isinstance(raw, dict):
+            raise _path_error(f"{path}[{index}]", "only text content parts are supported")
+        if raw.get("type") == "refusal" and reasons is not None:
+            field = "refusal"
+            reasons.add("refusal")
+        elif raw.get("type") in _TEXT_PART_TYPES:
+            field = "text"
+        else:
+            raise _path_error(f"{path}[{index}]", "only text content parts are supported")
+        text = raw.get(field)
+        if not isinstance(text, str):
+            raise _path_error(f"{path}[{index}].{field}", "expected a string")
+        parts.append(AtifContentPart(type="text", text=text))
+    if len(parts) == 1:
+        # One text part is the common case; Harbor's own exporter writes it as a plain string.
+        return parts[0].text or ""
+    return parts if parts else ""
+
+
+def _transcript_items(items: Any, *, path: str) -> list[Any]:
+    if items is None:
+        return []
+    if isinstance(items, str):
+        items = [{"role": "user", "content": items}]
+    try:
+        return _CONVERSATION_ADAPTER.validate_python(_json_value(items))
+    except ValidationError as exc:
+        raise _path_error(path, f"not a Responses API conversation: {exc.errors()[0].get('msg', exc)}") from exc
+
+
+def _attach_user_observation(step: AtifStep, item: Any, *, path: str) -> None:
+    """The Terminus extension: a user turn after agent output is what that step observed."""
+    result = AtifObservationResult(content=_transcript_text(item.content, path=f"{path}.content"))
+    results = list(step.observation.results) if step.observation is not None else []
+    results.append(result)
+    step.observation = AtifObservation(results=results)
+    extra = dict(step.extra or {})
+    extra.setdefault("nemo_gym", {})
+    extra["nemo_gym"] = {**extra["nemo_gym"], "observation_source": "user_turn"}
+    step.extra = extra
+
+
+def transcript_to_atif(
+    input_items: Any,
+    output_items: Any,
+    *,
+    session_id: str,
+    agent_name: str,
+    agent_version: str,
+    model_name: str | None = None,
+    usage: Mapping[str, Any] | None = None,
+) -> AtifTrajectoryV1_7:
+    """Convert a live Responses API transcript into an ATIF v1.7 trajectory.
+
+    ``input_items`` is the task's ``responses_create_params.input`` (a string or item list) and
+    ``output_items`` the agent's ``response.output``. Shapes a model causes (reasoning without an answer
+    when it ran out of tokens, several reasoning segments, empty or encrypted reasoning, arguments that are
+    not a JSON object) export with the departure named under ``extra.nemo_gym.conversion`` (``status:
+    partial``, ``reasons``); raises :class:`AtifExportError` only for what the mapping cannot represent at
+    all (a copied assistant turn, a later system turn, a result for no call or a second
+    ``function_call_output`` for the same ``call_id``, item types ATIF has no place for).
+    """
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise _path_error("session_id", "expected a non-empty string")
+    if not isinstance(agent_name, str) or not agent_name.strip():
+        raise _path_error("agent_name", "expected a non-empty string")
+    if not isinstance(agent_version, str) or not agent_version.strip():
+        raise _path_error("agent_version", "expected a non-empty string")
+    conversation = _transcript_items(input_items, path="input") + _transcript_items(output_items, path="output")
+
+    steps: list[AtifStep] = []
+    agent_steps: list[AtifStep] = []
+    open_calls: dict[str, AtifStep] = {}
+    pending_reasoning: list[NeMoGymResponseReasoningItem] = []
+    reasons: set[str] = set()
+    seen_agent_output = False
+
+    def flush_reasoning(path: str) -> None:
+        """Reasoning that no answer follows is the step of a turn cut off at ``max_output_tokens``.
+
+        The converter emits a reasoning-only output for a response that ended inside the model's
+        thinking; harnesses that compact and go on (Terminus) keep it in the transcript. It exports as
+        an agent step with an empty message, so the episode's sandbox state is still graded.
+        """
+        nonlocal pending_reasoning
+        if not pending_reasoning:
+            return
+        reasons.add("trailing_reasoning")
+        step = AtifStep(
+            step_id=len(steps) + 1,
+            source="agent",
+            message="",
+            reasoning_content=_live_reasoning_text(pending_reasoning, path=f"{path}.reasoning", reasons=reasons),
+            extra={"nemo_gym": {"incomplete": "max_output_tokens"}},
+        )
+        pending_reasoning = []
+        steps.append(step)
+        agent_steps.append(step)
+
+    index = 0
+    while index < len(conversation):
+        item = conversation[index]
+        path = f"transcript[{index}]"
+        if isinstance(item, (NeMoGymEasyInputMessage, NeMoGymMessage)):
+            if item.role == "assistant":
+                raise _path_error(f"{path}.role", "copied assistant context is not supported")
+            if seen_agent_output:
+                if item.role != "user":
+                    raise _path_error(path, "later system or developer turns are not supported")
+                flush_reasoning(path)
+                _attach_user_observation(agent_steps[-1], item, path=path)
+            else:
+                # ATIF has no developer source; developer instructions are system instructions to the model.
+                steps.append(
+                    AtifStep(
+                        step_id=len(steps) + 1,
+                        source="system" if item.role == "developer" else item.role,
+                        message=_transcript_text(item.content, path=f"{path}.content"),
+                        extra={"nemo_gym": {"role": "developer"}} if item.role == "developer" else None,
+                    )
+                )
+            index += 1
+            continue
+        seen_agent_output = True
+        if isinstance(item, NeMoGymResponseReasoningItem):
+            pending_reasoning.append(item)
+            index += 1
+            continue
+        if isinstance(item, NeMoGymResponseFunctionToolCall):
+            calls: list[NeMoGymResponseFunctionToolCall] = []
+            while index < len(conversation) and isinstance(conversation[index], NeMoGymResponseFunctionToolCall):
+                calls.append(conversation[index])
+                index += 1
+            atif_calls: list[AtifToolCall] = []
+            for offset, call in enumerate(calls):
+                call_path = f"transcript[{index - len(calls) + offset}]"
+                if not call.call_id.strip() or not call.name.strip():
+                    raise _path_error(call_path, "function calls need a call_id and a name")
+                if call.call_id in open_calls or any(call.call_id == c.tool_call_id for c in atif_calls):
+                    raise _path_error(call_path, f"duplicate function call ID {call.call_id!r}")
+                arguments, argument_extra = _live_arguments(call, reasons=reasons)
+                extra = ({"source_item_id": call.id} if call.id is not None else {}) | (argument_extra or {})
+                atif_calls.append(
+                    AtifToolCall(
+                        tool_call_id=call.call_id,
+                        function_name=call.name,
+                        arguments=arguments,
+                        extra={"nemo_gym": extra} if extra else None,
+                    )
+                )
+            step = AtifStep(
+                step_id=len(steps) + 1,
+                source="agent",
+                message="",
+                reasoning_content=_live_reasoning_text(pending_reasoning, path=f"{path}.reasoning", reasons=reasons),
+                tool_calls=atif_calls,
+            )
+            for call in atif_calls:
+                open_calls[call.tool_call_id] = step
+            pending_reasoning = []
+            steps.append(step)
+            agent_steps.append(step)
+            continue
+        if isinstance(item, NeMoGymFunctionCallOutput):
+            flush_reasoning(path)
+            step = open_calls.pop(item.call_id, None)
+            if step is None:
+                raise _path_error(path, f"function result {item.call_id!r} matches no pending call")
+            results = list(step.observation.results) if step.observation is not None else []
+            results.append(
+                AtifObservationResult(
+                    source_call_id=item.call_id,
+                    content=_transcript_text(item.output, path=f"{path}.output"),
+                    extra={"nemo_gym": {"source_item_id": item.id}} if item.id is not None else None,
+                )
+            )
+            step.observation = AtifObservation(results=results)
+            index += 1
+            continue
+        if isinstance(item, NeMoGymResponseOutputMessage):
+            message_reasons: set[str] = set()
+            message = _transcript_text(item.content, path=f"{path}.content", reasons=message_reasons)
+            reasons |= message_reasons
+            step_extra = {"source_item_id": item.id} if item.id else {}
+            if "refusal" in message_reasons:
+                # The step's text is a refusal, not an answer; the marker says so next to the partial reason.
+                step_extra["refusal"] = True
+            step = AtifStep(
+                step_id=len(steps) + 1,
+                source="agent",
+                message=message,
+                reasoning_content=_live_reasoning_text(pending_reasoning, path=f"{path}.reasoning", reasons=reasons),
+                extra={"nemo_gym": step_extra} if step_extra else None,
+            )
+            pending_reasoning = []
+            steps.append(step)
+            agent_steps.append(step)
+            index += 1
+            continue
+        raise _path_error(path, f"unsupported transcript item {type(item).__name__}")
+    flush_reasoning(f"transcript[{len(conversation) - 1}]")
+    if not steps:
+        raise _path_error("transcript", "contains no messages")
+
+    final_metrics = AtifFinalMetrics(total_steps=len(steps))
+    if usage:
+        prompt = usage.get("input_tokens")
+        completion = usage.get("output_tokens")
+        if isinstance(prompt, int) and not isinstance(prompt, bool) and prompt >= 0:
+            final_metrics.total_prompt_tokens = prompt
+        if isinstance(completion, int) and not isinstance(completion, bool) and completion >= 0:
+            final_metrics.total_completion_tokens = completion
+    conversion: dict[str, Any] = {
+        "profile": TRANSCRIPT_EXPORT_PROFILE,
+        "status": "partial" if reasons else "complete",
+        "open_tool_calls": sorted(open_calls),
+    }
+    if reasons:
+        conversion["reasons"] = sorted(reasons)
+    return AtifTrajectoryV1_7(
+        schema_version=ATIF_SCHEMA_VERSION,
+        session_id=session_id,
+        trajectory_id=session_id,
+        agent=AtifAgent(name=agent_name, version=agent_version, model_name=model_name or None),
+        steps=steps,
+        final_metrics=final_metrics,
+        extra={
+            "nemo_gym": {
+                "exporter": {"name": "nemo-gym", "version": __version__},
+                "source": {"format": "responses_transcript"},
+                "conversion": conversion,
+            }
+        },
+    )
+
+
+def encode_atif_trajectory(trajectory: AtifTrajectoryV1_7) -> bytes:
+    """The trajectory as the UTF-8 JSON bytes Harbor reads from ``trajectory.json``."""
+    return _encoded_trajectory(trajectory)

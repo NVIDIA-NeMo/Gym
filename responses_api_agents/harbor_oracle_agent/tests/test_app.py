@@ -95,6 +95,8 @@ def seed_body(
     *,
     session="ag-1",
     rollout="r1",
+    attempt=0,
+    task="hello",
     with_sandbox=True,
     timeout: float | None = 120.0,
     user: str | None = "runner",
@@ -104,8 +106,8 @@ def seed_body(
     user, the `[solution].env` it resolved on its host, and the task's `[agent].timeout_sec`."""
     body = {
         "agent_session_id": session,
-        "episode_id": {"rollout_id": rollout, "attempt": 0},
-        "task_id": {"taskset": "ds", "task_id": "hello"},
+        "episode_id": {"rollout_id": rollout, "attempt": attempt},
+        "task_id": {"taskset": "ds", "task_id": task},
         "tool_accesses": [],
     }
     if with_sandbox:
@@ -400,3 +402,71 @@ def test_provider_error_in_the_log_dir_setup_is_not_scored_either(monkeypatch):
     assert sandbox.execs[1]["command"].startswith(f"mkdir -p {module.SOLVE_LOG_DIR}")
     assert sandbox.execs[1]["user"] == TRANSFER_USER
     assert len(sandbox.execs) == 2
+
+
+def test_verbose_logging_traces_the_solve_run_at_debug_level_only(monkeypatch, caplog):
+    import logging
+
+    agent, sandbox, _ = make_agent(
+        monkeypatch, sandbox=FakeSandbox(result=SandboxExecResult(stdout="", stderr="boom", return_code=3))
+    )
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+    with caplog.at_level(logging.DEBUG, logger=module.__name__):
+        response = client.post("/v1/responses", json=RESPONSES_BODY)
+    assert response.status_code == 200 and response.json()["metadata"]["oracle"] == "failed"
+    records = [record for record in caplog.records if record.name == module.__name__]
+    # Each line names the task and the episode (its capture key) the session was seeded for, as the environment
+    # server's trace does, so concurrent reference solutions, all at the same script path, can be told apart.
+    assert [record.getMessage() for record in records] == [
+        "hello: episode r1: running /solution/solve.sh as runner in /app with a 120s budget",
+        "hello: episode r1: /solution/solve.sh exited 3 (failed)",
+    ]
+    # Only `--verbose` (`verbose: true`, which raises the root level) shows the trace.
+    assert {record.levelno for record in records} == {logging.DEBUG}
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=module.__name__):
+        client.post("/v1/responses", json=RESPONSES_BODY)
+    assert not [record for record in caplog.records if record.name == module.__name__]
+
+    # A task that names no [agent].user (the common case) runs as the sandbox's default user, and says so.
+    agent, _, _ = make_agent(monkeypatch)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body(session="ag-2", user=None)).status_code == 200
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger=module.__name__):
+        assert client.post("/v1/responses", json=RESPONSES_BODY).json()["metadata"]["oracle"] == "solved"
+    assert [record.getMessage() for record in caplog.records if record.name == module.__name__] == [
+        "hello: episode r1: running /solution/solve.sh as the sandbox default user in /app with a 120s budget",
+        "hello: episode r1: /solution/solve.sh exited 0 (solved)",
+    ]
+
+
+def test_concurrent_oracle_traces_name_their_task_and_episode(monkeypatch, caplog):
+    """Review (round 38, non-blocking): concurrent reference solutions run the same script path with possibly
+    identical settings, so the start and exit lines carry the task and episode identifiers from the session's seed
+    request, correlating with each other and with the environment server's `<task>: episode <key>` traces."""
+    import logging
+
+    agent, _, _ = make_agent(
+        monkeypatch, sandbox=FakeSandbox(result=SandboxExecResult(stdout="", stderr="boom", return_code=3))
+    )
+    app = agent.setup_webserver()
+    # One client per session: the session rides on the seed's cookie.
+    first, second = TestClient(app), TestClient(app)
+    assert first.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+    assert (
+        second.post(
+            "/v1/agent_sessions", json=seed_body(session="ag-2", task="world", rollout="r2", attempt=1, user=None)
+        ).status_code
+        == 200
+    )
+    with caplog.at_level(logging.DEBUG, logger=module.__name__):
+        assert first.post("/v1/responses", json=RESPONSES_BODY).json()["metadata"]["oracle"] == "failed"
+        assert second.post("/v1/responses", json=RESPONSES_BODY).json()["metadata"]["oracle"] == "failed"
+    assert [record.getMessage() for record in caplog.records if record.name == module.__name__] == [
+        "hello: episode r1: running /solution/solve.sh as runner in /app with a 120s budget",
+        "hello: episode r1: /solution/solve.sh exited 3 (failed)",
+        "world: episode r2-a1: running /solution/solve.sh as the sandbox default user in /app with a 120s budget",
+        "world: episode r2-a1: /solution/solve.sh exited 3 (failed)",
+    ]

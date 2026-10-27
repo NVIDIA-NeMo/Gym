@@ -236,19 +236,78 @@ class TestApp:
         real_request = self._create_counting_composition_request(2, 2, response_content)
         self._run_verify_test(real_request, False, 0.0, [False])
 
-    def test_only_counting_composition_checker_is_replaced(self):
-        """Only count:counting_composition is overridden; every other instruction uses the upstream checker."""
+    def _create_count_unique_request(self, response_content, kwargs=None):
+        """Helper to create a count:count_unique request with the instruction text it is graded against.
+
+        The published rows store `null` as this instruction's kwargs, so the default mirrors them.
+        """
+        return self._create_real_request(
+            instruction_ids=["count:count_unique"],
+            prompt="Only use unique words in your response, no word should be repeated!",
+            kwargs=[kwargs],
+            response_content=response_content,
+        )
+
+    @pytest.mark.parametrize(
+        "response_content",
+        [
+            pytest.param("Cats purr. Dogs bark.", id="two-sentences-only-the-period-repeats"),
+            pytest.param("Cats purr, dogs bark, birds sing.", id="repeated-commas"),
+            pytest.param("Really? Why run? Because cats chase!", id="repeated-question-marks"),
+            pytest.param("“Cats purr,” she said. “Dogs bark,” he replied.", id="curly-quotes-also-dropped"),
+            pytest.param("- cats purr\n- dogs bark\n- birds sing", id="markdown-bullets-dropped"),
+            pytest.param("I paid $5 and $6.", id="symbols-dropped-digits-are-distinct-words"),
+            pytest.param("Hello world.", id="one-sentence-passed-upstream-too"),
+            pytest.param("Dogs bark. dogs run.", id="case-kept-as-upstream"),
+        ],
+    )
+    def test_count_unique_positive(self, response_content):
+        """Test count:count_unique instruction - should pass when no word repeats, whatever the punctuation."""
+        real_request = self._create_count_unique_request(response_content)
+        self._run_verify_test(real_request, True, 1.0, [True])
+
+    @pytest.mark.parametrize(
+        "response_content",
+        [
+            pytest.param("Cats purr. Cats bark.", id="word-repeated-across-sentences"),
+            pytest.param("run run", id="word-repeated-without-punctuation"),
+            pytest.param("Dogs bark, dogs bark.", id="bark-repeats-while-Dogs-and-dogs-differ"),
+            pytest.param("Don't stop. Can't wait.", id="contractions-split-as-upstream"),
+        ],
+    )
+    def test_count_unique_negative(self, response_content):
+        """Test count:count_unique instruction - should fail when a word repeats."""
+        real_request = self._create_count_unique_request(response_content)
+        self._run_verify_test(real_request, False, 0.0, [False])
+
+    def test_count_unique_checker_keeps_upstream_instruction_text(self):
+        """Only `check_following` is overridden, so the published prompts still describe what is graded."""
+        from verifiable_instructions import instructions_registry
+
+        from resources_servers.instruction_following.count_unique import CountUniqueChecker
+
+        upstream = instructions_registry.INSTRUCTION_DICT["count:count_unique"]("count:count_unique")
+        local = CountUniqueChecker("count:count_unique")
+        assert local.build_description() == upstream.build_description()
+        assert local.get_instruction_args() == upstream.get_instruction_args()
+        assert local.get_instruction_args_keys() == upstream.get_instruction_args_keys()
+
+    def test_only_local_checkers_replace_upstream(self):
+        """Only the two local count: checkers are overridden; every other instruction uses the upstream checker."""
         from verifiable_instructions import instructions_registry
 
         from resources_servers.instruction_following.app import INSTRUCTION_DICT
+        from resources_servers.instruction_following.count_unique import CountUniqueChecker
         from resources_servers.instruction_following.counting_composition import CountingCompositionChecker
 
         upstream = instructions_registry.INSTRUCTION_DICT
         assert INSTRUCTION_DICT.keys() == upstream.keys()
         assert {key for key, cls in INSTRUCTION_DICT.items() if cls is not upstream[key]} == {
-            "count:counting_composition"
+            "count:counting_composition",
+            "count:count_unique",
         }
         assert INSTRUCTION_DICT["count:counting_composition"] is CountingCompositionChecker
+        assert INSTRUCTION_DICT["count:count_unique"] is CountUniqueChecker
 
     def test_multiple_constraints_positive(self):
         """Test multiple constraints together - should pass both."""

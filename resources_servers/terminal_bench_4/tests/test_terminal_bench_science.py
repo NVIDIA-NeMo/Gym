@@ -376,7 +376,9 @@ async def test_profile_runs_published_compose_isolation_through_the_sandbox_adap
     environment = benchmark_config().terminal_bench_science.resources_servers.terminal_bench_4.environment
     source = yaml.safe_load(COMPOSE_FILES[task])
     with pytest.raises(NotImplementedError):
-        AsyncSandboxCompose._validate(SimpleNamespace(document=source))
+        # The adapter's field check reads the deployment platform and the per-service providers before it refuses
+        # `build:`; a bare fake has neither.
+        AsyncSandboxCompose._validate(SimpleNamespace(document=source, platform="linux/amd64", service_providers={}))
     images = {name: f"registry/{name}" for name in source["services"] if name != "main"}
     records = json.loads((BENCHMARK_DIR / "compose-images.json").read_text())
     document = resolve_compose(

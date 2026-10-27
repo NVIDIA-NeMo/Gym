@@ -197,6 +197,11 @@ class TestTaskDataValidator:
             1, {"task_id": task, "task_input": {"responses_create_params": {}, "task_data": {"question": 1}}}
         )
         assert v.report.error_rows == 1
+        # A multi-turn row carries its requests as `turns` beside task_data: framework-owned, not an unknown field.
+        turns = [{"name": "plan", "responses_create_params": {}}]
+        fields = {"question": "q", "expected_answer": "a"}
+        v.validate_row(2, {"task_id": task, "task_input": {"turns": turns, "task_data": fields}})
+        assert v.report.unknown_keys == {} and v.report.error_rows == 1
 
     def test_generic_materialized_task_validates_flat_fields(self):
         v = self._validator()

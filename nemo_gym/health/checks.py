@@ -266,6 +266,12 @@ def _agent_steps(trajectory: dict[str, Any]) -> list[_AgentStep]:
 
 
 def _normalized_trajectory_calls(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
+    # The session each invocation belongs to: activations of one harness session share it.
+    sessions = {
+        invocation["invocation_id"]: invocation.get("harness_session_id") or invocation["invocation_id"]
+        for invocation in trajectory.get("invocations") or []
+        if isinstance(invocation, dict) and invocation.get("invocation_id")
+    }
     calls: list[dict[str, Any]] = []
     for position, raw in enumerate(trajectory.get("model_calls") or []):
         metadata = raw.get("response_metadata") or {}
@@ -290,6 +296,7 @@ def _normalized_trajectory_calls(trajectory: dict[str, Any]) -> list[dict[str, A
                 "tokens_out": tokens.get("completion_tokens"),
                 "request": raw.get("request"),
                 "response": raw.get("response"),
+                "session": sessions.get(raw.get("client_session_id"), raw.get("client_session_id")),
             }
         )
     return calls
@@ -308,6 +315,21 @@ def _is_failed(call: dict[str, Any]) -> bool:
 def _is_successful(call: dict[str, Any]) -> bool:
     status = call.get("status_code")
     return not _is_failed(call) and (status is None or (isinstance(status, int) and 200 <= status < 400))
+
+
+# The categories vllm_model records for an upstream refusal on length: the conversation outgrew the window, or the
+# request's own output budget exceeds all of it.
+_LENGTH_REFUSAL_CATEGORIES = frozenset({"context_length_exceeded", "invalid_output_token_parameter"})
+
+
+def _is_length_refusal(call: dict[str, Any]) -> bool:
+    """An upstream refusal on length, of either kind: the engine generated nothing, so the token checks have nothing
+    to read. Only an overflow (`_is_context_overflow_rejection`) can be the model's own end."""
+    return (
+        call.get("upstream_attempted") is True
+        and call.get("upstream_status_code") == 400
+        and not _LENGTH_REFUSAL_CATEGORIES.isdisjoint({call.get("local_response_reason"), call.get("error_category")})
+    )
 
 
 def _is_context_overflow_rejection(call: dict[str, Any]) -> bool:
@@ -448,6 +470,12 @@ def _bind_policy_call_views(
             matched_calls=tuple(matched_calls),
             missing_references=tuple(missing_references),
             duplicated_references=tuple(duplicated_references),
+            # What each reference resolved to, for the hollow-turn exemption. A missing reference resolves to (),
+            # so its empty turn stays flagged.
+            resolutions={
+                _call_reference_signature(raw_reference): tuple(resolved[_call_reference_signature(raw_reference)])
+                for _, raw_reference in reference_items
+            },
         )
 
     return build_bindings(turn_reference_items), build_bindings(owned_reference_items)
@@ -463,19 +491,34 @@ def _call_locator(call: dict[str, Any], fallback: int) -> dict[str, int | str]:
     return {"call_id": str(call.get("model_call_id") or call.get("response_id") or fallback)}
 
 
-def _response_has_content(response: Any) -> bool:
+def _response_has_usable_output(response: Any) -> bool:
+    """Whether a saved response holds something the agent can act on: answer text, a refusal or a tool call, in the
+    Responses, Chat Completions or Messages shape. Reasoning alone, a summary of it included, is not usable."""
     if not isinstance(response, dict):
         return False
-    if _nonempty(response.get("output_text")) or _nonempty(response.get("content")):
+    if _nonempty(response.get("output_text")):
         return True
-    output = response.get("output")
-    choices = response.get("choices")
-    chat_content = any(
-        _nonempty(choice.get("text")) or _nonempty((choice.get("message") or {}).get("content"))
-        for choice in choices or []
-        if isinstance(choice, dict)
-    )
-    return _nonempty(output) or chat_content
+    for item in response.get("output") or []:
+        if not isinstance(item, dict) or item.get("type") == "reasoning":
+            continue
+        # Any other output item is a tool call of some kind.
+        if item.get("type") != "message" or _nonempty(item.get("content")):
+            return True
+    content = response.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    for block in content if isinstance(content, list) else []:
+        if isinstance(block, dict) and (
+            block.get("type") == "tool_use" or (block.get("type") == "text" and _nonempty(block.get("text")))
+        ):
+            return True
+    for choice in response.get("choices") or []:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+        if _nonempty(choice.get("text")) or _nonempty(message.get("content")) or message.get("tool_calls"):
+            return True
+    return False
 
 
 def _usage_tokens(usage: Any) -> tuple[int | None, int | None]:
@@ -514,7 +557,15 @@ def _rollout_missing_agent_turns(trajectory: dict[str, Any], subject: dict[str, 
     ]
 
 
-def _agent_turn_hollow(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
+def _agent_turn_hollow(
+    trajectory: dict[str, Any], bindings: _CallBindings, subject: dict[str, int | str]
+) -> list[Finding]:
+    # An empty turn that ended on its own model call being rejected for a full context is the model filling its
+    # context, when another check accounts for that overflow (`_turn_ended_on_context_overflow`). The exemption is not
+    # applied when an incomplete capture leaves those checks unobserved. The calls are optional evidence here: without
+    # captured calls, every empty turn is still flagged.
+    incomplete = _trajectory_has_any_gap(trajectory, _INCOMPLETE_MODEL_CALL_GAPS)
+    chains = _model_chains(_normalized_trajectory_calls(trajectory))
     return [
         Finding(
             check="agent_turn_hollow",
@@ -522,9 +573,49 @@ def _agent_turn_hollow(trajectory: dict[str, Any], subject: dict[str, int | str]
             locator=step.locator,
             detail={"reason": "agent turn has no message or tool calls"},
         )
-        for step in _agent_steps(trajectory)
-        if not step.has_message and not step.has_tool_calls
+        for step, turn in zip(_agent_steps(trajectory), trajectory.get("turns") or [], strict=True)
+        if not step.has_message
+        and not step.has_tool_calls
+        and (incomplete or not _turn_ended_on_context_overflow(turn, bindings, chains))
     ]
+
+
+def _turn_ended_on_context_overflow(
+    turn: dict[str, Any], bindings: _CallBindings, chains: dict[Any, list[dict[str, Any]]]
+) -> bool:
+    """Whether a turn's own model calls end on a context-overflow rejection that another check accounts for.
+
+    Each of the turn's references must resolve to exactly one call: a call that another turn's reference
+    resolved says nothing about this turn. Of the turn's calls, the last in time decides, as in
+    `_chain_ended_on_failure`, so an overflow followed by an empty retry is still hollow. When the calls
+    cannot be ordered, every one must be an overflow.
+
+    Each such overflow must be accounted for: by a success of the same model in the same conversation, or by
+    `rollout_ended_on_failed_model_call` flagging that model's chain. An unordered chain that mixes in another
+    conversation's success is flagged by neither, so its empty turn stays hollow.
+    """
+    calls = []
+    for raw_reference in turn.get("model_calls") or []:
+        if not isinstance(raw_reference, dict) or _call_ref_key(raw_reference) is None:
+            continue
+        matches = bindings.resolutions.get(_call_reference_signature(raw_reference), ())
+        if len(matches) != 1:
+            return False
+        calls.append(matches[0])
+    if not calls:
+        return False
+    ends = calls
+    if all(call.get("started_at") is not None for call in calls):
+        ends = sorted(calls, key=lambda call: (call.get("started_at") or 0.0, call.get("call_index") or 0))[-1:]
+    for end in ends:
+        if not _is_context_overflow_rejection(end):
+            return False
+        ref = end.get("model_ref")
+        chain = chains.get((ref.get("type"), ref.get("name")) if isinstance(ref, dict) else None, [])
+        answered = any(_is_successful(call) and _same_conversation(call, end) for call in chain)
+        if not answered and not _chain_ended_on_failure(chain):
+            return False
+    return True
 
 
 def _model_call_zero_completion_tokens(bindings: _CallBindings, subject: dict[str, int | str]) -> list[Finding]:
@@ -536,7 +627,7 @@ def _model_call_zero_completion_tokens(bindings: _CallBindings, subject: dict[st
             detail={"completion_tokens": 0},
         )
         for position, call in enumerate(bindings.matched_calls)
-        if not _is_context_overflow_rejection(call) and not _is_failed_attempt(call) and call.get("tokens_out") == 0
+        if not _is_length_refusal(call) and not _is_failed_attempt(call) and call.get("tokens_out") == 0
     ]
 
 
@@ -555,7 +646,7 @@ def _model_call_missing_token_counts(bindings: _CallBindings, subject: dict[str,
             },
         )
         for position, call in enumerate(bindings.matched_calls)
-        if not _is_context_overflow_rejection(call)
+        if not _is_length_refusal(call)
         and not _is_failed_attempt(call)
         and (call.get("tokens_in") is None or call.get("tokens_out") is None)
     ]
@@ -627,6 +718,32 @@ def _model_chains(calls: Sequence[dict[str, Any]]) -> dict[Any, list[dict[str, A
     return chains
 
 
+def _conversation_head(call: dict[str, Any]) -> Any:
+    """How the conversation a call continues opens: its instructions, system prompt, or first message.
+
+    Calls of one conversation share it; another conversation on the same model server, such as a user simulator's,
+    opens differently. A call whose request was not captured has none.
+    """
+    request = call.get("request")
+    if not isinstance(request, dict):
+        return None
+    for key in ("instructions", "system"):
+        if request.get(key):
+            return request[key]
+    items = request.get("messages", request.get("input"))
+    if isinstance(items, list):
+        return items[0] if items else None
+    return items or None
+
+
+def _same_conversation(call: dict[str, Any], other: dict[str, Any]) -> bool:
+    """Whether two calls continue one conversation: their requests open the same way, and no captured session
+    tells them apart. Two agents can share instructions, so a session only ever separates calls."""
+    head = _conversation_head(call)
+    sessions = {call.get("session"), other.get("session")} - {None}
+    return head is not None and head == _conversation_head(other) and len(sessions) <= 1
+
+
 def _chain_ended_on_failure(chain: Sequence[dict[str, Any]]) -> bool:
     """Whether this model's own last call, in time, failed.
 
@@ -638,19 +755,26 @@ def _chain_ended_on_failure(chain: Sequence[dict[str, Any]]) -> bool:
     the position in the merged trajectory list, so a producer-supplied retry
     can precede the attempt it retried. Say nothing rather than call a
     recovered rollout unhealthy.
+
+    A last call the upstream rejected because the context was full is the
+    model's own end, scored like any other answer, once the model has answered
+    earlier in the same conversation (`_same_conversation`). A success in another
+    conversation on the same server, such as a user simulator's or another
+    session's, says nothing of whether this request fit. Before any answer the request never fit the deployment (a
+    prompt or output budget too large for it), which is a failure like any
+    other. An unordered chain of only failures has no answer and ended on one of
+    them, so it is flagged.
     """
     if not chain:
         return False
     failed = [call for call in chain if _is_failed(call)]
     if not failed:
         return False
-    if len(failed) == len(chain):
-        # Nothing to order: whichever went last, it failed.
-        return True
-    if any(call.get("started_at") is None for call in chain):
-        return False
-    ordered = sorted(chain, key=lambda call: (call.get("started_at") or 0.0, call.get("call_index") or 0))
-    return _is_failed(ordered[-1])
+    if all(call.get("started_at") is not None for call in chain):
+        last = sorted(chain, key=lambda call: (call.get("started_at") or 0.0, call.get("call_index") or 0))[-1]
+        answered = any(_is_successful(call) and _same_conversation(call, last) for call in chain)
+        return _is_failed(last) and not (answered and _is_context_overflow_rejection(last))
+    return len(failed) == len(chain)
 
 
 def _ended_on_failed_call(calls: Sequence[dict[str, Any]]) -> bool:
@@ -670,7 +794,10 @@ def _rollout_ended_on_failed_model_call(trajectory: dict[str, Any], subject: dic
     Judged per model and in time order -- see `_chain_ended_on_failure`. Only
     the chain's last call counts, so a failure the client retried successfully
     stays healthy; the signal is that the rollout ENDED on a failure, which is
-    what makes its reward indistinguishable from a genuine zero.
+    what makes its reward indistinguishable from a genuine zero. A last call
+    the upstream rejected as a context-length overflow is not flagged once the
+    model has answered earlier in the same conversation: that zero is the
+    model's own result.
     """
     findings = []
     for key, chain in _model_chains(_normalized_trajectory_calls(trajectory)).items():
@@ -728,9 +855,9 @@ def _model_call_runaway_generation(bindings: _CallBindings, subject: dict[str, i
             detail={"finish_reason": call.get("finish_reason")},
         )
         for position, call in enumerate(bindings.matched_calls)
-        if not _is_context_overflow_rejection(call)
+        if not _is_length_refusal(call)
         and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
-        and not _response_has_content(call.get("response"))
+        and not _response_has_usable_output(call.get("response"))
     ]
 
 
@@ -750,7 +877,9 @@ _ROLLOUT_CHECKS: dict[
     "rollout_ended_on_failed_model_call": lambda record, trajectory, bindings, subject: (
         _rollout_ended_on_failed_model_call(trajectory, subject)
     ),
-    "agent_turn_hollow": lambda record, trajectory, bindings, subject: _agent_turn_hollow(trajectory, subject),
+    "agent_turn_hollow": lambda record, trajectory, bindings, subject: _agent_turn_hollow(
+        trajectory, bindings, subject
+    ),
     "model_call_zero_completion_tokens": lambda record, trajectory, bindings, subject: (
         _model_call_zero_completion_tokens(bindings, subject)
     ),

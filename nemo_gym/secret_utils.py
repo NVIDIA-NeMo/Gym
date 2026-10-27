@@ -50,7 +50,8 @@ def hide_secrets_in_overrides(tokens: List[str]) -> List[str]:
         match = override_re.match(token)
         if match:
             prefix, key, _value = match.groups()
-            if looks_like_secret_key(key.rsplit(".", 1)[-1]):
+            # Any secret-shaped segment, not only the leaf: `...harbor.secrets.JUDGE_AUTH` is a secret too.
+            if any(looks_like_secret_key(segment) for segment in key.split(".")):
                 token = f"{prefix}{key}={MASKED_VALUE}"
         redacted.append(token)
     return redacted
@@ -59,13 +60,28 @@ def hide_secrets_in_overrides(tokens: List[str]) -> List[str]:
 def recursively_hide_secrets(dict_config: DictConfig) -> None:
     """Mask every secret-shaped leaf in place with '****' so a config can be printed or exported.
 
+    A leaf is secret-shaped by its own name, or by sitting anywhere below a secret-shaped key: every
+    value of a `secrets:` mapping is a secret whatever its environment variable is called.
+
     Used by the config parser and the exporters.
     """
+
+    def mask_all(node) -> None:
+        for k, v in list(node.items()):
+            if isinstance(v, (DictConfig, dict)):
+                mask_all(v)
+            elif isinstance(v, (ListConfig, list)):
+                node[k] = [MASKED_VALUE] * len(v)
+            else:
+                node[k] = MASKED_VALUE
 
     def hide(node) -> None:
         for k, v in list(node.items()):
             if isinstance(v, (DictConfig, dict)):
-                hide(v)
+                if looks_like_secret_key(k):
+                    mask_all(v)
+                else:
+                    hide(v)
             elif isinstance(v, (ListConfig, list)):
                 if looks_like_secret_key(k):
                     node[k] = [MASKED_VALUE] * len(v)

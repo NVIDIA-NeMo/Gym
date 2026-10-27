@@ -20,6 +20,15 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - Docs live under `fern/versions/latest/pages/`. Bleeding-edge nav is `fern/versions/main.yml`. See `fern/README.md` and the `nemo-gym-docs` skill.
 - Do not introduce licenses incompatible with Apache-2.0. New source files need the standard NVIDIA SPDX header.
 
+## Code provenance
+
+- Avoid copying or adapting code from other repositories. Write an independent implementation whenever possible.
+- When copying or adapting external code is necessary, you **must** record the source URL, exact revision (commit SHA),
+  and applicable license in **both the PR description and the header of every file containing that code**. Identify
+  the original source file(s) and the affected Gym files in the PR description.
+- Retain all required copyright notices, license notices, and attribution. Follow the Apache-2.0 compatibility and
+  vendoring requirements in [CONTRIBUTING.md](CONTRIBUTING.md#licensing-of-contributions).
+
 ## Pull Requests
 
 - For normal authored PRs, use a Conventional Commit-style title: `type(optional-scope): imperative summary`.

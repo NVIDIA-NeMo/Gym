@@ -15,6 +15,7 @@ from nemo_gym.sandbox.transfer import (
     SandboxProbeError,
     SandboxTransferError,
     SandboxUnavailableError,
+    _pack,
     _unpack,
     download_dir,
     download_path,
@@ -155,6 +156,52 @@ async def test_transfer_preserves_target_permissions_and_task_file_modes(tmp_pat
     process = await asyncio.create_subprocess_exec(str(target / "test.sh"), stdout=asyncio.subprocess.PIPE)
     stdout, _ = await process.communicate()
     assert process.returncode == 0 and stdout == b"works"
+
+
+def test_pack_leaves_out_the_names_the_task_digest_skips_when_asked(tmp_path):
+    """Review (round 14): ``upload_dir`` shipped a task's ``tests/`` or ``environment/`` whole, ``helper.pyc`` and
+    ``__pycache__/`` included, which ``content_hash`` skips: importable bytes outside the digest. With ``ignore``
+    (the digest's own rule) the archive holds exactly what the digest covers, a folder left out taking its
+    subtree with it; without it (artifacts restored into the verifier) everything travels as before."""
+    from nemo_gym.tasks.harbor.digest import is_ignored
+
+    source = tmp_path / "tests"
+    (source / "__pycache__").mkdir(parents=True)
+    (source / "sub").mkdir()
+    (source / "test.sh").write_text("echo 1\n")
+    (source / "helper.pyc").write_bytes(b"\x00")
+    (source / "__pycache__" / "x.pyc").write_bytes(b"\x00")
+    (source / "sub" / "data.txt").write_text("d")
+    (source / "sub" / "cached.pyc").write_bytes(b"\x00")
+    archive = tmp_path / "upload.tar.gz"
+    _pack(source, archive, ignore=is_ignored)
+    with tarfile.open(archive) as tar:
+        assert sorted(tar.getnames()) == ["sub", "sub/data.txt", "test.sh"]
+    _pack(source, archive)
+    with tarfile.open(archive) as tar:
+        assert sorted(tar.getnames()) == [
+            "__pycache__",
+            "__pycache__/x.pyc",
+            "helper.pyc",
+            "sub",
+            "sub/cached.pyc",
+            "sub/data.txt",
+            "test.sh",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_upload_dir_with_the_digest_rule_ships_what_the_digest_covers(tmp_path):
+    from nemo_gym.tasks.harbor.digest import is_ignored
+
+    source, target = tmp_path / "tests", tmp_path / "target"
+    (source / "__pycache__").mkdir(parents=True)
+    target.mkdir()
+    (source / "test.sh").write_text("echo 1\n")
+    (source / "helper.pyc").write_bytes(b"\x00")
+    (source / "__pycache__" / "x.pyc").write_bytes(b"\x00")
+    await upload_dir(LocalSandbox(), source, str(target), ignore=is_ignored)
+    assert sorted(path.name for path in target.iterdir()) == ["test.sh"]
 
 
 @pytest.mark.asyncio

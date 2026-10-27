@@ -16,8 +16,10 @@ from nemo_gym import __version__
 from nemo_gym.atif_export import (
     AtifExportError,
     ExportAtifConfig,
+    encode_atif_trajectory,
     export_rollouts_to_atif,
     gym_rollout_to_atif,
+    transcript_to_atif,
 )
 from nemo_gym.atif_reverification import (
     index_materialized_inputs,
@@ -64,6 +66,10 @@ def _assistant_message(item_id: str, text: str) -> dict[str, Any]:
         "status": "completed",
         "content": [{"type": "output_text", "text": text, "annotations": []}],
     }
+
+
+def _refusal_message(item_id: str, refusal: str) -> dict[str, Any]:
+    return {**_assistant_message(item_id, ""), "content": [{"type": "refusal", "refusal": refusal}]}
 
 
 def _canonical_rollout(
@@ -1788,3 +1794,299 @@ def test_strict_export_rejects_unsupported_or_incomplete_source_shapes(
 
     with pytest.raises(AtifExportError, match=message):
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
+# -- live transcripts (the harbor environment server's export before every verify) -----------------
+
+
+def _transcript(input_items, output_items, **kwargs) -> AtifTrajectoryV1_7:
+    return transcript_to_atif(
+        input_items,
+        output_items,
+        session_id="rollout-1",
+        agent_name="hermes_agent",
+        agent_version="1.2.3",
+        **kwargs,
+    )
+
+
+def test_transcript_to_atif_groups_tool_calls_with_their_outputs_and_keeps_reasoning() -> None:
+    trajectory = _transcript(
+        [{"role": "system", "content": "Be careful."}, {"role": "user", "content": "Create hello.txt"}],
+        [
+            _reasoning("rs_1", "I will write the file."),
+            _function_call("call_1", "terminal", {"cmd": "echo hi > hello.txt"}),
+            _function_call("call_2", "terminal", {"cmd": "cat hello.txt"}),
+            _function_output("call_1", ""),
+            _function_output("call_2", "hi\n"),
+            _assistant_message("msg_1", "Done."),
+        ],
+        model_name="qwen",
+        usage={"input_tokens": 120, "output_tokens": 30, "total_tokens": 150},
+    )
+
+    assert trajectory.schema_version == "ATIF-v1.7"
+    assert [(step.step_id, step.source) for step in trajectory.steps] == [
+        (1, "system"),
+        (2, "user"),
+        (3, "agent"),
+        (4, "agent"),
+    ]
+    tool_step = trajectory.steps[2]
+    assert tool_step.reasoning_content == "I will write the file."
+    assert [(call.tool_call_id, call.function_name, call.arguments) for call in tool_step.tool_calls] == [
+        ("call_1", "terminal", {"cmd": "echo hi > hello.txt"}),
+        ("call_2", "terminal", {"cmd": "cat hello.txt"}),
+    ]
+    assert [(r.source_call_id, r.content) for r in tool_step.observation.results] == [
+        ("call_1", ""),
+        ("call_2", "hi\n"),
+    ]
+    assert trajectory.steps[3].message == "Done." and trajectory.steps[3].observation is None
+    assert trajectory.agent.name == "hermes_agent" and trajectory.agent.model_name == "qwen"
+    assert trajectory.final_metrics.total_steps == 4
+    assert trajectory.final_metrics.total_prompt_tokens == 120
+    assert trajectory.final_metrics.total_completion_tokens == 30
+    assert trajectory.extra["nemo_gym"]["conversion"] == {
+        "profile": "ng-transcript-to-atif-v1",
+        "status": "complete",
+        "open_tool_calls": [],
+    }
+    # The bytes Harbor reads are the strict model's JSON, so they validate back into the same trajectory.
+    encoded = encode_atif_trajectory(trajectory)
+    assert AtifTrajectoryV1_7.model_validate_json(encoded) == trajectory
+
+
+def test_transcript_to_atif_terminus_user_turns_become_the_previous_steps_observation() -> None:
+    """Terminus feeds the terminal back as user turns; ATIF has no later user turns, so they are observations."""
+    trajectory = _transcript(
+        "Fix the build",
+        [
+            _assistant_message("msg_1", "```bash\nmake\n```"),
+            {"role": "user", "content": [{"type": "input_text", "text": "make: *** No rule to make target"}]},
+            _assistant_message("msg_2", "```bash\nls\n```"),
+            {"role": "user", "content": "Makefile src"},
+            _assistant_message("msg_3", "Task complete."),
+        ],
+    )
+
+    sources = [step.source for step in trajectory.steps]
+    assert sources == ["user", "agent", "agent", "agent"]
+    first, second, last = trajectory.steps[1:]
+    assert first.observation.results[0].content == "make: *** No rule to make target"
+    assert first.extra["nemo_gym"]["observation_source"] == "user_turn"
+    assert second.observation.results[0].content == "Makefile src"
+    assert last.observation is None
+
+
+def test_transcript_to_atif_maps_developer_to_system_and_keeps_pending_calls_open() -> None:
+    trajectory = _transcript(
+        [{"role": "developer", "content": "Use the terminal."}, {"role": "user", "content": "go"}],
+        [_function_call("call_9", "terminal", {"cmd": "sleep 1000"})],
+    )
+    assert trajectory.steps[0].source == "system" and trajectory.steps[0].extra == {"nemo_gym": {"role": "developer"}}
+    # The harness stopped before the tool returned: the call stays open, which the conversion record says.
+    assert trajectory.steps[-1].observation is None
+    assert trajectory.extra["nemo_gym"]["conversion"]["open_tool_calls"] == ["call_9"]
+
+
+@pytest.mark.parametrize(
+    ("output_items", "message"),
+    [
+        ([_function_output("call_404", "x")], "matches no pending call"),
+        ([_assistant_message("m", "a"), {"role": "system", "content": "later"}], "later system or developer"),
+        ([_reasoning("rs", "thinking"), {"role": "system", "content": "later"}], "later system or developer"),
+        ([{"role": "assistant", "content": "copied"}], "copied assistant context"),
+        ([_function_call("c1", "t", {}), _function_call("c1", "t", {})], "duplicate function call ID"),
+        ([{"type": "mcp_list_tools", "id": "l", "server_label": "s", "tools": []}], "unsupported transcript item"),
+    ],
+)
+def test_transcript_to_atif_refuses_what_it_cannot_represent(output_items: list[dict[str, Any]], message: str) -> None:
+    with pytest.raises(AtifExportError, match=message):
+        _transcript([{"role": "user", "content": "go"}], output_items)
+
+
+@pytest.mark.parametrize(
+    "output_items",
+    [
+        [
+            _function_call("c1", "t", {}),
+            {**_function_output("c1", ""), "output": [{"type": "refusal", "refusal": "no"}]},
+        ],
+        [_assistant_message("m", "a"), {"role": "user", "content": [{"type": "refusal", "refusal": "no"}]}],
+    ],
+    ids=["tool-output", "user-turn"],
+)
+def test_transcript_to_atif_accepts_a_refusal_only_in_the_models_own_message(
+    output_items: list[dict[str, Any]],
+) -> None:
+    """A refusal is something the model says; in a tool result or a user turn it is not a Responses API shape
+    (the item union may read such a turn as some other, unsupported item; either way it never exports)."""
+    with pytest.raises(AtifExportError, match="not a Responses API|only text content parts|unsupported transcript"):
+        _transcript([{"role": "user", "content": "go"}], output_items)
+
+
+def _bad_arguments_call(call_id: str, arguments: str) -> dict[str, Any]:
+    return {**_function_call(call_id, "terminal", {}), "arguments": arguments}
+
+
+@pytest.mark.parametrize(
+    ("output_items", "reasons", "check"),
+    [
+        # A reasoning policy cut off at max_output_tokens: the converter emits a reasoning-only output.
+        (
+            [_assistant_message("m1", "ls"), _reasoning("rs", "half a thought")],
+            ["trailing_reasoning"],
+            lambda t: (t.steps[-1].message, t.steps[-1].reasoning_content, t.steps[-1].extra)
+            == ("", "half a thought", {"nemo_gym": {"incomplete": "max_output_tokens"}}),
+        ),
+        # Terminus keeps that output and goes on after compaction: the next user turn is its observation.
+        (
+            [
+                _reasoning("r1", "plan"),
+                _assistant_message("m1", "```bash\nmake\n```"),
+                {"role": "user", "content": "make: error"},
+                _reasoning("r2", "cut off"),
+                {"role": "user", "content": "(terminal unchanged)"},
+                _reasoning("r3", "retry"),
+                _assistant_message("m2", "```bash\nls\n```"),
+            ],
+            ["trailing_reasoning"],
+            lambda t: [(s.source, s.message, s.reasoning_content) for s in t.steps]
+            == [
+                ("user", "go", None),
+                ("agent", "```bash\nmake\n```", "plan"),
+                ("agent", "", "cut off"),
+                ("agent", "```bash\nls\n```", "retry"),
+            ]
+            and t.steps[2].observation.results[0].content == "(terminal unchanged)"
+            and t.steps[2].extra["nemo_gym"] == {"incomplete": "max_output_tokens", "observation_source": "user_turn"},
+        ),
+        # Reasoning between a call and its result (the harness returned the result after the cut-off turn).
+        (
+            [_function_call("c1", "t", {}), _reasoning("rs", "x"), _function_output("c1", "out")],
+            ["trailing_reasoning"],
+            lambda t: [s.reasoning_content for s in t.steps[1:]] == [None, "x"]
+            and t.steps[1].observation.results[0].content == "out",
+        ),
+        # Two <think> blocks in one completion: one reasoning item per block, or one item with two parts.
+        (
+            [_reasoning("r1", "a"), _reasoning("r2", "b"), _assistant_message("m", "ok")],
+            ["joined_reasoning_segments"],
+            lambda t: t.steps[1].reasoning_content == "a\nb",
+        ),
+        (
+            [
+                {
+                    **_reasoning("r1", "a"),
+                    "summary": [_reasoning("r1", "a")["summary"][0], _reasoning("r1", "b")["summary"][0]],
+                },
+                _assistant_message("m", "ok"),
+            ],
+            ["joined_reasoning_segments"],
+            lambda t: t.steps[1].reasoning_content == "a\nb",
+        ),
+        # OpenAI reasoning models answer with `summary: []` unless a summary is requested.
+        (
+            [{**_reasoning("r1", "a"), "summary": []}, _assistant_message("m", "ok")],
+            ["empty_reasoning"],
+            lambda t: t.steps[1].reasoning_content is None and t.steps[1].message == "ok",
+        ),
+        (
+            [{**_reasoning("r1", "a"), "summary": [], "encrypted_content": "opaque"}, _assistant_message("m", "ok")],
+            ["encrypted_reasoning"],
+            lambda t: t.steps[1].reasoning_content is None,
+        ),
+        # Arguments the model got wrong: the harness survived them, the episode is still gradable.
+        (
+            [_bad_arguments_call("c1", ""), _function_output("c1", "error"), _assistant_message("m", "ok")],
+            ["unparsable_arguments"],
+            lambda t: t.steps[1].tool_calls[0].arguments == {}
+            and t.steps[1].tool_calls[0].extra["nemo_gym"] == {"source_item_id": "item-c1", "raw_arguments": ""},
+        ),
+        (
+            [_bad_arguments_call("c1", '{"cmd": "ls" '), _function_output("c1", "error")],
+            ["unparsable_arguments"],
+            lambda t: t.steps[1].tool_calls[0].extra["nemo_gym"]["raw_arguments"] == '{"cmd": "ls" ',
+        ),
+        (
+            [_bad_arguments_call("c1", "[1, 2]"), _function_output("c1", "error")],
+            ["unparsable_arguments"],
+            lambda t: t.steps[1].tool_calls[0].arguments == {},
+        ),
+        # The model refused a turn; Terminus fed the terminal back and the model answered on the next one. The
+        # refusal is the step's text (Harbor's Terminus keeps an empty step there) and the episode is graded.
+        (
+            [
+                _refusal_message("m1", "I can't help with that."),
+                {"role": "user", "content": "(terminal unchanged)"},
+                _assistant_message("m2", "```bash\nls\n```"),
+            ],
+            ["refusal"],
+            lambda t: t.steps[1].message == "I can't help with that."
+            and t.steps[1].extra["nemo_gym"]
+            == {"source_item_id": "m1", "refusal": True, "observation_source": "user_turn"}
+            and t.steps[1].observation.results[0].content == "(terminal unchanged)"
+            and t.steps[2].message == "```bash\nls\n```"
+            and t.steps[2].extra == {"nemo_gym": {"source_item_id": "m2"}},
+        ),
+        # An empty refusal is exactly Harbor's own shape for a refused turn: an agent step with an empty message.
+        (
+            [_refusal_message("m1", ""), _assistant_message("m2", "ok")],
+            ["refusal"],
+            lambda t: t.steps[1].message == "" and t.steps[1].extra["nemo_gym"]["refusal"] is True,
+        ),
+    ],
+    ids=[
+        "trailing-reasoning",
+        "terminus-truncated-turn",
+        "reasoning-before-tool-result",
+        "two-reasoning-items",
+        "two-summary-parts",
+        "empty-summary",
+        "encrypted",
+        "empty-arguments",
+        "malformed-arguments",
+        "non-object-arguments",
+        "refusal",
+        "empty-refusal",
+    ],
+)
+def test_transcript_to_atif_exports_model_caused_shapes_as_partial(
+    output_items: list[dict[str, Any]], reasons: list[str], check: Callable[[AtifTrajectoryV1_7], bool]
+) -> None:
+    trajectory = _transcript([{"role": "user", "content": "go"}], output_items)
+
+    assert check(trajectory), trajectory.steps
+    conversion = trajectory.extra["nemo_gym"]["conversion"]
+    assert conversion["status"] == "partial" and conversion["reasons"] == reasons
+    # The document round-trips through the encoder as a valid ATIF v1.7 trajectory.
+    encoded = json.loads(encode_atif_trajectory(trajectory))
+    assert AtifTrajectoryV1_7.model_validate(encoded).steps[-1].step_id == len(trajectory.steps)
+    harbor_trajectory = pytest.importorskip("harbor.models.trajectories.trajectory", reason="Harbor is optional")
+    harbor_trajectory.Trajectory.model_validate(encoded)
+
+
+def test_transcript_to_atif_complete_transcripts_carry_no_reasons() -> None:
+    trajectory = _transcript(
+        [{"role": "user", "content": "go"}],
+        [
+            _reasoning("r", "plan"),
+            _function_call("c1", "t", {"k": 1}),
+            _function_output("c1", "o"),
+            _assistant_message("m", "ok"),
+        ],
+    )
+    assert trajectory.extra["nemo_gym"]["conversion"] == {
+        "profile": "ng-transcript-to-atif-v1",
+        "status": "complete",
+        "open_tool_calls": [],
+    }
+    assert trajectory.steps[1].tool_calls[0].extra == {"nemo_gym": {"source_item_id": "item-c1"}}
+
+
+def test_transcript_to_atif_needs_identity_and_at_least_one_message() -> None:
+    with pytest.raises(AtifExportError, match="session_id"):
+        transcript_to_atif([], [], session_id=" ", agent_name="a", agent_version="1")
+    with pytest.raises(AtifExportError, match="contains no messages"):
+        _transcript([], [])

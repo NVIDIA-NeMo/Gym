@@ -62,13 +62,13 @@ class TestValidationSummary:
         report = summarize_validation(rollouts, ["never_ran"])
 
         lines = report.text.splitlines()
-        assert lines[0] == "task_id\tstatus\treward"
-        assert "solved\toracle solved\t1.0" in lines
-        assert "wrong\toracle solved (harbor:missing_reward)\t0.0" in lines
-        assert "skipped\tunvalidated (no solution/)\t-" in lines
-        assert "broken\tfailed: seed exploded\t-" in lines
-        assert "masked\tmasked (provider_unavailable)\t-" in lines
-        assert "never_ran\tunvalidated (no solution/)\t-" in lines
+        assert lines[0] == "task_id\tstatus\treward\tverify_s\tnetwork"
+        assert "solved\toracle solved\t1.0\t-\t-" in lines
+        assert "wrong\toracle solved (harbor:missing_reward)\t0.0\t-\t-" in lines
+        assert "skipped\tunvalidated (no solution/)\t-\t-\t-" in lines
+        assert "broken\tfailed: seed exploded\t-\t-\t-" in lines
+        assert "masked\tmasked (provider_unavailable)\t-\t-\t-" in lines
+        assert "never_ran\tunvalidated (no solution/)\t-\t-\t-" in lines
         assert report.ok is False
 
     def test_all_good_is_ok(self, tmp_path):

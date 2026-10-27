@@ -276,6 +276,12 @@ class SlurmExecutor(BaseExecutor):
                         "&& ! grep -qF -- ++resubmit=True job.sh; then "
                         'fail "job.sh in $PWD predates resubmit, so it could start the run fresh and delete its '
                         'rollouts; submit the run again instead"; fi',
+                        # Saved runners may predate normalization of the resume flag. Upgrade only the built-in
+                        # resubmit command, under the same lock, before queueing the existing script.
+                        "if grep -qx -- '[[:space:]]*gym eval run' job.sh "
+                        "&& grep -qF -- 'GYM_CMD+=(++resubmit=True)' job.sh; then "
+                        "sed -i 's/GYM_CMD+=(++resubmit=True)/GYM_CMD+=(++resubmit=True ++resume_from_cache=True)/g' "
+                        "job.sh || fail 'cannot normalize resubmit flags in job.sh'; fi",
                         *collector_update,
                         f"export {RESUBMIT_ENV}=1",
                         _sbatch_command(benchmark, job_dir / "job.sh"),

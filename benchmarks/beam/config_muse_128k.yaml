@@ -1,0 +1,28 @@
+# BEAM — Muse-Glimmer-30B 128k variant. `prepare_muse_128k.py` keeps only
+# questions whose full prompt (whole chat + question, Muse chat template) is
+# <= 131072 tokens and drops the rest (260 questions, all from the 100K split).
+# Serve with --max-model-len >= 131072 + max output tokens (147456 for 16384).
+config_paths:
+  - resources_servers/beam/configs/beam.yaml
+
+beam_muse_128k_benchmark_simple_agent:
+  _inherit_from: beam_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: beam_muse_128k
+        type: benchmark
+        jsonl_fpath: benchmarks/beam/data/beam_muse_128k_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/beam/prepare_muse_128k.py
+        prepare_dependencies: [transformers]
+        license: Creative Commons Attribution-ShareAlike 4.0 International
+        # pass@1[avg-of-4]: collation repeats every question 4x (keep --num-repeats at 1).
+        num_repeats: 4
+
+beam_muse_128k_benchmark_environment_server:
+  _inherit_from: beam_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: beam_muse_128k_benchmark_simple_agent

@@ -97,6 +97,7 @@ def format_entry(row: dict, prompt_config: Any = None) -> dict:
         # Metadata for analysis; not used for grading.
         "answer_type": row.get("answer_type"),
         "uuid": row["id"],
+        "task_id": row["id"],
         "category": row.get("category"),
         "raw_subject": row.get("raw_subject"),
         "verified_class": VERIFIED_CLASSES_MAP.get(row.get("Verified_Classes"), row.get("Verified_Classes")),

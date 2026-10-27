@@ -26,6 +26,7 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, model_validator
 
+from nemo_gym.agent_outcome import AgentOutcome
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.base_responses_api_agent import (
@@ -38,6 +39,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -331,6 +333,13 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             resources_cookies=state.resources_cookies,
         )
 
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Use the SDK HTTP status retained by the sandbox runner; never infer it from error text."""
+        status = native_result.get("model_error_status")
+        if native_result.get("model_error") and type(status) is int and 400 <= status <= 599:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        return super().classify_outcome(native_result)
+
     async def _run_sandbox_episode(
         self, body: NeMoGymResponseCreateParamsNonStreaming, state: StirrupSessionState
     ) -> NeMoGymResponse:
@@ -397,7 +406,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             # The only request was rejected before any processing: a known zero. A request killed in flight may
             # have used tokens, so that case stays unknown.
             usage = _zero_usage()
-        return NeMoGymResponse(
+        response = NeMoGymResponse(
             id=f"stirrup-{state.request.episode_id.capture_key}",
             created_at=int(time.time()),
             model=model_name,
@@ -414,6 +423,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             error={"code": "server_error", "message": output["model_error"]} if output.get("model_error") else None,
             usage=usage,
         )
+        return self.report_outcome(response, output)
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()

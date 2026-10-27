@@ -63,7 +63,7 @@ def test_benchmark_tools_are_the_tools_the_server_serves(server):
             "type": "function",
             "name": t.name,
             "description": t.tool.description,
-            "parameters": t.tool.inputSchema,
+            "parameters": t.tool.model_dump(by_alias=True)["inputSchema"],
             "strict": None,
         }
         for t in tools.values()

@@ -36,6 +36,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.reward_profile import RewardProfiler
 from nemo_gym.rollout_correlation import current_rollout_id, rollout_context
 from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+from resources_servers.genrm_compare.tests.support import request_with_session
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import collected_comparisons, member
 
 
@@ -59,18 +60,20 @@ def failing_judge(status):
 async def test_judge_http_failure_never_completes_cohort(server, status):
     response = failing_judge(status)
     server.server_client.post = AsyncMock(return_value=response)
-    results = await asyncio.gather(*(server.verify(member(i)) for i in range(2)), return_exceptions=True)
+    results = await asyncio.gather(
+        *(server.verify(request_with_session(), member(i)) for i in range(2)), return_exceptions=True
+    )
     assert all(isinstance(result, genrm.JudgeError) and "judge offline" in str(result) for result in results)
     cohort = next(iter(server._verify_cohorts.values()))
     assert cohort.phase == "failed" and not cohort.results
     response.read.assert_not_awaited()
     with pytest.raises(genrm.JudgeError, match="judge offline"):
-        await server.verify(member(0, response_id="regenerated-answer"))
+        await server.verify(request_with_session(), member(0, response_id="regenerated-answer"))
     calls_after_failure = server.server_client.post.await_count
     max_calls = 2 * (1 if status == 401 else server.config.genrm_parse_retries + 1)
     assert 1 <= calls_after_failure <= max_calls
     server._collect_comparisons = AsyncMock(return_value=collected_comparisons([1.0, 2.0]))
-    recovered = await asyncio.gather(*(server.verify(member(i, attempt=1)) for i in range(2)))
+    recovered = await asyncio.gather(*(server.verify(request_with_session(), member(i, attempt=1)) for i in range(2)))
     assert [result.reward for result in recovered] == [1.0, 2.0]
     server._collect_comparisons.assert_awaited_once()
 
@@ -78,7 +81,9 @@ async def test_judge_http_failure_never_completes_cohort(server, status):
 @pytest.mark.parametrize("error", [ConnectionError("offline"), TimeoutError("judge timeout")])
 async def test_judge_transport_failure_never_defaults(server, error):
     server.server_client.post = AsyncMock(side_effect=error)
-    results = await asyncio.gather(*(server.verify(member(i)) for i in range(2)), return_exceptions=True)
+    results = await asyncio.gather(
+        *(server.verify(request_with_session(), member(i)) for i in range(2)), return_exceptions=True
+    )
     assert all(isinstance(result, genrm.JudgeError) for result in results)
     assert not next(iter(server._verify_cohorts.values())).results
 
@@ -90,7 +95,9 @@ async def test_unsuccessful_http_200_judge_is_failure(server, payload):
     response = MagicMock(ok=True)
     response.read = AsyncMock(return_value=json.dumps(payload).encode())
     server.server_client.post = AsyncMock(return_value=response)
-    results = await asyncio.gather(*(server.verify(member(i)) for i in range(2)), return_exceptions=True)
+    results = await asyncio.gather(
+        *(server.verify(request_with_session(), member(i)) for i in range(2)), return_exceptions=True
+    )
     assert all(isinstance(r, genrm.JudgeError) for r in results)
     with pytest.raises(HTTPException, match="503"):
         await server.compare(genrm.GenRMCompareRequest(conversation_history=[], response_objs=[{}, {}]))
@@ -122,7 +129,7 @@ async def test_nonempty_parse_retries_preserve_existing_fallback(server, recover
 async def test_group_attempt_metadata_is_not_a_reward_metric(server):
     server._run_single_comparison = AsyncMock(return_value=comparison_result())
     rows = [member(i, attempt=2) for i in range(2)]
-    results = await asyncio.gather(*(server.verify(row) for row in reversed(rows)))
+    results = await asyncio.gather(*(server.verify(request_with_session(), row) for row in reversed(rows)))
     assert [r.rollout_index for r in results] == [1, 0]
     assert [r.reward for r in results] == [3.0, 3.0]
     for result in results:
@@ -139,7 +146,10 @@ async def test_actual_judge_receives_normalized_prompt(server, input_value):
     server._run_single_comparison = AsyncMock(return_value=comparison_result())
     params = NeMoGymResponseCreateParamsNonStreaming(input=input_value)
     await asyncio.gather(
-        *(server.verify(member(i).model_copy(update={"responses_create_params": params})) for i in range(2))
+        *(
+            server.verify(request_with_session(), member(i).model_copy(update={"responses_create_params": params}))
+            for i in range(2)
+        )
     )
     assert server._run_single_comparison.await_args.args[0] == [{"role": "user", "content": "Hello"}]
 
@@ -153,10 +163,10 @@ async def test_shared_judging_has_no_member_capture_context(server):
 
     server._run_single_comparison = AsyncMock(side_effect=judge)
     with rollout_context("member-a"):
-        first = asyncio.create_task(server.verify(member(0)))
+        first = asyncio.create_task(server.verify(request_with_session(), member(0)))
     await asyncio.sleep(0)
     with rollout_context("member-b"):
-        second = asyncio.create_task(server.verify(member(1)))
+        second = asyncio.create_task(server.verify(request_with_session(), member(1)))
     await asyncio.gather(first, second)
     assert seen == [None, None]
 
@@ -292,9 +302,9 @@ async def test_late_member_receives_original_timeout_failure(server, index):
     server.config.cohort_collection_timeout_s = 0.01
     server._run_single_comparison = AsyncMock()
     with pytest.raises(HTTPException) as first:
-        await server.verify(member(0))
+        await server.verify(request_with_session(), member(0))
     with pytest.raises(HTTPException) as late:
-        await server.verify(member(index, response_id="new-answer"))
+        await server.verify(request_with_session(), member(index, response_id="new-answer"))
     assert first.value.status_code == late.value.status_code == 503
     assert late.value.detail == first.value.detail
     assert "did not collect" in late.value.detail
@@ -305,7 +315,7 @@ async def test_judge_failure_preserves_existing_instance_config_and_masks_all_me
     server._collect_comparisons = AsyncMock(side_effect=genrm.JudgeError("judge offline"))
     bodies = [member(i) for i in range(2)]
     bodies[0].instance_config = {"task": "keep", "mask_sample": False}
-    results = await asyncio.gather(*(judge_failsafe(server.verify)(body) for body in bodies))
+    results = await asyncio.gather(*(judge_failsafe(server.verify)(request_with_session(), body) for body in bodies))
     rows = [json.loads(result.body) for result in results]
     assert rows[0]["instance_config"] == {"task": "keep", "mask_sample": True}
     assert rows[1]["instance_config"] == {"mask_sample": True}
@@ -461,7 +471,7 @@ async def test_verify_maps_selected_and_overall_diagnostics(server: genrm.GenRMC
     # The shortest answer wins on rubrics but loses on overall scores.
     verdict = (5.0, 2.0, 1.0, 1.0, 4.0, 6.0, -1.0, -1.0, -1.0, 0.0, 0.0)
     server._collect_comparisons = AsyncMock(return_value=([verdict], [(0, 1, 0)]))
-    results = await asyncio.gather(*(server.verify(row) for row in rows))
+    results = await asyncio.gather(*(server.verify(request_with_session(), row) for row in rows))
     assert [r.reward for r in results] == pytest.approx([6.2, 1.8])
     assert [r.reward_score_raw for r in results] == [5.0, 2.0]
     assert [r.reward_rubric_aggregate_valid for r in results] == [5.0, 2.0]
@@ -480,14 +490,14 @@ async def test_reordered_rubric_ids_share_cohort_and_completed_replay(
         genrm.GenRMCompareVerifyRequest.model_validate(member(i).model_dump() | {"expected_rubric_ids": ids})
         for i, ids in enumerate([[2, 1], [1, 2]])
     ]
-    results = await asyncio.gather(*(server.verify(row) for row in rows))
+    results = await asyncio.gather(*(server.verify(request_with_session(), row) for row in rows))
     assert [result.reward for result in results] == [3.0, 3.0]
     replay = genrm.GenRMCompareVerifyRequest.model_validate(rows[0].model_dump() | {"expected_rubric_ids": [1, 2]})
-    assert (await server.verify(replay)).model_dump() == results[0].model_dump()
+    assert (await server.verify(request_with_session(), replay)).model_dump() == results[0].model_dump()
     assert server._run_single_comparison.await_count == 2
     different = genrm.GenRMCompareVerifyRequest.model_validate(rows[0].model_dump() | {"expected_rubric_ids": [1, 3]})
     with pytest.raises(HTTPException) as error:
-        await server.verify(different)
+        await server.verify(request_with_session(), different)
     assert error.value.status_code == 409
 
 

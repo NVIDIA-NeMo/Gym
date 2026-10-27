@@ -8,7 +8,7 @@ file, with Harbor's infrastructure variables in the environment. This module wri
 template and Gym's images override, resolves the build environment in Harbor's order,
 interpolates the task file the way Compose does, reads each service's build section into the
 plan, and refuses what must not run on the build host: secrets, ssh, extra contexts and hosts,
-host networking, cache credentials and paths outside the environment folder. The build-side
+host networking, BuildKit entitlements, cache credentials and paths outside the environment folder. The build-side
 variable helpers deliberately stay separate from the loader's copies in compose_variables.
 """
 
@@ -17,19 +17,14 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from nemo_gym.sandbox.compose_fields import ComposeSubstitutionError
-from nemo_gym.tasks.harbor.build_plan import (
-    DOCKERFILE_NAME,
-    HARBOR_COMPOSE_FILE,
-    MAIN_SERVICE,
-    BuildError,
-    BuildPlanEntry,
-)
+from nemo_gym.tasks.harbor.build_plan import DOCKERFILE_NAME, HARBOR_COMPOSE_FILE, BuildError, BuildPlanEntry
 from nemo_gym.tasks.harbor.compose_variables import (
     LOG_MOUNT_PATHS,
     TEST_DIR,
@@ -39,6 +34,7 @@ from nemo_gym.tasks.harbor.compose_variables import (
 )
 from nemo_gym.tasks.harbor.harbor_compat import sanitize_docker_image_name
 from nemo_gym.tasks.harbor.image_configs import COMPOSE_FILE_NAMES
+from nemo_gym.tasks.harbor.records import MAIN_SERVICE
 
 
 LOGGER = logging.getLogger(__name__)
@@ -47,9 +43,14 @@ LOGGER = logging.getLogger(__name__)
 MAIN_IMAGE_VARIABLE = "MAIN_IMAGE_NAME"
 # The file name Harbor ships its build template under; Gym writes its copy under the same name.
 COMPOSE_BUILD_FILE = "docker-compose-build.yaml"
+# Gym's own override, passed to ``docker compose build`` after the task's file: the image name of every service built.
+COMPOSE_IMAGES_FILE = "docker-compose-images.yaml"
 
 # Build keys of a task's Compose file that reach the build host and are refused (see validate_task_compose).
-REFUSED_BUILD_KEYS = ("secrets", "ssh", "extra_hosts")
+# ``entitlements`` is Compose's spelling of BuildKit's ``--allow`` (``network.host`` lets ``RUN --network=host``
+# use the build host's network, ``security.insecure`` lifts the sandbox) and ``privileged: true`` grants both, so
+# the two are refused whatever their value, like ``secrets``: the main service and a built sidecar alike.
+REFUSED_BUILD_KEYS = ("secrets", "ssh", "extra_hosts", "entitlements", "privileged")
 # Keys of a ``cache_from`` / ``cache_to`` entry (``type=...,ref=...,key=value``) that carry credentials.
 CACHE_CREDENTIAL_KEYS = frozenset(
     {"token", "secret", "password", "credentials", "access_key_id", "secret_access_key", "session_token"}
@@ -66,6 +67,90 @@ COMPOSE_ENV_FILES = "COMPOSE_ENV_FILES"
 
 # ``(context, variable)`` pairs already warned about as unset: a context's file is interpolated more than once per build.
 _WARNED_UNSET: set[tuple[str, str]] = set()
+
+
+def build_section(document: dict[str, Any] | None, service: str) -> dict[str, Any] | None:
+    """``services.<service>.build`` of a Compose document as a mapping (the string form read as its ``context``),
+    or ``None`` when the service has none."""
+    services = document.get("services") if isinstance(document, dict) else None
+    entry = services.get(service) if isinstance(services, dict) else None
+    build = entry.get("build") if isinstance(entry, dict) else None
+    if isinstance(build, str):
+        build = {"context": build}
+    return build if isinstance(build, dict) else None
+
+
+def service_build_settings(
+    entry: BuildPlanEntry, document: dict[str, Any] | None, env: dict[str, str]
+) -> dict[str, Any]:
+    """The entry's service's ``build`` section of the task's Compose file as :class:`BuildPlanEntry` fields, or
+    ``{}`` without one.
+
+    ``document`` is the file as :func:`validate_task_compose` returned it for ``env``, the build's environment
+    (:func:`compose_build_env`): interpolated as Compose interpolates it, its paths checked to stay under
+    ``environment/``. This is what ``docker compose build`` applies from the task file (over Harbor's template for
+    ``main``), read here so the direct build of buildah and podman applies the same: the build ``context`` (a path,
+    or the string form of the section) and ``dockerfile``, resolved under ``environment/``
+    (:func:`_contained_build_path` again, so a caller handing in an unchecked document still cannot escape it);
+    ``args`` as a mapping or Compose's ``KEY=value`` list, where a mapping value of ``null`` and a bare list ``KEY``
+    alike take the variable's value from the build's environment and are dropped when it is unset, as Compose
+    drops them, so the Dockerfile's own ``ARG`` default stands; ``target``; and whether a ``dockerfile_inline`` is
+    set. ``args`` of another shape is a :class:`BuildError`.
+    """
+    path = entry.context / HARBOR_COMPOSE_FILE
+    service = entry.compose_service
+    build = build_section(document, service)
+    if build is None:
+        return {}
+    build_context = _contained_build_path(
+        build.get("context", "."),
+        base=entry.context,
+        context=entry.context,
+        path=path,
+        service=service,
+        key="build.context",
+    ).resolve()
+    dockerfile = DOCKERFILE_NAME
+    if build.get("dockerfile") is not None:
+        _contained_build_path(
+            build["dockerfile"],
+            base=build_context,
+            context=entry.context,
+            path=path,
+            service=service,
+            key="build.dockerfile",
+        )
+        dockerfile = str(build["dockerfile"])
+    raw_args = build.get("args") or {}
+    pairs: list[tuple[str, Any]] = []
+    if isinstance(raw_args, dict):
+        pairs = [(str(key), value) for key, value in raw_args.items()]
+    elif isinstance(raw_args, list):
+        for item in raw_args:
+            key, separator, value = str(item).partition("=")
+            pairs.append((key, value if separator else None))
+    else:
+        raise _refuse(path, service, "build.args", "it must be a mapping or a list of KEY=value")
+    args: dict[str, str] = {}
+    variables: dict[str, str] | None = None
+    for key, value in pairs:
+        if value is None:
+            # Compose: a null mapping value or a bare list KEY is read from the build's environment, dropped when unset.
+            if variables is None:
+                variables = compose_interpolation_variables(entry.context, env, tasks=entry.tasks)
+            if key in variables:
+                args[key] = variables[key]
+            continue
+        args[key] = _compose_scalar(value)
+    target = build.get("target")
+    return {
+        "build_context": build_context,
+        "dockerfile": dockerfile,
+        "build_args": args,
+        "target": _compose_scalar(target) if target not in (None, "") else None,
+        "dockerfile_inline": build.get("dockerfile_inline") is not None,
+        "compose_build": dict(build),
+    }
 
 
 def _compose_scalar(value: Any) -> str:
@@ -116,6 +201,29 @@ def harbor_compose_document(context: Path, image: str) -> dict[str, Any]:
             }
         }
     }
+
+
+def images_compose_document(images: Mapping[str, str]) -> dict[str, Any]:
+    """Gym's images override for ``docker compose build``: ``image`` per built service, ``main`` included.
+
+    Harbor passes its template, then the task's file, then its own generated overrides (``docker.py#L363-L371`` at
+    v0.22.0). Gym's one override, passed last, names every service it builds: ``main`` as ``hb__<hash>`` (the
+    template already says so) and each sidecar as ``hb__<hash>-<service>``. Last wins in Compose, so a sidecar's
+    own ``image:`` in the task file (kumo's ``${MAIN_IMAGE_NAME}_verifier``) is overridden without a ``docker tag``
+    step, and a sidecar without one gets Gym's name instead of Compose's ``<project>-<service>`` default, which
+    under the project name Gym passes is the same string.
+    """
+    return {"services": {service: {"image": image} for service, image in images.items()}}
+
+
+def write_compose_files(folder: Path, context: Path, main_image: str, images: Mapping[str, str]) -> tuple[Path, Path]:
+    """Write Harbor's build template (:func:`harbor_compose_document`) and Gym's images override
+    (:func:`images_compose_document`) under ``folder`` and return their paths, in the order they are passed."""
+    build_path = Path(folder) / COMPOSE_BUILD_FILE
+    build_path.write_text(yaml.safe_dump(harbor_compose_document(context, main_image), sort_keys=False))
+    images_path = Path(folder) / COMPOSE_IMAGES_FILE
+    images_path.write_text(yaml.safe_dump(images_compose_document(images), sort_keys=False))
+    return build_path, images_path
 
 
 def task_compose_file(context: Path) -> Path | None:
@@ -219,21 +327,27 @@ def _warn_unset(context: Path, tasks: tuple[str, ...], unset: set[str]) -> None:
         )
 
 
-def validate_task_compose(context: Path, env: dict[str, str], *, tasks: tuple[str, ...] = ()) -> dict[str, Any] | None:
+def validate_task_compose(
+    context: Path, env: dict[str, str], *, tasks: tuple[str, ...] = (), builds_main: bool = True
+) -> dict[str, Any] | None:
     """Check the task's Compose file before ``docker compose build`` runs it on the build host, and return it
     interpolated (``None`` when the context ships none). Anything refused raises :class:`BuildError` naming the
     service and key.
 
     The file is third-party content and the build host often holds the push credentials, so what it may ask
-    of the host is bounded to what a legitimate task build needs: ``main`` may carry ``build`` args, a target,
-    a context and a Dockerfile under ``environment/`` (symlinks resolved, like the loader's ``env_file`` rule),
-    or a ``dockerfile_inline``. Refused on any service with a ``build`` section: ``secrets``, ``ssh``,
-    ``extra_hosts``, ``network: host``, ``additional_contexts`` other than ``service:`` references, and
+    of the host is bounded to what a legitimate task build needs: a service with a ``build`` section may carry
+    args, a target, a context and a Dockerfile under ``environment/`` (symlinks resolved, like the loader's
+    ``env_file`` rule), or a ``dockerfile_inline``. Refused on any service with a ``build`` section: ``secrets``, ``ssh``,
+    ``extra_hosts``, ``entitlements`` and ``privileged`` (BuildKit's ``--allow network.host`` / ``security.insecure``,
+    which let a ``RUN --network=host`` line reach the build host's network), ``network: host``,
+    ``additional_contexts`` other than ``service:`` references, and
     ``cache_from`` / ``cache_to`` entries carrying credentials; refused anywhere: a top-level ``include``
     and an ``extends`` with a ``file``, which pull further files in unchecked. ``main``'s ``image`` has to
-    resolve to ``MAIN_IMAGE_NAME`` when set (``${MAIN_IMAGE_NAME}``, ``${MAIN_IMAGE_NAME:-...}`` and
-    ``${MAIN_IMAGE_NAME-...}`` all do, since Harbor always exports the variable), or the build would be
-    tagged under another name than the one recorded.
+    resolve to ``MAIN_IMAGE_NAME`` when set and ``main`` is among the services being built (``builds_main``):
+    ``${MAIN_IMAGE_NAME}``, ``${MAIN_IMAGE_NAME:-...}`` and ``${MAIN_IMAGE_NAME-...}`` all do, since Harbor
+    always exports the variable; otherwise the build would be tagged under another name than the one recorded.
+    A sidecar-only build (a prebuilt, pull-mode or overlay ``main``, or one already recorded) neither reads nor
+    tags ``main``'s image, so its spelling is not checked, as Harbor's prebuilt mode never reads it.
 
     Compose interpolates the file against the command's environment before it reads a single key, so the checks
     run on the document interpolated the same way: ``env`` is the environment the build runs with
@@ -248,10 +362,10 @@ def validate_task_compose(context: Path, env: dict[str, str], *, tasks: tuple[st
     Compose resolves to the main image passes and a literal other image, or a reference to another variable, is
     refused with what it resolves to.
 
-    A sidecar with a ``build`` section is refused: the loader records a sidecar from its ``image:`` (one
-    without is refused as "builds are not supported") and no provider starts a locally built sidecar, so
-    building it here would spend the time on an image nothing uses, or on one that then differs from the
-    registry image the task runs with. Sidecars name a prebuilt ``image:`` and carry no ``build:``.
+    A sidecar with a ``build`` section passes the same checks as ``main``'s and is built (:func:`plan_builds`),
+    as Harbor builds it. Its ``image:``, when it has one, is accepted whatever it says: the build is tagged with
+    Gym's name for it (:meth:`ImageBuilder.tag_for`) and the seed document is filled from the record by service
+    name, so no rule on its spelling is needed.
     """
     path = task_compose_file(context)
     if path is None:
@@ -271,7 +385,7 @@ def validate_task_compose(context: Path, env: dict[str, str], *, tasks: tuple[st
     unset: set[str] = set()
     try:
         variables = compose_interpolation_variables(context, env, tasks=tasks)
-        if main_image:
+        if builds_main and main_image:
             expected = variables.get(MAIN_IMAGE_VARIABLE)
             try:
                 resolved = str(substitute_compose(str(main_image), variables)).strip()
@@ -306,12 +420,6 @@ def validate_task_compose(context: Path, env: dict[str, str], *, tasks: tuple[st
         build = service.get("build")
         if build is None:
             continue
-        if service_name != MAIN_SERVICE:
-            raise BuildError(
-                f"{path}: service {service_name!r} has a build section; sidecars must name a prebuilt image: and "
-                "carry no build: (the loader records a sidecar's image from the registry and no provider starts a "
-                f"locally built one). Only {MAIN_SERVICE} is built, from environment/Dockerfile."
-            )
         if isinstance(build, str):
             build = {"context": build}
         if not isinstance(build, dict):
@@ -419,83 +527,3 @@ def compose_build_env(entry: BuildPlanEntry, image: str, platform: str | None) -
     if platform:
         env["DOCKER_DEFAULT_PLATFORM"] = platform
     return env
-
-
-def main_build_settings(entry: BuildPlanEntry, document: dict[str, Any] | None, env: dict[str, str]) -> dict[str, Any]:
-    """``services.main.build`` of the task's Compose file as :class:`BuildPlanEntry` fields, or ``{}`` without one.
-
-    ``document`` is the file as :func:`validate_task_compose` returned it for ``env``, the build's environment
-    (:func:`compose_build_env`): interpolated as Compose interpolates it, its paths checked to stay under
-    ``environment/``. This is what ``docker compose build`` applies from the task file over Harbor's template,
-    read here so the direct build of buildah and podman applies the same: the build ``context`` (a path, or the
-    string form of the section) and ``dockerfile``, resolved under ``environment/`` (:func:`_contained_build_path`
-    again, so a caller handing in an unchecked document still cannot escape it); ``args`` as a mapping or
-    Compose's ``KEY=value`` list, where a mapping value of ``null`` and a bare list ``KEY`` alike take the
-    variable's value from the build's environment and are dropped when it is unset, as Compose drops them, so
-    the Dockerfile's own ``ARG`` default stands; ``target``; and whether a ``dockerfile_inline`` is set. ``args``
-    of another shape is a :class:`BuildError`.
-    """
-    path = entry.context / HARBOR_COMPOSE_FILE
-    services = document.get("services") if isinstance(document, dict) else None
-    main = services.get(MAIN_SERVICE) if isinstance(services, dict) else None
-    build = main.get("build") if isinstance(main, dict) else None
-    if isinstance(build, str):
-        build = {"context": build}
-    if not isinstance(build, dict):
-        return {}
-    build_context = _contained_build_path(
-        build.get("context", "."),
-        base=entry.context,
-        context=entry.context,
-        path=path,
-        service=MAIN_SERVICE,
-        key="build.context",
-    ).resolve()
-    dockerfile = DOCKERFILE_NAME
-    if build.get("dockerfile") is not None:
-        _contained_build_path(
-            build["dockerfile"],
-            base=build_context,
-            context=entry.context,
-            path=path,
-            service=MAIN_SERVICE,
-            key="build.dockerfile",
-        )
-        dockerfile = str(build["dockerfile"])
-    raw_args = build.get("args") or {}
-    pairs: list[tuple[str, Any]] = []
-    if isinstance(raw_args, dict):
-        pairs = [(str(key), value) for key, value in raw_args.items()]
-    elif isinstance(raw_args, list):
-        for item in raw_args:
-            key, separator, value = str(item).partition("=")
-            pairs.append((key, value if separator else None))
-    else:
-        raise _refuse(path, MAIN_SERVICE, "build.args", "it must be a mapping or a list of KEY=value")
-    args: dict[str, str] = {}
-    variables: dict[str, str] | None = None
-    for key, value in pairs:
-        if value is None:
-            # Compose: a null mapping value or a bare list KEY is read from the build's environment, dropped when unset.
-            if variables is None:
-                variables = compose_interpolation_variables(entry.context, env, tasks=entry.tasks)
-            if key in variables:
-                args[key] = variables[key]
-            continue
-        args[key] = _compose_scalar(value)
-    target = build.get("target")
-    return {
-        "build_context": build_context,
-        "dockerfile": dockerfile,
-        "build_args": args,
-        "target": _compose_scalar(target) if target not in (None, "") else None,
-        "dockerfile_inline": build.get("dockerfile_inline") is not None,
-        "compose_build": dict(build),
-    }
-
-
-def write_compose_file(folder: Path, context: Path, image: str) -> Path:
-    """Write :func:`harbor_compose_document` under ``folder`` as ``docker-compose-build.yaml`` and return it."""
-    path = Path(folder) / COMPOSE_BUILD_FILE
-    path.write_text(yaml.safe_dump(harbor_compose_document(context, image), sort_keys=False))
-    return path
