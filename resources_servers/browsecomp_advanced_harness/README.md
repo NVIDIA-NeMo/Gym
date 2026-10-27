@@ -10,7 +10,7 @@ This resources server provides two browsing tools backed by a configurable searc
 - **`search`** — parallel web search returning top results with content snippets
 - **`browse`** — full-page content extraction from given URLs
 
-Select the provider with `search_provider`: `ydc` ([You.com](https://you.com/), default), `exa`, or `tavily`.
+Select the provider with `search_provider`: `ydc` ([You.com](https://you.com/docs/quickstart), default), `exa`, or `tavily`.
 For `ydc`, `search` calls `/v1/search` with highlights extraction and `browse` calls `/v1/contents`
 for full-page markdown.
 
