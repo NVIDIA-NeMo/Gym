@@ -591,6 +591,10 @@ Some frameworks change their behavior based on a model or runtime profile. For e
 
 Return a `NeMoGymResponse` with text, reasoning, tool calls and results, usage, and status where available. Collect [rollout evidence](/main/observability/rollout-evidence#add-evidence-to-a-custom-agent): tool timing, model-call references, aggregated usage, and explicit evidence gaps.
 
+Set the response status by the harness's own rule for a failed run, read from its source at the pinned version. An error that the harness ignores or recovers from, such as a subagent's error or a failed model call followed by a successful one, must not fail a run that finished.
+
+Report aggregate usage only when every model call has a usage record. Collect model-call references from every record the harness writes, such as its event log and its telemetry, because each can miss calls the other has. When a call has no usage record, leave usage unknown and record an `ObservationGap` instead of reporting a subtotal.
+
 When a harness item has no exact Responses API equivalent, decide whether to convert it, drop it, or keep it only as an artifact. Record anything that is lost as an `ObservationGap` with a specific code, and never drop tool calls or their results. Keep the harness's raw output and execution artifacts, including the ones available after a failure.
 
 ### Keep execution health separate from reward
