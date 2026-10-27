@@ -46,13 +46,18 @@ now() {
 
 # Fields of /proc/PID/stat after the command name: [0] state, [1] ppid, [2] pgrp, [19] start time.
 # The kernel prints the name unescaped, so it can hold spaces, parentheses and newlines: read the
-# whole file, split after the last ") ", and never evaluate a field as arithmetic.
+# whole file, split after the last ") ", and never evaluate a field as arithmetic. Scans parse every
+# process, so this strips the shortest prefix until no ") " is left and tests digits with globs:
+# ${stat##*) } takes quadratic time and each =~ compiles a regex.
 stat_fields() {
     local stat=
     IFS= read -r -d '' stat 2>/dev/null <"/proc/$1/stat"
     [[ $stat == *') '* ]] || return 1
-    fields=(${stat##*) })
-    [[ ${fields[1]} =~ ^[0-9]+$ && ${fields[2]} =~ ^[0-9]+$ && ${fields[19]} =~ ^[0-9]+$ ]]
+    while [[ $stat == *') '* ]]; do
+        stat=${stat#*) }
+    done
+    fields=($stat)
+    [[ ${fields[1]} && ${fields[2]} && ${fields[19]} && ${fields[1]}${fields[2]}${fields[19]} != *[!0-9]* ]]
 }
 
 # Succeeds when process $1, started at $2, inherited this supervisor's marker. A process that started
@@ -80,13 +85,17 @@ owned_group() {
 # Record in tracked[PID]=START and groups[PGID]=LEADER_START what a forced stop reaches: the
 # harness, members of the groups already recorded, processes already tracked, processes that carry
 # the marker without descending from a preserved one, and the descendants of all of these. The first
-# scan of a stop preserves marked processes that it does not reach.
+# scan of a stop preserves marked processes that it does not reach. Succeeds, like reached_alive,
+# while a reached process can still run.
 scan() {
-    local entry pid leader changed=1
+    local entry pid leader changed=1 unreadable=0
     local -a parent=() group=() start=() inside=() kept=()
     for entry in /proc/[0-9]*; do
         pid=${entry#/proc/}
-        [[ $pid =~ ^[0-9]+$ ]] && stat_fields "$pid" || continue
+        if ! [[ $pid =~ ^[0-9]+$ ]] || ! stat_fields "$pid"; then
+            [[ -e $entry ]] && unreadable=1
+            continue
+        fi
         start[pid]=${fields[19]}
         [[ ${fields[0]} == [ZX] ]] || parent[pid]=${fields[1]} group[pid]=${fields[2]}
     done
@@ -130,6 +139,7 @@ scan() {
         tracked[pid]=${start[pid]}
         [[ ${group[pid]} == "$pid" ]] && groups[pid]=${start[pid]}
     done
+    ((${#inside[@]} || unreadable))
 }
 
 kill_reached() {
@@ -240,12 +250,12 @@ if kill -0 "$harness" 2>/dev/null; then
     scan
     kill -TERM "$harness" 2>/dev/null
     grace=$((NOW + cleanup))
-    while kill -0 "$harness" 2>/dev/null && ((NOW < grace)); do
-        sleep 0.05
+    # Once the harness has exited, the drain below scans for what it left.
+    while sleep 0.05; kill -0 "$harness" 2>/dev/null; do
         scan
         now
+        ((NOW < grace)) || break
     done
-    scan
 fi
 trap '' TERM
 
@@ -266,8 +276,11 @@ return_code=$?
 now
 deadline=$((NOW + cleanup))
 while :; do
-    ((forced)) && scan
-    reached_alive || break
+    if ((forced)); then
+        scan || break
+    else
+        reached_alive || break
+    fi
     kill_reached
     now
     if ((NOW >= deadline)); then
