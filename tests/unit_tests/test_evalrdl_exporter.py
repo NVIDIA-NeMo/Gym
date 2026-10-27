@@ -206,6 +206,7 @@ class TestStaging:
         [
             ("aggregate_metrics_json_fpath", "Aggregate metrics not found"),
             ("resolved_config_yaml_fpath", "Saved run config not found"),
+            ("rollouts_jsonl_fpath", "Rollouts file not found"),
         ],
     )
     def test_a_run_missing_what_the_reader_needs_fails_before_any_environment_is_built(
