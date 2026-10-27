@@ -5,6 +5,7 @@
 import asyncio
 import tempfile
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -526,6 +527,45 @@ async def test_pruning_keeps_an_outcome_an_open_session_still_needs(config, prun
     # Restored groups joined the attempt-record order too, so their watermarks are evicted the same way.
     assert len(restored._latest_group_attempts) == (1 if pruned_by == "count" else 0)
     await restored.aclose()
+
+
+@pytest.mark.parametrize("pruned_at", [111.0, 106.0], ids=["expired", "over_count"])
+async def test_an_outcome_kept_for_an_open_session_does_not_evict_another_groups_result(
+    config, monkeypatch, pruned_at
+):
+    """A kept record must not use the allowance for other finished groups: an exact retry of a group evicted in its
+    place would start a new cohort and wait for members that already finished, until the collection timeout."""
+    now = [100.0]
+    monkeypatch.setattr(genrm, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    config = config.model_copy(update={"max_terminal_cohorts": 1, "cohort_result_ttl_s": 10.0})
+    server, participant = participant_server(config, judge=AsyncMock(side_effect=member_0_wins))
+    for group in ("a", "b"):
+        for index in range(2):
+            participant.seeded(f"{group}{index}", EpisodeId(rollout_id=f"{group}_g{index}"))
+    await asyncio.gather(*(verify_as(server, f"a{index}", member(index, group="a")) for index in range(2)))
+    # a1 has not recorded its outcome, so group a is kept for it.
+    participant.ended("a0")
+    now[0] = 105.0
+    outcomes = await asyncio.gather(*(verify_as(server, f"b{index}", member(index, group="b")) for index in range(2)))
+    for index in range(2):
+        participant.ended(f"b{index}")
+    judged = server._run_single_comparison.await_count
+
+    # Group a is past its retention time or over the count limit; group b is within both.
+    now[0] = pruned_at
+    server._prune_terminal_cohorts()
+    assert {cohort.group_id for cohort in server._verify_cohorts.values()} == {"a", "b"}
+    assert set(server._latest_group_attempts) == {"a", "b"}
+    retry = await asyncio.wait_for(verify_as(server, "b0", member(0, group="b")), timeout=0.5)
+    assert retry.reward == outcomes[0].reward
+    assert server._run_single_comparison.await_count == judged
+
+    # Once a1 closes its session, group a counts toward the limit again.
+    participant.ended("a1")
+    server._prune_terminal_cohorts()
+    assert not server._held_cohorts and not server._held_groups
+    assert len(server._verify_cohorts) == len(server._latest_group_attempts) == 1
+    await server.aclose()
 
 
 @pytest.mark.parametrize("judge_fails", [False, True], ids=["reward", "judge_failure"])

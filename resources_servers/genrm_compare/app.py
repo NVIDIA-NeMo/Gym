@@ -451,6 +451,10 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     _latest_group_attempts: Dict[str, _GroupAttemptWatermark] = PrivateAttr(default_factory=dict)
     # Only groups whose latest attempt is terminal can be evicted, ordered by completion or last retry.
     _idle_groups: OrderedDict[str, float] = PrivateAttr(default_factory=OrderedDict)
+    # Records an open checkpoint session needed when pruning last checked them, longest held first. They keep
+    # their place in the orders above but do not count toward max_terminal_cohorts.
+    _held_cohorts: OrderedDict[str, None] = PrivateAttr(default_factory=OrderedDict)
+    _held_groups: OrderedDict[str, None] = PrivateAttr(default_factory=OrderedDict)
     # Never suspend while holding either lock, except to acquire a cohort lock.
     # In particular, model calls and timer waits must remain outside these sections.
     _cohort_registry_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
@@ -727,7 +731,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     group_attempt=body.group_attempt,
                 )
                 self._verify_cohorts[prompt_key] = cohort
-                self._idle_groups.pop(body.group_id, None)
+                self._end_idle_group(body.group_id)
             elif cohort.terminal_at is not None:
                 # A retry keeps the record for this finished attempt alive.
                 self._idle_groups.pop(body.group_id, None)
@@ -1065,40 +1069,69 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         Active groups are absent from the idle order, so they keep their watermarks without being scanned.
         A finished cohort an open member session may still need is kept, and so is its group's watermark, so the
         group still refuses older attempts: either record moves to the back of its order and its retention restarts.
-        Only eviction candidates are checked for open sessions, and each record at most once per pass.
+        A kept record is held: it no longer counts toward ``max_terminal_cohorts``, so it cannot evict another
+        group's record. Each pass checks the longest-held record of each order again and releases it once its
+        sessions have closed. Only eviction candidates and those two held records are checked for open sessions.
         """
         now = time.monotonic()
         ttl = self.config.cohort_result_ttl_s
         limit = self.config.max_terminal_cohorts
+        if self._held_cohorts:
+            key = next(iter(self._held_cohorts))
+            if self._needed_by_open_session(self._terminal_cohorts[key]):
+                self._held_cohorts.move_to_end(key)
+            else:
+                del self._held_cohorts[key]
         for _ in range(len(self._terminal_cohorts)):
             key, cohort = next(iter(self._terminal_cohorts.items()))
             assert cohort.terminal_at is not None  # Only _record_terminal_cohort adds entries.
             expired = ttl is not None and now - cohort.terminal_at >= ttl
-            if not expired and len(self._terminal_cohorts) <= limit:
+            if not expired and len(self._terminal_cohorts) - len(self._held_cohorts) <= limit:
                 break
             if self._needed_by_open_session(cohort):
                 cohort.terminal_at = now
                 self._terminal_cohorts.move_to_end(key)
+                self._held_cohorts[key] = None
+                self._held_cohorts.move_to_end(key)
                 continue
+            self._held_cohorts.pop(key, None)
             self._terminal_cohorts.popitem(last=False)
             if self._verify_cohorts.get(key) is cohort:
                 self._drop_cohort(key)
                 self._forget_unused_restored_watermark(cohort)
 
+        if self._held_groups:
+            group_id = next(iter(self._held_groups))
+            if self._group_needed_by_open_session(group_id):
+                self._held_groups.move_to_end(group_id)
+            else:
+                del self._held_groups[group_id]
         for _ in range(len(self._idle_groups)):
             group_id, idle_since = next(iter(self._idle_groups.items()))
             expired = ttl is not None and now - idle_since >= ttl
-            # Active groups must not consume the allowance for finished groups.
-            if not expired and len(self._idle_groups) <= limit:
+            # Active and held groups must not consume the allowance for finished groups.
+            if not expired and len(self._idle_groups) - len(self._held_groups) <= limit:
                 break
-            latest = self._verify_cohorts.get(self._latest_group_attempts[group_id].cohort_key)
-            if latest is not None and self._needed_by_open_session(latest):
+            if self._group_needed_by_open_session(group_id):
                 self._idle_groups.move_to_end(group_id)
                 self._idle_groups[group_id] = now
+                self._held_groups[group_id] = None
+                self._held_groups.move_to_end(group_id)
                 continue
+            self._held_groups.pop(group_id, None)
             self._idle_groups.popitem(last=False)
             # Results have their own retention order and remain replayable while retained.
             self._latest_group_attempts.pop(group_id)
+
+    def _group_needed_by_open_session(self, group_id: str) -> bool:
+        """Whether an open member session may still need the cohort of the group's latest attempt."""
+        latest = self._verify_cohorts.get(self._latest_group_attempts[group_id].cohort_key)
+        return latest is not None and self._needed_by_open_session(latest)
+
+    def _end_idle_group(self, group_id: str) -> None:
+        """Take a group out of the idle order, as when its latest attempt starts a cohort or loses its watermark."""
+        self._idle_groups.pop(group_id, None)
+        self._held_groups.pop(group_id, None)
 
     def _forget_unused_restored_watermark(self, cohort: _CohortState) -> None:
         """Drop the watermark a restore installed for a pruned cohort when no verification has used it.
@@ -1112,7 +1145,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         if group_id in self._restored_watermarks and watermark is not None and watermark.cohort_key == cohort.key:
             self._restored_watermarks.discard(group_id)
             del self._latest_group_attempts[group_id]
-            self._idle_groups.pop(group_id, None)
+            self._end_idle_group(group_id)
 
     def _drop_cohort(self, key: str) -> None:
         """Remove a cohort, its retention entry, and the member records that name it."""
@@ -1121,6 +1154,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             return
         if self._terminal_cohorts.get(key) is cohort:
             del self._terminal_cohorts[key]
+            self._held_cohorts.pop(key, None)
         for session_id in cohort.member_sessions:
             if self._session_members.get(session_id, (None,))[0] == key:
                 del self._session_members[session_id]
@@ -1263,7 +1297,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         ):
             self._restored_watermarks.discard(group_id)
             self._latest_group_attempts.pop(group_id, None)
-            self._idle_groups.pop(group_id, None)
+            self._end_idle_group(group_id)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -1298,6 +1332,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         self._terminal_cohorts.clear()
         self._latest_group_attempts.clear()
         self._idle_groups.clear()
+        self._held_cohorts.clear()
+        self._held_groups.clear()
         self._session_members.clear()
         self._restored_watermarks.clear()
 

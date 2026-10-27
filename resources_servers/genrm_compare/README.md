@@ -503,9 +503,10 @@ re-form the group under the same attempt.
 A finished group that a member with an open session may still need is kept past `cohort_result_ttl_s` and
 beyond `max_terminal_cohorts`, so pruning cannot evict an outcome a later checkpoint must export or
 a replay must return. Its attempt record is kept too, so the group still refuses older attempts. Each time
-pruning keeps either record, that record's retention restarts. It becomes an ordinary tombstone once those
-members close their sessions or are retired. A newer attempt of the group still removes it, because the
-caller has replaced the whole group. Restored groups join the same retention order as other finished groups.
+pruning keeps either record, that record's retention restarts. A kept record does not count toward
+`max_terminal_cohorts`, so it cannot evict another group's record. Each prune checks the longest-kept record
+again, and a record becomes an ordinary tombstone once its members have closed their sessions or been retired.
+A newer attempt of the group still removes it, because the caller has replaced the whole group. Restored groups join the same retention order as other finished groups.
 
 Only groups with an explicit `_ng_group_id` are exported. A member that is started over from its input while
 its restored group still holds continued members gets a conflicting response for its slot; the controller
