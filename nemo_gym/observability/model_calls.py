@@ -595,11 +595,15 @@ def model_call_capture_uncovered_reasons(result: Mapping[str, Any]) -> list[str]
     trajectory = result.get("ng_trajectory")
     if not isinstance(trajectory, Mapping):
         return [*reasons, "no_trajectory"]
+    payload_gaps = []
     for source in (trajectory, result.get(NG_AGENT_OBSERVATIONS_KEY)):
         gaps = source.get("gaps") if isinstance(source, Mapping) else None
         for gap in gaps or []:
             if isinstance(gap, Mapping) and gap.get("code") in _PAYLOAD_OMISSION_GAPS:
-                reasons.append(f"payload_gap:{gap['code']}")
+                payload_gaps.append(f"payload_gap:{gap['code']}")
+    if payload_gaps:
+        # The gap already says the payloads were left out, so each call lacking one adds nothing.
+        return [*reasons, *payload_gaps]
 
     with_payload = {
         call.get("model_call_id")

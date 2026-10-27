@@ -839,6 +839,12 @@ def _covered_record():
     }
 
 
+def _redact_payloads(record):
+    record["ng_trajectory"]["gaps"].append({"code": "multimodal_history_redacted"})
+    for call in record["ng_trajectory"]["model_calls"]:
+        call["request"] = call["response"] = None
+
+
 def test_uncovered_reasons_is_empty_when_every_call_has_its_payload():
     from nemo_gym.observability.model_calls import model_call_capture_uncovered_reasons
 
@@ -859,6 +865,11 @@ def test_uncovered_reasons_is_empty_when_every_call_has_its_payload():
             lambda r: r["ng_trajectory"]["gaps"].append({"code": "multimodal_history_redacted"}),
             ["payload_gap:multimodal_history_redacted"],
             id="redacted history in the trajectory",
+        ),
+        pytest.param(
+            lambda r: _redact_payloads(r),
+            ["payload_gap:multimodal_history_redacted"],
+            id="redacted history leaves no payloads, reported once",
         ),
         pytest.param(
             lambda r: r.update(ng_agent_observations={"gaps": [{"code": "multimodal_history_redacted"}]}),
