@@ -403,7 +403,7 @@ def compose_variables(task: HarborTask, *, unset: set[str] | None = None) -> dic
     if context.is_dir():
         # Not the runtime project name (Harbor: the trial session id; Gym: the adapter's compose-<uuid>). A stable
         # per-task value, so files like o11y-bench's `o11y-stack-${COMPOSE_PROJECT_NAME}` alias and URL agree.
-        infra["COMPOSE_PROJECT_NAME"] = f"hb__{context_digest(context)}"
+        infra["COMPOSE_PROJECT_NAME"] = f"hb__{task.context_id or context_digest(context)}"
     if environment.docker_image:
         infra["PREBUILT_IMAGE_NAME"] = environment.docker_image
     if environment.cpus:
@@ -429,6 +429,15 @@ def compose_variables(task: HarborTask, *, unset: set[str] | None = None) -> dic
 def _literal(value: str) -> str:
     """``value`` as the document's interpolation and literal checks read a literal: every ``$`` doubled."""
     return value.replace("$", "$$")
+
+
+def literal_variables(variables: Mapping[str, str] | None) -> dict[str, str] | None:
+    """A deployment's ``compose_variables`` values as the document reads literals (:func:`_literal` on each), the way
+    every source of :func:`compose_variables` is escaped; ``None`` (no deployment values, as at prepare) stays
+    ``None``."""
+    if variables is None:
+        return None
+    return {key: _literal(value) for key, value in variables.items()}
 
 
 def _task_env(task: HarborTask, env: Mapping[str, Any]) -> dict[str, str]:

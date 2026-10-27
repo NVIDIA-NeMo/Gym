@@ -10,6 +10,7 @@ and writes reports.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import warnings
 from collections import Counter, defaultdict
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import orjson
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym.health.checks import (
     _INCOMPLETE_MODEL_CALL_GAPS,
@@ -31,9 +33,9 @@ from nemo_gym.health.checks import (
     _bind_policy_call_views,
     _canonical_trajectory,
     _ended_on_failed_call,
-    _is_context_overflow_rejection,
     _is_failed,
     _is_failed_attempt,
+    _is_length_refusal,
     _is_successful,
     _normalized_trajectory_calls,
     _replay_identity,
@@ -66,7 +68,7 @@ from nemo_gym.health.types import (
     _TaskRepeat,
     _WorkerInput,
 )
-from nemo_gym.path_utils import failures_path_for, materialized_path_for
+from nemo_gym.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
 
 
 _PROCESS_POOL_CHUNKS_PER_WORKER = 4
@@ -215,7 +217,7 @@ def evaluate_record(
             unobserved.append(spec.id)
             continue
         if spec.id == "model_call_runaway_generation" and any(
-            not _is_context_overflow_rejection(call)
+            not _is_length_refusal(call)
             and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
             and call.get("response") is None
             for call in bindings.matched_calls
@@ -266,7 +268,7 @@ def evaluate_record(
             for call in failed
         ),
         errors_by_status=dict(errors_by_status),
-        ended_on_error=_ended_on_failed_call(calls),
+        ended_on_error=model_calls_observed and _ended_on_failed_call(calls),
         duplicated_calls=duplicated,
         transcript_prompt_tokens=transcript_prompt,
         transcript_completion_tokens=transcript_completion,
@@ -323,14 +325,20 @@ def _unique_task_repeats(digests: list[RolloutDigest]) -> list[_TaskRepeat]:
     return repeats
 
 
-def _mark_duplicate_identities(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> None:
-    """Flag physical records that claim the same logical rollout identity."""
+def _mark_duplicate_identities(
+    digests: list[RolloutDigest], lines: list[_LineSlice], ignored_checks: frozenset[str]
+) -> None:
+    """Flag physical records of one input that claim the same logical rollout identity.
+
+    Each input numbers its rollouts on its own, as the run accounting counts them: runs merged from different
+    environment servers can reuse task indices.
+    """
     if "rollout_duplicate_identity" in ignored_checks:
         return
 
-    grouped: dict[tuple[int | str | None, int | str, int | str], list[RolloutDigest]] = defaultdict(list)
-    for digest in digests:
-        grouped[(digest.stage_index, digest.task_index, digest.rollout_index)].append(digest)
+    grouped: dict[tuple[int, int | str | None, int | str, int | str], list[RolloutDigest]] = defaultdict(list)
+    for digest, line in zip(digests, lines, strict=True):
+        grouped[(line.source_index, digest.stage_index, digest.task_index, digest.rollout_index)].append(digest)
 
     for copies in grouped.values():
         if len(copies) < 2:
@@ -490,7 +498,9 @@ def _rollout_accounting(
 
     ``landed`` holds ``(input index, task index, rollout index)`` of every persisted record. Failures come
     from each input's ``_failures.jsonl`` sidecar, where the last attempt of a rollout stands; one that
-    later landed is not failed. ``is_terminal_failure`` splits them into
+    later landed is not failed. A ``record_omitted_rollouts`` row records no result: an interrupted attempt is the
+    rollout's latest execution and leaves it missing, and a row never started is skipped.
+    ``is_terminal_failure`` splits them into
     final ones, which are not retried, and not final ones, which are; the split says nothing of the cause. ``failed`` is null when no input has a sidecar.
     ``expected``, ``missing`` and ``healthy`` need the ``_materialized_inputs.jsonl`` inventory and
     are null when an input has none. A run is healthy when nothing is missing, no rollout is
@@ -498,7 +508,12 @@ def _rollout_accounting(
     The limits are off (None) by default, so failures alone never make a run unhealthy unless configured.
     """
     # Lazy: rollout_collection imports this module, and health workers need none of its dependencies.
-    from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, is_terminal_failure
+    from nemo_gym.rollout_collection import (
+        NG_FAILURE_CLASS_KEY,
+        is_omitted_rollout_row,
+        is_terminal_failure,
+        is_unstarted_rollout_row,
+    )
 
     failed: dict[tuple[Any, ...], dict[str, Any]] = {}
     any_sidecar = False
@@ -507,6 +522,8 @@ def _rollout_accounting(
         if failures_path_for(path).is_file():
             any_sidecar = True
             for row in _jsonl_rows(failures_path_for(path)):
+                if is_unstarted_rollout_row(row):
+                    continue
                 failed[(source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))] = row
         if not materialized_path_for(path).is_file():
             owed = None
@@ -515,6 +532,7 @@ def _rollout_accounting(
                 (source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))
                 for row in _jsonl_rows(materialized_path_for(path))
             )
+    failed = {key: row for key, row in failed.items() if not is_omitted_rollout_row(row)}
     for key in landed:
         failed.pop(key, None)
     if owed is not None:
@@ -694,7 +712,7 @@ def run_health_checks(
                 worker_results = [_worker(item) for item in worker_inputs]
 
     digests = worker_results
-    _mark_duplicate_identities(digests, ignored)
+    _mark_duplicate_identities(digests, lines, ignored)
     summary = _reduce(digests, ignored)
     artifacts = summary["run"]["artifacts"]
     artifacts.update(
@@ -770,6 +788,91 @@ def _persisted_limits(run_dir: Path) -> RunHealthLimits:
         return RunHealthLimits()
 
 
+class _AggregationSources(BaseModel):
+    """The shards `gym eval aggregate` merged into a rollout file, in its order, each as its path, size and SHA-256,
+    and that file's size and SHA-256."""
+
+    shards: list[tuple[str, int, str]]
+    merged_bytes: int
+    merged_sha256: str
+
+
+def _sha256(fpath: Path) -> str:
+    with fpath.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def write_aggregation_sources(
+    merged_fpath: Path, shards: Sequence[tuple[Path, int, str]], merged_contents_fpath: Path
+) -> None:
+    """Record the shards ``merged_fpath`` is merged from, for a recheck of its directory to read.
+
+    The merged file holds only the shards' rows: their failure sidecars and inventories stay next to them.
+    ``shards`` holds each shard's path with the size and SHA-256 of what the merge read from it, and
+    ``merged_contents_fpath`` the rows about to take ``merged_fpath``'s place; the record names both by size and
+    SHA-256, so it never vouches for other contents. Each shard is recorded relative to the record's directory,
+    so the shards and the merged file can move together, and under its own file name: a shard reached through a
+    file link keeps the sidecars beside the link, as the aggregation read them.
+    """
+    sources_fpath = aggregation_sources_path_for(merged_fpath)
+    base = sources_fpath.parent.resolve()
+    sources = _AggregationSources(
+        shards=[
+            (os.path.relpath(path.parent.resolve() / path.name, base), size, sha256) for path, size, sha256 in shards
+        ],
+        merged_bytes=merged_contents_fpath.stat().st_size,
+        merged_sha256=_sha256(merged_contents_fpath),
+    )
+    sources_fpath.write_text(sources.model_dump_json(indent=2) + "\n")
+
+
+def _aggregated_shards(run_dir: Path, *, rollout_name: str = "rollouts.jsonl") -> list[Path] | None:
+    """The shards `gym eval aggregate` merged into ``run_dir/rollout_name``, in its order; None if it merged none.
+
+    The merged rows have none of the shards' failures or inventories, so a recheck reads the shards, as the
+    aggregation did. A merged file that is gone, or not byte for byte the one the list was written for, is not
+    theirs; a shard that is gone cannot be read, and one not byte for byte the one merged holds other rows. Each
+    raises rather than check rows other than the merged ones, or without their failures.
+    """
+    merged_fpath = run_dir / rollout_name
+    sources_fpath = aggregation_sources_path_for(merged_fpath)
+    if not sources_fpath.is_file():
+        return None
+    try:
+        sources = _AggregationSources.model_validate_json(sources_fpath.read_bytes())
+    except ValidationError as exc:
+        raise ValueError(f"Unreadable shard list {sources_fpath}: {exc}") from exc
+    # The size first, as it is cheap; equal sizes alone do not make equal contents.
+    if (
+        not merged_fpath.is_file()
+        or merged_fpath.stat().st_size != sources.merged_bytes
+        or _sha256(merged_fpath) != sources.merged_sha256
+    ):
+        raise ValueError(
+            f"{merged_fpath} is not the file `gym eval aggregate` merged from the shards in {sources_fpath}. Rerun "
+            "the aggregation, or pass --rollouts-file rollouts.jsonl to check that file alone."
+        )
+    # Only the directories are resolved: each shard keeps its own name, and with it the sidecars beside it.
+    shards = [path.parent.resolve() / path.name for path in (run_dir / shard for shard, _, _ in sources.shards)]
+    missing = [str(shard) for shard in shards if not shard.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"{merged_fpath} was merged from shards that are gone: {', '.join(missing)}. Recheck the shards, or pass "
+            "--rollouts-file rollouts.jsonl to check the merged rows alone, without the shards' failures."
+        )
+    changed = [
+        str(shard)
+        for shard, (_, size, sha256) in zip(shards, sources.shards)
+        if shard.stat().st_size != size or _sha256(shard) != sha256
+    ]
+    if changed:
+        raise ValueError(
+            f"{merged_fpath} was merged from shards that changed since: {', '.join(changed)}. Rerun "
+            "`gym eval aggregate` to merge and check them as they are now."
+        )
+    return shards
+
+
 def _resolve_rollout_path(run_dir: Path, rollout_file: str | Path | None) -> Path:
     if not run_dir.is_dir():
         raise FileNotFoundError(f"Run directory not found: {run_dir}")
@@ -803,14 +906,18 @@ def health_check_run_dir(
 ) -> HealthCheckResult:
     """Recheck a run directory. The run's own persisted limits judge it, so the verdict of the same artifacts
     does not change. Each limit set explicitly on ``limits`` overrides only that persisted limit and is recorded
-    as an override; set to ``None`` it removes the limit. A limit not set keeps its persisted value."""
+    as an override; set to ``None`` it removes the limit. A limit not set keeps its persisted value.
+
+    A directory ``gym eval aggregate`` merged shards into is rechecked from those shards, with the failures and
+    inventories beside them, as the aggregation checked them. An explicit ``rollout_file`` is checked alone."""
     path = Path(run_dir)
-    rollout_path = _resolve_rollout_path(path, rollout_file)
+    shards = _aggregated_shards(path) if rollout_file is None else None
+    rollout_paths = shards if shards is not None else _resolve_rollout_path(path, rollout_file)
     overrides = {name: getattr(limits, name) for name in limits.model_fields_set} if limits is not None else {}
     limits = _persisted_limits(path).model_copy(update=overrides)
     limits_source = {name: "override" if name in overrides else "persisted" for name in RunHealthLimits.model_fields}
     result = run_health_checks(
-        rollout_path,
+        rollout_paths,
         output_dir=path,
         workers=workers,
         ignored_checks=ignored_checks,

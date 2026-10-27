@@ -100,6 +100,7 @@ def _call(**updates) -> dict:
 def _trajectory_call(call: dict) -> dict:
     return {
         "model_call_id": call.get("model_call_id"),
+        "client_session_id": call.get("client_session_id"),
         "started_at": call.get("started_at"),
         "request": call.get("request"),
         "response": call.get("response"),
@@ -991,6 +992,24 @@ def test_turn_call_scope_gap_only_gates_completeness_checks(tmp_path: Path, gap:
     assert ("task_no_successful_model_calls" in result.summary["tasks"]["0"]["flags"]) is not incomplete
 
 
+def test_runs_that_reuse_task_indices_are_not_duplicates(tmp_path: Path) -> None:
+    """`gym eval aggregate` merges runs from different environment servers, and each numbers its tasks from 0."""
+    paths = []
+    for run in ("run1", "run2"):
+        (tmp_path / run).mkdir()
+        _inventory(tmp_path / run, 1)
+        paths.append(
+            _write_fixture(tmp_path / run, [(_record(0, 0, usage={"input_tokens": 3, "output_tokens": 2}), [_call()])])
+        )
+
+    result = run_health_checks(paths, workers=1)
+
+    assert result.summary["run"]["issues"]["rollout_duplicate_identity"] == 0
+    assert all("rollout_duplicate_identity" not in {finding.check for finding in d.findings} for d in result.rollouts)
+    artifacts = result.summary["run"]["artifacts"]
+    assert (artifacts["expected"], artifacts["missing"], artifacts["healthy"]) == (2, 0, True)
+
+
 def test_duplicate_rollout_identity_counts_once_at_task_scope(tmp_path: Path) -> None:
     duplicate = _record(7, 0, usage={"input_tokens": 3, "output_tokens": 2})
     rollout_path = _write_fixture(
@@ -1081,8 +1100,8 @@ def test_zero_token_call_is_flagged_and_nonempty_length_response_is_exempt(tmp_p
     checks = {finding.check for finding in result.rollouts[0].findings}
     assert "model_call_zero_completion_tokens" in checks
     assert "model_call_runaway_generation" not in checks
-    assert health_checks._response_has_content("malformed") is False
-    assert health_checks._response_has_content({"content": "visible"}) is True
+    assert health_checks._response_has_usable_output("malformed") is False
+    assert health_checks._response_has_usable_output({"content": "visible"}) is True
 
 
 @pytest.mark.parametrize(
@@ -1139,6 +1158,60 @@ def test_current_capture_length_limit_reasons_trigger_runaway_generation(
 
     assert call["finish_reason"] == expected_reason
     assert finding.detail == {"finish_reason": expected_reason}
+
+
+_REASONING_ONLY = {
+    "responses": {"output": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "partial"}]}]},
+    "chat": {"choices": [{"message": {"content": "", "reasoning_content": "partial"}}]},
+    "messages": {"content": [{"type": "thinking", "thinking": "partial"}]},
+}
+_ACTIONABLE = {
+    "responses_function_call": {
+        "output": [
+            {"type": "reasoning", "summary": [{"type": "summary_text", "text": "partial"}]},
+            {"type": "function_call", "call_id": "t1", "name": "run", "arguments": "{}"},
+        ]
+    },
+    "responses_answer": {"output": [{"type": "message", "content": [{"type": "output_text", "text": "cut off"}]}]},
+    "chat_tool_call": {"choices": [{"message": {"content": "", "tool_calls": [{"id": "t1", "type": "function"}]}}]},
+    "messages_tool_use": {"content": [{"type": "thinking", "thinking": "partial"}, {"type": "tool_use", "id": "t1"}]},
+}
+
+
+@pytest.mark.parametrize(
+    ("response", "flagged"),
+    [
+        *((response, True) for response in _REASONING_ONLY.values()),
+        *((response, False) for response in _ACTIONABLE.values()),
+    ],
+    ids=[*_REASONING_ONLY, *_ACTIONABLE],
+)
+def test_a_length_limited_call_with_only_reasoning_is_a_runaway_generation(
+    tmp_path: Path, response: dict, flagged: bool
+) -> None:
+    """Reasoning gives the agent nothing to act on; an answer or a tool call does. A later call's recovery does not
+    erase the clipped one."""
+    clipped = _call(
+        model_call_id="clipped", response_id="r-clipped", started_at=1.0, finish_reason="length", response=response
+    )
+    recovered = _call(
+        model_call_id="recovered",
+        response_id="r-recovered",
+        started_at=2.0,
+        response={"output": [{"type": "message", "content": [{"type": "output_text", "text": "done"}]}]},
+    )
+    record = _record(
+        0,
+        0,
+        refs=[{"model_call_id": "clipped"}, {"model_call_id": "recovered"}],
+        usage={"input_tokens": 6, "output_tokens": 4},
+    )
+    rollout_path = _write_fixture(tmp_path, [(record, [clipped, recovered])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    flagged_calls = [f.locator["call_id"] for f in digest.findings if f.check == "model_call_runaway_generation"]
+    assert flagged_calls == (["clipped"] if flagged else [])
 
 
 def test_runaway_generation_is_unobserved_without_a_saved_response(tmp_path: Path) -> None:
@@ -1429,6 +1502,504 @@ def test_a_rollout_ending_on_a_failed_attempt_is_unhealthy_for_that_reason_only(
     assert {finding.check for finding in digest.findings} == {"rollout_ended_on_failed_model_call"}
 
 
+# The two shapes a context-length overflow takes in the capture.
+CONTEXT_OVERFLOWS = {
+    # vLLM answers locally with an empty "length" completion when overflow errors are not propagated.
+    "answered_locally": {
+        "status_code": 200,
+        "upstream_status_code": 400,
+        "upstream_attempted": True,
+        "error_category": "context_length_exceeded",
+        "local_response_reason": "context_length_exceeded",
+        "response_source": "local",
+        "response_status": None,
+        "finish_reason": "length",
+    },
+    # Propagated to the client as the upstream's own 400.
+    "propagated": {
+        "status_code": 400,
+        "upstream_status_code": 400,
+        "upstream_attempted": True,
+        "error_category": "context_length_exceeded",
+        "response_source": "upstream",
+        "response": {"error": {"code": "context_length_exceeded"}},
+        **_NO_GENERATION,
+    },
+}
+
+
+# The adapter's category when the request's own output budget exceeds the whole window: no prompt fits.
+INVALID_OUTPUT_BUDGETS = {
+    name: overflow
+    | {"error_category": "invalid_output_token_parameter"}
+    | ({"local_response_reason": "invalid_output_token_parameter"} if "local_response_reason" in overflow else {})
+    for name, overflow in CONTEXT_OVERFLOWS.items()
+}
+
+
+_POLICY_REF = {"type": "responses_api_models", "name": "policy_model"}
+# A turn points at its call by the call id, or, as Terminal-Bench 4's turns do, by the model and response id.
+TURN_CALL_REFERENCES = {
+    "by_call_id": {"model_call_id": "c1"},
+    "by_response_id": {"model_ref": _POLICY_REF, "response_id": "r1"},
+}
+
+
+@pytest.mark.parametrize("reference", TURN_CALL_REFERENCES.values(), ids=TURN_CALL_REFERENCES.keys())
+@pytest.mark.parametrize("overflow", CONTEXT_OVERFLOWS.values(), ids=CONTEXT_OVERFLOWS.keys())
+def test_an_empty_turn_from_a_context_overflow_is_not_hollow(tmp_path, overflow, reference):
+    """The model answered, then filled its context: the empty turn is not hollow, and the rollout is not
+    unhealthy."""
+    answered = _call(model_call_id="c0", response_id="r0", started_at=1.0, model_ref=_POLICY_REF)
+    record = _record(
+        0,
+        0,
+        answer=None,
+        refs=[{"model_call_id": "c0"}, reference],
+        include_response_output=False,
+        usage={"input_tokens": 3, "output_tokens": 2},
+    )
+    overflow_call = _call(
+        **(
+            {
+                "call_index": 1,
+                "started_at": 2.0,
+                "tokens_in": None,
+                "tokens_out": 0,
+                "response": {},
+                "model_ref": _POLICY_REF,
+            }
+            | overflow
+        )
+    )
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, [answered, overflow_call])]), workers=1).rollouts
+
+    assert "agent_turn_hollow" not in {finding.check for finding in digest.findings}
+    assert digest.verdict != "unhealthy"
+
+
+def test_an_empty_turn_from_any_other_call_is_still_hollow(tmp_path):
+    record = _record(0, 0, answer=None, include_response_output=False)
+    empty_call = _call(tokens_out=0, response={})
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, [empty_call])]), workers=1).rollouts
+
+    assert "agent_turn_hollow" in {finding.check for finding in digest.findings}
+
+
+@pytest.mark.parametrize("overflow", CONTEXT_OVERFLOWS.values(), ids=CONTEXT_OVERFLOWS.keys())
+def test_a_rollout_ending_on_a_context_overflow_is_not_flagged(tmp_path, overflow):
+    """The model filled its context: a zero it earned, not an unhealthy rollout."""
+    succeeded = _call(model_call_id="first", started_at=1.0)
+    last = _call(model_call_id="last", started_at=2.0, tokens_in=None, tokens_out=0, **overflow)
+    rollout_path = _write_fixture(tmp_path, [(_owned_attempts(succeeded, last), [succeeded, last])])
+
+    result = run_health_checks(rollout_path, workers=1)
+    [digest] = result.rollouts
+
+    assert "rollout_ended_on_failed_model_call" not in {finding.check for finding in digest.findings}
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_error"] == 0
+    # The call is still a failed call in the error counts.
+    assert digest.model_call_errors == 1
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [INVALID_OUTPUT_BUDGETS["answered_locally"], CONTEXT_OVERFLOWS["answered_locally"]],
+    ids=["invalid-budget", "context-overflow"],
+)
+@pytest.mark.parametrize("with_clipped", [True, False], ids=["beside-a-clipped-call", "alone"])
+def test_a_length_refusal_without_a_saved_body_leaves_runaway_generation_observed(
+    tmp_path: Path, refusal: dict, with_clipped: bool
+) -> None:
+    """The engine refused before generating anything, so a missing body is no missing evidence, and another call's
+    runaway generation is still found."""
+    calls = [
+        _call(
+            model_call_id="refusal",
+            response_id="r-refusal",
+            started_at=1.0,
+            tokens_in=None,
+            tokens_out=0,
+            **(refusal | {"response": None}),
+        )
+    ]
+    refs = [{"model_call_id": "refusal"}]
+    if with_clipped:
+        reasoning = {"type": "reasoning", "summary": [{"type": "summary_text", "text": "partial"}]}
+        calls.append(
+            _call(
+                model_call_id="clipped",
+                response_id="r-clipped",
+                started_at=2.0,
+                finish_reason="length",
+                response={"output": [reasoning]},
+            )
+        )
+        refs.append({"model_call_id": "clipped"})
+    record = _record(0, 0, refs=refs, usage={"input_tokens": 6, "output_tokens": 4})
+    rollout_path = _write_fixture(tmp_path, [(record, calls)])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert "model_call_runaway_generation" not in digest.unobserved
+    flagged = [f.locator["call_id"] for f in digest.findings if f.check == "model_call_runaway_generation"]
+    assert flagged == (["clipped"] if with_clipped else [])
+
+
+@pytest.mark.parametrize("invalid", INVALID_OUTPUT_BUDGETS.values(), ids=INVALID_OUTPUT_BUDGETS.keys())
+def test_a_budget_larger_than_the_window_still_flags_after_an_answer(tmp_path, invalid):
+    """No prompt fits such a budget, so an earlier answer excuses nothing."""
+    succeeded = _call(model_call_id="first", started_at=1.0)
+    last = _call(model_call_id="last", started_at=2.0, tokens_in=None, tokens_out=0, **invalid)
+    rollout_path = _write_fixture(tmp_path, [(_owned_attempts(succeeded, last), [succeeded, last])])
+
+    result = run_health_checks(rollout_path, workers=1)
+    [digest] = result.rollouts
+
+    checks = {finding.check for finding in digest.findings}
+    assert "rollout_ended_on_failed_model_call" in checks
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_error"] == 1
+    assert digest.model_call_errors == 1
+    # The engine generated nothing, so the token checks have nothing to read, as for an overflow.
+    assert not checks & {
+        "model_call_zero_completion_tokens",
+        "model_call_missing_token_counts",
+        "model_call_runaway_generation",
+    }
+
+
+@pytest.mark.parametrize("ordered", [True, False], ids=["ordered", "unordered"])
+@pytest.mark.parametrize("overflow", CONTEXT_OVERFLOWS.values(), ids=CONTEXT_OVERFLOWS.keys())
+def test_an_overflow_before_the_model_ever_answered_still_flags(tmp_path, overflow, ordered):
+    """With no answer first, the request never fit the deployment: a budget of 0 or one larger than the window,
+    or a prompt too long for it. That is a broken run, not the model filling its context."""
+    calls = [
+        _call(
+            call_index=index,
+            model_call_id=None,
+            response_id=None,
+            tokens_out=0,
+            **({"started_at": float(index)} if ordered else {}),
+            **overflow,
+        )
+        for index in range(2)
+    ]
+    rollout_path = _write_fixture(tmp_path, [(_unreferenced_failure_record([]), calls)])
+
+    result = run_health_checks(rollout_path, workers=1)
+    [digest] = result.rollouts
+
+    assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_error"] == 1
+
+
+@pytest.mark.parametrize("failure", FAILED_ATTEMPTS.values(), ids=FAILED_ATTEMPTS.keys())
+def test_a_failure_after_a_context_overflow_still_flags(tmp_path, failure):
+    """Only the last call decides: an overflow earlier in the chain hides nothing that came after it."""
+    overflow = _call(model_call_id="first", started_at=1.0, tokens_out=0, **CONTEXT_OVERFLOWS["propagated"])
+    failed = _call(model_call_id="last", started_at=2.0, tokens_in=None, tokens_out=None, **failure)
+    rollout_path = _write_fixture(tmp_path, [(_owned_attempts(overflow, failed), [overflow, failed])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
+
+
+@pytest.mark.parametrize("failure", FAILED_ATTEMPTS.values(), ids=FAILED_ATTEMPTS.keys())
+def test_a_context_overflow_after_only_failed_calls_still_flags(tmp_path, failure):
+    """Every call failed, so the model never answered: the overflow says the request never fit."""
+    failed = _call(model_call_id="first", started_at=1.0, tokens_in=None, tokens_out=None, **failure)
+    overflow = _call(model_call_id="last", started_at=2.0, tokens_out=0, **CONTEXT_OVERFLOWS["propagated"])
+    rollout_path = _write_fixture(tmp_path, [(_owned_attempts(failed, overflow), [failed, overflow])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
+
+
+def test_another_models_answer_does_not_excuse_an_overflow(tmp_path):
+    """Judged per model: a judge's answer says nothing of whether the policy's request fit."""
+    judge = _call(
+        model_call_id="judge", started_at=1.0, model_ref={"type": "responses_api_models", "name": "judge_model"}
+    )
+    overflow = _call(
+        model_call_id="last",
+        started_at=2.0,
+        tokens_in=None,
+        tokens_out=0,
+        model_ref=_POLICY_REF,
+        **CONTEXT_OVERFLOWS["propagated"],
+    )
+    rollout_path = _write_fixture(tmp_path, [(_owned_attempts(judge, overflow), [judge, overflow])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
+
+
+def _conversation(dialect: str, opening: str, *messages: str) -> dict:
+    """A chat or Responses request whose conversation opens with `opening`."""
+    turns = [{"role": "user", "content": message} for message in messages]
+    if dialect == "responses":
+        return {"instructions": opening, "input": turns}
+    return {"messages": [{"role": "system", "content": opening}, *turns]}
+
+
+@pytest.mark.parametrize("dialect", ["chat", "responses"])
+def test_an_overflow_after_an_answer_in_the_same_conversation_is_not_flagged(tmp_path, dialect):
+    """A multi-turn agent answered, then its own conversation outgrew the window: its calls open the same way."""
+    answered = _call(
+        model_call_id="first",
+        started_at=1.0,
+        model_ref=_POLICY_REF,
+        request=_conversation(dialect, "You are an agent.", "task"),
+    )
+    overflow = _call(
+        model_call_id="last",
+        started_at=2.0,
+        tokens_in=None,
+        tokens_out=0,
+        model_ref=_POLICY_REF,
+        request=_conversation(dialect, "You are an agent.", "task", "next step"),
+        **CONTEXT_OVERFLOWS["propagated"],
+    )
+    rollout_path = _write_fixture(tmp_path, [(_owned_attempts(answered, overflow), [answered, overflow])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert "rollout_ended_on_failed_model_call" not in {finding.check for finding in digest.findings}
+
+
+@pytest.mark.parametrize("dialect", ["chat", "responses"])
+@pytest.mark.parametrize("opening", ["You play the customer.", None], ids=["another_conversation", "no_request"])
+def test_an_answer_outside_the_overflowing_conversation_does_not_excuse_it(tmp_path, dialect, opening):
+    """tau2 can serve its user simulator from the policy's own model server, and the simulator speaks first. Its
+    answer says nothing of whether the agent's request fit, and neither does an answer whose request was not
+    captured."""
+    answered = _call(
+        model_call_id="simulator",
+        started_at=1.0,
+        model_ref=_POLICY_REF,
+        request=_conversation(dialect, opening, "hello") if opening else None,
+    )
+    overflow = _call(
+        model_call_id="agent",
+        started_at=2.0,
+        tokens_in=None,
+        tokens_out=0,
+        model_ref=_POLICY_REF,
+        request=_conversation(dialect, "You are an agent.", "task"),
+        **CONTEXT_OVERFLOWS["propagated"],
+    )
+    rollout_path = _write_fixture(tmp_path, [(_unreferenced_failure_record([]), [answered, overflow])])
+
+    result = run_health_checks(rollout_path, workers=1)
+    [digest] = result.rollouts
+
+    assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_error"] == 1
+
+
+@pytest.mark.parametrize(
+    "harness_sessions,flagged",
+    [((None, None), True), (("shared", "shared"), False)],
+    ids=["two_sessions", "two_activations_of_one_harness_session"],
+)
+def test_a_session_tells_apart_conversations_that_open_alike(tmp_path, harness_sessions, flagged):
+    """Two sessions can share an agent's instructions: one session's answer says nothing of whether the other's first
+    request fit. Activations of one harness session continue one conversation."""
+    answered = _call(
+        model_call_id="first",
+        started_at=1.0,
+        model_ref=_POLICY_REF,
+        client_session_id="s1",
+        request=_conversation("chat", "You are an agent.", "task A"),
+    )
+    overflow = _call(
+        model_call_id="second",
+        started_at=2.0,
+        tokens_in=None,
+        tokens_out=0,
+        model_ref=_POLICY_REF,
+        client_session_id="s2",
+        request=_conversation("chat", "You are an agent.", "task B"),
+        **CONTEXT_OVERFLOWS["propagated"],
+    )
+    record = _unreferenced_failure_record([])
+    record["ng_trajectory"]["invocations"] = [
+        {"kind": "agent_invocation", "invocation_id": session, "status": "completed"}
+        | ({"harness_session_id": harness} if harness else {})
+        for session, harness in zip(("s1", "s2"), harness_sessions)
+    ]
+    rollout_path = _write_fixture(tmp_path, [(record, [answered, overflow])])
+
+    result = run_health_checks(rollout_path, workers=1)
+    [digest] = result.rollouts
+
+    assert ("rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}) is flagged
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_error"] == int(flagged)
+
+
+def test_an_empty_overflow_turn_stays_hollow_when_no_other_check_accounts_for_it(tmp_path: Path) -> None:
+    """Without timestamps, an overflow beside another conversation's answer cannot be ordered, so
+    `rollout_ended_on_failed_model_call` says nothing: the empty turn is then the only finding left."""
+    answered = _call(model_call_id="aux", model_ref=_POLICY_REF, request={"input": "another conversation"})
+    overflow = _call(
+        model_ref=_POLICY_REF, tokens_in=None, tokens_out=0, response={}, **CONTEXT_OVERFLOWS["answered_locally"]
+    )
+    record = _record(0, 0, answer=None, include_response_output=False)
+    rollout_path = _write_fixture(tmp_path, [(record, [answered, overflow])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    checks = {finding.check for finding in digest.findings}
+    assert "agent_turn_hollow" in checks
+    assert "rollout_ended_on_failed_model_call" not in checks
+    assert digest.verdict == "unhealthy"
+
+
+def test_an_unordered_chain_of_an_overflow_and_a_transport_failure_still_flags(tmp_path: Path) -> None:
+    calls = [
+        _call(call_index=0, model_call_id=None, response_id=None, tokens_out=0, **CONTEXT_OVERFLOWS["propagated"]),
+        _call(call_index=1, model_call_id=None, response_id=None, **FAILED_ATTEMPTS["cancelled"]),
+    ]
+    rollout_path = _write_fixture(tmp_path, [(_unreferenced_failure_record([]), calls)])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
+
+
+def test_an_empty_retry_after_a_context_overflow_in_the_same_turn_is_still_hollow(tmp_path: Path) -> None:
+    """Only the turn's last call can excuse it: a successful empty retry after an overflow is hollow."""
+    overflow = _call(
+        model_call_id="overflow",
+        response_id="r-overflow",
+        started_at=1.0,
+        tokens_in=None,
+        tokens_out=0,
+        model_ref=_POLICY_REF,
+        **CONTEXT_OVERFLOWS["propagated"],
+    )
+    retry = _call(
+        model_call_id="retry",
+        response_id="r-retry",
+        call_index=1,
+        started_at=2.0,
+        tokens_out=1,
+        response={},
+        model_ref=_POLICY_REF,
+    )
+    record = _record(
+        0,
+        0,
+        answer=None,
+        refs=[{"model_call_id": "overflow"}, {"model_call_id": "retry"}],
+        include_response_output=False,
+        usage={"input_tokens": 3, "output_tokens": 1},
+    )
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, [overflow, retry])]), workers=1).rollouts
+
+    checks = {finding.check for finding in digest.findings}
+    assert "agent_turn_hollow" in checks
+    assert "rollout_ended_on_failed_model_call" not in checks
+    assert digest.verdict == "unhealthy"
+
+
+@pytest.mark.parametrize("failure", FAILED_ATTEMPTS.values(), ids=FAILED_ATTEMPTS.keys())
+def test_an_empty_turn_ending_on_a_context_overflow_after_a_failed_call_is_not_hollow(tmp_path, failure):
+    failed = _call(
+        model_call_id="failed", response_id="r-failed", started_at=1.0, tokens_in=None, tokens_out=None, **failure
+    )
+    overflow = _call(
+        model_call_id="overflow",
+        response_id="r-overflow",
+        call_index=1,
+        started_at=2.0,
+        tokens_in=None,
+        tokens_out=0,
+        model_ref=_POLICY_REF,
+        **CONTEXT_OVERFLOWS["propagated"],
+    )
+    record = _record(
+        0,
+        0,
+        answer=None,
+        refs=[{"model_call_id": "failed"}, {"model_call_id": "overflow"}],
+        include_response_output=False,
+    )
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, [failed, overflow])]), workers=1).rollouts
+
+    assert "agent_turn_hollow" not in {finding.check for finding in digest.findings}
+
+
+def test_an_empty_turn_whose_own_reference_does_not_resolve_is_still_hollow(tmp_path: Path) -> None:
+    """Turn 2 names the overflow call with a stale response id, so the call that turn 1 resolved excuses only turn 1."""
+    overflow = _call(
+        tokens_in=None, tokens_out=0, response={}, model_ref=_POLICY_REF, **CONTEXT_OVERFLOWS["answered_locally"]
+    )
+    record = _record(0, 0, answer=None, refs=[{"model_call_id": "c1"}], include_response_output=False)
+    stale_turn = dict(record["ng_trajectory"]["turns"][0])
+    stale_turn.update(turn_no=2, timestamp=2.0, model_calls=[{"model_call_id": "c1", "response_id": "stale"}])
+    record["ng_trajectory"]["turns"].append(stale_turn)
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, [overflow])]), workers=1).rollouts
+
+    hollow = [finding.locator for finding in digest.findings if finding.check == "agent_turn_hollow"]
+    assert hollow == [{"turn": 2}]
+    assert "trajectory_capture_mismatch" in {finding.check for finding in digest.findings}
+
+
+def test_an_ambiguous_response_reference_is_not_excused_but_an_exact_call_reference_is(tmp_path: Path) -> None:
+    """Two overflow calls share one model and response id: the call-id reference resolves, the response-id one
+    matches both calls and excuses nothing."""
+    shared = {"response_id": "shared", "tokens_in": None, "tokens_out": 0, "response": {}, "model_ref": _POLICY_REF}
+    first = _call(model_call_id="c1", **shared, **CONTEXT_OVERFLOWS["answered_locally"])
+    second = _call(model_call_id="c2", call_index=1, **shared, **CONTEXT_OVERFLOWS["answered_locally"])
+    record = _record(0, 0, answer=None, refs=[{"model_call_id": "c1"}], include_response_output=False)
+    ambiguous_turn = dict(record["ng_trajectory"]["turns"][0])
+    ambiguous_turn.update(turn_no=2, timestamp=2.0, model_calls=[{"model_ref": _POLICY_REF, "response_id": "shared"}])
+    record["ng_trajectory"]["turns"].append(ambiguous_turn)
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, [first, second])]), workers=1).rollouts
+
+    hollow = [finding.locator for finding in digest.findings if finding.check == "agent_turn_hollow"]
+    assert hollow == [{"turn": 2}]
+
+
+def test_an_incomplete_capture_excuses_no_empty_turn(tmp_path: Path) -> None:
+    """An incomplete capture leaves `rollout_ended_on_failed_model_call` unobserved: it cannot flag a request that
+    never fit, so the empty turn is still hollow."""
+    overflow = _call(
+        tokens_in=None, tokens_out=0, response={}, model_ref=_POLICY_REF, **CONTEXT_OVERFLOWS["answered_locally"]
+    )
+    record = _record(0, 0, answer=None, refs=[{"model_call_id": "c1"}], include_response_output=False)
+    record["ng_trajectory"]["gaps"] = [{"code": "model_call_capture_incomplete"}]
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, [overflow])]), workers=1).rollouts
+
+    assert "rollout_ended_on_failed_model_call" in digest.unobserved
+    assert "agent_turn_hollow" in {finding.check for finding in digest.findings}
+
+
+def test_a_400_without_the_overflow_category_still_flags(tmp_path: Path) -> None:
+    """The overflow is read from the recorded category, never inferred from a 400 alone."""
+    succeeded = _call(model_call_id="first", started_at=1.0)
+    rejected = _call(
+        model_call_id="last",
+        started_at=2.0,
+        status_code=400,
+        upstream_status_code=400,
+        upstream_attempted=True,
+        error_category="client_error",
+        tokens_in=None,
+        tokens_out=None,
+        **_NO_GENERATION,
+    )
+    rollout_path = _write_fixture(tmp_path, [(_owned_attempts(succeeded, rejected), [succeeded, rejected])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
+
+
 def test_a_body_capture_could_not_parse_still_needs_token_counts(tmp_path: Path) -> None:
     """`capture_parse_error` marks a 2xx call whose body was unreadable: a capture defect, not a failed call."""
     unparsed = _call(
@@ -1490,6 +2061,24 @@ def test_the_ended_on_error_statistic_and_the_finding_agree(tmp_path: Path) -> N
 
     assert digest.ended_on_error is True
     assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
+
+
+def test_an_incomplete_capture_is_not_counted_as_ending_on_an_error(tmp_path: Path) -> None:
+    """The check is unobserved on an incomplete capture, so the statistic leaves the rollout out as well."""
+    succeeded = _call(model_call_id="first", started_at=1.0)
+    failed = _call(
+        model_call_id="last", started_at=2.0, tokens_in=None, tokens_out=None, **FAILED_ATTEMPTS["http_500"]
+    )
+    record = _owned_attempts(succeeded, failed)
+    record["ng_trajectory"]["gaps"] = [{"code": "model_call_capture_incomplete"}]
+
+    result = run_health_checks(_write_fixture(tmp_path, [(record, [succeeded, failed])]), workers=1)
+    [digest] = result.rollouts
+
+    assert "rollout_ended_on_failed_model_call" in digest.unobserved
+    assert "rollout_ended_on_failed_model_call" not in {finding.check for finding in digest.findings}
+    assert digest.ended_on_error is False
+    assert result.summary["run"]["stats"]["model_call_errors"]["ended_on_error"] == 0
 
 
 POLICY_REF = {"type": "responses_api_models", "name": "policy_model"}

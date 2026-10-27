@@ -155,8 +155,9 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
 
     def __init__(self, participant: CheckpointParticipant, *, expected_workers: int) -> None:
         super().__init__(expected_workers=expected_workers)
-        # The coordinator stands in for the workers' participants, so it shares their kind and records.
+        # The coordinator stands in for the workers' participants, so it shares their kind, mode and records.
         self.kind = participant.kind
+        self.mode = participant.mode
         self.record_model = participant.record_model
         self.worker_label = participant.kind
         self.claim_key = participant.claim_key

@@ -32,7 +32,7 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -733,7 +733,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                     f"Pi sandbox installation failed (exit {installed.return_code}, "
                     f"error_type={installed.error_type}): {details[-16000:]}"
                 )
-            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
+            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)

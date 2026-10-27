@@ -19,13 +19,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import nemo_gym.server_utils
 from environment_servers.single_agent_turn.app import (
-    AgentOutcomePolicyConfig,
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
     SingleAgentTurnResult,
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, AgentOutcomePolicyConfig
 from nemo_gym.base_environment_server import is_retryable_dependency_error
 from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
@@ -940,7 +939,7 @@ async def test_an_agent_that_returns_during_a_checkpoint_parks_at_close_agent_an
     from nemo_gym._checkpoint.environment import EnvironmentParticipant
 
     environment_server, client = _environment_server()
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment_server._checkpoint = participant
     controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
     client.slow_path = environment_server._agent_responses_path(_request())
@@ -975,7 +974,7 @@ async def test_an_episode_restored_at_close_agent_closes_and_verifies_without_in
     from nemo_gym._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
 
     environment_server, client = _environment_server()
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment_server._checkpoint = participant
     request = _request()
     handles = {"resources_session_id": "resources-session", "agent_session_id": "agent-session"}
@@ -1006,7 +1005,7 @@ async def test_an_episode_restored_at_verify_with_skip_on_closes_without_verifyi
     environment_server, client = _skipping_environment_server(
         environment={"skip_verification": True, "skip_verification_reward": 0.5}, agent={}
     )
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment_server._checkpoint = participant
     request = _request()
     participant.restore_records(
@@ -1053,7 +1052,7 @@ async def test_a_restored_replacement_admitted_during_a_second_checkpoint_parks_
     from nemo_gym._checkpoint.store import write_participant_state
 
     environment_server, client = _environment_server(client_type=_HoldingClient)
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment_server._checkpoint = participant
     controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
     request = _request()
@@ -1144,7 +1143,7 @@ async def test_an_agent_failure_during_a_checkpoint_closes_the_agent_only_after_
     from nemo_gym._checkpoint.environment import EnvironmentParticipant
 
     environment_server, client = _environment_server(client_type=_AgentGateClient)
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment_server._checkpoint = participant
     controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
     observations = {
@@ -1296,7 +1295,7 @@ async def test_an_agent_reply_lost_to_a_restore_is_given_again_without_running_t
     client.agent = restored_http
     # Only the verification and the resources close are scripted; the agent answers the rest.
     del client.responses[:4]
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment._checkpoint = participant
     participant.restore_records(
         [
@@ -1326,7 +1325,7 @@ async def test_with_checkpointing_on_a_direct_http_grant_names_the_seeding_attem
     from nemo_gym._checkpoint.environment import EnvironmentParticipant
 
     environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
-    environment_server._checkpoint = EnvironmentParticipant()
+    environment_server._checkpoint = EnvironmentParticipant(mode="exported")
     await environment_server.run_request(_request())
 
     [tool_access] = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"]).tool_accesses
