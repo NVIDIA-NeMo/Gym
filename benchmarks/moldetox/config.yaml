@@ -30,5 +30,8 @@ moldetox_benchmark_environment_server:
   _inherit_from: moldetox_environment_server
   environment_servers:
     single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: moldetox
       agent_server:
         name: moldetox_benchmark_simple_agent

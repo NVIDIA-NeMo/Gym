@@ -605,8 +605,7 @@ def test_switch_replaces_a_simple_agent_relay(tmp_path: Path, capsys: pytest.Cap
     text = config.read_text()
     assert text.startswith(AGENT_CONFIG) and text.endswith(FOLLOWING)
     server = _switched_server(yaml.safe_load(text), "my_environment_server")
-    # Without its own resources_server, the server binds the agent's, as the relay did.
-    assert "resources_server" not in server
+    assert server["resources_server"] == {"type": "resources_servers", "name": "my_resources"}
     assert server["agent_server"] == {"type": "responses_api_agents", "name": "my_simple_agent"}
     # The agent's /run called the Resources Server's tool routes; the grant gives the session the same routes.
     assert server["resources_tool_transports"] == ["direct_http"]
@@ -718,18 +717,22 @@ def test_switch_keeps_a_child_relay_inheriting_its_switched_parent(tmp_path: Pat
     # Still inheriting, the parent stays a template that composition consumes.
     assert document["child_environment_server"]["_inherit_from"] == "my_environment_server"
     server = _switched_server(document, "child_environment_server")
-    assert server == {"agent_server": {"name": "child_agent"}}
+    assert server == {
+        "agent_server": {"name": "child_agent"},
+        "resources_server": {"type": "resources_servers", "name": "child_resources"},
+    }
     resolved = _parse(child, strict=True)
     assert _environment_servers_by_agent(resolved) == {"child_agent": ["child_environment_server"]}
     merged = resolved["child_environment_server"]["environment_servers"]
     assert list(merged) == ["single_agent_turn_legacy"]
     assert merged["single_agent_turn_legacy"]["entrypoint"] == "app.py"
+    assert merged["single_agent_turn_legacy"]["resources_server"]["name"] == "child_resources"
     assert resolved["child_agent"]["responses_api_agents"]["simple_agent"]["resources_server"]["name"] == (
         "child_resources"
     )
 
 
-def test_a_switched_relay_follows_an_agent_rename(tmp_path: Path) -> None:
+def test_a_switched_relay_follows_agent_and_resources_renames(tmp_path: Path) -> None:
     # A benchmark that only renames the agent and its resources server, and declares no relay of its own,
     # reaches the source config's server through Gym's agent rename; that server must name nothing renamed away.
     base = tmp_path / "base.yaml"
@@ -753,6 +756,168 @@ renamed_agent:
 
     assert _environment_servers_by_agent(resolved) == {"renamed_agent": ["my_environment_server"]}
     assert list(resolved["my_environment_server"]["environment_servers"]) == ["single_agent_turn_legacy"]
+    server = resolved["my_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+    assert server["resources_server"]["name"] == "renamed_resources"
+
+
+def test_switch_keeps_a_child_resources_copy_explicit(tmp_path: Path) -> None:
+    base, child = _parent_and_child(tmp_path)
+    child.write_text(child.read_text().replace("_inherit_from: my_resources", "_copy: my_resources"))
+
+    assert migration.main(["--switch-simple-agent", str(base), str(child)]) == 0
+
+    resolved = _parse(child, strict=True)
+    assert "my_resources" in resolved and "child_resources" in resolved
+    server = resolved["child_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+    assert server["resources_server"]["name"] == "child_resources"
+
+
+@pytest.mark.parametrize("rename_agent", [False, True], ids=["same-agent", "renamed-agent"])
+def test_switch_refuses_an_agent_resources_override_without_an_environment_binding(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, rename_agent: bool
+) -> None:
+    base = tmp_path / "base.yaml"
+    base.write_text(AGENT_CONFIG + RELAY)
+    child = tmp_path / "child.yaml"
+    agent = "child_agent:\n  _inherit_from: my_simple_agent\n" if rename_agent else "my_simple_agent:\n"
+    child.write_text(
+        f"config_paths:\n  - {base}\n"
+        "child_resources:\n  _copy: my_resources\n"
+        + agent
+        + "  responses_api_agents:\n    simple_agent:\n      resources_server:\n        name: child_resources\n"
+    )
+    monkeypatch.setattr(migration, "repo_config_files", lambda: [base, child])
+    before = base.read_text(), child.read_text()
+
+    assert migration.main(["--switch-simple-agent", str(base), str(child)]) == 2
+
+    assert (base.read_text(), child.read_text()) == before
+    error = capsys.readouterr().err
+    assert "my_environment_server.environment_servers.single_agent_turn_legacy.resources_server.name" in error
+    assert "child_resources" in error
+
+
+def test_switch_allows_unambiguous_resources_renames_in_including_configs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, child = _parent_and_child(tmp_path)
+    child.write_text(child.read_text().split("child_environment_server:")[0])
+    monkeypatch.setattr(migration, "repo_config_files", lambda: [base, child])
+
+    assert migration.main(["--switch-simple-agent", str(base), str(child)]) == 0
+
+    resolved = _parse(child, strict=True)
+    server = resolved["my_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+    assert server["agent_server"]["name"] == "child_agent"
+    assert server["resources_server"]["name"] == "child_resources"
+
+
+@pytest.mark.parametrize("deleted_key", ["responses_api_agents", " responses_api_agents "])
+def test_switch_refuses_rebinding_when_only_one_inherited_destination_is_an_agent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, deleted_key: str
+) -> None:
+    base, child = _parent_and_child(tmp_path)
+    child.write_text(
+        child.read_text()
+        .split("child_environment_server:")[0]
+        .replace("_inherit_from: my_resources", "_copy: my_resources")
+        + f"holder:\n  _inherit_from: my_simple_agent\n  _delete_key: '{deleted_key}'\n"
+    )
+    monkeypatch.setattr(migration, "repo_config_files", lambda: [base, child])
+    before = base.read_text(), child.read_text()
+    resolved = _parse(child, strict=True)
+    assert "responses_api_agents" not in resolved["holder"]
+    assert _environment_servers_by_agent(resolved) == {"child_agent": ["my_environment_server"]}
+
+    assert migration.main(["--switch-simple-agent", str(base), str(child)]) == 2
+
+    assert (base.read_text(), child.read_text()) == before
+    assert "resources_server.name: child_resources" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("rename", ["string", "non-resources-destination"])
+def test_switch_matches_parser_resources_rename_destinations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rename: str
+) -> None:
+    base, child = _parent_and_child(tmp_path)
+    text = child.read_text().split("child_environment_server:")[0]
+    if rename == "string":
+        text = text.replace(
+            "child_resources:\n  _inherit_from: my_resources",
+            "child_resources: ${inherit_from:my_resources}",
+        )
+    else:
+        text += "holder:\n  _inherit_from: my_resources\n  _delete_key: resources_servers\n"
+    child.write_text(text)
+    monkeypatch.setattr(migration, "repo_config_files", lambda: [base, child])
+
+    assert migration.main(["--switch-simple-agent", str(base), str(child)]) == 0
+
+    resolved = _parse(child, strict=True)
+    server = resolved["my_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+    assert server["agent_server"]["name"] == "child_agent"
+    assert server["resources_server"]["name"] == "child_resources"
+    assert "my_resources" not in resolved
+
+
+def test_switch_preserves_a_string_environment_alias(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    base, child = _parent_and_child(tmp_path)
+    child.write_text(
+        child.read_text().split("child_environment_server:")[0]
+        + "child_environment_server: ${inherit_from:my_environment_server}\n"
+    )
+    monkeypatch.setattr(migration, "repo_config_files", lambda: [base, child])
+    before = child.read_text()
+
+    assert migration.main(["--switch-simple-agent", str(base), str(child)]) == 0
+
+    assert child.read_text() == before
+    resolved = _parse(child, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"child_agent": ["child_environment_server"]}
+    server = resolved["child_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+    assert server["resources_server"]["name"] == "child_resources"
+
+
+def test_switch_preserves_an_including_environments_explicit_resources_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = tmp_path / "base.yaml"
+    base.write_text(AGENT_CONFIG + RELAY)
+    child = tmp_path / "child.yaml"
+    child.write_text(
+        f"config_paths:\n  - {base}\n"
+        "child_resources:\n  _copy: my_resources\n"
+        "my_environment_server:\n  environment_servers:\n    single_agent_turn_legacy:\n"
+        "      resources_server:\n        type: resources_servers\n        name: child_resources\n"
+    )
+    monkeypatch.setattr(migration, "repo_config_files", lambda: [base, child])
+    before = child.read_text()
+
+    assert migration.main(["--switch-simple-agent", str(base), str(child)]) == 0
+
+    assert child.read_text() == before
+    resolved = _parse(child, strict=True)
+    server = resolved["my_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+    assert server["resources_server"]["name"] == "child_resources"
+    assert resolved["my_simple_agent"]["responses_api_agents"]["simple_agent"]["resources_server"]["name"] == (
+        "my_resources"
+    )
+
+
+def test_switch_refuses_an_ambiguous_resources_rename_without_an_environment_binding(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, child = _parent_and_child(tmp_path)
+    child.write_text(
+        child.read_text().split("child_environment_server:")[0] + "other_resources:\n  _inherit_from: my_resources\n"
+    )
+    monkeypatch.setattr(migration, "repo_config_files", lambda: [base, child])
+    before = base.read_text(), child.read_text()
+
+    assert migration.main(["--switch-simple-agent", str(base), str(child)]) == 2
+
+    assert (base.read_text(), child.read_text()) == before
+    assert "resources_server.name: child_resources" in capsys.readouterr().err
 
 
 def test_switch_refuses_a_child_relay_without_its_parent(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -956,10 +1121,11 @@ def test_a_harness_can_override_a_relay_without_changing_its_name(
 
 
 @pytest.mark.parametrize("present_before_inheritance", [False, True])
-def test_resolved_instances_matches_gym_deletion_order(present_before_inheritance: bool) -> None:
+@pytest.mark.parametrize("directive", ["_inherit_from", "_copy"])
+def test_resolved_instances_matches_gym_deletion_order(present_before_inheritance: bool, directive: str) -> None:
     document = {
         "base": {"setting": "inherited", "retained": True},
-        "child": {"_inherit_from": "base", "_delete_key": "setting"},
+        "child": {directive: "base", "_delete_key": "setting"},
     }
     if present_before_inheritance:
         document["child"]["setting"] = "overridden"
@@ -1018,7 +1184,12 @@ def test_harness_recipes_preserve_routing_and_bindings_across_the_switch(
                     agent = (relay.get("agent_server") or {}).get("name", "") if relay else ""
                     if agent.endswith("_simple_agent"):
                         document[name] = OmegaConf.create(
-                            migration.stanza(name, agent, instance.get("_inherit_from"))
+                            migration.stanza(
+                                name,
+                                agent,
+                                resources_name if name == server_name else resources,
+                                instance.get("_inherit_from"),
+                            )
                         )[name]
         parsed = parser.parse(
             GlobalConfigDictParserConfig(
@@ -1143,3 +1314,17 @@ def test_repository_non_executing_simple_agents_run_in_sessions_without_tool_acc
 
     assert ("swe_pivot_environment_server", "swe_pivot_tool_simulation_agent") in fronting
     assert {key: value for key, value in fronting.items() if value[0] == "legacy_agent" or value[1]} == {}
+
+
+def test_repository_step_environments_declare_their_resources() -> None:
+    loaded: dict[Path, dict | None] = {}
+    missing = []
+    for path in migration.repo_config_files():
+        instances = migration.resolved_instances([document for _, document in migration.run_documents(path, loaded)])
+        for name, instance in instances.items():
+            for server_type, server in (instance.get("environment_servers") or {}).items():
+                if server_type in {"single_agent_turn", "single_agent_turn_legacy"}:
+                    if not (server.get("resources_server") or {}).get("name"):
+                        missing.append((migration.display(path), name))
+
+    assert missing == []

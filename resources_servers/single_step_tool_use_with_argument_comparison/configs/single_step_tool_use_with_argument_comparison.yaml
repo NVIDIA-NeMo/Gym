@@ -47,6 +47,9 @@ single_step_tool_use_with_argument_comparison_environment_server:
   environment_servers:
     single_agent_turn_legacy:
       entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: single_step_tool_use_with_argument_comparison_resources_server
       agent_server:
         type: responses_api_agents
         name: single_step_tool_use_with_argument_comparison_agent

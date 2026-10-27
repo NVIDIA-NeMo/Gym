@@ -203,6 +203,10 @@ class AmbiguousAgentRenameError(ConfigError, ValueError):
     """An environment server references an agent inherited by several new instances."""
 
 
+class AmbiguousResourcesRenameError(ConfigError, ValueError):
+    """An environment server references resources inherited by several new instances."""
+
+
 class AgentCompositionError(ConfigError, ValueError):
     """A standalone agent config could not be composed onto the merged config's agent instances."""
 

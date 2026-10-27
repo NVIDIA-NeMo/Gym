@@ -27,5 +27,8 @@ indic_aime_2026_math_with_judge_environment_server:
   _inherit_from: math_with_judge_environment_server
   environment_servers:
     single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: indic_aime_2026_math_with_judge_resources_server
       agent_server:
         name: indic_aime_2026_math_with_judge_simple_agent

@@ -23,5 +23,8 @@ long_transduction_benchmark_environment_server:
   _inherit_from: long_transduction_environment_server
   environment_servers:
     single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: long_transduction_resources_server
       agent_server:
         name: long_transduction_agent

@@ -24,5 +24,8 @@ livecodebench_v5_cascade_code_gen_environment_server:
   _inherit_from: code_gen_environment_server
   environment_servers:
     single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: livecodebench_v5_cascade_code_gen_resources_server
       agent_server:
         name: livecodebench_v5_cascade_code_gen_simple_agent

@@ -18,5 +18,8 @@ ugphysics_ugphysics_judge_environment_server:
   _inherit_from: ugphysics_judge_environment_server
   environment_servers:
     single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: ugphysics_judge
       agent_server:
         name: ugphysics_ugphysics_judge_simple_agent

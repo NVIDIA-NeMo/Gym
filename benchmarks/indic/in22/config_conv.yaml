@@ -23,5 +23,8 @@ in22_conv_environment_server:
   _inherit_from: wmt_translation_environment_server
   environment_servers:
     single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: in22_wmt_translation_resources_server
       agent_server:
         name: in22_conv_agent
