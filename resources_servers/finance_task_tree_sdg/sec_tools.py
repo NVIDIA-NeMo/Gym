@@ -141,9 +141,12 @@ class AsOfEdgarSearchTool(CachedEdgarSearchTool):
         user_agent: str,
         timeout_s: float = 20.0,
         corpus: LocalSecCorpus | None = None,
+        upstream_format: bool = False,
     ) -> None:
         super().__init__(cache=cache, user_agent=user_agent, timeout_s=timeout_s)
         self._corpus = corpus
+        # True: emit exactly the upstream fields (no report_date, no filed_on_or_before).
+        self._upstream_format = upstream_format
         self.history: SecFilingHistory | LocalFilingHistory = (
             LocalFilingHistory(corpus) if corpus is not None else SecFilingHistory(self)
         )
@@ -172,21 +175,18 @@ class AsOfEdgarSearchTool(CachedEdgarSearchTool):
             if form_type and record.form.upper() != str(form_type).upper():
                 continue
             folder = record.accession.replace("-", "")
-            out.append(
-                {
-                    "form": record.form,
-                    "filing_date": record.filing_date,
-                    "report_date": record.report_date,
-                    "accession": record.accession,
-                    "primary_document_url": (
-                        f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{folder}/{record.primary_document}"
-                    ),
-                }
+            item = {"form": record.form, "filing_date": record.filing_date}
+            if not self._upstream_format:
+                item["report_date"] = record.report_date
+            item["accession"] = record.accession
+            item["primary_document_url"] = (
+                f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{folder}/{record.primary_document}"
             )
+            out.append(item)
             if len(out) >= limit:
                 break
         payload: dict[str, Any] = {"ticker": ticker.upper(), "cik": cik, "filings": out}
-        if cutoff:
+        if cutoff and not self._upstream_format:
             payload["filed_on_or_before"] = cutoff
         return json.dumps(payload, ensure_ascii=False)
 

@@ -36,6 +36,23 @@ requests. Configure the policy model in the normal Gym overlay. Configure the
 independent judge with `big_finance_judge_base_url`,
 `big_finance_judge_api_key`, and `big_finance_judge_model_name`.
 
+## Running without web search
+
+Web search is on by default. To run without it, switch both the rows and the
+server:
+
+```bash
+python benchmarks/big_finance/prepare.py --no-web-search --input <rows>.jsonl --output <rows>.no_web.jsonl
+```
+
+and set `big_finance_web_search: false`. The rows then omit the `web_search` tool,
+the system prompt lists only SEC EDGAR filings, URL fetching, Python, and the final
+answer, and the `fetch_url` description no longer points to `web_search`. Every
+other tool schema, the prompt text, and the grading are unchanged. The server builds
+no search backend and needs no `SERP_API_KEY` or `TAVILY_API_KEY`; a `web_search`
+call returns the standard "Tool 'web_search' is not configured." error observation.
+The two settings are independent, so rows and server must be switched together.
+
 The shipped `gpt-5-mini` judge is a convenient default. Judge model choice affects
 scores. When comparing with published results, explicitly override
 `big_finance_judge_model_name` and match the judge model snapshot and grading

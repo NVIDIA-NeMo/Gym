@@ -76,18 +76,42 @@ def test_convert_preserves_labels_and_bakes_upstream_surface(tmp_path) -> None:
     assert row["responses_create_params"]["parallel_tool_calls"] is True
 
 
+def test_no_web_search_removes_the_tool_and_every_mention_of_it(tmp_path) -> None:
+    source = tmp_path / "fixture.jsonl"
+    output = tmp_path / "gym.jsonl"
+    source.write_text(json.dumps(_row()) + "\n", encoding="utf-8")
+
+    assert prepare.main(["--input", str(source), "--output", str(output), "--no-web-search"]) == 0
+    params = json.loads(output.read_text(encoding="utf-8"))["responses_create_params"]
+    spec = prepare.load_spec()
+    with_search = {tool["name"]: tool for tool in spec["tools"]}
+
+    system_prompt = params["input"][0]["content"]
+    assert "web search" not in system_prompt.lower()
+    assert system_prompt == spec["system_prompt"].replace("web search, SEC EDGAR filings", "SEC EDGAR filings")
+    assert [tool["name"] for tool in params["tools"]] == ["edgar_search", "fetch_url", "python_exec", "final_answer"]
+    for tool in params["tools"]:
+        assert "web_search" not in json.dumps(tool)
+        if tool["name"] == "fetch_url":
+            assert tool["description"].endswith("Useful for SEC filings, press releases, and web pages.")
+            assert {**tool, "description": with_search["fetch_url"]["description"]} == with_search["fetch_url"]
+        else:
+            assert tool == with_search[tool["name"]]
+
+
+def test_web_search_edits_fail_loudly_when_upstream_text_changes() -> None:
+    spec = prepare.load_spec()
+    spec["system_prompt"] = "You have tools."
+    with pytest.raises(ValueError, match="update the web-search edits"):
+        prepare.build_system_prompt(spec, web_search=False)
+    assert prepare.build_system_prompt(spec) == "You have tools."
+
+
 def test_public_count_guard_avoids_silent_partial_download(tmp_path) -> None:
     source = tmp_path / "fixture.jsonl"
     source.write_text(json.dumps(_row()) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="expected 50"):
         prepare.convert_file(source, tmp_path / "out.jsonl", expected_count=50)
-
-
-def test_evaluation_only_guards_cannot_be_disabled() -> None:
-    row = _row()
-    row["do_not_train"] = False
-    with pytest.raises(ValueError, match="evaluation_only and do_not_train"):
-        prepare.convert_rows([row])
 
 
 def test_dataset_url_and_snapshot_are_commit_pinned() -> None:

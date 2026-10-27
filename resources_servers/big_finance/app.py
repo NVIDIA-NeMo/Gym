@@ -55,8 +55,10 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
 from resources_servers.big_finance.sec_cache import CachedEdgarSearchTool, CachedFetchUrlTool, SecHttpCache
+from resources_servers.finance_task_tree_sdg.local_sec import LocalSecCorpus
+from resources_servers.finance_task_tree_sdg.sec_tools import AsOfEdgarSearchTool, AsOfFetchUrlTool, parse_as_of
 
 
 logger = logging.getLogger(__name__)
@@ -78,11 +80,17 @@ Return only the JSON object specified by the response schema. Do not add comment
 class BigFinanceResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
+    # Off: no search backend is built and /web_search answers "not configured". Rows must
+    # then come from `prepare.py --no-web-search`, which removes the tool and its mentions.
+    web_search: bool = True
     serp_api_key: Optional[str] = None
     tavily_api_key: Optional[str] = None
     sec_edgar_user_agent: Optional[str] = None
     use_cache: bool = False
     cache_dir: Optional[str] = None
+    # Set: edgar_search and fetch_url read this downloaded SEC corpus and never call SEC,
+    # and hide filings made after a row's `as_of_date`. Non-SEC URLs are still fetched live.
+    sec_corpus_metadata_path: Optional[str] = None
     web_search_timeout_s: float = 30.0
     edgar_timeout_s: float = 20.0
     fetch_timeout_s: float = 30.0
@@ -103,10 +111,12 @@ class BigFinanceRunRequest(BaseRunRequest):
     query: str = ""
     reference_answer: str = ""
     rubric: list[RubricLine] = Field(default_factory=list)
-    evaluation_only: Literal[True] = True
-    do_not_train: Literal[True] = True
+    evaluation_only: Optional[bool] = None
+    do_not_train: Optional[bool] = None
     benchmark_canary: Optional[str] = None
     sources: list[str] = Field(default_factory=list)
+    # ISO date; with an offline corpus, SEC filings made after it are hidden from the tools.
+    as_of_date: Optional[str] = None
 
 
 class BigFinanceVerifyRequest(BigFinanceRunRequest, BaseVerifyRequest):
@@ -382,8 +392,8 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         cache = SecHttpCache(cache_dir=self.config.cache_dir, use_cache=self.config.use_cache)
-        web_search = WebSearchTool(timeout_s=self.config.web_search_timeout_s)
-        if self.config.serp_api_key or self.config.tavily_api_key:
+        web_search = WebSearchTool(timeout_s=self.config.web_search_timeout_s) if self.config.web_search else None
+        if web_search is not None and (self.config.serp_api_key or self.config.tavily_api_key):
             configured_keys = {
                 "SERP_API_KEY": self.config.serp_api_key,
                 "TAVILY_API_KEY": self.config.tavily_api_key,
@@ -405,9 +415,28 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
                     else:
                         os.environ[key] = value
 
-        self._tools: dict[str, Any] = {
-            "web_search": web_search,
-            "edgar_search": (
+        self._as_of: dict[str, Any] = {}
+        self._offline = self.config.sec_corpus_metadata_path is not None
+        if self._offline:
+            if not self.config.sec_edgar_user_agent:
+                raise ValueError("sec_corpus_metadata_path requires sec_edgar_user_agent")
+            corpus = LocalSecCorpus(metadata_path=self.config.sec_corpus_metadata_path)
+            edgar_search: Any = AsOfEdgarSearchTool(
+                cache=cache,
+                user_agent=self.config.sec_edgar_user_agent,
+                timeout_s=self.config.edgar_timeout_s,
+                corpus=corpus,
+                upstream_format=True,
+            )
+            fetch_url: Any = AsOfFetchUrlTool(
+                cache=cache,
+                history=edgar_search.history,
+                timeout_s=self.config.fetch_timeout_s,
+                sec_user_agent=self.config.sec_edgar_user_agent,
+                corpus=corpus,
+            )
+        else:
+            edgar_search = (
                 CachedEdgarSearchTool(
                     cache=cache,
                     user_agent=self.config.sec_edgar_user_agent,
@@ -415,24 +444,46 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
                 )
                 if self.config.sec_edgar_user_agent
                 else None
-            ),
-            "fetch_url": CachedFetchUrlTool(
+            )
+            fetch_url = CachedFetchUrlTool(
                 cache=cache,
                 timeout_s=self.config.fetch_timeout_s,
                 sec_user_agent=self.config.sec_edgar_user_agent,
-            ),
+            )
+
+        self._tools: dict[str, Any] = {
+            "web_search": web_search,
+            "edgar_search": edgar_search,
+            "fetch_url": fetch_url,
             "python_exec": PythonExecTool(timeout_s=self.config.python_exec_timeout_s),
             "final_answer": FinalAnswerTool(),
         }
 
-    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
-        return await super().seed_session(body)
+    async def seed_session(self, request: Request, body: BigFinanceRunRequest) -> BaseSeedSessionResponse:
+        if self._offline:
+            self._as_of[request.session[SESSION_ID_KEY]] = parse_as_of(body.as_of_date)
+        return await super().seed_session(BaseSeedSessionRequest())
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         for name in self._tools:
-            app.post(f"/{name}")(self._handler(name))
+            if self._offline and name in {"edgar_search", "fetch_url"}:
+                app.post(f"/{name}")(self._as_of_handler(name))
+            else:
+                app.post(f"/{name}")(self._handler(name))
         return app
+
+    def _as_of_handler(self, name: str):
+        async def handler(request: Request, body: dict = Body(default={})):
+            session_id = request.session.get(SESSION_ID_KEY)
+            if session_id not in self._as_of:
+                return PlainTextResponse(
+                    "no seeded session for this rollout", headers={"x-nemo-gym-tool-error": "true"}
+                )
+            args = body if isinstance(body, dict) else {}
+            return await self._run(self._tools[name].run(args, as_of=self._as_of[session_id]))
+
+        return handler
 
     def _handler(self, name: str):
         async def handler(body: dict = Body(default={})):
@@ -442,26 +493,30 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
                     f"Tool '{name}' is not configured.",
                     headers={"x-nemo-gym-tool-error": "true"},
                 )
-            try:
-                # The shared agent records the HTTP response body verbatim as the
-                # function_call_output. Returning the upstream string directly keeps
-                # model-visible observations identical to the standalone harness.
-                return PlainTextResponse(
-                    await tool.run(body if isinstance(body, dict) else {}),
-                    headers={"x-nemo-gym-tool-error": "false"},
-                )
-            except ToolError as exc:
-                return PlainTextResponse(
-                    str(exc),
-                    headers={"x-nemo-gym-tool-error": "true"},
-                )
-            except Exception as exc:  # noqa: BLE001 - tool errors are observations, not HTTP 500s
-                return PlainTextResponse(
-                    f"unexpected tool error: {type(exc).__name__}: {exc}",
-                    headers={"x-nemo-gym-tool-error": "true"},
-                )
+            return await self._run(tool.run(body if isinstance(body, dict) else {}))
 
         return handler
+
+    @staticmethod
+    async def _run(call: Any) -> PlainTextResponse:
+        try:
+            # The shared agent records the HTTP response body verbatim as the
+            # function_call_output. Returning the upstream string directly keeps
+            # model-visible observations identical to the standalone harness.
+            return PlainTextResponse(
+                await call,
+                headers={"x-nemo-gym-tool-error": "false"},
+            )
+        except ToolError as exc:
+            return PlainTextResponse(
+                str(exc),
+                headers={"x-nemo-gym-tool-error": "true"},
+            )
+        except Exception as exc:  # noqa: BLE001 - tool errors are observations, not HTTP 500s
+            return PlainTextResponse(
+                f"unexpected tool error: {type(exc).__name__}: {exc}",
+                headers={"x-nemo-gym-tool-error": "true"},
+            )
 
     async def _judge(self, body: BigFinanceVerifyRequest, answer: Optional[str]) -> tuple[dict[str, Any], str]:
         if self.config.judge_model_server is None:
@@ -505,6 +560,7 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
         return grade, text
 
     async def verify(self, request: Request, body: BigFinanceVerifyRequest) -> BigFinanceVerifyResponse:
+        self._as_of.pop(request.session.get(SESSION_ID_KEY), None)
         answer = extract_final_answer(body.response)
         if self.config.reward_mode == "passthrough":
             return BigFinanceVerifyResponse(

@@ -34,6 +34,28 @@ fields. The required five-row `data/example_rollouts.jsonl` and matching
 `data/example_metrics.json` are committed alongside it. Validate all three with
 `gym env test --resources-server big_finance`.
 
+`big_finance_web_search: false` turns web search off: no search backend is built
+and `/web_search` returns the "not configured" error. Pair it with rows prepared
+by `benchmarks/big_finance/prepare.py --no-web-search`, which removes the tool
+and its mentions from the prompt and the `fetch_url` description (see
+`benchmarks/big_finance/README.md`).
+
+## Offline SEC corpus
+
+Set `big_finance_sec_corpus_metadata_path` to the `sec_metadata.parquet` of a
+downloaded SEC corpus (the format `finance_task_tree_sdg` reads; see its README)
+to serve `edgar_search` and `fetch_url` from it:
+
+- Neither tool sends any request to SEC. `edgar_search` lists the company's
+  filings in the corpus newest first, with the upstream fields only. `fetch_url`
+  returns SEC documents from the corpus through the upstream parsing, retrieval,
+  and truncation; an SEC URL outside the corpus is an error observation, never a
+  live request. Non-SEC URLs are still fetched live.
+- A row may carry `as_of_date` (ISO date). Filings made after it are left out of
+  `edgar_search` and refused by `fetch_url`. Rows without it are not clamped.
+- Tool names, schemas, and descriptions, the prompt, and grading are unchanged.
+  `sec_edgar_user_agent` is still required.
+
 For OpenAI-backed rollouts, also pass
 `--config resources_servers/big_finance/configs/openai_model.yaml`. This applies
 BigFinance's retry and timeout settings to its own `big_finance_policy_model`
