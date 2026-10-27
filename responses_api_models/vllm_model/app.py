@@ -77,6 +77,7 @@ from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.external_capture import (
     DYNAMO_GYM_REQUEST_ANNOTATION,
     DYNAMO_PREFIX_ANNOTATION_PREFIX,
+    DYNAMO_SESSION_ID_HEADER,
     ExternalCaptureHandler,
     annotate_dynamo_request,
     make_external_capture_handler,
@@ -479,6 +480,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # logged once. Chat path only: with ``use_completions_api`` the request field
     # is always dropped. Opt in deliberately and re-baseline with a same-config run.
     forward_request_chat_template_kwargs: bool = False
+    # Template kwargs under every other source: ``chat_template_kwargs`` above, the request's own kwargs,
+    # ``metadata.chat_template_kwargs`` and ``extra_body`` each override a key set here. For a caller that
+    # supplies defaults, such as a training framework, without replacing the kwargs an environment configures.
+    default_chat_template_kwargs: Optional[Dict[str, Any]] = None
 
     # When True, if the last input message is an assistant message, forward it to vLLM as a
     # prefix to continue (continue_final_message=True, add_generation_prompt=False) instead of
@@ -989,6 +994,17 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict.update(self.config.sampling_overrides)
         return body_dict
 
+    def _apply_default_chat_template_kwargs(self, body_dict: Dict[str, Any]) -> None:
+        """Put ``config.default_chat_template_kwargs`` under the outbound body's own kwargs, in place.
+
+        Called once every other source has set ``chat_template_kwargs``, ``extra_body`` included, so a
+        default fills only the keys none of them set.
+        """
+        if self.config.default_chat_template_kwargs:
+            body_dict["chat_template_kwargs"] = deepcopy(self.config.default_chat_template_kwargs) | (
+                body_dict.get("chat_template_kwargs") or {}
+            )
+
     async def _responses_native(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> NeMoGymResponse:
@@ -1012,6 +1028,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
         if self.config.extra_body:
             body_dict = self.config.extra_body | body_dict
+        self._apply_default_chat_template_kwargs(body_dict)
         self._apply_sampling_overrides(body_dict)
 
         note_generation_request(body_dict)
@@ -1243,6 +1260,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if extra_body:
             body_dict = extra_body | body_dict
+        self._apply_default_chat_template_kwargs(body_dict)
 
         self._splice_audio_from_metadata(body_dict, metadata)
 
@@ -1576,6 +1594,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         extra_headers = (
             self._external_capture_handler.request_headers() if self._external_capture_handler is not None else {}
         )
+        if self.config.dynamo_frontend:
+            # The router picks an engine before that engine splices the echoed prefix, so it can send a later
+            # turn away from the engine caching the earlier ones. Pin each rollout to one engine instead.
+            extra_headers.setdefault(DYNAMO_SESSION_ID_HEADER, self._routing_session_id(request))
         execution["upstream_attempted"] = True
         context = current_capture_context()
         transport_options = (
@@ -2101,18 +2123,18 @@ class VLLMModel(SimpleResponsesAPIModel):
         Assistant and tool messages, plus any tool definitions, are passed
         through to the template unchanged.
 
-        ``chat_template_kwargs`` is merged from two sources: the
-        server-level value from config, plus an optional per-request
-        override JSON-encoded under ``metadata.chat_template_kwargs``. The
-        per-request override wins on key conflicts.
+        ``chat_template_kwargs`` is merged from three sources:
+        ``default_chat_template_kwargs`` and ``chat_template_kwargs`` from
+        config, plus an optional per-request override JSON-encoded under
+        ``metadata.chat_template_kwargs``. A later source wins on key conflicts.
         """
         messages = body_dict.get("messages") or []
         tools = body_dict.get("tools") or None
         self._validate_text_only_messages(messages)
 
-        # Global config baseline, per-request metadata overrides on top. Unlike the
+        # Defaults, then the global config baseline, then per-request metadata overrides. Unlike the
         # chat path, a request's top-level chat_template_kwargs is never merged here.
-        chat_template_kwargs: Dict[str, Any] = {}
+        chat_template_kwargs: Dict[str, Any] = deepcopy(self.config.default_chat_template_kwargs or {})
         if self.config.chat_template_kwargs:
             chat_template_kwargs.update(deepcopy(self.config.chat_template_kwargs))
         metadata = body_dict.get("metadata") or {}
@@ -2370,12 +2392,16 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise ValueError(f"no generation_cut_control_url is configured for backend {base_url}")
         return control_url.rstrip("/")
 
-    def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
-        self._maybe_rebind_endpoint()
+    @staticmethod
+    def _routing_session_id(request: Request) -> str:
         # Route by rollout when the call carries one: agents that drop cookies get a new
         # session per call, which scatters a rollout's turns and lets the slowest endpoint
         # collect them. Keying on the rollout keeps its turns on one endpoint.
-        session_id = current_rollout_id() or request.session[SESSION_ID_KEY]
+        return current_rollout_id() or request.session[SESSION_ID_KEY]
+
+    def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
+        self._maybe_rebind_endpoint()
+        session_id = self._routing_session_id(request)
         client = self._session_id_to_client.get(session_id)
         if self.config.route_around_failing_endpoints:
             hashed = self._hashed_client(session_id)

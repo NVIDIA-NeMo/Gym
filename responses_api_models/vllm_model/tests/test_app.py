@@ -1746,6 +1746,8 @@ class TestApp:
         if not capture:
             assert call_annotation == "ng_prefix:[1,2]"
         assert sent[0]["headers"]["x-default"] == "kept"
+        # Every call pins its rollout to one engine, keyed like the client choice; capture keeps its admission's id.
+        assert sent[0]["headers"]["x-dynamo-session-id"] == ("rollout-1" if capture else "session-1")
         if error:
             return
         served = response.model_dump()
@@ -1758,13 +1760,11 @@ class TestApp:
             assert CaptureAdmission.model_validate_json(call_annotation.removeprefix("ng_capture:")) == (
                 context.capture_admission
             )
-            assert sent[0]["headers"]["x-dynamo-session-id"] == "rollout-1"
             assert context.committed is True
             manifest = await context.lineage_store.manifest("rollout-1")
             assert manifest["records"][0]["staging_key"] == "rollout-1/c1"
             assert "ng_commit_coords" not in served
         else:
-            assert "x-dynamo-session-id" not in sent[0]["headers"]
             message = served["choices"][0]["message"]
             assert message["prompt_token_ids"] == [1, 2]
             assert message["generation_token_ids"] == [3]
@@ -4650,6 +4650,25 @@ class TestVLLMConverter:
         )
         assert rejected.status_code == 422
 
+    @mark.parametrize(
+        "config_overrides",
+        [
+            {"chat_template_kwargs": {"enable_thinking": False}},
+            {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}},
+        ],
+        ids=["chat_template_kwargs", "extra_body"],
+    )
+    def test_default_chat_template_kwargs_have_lowest_precedence(self, config_overrides: dict[str, Any]) -> None:
+        """A default fills only the keys no other source sets, and leaves ``extra_body`` kwargs in place."""
+        client, captured_kwargs = self._chat_client_capturing_upstream(
+            default_chat_template_kwargs={"enable_thinking": True, "default_only": 1}, **config_overrides
+        )
+
+        response = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+
+        assert response.status_code == 200, response.text
+        assert captured_kwargs["chat_template_kwargs"] == {"enable_thinking": False, "default_only": 1}
+
     def test_request_chat_template_kwargs_dropped_by_default(self, caplog):
         """By default the field is accepted at ingress but not forwarded.
 
@@ -6187,6 +6206,7 @@ def _make_chat_template_model(
     *,
     has_chat_template: bool = True,
     chat_template_kwargs: dict | None = None,
+    default_chat_template_kwargs: dict | None = None,
 ) -> tuple[VLLMModel, _FakeTokenizer]:
     config = VLLMModelConfig(
         host="0.0.0.0",
@@ -6204,6 +6224,7 @@ def _make_chat_template_model(
         # actually load HF AutoTokenizer at construction. We flip it on after
         # injecting a _FakeTokenizer instance.
         chat_template_kwargs=chat_template_kwargs,
+        default_chat_template_kwargs=default_chat_template_kwargs,
     )
     model = VLLMModel(
         config=config,
@@ -6263,6 +6284,7 @@ class TestCompletionsBackendChatTemplateRender:
     def test_chat_template_kwargs_merged_with_metadata_override(self) -> None:
         model, tokenizer = _make_chat_template_model(
             chat_template_kwargs={"enable_thinking": True, "tool_use_mode": "tool_calls"},
+            default_chat_template_kwargs={"tool_use_mode": "default", "default_only": 0},
         )
         body_dict = {
             "messages": [{"role": "user", "content": "x"}],
@@ -6273,8 +6295,8 @@ class TestCompletionsBackendChatTemplateRender:
         }
         model._render_messages_via_chat_template(body_dict)
 
-        # Per-request override beats global config; non-overridden global keys persist;
-        # new metadata-only keys are added.
+        # Per-request override beats global config, which beats the defaults; non-overridden
+        # keys persist; new metadata-only keys are added.
         kwargs_seen = {
             k: v
             for k, v in tokenizer.last_call.items()
@@ -6282,8 +6304,9 @@ class TestCompletionsBackendChatTemplateRender:
         }
         assert kwargs_seen == {
             "enable_thinking": False,  # metadata override
-            "tool_use_mode": "tool_calls",  # global config preserved
+            "tool_use_mode": "tool_calls",  # global config preserved over the default
             "extra_knob": 7,  # metadata-only addition
+            "default_only": 0,  # default nothing else sets
         }
 
     def test_post_init_loads_tokenizer_when_render_chat_template_is_set(self, monkeypatch: MonkeyPatch) -> None:
