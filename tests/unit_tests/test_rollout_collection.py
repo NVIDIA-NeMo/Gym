@@ -5176,6 +5176,16 @@ class TestRolloutCollection:
                 *args,
                 **kwargs,
             ):
+                from hashlib import sha256
+
+                from nemo_gym.path_utils import provenance_path_for
+
+                provenance = orjson.loads(provenance_path_for(output_jsonl_fpath).read_bytes())
+                assert (
+                    provenance["materialized_inputs_sha256"]
+                    == sha256(config.materialized_jsonl_fpath.read_bytes()).hexdigest()
+                )
+                assert str(input_jsonl_fpath) in provenance["datasets"]
                 futures = []
                 for example in examples:
                     future = Future()
@@ -11767,7 +11777,11 @@ class TestLiveHealthEvaluation:
         monkeypatch.setattr(nemo_gym.rollout_collection, "is_metrics_exporter_active", lambda: True)
         seen_at_await: list[str] = []
 
-        async def cancelled_thread(*args, **kwargs):
+        original_to_thread = asyncio.to_thread
+
+        async def cancelled_thread(function, *args, **kwargs):
+            if function is not nemo_gym.rollout_collection._record_rollout_health:
+                return await original_to_thread(function, *args, **kwargs)
             seen_at_await.append(capsys.readouterr().out)
             raise asyncio.CancelledError
 
@@ -12241,3 +12255,37 @@ def test_episode_record_carries_the_failure_kind_into_the_sidecar_row() -> None:
     assert "failure_kind" not in rollout_collection._counted_failure_row(record)
     plain = rollout_collection._episode_record(reply | {"failure": {"failure_reason": "bad task", "terminal": True}})
     assert "failure_kind" not in plain and not any(key.endswith("_step") for key in plain)
+
+
+async def test_review_provenance_skipped_metadata_does_not_prevent_dispatch(
+    tmp_path: Path, empty_global_config, caplog
+) -> None:
+    from nemo_gym.path_utils import provenance_path_for
+
+    source = tmp_path / "input.jsonl"
+    source.write_bytes(b'{"agent_ref":{"name":"a"},"responses_create_params":{"input":[],"metadata":"secret"}}\n')
+    output = tmp_path / "rollouts.jsonl"
+    dispatched = []
+
+    class Helper(RolloutCollectionHelper):
+        def _run_examples_with_metadata(self, examples, *args, **kwargs):
+            provenance = orjson.loads(provenance_path_for(output).read_bytes())
+            assert provenance["status"] == "available"
+            assert provenance["input_sampling_rows_skipped"] == 1
+            assert provenance["materialized_inputs_sha256"]
+            dispatched.extend(examples)
+            future = Future()
+            future.set_result(_CompletedRollout(row=examples[0], result={"reward": 1.0}, rollout_latency_ms=None))
+            return [future]
+
+    await Helper().run_from_config(
+        RolloutCollectionConfig(
+            input_jsonl_fpath=str(source),
+            output_jsonl_fpath=str(output),
+            disable_aggregation=True,
+            upload_rollouts=False,
+        )
+    )
+    assert len(dispatched) == 1
+    assert orjson.loads(output.read_bytes())["reward"] == 1.0
+    assert "secret" not in caplog.text
