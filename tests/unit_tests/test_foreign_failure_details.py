@@ -113,3 +113,17 @@ def test_selected_sdk_fields_are_bounded_without_serializing_arbitrary_exception
     assert len(selected.message) == 2000
     assert selected.message.endswith(" [truncated]")
     assert foreign_error_details(RuntimeError("private request data")).message == ""
+
+
+def test_selected_scalar_constructor_message_is_bounded_and_invalid_values_do_not_hide_failure():
+    from nemo_gym.typed_exceptions import foreign_error_details
+
+    error = RuntimeError("constructor message")
+    assert foreign_error_details(error).message == ""
+    selected = foreign_error_details(error, message=error.args[0])
+    assert selected.message == "constructor message"
+    error.message = {"request": "must not be serialized"}
+    assert foreign_error_details(error).message == ""
+    long_type = type("SdkError", (RuntimeError,), {"__qualname__": "SdkError" + "x" * 300})
+    selected = foreign_error_details(long_type("failed"))
+    assert len(selected.exception_type) == 256 and selected.exception_type.endswith(" [truncated]")

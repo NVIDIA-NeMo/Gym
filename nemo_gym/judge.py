@@ -73,7 +73,7 @@ class JudgeError(Exception):
 
 
 class _TypedJudgeError(JudgeError, ResServerFailure):
-    pass
+    """Keep existing JudgeError handlers while adding a resources-server boundary observation."""
 
 
 class JudgeCallFailed(_TypedJudgeError):

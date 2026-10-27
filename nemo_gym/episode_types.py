@@ -83,8 +83,15 @@ MAX_FAILURE_EVENTS = 64
 
 
 class ForeignErrorDetails(BaseModel):
-    # Explicitly selected diagnostics, never an SDK object or a request/response payload.
-    # Oversized values are rejected instead of silently losing part of the reported evidence.
+    """Immutable SDK diagnostics selected by a boundary adapter before it translates an error.
+
+    The adapter supplies the observed type, a scalar SDK message and, when available, its HTTP status.
+    These fields travel on ``NgFailureEvent`` and then ``FailureEventRecord`` through HTTP to Collection.
+    They are diagnostic data, not another cause link or a retry/scoring instruction. SDK objects, request
+    bodies, outputs and response payloads stay outside this model. Direct oversized values are rejected;
+    automatic capture bounds selected strings with an explicit truncation marker before construction.
+    """
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     exception_type: str = Field(min_length=1, max_length=256)
@@ -100,7 +107,12 @@ class FailureEventRecord(BaseModel):
     same map. ``type`` is the boundary class (``ModelFailure``, ``ResServerFailure``, ...) or ``untyped``;
     ``exception_type`` is the raised class when it differs. Kinds and reasons are each boundary's own. Request
     bodies, outputs, conversations and tool results are never part of a record: ``operation_id`` and
-    ``attempt_id`` reference the records that hold them.
+    ``attempt_id`` reference the records that hold them when the producer has those identities.
+
+    Shared helpers serialize Python exceptions into this model, forward its bounded map on replies, and
+    reconstruct safe boundary exceptions on receipt. Collection retains the map beside its existing outcome
+    records, including observations accompanying success. This model stores no execution history and chooses
+    no outcome: ``EpisodeFailure.terminal`` and existing consumer policy remain authoritative.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -155,9 +167,14 @@ def validate_failure_event_map(events: Mapping[str, FailureEventRecord]) -> Mapp
 class EpisodeFailure(BaseModel):
     """Describe a failure using the same fields on the wire and in saved records.
 
-    The explanation is ``failure_reason``. Kind and stage are optional. The kind
-    identifies what happened; it does not determine terminality. A collector
-    observing a lost reply may not know the episode's stage.
+    An environment server returns this envelope for one failed episode attempt. Collection uses its
+    existing ``terminal`` flag and retry budget; ``failure_kind`` describes the failure without deciding
+    terminality. Kind and stage are optional because a collector observing a lost reply may not know them.
+
+    ``failure_id`` selects this envelope's current failure from ``failure_events``. The same map may retain
+    earlier recovered observations and explicit causes, each stored once under its origin ID. Producers and
+    HTTP helpers supply that evidence; this envelope neither creates an execution-history store nor changes
+    scoring. A successful reply forwards observations separately without a current failure ID.
     """
 
     model_config = ConfigDict(extra="forbid")

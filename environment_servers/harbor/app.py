@@ -1471,7 +1471,10 @@ def _setup_cause(exc: Exception) -> BaseException:
             message=f"{type(exc).__name__}: {exc}"[:2000],
             operation="sandbox.setup",
             stage="seed",
-            foreign_error=foreign_error_details(exc),
+            # OpenSandbox stores its scalar constructor message in args[0]; str() appends SDK diagnostics.
+            foreign_error=foreign_error_details(
+                exc, message=exc.args[0] if exc.args and isinstance(exc.args[0], str) else None
+            ),
         ) from exc
     except SandboxCredentialsRejected as rejected:
         return rejected

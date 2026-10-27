@@ -51,7 +51,12 @@ class NgFailureEvent(Exception):
     Instance fields, keyword-only: ``message`` (the exception text, the event's ``failure_reason``),
     ``operation`` (the call that failed) and ``stage``. The class sets ``failure_kind`` when a registered or
     namespaced name fits; a boundary failure may pass its own. ``event_id`` is assigned once, here; pass
-    ``operation_id`` / ``attempt_id`` to reference the operation's own records.
+    ``operation_id`` / ``attempt_id`` to reference the operation's own records when available.
+
+    Raise a boundary subclass ``from error`` to preserve the explicit Python cause. Shared helpers convert
+    the chain to ``FailureEventRecord`` objects for HTTP, preserving origin IDs; receivers reconstruct only
+    known boundary classes. ``observe_failure`` also retains attempts recovered by an existing retry. Collection
+    owns persistence of the forwarded evidence. This exception does not choose retries, terminality or scores.
     """
 
     failure_kind: ClassVar[str | None] = None
@@ -105,7 +110,12 @@ class NgFailureEvent(Exception):
 
 
 class ModelFailure(NgFailureEvent):
-    """A model request failed. ``http_status`` is the model server's reply status, when there was one."""
+    """A model client's request or wire attempt failed.
+
+    The client records this before applying its existing retry schedule, so recovery can still be reported.
+    ``http_status`` is the observed model-server reply status, not a status inferred from another boundary.
+    The explicit cause and optional selected SDK diagnostics describe the underlying error.
+    """
 
     def __init__(self, *args: Any, http_status: int | None = None, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -113,23 +123,48 @@ class ModelFailure(NgFailureEvent):
 
 
 class HarnessFailure(NgFailureEvent):
-    """An agent harness (the program an agent server drives) failed."""
+    """A harness adapter observed failure of the program an agent server drives.
+
+    Harness-specific exceptions retain their existing catch behavior and attach this boundary to the cause
+    chain. The agent can forward it inside its own failure; harness output and process receipts stay in their
+    existing records. The adapter's existing cleanup and outcome handling remain in control.
+    """
 
 
 class AgentFailure(NgFailureEvent):
-    """An agent server's operation failed."""
+    """An agent server's route or session operation failed.
+
+    The agent adds this boundary above the original error rather than copying its kind. HTTP middleware keeps
+    the existing response/status and forwards the chain to the environment. Earlier recovered model failures
+    can accompany a successful agent reply without creating an AgentFailure.
+    """
 
 
 class ResServerFailure(NgFailureEvent):
-    """A resources server's operation (verify, a tool, a session) failed."""
+    """A resources server observed failure in verification, a tool or a session operation.
+
+    Subclasses choose a boundary-appropriate kind, such as ``judge_failed``. A provider's status and more
+    specific kind remain on the explicit cause. Shared HTTP helpers forward these observations without
+    choosing a scoring treatment or spending another episode attempt.
+    """
 
 
 class EnvServerFailure(NgFailureEvent):
-    """An environment server's operation failed."""
+    """An environment server observed failure while preparing, running or verifying an episode.
+
+    The environment wraps its dependency with an explicit cause and returns the existing ``EpisodeFailure``
+    envelope. Shared helpers add the event map to that envelope; its terminal flag and the environment's
+    existing policy still determine how Collection treats the attempt.
+    """
 
 
 class CollectionFailure(NgFailureEvent):
-    """Rollout collection's own operation failed."""
+    """Collection observed failure of its dispatch or response-processing operation.
+
+    This outer observation references the received environment/HTTP error while preserving the existing
+    saved failure class. Collection saves the map beside its outcome records. Existing terminal state,
+    execution history and attempt budgets determine resume; this exception adds no retry policy.
+    """
 
 
 _REPLIES_WITH_CAUSE = "_ng_replies_with_cause"
@@ -223,16 +258,16 @@ def http_status(error: BaseException) -> int | None:
     return None
 
 
-def foreign_error_details(error: BaseException) -> ForeignErrorDetails:
+def foreign_error_details(error: BaseException, *, message: str | None = None) -> ForeignErrorDetails:
     """Snapshot an SDK's selected type, scalar ``message`` and status, without its body or request.
 
-    Only an explicit SDK ``message`` field is selected: arbitrary ``str(error)`` may contain request data.
-    Long selected diagnostics carry a visible truncation marker within the existing record bounds.
+    Use the SDK's ``message`` field, or a scalar constructor message explicitly selected by its adapter.
+    Arbitrary ``str(error)`` may contain request data. Long selected diagnostics carry a visible truncation marker.
     """
     exception_type = qualified_type(error)
     if len(exception_type) > 256:
         exception_type = exception_type[: 256 - len(_TRUNCATED)] + _TRUNCATED
-    message = getattr(error, "message", "")
+    message = getattr(error, "message", "") if message is None else message
     message = message if isinstance(message, str) else ""
     if len(message) > 2000:
         message = message[: 2000 - len(_TRUNCATED)] + _TRUNCATED
