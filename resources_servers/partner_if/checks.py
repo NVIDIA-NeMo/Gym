@@ -15,7 +15,7 @@ from typing import Callable
 
 from pydantic import model_validator
 
-from resources_servers.partner_if import fixed_checks
+from resources_servers.partner_if import fixed_checks, tool_checks
 from resources_servers.partner_if.evidence import EvidenceBundle
 from resources_servers.partner_if.grading_contract import StrictModel, Text, VerifierSpec
 
@@ -80,6 +80,7 @@ REGISTRY = {
     "llm_judge_v1": Checker(LLMParams, None),
     "text_contains_v1": Checker(TextParams, text_contains),
     "text_no_uuid_v1": fixed(text_no_uuid),
+    "single_advertised_tool_call_v1": fixed(tool_checks.single_advertised_tool_call),
     "scratchpad_comments_v1": fixed(fixed_checks.scratchpad_comments),
     "review_sections_v1": fixed(fixed_checks.review_sections),
     "max_100_words_v1": fixed(fixed_checks.max_100_words),

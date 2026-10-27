@@ -27,6 +27,16 @@ needs; omit it to require all), `text_contains_v1` (`source`: `answer` or
 `artifact:<name>`; `literal`) and `text_no_uuid_v1` (fails if the answer or any assistant
 message contains a UUID; tool calls, tool results and context are not checked).
 
+`single_advertised_tool_call_v1` takes no parameters and requires exactly one new
+function call to a name in the request's advertised function registry, with JSON-object
+arguments satisfying that function's parameter schema. Use `tool_call_response` to
+grade an unexecuted next call. Supplied history stays context; prose and reasoning
+mentions do not count as calls. No call, multiple calls, an unlisted name, or malformed
+arguments fail. Python syntax, `await` usage and execution are not assessed. An invalid
+or missing registry, unresolved schema reference, or incomplete trajectory is
+unscorable. Schema references are resolved locally without network retrieval. This
+checker measures the one-call reproduction contract, not every IF-TOOLGROUND scenario.
+
 The fixed output checks in `fixed_checks.py` take no parameters. They parse the answer as
 CommonMark with `markdown-it-py`, so code blocks, code spans and quotes don't count as the
 answer's own structure:
