@@ -37,7 +37,7 @@ def setup(tmp_path: Path):
     )
     sandbox = SimpleNamespace(
         _handle=SimpleNamespace(sandbox_id="task-sandbox"),
-        exec=AsyncMock(return_value=SimpleNamespace(stdout="/work/task\n", stderr="", return_code=0)),
+        exec=AsyncMock(return_value=SimpleNamespace(stdout="/work/task\n", stderr="", return_code=0, error_type=None)),
         serialize=AsyncMock(return_value={"sandbox_id": "task-sandbox"}),
         download=AsyncMock(side_effect=lambda remote, local: Path(local).write_text("1")),
         stop=AsyncMock(),
