@@ -141,7 +141,7 @@ class TestTrajectoryOutput:
         calls_out = [item for item in output if item["type"] == "function_call"]
         outputs = [item for item in output if item["type"] == "function_call_output"]
         assert [item["call_id"] for item in calls_out] == [item["call_id"] for item in outputs] == ["a", "b"]
-        assert [item["output"] for item in outputs] == ["files", ""]
+        assert [item["output"] for item in outputs] == ["", "files"]
 
     def test_raw_content_preserves_training_fields_and_commands(self) -> None:
         trajectory = {
