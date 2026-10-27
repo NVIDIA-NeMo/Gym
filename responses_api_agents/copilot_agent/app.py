@@ -143,7 +143,11 @@ def parse_copilot_events(events: list[tuple[float, dict[str, JsonValue]]], invoc
     for _, event in events:
         kind = event.get("type")
         data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        # Copilot 1.0.103 marks sub-agent events with agentId or data.parentToolCallId.
+        root = not (event.get("agentId") or data.get("agentId") or data.get("parentToolCallId"))
         if kind == "assistant.message":
+            if root and (transcript.error or {}).get("errorType") == "model_call":
+                transcript.error = None  # Copilot recovered from the failed call.
             message_start = len(transcript.output)
             content = data.get("content")
             if isinstance(content, str) and content.strip():
@@ -224,7 +228,8 @@ def parse_copilot_events(events: list[tuple[float, dict[str, JsonValue]]], invoc
                 transcript.gaps.append(ObservationGap(code="tool_timing_unavailable", detail=call_id))
             if not isinstance(success, bool):
                 transcript.gaps.append(ObservationGap(code="tool_outcome_unavailable", detail=call_id))
-        elif kind == "session.error":
+        elif kind == "session.error" and root and data.get("errorType") != "hook":
+            # Copilot's exit status ignores sub-agent and hook errors; so does the response status.
             transcript.error = data
         elif kind == "result":
             transcript.result = event
@@ -588,9 +593,8 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         failure: BaseException | None = None,
     ) -> AgentObservationBundle:
         invocation_id = state.request.episode_id.capture_key
-        # Spans lead with failed attempts; events add calls whose span the exporter never wrote.
-        span_ids = usage.response_ids if usage is not None else []
-        response_ids = [*span_ids, *(id_ for id_ in transcript.response_ids if id_ not in span_ids)]
+        # Span IDs first; events add calls whose span the exporter never wrote.
+        response_ids = list(dict.fromkeys([*(usage.response_ids if usage else []), *transcript.response_ids]))
         gaps = [
             ObservationGap(code="subagent_hierarchy_unavailable", invocation_id=invocation_id),
             ObservationGap(code="compaction_observations_unavailable", invocation_id=invocation_id),
@@ -606,7 +610,7 @@ class CopilotAgent(SimpleResponsesAPIAgent):
                 )
             )
         if usage is not None and usage.compaction_state_unavailable:
-            gaps.append(ObservationGap(code="native_compaction_state_unavailable"))
+            gaps.append(ObservationGap(code="compaction_state_unavailable"))
         cleanup = state.session.cleanup
         access = state.request.sandbox_access
         if cleanup is None:
@@ -804,7 +808,12 @@ class CopilotAgent(SimpleResponsesAPIAgent):
                     detail="Copilot wrote no OpenTelemetry span for " + ", ".join(missing_spans),
                 )
             )
-        elif usage is not None and not known:
+        elif (
+            usage is not None
+            and not known
+            and not usage.compaction_usage_unavailable
+            and not usage.compaction_state_unavailable
+        ):
             gaps.append(
                 ObservationGap(code="partial_model_usage_unavailable", detail="a model call reported no usage")
             )

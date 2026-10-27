@@ -117,14 +117,16 @@ references, harness tool timing, sandbox identity and execution outcome, and exp
 Observed rejected model calls contribute zero completed-response tokens; missing chat telemetry stays unknown.
 A call that Copilot's events report but that has no chat span also makes aggregate usage unknown
 (`model_usage_spans_missing`); its model-call reference comes from the events.
-Copilot 1.0.103 omits compaction calls from its native usage spans. The adapter also checks its persisted
+Copilot 1.0.103 omits compaction calls from its OpenTelemetry chat spans. The adapter also checks its persisted
 session events, including late background compaction attempts with no subsequent chat span. Aggregate
 response usage stays unknown after observed compaction (`compaction_model_usage_unavailable`) or when
-the native event store cannot be inspected (`native_compaction_state_unavailable`). Enable Gym Model
+Copilot's session event store cannot be inspected (`compaction_state_unavailable`). Enable Gym Model
 Server capture to retain per-call token counts, including compaction.
 
 A provider error that Copilot reports (`session.error`) returns a failed response with a classified cause:
 an HTTP status becomes `model_request_error`, and an unreachable provider becomes `model_transport_error`.
+As in Copilot's own exit status, errors from sub-agents or hooks, and a model-call error followed by a
+later root assistant message, do not fail the run.
 The Environment Server decides grading and retries. Copilot retries 429 and 5xx responses itself before
 reporting. A timeout returns partial work as incomplete. Other runner or termination failures are execution
 errors. A deadline can interrupt a tool before Copilot reports its result. That tool remains incomplete,

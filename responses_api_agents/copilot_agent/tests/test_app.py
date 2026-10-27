@@ -233,6 +233,46 @@ def test_parse_events_keeps_unfinished_and_failed_tools():
     assert {gap.code for gap in transcript.gaps} == {"tool_timing_unavailable"}
 
 
+@pytest.mark.parametrize(
+    "error_event,fails",
+    [
+        ({"agentId": "sub-1", "data": {"errorType": "query", "message": "503", "statusCode": 503}}, False),
+        ({"data": {"errorType": "query", "message": "503", "parentToolCallId": "call-9"}}, False),
+        ({"data": {"errorType": "hook", "message": "hook failed"}}, False),
+        # A later root assistant message shows that Copilot recovered from the failed call.
+        ({"data": {"errorType": "model_call", "message": "fetch failed"}}, False),
+        ({"data": {"errorType": "query", "message": "400 rejected", "statusCode": 400}}, True),
+    ],
+    ids=["subagent", "subagent-tool", "hook", "recovered-model-call", "root-query"],
+)
+def test_only_root_errors_that_end_the_run_fail_it(error_event, fails):
+    events = copilot_events()
+    events.insert(4, {"type": "session.error", **error_event})
+    transcript = parse_copilot_events([(0.0, e) for e in events], "inv")
+    assert (transcript.error is not None) is fails
+    assert transcript.output[-1].content[0].text == "Fixed"
+
+
+def test_unrecovered_model_call_error_fails_the_run():
+    events = copilot_events(result=False)[:4] + [
+        {"type": "session.error", "data": {"errorType": "model_call", "message": "fetch failed"}},
+        {"type": "result", "sessionId": "copilot-run-1", "exitCode": 0},
+    ]
+    assert parse_copilot_events([(0.0, e) for e in events], "inv").error["message"] == "fetch failed"
+
+
+def test_subagent_error_keeps_a_finished_run_gradable(setup):
+    agent, sandbox = setup
+    sandbox.events = copilot_events()
+    sandbox.events.insert(
+        4, {"type": "session.error", "agentId": "sub-1", "data": {"errorType": "query", "statusCode": 503}}
+    )
+    result, _ = run_session(agent)
+    body = result.json()
+    assert body["status"] == "completed" and body["error"] is None
+    assert AGENT_OUTCOME_METADATA_KEY not in body["metadata"]
+
+
 def test_nonzero_shell_exit_is_a_failed_tool_call():
     # Copilot 1.0.103 reports success for a shell command that exits 7 (seen in the tool_failure probe).
     events = copilot_events()
@@ -429,9 +469,9 @@ def test_late_or_unobserved_compaction_does_not_publish_partial_totals(setup, co
         assert result.json()["usage"]["total_tokens"] == 20
     else:
         assert result.json()["usage"] is None
-        assert (
-            "compaction_model_usage_unavailable" if compaction_state else "native_compaction_state_unavailable"
-        ) in gaps
+        assert ("compaction_model_usage_unavailable" if compaction_state else "compaction_state_unavailable") in gaps
+        # Every chat span reported usage; only compaction makes the aggregate unknown.
+        assert "partial_model_usage_unavailable" not in gaps
 
 
 def test_reported_provider_error_is_a_classified_failed_response(setup):
