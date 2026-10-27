@@ -10261,6 +10261,88 @@ class TestTurnsFromModelCalls:
         assert turns[0].model_calls[0].model_call_id == "first"
         assert [turn.resolved for turn in turns] == [None, True]
 
+    @pytest.mark.parametrize("reference_key", ["model_call_id", "response_id", "both"])
+    def test_compaction_helpers_are_retained_and_billed_without_policy_turns(self, reference_key: str) -> None:
+        model_ref = {"type": "responses_api_models", "name": "policy_model"}
+        helper_ref = {"model_ref": model_ref}
+        if reference_key in ("model_call_id", "both"):
+            helper_ref["model_call_id"] = "summary"
+        if reference_key in ("response_id", "both"):
+            helper_ref["response_id"] = "resp-summary"
+        result = {
+            "resolved": True,
+            "ng_agent_observations": {
+                "source": "opencode",
+                "records": [
+                    {
+                        "kind": "agent_invocation",
+                        "invocation_id": "root",
+                        "model_calls": [{"model_call_id": call_id} for call_id in ("first", "summary", "last")],
+                    },
+                    {
+                        "kind": "context_compaction",
+                        "invocation_id": "root",
+                        "model_calls": [helper_ref],
+                        "outcome": "completed",
+                        "summary": "Continue the task.",
+                    },
+                ],
+            },
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": call_id,
+                        "response_id": f"resp-{call_id}",
+                        "model_ref": model_ref,
+                        "response": {"output": []},
+                        "tokens_in": tokens_in,
+                        "tokens_out": 2,
+                        "started_at": index + 1.0,
+                        "status_code": 200,
+                    }
+                    for index, (call_id, tokens_in) in enumerate((("first", 10), ("summary", 20), ("last", 30)))
+                ]
+            },
+        }
+
+        _attach_trajectory_record({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}, result)
+
+        trajectory = result[NG_TRAJECTORY_KEY]
+        assert [turn["model_calls"][0]["model_call_id"] for turn in trajectory["turns"]] == ["first", "last"]
+        assert [turn["turn_no"] for turn in trajectory["turns"]] == [1, 2]
+        assert [turn["resolved"] for turn in trajectory["turns"]] == [None, True]
+        assert [call["model_call_id"] for call in trajectory["model_calls"]] == ["first", "summary", "last"]
+        assert [ref["model_call_id"] for ref in trajectory["invocations"][0]["model_calls"]] == [
+            "first",
+            "summary",
+            "last",
+        ]
+        perf = _build_ng_perf(result, rollout_latency_ms=None)
+        assert perf["num_turns"] == 2
+        assert perf["prompt_tokens"] == 60
+        assert perf["completion_tokens"] == 6
+        assert perf["token_observability_coverage"] == 1.0
+
+    @pytest.mark.parametrize("conflict", ["invocation", "response", "model", "ambiguous"])
+    def test_invalid_compaction_reference_does_not_hide_policy_calls(self, conflict: str) -> None:
+        from nemo_gym.rollout_observability import ContextCompactionObservation
+
+        calls = [self._call("policy", {"output": []}, started_at=1.0, response_id="resp-policy")]
+        reference = {
+            "model_call_id": "policy",
+            "response_id": "wrong" if conflict == "response" else "resp-policy",
+            "model_ref": {"type": "responses_api_models", "name": "wrong" if conflict == "model" else "policy_model"},
+        }
+        if conflict == "ambiguous":
+            calls.append(calls[0].model_copy(deep=True))
+        compaction = ContextCompactionObservation.model_validate(
+            {"invocation_id": "other" if conflict == "invocation" else "root", "model_calls": [reference]}
+        )
+        turns = nemo_gym.rollout_collection._turns_from_model_calls(
+            "task", "rollout", [self._invocation("root", ["policy"])], calls, None, compactions=[compaction]
+        )
+        assert len(turns) == len(calls)
+
     def test_chat_completion_calls_split_the_message_and_its_reasoning(self) -> None:
         message = {"role": "assistant", "content": "", "reasoning_content": "think", "tool_calls": [{"id": "t1"}]}
         calls = [self._call("only", {"choices": [{"message": message}]}, started_at=1.0)]
