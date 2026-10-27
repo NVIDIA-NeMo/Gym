@@ -390,7 +390,26 @@ For a multi-process deployment, run the check against the real shared backend ra
 
 A sink that implements `begin_call` but not the optional `record_engine_refusal` extension passes with a `ConformanceWarning` named `engine_refusal_resolution` in place of that check. Such a sink cannot resolve the capture intent of a call the engine refuses, so a rollout that runs into the context window freezes incomplete and is masked by default (see `mask_incomplete_when_attributed` above).
 
-### Provide unique rollout ids
+## Let the framework own context reconstruction
+
+For compaction-aware training with a compatible framework worker, enable
+`token_id_capture.parent_resolution: source_history` together with `external_staging: true`,
+`external_staging_backend: vllm_worker`, and `rebuild_response: false`.
+See [Source-history continuity and context compaction](/main/model-server/model-call-capture#source-history-continuity-and-context-compaction)
+for configuration prerequisites, supported APIs, measurement, and admission closure.
+
+The harness keeps using rollout-correlated Responses or Chat requests with explicit history.
+It owns compaction of the next input and needs no special parent header or segment definition.
+Return the complete accepted execution history or existing call references, including actions
+before compaction. The shortened next input alone is not that history. NeMo RL joins the returned
+evidence to captured calls and reconstructs their context chains; Gym does not replace `response.output`.
+Concurrent capture is permitted, but selecting subagent calls for training remains the framework's
+responsibility. Capture alone cannot establish which calls the harness accepted.
+
+The single-chain rebuilding steps and metrics above describe Gym's local capture path. Framework-owned
+reconstruction has its own finalization and validity checks; it does not use that delivery function.
+
+## Provide unique rollout ids
 
 Gym normally derives the capture id from the task and rollout indices. If a custom training loop restarts those indices on each step, explicitly provide a unique `_ng_rollout_id`:
 

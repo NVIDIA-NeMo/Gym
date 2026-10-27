@@ -849,8 +849,9 @@ class AsyncSandboxCompose:
             if done.stdout and done.stdout.strip():
                 if condition == "service_completed_successfully" and done.stdout.strip() == "0":
                     return
-                log = await self.services[name].exec(f"tail -c 4096 {plan['runtime']}/log")
-                raise RuntimeError(f"Compose service {name!r} exited ({done.stdout.strip()}): {log.stdout}")
+                raise RuntimeError(
+                    f"Compose service {name!r} exited ({done.stdout.strip()}); {await self._command_log_note(name)}"
+                )
             if condition == "service_completed_successfully":
                 await asyncio.sleep(self.poll_interval_s)
                 continue
@@ -874,7 +875,12 @@ class AsyncSandboxCompose:
             if not in_start_period:
                 failures += 1
                 if failures >= health.get("retries", 3):
-                    raise RuntimeError(f"Compose service {name!r} unhealthy: {detail}")
+                    # The healthcheck's own output rarely says why (a connection refused is "exit status 1"); the
+                    # service's command log, which the run script redirects stdout and stderr to, usually does. A
+                    # bounded tail of it travels with the failure, as it does for a service that exited.
+                    raise RuntimeError(
+                        f"Compose service {name!r} unhealthy: {detail}; {await self._command_log_note(name)}"
+                    )
             interval = health.get("start_interval", "5s") if in_start_period else health.get("interval", "30s")
             await asyncio.sleep(_seconds(interval))
 
@@ -903,6 +909,19 @@ class AsyncSandboxCompose:
                 f"Service {name!r}: cannot create its working directory {workdir!r}: "
                 f"{result.stderr or result.stdout or f'exit status {result.return_code}'}"
             )
+
+    async def _command_log_note(self, name: str) -> str:
+        """What a failed service's command log says, for the failure's message: a bounded tail of the log the run
+        script redirects the command's stdout and stderr to, a note that it wrote nothing, or why the log could not
+        be read. The read is a second exec after the verdict that names the service, and the service's sandbox may
+        be gone by then (a provider that ends an OOM-killed pod between the final healthcheck and this read), so
+        anything it raises goes into the message rather than replacing the verdict."""
+        try:
+            log = await self.services[name].exec(f"tail -c 4096 {self._plans[name]['runtime']}/log", timeout_s=30)
+        except Exception as exc:
+            return f"its command log could not be read ({type(exc).__name__}: {exc})"
+        output = (log.stdout or "").strip() if log.return_code == 0 else ""
+        return f"last output of its command: {output}" if output else "its command wrote no output"
 
     async def start(self):
         if self._started or self._closed:

@@ -464,7 +464,14 @@ def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
     received = {}
 
     def fake_health_check(
-        run_dir, *, rollout_file=None, workers=None, ignored_checks=(), limits=None, json_output=False
+        run_dir,
+        *,
+        rollout_file=None,
+        workers=None,
+        ignored_checks=(),
+        limits=None,
+        json_output=False,
+        model_call_capture_dir=None,
     ):
         received.update(
             run_dir=run_dir,
@@ -472,6 +479,7 @@ def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
             workers=workers,
             ignored_checks=ignored_checks,
             json_output=json_output,
+            model_call_capture_dir=model_call_capture_dir,
         )
 
     monkeypatch.setattr(cli_eval, "health_check_rollouts", fake_health_check)
@@ -501,6 +509,7 @@ def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
         "workers": 3,
         "ignored_checks": ["model_call_missing_token_counts", "model_call_zero_completion_tokens"],
         "json_output": True,
+        "model_call_capture_dir": None,
     }
 
 
@@ -2631,6 +2640,19 @@ def test_only_inventory_rows_count_and_non_object_sidecar_lines_are_skipped(tmp_
 
     assert (artifacts["expected"], artifacts["missing"]) == (4, 1)
     assert artifacts["failed"]["total"] == 0
+
+
+def test_the_reports_record_the_rollouts_they_were_computed_from(tmp_path: Path) -> None:
+    """The reports keep one name per folder whatever the rollouts file is called, so the quality summary names the
+    rollouts it was computed from, relative to its own folder (a Harbor run's summary links a report by it)."""
+    rollout_path = _write_fixture(tmp_path, [(_record(0, 0), [_call()])])
+    result = run_health_checks(rollout_path, workers=1)
+    assert json.loads(result.summary_path.read_text())["run"]["rollouts"] == ["rollouts.jsonl"]
+    elsewhere = run_health_checks(rollout_path, output_dir=tmp_path / "reports", workers=1)
+    assert json.loads(elsewhere.summary_path.read_text())["run"]["rollouts"] == ["../rollouts.jsonl"]
+    _inventory(tmp_path, 1)
+    provisional = health.write_provisional_summary(rollout_path, {(0, 0)})
+    assert json.loads(provisional.read_text())["run"]["rollouts"] == ["rollouts.jsonl"]
 
 
 def test_a_provisional_summary_without_a_reason_leaves_healthy_unknown(tmp_path: Path) -> None:

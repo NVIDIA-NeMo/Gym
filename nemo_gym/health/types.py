@@ -18,6 +18,7 @@ from nemo_gym.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
+from nemo_gym.health.timeouts import RolloutTiming
 
 
 TASK_INDEX_KEY = TASK_INDEX_KEY_NAME
@@ -25,6 +26,9 @@ ROLLOUT_INDEX_KEY = ROLLOUT_INDEX_KEY_NAME
 ROLLOUT_ID_KEY = ROLLOUT_ID_KEY_NAME
 QUALITY_SUMMARY_FILENAME = "quality_summary.json"
 ROLLOUT_VERDICTS_FILENAME = "rollout_verdicts.jsonl"
+# The key under the quality summary's ``run`` that names the rollouts file(s) it was computed from, relative to
+# the folder it is written in: the reports keep one name per folder whatever the rollouts file is called.
+QUALITY_SUMMARY_SOURCES_KEY = "rollouts"
 
 Verdict = Literal["healthy", "unhealthy", "unobserved"]
 # Where each limit a summary was judged by came from: the run's config, the run's own earlier summary, or an
@@ -173,6 +177,8 @@ class RolloutDigest(BaseModel):
     transcript_completion_tokens: int = 0
     capture_prompt_tokens: int = 0
     capture_completion_tokens: int = 0
+    # What this rollout contributes to `run.stats.timeouts`.
+    timing: RolloutTiming | None = None
 
 
 class HealthCheckResult(BaseModel):
