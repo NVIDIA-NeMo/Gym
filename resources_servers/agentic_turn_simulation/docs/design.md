@@ -150,9 +150,11 @@ result in both cut to 2,000 characters (head and tail kept), but never the polic
 the agent did and said. When `corrected_turn_item_range` marks the earlier turn the user is correcting, it is wrapped
 in `<rejected_turn>` and marked as the turn the user is correcting.
 
-**Voting and ties.** With several judges, only usable verdicts count. Each judge's `correct_ladder` is `no` if its
-steerability is `no`, else its `correct`, and the reward follows the majority of those ladders; the other axes are
-voted separately. Voting the ladder rather than the axes keeps the reward consistent with each judge's own reading:
+**Voting and ties.** With several judges, only usable verdicts count: a usable verdict has every field the verdict
+schema requires, each a string and one of the values the schema lists, so a vote with a missing or null steerability
+can never pay. A judge reply that is not usable (a cut-off one included, unless every field was already written) is
+retried up to `judge_max_attempts`. Each judge's `correct_ladder` is `no` if its steerability is `no`, else its
+`correct`, and the reward follows the majority of those ladders; the other axes are voted separately. Voting the ladder rather than the axes keeps the reward consistent with each judge's own reading:
 two judges that each fail the turn for a different reason still fail it. Ties go to `no` for steerability,
 correctness and the ladder, to `ok` for `request_questionable`, and to `no` for `discard`, because a reward should not
 be paid on a coin flip. `blocked_by` comes from the judges that marked the turn incorrect, so a dissenting "none"

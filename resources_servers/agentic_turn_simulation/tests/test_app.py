@@ -47,7 +47,7 @@ from resources_servers.agentic_turn_simulation.harnesses.sandbox import (
     file_hash,
 )
 from resources_servers.agentic_turn_simulation.items import UNPARSEABLE_ARGS_KEY
-from resources_servers.agentic_turn_simulation.judge import evaluation_schema, load_prompt
+from resources_servers.agentic_turn_simulation.judge import evaluation_schema, load_prompt, parse_verdict
 from resources_servers.agentic_turn_simulation.simulator import SIMULATOR_FAILED, simulator_failure
 from resources_servers.agentic_turn_simulation.tests.support import (
     SERVER,
@@ -933,12 +933,19 @@ class TestVerifyJudge:
         assert (await server.verify(req(), _verify_body())).reward == 1.0
         assert sent[1]["json"]["max_tokens"] == expected and "max_completion_tokens" not in sent[1]["json"]
 
-    async def test_truncated_but_salvageable_verdict_is_used(self) -> None:
+    async def test_a_truncated_verdict_missing_fields_is_retried(self) -> None:
         server = make_server()
-        text = '{"analysis": "ok", "addresses_concern": "yes", "correct": "no", "blocked_by": "infra", "req'
-        sent = script(server, [judge_reply(text=text, finish="length")])
+        text = '{"analysis": "ok", "addresses_concern": "yes", "correct": "yes", "blocked_by": "none", "req'
+        sent = script(server, [judge_reply(text=text, finish="length"), judge_reply(BAD)])
         out = await server.verify(req(), _verify_body())
-        assert len(sent) == 1 and out.reward == 0.0 and out.blocked_by == "infra"
+        assert len(sent) == 2 and sent[1]["json"]["max_tokens"] == 4000  # retried with double the budget
+        assert (out.reward, out.blocked_by) == (0.0, "model") and "truncated" not in out.judge_verdicts[0]
+
+    async def test_a_truncated_verdict_with_every_field_is_used(self) -> None:
+        server = make_server()
+        sent = script(server, [judge_reply(text=json.dumps(BAD)[:-1], finish="length")])
+        out = await server.verify(req(), _verify_body())
+        assert len(sent) == 1 and out.reward == 0.0 and out.blocked_by == "model"
         assert out.judge_verdicts[0]["truncated"] is True
 
     async def test_per_judge_overrides(self) -> None:
@@ -964,11 +971,65 @@ class TestVerifyJudge:
         assert sleep.await_count == 1  # a schema rejection has nothing to relax: an ordinary retry
 
     async def test_verdict_fields_that_are_not_strings_are_dropped(self) -> None:
-        server = make_server()
-        script(server, [judge_reply({**GOOD, "discard": False, "request_questionable": ["ok"]})])
+        # Dropped, they leave the verdict short of the schema: it is retried, then the rollout is masked.
+        server = make_server(judge_max_attempts=2)
+        verdict = {**GOOD, "discard": False, "request_questionable": ["ok"]}
+        sent = script(server, [judge_reply(verdict), judge_reply(verdict)])
         out = await server.verify(req(), _verify_body())
-        assert out.reward == 1.0 and (out.discard, out.request_questionable) == (None, None)
-        assert "discard" not in out.judge_verdicts[0]
+        assert len(sent) == 2 and getattr(out, MASK_SAMPLE_FIELD) is True
+        assert out.failure_kind == failure_kinds.JUDGE_FAILED and out.reward == 0.0
+        assert "discard" not in out.judge_verdicts[0] and "request_questionable" not in out.judge_verdicts[0]
+
+    @pytest.mark.parametrize(
+        "verdict",
+        [
+            {**GOOD, "addresses_concern": None},
+            {k: v for k, v in GOOD.items() if k != "addresses_concern"},
+            {**GOOD, "addresses_concern": "maybe"},
+            {**GOOD, "discard": True},
+            {**GOOD, "blocked_by": "the judge"},
+            {k: v for k, v in GOOD.items() if k != "reason"},
+        ],
+        ids=[
+            "steer-null",
+            "steer-missing",
+            "steer-invalid",
+            "discard-boolean",
+            "blocked_by-invalid",
+            "reason-missing",
+        ],
+    )
+    async def test_a_verdict_short_of_the_schema_is_retried_and_never_pays(
+        self, verdict: dict[str, Any], sleep: AsyncMock
+    ) -> None:
+        server = make_server(judge_max_attempts=3)
+        sent = script(server, [judge_reply(verdict)] * 3)
+        out = await server.verify(req(), _verify_body())
+        assert len(sent) == 3 and sleep.await_count == 3
+        assert getattr(out, MASK_SAMPLE_FIELD) is True and out.failure_kind == failure_kinds.JUDGE_FAILED
+        assert (out.reward, out.correct_ladder, out.correct) == (0.0, None, None)
+        assert out.judge_verdicts == [parse_verdict(json.dumps(verdict))]  # the last one, as parsed, for inspection
+
+    async def test_a_verdict_short_of_the_schema_is_retried_until_a_usable_one(self) -> None:
+        server = make_server()
+        sent = script(server, [judge_reply({**GOOD, "addresses_concern": None}), judge_reply(BAD)])
+        out = await server.verify(req(), _verify_body())
+        assert len(sent) == 2 and not getattr(out, MASK_SAMPLE_FIELD)
+        assert (out.reward, out.correct_ladder, out.judge_verdicts) == (0.0, "no", [BAD])
+
+    async def test_judges_without_a_usable_verdict_leave_the_vote(self) -> None:
+        # Two judges say `correct: yes` with a null steerability: they do not outvote the one valid verdict.
+        server = make_server(n_judges=3, judge_max_attempts=1)
+        unusable = {**GOOD, "addresses_concern": None}
+        replies = {
+            "judge_0": [judge_reply(unusable)],
+            "judge_1": [judge_reply(unusable)],
+            "judge_2": [judge_reply(BAD)],
+        }
+        script(server, replies)
+        out = await server.verify(req(), _verify_body())
+        assert (out.reward, out.correct_ladder, out.judge_verdicts) == (0.0, "no", [unusable, unusable, BAD])
+        assert not getattr(out, MASK_SAMPLE_FIELD)
 
     @pytest.mark.parametrize(
         "verdicts, reward, usable",

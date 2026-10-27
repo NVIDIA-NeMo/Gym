@@ -127,22 +127,76 @@ class TestParseVerdict:
         dropped = ("addresses_concern", "discard", "request_questionable")
         expected = {k: v for k, v in verdict.items() if k not in dropped}
         assert parse_verdict(json.dumps(verdict)) == expected  # null and non-verdict keys are kept
-        assert usable(expected) and combine([expected])["discard"] is None
+        # Dropped and null fields leave the verdict short of the schema: it pays nothing.
+        assert not usable(expected) and combine([expected])["n_usable"] == 0
 
     def test_truncated_output_is_salvaged(self) -> None:
         text = (
             '{"analysis": "the agent ran it", "addresses_concern": "yes", "correct": "no", "blocked_by": "infra", "rea'
         )
-        assert parse_verdict(text) == {
+        salvaged = parse_verdict(text)
+        assert salvaged == {
             "analysis": "the agent ran it",
             "addresses_concern": "yes",
             "correct": "no",
             "blocked_by": "infra",
             "truncated": True,
         }
+        assert not usable(salvaged)  # fields are missing: the judge is retried
+
+    def test_a_salvage_with_every_field_is_usable(self) -> None:
+        # Cut off after the last field, before the closing brace.
+        salvaged = parse_verdict(json.dumps(BAD)[:-1])
+        assert salvaged == {**BAD, "truncated": True}
+        assert usable(salvaged) and correct_ladder(salvaged) == "no"
 
     def test_salvage_needs_the_required_key(self) -> None:
         assert parse_verdict('{"analysis": "x", "correct": "yes", "blocked_by": "none"') is None
+
+
+_MISSING = object()
+
+
+def _invalid_field_cases() -> list[Any]:
+    """For each field the verdict schema requires: the field missing, null, a boolean, and a value the schema does
+    not allow (outside its enum, or not a string where it has none)."""
+    schema = evaluation_schema()
+    cases = []
+    for key in schema["required"]:
+        enum = schema["properties"][key].get("enum")
+        for label, value in (
+            ("missing", _MISSING),
+            ("null", None),
+            ("boolean", True),
+            ("invalid", "maybe" if enum else 1),
+        ):
+            cases.append(pytest.param(key, value, id=f"{key}-{label}"))
+    return cases
+
+
+class TestUsable:
+    @pytest.mark.parametrize("key, value", _invalid_field_cases())
+    def test_a_missing_or_invalid_required_field_is_unusable(self, key: str, value: Any) -> None:
+        verdict = {k: v for k, v in GOOD.items() if k != key} if value is _MISSING else _v(**{key: value})
+        assert not usable(verdict) and correct_ladder(verdict) is None
+        # It never takes part in the vote: alone it leaves no usable verdict, beside a valid one it is ignored.
+        assert combine([verdict])["n_usable"] == 0 and combine([verdict])["correct_ladder"] is None
+        assert combine([verdict, BAD])["n_usable"] == 1 and combine([verdict, BAD])["correct_ladder"] == "no"
+
+    def test_every_value_the_schema_allows_is_usable(self) -> None:
+        schema = evaluation_schema()
+        assert set(schema["required"]) == set(GOOD)
+        for key in schema["required"]:
+            for value in schema["properties"][key].get("enum", ["any text"]):
+                assert usable(_v(**{key: value})), (key, value)
+
+    def test_extra_keys_do_not_matter(self) -> None:
+        assert usable(_v(truncated=True, note=[1]))
+
+    def test_correct_yes_without_a_valid_steerability_pays_nothing(self) -> None:
+        # `correct: yes` alone is not a vote: steerability gates it, so it must be a valid answer too.
+        for steer in (None, "", "YES"):
+            assert correct_ladder(_v(addresses_concern=steer)) is None
 
 
 class TestLadder:
@@ -154,8 +208,11 @@ class TestLadder:
             (GOOD, "yes"),
             (BAD, "no"),
             (_v(addresses_concern="no"), "no"),  # did not engage: not correct, whatever `correct` says
+            (_v(addresses_concern="no", correct="no", blocked_by="model"), "no"),
             (_v(correct="maybe"), None),
+            (_v(addresses_concern="no", correct="maybe"), None),  # an invalid field makes the whole vote unusable
             ({"addresses_concern": "yes"}, None),
+            ({"addresses_concern": "no"}, None),
         ],
     )
     def test_correct_ladder_and_usable(self, verdict, ladder) -> None:

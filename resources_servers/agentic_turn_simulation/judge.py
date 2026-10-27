@@ -141,7 +141,8 @@ def parse_verdict(text: str | None) -> dict[str, Any] | None:
         if found is not None:
             # The vote and the verify response take verdict fields as strings (or null): drop any other value.
             return {k: v for k, v in found.items() if k not in VERDICT_FIELDS or isinstance(v, str) or v is None}
-    # A judge that ran out of output budget usually wrote the verdicts before the object broke.
+    # A judge that ran out of output budget usually wrote the verdicts before the object broke. The salvage is usable
+    # only when it holds every field the schema requires (`usable`); otherwise the judge is retried.
     salvaged: dict[str, Any] = {}
     for key in VERDICT_FIELDS + ["reason", "analysis"]:
         match = re.search(rf'"{key}"\s*:\s*"([^"]+)"', text)
@@ -153,19 +154,35 @@ def parse_verdict(text: str | None) -> dict[str, Any] | None:
     return salvaged
 
 
-def correct_ladder(verdict: dict[str, Any] | None) -> str | None:
-    """Correctness presupposes engagement: a turn that did not address the user is not correct."""
-    if not verdict:
-        return None
-    if verdict.get("addresses_concern") == "no":
-        return "no"
-    value = verdict.get("correct")
-    return value if value in ("yes", "no") else None
+@lru_cache(maxsize=1)
+def _required_fields() -> tuple[tuple[str, frozenset[str] | None], ...]:
+    """Each field the verdict schema requires, with the values its `enum` allows (None: any string)."""
+    schema = evaluation_schema()
+    properties = schema["properties"]
+    return tuple(
+        (key, frozenset(properties[key]["enum"]) if "enum" in properties[key] else None) for key in schema["required"]
+    )
 
 
 def usable(verdict: dict[str, Any] | None) -> bool:
-    """A verdict the reward can be computed from."""
-    return correct_ladder(verdict) is not None
+    """A verdict the reward can be computed from: one that fully matches the verdict schema's required fields, each
+    present, a string and, where the schema lists values, one of them. A partial verdict (a salvaged cut-off one
+    included) or a field the judge left null or gave another type is unusable, so it can never pay a reward."""
+    if not verdict:
+        return False
+    for key, allowed in _required_fields():
+        value = verdict.get(key)
+        if not isinstance(value, str) or (allowed is not None and value not in allowed):
+            return False
+    return True
+
+
+def correct_ladder(verdict: dict[str, Any] | None) -> str | None:
+    """Correctness presupposes engagement: a turn that did not address the user is not correct. None for a verdict
+    that is not `usable`."""
+    if not usable(verdict):
+        return None
+    return "no" if verdict["addresses_concern"] == "no" else verdict["correct"]
 
 
 def _majority(values: list[Any], axis: str) -> Any:
