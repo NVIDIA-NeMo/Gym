@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import runpy
 import time
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
@@ -19,13 +20,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import nemo_gym.server_utils
 from environment_servers.single_agent_turn.app import (
+    SessionHandles,
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
     SingleAgentTurnResult,
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 from nemo_gym.agent_outcome import AgentOutcomePolicyConfig
-from nemo_gym.base_environment_server import is_retryable_dependency_error
+from nemo_gym.base_environment_server import HandledEpisodeError, is_retryable_dependency_error
 from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     ResourcesCloseSessionRequest,
@@ -34,7 +36,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.server_utils import BaseServerConfig, ServerClient, SimpleServer
@@ -1396,3 +1398,148 @@ async def test_invalid_outcome_is_retained_without_grading_or_retry(raw: str) ->
     assert result.failure.partial_response.model_dump(mode="json") == response
     assert "/verify" not in [path for _, path, _ in client.calls]
     assert [path for _, path, _ in client.calls][-1] == "/close_session"
+
+
+@pytest.mark.parametrize(
+    "authored, prefix",
+    [
+        ("Authored task", [{"role": "user", "content": "Authored task"}]),
+        ("", []),
+        ([], []),
+        ([{"role": "system", "content": "Policy"}], [{"role": "system", "content": "Policy"}]),
+        (
+            [
+                {"role": "system", "content": "Policy"},
+                {"type": "reasoning", "id": "rs_history", "summary": []},
+                {"type": "function_call", "call_id": "call_history", "name": "shell", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_history", "output": "Done"},
+                {"role": "user", "content": "Authored task"},
+            ],
+            [
+                {"role": "system", "content": "Policy"},
+                {"type": "reasoning", "id": "rs_history", "summary": []},
+                {"type": "function_call", "call_id": "call_history", "name": "shell", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_history", "output": "Done"},
+                {"role": "user", "content": "Authored task"},
+            ],
+        ),
+    ],
+    ids=["string", "empty-string", "empty-list", "system-list", "mixed-list"],
+)
+@pytest.mark.parametrize(
+    "seed_fields",
+    [{}, {"observation": None}, {"observation": ""}, {"observation": " \nReset prompt\t"}],
+    ids=["missing", "null", "empty", "text"],
+)
+async def test_seed_observation_is_appended_only_to_the_agent_request(
+    authored, prefix: list, seed_fields: dict
+) -> None:
+    environment, client = _environment_server()
+    client.responses[0] = _Response({"resources_session_id": "resources-session", **seed_fields})
+    request = _request()
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=authored,
+        model="authored-model",
+        temperature=0.5,
+        max_output_tokens=42,
+        tools=[{"type": "function", "name": "shell", "parameters": {"type": "object"}, "strict": False}],
+    )
+    request.task.task_input.responses_create_params = params
+    original = deepcopy(request.model_dump(mode="json", exclude_unset=True))
+    expected = params.model_dump(mode="json", exclude_unset=True)
+    observation = seed_fields.get("observation")
+    if observation:
+        expected["input"] = [*prefix, {"role": "user", "content": observation}]
+
+    result = await environment.run_request(request)
+
+    assert result.failure is None
+    agent_call = next(kwargs for _, path, kwargs in client.calls if path.endswith("/v1/responses"))
+    assert agent_call["json"] == expected
+    verify_call = next(kwargs for _, path, kwargs in client.calls if path == "/verify")
+    assert verify_call["json"] == {
+        **request.task.task_input.task_data,
+        "responses_create_params": params.model_dump(mode="json", exclude_unset=True),
+        "response": _agent_response().model_dump(mode="json"),
+    }
+    assert verify_call["cookies"] == {"session": "updated-cookie"}
+    assert request.task.task_input.responses_create_params is params
+    assert request.model_dump(mode="json", exclude_unset=True) == original
+
+
+@pytest.mark.parametrize("retain_observation", [True, False], ids=["observation", "checkpoint-without-field"])
+async def test_serialized_invoke_boundary_preserves_the_seed_observation(
+    monkeypatch: pytest.MonkeyPatch, retain_observation: bool
+) -> None:
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant, EpisodeRecord
+
+    environment, client = _environment_server()
+    participant = EnvironmentParticipant(mode="exported")
+    environment._checkpoint = participant
+    client.responses[0] = _Response({"resources_session_id": "resources-session", "observation": "Reset prompt"})
+    request = _request()
+    request.task.task_input.responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input="")
+    saved: list[str] = []
+    invoke = environment._invoke_agent
+
+    async def export_before_invoke(request: SingleAgentTurnRequest, handles: SessionHandles) -> NeMoGymResponse:
+        [record] = participant.export_records(None)
+        assert record.boundary["next"] == "invoke_agent"
+        assert record.boundary["handles"]["observation"] == "Reset prompt"
+        saved.append(record.model_dump_json())
+        return await invoke(request, handles)
+
+    monkeypatch.setattr(environment, "_invoke_agent", export_before_invoke)
+    assert (await environment.run_request(request)).failure is None
+
+    record = EpisodeRecord.model_validate_json(saved[0])
+    if not retain_observation:
+        del record.boundary["handles"]["observation"]
+    restored, restored_client = _environment_server()
+    restored_participant = EnvironmentParticipant(mode="exported")
+    restored_participant.restore_records([EpisodeRecord.model_validate_json(record.model_dump_json())])
+    restored._checkpoint = restored_participant
+    del restored_client.responses[:2]
+    replacement = request.model_copy(
+        update={"episode_id": request.episode_id.model_copy(update={"attempt": request.episode_id.attempt + 1})}
+    )
+
+    result = await restored.run_request(replacement)
+
+    assert result.failure is None
+    assert [path for _, path, _ in restored_client.calls] == [
+        "/ng-rollout/rollout-a3/v1/responses",
+        "/v1/agent_sessions/close",
+        "/verify",
+        "/close_session",
+    ]
+    assert restored_client.calls[0][2]["json"] == {
+        "input": [{"role": "user", "content": "Reset prompt"}] if retain_observation else ""
+    }
+    verify = restored_client.calls[2][2]["json"]
+    assert verify["responses_create_params"] == {"input": ""}
+    assert replacement.task.task_input.responses_create_params.input == ""
+
+
+@pytest.mark.parametrize(
+    "seed_fields",
+    [
+        {"observation": []},
+        {"observation": "Untrusted", "extra": True},
+        {"resources_session_id": "different", "observation": "Untrusted"},
+    ],
+)
+async def test_unvalidated_seed_observations_do_not_enter_session_handles(
+    monkeypatch: pytest.MonkeyPatch, seed_fields: dict
+) -> None:
+    environment, client = _environment_server()
+    handles = SessionHandles.new()
+
+    async def reply(self: _Client, **kwargs) -> _Response:
+        return _Response({"resources_session_id": handles.resources_session_id, **seed_fields})
+
+    monkeypatch.setattr(_Client, "post", reply)
+    with pytest.raises(HandledEpisodeError) as error:
+        await environment._seed_resources(_request(), handles)
+    assert error.value.failure.stage == "seed"
+    assert handles.observation is None

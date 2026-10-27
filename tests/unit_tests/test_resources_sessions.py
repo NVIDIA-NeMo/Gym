@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from nemo_gym.base_resources_server import BaseSeedSessionResponse, BaseVerifyResponse
+import pytest
+from pydantic import ValidationError
+
+from nemo_gym.base_resources_server import BaseSeedSessionResponse, BaseVerifyResponse, ResourcesSeedSessionResponse
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.single_agent_turn_types import SingleAgentTurnResult
 
@@ -32,3 +35,20 @@ def test_single_agent_turn_result_preserves_benchmark_fields() -> None:
         }
     )
     assert response.model_dump()["benchmark_diagnostic"] == "kept"
+
+
+@pytest.mark.parametrize("observation", [None, "", " \nReset prompt\t"])
+def test_resources_seed_response_accepts_an_optional_observation(observation: str | None) -> None:
+    payload = {"resources_session_id": "resources-session", "observation": observation}
+    response = ResourcesSeedSessionResponse.model_validate(payload)
+    assert response.model_dump(exclude_unset=True) == payload
+    assert ResourcesSeedSessionResponse(resources_session_id="resources-session").observation is None
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [{"observation": 42}, {"observation": True}, {"observation": []}, {"observation": {}}, {"unknown": "value"}],
+)
+def test_resources_seed_response_keeps_observation_types_and_extra_fields_strict(fields: dict) -> None:
+    with pytest.raises(ValidationError):
+        ResourcesSeedSessionResponse.model_validate({"resources_session_id": "resources-session", **fields})

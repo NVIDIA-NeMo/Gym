@@ -106,6 +106,39 @@ async def verify(
 - **Custom task metadata** requires a `BaseVerifyRequest` subclass. Declare fields such as `answer` or `expected_state`; undeclared fields are not retained by the base Pydantic model.
 - **`request: Request`**, when added to either method signature, provides access to the per-rollout session ID.
 
+### Initial Observation for a Single Agent Turn
+
+A Resources Server used by `environment_servers/single_agent_turn` can return an
+optional `observation` string in its `ResourcesSeedSessionResponse` when the task
+prompt becomes available during seeding or an environment reset:
+
+```python
+return ResourcesSeedSessionResponse(
+    resources_session_id=body.resources_session_id,
+    observation="Inspect the initialized workspace and complete the task.",
+)
+```
+
+The `single_agent_turn` Environment Server appends a nonempty observation
+verbatim as one user message after a copy of the authored
+`responses_create_params.input`. A nonempty string input becomes the first user
+message; an empty string contributes no message. List inputs keep their items
+and order. Model settings and tools stay as authored, and `/verify` receives the
+original authored request. Omitting `observation`, returning `null`, or returning
+an empty string leaves the agent request unchanged.
+
+The observation is retained with the episode's session handles, so restoring at
+agent invocation still supplies it once without seeding again. This consumption
+behavior belongs to `single_agent_turn`; other Environment Servers and Agent
+Servers must define how they use a seed observation.
+
+<Note>
+When Resources supplies the prompt, leave the authored user input empty for an
+agent that accepts only one user message. For example, use
+`responses_create_params: {input: ""}`. Adding an authored user prompt as well
+would send two user messages.
+</Note>
+
 ### Direct HTTP Tool-Calling Protocol
 
 The seed/verify episode protocol does not itself define how the Agent acts on the environment. `simple_agent` supplies a direct HTTP function-tool protocol inside `responses()`:

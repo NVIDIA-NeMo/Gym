@@ -41,7 +41,7 @@ from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,
@@ -77,6 +77,7 @@ class SessionHandles(BaseModel):
     agent_cookies: dict[str, str] = Field(default_factory=dict)
     # Whether a checkpoint may replay the resources server's /verify, as its seed reply reported.
     resources_verify_step_type: StepType = "wait"
+    observation: str | None = None
 
     @classmethod
     def new(cls) -> "SessionHandles":
@@ -305,6 +306,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 failure_model=SingleAgentTurnFailure,
                 stage="seed",
             ) from error
+        handles.observation = seed.observation
         return seed
 
     async def _seed_agent(
@@ -387,11 +389,19 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             ) from error
 
     async def _invoke_agent(self, request: SingleAgentTurnRequest, handles: "SessionHandles") -> NeMoGymResponse:
+        params = request.task.task_input.responses_create_params
+        if handles.observation:
+            input_items = params.input
+            if isinstance(input_items, str):
+                input_items = [NeMoGymEasyInputMessage(role="user", content=input_items)] if input_items else []
+            params = params.model_copy(
+                update={"input": [*input_items, NeMoGymEasyInputMessage(role="user", content=handles.observation)]}
+            )
         try:
             agent_http_response = await self.server_client.post(
                 server_name=self.config.agent_server.name,
                 url_path=self._agent_responses_path(request),
-                json=request.task.task_input.responses_create_params,
+                json=params,
                 cookies=handles.agent_cookies,
                 # The episode's only activation.
                 # A restore before its reply invokes it again, and the agent gives the reply it already gave.

@@ -258,13 +258,15 @@ class ResourcesSeedSessionRequest(BaseModel):
 
 
 class ResourcesSeedSessionResponse(BaseModel):
-    """Confirm resources state and return optional agent access."""
+    """Confirm resources state and return optional agent access and an initial observation."""
 
     model_config = ConfigDict(extra="forbid")
 
     resources_session_id: str
     resources_tools: MCPServerMetadata | None = None
     sandbox_access: SandboxAccess | None = None
+    # The single_agent_turn Environment Server appends this to the agent's input as one user message.
+    observation: str | None = None
 
 
 VerificationInputT = TypeVar("VerificationInputT")
