@@ -404,37 +404,84 @@ async def test_recorded_exit_code_wins_over_a_provider_fault(agent, fault):
     assert result.goose_exit_code == 0 and result.goose_error_type is None
 
 
-@pytest.mark.parametrize("reason", ["model_error", "max_turns"])
-async def test_goose_stopping_early_with_exit_zero_is_a_failure(agent, reason):
-    server, sandbox, _ = agent
-    download = sandbox.download.side_effect
-    notice = {
-        "model_error": "Network error: Could not connect to 127.0.0.1:9.\n\nPlease resend your message to try again.",
-        "max_turns": "I've reached the maximum number of actions I can do without user input. Continue?",
-    }[reason]
+# Notices verbatim from Goose 1.54.0 runs against a stub model server (500, 429, connection refused, context overflow).
+NOTICES = {
+    "server_error": "Ran into this error: Server error: Server error (500 Internal Server Error) at "
+    "http://127.0.0.1:18991/v1/chat/completions: boom.\n\nPlease retry if you think this is a transient or recoverable error.",
+    "rate_limit": "Ran into this error: Rate limit exceeded: rate limited.\n\nPlease retry if you think this is a transient "
+    "or recoverable error.",
+    "network": "Network error: Could not connect to 127.0.0.1:9 \u2014 check your network connection and try again.\n\n"
+    "Please resend your message to try again.",
+    "model_error": "Ran into this error trying to compact: Failed to compact: the base prompt (system prompt, tool schemas, "
+    "and conversation) exceeds the model's effective context window.",
+    "max_turns": "I've reached the maximum number of actions I can do without user input. Would you like me to continue?",
+}
 
-    def stream(last_id: str, text: str) -> str:
-        # A banner precedes the stream-json events. Model messages are persisted under their streamed id
-        # (m10 is the root's final message in the fixture store), Goose's own notice is not.
-        events = [
-            {"type": "message", "message": {"id": i, "role": "assistant", "content": [{"type": "text", "text": t}]}}
-            for i, t in (("m10", "Paris and Tokyo are sunny."), (last_id, text))
-        ]
-        return "    goose is ready\n" + "\n".join(json.dumps(e) for e in events + [{"type": "complete"}])
+
+def _stream(last_id: str, text: str) -> str:
+    # A banner precedes the stream-json events. Model messages are persisted under their streamed id (m10 is the root's
+    # final message in the fixture store), Goose's own notice is not.
+    events = [
+        {"type": "message", "message": {"id": i, "role": "assistant", "content": [{"type": "text", "text": t}]}}
+        for i, t in (("m10", "Paris and Tokyo are sunny."), (last_id, text))
+    ]
+    return "    goose is ready\n" + "\n".join(json.dumps(e) for e in events + [{"type": "complete"}])
+
+
+def _serve_stdout(sandbox, stdout: str) -> None:
+    download = sandbox.download.side_effect
 
     async def download_(remote, local):
         if remote.endswith("stdout.jsonl"):
-            Path(local).write_text(stream("msg_notice", notice))
+            Path(local).write_text(stdout)
         else:
             await download(remote, local)
 
     sandbox.download.side_effect = download_
+
+
+@pytest.mark.parametrize("reason", ["model_error", "max_turns"])
+async def test_goose_stopping_early_with_exit_zero_is_a_failure(agent, reason):
+    server, sandbox, _ = agent
+    _serve_stdout(sandbox, _stream("msg_notice", NOTICES[reason]))
     result = await server.run(SimpleNamespace(cookies={}), run_body())
     assert result.goose_exit_code == 0 and result.goose_failed and result.goose_error_type == reason
     assert result.reward == 0
-    assert (
-        goose_stop_reason(stream("m10", "Paris and Tokyo are sunny."), [{"messages": [{"message_id": "m10"}]}]) is None
-    )
+    sessions = [{"messages": [{"message_id": "m10"}]}]
+    assert goose_stop_reason(_stream("m10", "Paris and Tokyo are sunny."), sessions) is None
+
+
+@pytest.mark.parametrize("notice", ["server_error", "rate_limit", "network"])
+async def test_model_server_failure_fails_the_request(agent, notice):
+    # The model server failed, not the policy: the request fails so it is retried, never a scored zero.
+    server, sandbox, _ = agent
+    _serve_stdout(sandbox, _stream("msg_notice", NOTICES[notice]))
+    with pytest.raises(RuntimeError, match="transport"):
+        await server.run(SimpleNamespace(cookies={}), run_body())
+    assert not any(c.kwargs["url_path"] == "/verify" for c in server.server_client.post.await_args_list)
+    sandbox.stop.assert_awaited_once()
+
+
+async def test_goose_runs_under_an_in_sandbox_deadline(agent):
+    server, sandbox, _ = agent
+    run_exec = sandbox.exec.side_effect
+
+    async def exec_(command, **kwargs):
+        if "goose run" in command:
+            # The deadline ended Goose; the wrapper archived its sessions and recorded the exit status.
+            return SimpleNamespace(return_code=124, error_type=None, stdout="")
+        if command.startswith("cat ") and command.endswith("/exit_code"):
+            return SimpleNamespace(return_code=0, error_type=None, stdout="124\n")
+        return await run_exec(command, **kwargs)
+
+    sandbox.exec.side_effect = exec_
+    result = await server.run(SimpleNamespace(cookies={}), run_body())
+    run = next(c.kwargs for c in sandbox.exec.await_args_list if "goose run" in c.kwargs["command"])
+    deadline = int(run["command"].split("timeout --kill-after=10 ", 1)[1].split()[0])
+    # It fires before the provider's own deadline, with room to archive the sessions.
+    assert deadline + 10 < run["timeout_s"] == server.config.timeout
+    assert result.goose_failed and result.goose_error_type == "timeout" and result.goose_exit_code == 124
+    assert result.reward == 0 and result.response.output
 
 
 async def test_extension_that_fails_to_start_is_an_infrastructure_failure(agent):

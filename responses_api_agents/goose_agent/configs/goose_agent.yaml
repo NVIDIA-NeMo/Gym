@@ -32,7 +32,7 @@ goose_agent:
       execution_failure_reward_zero: true
       artifacts_dir: ${oc.env:GOOSE_ARTIFACTS_DIR,results/goose}
       sandbox_config:
-        image: python:3.13-bookworm  # needs curl or wget, sha256sum and tar
+        image: python:3.13-bookworm  # needs curl or wget, sha256sum, tar and coreutils timeout
         ttl_s: 7200
         ready_timeout_s: 1200
         entrypoint: [sleep, infinity]

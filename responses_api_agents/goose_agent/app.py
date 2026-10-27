@@ -74,6 +74,15 @@ GOOSE_RELEASE_URL = f"https://github.com/aaif-goose/goose/releases/download/v{GO
 MAX_SYSTEM_PROMPT_BYTES = 128 * 1024
 # Goose's MAX_TURNS_MESSAGE, streamed when --max-turns is reached.
 GOOSE_MAX_TURNS_NOTICE = "I've reached the maximum number of actions I can do without user input"
+# Goose 1.54.0's notices for a model call that failed in transport (connection refused or reset, 5xx, rate limit). The model
+# server failed, not the policy, so the request fails and is retried.
+GOOSE_TRANSPORT_NOTICES = (
+    "Network error:",
+    "Ran into this error: Server error",
+    "Ran into this error: Rate limit exceeded",
+)
+# Exit statuses of `timeout`: 124 when the deadline ended Goose, 137 when it had to be killed.
+TIMEOUT_EXIT_CODES = (124, 137)
 
 
 def goose_archive_name(arch: str) -> str:
@@ -221,7 +230,7 @@ def goose_stop_reason(stdout: str, sessions: list[dict[str, Any]]) -> str | None
 
     When a model call fails past its retries or --max-turns is reached, Goose streams a notice of its own as the
     last assistant message, never persists it, and still exits 0. Every message from the model is persisted
-    under the id it was streamed with.
+    under the id it was streamed with. "transport" marks a notice for a model server that failed, not the policy.
     """
     last = {}
     for line in stdout.splitlines():
@@ -235,6 +244,8 @@ def goose_stop_reason(stdout: str, sessions: list[dict[str, Any]]) -> str | None
     if not last.get("id") or last["id"] in {m["message_id"] for s in sessions for m in s["messages"]}:
         return None
     text = "".join(b.get("text", "") for b in last.get("content") or [] if b.get("type") == "text")
+    if text.startswith(GOOSE_TRANSPORT_NOTICES):
+        return "transport"
     return "max_turns" if text.startswith(GOOSE_MAX_TURNS_NOTICE) else "model_error"
 
 
@@ -386,10 +397,13 @@ class GooseAgent(SimpleResponsesAPIAgent):
         env |= self.config.env
         # `--system=` keeps a prompt that starts with "-" from being parsed as an option.
         system_arg = f'--system="$(cat {quote(remote)}/system.txt)"' if system else ""
-        # Sessions are archived even when Goose fails, so partial transcripts stay inspectable. The exit code
-        # file records that Goose finished, whatever the provider reports afterwards.
+        # Goose is stopped inside the sandbox before the provider deadline, because some providers only stop waiting at
+        # theirs (Goose keeps running) and some raise instead of returning a timeout. Sessions are archived even when
+        # Goose fails, so partial transcripts stay inspectable. The exit code file records that Goose finished, whatever
+        # the provider reports afterwards.
+        deadline = int(self.config.timeout - min(120, self.config.timeout / 4))
         command = (
-            f"{quote(remote)}/goose run --name gym -i {quote(remote)}/prompt.txt --max-turns {self.config.max_turns} "
+            f"timeout --kill-after=10 {deadline} {quote(remote)}/goose run --name gym -i {quote(remote)}/prompt.txt --max-turns {self.config.max_turns} "
             f"--output-format stream-json {system_arg} > {quote(remote)}/stdout.jsonl 2> {quote(remote)}/stderr.log; "
             f"code=$?; tar czf {quote(remote)}/sessions.tgz -C {quote(remote)}/root/data sessions; "
             f"echo $code > {quote(remote)}/exit_code; exit $code"
@@ -417,6 +431,8 @@ class GooseAgent(SimpleResponsesAPIAgent):
             else:
                 # A sandbox or transport fault is not the policy's failure: retry the request instead of scoring it.
                 raise RuntimeError(f"Goose sandbox execution failed: {error_type or type(fault).__name__}") from fault
+        if return_code in TIMEOUT_EXIT_CODES and not error_type:
+            error_type = "timeout"
         # Export failures propagate, so retrying such a request cannot become a scored zero.
         for name in ("stdout.jsonl", "stderr.log", "sessions.tgz"):
             await sandbox.download(f"{remote}/{name}", root / name)
@@ -427,7 +443,10 @@ class GooseAgent(SimpleResponsesAPIAgent):
         with tarfile.open(root / "sessions.tgz") as archive:
             archive.extractall(root, filter="data")
         sessions = await to_thread(read_goose_sessions, root / "sessions" / "sessions.db")
-        error_type = error_type or goose_stop_reason((root / "stdout.jsonl").read_text(errors="replace"), sessions)
+        if not error_type:
+            error_type = goose_stop_reason((root / "stdout.jsonl").read_text(errors="replace"), sessions)
+            if error_type == "transport":
+                raise RuntimeError("Goose's model calls failed in transport (model server unreachable or failing)")
         return {
             "sessions": sessions,
             "goose_failed": bool(error_type or return_code != 0),

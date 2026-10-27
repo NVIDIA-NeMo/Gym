@@ -56,9 +56,9 @@ child sessions linked by `parent_session_id`) and `generation.json` under `artif
 |---|---|
 | `goose_subagents` | Number of delegate sessions. |
 | `goose_max_concurrent_subagents` | Most delegates active at once (first to last message, second resolution). |
-| `goose_failed`, `goose_exit_code`, `goose_error_type` | Execution outcome. A run fails on a non-zero exit, a timeout (`timeout`), or a model error or `max_turns` that Goose itself ends with exit 0 (`model_error`, `max_turns`). With `execution_failure_reward_zero`, a failed run is graded as an empty response, except in a resource-owned sandbox, which is graded in place. |
+| `goose_failed`, `goose_exit_code`, `goose_error_type` | Execution outcome. A run fails on a non-zero exit, a timeout (`timeout`, enforced inside the sandbox a little before `timeout` so Goose is stopped on every provider), or a model error or `max_turns` that Goose itself ends with exit 0 (`model_error`, `max_turns`). With `execution_failure_reward_zero`, a failed run is graded as an empty response, except in a resource-owned sandbox, which is graded in place. |
 
-Sandbox or transport faults while Goose runs, and extensions that fail to start, fail the request instead of scoring it, so it can be retried.
+Sandbox or transport faults while Goose runs, model-server failures Goose reports as a network, server or rate-limit error, and extensions that fail to start fail the request instead of scoring it, so it can be retried.
 
 ## Run
 
