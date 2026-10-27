@@ -770,19 +770,22 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         current = self._agent_session_id_from_request(request)
         if current is not None and current != body.agent_session_id:
             raise HTTPException(409, "agent_session_id does not match the session cookie")
-        result = await self._close_agent_session_id(body.agent_session_id, body.episode_id, current=current)
-        # A stale /responses request must not fall back to the non-session path.
-        request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
+        result, receipt_created = await self._close_agent_session_id(
+            body.agent_session_id, body.episode_id, current=current
+        )
+        if receipt_created:
+            # A stale /responses request must not fall back to the non-session path.
+            request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
         return result
 
     async def _close_agent_session_id(
         self, session_id: str, episode_id: EpisodeId, *, current: str | None = None
-    ) -> AgentCloseSessionResponse:
+    ) -> tuple[AgentCloseSessionResponse, bool]:
         async with self._locked_agent_session(session_id) as record:
             if record.episode_id is not None and record.episode_id != episode_id:
                 raise HTTPException(409, "episode_id does not match the seeded agent session")
             if record.close_response is not None:
-                return record.close_response.model_copy(deep=True)
+                return record.close_response.model_copy(deep=True), False
             if record.state is None:
                 if current is not None:
                     raise HTTPException(409, "Agent close receipt has expired")
@@ -797,7 +800,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             record.expires_at = monotonic() + self.config.session_close_retry_window_seconds
             self._failed_seed_records.pop(session_id, None)
             self._closed_session_records[session_id] = record
-            return result
+            return result, True
 
     async def _close_session_state(
         self, agent_session_id: str, record: _AgentSessionRecord

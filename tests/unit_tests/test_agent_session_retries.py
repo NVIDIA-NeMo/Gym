@@ -481,3 +481,20 @@ def test_shutdown_drain_budget_must_be_positive_and_finite(timeout):
         BaseResponsesAPIAgentConfig(
             host="localhost", port=1, entrypoint="app.py", name="test", session_close_timeout_seconds=timeout
         )
+
+
+async def test_cached_close_does_not_bind_a_fresh_request_to_the_closed_session(agent):
+    first = _seed(0)
+    original_request = SimpleNamespace(session={})
+    await agent.seed_agent_session(original_request, first)
+    receipt = await agent.close_agent_session(original_request, _close(first))
+    assert original_request.session == {"agent_session_id": first.agent_session_id}
+
+    fresh_request = SimpleNamespace(session={})
+    repeated = await agent.close_agent_session(fresh_request, _close(first))
+    assert repeated == receipt
+    assert fresh_request.session == {}
+    second = _seed(1)
+    seeded = await agent.seed_agent_session(fresh_request, second)
+    assert seeded.agent_session_id == second.agent_session_id
+    await agent.close_agent_session(fresh_request, _close(second))
