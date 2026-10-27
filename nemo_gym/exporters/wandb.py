@@ -52,6 +52,7 @@ class WandbExporter(BaseExporter):
         # A resumed or resubmitted run resumes the W&B run recorded next to its output.
         run_id = self._recorded_run_id()
         resume = {"id": run_id, "resume": "allow"} if run_id is not None else {}
+        self.reopened = run_id is not None
         self.run = wandb.init(
             project=self.config.wandb_project,
             name=self.config.wandb_name,
@@ -61,9 +62,16 @@ class WandbExporter(BaseExporter):
         self._record_run_id(self.run.id)
 
     def teardown(self) -> None:
+        self._flush_pending_config()
         if self.run is not None:
             self.run.finish()
             self.run = None
+
+    def _close_reopened(self) -> None:
+        # Let go of the reopened run before finishing it, so the new output never logs to it, even when that fails.
+        run, self.run, self.reopened = self.run, None, False
+        if run is not None:
+            run.finish()
 
     def _active_run(self) -> Run:
         if self.run is None:

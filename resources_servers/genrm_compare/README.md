@@ -460,11 +460,39 @@ attempt. An individual rollout's retry counter does not advance this shared grou
 
 Run the resources server with one HTTP worker. State is process-local. Completed explicit-ID groups and
 failed groups retain compact response digests, rewards when completed, and failure/attempt information;
-full answer bodies and waiters are released. Retention is bounded by `cohort_result_ttl_s` and `max_terminal_cohorts`.
+full answer bodies and waiters are released. Retention is bounded by `cohort_result_ttl_s` and `max_terminal_cohorts`,
+except for groups an open session still needs during a partial-rollout checkpoint (see below).
 
 The count cap can evict state before the TTL. After eviction or restart, replay and stale-attempt detection
 are no longer guaranteed. The caller must enforce accepted attempt identity across those boundaries and
-use fresh group IDs for unrelated work. This cache does not provide durable recovery.
+use fresh group IDs for unrelated work. Outside a partial-rollout checkpoint, this cache does not provide
+durable recovery.
+
+### Partial-rollout checkpoints
+
+With checkpointing on, GenRM is an `exported` resources server whose `/verify` replays after a crash. Its
+outcomes reach a group's members one reply at a time, so a checkpoint can land after one member recorded its
+reward but before a sibling did. That sibling replays `/verify` after a restore; the member that already
+recorded its reward never does. So each resources session still open on a finished explicit-ID group exports
+its member's outcome, the reward or the judge failure that callers record as a masked row, and a restore
+reinstalls that finished group. The replay then gets the recorded outcome without another judge call. A
+group still collecting or evaluating exports nothing, and its members rebuild it by replaying, as before. Each saved
+response digest names how the response was serialized; a restore refuses digests saved under a scheme it
+does not know rather than refusing every replay.
+
+While a checkpoint is open, a finished evaluation holds its rewards or judge failure until resume, so no
+member records an outcome after this server exported. If a restored member's session is retired before it
+replays, for example after a failed restore, the member is dropped; a restored group left with no member is
+dropped with the attempt watermark its restore installed, so the rollouts that start over from their inputs
+re-form the group under the same attempt.
+
+A finished group that a member with an open session may still need is kept past `cohort_result_ttl_s` and
+beyond `max_terminal_cohorts`, so pruning cannot evict an outcome a later checkpoint must export or
+a replay must return. It becomes an ordinary tombstone once those members close their sessions or are retired.
+
+Only groups with an explicit `_ng_group_id` are exported. A member that is started over from its input while
+its restored group still holds continued members gets a conflicting response for its slot; the controller
+must replace the whole group by advancing `_ng_group_attempt`.
 
 ### Using the file collector
 
@@ -499,7 +527,8 @@ when only some completed rewards reached disk. The collector's individual rollou
 not coordinate a group attempt. A failed legacy run requires a fresh explicit group ID and a complete
 replacement submission with a fresh output path. Plain `--resume` against the retained failed legacy key
 returns its failure again. Partial resume is also unsafe: if only some rewards reached disk, the missing
-members cannot form a full group by themselves. Use caller-coordinated complete attempts for recovery. Durable answer reuse and training checkpoint recovery require caller-side coordination.
+members cannot form a full group by themselves. Use caller-coordinated complete attempts for recovery. The file collector takes no checkpoints, so durable
+answer reuse requires caller-side coordination; for training, see [Partial-rollout checkpoints](#partial-rollout-checkpoints).
 
 ### Reverification limits
 

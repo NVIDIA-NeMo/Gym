@@ -44,6 +44,7 @@ class FakeParticipant(CheckpointParticipant):
     """Executions are either running or parked; prepare is ready once none are running."""
 
     kind = "fake"
+    mode = "exported"
     record_model = Record
 
     def __init__(self) -> None:
@@ -2158,3 +2159,49 @@ async def test_an_export_that_outlives_its_commit_and_then_fails_is_final_for_it
     assert late.json()["error"]["code"] == "checkpoint_deadline_exceeded"
     assert retried.status_code == 409 and retried.json()["error"]["code"] == "checkpoint_export_failed"
     assert len(exports) == 1 and not (tmp_path / "gym").exists()
+
+
+def _participants_by_mode() -> list:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nemo_gym._checkpoint.agent import AgentSessionParticipant, RestartOnlyAgentParticipant
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant
+    from nemo_gym._checkpoint.model import PolicyModelParticipant
+    from nemo_gym._checkpoint.resources import ResourcesParticipant
+
+    return [
+        pytest.param(lambda: AgentSessionParticipant(MagicMock()), "agent", "exported", id="session-agent"),
+        pytest.param(RestartOnlyAgentParticipant, "agent", "restart_only", id="restart-only-agent"),
+        pytest.param(lambda: EnvironmentParticipant(mode="exported"), "environment", "exported", id="environment"),
+        pytest.param(
+            lambda: EnvironmentParticipant(mode="restart_only"),
+            "environment",
+            "restart_only",
+            id="restart-only-environment",
+        ),
+        *(
+            pytest.param(lambda mode=mode: ResourcesParticipant(AsyncMock(), mode), "resources", mode, id=mode)
+            for mode in ("restart_only", "stateless", "exported")
+        ),
+        pytest.param(PolicyModelParticipant, "model", "exported", id="policy-model"),
+    ]
+
+
+@pytest.mark.parametrize(("build", "kind", "mode"), _participants_by_mode())
+async def test_every_participant_reports_its_checkpoint_mode_beside_its_kind(build, kind: str, mode: str) -> None:
+    app = FastAPI()
+    install_participant(app, build(), auth_token="t", instance_name="server", lease_grace_seconds=60)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://server") as client:
+        status = (await client.get("/ng-control/v1/checkpoint/status", headers={"Authorization": "Bearer t"})).json()
+
+    assert (status["kind"], status["mode"]) == (kind, mode)
+
+
+@pytest.mark.parametrize("mode", [None, "export"], ids=["missing", "misspelled"])
+def test_a_participant_without_a_checkpoint_mode_is_refused(mode: Optional[str]) -> None:
+    """A controller could not tell whether such a server's rollouts start over after a crash."""
+    participant = FakeParticipant()
+    participant.mode = mode
+
+    with pytest.raises(ValueError, match="FakeParticipant declares no checkpoint mode"):
+        install_participant(FastAPI(), participant, auth_token="t", instance_name="fake", lease_grace_seconds=60)

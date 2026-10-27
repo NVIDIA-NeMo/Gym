@@ -235,6 +235,34 @@ class TestAgenticSandboxSpec:
         assert spec.provider_options == {}
         assert spec.env["NV_AGENT_HOME"] == "/code/.home"
 
+    def test_sandbox_model_url_carries_the_current_span(self, monkeypatch) -> None:
+        from nemo_gym import server_utils
+
+        segment = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+        monkeypatch.setattr(server_utils, "trace_context_path_segment", lambda: segment)
+        agent = self._agent(deps_provision="archive")
+        agent._model_url = MagicMock(return_value="http://model.example")
+        spec = agent._build_spec(self._run_request(), "build rtl", {}, agent._resolve_image())
+        assert spec.env["NV_MODEL_URL"] == f"http://model.example{segment}"
+
+    def test_sandbox_model_url_carries_the_rollout_prefix_when_capture_is_on(self, monkeypatch) -> None:
+        from nemo_gym import server_utils
+
+        segment = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+        monkeypatch.setattr(server_utils, "trace_context_path_segment", lambda: segment)
+        agent = self._agent(deps_provision="archive")
+        agent.server_client.global_config_dict = {"observability_enabled": True}
+        agent._model_url = MagicMock(return_value="http://model.example")
+        body = CVDPAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": [{"role": "user", "content": "build rtl"}], "model": "m"},
+                "_ng_task_index": 3,
+                "_ng_rollout_index": 0,
+            }
+        )
+        spec = agent._build_spec(body, "build rtl", {}, agent._resolve_image())
+        assert spec.env["NV_MODEL_URL"] == f"http://model.example/ng-rollout/3-0{segment}"
+
     def test_local_sif_rejected_for_open_sandbox(self) -> None:
         agent = self._agent(image="/tmp/cvdp.sif")
         with pytest.raises(ValueError, match="Apptainer"):

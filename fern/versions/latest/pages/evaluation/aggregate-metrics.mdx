@@ -94,7 +94,7 @@ plus, for **every numeric field** (`reward`, token usage, and any numeric field 
 <Warning>
 `missing_count` is **not** measured against the expected task list. Its denominator is the set of tasks that completed in at least one repeat, so it only catches tasks that succeeded somewhere else and are absent here.
 
-A task that fails in *every* repeat never appears in any repeat, so it is counted nowhere and `missing_count` stays `0` for it. Those rollouts are in `<output>_failures.jsonl` — or, for `kill_shaped` failures (Slurm SIGTERM, Ray actor died, OOM), nowhere at all, since the absence of a row is itself the signal.
+A task that fails in *every* repeat never appears in any repeat, so it is counted nowhere and `missing_count` stays `0` for it. Those rollouts are in `<output>_failures.jsonl` — or, for `kill_shaped` failures (Slurm SIGTERM, Ray actor died, OOM) and rows the dispatch budget never started, nowhere at all, since the absence of a row is itself the signal. With `+record_omitted_rollouts=true` those two leave a sidecar row marked `_ng_omitted_rollout: true`; it records that no result exists and is not counted as a failure.
 
 To check real coverage, use the numbers that *are* measured against the materialized inputs: `expected_num_rollouts` and `missing_num_rollouts` in `group_level_metrics`, and the completion summary `gym eval profile` prints at the end of a run.
 </Warning>

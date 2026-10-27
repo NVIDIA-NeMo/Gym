@@ -380,6 +380,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
         started = time.time()
         stop_reason = None
         model_error = None
+        model_error_status = None
         async with agent.session(cache_on_interrupt=False) as session:
             try:
                 finish_params, history, _ = await session.run(messages)
@@ -394,6 +395,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
                 # The episode ends here and is graded on the turns completed so far.
                 finish_params, history = None, _completed_turns(session, messages)
                 stop_reason, model_error = "model_error", str(error)
+                model_error_status = error.status_code
         if model_error is not None:
             status = InvocationStatus.FAILED
         else:
@@ -406,6 +408,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             "resources_cookies": {cookie.name: cookie.value for cookie in http.cookies.jar},
             "stop_reason": stop_reason,
             "model_error": model_error,
+            "model_error_status": model_error_status,
             **observer.report(status, history, output_items),
         }
 

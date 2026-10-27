@@ -1383,6 +1383,17 @@ class TestCollateSamples:
         assert prepare_path.exists()  # parent dir auto-created; write did not crash
         assert json.loads(prepare_path.read_text().strip())["foo"] == "bar"
 
+    def test_collate_writes_each_task_once_when_the_run_sets_num_repeats(self, tmp_path: Path) -> None:
+        # A dataset's num_repeats copies each task; a run's --num-repeats replaces it, so each task is written once.
+        data = tmp_path / "data.jsonl"
+        data.write_text('{"id": 0}\n{"id": 1}\n')
+        cfg = _make_agent_instance_config(
+            "ex", [{"name": "example", "type": "example", "jsonl_fpath": str(data), "num_repeats": 3}]
+        )
+        for num_repeats, expected in ((None, [0, 0, 0, 1, 1, 1]), (2, [0, 1])):
+            (path,) = TrainDataProcessor()._collate_samples_single_type("example", [cfg], num_repeats=num_repeats)
+            assert [json.loads(line)["id"] for line in path.read_text().splitlines()] == expected
+
     def test_collate_samples_metrics_conflict_raises_ValueError(self, monkeypatch: MonkeyPatch) -> None:
         write_filenames_to_mock = dict()
 
@@ -1535,6 +1546,150 @@ class TestCollateTaskSourceStamping:
         rows = self._read(paths[0])
         assert rows[0]["task_source"] == "tau2_agent"
         assert "agent_ref" not in rows[0]
+
+    def test_materialized_rows_keep_their_own_task_source(self, tmp_path, monkeypatch) -> None:
+        """A Harbor row names its dataset itself (`task_source` is the dataset folder's name, written at
+        preparation) and routes by taskset, so collate keeps it; a materialized row without one, and every flat
+        row, is stamped with the declaring instance as before."""
+        materialized = {
+            "task_id": {"taskset": "tb21", "task_id": "hello"},
+            "task_input": {"responses_create_params": {"input": []}, "task_data": {"_ng_digest": "d" * 64}},
+        }
+        rows = [materialized | {"task_source": "tb21"}, materialized, materialized | {"task_source": ""}]
+        agent = _instance(
+            "harbor_tb21_agent",
+            "responses_api_agents",
+            # Declared as the Harbor run config does: already materialized rows, no `taskset` to materialize by.
+            {"entrypoint": "app.py", "datasets": [_dataset(tmp_path, "d5", rows)]},
+        )
+        paths = self._collate(tmp_path, monkeypatch, [agent])
+        assert [row["task_source"] for row in self._read(paths[0])] == [
+            "tb21",
+            "harbor_tb21_agent",
+            "harbor_tb21_agent",
+        ]
+
+    def test_catalog_edits_between_two_runs_do_not_conflict_with_the_metrics_sidecar(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The entry's `domain`, `verified` and `allowed_agents` are catalog declarations, not properties of the
+        rows, so the metrics sidecar beside the rows records none of them: flipping `verified` after baselining,
+        widening or dropping `allowed_agents` or changing `domain` between two runs of one taskset and agent (a
+        `[gym]` edit of a Harbor dataset) validates against the first run's sidecar. A `license` edit still
+        conflicts, as for any Gym dataset, and the conflict names the sidecar to delete."""
+        materialized = {
+            "task_id": {"taskset": "ds", "task_id": "hello"},
+            "task_input": {"responses_create_params": {"input": []}, "task_data": {"_ng_digest": "d" * 64}},
+            "task_source": "ds",
+        }
+        base = _dataset(tmp_path, "tasks_hermes_agent", [materialized]) | {
+            "type": "validation",
+            "license": "Apache 2.0",
+            "domain": "coding",
+            "verified": False,
+            "allowed_agents": ["hermes_agent"],
+        }
+
+        def declared(entry: dict):
+            return _instance("harbor_ds_agent", "responses_api_agents", {"entrypoint": "app.py", "datasets": [entry]})
+
+        monkeypatch.chdir(tmp_path)
+        processor = TrainDataProcessor()
+        processor.validate_samples_and_aggregate_metrics([declared(base)], overwrite_metrics_conflicts=False)
+        sidecar = tmp_path / "tasks_hermes_agent_metrics.json"
+        recorded = json.loads(sidecar.read_text())
+        assert {"name", "type", "license", "jsonl_fpath"} <= set(recorded)
+        assert not {"domain", "verified", "allowed_agents"} & set(recorded)
+        edits = [
+            {"verified": True},
+            {"allowed_agents": ["hermes_agent", "codex_agent"]},
+            {"domain": "agent"},
+            {"allowed_agents": None, "domain": None},
+        ]
+        for edit in edits:
+            entry = {key: value for key, value in (base | edit).items() if value is not None}
+            processor.validate_samples_and_aggregate_metrics([declared(entry)], overwrite_metrics_conflicts=False)
+        assert json.loads(sidecar.read_text()) == recorded
+        assert not list(tmp_path.glob("*_conflict.json"))
+        with raises(ValueError, match="Found conflicting aggregate metrics") as excinfo:
+            processor.validate_samples_and_aggregate_metrics(
+                [declared(base | {"license": "MIT"})], overwrite_metrics_conflicts=False
+            )
+        assert str(sidecar) in str(excinfo.value)
+
+    def test_the_per_split_sidecar_keeps_the_preparation_fields_an_existing_one_records(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Review (Yu He, M37): `collate_samples` writes `<split>_metrics.json` from the entry minus agent and
+        taskset, preparation fields included, and validates an existing sidecar key by key. Leaving the catalog
+        keys out of it must not drop `prepare_script` and `prepare_dependencies` too, or every dataset prepared
+        before conflicts with its own sidecar. The sidecar an earlier release wrote validates and is left as is."""
+        rows = [{"responses_create_params": {"input": [{"role": "user", "content": "hi"}]}}]
+        entry = _dataset(tmp_path, "local", rows) | {
+            "type": "train",
+            "license": "MIT",
+            "prepare_script": str(tmp_path / "prepare.py"),
+            "prepare_dependencies": ["datasets"],
+        }
+        agent = _instance("agent", "responses_api_agents", {"entrypoint": "app.py", "datasets": [entry]})
+        metrics = DatasetMetrics(
+            is_aggregated=False,
+            number_of_examples=1,
+            number_of_tools=AvgMinMax(is_aggregated=False, total=1, average=0.0, min=0.0, max=0.0),
+            json_dumped_number_of_words=AvgMinMax(is_aggregated=False, total=1, average=9.0, min=9.0, max=9.0),
+            number_of_turns=AvgMinMax(is_aggregated=False, total=1, average=1.0, min=1.0, max=1.0),
+            temperature=AvgMinMax(is_aggregated=False, total=0, average=0, min=float("inf"), max=float("-inf")),
+        )
+        out = tmp_path / "out"
+        out.mkdir()
+        # The sidecar the earlier release wrote for this split: the entry minus agent and taskset, then the metrics.
+        previous = DatasetConfig.model_validate(entry).model_dump(mode="json", exclude={"agent", "taskset"})
+        previous |= metrics.aggregate().model_dump_for_output()
+        assert {"prepare_script", "prepare_dependencies"} <= set(previous)
+        (out / "train_metrics.json").write_text(json.dumps(previous, indent=4))
+        monkeypatch.chdir(tmp_path)
+        config = TrainDataProcessorConfig(output_dirpath=str(out), mode="train_preparation", should_download=False)
+        TrainDataProcessor().collate_samples(
+            config=config, server_instance_configs=[agent], dataset_type_to_aggregate_metrics={"train": metrics}
+        )
+        assert not list(out.glob("*_conflict.json"))
+        assert json.loads((out / "train_metrics.json").read_text()) == previous
+        # The catalog declarations still stay out of a fresh per-split sidecar.
+        catalog = _instance(
+            "agent",
+            "responses_api_agents",
+            {"entrypoint": "app.py", "datasets": [entry | {"domain": "math", "verified": True}]},
+        )
+        fresh = tmp_path / "fresh"
+        fresh.mkdir()
+        TrainDataProcessor().collate_samples(
+            config=TrainDataProcessorConfig(
+                output_dirpath=str(fresh), mode="train_preparation", should_download=False
+            ),
+            server_instance_configs=[catalog],
+            dataset_type_to_aggregate_metrics={"train": metrics},
+        )
+        written = json.loads((fresh / "train_metrics.json").read_text())
+        assert {"prepare_script", "prepare_dependencies"} <= set(written)
+        assert not {"domain", "verified", "allowed_agents"} & set(written)
+
+    def test_a_benchmark_entry_without_a_prepare_script_collates_its_rows(self, tmp_path, monkeypatch) -> None:
+        """The generated entry of a hub dataset without a license: `type: benchmark`, no `prepare_script`
+        (the rows were written by the run that generated it), `verified: false`. Collate accepts it through the
+        typed config and keeps the rows' own `task_source`."""
+        materialized = {
+            "task_id": {"taskset": "tb21", "task_id": "hello"},
+            "task_input": {"responses_create_params": {"input": []}, "task_data": {"_ng_digest": "d" * 64}},
+            "task_source": "tb21",
+        }
+        entry = _dataset(tmp_path, "tb21", [materialized]) | {"type": "benchmark", "verified": False}
+        agent = _instance("harbor_tb21_agent", "responses_api_agents", {"entrypoint": "app.py", "datasets": [entry]})
+        (declared,) = agent.datasets
+        assert declared.type == "benchmark" and declared.prepare_script is None and declared.verified is False
+        monkeypatch.chdir(tmp_path)
+        paths = TrainDataProcessor()._collate_samples_single_type(type="benchmark", server_instance_configs=[agent])
+        (row,) = self._read(paths[0])
+        assert row["task_source"] == "tb21" and row["task_id"] == {"taskset": "tb21", "task_id": "hello"}
 
     def test_incoming_legacy_agent_ref_is_stripped_with_warning(self, tmp_path, monkeypatch) -> None:
         legacy_rows = [

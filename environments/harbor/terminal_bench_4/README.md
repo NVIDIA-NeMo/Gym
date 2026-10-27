@@ -18,7 +18,7 @@ concurrent SWE-bench samples and adds about 11 s per TB4 task between the agent'
 trajectory write.
 
 Both commands resolve the same reference through the package store. The first fetch writes the task
-folders into `datasets/terminal-bench-4.0.0/` and every later fetch keeps each folder whose content hash
+folders into `environments/harbor/terminal-bench-4.0.0/` and every later fetch keeps each folder whose content hash
 still matches, so the model run reuses the validated tasks. `gym dataset validate` runs every reference
 solution through the separate verifier. `--agent terminus_2_sandboxed_agent` runs Terminus 2 instead.
 The 11 Compose tasks start sidecar images whose entrypoint, command, user and ports live in the image, not the
@@ -36,7 +36,7 @@ with the legacy benchmark's server, which sets `CIRCLE_NODE_TOTAL=3` for `nextjs
 override beside the fetched tasks; the loader applies it and nothing else changes:
 
 ```toml
-# datasets/terminal-bench-4.0.0/dataset.toml
+# environments/harbor/terminal-bench-4.0.0/dataset.toml
 [gym.tasks."nextjs-performance".environment]
 env = { CIRCLE_NODE_TOTAL = "3" }
 ```

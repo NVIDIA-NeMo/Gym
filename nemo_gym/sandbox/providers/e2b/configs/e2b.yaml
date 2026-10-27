@@ -12,7 +12,7 @@
 #     --config nemo_gym/sandbox/providers/e2b/configs/e2b.yaml \
 #     --config responses_api_models/vllm_model/configs/vllm_model.yaml
 #
-# Requires the SDK: `pip install 'e2b>=2.36.0,<3.0.0'`.
+# Requires the SDK: `pip install 'e2b>=2.46.0,<3.0.0'`.
 #
 # Works against e2b.dev and against any e2b-compatible gateway -- point
 # `connection.api_url`/`connection.sandbox_url` at the gateway.

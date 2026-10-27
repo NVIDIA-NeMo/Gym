@@ -19,6 +19,7 @@ from pathlib import Path
 import uvicorn
 import yaml
 
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import NeMoGymResponse
 from nemo_gym.harness_capabilities.cli import digest_file
@@ -189,7 +190,12 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                 ) -> NeMoGymResponse:
                     response = await super()._invoke_agent(request, handles)
                     # Witness what actually reached the caller, before verification or masking.
-                    probe.agent_responses.append(response.model_dump(mode="json", include={"status", "error"}))
+                    probe.agent_responses.append(
+                        response.model_dump(
+                            mode="json",
+                            include={"status": True, "error": True, "metadata": {AGENT_OUTCOME_METADATA_KEY}},
+                        )
+                    )
                     probe.save()
                     return response
 

@@ -152,20 +152,20 @@ def _staging_owner(receipt: RolloutReceipt, record: CallRecord) -> str:
     A restored episode keeps the calls made before its checkpoint, staged under an earlier attempt of the same rollout.
     Any other owner would splice a foreign rollout's tokens into this receipt.
     """
-    if record.capture_key is None:
-        return receipt.rollout_id
+    if record.source_capture_key is None:
+        return receipt.capture_key
     try:
-        owner = EpisodeId.from_capture_key(record.capture_key)
-        current = EpisodeId.from_capture_key(receipt.rollout_id)
+        owner = EpisodeId.from_capture_key(record.source_capture_key)
+        current = EpisodeId.from_capture_key(receipt.capture_key)
     except ValueError as error:
         raise _fail("foreign_capture_key", f"call {record.model_call_id}: {error}") from error
     if owner.rollout_id != current.rollout_id or owner.attempt > current.attempt:
         raise _fail(
             "foreign_capture_key",
-            f"call {record.model_call_id} is staged under {record.capture_key}, "
-            f"which is not an earlier attempt of {receipt.rollout_id}",
+            f"call {record.model_call_id} is staged under {record.source_capture_key}, "
+            f"which is not an earlier attempt of {receipt.capture_key}",
         )
-    return record.capture_key
+    return record.source_capture_key
 
 
 def _compare_manifest_fields(
@@ -174,8 +174,8 @@ def _compare_manifest_fields(
     snapshot: StagedCallBaseSnapshot,
 ) -> None:
     call_id = record.model_call_id
-    if snapshot.rollout_id != _staging_owner(receipt, record):
-        raise _fail("wrong_rollout", f"snapshot {call_id} belongs to {snapshot.rollout_id}")
+    if snapshot.capture_key != _staging_owner(receipt, record):
+        raise _fail("wrong_rollout", f"snapshot {call_id} belongs to {snapshot.capture_key}")
     comparisons = {
         "model_call_id": snapshot.model_call_id,
         "parent_call_id": snapshot.parent_call_id,
@@ -215,7 +215,7 @@ def _recompute_integrity(snapshot: StagedCallBaseSnapshot) -> None:
             schema_version=snapshot.schema_version,
             digest_version=snapshot.digest_version,
             extras_digest_version=snapshot.extras_digest_version,
-            rollout_id=snapshot.rollout_id,
+            capture_key=snapshot.capture_key,
             model_call_id=call_id,
             parent_call_id=snapshot.parent_call_id,
             mode=snapshot.mode,
@@ -409,7 +409,7 @@ def verify_and_linearize(
         for record in chain
     ]
     return LinearizedRow(
-        rollout_id=receipt.rollout_id,
+        rollout_id=receipt.capture_key,
         token_ids=token_ids,
         token_mask=token_mask,
         logprobs=logprobs,
@@ -437,7 +437,7 @@ def linearize(
         # surface the same rebuild failure the verifier reports for that case.
         raise _fail("missing_terminal", "successful receipt has no terminal call")
     receipt = RolloutReceipt(
-        rollout_id=rollout_id,
+        capture_key=rollout_id,
         terminal_model_call_id=terminal_hint,
         manifest=manifest,
         terminal_selection="declared",

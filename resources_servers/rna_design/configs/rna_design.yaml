@@ -1,0 +1,95 @@
+# Claude Code harness in a sandbox per rollout, calling the rna_design tools over MCP. The tools and the scoring stay on
+# the Gym node, so the sandbox calls back to it: Gym listens on the node's address rather than localhost.
+use_absolute_ip: true
+config_paths:
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+rna_design:
+  resources_servers:
+    rna_design:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      expose_tools_over_mcp: true
+      worker_python: ${oc.env:RNA_WORKER_PYTHON,null}
+      # Just above the harness's rollout_timeout: no live session is older, and a rollout that died before /verify
+      # leaves its worker for no longer than this.
+      session_ttl_s: 4200
+      description: "RNA inverse folding: the design tools served over MCP to a harness such as Claude Code."
+
+rna_design_claude_code_agent:
+  responses_api_agents:
+    harness_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: rna_design
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      agent: claude_code
+      forward_mcp_tools: true
+      agent_kwargs:
+        model: ${policy_model_name}
+        anthropic_api_key: unused  # pragma: allowlist secret
+        max_turns: 1000
+        timeout: 3600
+        bare: true
+        system_prompt: |
+          You act through the rna_design MCP tools. Call campaign_state first: it shows the target, how designs are ranked, the budget and the best designs so far, and it costs nothing. Each other tool returns the campaign state after it runs. Stop when further calls will not improve the result.
+
+          You are running an RNA design campaign.
+
+          Each tool call is one round of the campaign and spends from its budget.
+
+          The state's `objective` block is the thing you are being judged on: it names
+          the metric candidates are ranked by and the gates they must pass. Generating is
+          only half the job — a candidate with no score counts for nothing, so whenever
+          `objective.unscored_candidates` is large, score before you generate again.
+
+          What to keep in mind:
+          - The budget is hard. When any dimension is spent the campaign ends, whatever
+            state it is in, so spend expensive tools on candidates worth the cost.
+          - Leave enough budget to score. Ending with many candidates and no scores is
+            the worst outcome available to you; it reports as zero.
+          - To score candidates that already exist, pass one of the strings in
+            `sequence_selectors` as a tool's `sequences` argument — "@unscored" and
+            "@top:50" are expanded for you. Never invent a filename, and never retype a
+            sequence you were shown truncated.
+          - Omit an optional argument you have no opinion about rather than passing an
+            empty string for it. An empty value is not the same as a default.
+          - Tool descriptions say what a score does and does not mean. Read them before
+            treating a number as evidence.
+          - A tool that failed is information. Do not repeat a call that just failed with
+            the same arguments.
+      sandbox_provider: sandbox
+      # Any image with Python 3.12+ and Node.js works. Claude Code is installed in the box on first use.
+      sandbox_image: nikolaik/python-nodejs:python3.13-nodejs22-slim
+      sandbox_python: python3
+      setup_commands:
+      - python3 -m pip install -q "nemo-gym @ https://github.com/NVIDIA-NeMo/Gym/archive/refs/heads/main.zip"
+      sandbox_spec:
+        ttl_s: 7200
+        resources:
+          cpu: 2
+          memory_mib: 4096
+        env:
+          # gRNAde on a busy CPU node runs for minutes, past Claude Code's limits on an MCP call: 60 s in all and
+          # 300 s with no progress.
+          MCP_TOOL_TIMEOUT: "1800000"
+          CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: "1800000"
+          API_TIMEOUT_MS: "1800000"
+      rollout_timeout: 3900
+      concurrency: 4
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/rna_design/data/example.jsonl
+
+rna_design_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: rna_design_claude_code_agent

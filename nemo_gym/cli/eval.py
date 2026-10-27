@@ -422,8 +422,7 @@ class PlanBenchmarkConfig(PrepareBenchmarkConfig):
     Prepare one benchmark and write its plan: every task once, with a stable id and a digest of its input.
 
     The plan file's format is versioned and printed by `--schema`.
-    Benchmarks whose rows have no `task_id`/`problem_id`/`instance_id`, and benchmarks with a prompt template,
-    are refused.
+    Benchmarks whose rows have no `task_id`/`problem_id`/`instance_id` are refused.
 
     Examples:
 
@@ -473,11 +472,6 @@ def plan_benchmark() -> None:
             f"{[benchmark.name for benchmark in benchmarks]}."
         )
     benchmark = benchmarks[0]
-    if benchmark.dataset.prompt_config is not None:
-        raise ConfigError(
-            f"Benchmark {benchmark.name!r} declares a prompt template ({benchmark.dataset.prompt_config}); "
-            "plans do not support prompt templates yet."
-        )
 
     _prepare_datasets([benchmark], plan_config)
     rows = [json.loads(line) for line in benchmark.dataset.jsonl_fpath.read_text().splitlines() if line.strip()]
@@ -645,9 +639,14 @@ def e2e_rollout_collection():  # pragma: no cover
         # A failed or interrupted run reports health too, so its failed and missing rollouts are counted.
         try:
             if health_check_enabled:
+                from nemo_gym.rollout_health import capture_dirs_for_health
+
                 # A custom driver keeps no landed keys, so its stopped run gets the full check.
                 _health_check_collected_rollouts(
-                    output_fpath, rollout_collection_config, None if driver_path else rch._landed_keys
+                    output_fpath,
+                    rollout_collection_config,
+                    None if driver_path else rch._landed_keys,
+                    model_call_capture_dirs=capture_dirs_for_health(global_config_dict),
                 )
         finally:
             rh.shutdown()
@@ -683,7 +682,9 @@ def _remove_health_reports(output_fpath: Path) -> None:
         (output_fpath.parent / report).unlink(missing_ok=True)
 
 
-def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_keys: set | None = None) -> None:
+def _health_check_collected_rollouts(
+    output_fpath: Path, config: Any, landed_keys: set | None = None, *, model_call_capture_dirs: Sequence[Path] = ()
+) -> None:
     """Write the quality summary for whatever a run collected; a run that never started collection has none.
 
     After SIGTERM, Slurm kills the job once KillWait (120 s on some clusters) is over, and the full check can take
@@ -692,9 +693,17 @@ def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_key
     """
     if not output_fpath.exists():
         return
+    from nemo_gym.health.timeouts import export_run_health_timeouts
     from nemo_gym.rollout_health import format_health_report, run_health_checks, write_provisional_summary
 
     if _terminated and landed_keys is not None:
+        from nemo_gym.path_utils import aggregation_sources_path_for
+
+        if aggregation_sources_path_for(output_fpath).is_file():
+            # A run drops the shard list with the first row it writes, so this run added none: the summary the
+            # aggregation wrote from its shards still holds, and the run accounting alone would replace it wrongly.
+            print("Shard-backed health was not recomputed after stopping; run `gym eval health-check` to check it.")
+            return
         try:
             summary_path = write_provisional_summary(
                 output_fpath,
@@ -708,16 +717,24 @@ def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_key
             print(f"Provisional quality summary (run accounting only): {summary_path}")
         return
     try:
+        from nemo_gym.rollout_health import _aggregated_shards
+
+        # An output `gym eval aggregate` merged shards into is checked from those shards, as the collector and a
+        # recheck check it: its own rows have none of their failures or inventories.
+        shards = _aggregated_shards(output_fpath.parent, rollout_name=output_fpath.name)
         health_result = run_health_checks(
-            output_fpath,
+            shards if shards is not None else output_fpath,
+            output_dir=output_fpath.parent,
             workers=config.health_check_workers,
             ignored_checks=config.health_check_ignored_checks,
             limits=config.run_health_limits,
+            model_call_capture_dirs=model_call_capture_dirs,
         )
     except Exception:
         logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
     else:
         print(format_health_report(health_result))
+        export_run_health_timeouts(health_result)
 
 
 @exit_cleanly_on_config_error
@@ -751,7 +768,14 @@ def collect_rollouts():  # pragma: no cover
             shutdown_telemetry()
         finally:
             if health_check_enabled:
-                _health_check_collected_rollouts(Path(config.output_jsonl_fpath), config, rch._landed_keys)
+                from nemo_gym.rollout_health import capture_dirs_for_health
+
+                _health_check_collected_rollouts(
+                    Path(config.output_jsonl_fpath),
+                    config,
+                    rch._landed_keys,
+                    model_call_capture_dirs=capture_dirs_for_health(global_config_dict),
+                )
     _exit_if_terminated()
 
 
@@ -774,6 +798,7 @@ def health_check_rollouts(
     ignored_checks: Sequence[str] = (),
     limits: Any = None,
     json_output: bool = False,
+    model_call_capture_dir: str | Path | None = None,
 ):
     """Run rollout quality verification for an existing run directory.
 
@@ -790,6 +815,7 @@ def health_check_rollouts(
         ignored_checks=ignored_checks,
         limits=limits,
         json_output=json_output,
+        model_call_capture_dir=model_call_capture_dir,
     )
 
 

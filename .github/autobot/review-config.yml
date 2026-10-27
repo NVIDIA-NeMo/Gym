@@ -2,7 +2,7 @@
 auto-review:
   enabled: true
   mode: comment
-  on: status_change
+  on: [opened, status_change]
   when: ready_for_review
 
 approval:

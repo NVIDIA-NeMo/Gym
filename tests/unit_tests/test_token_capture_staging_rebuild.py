@@ -62,7 +62,7 @@ def _snapshot(
         schema_version=STAGING_SCHEMA_VERSION,
         digest_version=STAGING_DIGEST_VERSION,
         extras_digest_version=EXTRAS_DIGEST_VERSION,
-        rollout_id=rollout_id,
+        capture_key=rollout_id,
         model_call_id=model_call_id,
         parent_call_id=parent_call_id,
         mode=mode,
@@ -78,7 +78,7 @@ def _snapshot(
         cumulative_hash=cumulative_hash,
     )
     return StagedCallBaseSnapshot(
-        rollout_id=rollout_id,
+        capture_key=rollout_id,
         model_call_id=model_call_id,
         parent_call_id=parent_call_id,
         mode=mode,
@@ -100,10 +100,10 @@ def _manifest_row(
     snapshot: StagedCallBaseSnapshot,
     *,
     staging_key: str | None = None,
-    capture_key: str | None = None,
+    source_capture_key: str | None = None,
 ) -> CallRecord:
     return CallRecord(
-        capture_key=capture_key,
+        source_capture_key=source_capture_key,
         model_call_id=snapshot.model_call_id,
         parent_call_id=snapshot.parent_call_id,
         prev_len=snapshot.prev_len,
@@ -127,7 +127,7 @@ def _receipt(
     poisoned: bool = False,
 ) -> RolloutReceipt:
     return RolloutReceipt(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         terminal_model_call_id=terminal,
         manifest=[_manifest_row(snapshot) for snapshot in snapshots],
         capture_poisoned=poisoned,
@@ -249,7 +249,7 @@ def test_committed_extras_verify_and_corrupt_extras_fail_at_point_of_use() -> No
         ("prev_len", 1, "wrong_prev_len"),
         ("cum_len", 99, "wrong_cum_len"),
         ("mode", "token_in", "wrong_mode"),
-        ("rollout_id", "rollout-2", "wrong_rollout"),
+        ("capture_key", "rollout-2", "wrong_rollout"),
         ("model_call_id", "other", "snapshot_identity_mismatch"),
         ("digest", "0" * 64, "wrong_digest"),
         ("extras_digest", "0" * 64, "wrong_extras_digest"),
@@ -445,7 +445,7 @@ def test_base_snapshot_validates_strictly_without_extras_bytes() -> None:
         StagedCallBaseSnapshot(**{**snapshot.model_dump(), "token_ids_delta": [99, 11]})
 
 
-def _restored_pair(capture_key: str | None) -> tuple[RolloutReceipt, list[StagedCallBaseSnapshot]]:
+def _restored_pair(source_capture_key: str | None) -> tuple[RolloutReceipt, list[StagedCallBaseSnapshot]]:
     """A restored attempt whose root call was staged before the checkpoint, under attempt 0's key."""
     root = _snapshot(
         "root",
@@ -465,16 +465,16 @@ def _restored_pair(capture_key: str | None) -> tuple[RolloutReceipt, list[Staged
         rollout_id="rollout-1-a1",
     )
     receipt = RolloutReceipt(
-        rollout_id="rollout-1-a1",
+        capture_key="rollout-1-a1",
         terminal_model_call_id="child",
-        manifest=[_manifest_row(root, capture_key=capture_key), _manifest_row(child)],
+        manifest=[_manifest_row(root, source_capture_key=source_capture_key), _manifest_row(child)],
         terminal_selection="declared",
     )
     return receipt, [root, child]
 
 
 def test_restored_receipt_verifies_calls_staged_by_an_earlier_attempt() -> None:
-    receipt, snapshots = _restored_pair(capture_key="rollout-1")
+    receipt, snapshots = _restored_pair(source_capture_key="rollout-1")
 
     row = verify_and_linearize(receipt, snapshots)
 
@@ -483,17 +483,17 @@ def test_restored_receipt_verifies_calls_staged_by_an_earlier_attempt() -> None:
 
 
 def test_a_carried_over_call_without_its_capture_key_is_rejected() -> None:
-    receipt, snapshots = _restored_pair(capture_key=None)
+    receipt, snapshots = _restored_pair(source_capture_key=None)
 
     with pytest.raises(ReceiptVerificationError) as raised:
         verify_and_linearize(receipt, snapshots)
     assert raised.value.code == "wrong_rollout"
 
 
-@pytest.mark.parametrize("capture_key", ["rollout-2", "rollout-1-a2"])
-def test_a_capture_key_outside_the_restore_lineage_is_rejected(capture_key: str) -> None:
+@pytest.mark.parametrize("source_capture_key", ["rollout-2", "rollout-1-a2"])
+def test_a_capture_key_outside_the_restore_lineage_is_rejected(source_capture_key: str) -> None:
     """Only an earlier attempt of the same rollout may contribute calls to a receipt."""
-    receipt, snapshots = _restored_pair(capture_key=capture_key)
+    receipt, snapshots = _restored_pair(source_capture_key=source_capture_key)
 
     with pytest.raises(ReceiptVerificationError) as raised:
         verify_and_linearize(receipt, snapshots)

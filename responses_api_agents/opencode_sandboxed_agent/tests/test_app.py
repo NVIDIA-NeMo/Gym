@@ -1346,3 +1346,94 @@ def test_assistant_message_plugin_hooks() -> None:
         check=True,
         timeout=30,
     )
+
+
+def test_an_unreadable_part_leaves_tool_timing_unknown(tmp_path: Path) -> None:
+    """The part may have been a tool call, so the tool history read is not complete."""
+    from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
+    db_path = tmp_path / "opencode.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute("create table session (id text, parent_id text, time_created integer)")
+    connection.execute("create table message (id text, session_id text, data text, time_created integer)")
+    connection.execute(
+        "create table part (id text, message_id text, session_id text, data text, time_created integer)"
+    )
+    connection.execute("insert into session values ('root', null, 0)")
+    connection.execute(
+        "insert into message values (?, ?, ?, ?)",
+        ("m1", "root", json.dumps({"role": "assistant", "time": {"created": 1, "completed": 3}}), 1),
+    )
+    connection.execute("insert into part values ('p1', 'm1', 'root', 'not json', 1)")
+    connection.commit()
+    connection.close()
+
+    bundle = parse_opencode_observations(db_path, "fallback")
+
+    gaps = [(gap.code, gap.detail) for gap in bundle.gaps]
+    assert ("agent_artifact_record_unparseable", None) in gaps
+    assert ("tool_timing_unavailable", "p1") in gaps
+
+
+@mark.parametrize("call_id", ["absent", None, ""], ids=["absent", "null", "empty"])
+def test_a_tool_part_without_a_call_id_leaves_tool_timing_unknown(tmp_path: Path, call_id) -> None:
+    """The tool ran but has no observation to time, so the tool history read is not complete."""
+    from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
+    part = {"type": "tool", "tool": "bash", "state": {"status": "completed", "time": {"start": 1000, "end": 2000}}}
+    if call_id != "absent":
+        part["callID"] = call_id
+    db_path = tmp_path / "opencode.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute("create table session (id text, parent_id text, time_created integer)")
+    connection.execute("create table message (id text, session_id text, data text, time_created integer)")
+    connection.execute(
+        "create table part (id text, message_id text, session_id text, data text, time_created integer)"
+    )
+    connection.execute("insert into session values ('root', null, 0)")
+    connection.execute(
+        "insert into message values (?, ?, ?, ?)",
+        ("m1", "root", json.dumps({"role": "assistant", "time": {"created": 1, "completed": 3}}), 1),
+    )
+    connection.execute("insert into part values ('p1', 'm1', 'root', ?, 1)", (json.dumps(part),))
+    connection.commit()
+    connection.close()
+
+    bundle = parse_opencode_observations(db_path, "fallback")
+
+    gaps = [(gap.code, gap.detail) for gap in bundle.gaps]
+    assert ("tool_call_identity_unavailable", "p1") in gaps
+    assert ("tool_timing_unavailable", "p1") in gaps
+
+
+@mark.parametrize(
+    "message_data",
+    ["not json", json.dumps({"time": {"created": 1, "completed": 3}})],
+    ids=["unreadable-message", "message-without-role"],
+)
+def test_a_tool_part_left_out_for_its_message_leaves_tool_timing_unknown(tmp_path: Path, message_data: str) -> None:
+    """Its tool is known but cannot be placed, so the tool history read is not complete."""
+    from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
+    part = {
+        "type": "tool",
+        "callID": "c1",
+        "tool": "bash",
+        "state": {"status": "completed", "time": {"start": 1000, "end": 2000}},
+    }
+    db_path = tmp_path / "opencode.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute("create table session (id text, parent_id text, time_created integer)")
+    connection.execute("create table message (id text, session_id text, data text, time_created integer)")
+    connection.execute(
+        "create table part (id text, message_id text, session_id text, data text, time_created integer)"
+    )
+    connection.execute("insert into session values ('root', null, 0)")
+    connection.execute("insert into message values ('m1', 'root', ?, 1)", (message_data,))
+    connection.execute("insert into part values ('p1', 'm1', 'root', ?, 1)", (json.dumps(part),))
+    connection.commit()
+    connection.close()
+
+    bundle = parse_opencode_observations(db_path, "fallback")
+
+    assert ("tool_timing_unavailable", "p1") in [(gap.code, gap.detail) for gap in bundle.gaps]

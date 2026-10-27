@@ -387,7 +387,7 @@ async def test_token_lineage_continues_across_a_crash(deploy, tmp_path: Path, po
     # Call 1 was never delivered,
     # so its replacement (call 2) continues from call 0 and call 1 is not part of the continued lineage.
     assert replacement.json()["reward"] == 1.0
-    assert admissions[2]["rollout_id"] == "counter-1-a1"
+    assert admissions[2]["capture_key"] == "counter-1-a1"
     assert admissions[2]["parent_call_id"] == admissions[0]["model_call_id"]
     assert chain[0] == admissions[0]["model_call_id"]
     assert admissions[1]["model_call_id"] not in chain
@@ -410,7 +410,7 @@ async def test_an_in_flight_generation_is_cut_and_its_prefix_continued(
         first.cancel()
         replacement = await http.post("/run", json=weather_episode("cut-1", attempt=1))
 
-    after = [call for call in deployment.backend_calls() if call["admission"]["rollout_id"] == "cut-1-a1"]
+    after = [call for call in deployment.backend_calls() if call["admission"]["capture_key"] == "cut-1-a1"]
     assert cut_rounds == [[cut_call]]
     assert [call.get("continued_from") for call in after] == [cut_call]
     assert replacement.json()["result"]["reward"] == 1.0

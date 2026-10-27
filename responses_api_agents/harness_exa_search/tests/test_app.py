@@ -164,3 +164,46 @@ async def test_smoke_rollout_uses_prebuilt_runtime(monkeypatch, tmp_path: Path) 
         ),
     )
     assert result.output[0].content[0].text == "Say hello"
+
+
+def test_upstream_model_url_carries_the_rollout_prefix_and_the_current_span(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    segment = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+    monkeypatch.setattr("responses_api_agents.harness_exa_search.app.trace_context_path_segment", lambda: segment)
+    monkeypatch.setattr(
+        "responses_api_agents.harness_exa_search.app.resolve_agent",
+        lambda _: (
+            "responses_api_agents.harness_exa_search.tests.sample_harness",
+            "SampleHarness",
+            "SampleHarnessConfig",
+        ),
+    )
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"policy_model": {"responses_api_models": {"model": {}}}}
+    client._build_server_base_url.return_value = "http://model"
+
+    def agent(**overrides):
+        config = HarnessExaSearchConfig(
+            host="0.0.0.0",
+            port=0,
+            entrypoint="app.py",
+            name="test",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            resources_server=ResourcesServerRef(type="resources_servers", name="verifier"),
+            agent="sample",
+            image="unused",
+            sandbox_provider={"local": {}},
+            **overrides,
+        )
+        return HarnessExaSearchAgent(config=config, server_client=client)
+
+    prefixed = SimpleNamespace(
+        path_params={"rollout_id": "3-0"}, url=SimpleNamespace(path="/ng-rollout/3-0/v1/responses")
+    )
+    plain = SimpleNamespace(path_params={}, url=SimpleNamespace(path="/v1/responses"))
+    assert agent()._upstream_model_url(prefixed) == f"http://model/ng-rollout/3-0{segment}"
+    assert agent()._upstream_model_url(plain) == f"http://model{segment}"
+    assert agent(sandbox_model_base_url="http://gateway:9000/")._upstream_model_url(prefixed) == (
+        f"http://gateway:9000/ng-rollout/3-0{segment}"
+    )

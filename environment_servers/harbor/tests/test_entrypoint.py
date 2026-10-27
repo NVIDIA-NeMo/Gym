@@ -29,13 +29,16 @@ from environment_servers.harbor.tests.conftest import (
     OVERLAY_DOCKERFILE,
     SEPARATE_IN_TASK_IMAGE_TOML,
     TASK_TOML,
+    VERIFIER_TESTS_DOCKERFILE,
+    FakeCompose,
     FakeSandbox,
     archive_of,
     make_server,
+    record_verifier_build,
     run_episode,
     write_image_config,
 )
-from environment_servers.harbor.verifier import _verifier_image
+from environment_servers.harbor.verifier import _verifier_image, _verifier_runs_task_image, _verifier_start
 from nemo_gym import failure_kinds
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.tasks.harbor import load_task
@@ -207,8 +210,10 @@ def build_mode(task, *, record: dict | None = ENTRYPOINT_CONFIG, image: str = BU
     (task.path / "environment" / "Dockerfile").write_text(
         'FROM ubuntu:24.04\nCOPY . /app\nENTRYPOINT ["/entrypoint.sh"]\n'
     )
-    built = {context_digest(task.path / "environment"): {"image": image}}
-    (task.path.parent / BUILT_IMAGES_FILE).write_text(json.dumps(built))
+    record_path = task.path.parent / BUILT_IMAGES_FILE
+    built = json.loads(record_path.read_text()) if record_path.is_file() else {}
+    built[context_digest(task.path / "environment")] = {"image": image}
+    record_path.write_text(json.dumps(built))
     if record is not None:
         write_image_config(task.path.parent, image, **record)
     return load_task(task.path)
@@ -284,7 +289,9 @@ class TestEntrypoint:
         (task.path / "environment" / "docker-compose.yaml").write_text("services:\n  main:\n    image: x\n")
         task = build_mode(task)  # the Compose file is part of the build context, so the record is keyed anew
         assert task.needs_compose and task.entrypoint == ("/entrypoint.sh",)
-        assert entrypoint_to_run(task) is None
+        # The adapter started main (the seed says so); a plain sandbox of the same image starts it itself.
+        assert entrypoint_to_run(task, compose_managed=True) is None
+        assert entrypoint_to_run(task) == ["/entrypoint.sh"]
 
     @pytest.mark.parametrize(
         ("argv", "keepalive"),
@@ -558,7 +565,7 @@ class TestEntrypoint:
         (task.path / "environment" / "docker-compose.yaml").write_text("services:\n  main:\n    image: x\n")
         task = build_mode(task, record=record)
         assert task.needs_compose and task.image_shell == ("/bin/bash", "-o", "pipefail", "-c")
-        await server._wait_healthy(sandbox, task)
+        await server._wait_healthy(sandbox, task, compose_managed=True)
         assert not any("false | true" in c["command"] for c in sandbox.execs)
         assert sandbox.health_probes == 1 and sandbox.execs[-1]["command"] == "test -f /app/ready.txt"
 
@@ -613,10 +620,23 @@ class TestEntrypoint:
         image_probes = [i for i, c in enumerate(sandbox.execs) if c["command"] == "test -f /tmp/healthy"]
         assert len(image_probes) == 6 and image_probes[-1] < sandbox.index_of("test -f /app/ready.txt")
 
-    def separate_server(self, tmp_path, monkeypatch, *, toml, agent=None, verifier=None, record=ENTRYPOINT_CONFIG):
+    VERIFIER_IMAGE = "registry.example/ds-hello-verifier:abc"
+
+    def separate_server(
+        self, tmp_path, monkeypatch, *, toml, agent=None, verifier=None, record=ENTRYPOINT_CONFIG, verifier_record=None
+    ):
+        """A separate-mode task in build mode: its agent image is ``record``'s, and (D1) its verifier grades in the
+        image prepare built from ``tests/Dockerfile``, recorded with ``verifier_record`` (``record`` by default, so
+        both images start alike). A declared ``[verifier.environment].docker_image`` in ``toml`` takes precedence."""
         agent = agent or EntrypointSandbox()
         verifier = verifier or EntrypointSandbox()
-        server, task, _, _ = make_server(tmp_path, monkeypatch, agent, toml=toml)
+        # Written in shared mode first: the loader refuses a separate-mode task before its verifier image is recorded.
+        server, task, _, _ = make_server(tmp_path, monkeypatch, agent)
+        (task.path / "task.toml").write_text(toml)
+        (task.path / "tests" / "Dockerfile").write_text(VERIFIER_TESTS_DOCKERFILE)
+        record_verifier_build(
+            task.path, self.VERIFIER_IMAGE, **(record if verifier_record is None else verifier_record)
+        )
         task = build_mode(task, record=record)
         server.config.tasksets["ds"].tasks["hello"] = task.digest
 
@@ -627,8 +647,14 @@ class TestEntrypoint:
         monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
         return server, task, agent, verifier
 
-    async def test_separate_verifier_in_the_task_image_runs_the_entrypoint_before_test_sh(self, tmp_path, monkeypatch):
+    async def test_separate_verifier_in_the_built_image_runs_its_entrypoint_before_test_sh(
+        self, tmp_path, monkeypatch
+    ):
         server, task, agent, verifier = self.separate_server(tmp_path, monkeypatch, toml=SEPARATE_IN_TASK_IMAGE_TOML)
+        # The loader read the verifier image's record (D1 built it from tests/Dockerfile) beside the task image's.
+        assert task.verifier_image == self.VERIFIER_IMAGE and task.entrypoint == ("/entrypoint.sh",)
+        assert task.verifier_image_config.entrypoint == ("/entrypoint.sh",)
+        assert (task.verifier_image_config.user, task.verifier_image_config.workdir) == ("app", "/app")
 
         response = await run_episode(server, task)
 
@@ -638,7 +664,7 @@ class TestEntrypoint:
         # The verifier's /logs folders exist before its entrypoint starts, as in the seed; test.sh comes after.
         launched = verifier.index_of(f"sh {ENTRYPOINT_DIR}/run.sh")
         assert (
-            verifier.index_of("mkdir -p /tests /logs/verifier /logs/artifacts")
+            verifier.index_of("mkdir -p /tests /logs/verifier /logs/agent /logs/artifacts")
             < launched
             < verifier.index_of("test.sh")
         )
@@ -648,10 +674,86 @@ class TestEntrypoint:
         assert verifier.launch_cancelled_before_stop is True and verifier.stopped
         assert not server._sandboxes and not server._sessions
 
+    async def test_built_verifier_image_starts_with_its_own_record_not_the_task_images(self, tmp_path, monkeypatch):
+        # Harbor `up --wait`s the image built from tests/Dockerfile: its entrypoint, as its user in its WorkingDir,
+        # and its HEALTHCHECK, whatever the agent image's are.
+        verifier_record = {
+            "Entrypoint": ["/verify.sh"],
+            "User": "grader",
+            "WorkingDir": "/tests",
+            "Healthcheck": IMAGE_HEALTHCHECK,
+        }
+        verifier = EntrypointSandbox(health_failures=1)
+        server, task, agent, verifier = self.separate_server(
+            tmp_path, monkeypatch, toml=SEPARATE_IN_TASK_IMAGE_TOML, verifier=verifier, verifier_record=verifier_record
+        )
+        assert task.image_healthcheck is None and task.verifier_image_config.healthcheck == IMAGE_HEALTHCHECK
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0
+        assert (agent.launch()["user"], agent.launch()["cwd"]) == ("app", "/app")
+        assert (verifier.launch()["user"], verifier.launch()["cwd"]) == ("grader", "/tests")
+        assert "/verify.sh sh -c 'sleep infinity'" in verifier.run_script()
+        assert "/entrypoint.sh" not in verifier.run_script()
+        assert verifier.health_probes == 2 and agent.health_probes == 0
+        assert verifier.index_of(f"sh {ENTRYPOINT_DIR}/run.sh") < verifier.index_of("test -f /tmp/healthy")
+        assert verifier.index_of("test -f /tmp/healthy") < verifier.index_of("bash /tests/test.sh")
+        # A verifier image whose record has no entrypoint starts nothing, while the agent image's still runs.
+        quiet = EntrypointSandbox()
+        server, task, agent, quiet = self.separate_server(
+            tmp_path / "b",
+            monkeypatch,
+            toml=SEPARATE_IN_TASK_IMAGE_TOML,
+            verifier=quiet,
+            verifier_record={"Env": [f"PATH={IMAGE_PATH}"], "WorkingDir": "/tests"},
+        )
+        assert task.verifier_image_config.entrypoint is None
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        assert agent.launch() is not None and quiet.launch() is None
+        assert not any(ENTRYPOINT_DIR in c["command"] for c in quiet.execs)
+
+    async def test_separate_verifier_in_the_task_image_runs_its_entrypoint_before_test_sh(self, tmp_path, monkeypatch):
+        # Harbor's prebuilt verifier: no [verifier.environment], so the effective verifier environment is a copy of
+        # [environment] with its docker_image, and the verifier grades in the task's own image, whose recorded start
+        # (here the pull-mode Dockerfile's base image's) is what Harbor's `up --wait` runs.
+        toml = SEPARATE_IN_TASK_IMAGE_TOML.replace("[environment]\n", '[environment]\ndocker_image = "org/app:1"\n')
+        agent, verifier = EntrypointSandbox(), EntrypointSandbox()
+        server, task, _, _ = make_server(
+            tmp_path,
+            monkeypatch,
+            agent,
+            toml=toml,
+            dockerfile="FROM org/app:1\nWORKDIR /app\n",
+            image_config=ENTRYPOINT_CONFIG,
+        )
+        assert task.image == "org/app:1" and task.verifier_image is None and task.verifier_image_config is None
+        assert task.entrypoint == ("/entrypoint.sh",) and (task.entrypoint_user, task.entrypoint_workdir) == (
+            "app",
+            "/app",
+        )
+
+        async def create_verifier(task, *, episode_key=None):
+            server._sandboxes[f"{episode_key}/verifier"] = verifier
+            return verifier
+
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0 and response.result.verifier_mode == "separate"
+        assert agent.launch() is not None and verifier.launch() is not None
+        assert (verifier.launch()["user"], verifier.launch()["cwd"]) == ("app", "/app")
+        assert verifier.index_of(f"sh {ENTRYPOINT_DIR}/run.sh") < verifier.index_of("test.sh")
+        assert verifier.launch_cancelled_before_stop is True and verifier.stopped and not server._sandboxes
+
     async def test_separate_verifier_in_another_image_gets_no_launcher(self, tmp_path, monkeypatch):
         toml = SEPARATE_IN_TASK_IMAGE_TOML + '\n[verifier.environment]\ndocker_image = "org/verifier:1"\n'
         server, task, agent, verifier = self.separate_server(tmp_path, monkeypatch, toml=toml)
         assert _verifier_image(task) == "org/verifier:1" and task.entrypoint == ("/entrypoint.sh",)
+        assert task.verifier_image_config is None  # a declared verifier image nothing recorded: no start
         response = await run_episode(server, task)
         assert response.failure is None, response.failure
         assert agent.launch() is not None and verifier.launch() is None
@@ -824,7 +926,7 @@ class TestEntrypoint:
         )
         server, task, sandbox = self.entrypoint_server(tmp_path, monkeypatch, sandbox=sandbox, toml=HEALTHCHECK_TOML)
 
-        with caplog.at_level("WARNING", logger="environment_servers.harbor.users"):
+        with caplog.at_level("WARNING", logger="environment_servers.harbor.entrypoint"):
             response = await run_episode(server, task)
 
         assert response.failure is None, response.failure
@@ -900,7 +1002,7 @@ class TestEntrypoint:
         sandbox = EntrypointSandbox(passwd={"0": "root"})
         record = ENTRYPOINT_CONFIG | {"User": "1000"}
         server, task, sandbox = self.entrypoint_server(tmp_path, monkeypatch, sandbox=sandbox, record=record)
-        with caplog.at_level("WARNING", logger="environment_servers.harbor.entrypoint"):
+        with caplog.at_level("WARNING", logger="environment_servers.harbor.users"):
             response = await run_episode(server, task)
         assert response.failure is None, response.failure
         assert sandbox.launch()["user"] == "1000"
@@ -980,6 +1082,195 @@ class TestEntrypoint:
         assert verifier.health_probes == 3
         assert not any("test.sh" in c["command"] for c in verifier.execs)
         assert verifier.stopped and agent.stopped and not server._sandboxes
+
+    @pytest.mark.parametrize("passes", [True, False], ids=["healthy", "never-healthy"])
+    async def test_compose_agent_with_a_built_verifier_starts_it_by_plain_sandbox_rules(
+        self, tmp_path, monkeypatch, passes
+    ):
+        """The agent runs as a Compose group (the adapter started main's entrypoint and waited for its healthcheck),
+        and the verifier is a standalone sandbox prepare built from tests/Dockerfile, as Harbor's ``up --wait`` of the
+        verifier image is. Its startup is its own decision: the verifier image's ENTRYPOINT is launched there and its
+        HEALTHCHECK gates test.sh, whatever the agent's environment was."""
+        agent = EntrypointSandbox()
+        verifier = EntrypointSandbox(health_failures=1 if passes else 10**6)
+        # Written in shared mode first: the loader refuses a separate-mode task before its verifier image is recorded.
+        server, task, _, _ = make_server(tmp_path, monkeypatch, agent, toml=HEALTHCHECK_TOML)
+        (task.path / "task.toml").write_text(SEPARATE_HEALTH_TOML)
+        (task.path / "environment" / "docker-compose.yaml").write_text("services:\n  main:\n    image: x\n")
+        (task.path / "tests" / "Dockerfile").write_text(VERIFIER_TESTS_DOCKERFILE)
+        record_verifier_build(
+            task.path,
+            self.VERIFIER_IMAGE,
+            Env=[f"PATH={IMAGE_PATH}"],
+            Entrypoint=["/start-db.sh"],
+            User="grader",
+            WorkingDir="/tests",
+            Healthcheck=IMAGE_HEALTHCHECK | {"Retries": 3},
+            Shell=["/bin/bash", "-o", "pipefail", "-c"],
+        )
+        task = build_mode(task, record=ENTRYPOINT_CONFIG)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        assert task.needs_compose and task.verifier_image == self.VERIFIER_IMAGE
+        assert task.verifier_image_config.entrypoint == ("/start-db.sh",)
+        compose = FakeCompose({"main": agent})
+
+        async def start_compose(task, episode_key):
+            return compose
+
+        async def create_verifier(task, *, episode_key=None):
+            server._sandboxes[f"{episode_key}/verifier"] = verifier
+            return verifier
+
+        monkeypatch.setattr(server, "_create_compose", start_compose)
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+
+        response = await run_episode(server, task)
+
+        # The agent side was the adapter's: no entrypoint launched by the seed, no image probe, the task's check only.
+        assert agent.launch() is None and agent.health_probes == 1
+        assert agent.execs[agent.index_of("test -f /app/ready.txt")]["command"] == "test -f /app/ready.txt"
+        # The verifier's side is a plain sandbox's: its image entrypoint runs as its user in its WorkingDir, and its
+        # HEALTHCHECK, through the verifier image's own Shell, is polled before anything is graded.
+        assert verifier.launch() is not None and "/start-db.sh sh -c 'sleep infinity'" in verifier.run_script()
+        assert (verifier.launch()["user"], verifier.launch()["cwd"]) == ("grader", "/tests")
+        probe = "/bin/bash -o pipefail -c 'test -f /tmp/healthy'"
+        probes = [i for i, c in enumerate(verifier.execs) if c["command"] == probe]
+        assert verifier.index_of(f"sh {ENTRYPOINT_DIR}/run.sh") < probes[0]
+        if passes:
+            assert response.failure is None, response.failure
+            assert response.result.reward == 1.0 and response.result.verifier_mode == "separate"
+            assert verifier.health_probes == 2 and probes[-1] < verifier.index_of("bash /tests/test.sh")
+        else:
+            result = response.result
+            assert result is not None, response.failure
+            assert result.mask_sample is True and result.failure_kind == failure_kinds.PROVIDER_UNAVAILABLE
+            assert f"Healthcheck failed 3 times: {probe!r} (the image HEALTHCHECK)" in result.failure_reason
+            assert verifier.health_probes == 3
+            assert not any("test.sh" in c["command"] for c in verifier.execs)
+        assert compose.stopped and verifier.stopped and not server._sandboxes
+
+    @pytest.mark.parametrize("passes", [True, False], ids=["healthy", "never-healthy"])
+    async def test_a_declared_verifier_image_that_is_the_task_image_starts_by_its_record(
+        self, tmp_path, monkeypatch, passes
+    ):
+        """Review (M24): ``[verifier.environment].docker_image`` names the task's own ``[environment].docker_image``,
+        whose start (ENTRYPOINT, user, WorkingDir, HEALTHCHECK) is recorded as the pull-mode Dockerfile's base. M20
+        keyed the verifier's start on that image identity; M24's rewrite of ``_verifier_runs_task_image`` to the
+        configuration shape (no explicit block) lost it, and a declared image had no ``verifier_image_config``, so the
+        verifier sandbox ran test.sh with the image's entrypoint never started and its healthcheck never polled. Harbor
+        ``up --wait``s a declared verifier image like any other. The loader now reads the declared image's own record
+        (``verifier_image_config``), so the start is that image's; the sandbox is still created from the explicit
+        block (its workdir and resources), the real ``_create_verifier_sandbox`` here with the provider's sandbox
+        replaced, and the block's user default and overlay rules are untouched."""
+        toml = SEPARATE_IN_TASK_IMAGE_TOML.replace("[environment]\n", '[environment]\ndocker_image = "org/app:1"\n')
+        toml += '\n[verifier.environment]\ndocker_image = "org/app:1"\ncpus = 3\nworkdir = "/grade"\n'
+        record = ENTRYPOINT_CONFIG | {"Healthcheck": IMAGE_HEALTHCHECK | {"Retries": 3}}
+        agent = EntrypointSandbox()
+        verifier = EntrypointSandbox(health_failures=1 if passes else 10**6)
+        server, task, _, _ = make_server(
+            tmp_path, monkeypatch, agent, toml=toml, dockerfile="FROM org/app:1\nWORKDIR /app", image_config=record
+        )
+        assert task.image == task.verifier_image == "org/app:1" and task.verifier_image_config is not None
+        assert task.entrypoint == ("/entrypoint.sh",) and task.image_healthcheck == record["Healthcheck"]
+        start = _verifier_start(task)
+        assert start is not None and start is not task and not _verifier_runs_task_image(task)
+        assert (start.image, start.entrypoint, start.overlay) == ("org/app:1", ("/entrypoint.sh",), ())
+        assert (start.entrypoint_user, start.entrypoint_workdir) == ("app", "/app")
+        assert start.image_healthcheck == record["Healthcheck"]
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        specs = []
+
+        async def start(spec):
+            specs.append(spec)
+
+        verifier.start = start
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandbox", lambda provider_config: verifier)
+
+        response = await run_episode(server, task)
+
+        # Created from [verifier.environment]: the declared image, its workdir and its resources.
+        (spec,) = specs
+        assert spec.image == "org/app:1" and spec.workdir == "/grade" and spec.resources.cpu == 3
+        # Started by the task's record: the image entrypoint as its user in its WorkingDir, its HEALTHCHECK polled
+        # (through /bin/sh, the image records no Shell) before anything is graded.
+        assert verifier.launch() is not None and "/entrypoint.sh sh -c 'sleep infinity'" in verifier.run_script()
+        assert (verifier.launch()["user"], verifier.launch()["cwd"]) == ("app", "/app")
+        probes = [i for i, c in enumerate(verifier.execs) if c["command"] == IMAGE_SHELL_PROBE]
+        assert verifier.index_of(f"sh {ENTRYPOINT_DIR}/run.sh") < probes[0]
+        if passes:
+            assert response.failure is None, response.failure
+            assert response.result.reward == 1.0 and response.result.verifier_mode == "separate"
+            assert verifier.health_probes == 2 and probes[-1] < verifier.index_of("bash /tests/test.sh")
+        else:
+            result = response.result
+            assert result is not None, response.failure
+            assert result.mask_sample is True and result.failure_kind == failure_kinds.PROVIDER_UNAVAILABLE
+            assert (
+                f"Healthcheck failed 3 times: {IMAGE_SHELL_PROBE!r} (the image HEALTHCHECK)" in result.failure_reason
+            )
+            assert result.response is not None  # the rollout is kept
+            assert verifier.health_probes == 3
+            assert not any("test.sh" in c["command"] for c in verifier.execs)
+        assert agent.stopped and verifier.stopped and not server._sandboxes
+
+    async def test_a_declared_verifier_image_that_is_an_overlay_tasks_base_starts_by_the_base_record(
+        self, tmp_path, monkeypatch
+    ):
+        """Review follow-up (M24): the task is an overlay (``FROM org/app:1`` plus ``RUN`` lines, a ``USER`` and a
+        ``WORKDIR`` of its own) and ``[verifier.environment].docker_image`` is that same base image. Harbor
+        ``up --wait``s ``org/app:1`` as it is for the verifier, so its entrypoint runs there as the image's own user in
+        its own WorkingDir and its HEALTHCHECK gates test.sh. The first fix keyed the start on image identity minus
+        the overlay and skipped this case; the start is now the declared image's own record, so the agent's sandbox
+        runs the overlay and starts the entrypoint as the Dockerfile's final USER in its WORKDIR, while the verifier's
+        gets no RUN line and starts the entrypoint as the record's ``User`` in its ``WorkingDir``."""
+        toml = SEPARATE_IN_TASK_IMAGE_TOML + '\n[verifier.environment]\ndocker_image = "org/app:1"\ncpus = 3\n'
+        dockerfile = "FROM org/app:1\nRUN useradd -m grader\nWORKDIR /work\nUSER grader\n"
+        record = ENTRYPOINT_CONFIG | {"Healthcheck": IMAGE_HEALTHCHECK | {"Retries": 3}}
+        agent, verifier = EntrypointSandbox(), EntrypointSandbox(health_failures=1)
+        server, task, _, _ = make_server(
+            tmp_path, monkeypatch, agent, toml=toml, dockerfile=dockerfile, image_config=record
+        )
+        assert task.overlay and task.verifier_image == "org/app:1" and task.verifier_image_config is not None
+        assert (task.entrypoint_user, task.entrypoint_workdir) == ("grader", "/work")
+        start = _verifier_start(task)
+        assert start is not None and not _verifier_runs_task_image(task) and not start.overlay
+        assert (start.image, start.entrypoint, start.image_healthcheck) == (
+            "org/app:1",
+            ("/entrypoint.sh",),
+            record["Healthcheck"],
+        )
+        assert (start.entrypoint_user, start.entrypoint_workdir) == ("app", "/app")
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        specs = []
+
+        async def create(spec):
+            specs.append(spec)
+
+        verifier.start = create
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandbox", lambda provider_config: verifier)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0 and response.result.verifier_mode == "separate"
+        # The agent: the overlay's RUN line, then the entrypoint as the Dockerfile's final USER in its WORKDIR.
+        assert any(c["seen"] and "useradd -m grader" in c["seen"]["command"] for c in agent.execs)
+        assert (agent.launch()["user"], agent.launch()["cwd"]) == ("grader", "/work")
+        # The verifier: created from [verifier.environment], no RUN line, the image's own entrypoint as its own user
+        # in its own WorkingDir, its HEALTHCHECK polled (through /bin/sh) before test.sh.
+        (spec,) = specs
+        assert spec.image == "org/app:1" and spec.resources.cpu == 3
+        assert not any(c["seen"] and "useradd" in c["seen"]["command"] for c in verifier.execs)
+        assert verifier.launch() is not None and "/entrypoint.sh sh -c 'sleep infinity'" in verifier.run_script()
+        assert (verifier.launch()["user"], verifier.launch()["cwd"]) == ("app", "/app")
+        probes = [i for i, c in enumerate(verifier.execs) if c["command"] == IMAGE_SHELL_PROBE]
+        assert verifier.index_of(f"sh {ENTRYPOINT_DIR}/run.sh") < probes[0] < verifier.index_of("bash /tests/test.sh")
+        assert verifier.health_probes == 2
+        assert agent.stopped and verifier.stopped and not server._sandboxes
 
     async def test_verifier_entrypoint_dying_before_test_sh_masks_the_sample(self, tmp_path, monkeypatch):
         # Dies after the launcher's probe, during the uploads: the probe right before test.sh catches it.

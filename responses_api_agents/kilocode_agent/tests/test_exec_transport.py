@@ -40,7 +40,7 @@ class ExecOnlySandbox:
         self.disconnected = True
 
     async def exec(self, command, *, cwd=None, timeout_s=30):
-        launch = "--receipt" in command and "process_supervisor.py" in command
+        launch = "--receipt" in command and "process_supervisor" in command
         if launch:
             self.deadline = timeout_s
             self.delayed_command = command
@@ -75,7 +75,7 @@ def make_session(tmp_path):
         session=SandboxSession(sandbox=provider, session_dir=str(directory), workdir=str(workdir), harness="KiloCode"),
     )
     shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner.py")
-    assert not (directory / "process_supervisor.py").exists()
+    assert not (directory / "process_supervisor").exists()
     return state, provider, workdir
 
 

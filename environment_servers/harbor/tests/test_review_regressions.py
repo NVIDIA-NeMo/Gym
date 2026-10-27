@@ -93,10 +93,15 @@ async def test_templates_resolve_at_use_without_changing_materialized_task(tmp_p
     assert "verifier-secret" not in (snapshots[0] / "task.toml").read_text()
 
 
-async def test_dockerfile_env_literal_is_not_a_host_template(tmp_path, monkeypatch):
+@pytest.mark.parametrize("probe", [None, "host-value"])
+async def test_dockerfile_env_literal_is_not_a_host_template(tmp_path, monkeypatch, probe):
     """A Dockerfile ``ENV`` value is baked, as ``docker build`` leaves it; only ``[environment.env]`` is a host template."""
     monkeypatch.setenv("HARBOR_TEST_TOKEN", "agent-secret")
-    monkeypatch.setenv("GYM4256_LITERAL_PROBE", "host-value")
+    if probe is None:
+        # No such host variable: the seed must not refuse the task for a value that was never a template.
+        monkeypatch.delenv("GYM4256_LITERAL_PROBE", raising=False)
+    else:
+        monkeypatch.setenv("GYM4256_LITERAL_PROBE", probe)
     dockerfile = "FROM debian:bookworm-slim\nENV LITERAL='${GYM4256_LITERAL_PROBE}'\nRUN echo probe\n"
     toml = TASK_TOML + '\n[environment.env]\nTOKEN = "${HARBOR_TEST_TOKEN}"\n'
     server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml, dockerfile=dockerfile)
@@ -136,9 +141,15 @@ async def test_live_folder_edits_do_not_change_seeded_verifier(tmp_path, monkeyp
     snapshots: list[Path] = []
     during_turn(server, lambda: snapshots.append(server._sessions["r2"].task.path))
     assert (await run_episode(server, task, rollout="r2")).result.reward == 1
-    with tarfile.open(fileobj=io.BytesIO(sandbox.uploaded_archives[-1])) as archive:
-        script = next(name for name in archive.getnames() if name.lstrip("./") == "test.sh")
-        assert archive.extractfile(script).read() == original
+    # Every upload is an archive (the trajectory travels as a one-file archive too): the last one holding
+    # test.sh is the second episode's tests/.
+    scripts = []
+    for data in sandbox.uploaded_archives:
+        with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+            scripts += [
+                archive.extractfile(name).read() for name in archive.getnames() if name.lstrip("./") == "test.sh"
+            ]
+    assert scripts and scripts[-1] == original
     # Both episodes ran from the one snapshot taken at the first seed.
     assert len(server._tasks) == 1 and snapshots[0] == server._tasks[next(iter(server._tasks))].result().path
 
@@ -149,11 +160,11 @@ async def test_concurrent_first_seeds_share_snapshot_even_if_one_is_cancelled(tm
     copies = []
     original = server._snapshot_task
 
-    def snapshot(folder, expected):
+    def snapshot(folder, expected, root=None):
         copies.append(folder)
         entered.set()
         assert release.wait(10)
-        return original(folder, expected)
+        return original(folder, expected, root)
 
     monkeypatch.setattr(server, "_snapshot_task", snapshot)
     first = asyncio.create_task(server.run_request(episode(task)))
@@ -306,6 +317,7 @@ async def test_hung_agent_close_does_not_pin_episode_key(tmp_path, monkeypatch):
 
     Each cleanup callback has its own budget (``CleanupContext.aclose``); under one shared budget the hung
     close starved both, the sandbox ran until its TTL and every redelivery of the episode was refused forever.
+    The finished turn is still scored: a close that fails only by timeout does not discard it.
     """
 
     server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
@@ -319,7 +331,7 @@ async def test_hung_agent_close_does_not_pin_episode_key(tmp_path, monkeypatch):
 
     monkeypatch.setattr(conftest.FakeAgentClient, "post", hanging_close)
     response = await asyncio.wait_for(run_episode(server, task), 10)
-    assert response.failure.stage == "cleanup"
+    assert response.failure is None and response.result.reward == 1 and response.result.ng_agent_observations is None
     assert sandbox.stopped and not server._sandboxes and not server._sessions and server._active == set()
     # The client's redelivery of the episode is admitted again, not refused as "still running".
     again = await asyncio.wait_for(run_episode(server, task), 10)
@@ -621,10 +633,13 @@ async def test_separate_verifier_spec_follows_the_task_image_or_the_explicit_env
     """Built through ``_create_verifier_sandbox`` itself, not a test double of it."""
     monkeypatch.setenv("HARBOR_TEST_TOKEN", "secret")
     explicit = mode != "task_image"
+    # The task image: Harbor's effective verifier environment is a copy of [environment], so the task must declare
+    # the image there (without one and without tests/Dockerfile the loader refuses the task, as Harbor does).
     toml = (
         SEPARATE_TOML
         if explicit
-        else SEPARATE_IN_TASK_IMAGE_TOML + '\n[environment.env]\nAPP_MODE = "${HARBOR_TEST_TOKEN}"\n'
+        else SEPARATE_IN_TASK_IMAGE_TOML.replace("[environment]\n", '[environment]\ndocker_image = "org/agent:1"\n')
+        + '\n[environment.env]\nAPP_MODE = "${HARBOR_TEST_TOKEN}"\n'
     )
     if mode == "explicit_workdir":
         toml = toml.replace(

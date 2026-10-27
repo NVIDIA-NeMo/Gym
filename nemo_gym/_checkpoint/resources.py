@@ -566,7 +566,6 @@ class ResourcesParticipant(CheckpointParticipant):
 
     def status_extra(self) -> dict[str, Any]:
         return {
-            "mode": self.mode,
             "verify": self.verify_step_type,
             "retired_sessions": len(self._retired_session_rollouts),
         }

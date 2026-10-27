@@ -924,6 +924,16 @@ class OpenSandboxProvider:
         self._pty_sessions: set[Any] = set()
         self._renewals: dict[str, asyncio.Task[None]] = {}
 
+    def pull_policy_options(self, policy: str) -> dict[str, Any]:
+        """Compose's ``pull_policy`` as the per-sandbox image pull policy extension (``_resolve_extensions`` lets a
+        per-sandbox value win over the deployment default)."""
+        mapped = {"always": "Always", "missing": "IfNotPresent", "never": "Never"}.get(policy)
+        if mapped is None:
+            raise ValueError(f"pull policy must be always, missing or never, got {policy!r}")
+        return {
+            "extensions": {IMAGE_PULL_POLICY_EXTENSION_KEY: mapped, IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY: mapped}
+        }
+
     def validate_runtime_requirements(self, *, cap_add: tuple[str, ...], shm_size: int | None) -> dict[str, str]:
         """Reject requirements without an operator-configured implementation."""
         metadata = {}
@@ -1641,15 +1651,21 @@ class OpenSandboxProvider:
     ) -> SandboxEndpoint:
         """Resolve one client-reachable direct or server-proxied service URL."""
 
+        get_endpoint = getattr(handle.raw, "get_endpoint", None)
+        if get_endpoint is None:
+            raise NotImplementedError(
+                "The installed opensandbox SDK does not expose Sandbox.get_endpoint; "
+                "sandbox service endpoints require opensandbox>=0.1.15"
+            )
         resolved = await self._await_sdk_operation(
-            lambda: handle.raw.get_endpoint(port),
+            lambda: get_endpoint(port),
             operation="get_endpoint",
             sandbox_id=handle.sandbox_id,
             timeout_s=(
                 float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None
             ),
         )
-        endpoint_url = str(resolved.endpoint or "")
+        endpoint_url = str(getattr(resolved, "endpoint", "") or "")
         if not endpoint_url:
             raise RuntimeError(f"OpenSandbox returned an empty endpoint for sandbox {handle.sandbox_id!r} port {port}")
         if "://" not in endpoint_url:
@@ -1657,13 +1673,14 @@ class OpenSandboxProvider:
             # resolved domains and protocols match the lifecycle request.
             scheme = urlsplit(handle.raw.connection_config.get_base_url()).scheme or "http"
             endpoint_url = f"{scheme}://{endpoint_url.lstrip('/')}"
-        headers = dict(handle.raw.connection_config.headers)
+        connection_config = getattr(handle.raw, "connection_config", None)
+        headers = dict(getattr(connection_config, "headers", None) or {})
         # Match the SDK's service adapters: connection-wide headers apply to
         # every request, while endpoint-specific routing or auth headers win.
         # The upstream proxy-auth fix adds the management API key to
         # ConnectionConfig.headers only in server-proxy mode, so direct
         # sandbox endpoints never receive it.
-        headers.update(resolved.headers)
+        headers.update(getattr(resolved, "headers", None) or {})
         return SandboxEndpoint(endpoint=endpoint_url, headers=headers)
 
     def _start_renewal(self, handle: SandboxHandle, ttl_s: int | float) -> None:

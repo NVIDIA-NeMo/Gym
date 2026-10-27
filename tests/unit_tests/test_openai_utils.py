@@ -245,12 +245,14 @@ class TestOpenAIUtils:
         assert "X-Request-Id" not in captured["headers"]
 
     @pytest.mark.parametrize("internal", [False, True])
-    @pytest.mark.parametrize("status", [429, 500, 504])
+    @pytest.mark.parametrize("status", [429, 500, 503, 504])
+    @pytest.mark.parametrize("captured", [False, True])
     async def test_explicit_attempt_cap_has_no_exhausted_status_sleep(
         self,
         monkeypatch,
         internal,
         status,
+        captured,
     ) -> None:
         sleeps = []
         calls = 0
@@ -284,12 +286,12 @@ class TestOpenAIUtils:
         client = NeMoGymAsyncOpenAI(
             api_key="abc",
             base_url="https://api.openai.com/v1",
-            max_num_tries=1,
+            max_num_tries=None if captured else 1,
             internal=internal,
         )
 
         with pytest.raises(RuntimeError, match="rate limited"):
-            await client._request(method="POST", url="https://example.test")
+            await client._request(method="POST", url="https://example.test", _resend_after_disconnect=not captured)
 
         assert calls == 1
         assert sleeps == []

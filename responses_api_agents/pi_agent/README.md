@@ -172,6 +172,9 @@ Natural CLI exit cannot distinguish unfinished tools in other sessions from serv
 those processes may still change task files. The stop-time cutoff also has adoption/PID
 races and cannot classify later service forks. It is not a security boundary.
 Services must use task-owned files rather than the temporary agent session directory.
+The supervisor and the runner above Pi run as `gym-supervisor` and `gym-runner` (links to the
+sandbox's `python3`) from files without a `.py` suffix, so a task agent's `pkill -f python3`,
+`pkill python3` or `killall python3` does not end Pi.
 
 Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`, shared with Hermes.
 The adapter stages its worker input and collects its own output. The shared session

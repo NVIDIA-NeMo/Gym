@@ -178,6 +178,7 @@ class Activation:
 
 class AgentSessionParticipant(CheckpointParticipant):
     kind = "agent"
+    mode = "exported"
     record_model = AgentSessionRecord
 
     def __init__(self, hooks: AgentSessionHooks) -> None:
@@ -731,6 +732,7 @@ class RestartOnlyAgentParticipant(CheckpointParticipant):
     """
 
     kind = "agent"
+    mode = "restart_only"
     record_model = CheckpointRecord
 
     def __init__(self, retire_session: Optional[Callable[[str], Awaitable[None]]] = None) -> None:

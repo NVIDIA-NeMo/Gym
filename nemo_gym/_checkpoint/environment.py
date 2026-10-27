@@ -21,6 +21,7 @@ from typing import Any, Optional
 from nemo_gym._checkpoint.control import (
     MAX_REPORTED_BLOCKERS,
     PARSED_JSON_CONTEXT,
+    CheckpointMode,
     CheckpointParticipant,
     CheckpointRecord,
     CheckpointRequest,
@@ -49,8 +50,10 @@ class EnvironmentParticipant(CheckpointParticipant):
     kind = "environment"
     record_model = EpisodeRecord
 
-    def __init__(self) -> None:
+    def __init__(self, *, mode: CheckpointMode) -> None:
         super().__init__()
+        # The environment server's checkpoint_mode; it decides whether episodes record boundaries or restart.
+        self.mode = mode
         self.steps = EpisodeSteps(self.notify)
         self._task_digests: dict[str, str] = {}
         self._restored: dict[str, EpisodeRecord] = {}

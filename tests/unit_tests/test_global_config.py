@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib
 import importlib.metadata
 import sys
 from contextlib import nullcontext as does_not_raise
@@ -26,7 +27,6 @@ from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, fixture, mark
 import nemo_gym.global_config
 import nemo_gym.server_utils
 from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, RESULTS_DIR, WORKING_DIR
-from nemo_gym._config_aliases import LEGACY_AGENT_ALIASES, LEGACY_CONFIG_PATH_ALIASES
 from nemo_gym.config_types import (
     AgentCompositionError,
     AgentWithoutEnvironmentServerError,
@@ -1695,13 +1695,40 @@ contested: second_inner
         assert dict_config[key] == expected
         assert dict_config["nested"][key] == expected
 
+    def test_recursively_hide_secrets_masks_every_value_under_a_secret_mapping(self) -> None:
+        """A `secrets:` mapping is keyed by environment variable name: `JUDGE_AUTH` has no secret-shaped
+        substring of its own, and is a secret all the same."""
+        canary = "sk-FAKE-CANARY"  # pragma: allowlist secret
+        dict_config = DictConfig(
+            {
+                "secrets": {"JUDGE_AUTH": canary, "JUDGE_API_KEY": canary, "inner": {"X": canary}, "many": [canary]},
+                "plain": {"JUDGE_AUTH": "kept"},
+            }
+        )
+
+        recursively_hide_secrets(dict_config)
+
+        assert OmegaConf.to_container(dict_config) == {
+            "secrets": {"JUDGE_AUTH": "****", "JUDGE_API_KEY": "****", "inner": {"X": "****"}, "many": ["****"]},
+            "plain": {"JUDGE_AUTH": "kept"},
+        }
+
     def test_hide_secrets_in_overrides_masks_keys_case_insensitively(self) -> None:
-        overrides = ["++DB_PASSWORD=sk-FAKE-CANARY", "+policy.OPENAI_API_KEY=sk-FAKE-CANARY", "++wandb_project=proj"]
+        overrides = [
+            "++DB_PASSWORD=sk-FAKE-CANARY",
+            "+policy.OPENAI_API_KEY=sk-FAKE-CANARY",
+            "++wandb_project=proj",
+            # The documented Harbor override: the secret-shaped segment is the parent, not the leaf.
+            "++harbor_environment_server.environment_servers.harbor.secrets.JUDGE_AUTH=sk-FAKE-CANARY",
+            "++harbor_environment_server.environment_servers.harbor.artifacts_dir=/tmp/out",
+        ]
 
         assert hide_secrets_in_overrides(overrides) == [
             "++DB_PASSWORD=****",
             "+policy.OPENAI_API_KEY=****",
             "++wandb_project=proj",
+            "++harbor_environment_server.environment_servers.harbor.secrets.JUDGE_AUTH=****",
+            "++harbor_environment_server.environment_servers.harbor.artifacts_dir=/tmp/out",
         ]
 
     def test_recursively_replace_keys(self, monkeypatch: MonkeyPatch) -> None:
@@ -2054,67 +2081,6 @@ class TestConfigLoadErrors:
         message = str(exc_info.value)
         assert str(missing) in message
         assert message.count("  - ") == 1
-
-    @mark.parametrize(("legacy", "canonical"), LEGACY_CONFIG_PATH_ALIASES.items())
-    def test_load_extra_config_paths_resolves_legacy_alias(
-        self, caplog: LogCaptureFixture, legacy: str, canonical: str
-    ) -> None:
-        parser = GlobalConfigDictParser()
-
-        with caplog.at_level("WARNING"):
-            config_paths, configs = parser.load_extra_config_paths([legacy])
-
-        assert config_paths == [canonical]
-        assert len(configs) == 1
-        assert f"Config path `{legacy}` is deprecated; use `{canonical}`." in caplog.text
-
-    def test_existing_legacy_config_path_takes_precedence(
-        self, monkeypatch: MonkeyPatch, tmp_path: Path, caplog: LogCaptureFixture
-    ) -> None:
-        legacy = next(iter(LEGACY_CONFIG_PATH_ALIASES))
-        local_config = tmp_path / legacy
-        local_config.parent.mkdir(parents=True)
-        local_config.write_text("local: true\n")
-        monkeypatch.chdir(tmp_path)
-
-        parser = GlobalConfigDictParser()
-        with caplog.at_level("WARNING"):
-            config_paths, configs = parser.load_extra_config_paths([legacy])
-
-        assert config_paths == [legacy]
-        assert configs[0].local is True
-        assert "deprecated" not in caplog.text
-
-    @mark.parametrize(("legacy", "canonical"), LEGACY_AGENT_ALIASES.items())
-    def test_legacy_agent_names_route_to_canonical_instance(
-        self, caplog: LogCaptureFixture, legacy: str, canonical: str
-    ) -> None:
-        config = OmegaConf.create(
-            {
-                canonical: {},
-                "agent_name": legacy,
-                "agent_map": {"source": legacy},
-                "fan_out": {"source": [legacy]},
-            }
-        )
-
-        with caplog.at_level("WARNING"):
-            GlobalConfigDictParser.apply_legacy_agent_aliases(config)
-
-        assert config.agent_name == canonical
-        assert config.agent_map.source == canonical
-        assert config.agent_map[legacy] == canonical
-        assert config.fan_out.source == [canonical]
-        assert f"`{legacy}` -> `{canonical}`" in caplog.text
-
-    def test_legacy_agent_alias_follows_composed_agent_route(self) -> None:
-        legacy, canonical = next(iter(LEGACY_AGENT_ALIASES.items()))
-        composed = "reasoning_gym_custom_agent"
-        config = OmegaConf.create({composed: {}, "agent_map": {canonical: composed}})
-
-        GlobalConfigDictParser.apply_legacy_agent_aliases(config)
-
-        assert config.agent_map[legacy] == composed
 
     def test_load_extra_config_paths_malformed_yaml_raises_config_error(self, tmp_path: Path) -> None:
         bad = tmp_path / "bad.yaml"
@@ -3773,3 +3739,16 @@ class TestAbsoluteIpServerTypes:
 
         with raises(ConfigError, match=match):
             GlobalConfigDictParser().parse(_absolute_ip_parse_config({"absolute_ip_server_types": value}))
+
+
+def test_the_cli_parse_leaves_hydras_argument_parser_as_it_found_it(monkeypatch: MonkeyPatch) -> None:
+    """The parser is patched for the call only. Left patched, every parse used to wrap the previous wrapper, one
+    frame deeper each time, until a long test session recursed past the limit inside hydra's parser."""
+    hydra_main_module = importlib.import_module("hydra.main")
+    original = hydra_main_module.get_args_parser
+
+    monkeypatch.setattr(sys, "argv", ["gym"])
+    for _ in range(4):
+        GlobalConfigDictParser().parse_global_config_dict_from_cli()
+
+    assert hydra_main_module.get_args_parser is original

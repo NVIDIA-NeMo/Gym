@@ -162,6 +162,8 @@ def _parse_opencode_session(
         part = _load_json(row["data"])
         if not part:
             gaps.append(ObservationGap(code="agent_artifact_record_unparseable"))
+            # The part may have been a tool call, so the tool history read is not complete.
+            gaps.append(ObservationGap(code="tool_timing_unavailable", detail=row["id"]))
             continue
         ptype = part.get("type")
         message_id = row["message_id"]
@@ -169,9 +171,15 @@ def _parse_opencode_session(
         session_id = row["session_id"] or message_sessions.get(message_id)
         if not isinstance(session_id, str):
             gaps.append(ObservationGap(code="agent_artifact_record_unowned"))
+            if ptype == "tool":
+                # A tool part that belongs to no session is left out, so the tool history read is not complete.
+                gaps.append(ObservationGap(code="tool_timing_unavailable", detail=row["id"]))
             continue
         conversation = conversations.setdefault(session_id, [])
         role = message.get("role")
+        if ptype == "tool" and role not in ("assistant", "user"):
+            # A tool part whose message cannot say who sent it is left out, so the tool history read is not complete.
+            gaps.append(ObservationGap(code="tool_timing_unavailable", invocation_id=session_id, detail=row["id"]))
 
         if ptype == "step-finish":
             continue
@@ -286,6 +294,14 @@ def _parse_opencode_session(
                 gaps.append(
                     ObservationGap(
                         code="tool_call_identity_unavailable",
+                        invocation_id=session_id,
+                        detail=row["id"],
+                    )
+                )
+                # The tool ran but has no observation to time, so the tool history read is not complete.
+                gaps.append(
+                    ObservationGap(
+                        code="tool_timing_unavailable",
                         invocation_id=session_id,
                         detail=row["id"],
                     )

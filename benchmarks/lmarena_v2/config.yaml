@@ -48,6 +48,10 @@ policy_model:
         enable_thinking: true
       extra_body: {}
 
+# Judge outages go to the failures sidecar, not the score; above this share of expected rollouts the run's
+# health check reports it unhealthy (the score is still published).
+health_check_max_not_final_failure_fraction: 0.01
+
 lmarena_v2_benchmark_environment_server:
   _inherit_from: lmarena_v2_environment_server
   environment_servers:

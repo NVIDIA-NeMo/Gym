@@ -32,6 +32,7 @@ from nemo_gym.base_responses_api_model import (
     ModelCallCaptureConfig,
     SimpleResponsesAPIModel,
     _orjson_dispatch_response,
+    _request_messages,
     install_model_call_capture,
     make_capture_store,
 )
@@ -43,6 +44,19 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import ServerClient, apply_rollout_prefix, rollout_path_prefix
+from nemo_gym.token_id_capture.replay import replay_context
+
+
+@pytest.mark.parametrize("text", ["What is 2 + 2?", ""])
+@pytest.mark.parametrize("typed", [False, True])
+def test_responses_string_input_matches_explicit_user_history(text: str, typed: bool) -> None:
+    body = {"input": text, "instructions": "Be concise."}
+    explicit = {**body, "input": [{"role": "user", "content": text}]}
+    if typed:
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
+        explicit = NeMoGymResponseCreateParamsNonStreaming.model_validate(explicit)
+    assert replay_context(_request_messages(body)) == replay_context(_request_messages(explicit))
+    assert _request_messages(body)[-1] == {"role": "user", "content": text}
 
 
 class TestBaseResponsesAPIModel:

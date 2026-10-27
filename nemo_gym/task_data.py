@@ -62,6 +62,8 @@ TASK_DATA_EXPORT_NAME = "TaskData"
 RESERVED_ROW_KEYS = frozenset(
     {
         "responses_create_params",
+        # A multi-turn row's requests, one per turn beside ``task_data`` (the Harbor materializer's ``turns``).
+        "turns",
         "agent_ref",
         "task_source",
         "_ng_task_index",

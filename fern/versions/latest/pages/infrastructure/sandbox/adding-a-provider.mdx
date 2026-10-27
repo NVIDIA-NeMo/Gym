@@ -92,7 +92,7 @@ sandbox:
 
 `resolve_provider_metadata("sandbox", global_config_dict)` returns the optional `default_metadata` block. Agents merge those values into `SandboxSpec.metadata` before provider create, with agent-level metadata taking precedence.
 
-Each named block must contain exactly one non-reserved provider key. The only reserved key today is `default_metadata`.
+Each named block must contain exactly one non-reserved provider key. The reserved keys today are `default_metadata` and `volume_sources` (`SANDBOX_BLOCK_RESERVED_KEYS` in `nemo_gym/sandbox/config.py`); a provider never sees either.
 
 ## Provider Options
 

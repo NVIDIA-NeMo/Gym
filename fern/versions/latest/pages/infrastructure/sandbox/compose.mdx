@@ -134,8 +134,9 @@ normalization, interpolate environment variables, read `.env` files, or merge
 Compose files. Resolve these inputs upstream.
 
 Use mappings for `environment` and `depends_on`, and long-form mappings for
-`ports` and `volumes`. Supply byte counts for `mem_limit` and `shm_size`, and
-resolved absolute bind paths. Strings are passed literally, including `$` and
+`volumes`; `ports` take the short (`"8080"`, `"8080:80/tcp"`) or long syntax and
+are checked against the endpoint rules at load. Supply byte counts for
+`mem_limit` and `shm_size`, and resolved absolute bind paths. Strings are passed literally, including `$` and
 `$$`; write shell variables as `$VAR` rather than escaping them for Compose.
 
 The YAML must reference prebuilt images and contain no `build` entries. This is

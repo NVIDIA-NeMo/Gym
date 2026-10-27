@@ -157,7 +157,7 @@ async def coordinated(
 
 
 def environment_worker() -> tuple[EnvironmentParticipant, FastAPI]:
-    return EnvironmentParticipant(), FastAPI()
+    return EnvironmentParticipant(mode="exported"), FastAPI()
 
 
 def agent_worker() -> tuple[AgentSessionParticipant, FastAPI]:
@@ -286,7 +286,7 @@ async def test_the_commit_reply_carries_the_fields_the_participant_kind_adds(soc
     """With several workers the coordinator answers the commit, so it must keep the kind's own reply fields."""
 
     def worker() -> tuple[EnvironmentParticipant, FastAPI]:
-        return ReplyingEnvironmentParticipant(), FastAPI()
+        return ReplyingEnvironmentParticipant(mode="exported"), FastAPI()
 
     async with coordinated(socket_dir, worker) as deployment:
         first, second = deployment.links
@@ -1936,6 +1936,31 @@ async def test_status_answers_without_a_worker_that_does_not(socket_dir: str, mo
     assert elapsed < 1.0
 
 
+async def test_status_reports_the_checkpoint_mode_when_no_worker_answers(
+    socket_dir: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The coordinator copies the mode, so it never depends on which workers answered in time."""
+    monkeypatch.setattr(participant_workers_module, "_STATUS_TIMEOUT_SECONDS", 0.2, raising=False)
+
+    def resources_worker() -> tuple[ResourcesParticipant, FastAPI]:
+        return ResourcesParticipant(AsyncMock(), "restart_only"), FastAPI()
+
+    async with coordinated(socket_dir, resources_worker) as deployment:
+        for link in deployment.links:
+            real_handle = link.handle
+
+            async def handle(kind: str, body: dict, real_handle=real_handle) -> dict:
+                if kind == "status":
+                    await asyncio.Event().wait()
+                return await real_handle(kind, body)
+
+            link.handle = handle
+        status = await dispatch_control(deployment.controller, "status", None)
+
+    assert status["status_workers"] == 0
+    assert (status["kind"], status["mode"]) == ("resources", "restart_only")
+
+
 async def test_a_large_export_arrives_in_chunks_with_every_record(
     socket_dir: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2447,7 +2472,7 @@ async def test_a_worker_lost_in_the_middle_of_a_message_is_reported_as_a_lost_wo
 def test_every_participant_takes_the_hooks_a_worker_link_sets() -> None:
     participants = [
         ResourcesParticipant(SessionStates(), "exported"),
-        EnvironmentParticipant(),
+        EnvironmentParticipant(mode="exported"),
         AgentSessionParticipant(AgentHooks()),
     ]
     unset = [(participant.claim_restored, participant.on_session_freed) for participant in participants]

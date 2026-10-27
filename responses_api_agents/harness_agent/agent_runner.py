@@ -42,6 +42,7 @@ def main() -> None:
     body = json.loads((WORK_DIR / "request.json").read_text())
     model_url = (WORK_DIR / "model_url.txt").read_text().strip()
     cfg_raw = (WORK_DIR / "agent_config.json").read_text().replace("__SANDBOX_MODEL_URL__", model_url)
+    cfg_raw = cfg_raw.replace("__WORK_DIR__", str(WORK_DIR))
     cfg_data = json.loads(cfg_raw)
 
     module = importlib.import_module(rc["agent_module"])

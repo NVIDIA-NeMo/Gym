@@ -14,6 +14,7 @@
 # limitations under the License.
 """Read-only catalog for manifest-backed and legacy environments and benchmarks."""
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Literal, Optional
@@ -34,11 +35,12 @@ from nemo_gym.environment.manifest import (
 
 
 ENVIRONMENTS_SUBDIR = "environments"
+# Written at the root of every pulled Harbor dataset (nemo_gym/tasks/harbor/manifest.py); discovery stops there.
+HARBOR_DATASET_MANIFEST = "manifest.toml"
 ENVIRONMENTS_DIR = PARENT_DIR / ENVIRONMENTS_SUBDIR
 BENCHMARKS_SUBDIR = "benchmarks"
 RESOURCES_SERVERS_SUBDIR = "resources_servers"
 ENVIRONMENT_CONFIG_FILENAME = "config.yaml"
-ENVIRONMENT_TOMBSTONE_FILENAME = ".nemo_gym_tombstone"
 
 CatalogKind = Literal["environment", "benchmark"]
 CatalogStatus = Literal["experimental", "no-manifest"]
@@ -233,9 +235,33 @@ def _legacy_config_paths(tree_dir: Path, kind: CatalogKind) -> Iterable[tuple[st
 
     for child in sorted(tree_dir.iterdir()):
         config_path = child / ENVIRONMENT_CONFIG_FILENAME
-        tombstone_path = child / ENVIRONMENT_TOMBSTONE_FILENAME
-        if child.is_dir() and config_path.is_file() and not tombstone_path.is_file():
+        if child.is_dir() and config_path.is_file():
             yield child.name, config_path
+
+
+def _manifest_paths(tree_dir: Path) -> List[Path]:
+    """Every ``manifest.yaml`` under ``tree_dir``, without descending into Harbor datasets.
+
+    A fetched dataset (``nemo_gym.tasks.harbor.hub.fetch_ref``) lands under ``environments/harbor/`` with a
+    Harbor ``manifest.toml`` at its root and hundreds of task folders below. Those folders are data, not
+    catalog entries, so the walk stops at any folder holding that file instead of scanning every task. The
+    folder itself is still read: a local dataset registered by a ``manifest.yaml`` at its root gets the same
+    ``manifest.toml`` the first time it is prepared (``nemo_gym.tasks.harbor.manifest.check_manifest``) and
+    stays a catalog entry.
+
+    Hidden folders are skipped at every depth, as recursive task discovery skips them
+    (``nemo_gym.tasks.harbor.task.discover_tasks``): the fetch stages its clone, a copy of every task, in a hidden
+    ``.nemo-gym-harbor-*`` folder inside the dataset folder, and a first fetch killed mid-clone leaves it there
+    before the ``manifest.toml`` that would stop the walk above it is written.
+    """
+    found: List[Path] = []
+    for current, dirnames, filenames in os.walk(tree_dir):
+        if HARBOR_DATASET_MANIFEST in filenames:
+            dirnames[:] = []
+        dirnames[:] = sorted(name for name in dirnames if not name.startswith("."))
+        if MANIFEST_FILENAME in filenames:
+            found.append(Path(current) / MANIFEST_FILENAME)
+    return sorted(found)
 
 
 def _discover_registry_tree(
@@ -250,10 +276,7 @@ def _discover_registry_tree(
 
     entries: Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry] = {}
     manifest_configs: set[Path] = set()
-    for manifest_path in sorted(tree_dir.rglob(MANIFEST_FILENAME)):
-        relative_path = manifest_path.relative_to(tree_dir)
-        if kind == "environment" and (tree_dir / relative_path.parts[0] / ENVIRONMENT_TOMBSTONE_FILENAME).is_file():
-            continue
+    for manifest_path in _manifest_paths(tree_dir):
         key = (kind, _path_identity(tree_dir, manifest_path))
         if key in claimed:
             continue
