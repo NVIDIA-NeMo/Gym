@@ -1066,52 +1066,79 @@ def test_delete_if_unchanged_reports_a_missing_file(tmp_path):
     assert CaptureStore(tmp_path).delete_if_unchanged("0-0", 0) == "capture_file_missing"
 
 
-def test_retire_deletes_a_capture_file_that_the_persisted_rollout_covers(tmp_path):
-    from nemo_gym.observability.model_calls import retire_covered_model_call_capture, snapshot_model_call_capture
+def _retire(rollout_id, record, snapshot, **add_kwargs):
+    """Queue one persisted rollout and flush, as rollout collection does; return the batch."""
+    from nemo_gym.observability.model_calls import CaptureRetirementBatch
+
+    batch = CaptureRetirementBatch()
+    batch.add(rollout_id, record, snapshot, **add_kwargs)
+    batch.flush(lambda: None)
+    return batch
+
+
+def test_retirement_deletes_a_capture_file_that_the_persisted_rollout_covers(tmp_path):
+    from nemo_gym.observability.model_calls import snapshot_model_call_capture
 
     store, record = _covered_capture(tmp_path)
     snapshot = snapshot_model_call_capture("0-0", [tmp_path])
     _merge_and_attach(tmp_path, record)
 
-    assert retire_covered_model_call_capture("0-0", record, snapshot) == []
+    batch = _retire("0-0", record, snapshot)
+
+    assert (batch.retired, dict(batch.kept)) == (1, {})
     assert not store.path_for("0-0").exists()
 
 
-def test_retire_keeps_the_capture_file_of_a_rollout_that_does_not_cover_it(tmp_path):
-    from nemo_gym.observability.model_calls import retire_covered_model_call_capture, snapshot_model_call_capture
+def test_retirement_judges_coverage_from_the_rollout_it_is_given(tmp_path):
+    from nemo_gym.observability.model_calls import snapshot_model_call_capture
 
     store, record = _covered_capture(tmp_path)
+    snapshot = snapshot_model_call_capture("0-0", [tmp_path])
     _merge_and_attach(tmp_path, record)
     record["ng_trajectory"]["gaps"].append({"code": "multimodal_history_redacted"})
     record["ng_trajectory"]["model_calls"][0]["request"] = None
 
-    reasons = retire_covered_model_call_capture("0-0", record, snapshot_model_call_capture("0-0", [tmp_path]))
+    batch = _retire("0-0", record, snapshot)
 
-    assert reasons == ["payload_gap:multimodal_history_redacted"]
+    assert (batch.retired, dict(batch.kept)) == (0, {"payload_gap": 1})
     assert store.path_for("0-0").exists()
 
 
-def test_retire_keeps_a_capture_file_that_grew_after_the_snapshot(tmp_path):
-    from nemo_gym.observability.model_calls import retire_covered_model_call_capture, snapshot_model_call_capture
+def test_retirement_keeps_a_capture_file_that_grew_after_the_snapshot(tmp_path):
+    from nemo_gym.observability.model_calls import snapshot_model_call_capture
 
     store, record = _covered_capture(tmp_path)
     snapshot = snapshot_model_call_capture("0-0", [tmp_path])
     store.record("0-0", _capture_exchange("responses", "B", {}, {"id": "resp-B"}))
-
     _merge_and_attach(tmp_path, record)
 
-    assert retire_covered_model_call_capture("0-0", record, snapshot) == ["capture_file_changed"]
+    batch = _retire("0-0", record, snapshot)
+
+    assert dict(batch.kept) == {"capture_file_changed": 1}
     assert store.path_for("0-0").exists()
 
 
-def test_retire_without_a_snapshot_has_no_file_to_delete():
-    from nemo_gym.observability.model_calls import retire_covered_model_call_capture
+def test_retirement_keeps_a_capture_file_that_a_rollout_shares_with_another(tmp_path):
+    from nemo_gym.observability.model_calls import snapshot_model_call_capture
 
-    assert retire_covered_model_call_capture("0-0", {}, None) == ["no_capture_file"]
+    store, record = _covered_capture(tmp_path)
+    snapshot = snapshot_model_call_capture("0-0", [tmp_path])
+    _merge_and_attach(tmp_path, record)
+
+    batch = _retire("0-0", record, snapshot, shares_capture_key=True)
+
+    assert dict(batch.kept) == {"rollout_id_shared": 1}
+    assert store.path_for("0-0").exists()
 
 
-def test_retire_only_touches_the_rollout_attempt_it_was_given(tmp_path):
-    from nemo_gym.observability.model_calls import retire_covered_model_call_capture, snapshot_model_call_capture
+def test_retirement_without_a_snapshot_has_no_file_to_delete():
+    batch = _retire("0-0", {}, None)
+
+    assert dict(batch.kept) == {"no_capture_attachment": 1, "no_capture_file": 1}
+
+
+def test_retirement_only_touches_the_rollout_attempt_it_was_given(tmp_path):
+    from nemo_gym.observability.model_calls import snapshot_model_call_capture
 
     store = CaptureStore(tmp_path)
     store.record("0-0", _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
@@ -1122,8 +1149,28 @@ def test_retire_only_touches_the_rollout_attempt_it_was_given(tmp_path):
         "ng_trajectory": {"model_calls": [{"model_call_id": "call-B", "request": {}, "response": {}}]},
     }
 
-    assert retire_covered_model_call_capture("0-0-a1", record, snapshot) == []
+    batch = _retire("0-0-a1", record, snapshot)
+
+    assert batch.retired == 1
     assert store.path_for("0-0").exists() and not store.path_for("0-0-a1").exists()
+
+
+def test_a_capture_file_that_cannot_be_deleted_is_left_in_place_without_failing_the_run(tmp_path, monkeypatch):
+    from nemo_gym.observability.model_calls import snapshot_model_call_capture
+
+    store, record = _covered_capture(tmp_path)
+    snapshot = snapshot_model_call_capture("0-0", [tmp_path])
+    _merge_and_attach(tmp_path, record)
+
+    def fail(self, rollout_id, expected_size):
+        raise PermissionError("read-only capture directory")
+
+    monkeypatch.setattr(CaptureStore, "delete_if_unchanged", fail)
+
+    batch = _retire("0-0", record, snapshot)
+
+    assert (batch.retired, dict(batch.kept)) == (0, {"delete_failed": 1})
+    assert store.path_for("0-0").exists()
 
 
 def test_retiring_covered_captures_is_opt_in_and_needs_observability():
@@ -1133,3 +1180,116 @@ def test_retiring_covered_captures_is_opt_in_and_needs_observability():
     assert retire_covered_model_call_captures_from_config(base) is False
     assert retire_covered_model_call_captures_from_config({**base, "retire_covered_model_call_captures": True}) is True
     assert retire_covered_model_call_captures_from_config({"retire_covered_model_call_captures": True}) is False
+
+
+def test_shared_capture_rollout_ids_names_keys_that_several_rows_map_to():
+    from nemo_gym.observability.model_calls import shared_capture_rollout_ids
+
+    rows = [
+        {"_ng_task_index": 0, "_ng_rollout_index": 0},
+        {"_ng_task_index": 0, "_ng_rollout_index": 0},
+        {"_ng_task_index": 0, "_ng_rollout_index": 1},
+        # A later attempt of the same rollout has its own capture key.
+        {"_ng_task_index": 1, "_ng_rollout_index": 0},
+        {"_ng_task_index": 1, "_ng_rollout_index": 0, "_ng_attempt_index": 1},
+        {"_ng_rollout_id": "explicit-1"},
+        {"_ng_rollout_id": "explicit-1"},
+        # A row without a usable id cannot share one.
+        {"_ng_rollout_id": "not valid!"},
+        {"unrelated": True},
+    ]
+
+    assert shared_capture_rollout_ids(rows) == {"0-0", "explicit-1"}
+
+
+_COVERED_ROLLOUT = {
+    "ng_model_call_capture": {"calls": [{"model_call_id": "a"}]},
+    "ng_trajectory": {"model_calls": [{"model_call_id": "a", "request": {}, "response": {}}]},
+}
+
+
+def test_retirement_batch_makes_rollouts_durable_before_deleting_any_capture_file(tmp_path):
+    from nemo_gym.observability.model_calls import CaptureRetirementBatch, snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    batch = CaptureRetirementBatch()
+    for rollout_id in ("0-0", "1-0"):
+        store.record(rollout_id, {"model_call_id": rollout_id})
+        batch.add(rollout_id, _COVERED_ROLLOUT, snapshot_model_call_capture(rollout_id, [tmp_path]))
+    files_present_when_durable = []
+
+    batch.flush(lambda: files_present_when_durable.append([store.path_for(r).exists() for r in ("0-0", "1-0")]))
+
+    assert files_present_when_durable == [[True, True]]
+    assert not store.path_for("0-0").exists() and not store.path_for("1-0").exists()
+
+
+def test_retirement_batch_deletes_nothing_when_making_rollouts_durable_fails(tmp_path):
+    from nemo_gym.observability.model_calls import CaptureRetirementBatch, snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "0-0"})
+    batch = CaptureRetirementBatch()
+    batch.add("0-0", _COVERED_ROLLOUT, snapshot_model_call_capture("0-0", [tmp_path]))
+
+    def fail():
+        raise OSError("fsync failed")
+
+    with pytest.raises(OSError, match="fsync failed"):
+        batch.flush(fail)
+
+    assert store.path_for("0-0").exists()
+    assert batch.retired == 0
+
+
+def test_retirement_batch_counts_a_rollout_once_under_each_distinct_kept_reason(tmp_path):
+    from nemo_gym.observability.model_calls import CaptureRetirementBatch, snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "0-0"})
+    # Two calls lack a payload and a write is still pending: three reasons, two distinct kinds.
+    rollout = {
+        "ng_model_call_capture": {
+            "calls": [{"model_call_id": "a"}, {"model_call_id": "b"}],
+            "gaps": [{"code": "model_call_capture_pending"}],
+        },
+        "ng_trajectory": {"model_calls": []},
+    }
+    batch = CaptureRetirementBatch()
+    batch.add("0-0", rollout, snapshot_model_call_capture("0-0", [tmp_path]))
+
+    batch.flush(lambda: None)
+
+    assert batch.kept == {"call_without_payload": 1, "capture_gap": 1}
+    assert batch.retired == 0
+    assert store.path_for("0-0").exists()
+
+
+def test_retirement_batch_does_not_make_anything_durable_when_nothing_is_queued():
+    from nemo_gym.observability.model_calls import CaptureRetirementBatch
+
+    calls = []
+
+    CaptureRetirementBatch().flush(lambda: calls.append("durable"))
+
+    assert calls == []
+
+
+def test_retirement_batch_is_due_when_full_or_old(monkeypatch):
+    from nemo_gym.observability import model_calls
+    from nemo_gym.observability.model_calls import CaptureRetirementBatch
+
+    now = [1000.0]
+    monkeypatch.setattr(model_calls.time, "monotonic", lambda: now[0])
+    batch = CaptureRetirementBatch(max_size=3, max_age_s=5.0)
+
+    assert batch.due() is False, "nothing is waiting"
+    batch.add("0-0", {}, None)
+    assert batch.due() is False
+    now[0] += 5.0
+    assert batch.due() is True, "old enough"
+    batch.flush(lambda: None)
+    assert batch.due() is False
+    for rollout_id in ("1-0", "2-0", "3-0"):
+        batch.add(rollout_id, {}, None)
+    assert batch.due() is True, "full"

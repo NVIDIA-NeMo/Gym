@@ -88,13 +88,14 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.health.types import RunHealthConfig
 from nemo_gym.observability.model_calls import (
+    CaptureRetirementBatch,
     await_model_call_capture_quiescence,
     clear_model_call_captures_for_rollouts,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
     observability_enabled_from_config,
-    retire_covered_model_call_capture,
     retire_covered_model_call_captures_from_config,
+    shared_capture_rollout_ids,
     snapshot_model_call_capture,
 )
 from nemo_gym.omitted_rollouts import omitted_rollout_record
@@ -3533,8 +3534,8 @@ class RolloutCollectionHelper(BaseModel):
         capture_dirs = model_call_capture_dirs_from_config(global_config)
         observability_enabled = observability_enabled_from_config(global_config)
         retire_captures = bool(capture_dirs) and retire_covered_model_call_captures_from_config(global_config)
-        captures_retired = 0
-        captures_kept: Counter = Counter()
+        capture_retirements = CaptureRetirementBatch() if retire_captures else None
+        shared_capture_ids = shared_capture_rollout_ids(input_rows) if retire_captures else set()
         # Live health metrics follow the metrics exporter alone: `disable_health_check` only gates the post-run
         # report. A traced dispatch also gets a `gym.rollout.health` span, whatever the metrics exporter does.
         health_metrics_enabled = is_metrics_exporter_active()
@@ -3909,14 +3910,15 @@ class RolloutCollectionHelper(BaseModel):
                     if rollout_id is not None and capture_build_can_retire(token_capture_build):
                         os.fsync(results_file.fileno())
                         await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
-                    if rollout_id is not None and retire_captures:
-                        # Durable first: the capture file is the only other copy of these calls.
-                        os.fsync(results_file.fileno())
-                        kept = retire_covered_model_call_capture(rollout_id, result, capture_snapshot)
-                        if kept:
-                            captures_kept.update(reason.partition(":")[0] for reason in kept)
-                        else:
-                            captures_retired += 1
+                    if rollout_id is not None and capture_retirements is not None:
+                        capture_retirements.add(
+                            rollout_id,
+                            result,
+                            capture_snapshot,
+                            shares_capture_key=rollout_id in shared_capture_ids,
+                        )
+                        if capture_retirements.due():
+                            capture_retirements.flush(lambda: os.fsync(results_file.fileno()))
 
                 counts_left[dispatch_name] -= 1
                 if counts_left[dispatch_name] <= 0:
@@ -3963,9 +3965,10 @@ class RolloutCollectionHelper(BaseModel):
                     print_str += f"""Examples left:
 {top_left_str}
 """
-                    if retire_captures:
+                    if capture_retirements is not None:
                         print_str += (
-                            f"Model-call capture files: {captures_retired} deleted, kept {dict(captures_kept)}\n"
+                            f"Model-call capture files: {capture_retirements.retired} deleted, "
+                            f"kept {dict(capture_retirements.kept)}\n"
                         )
                     for agent_name in sorted(agent_name_to_metrics):
                         metrics = agent_name_to_metrics[agent_name]
@@ -4050,6 +4053,9 @@ class RolloutCollectionHelper(BaseModel):
                     f"None of the {len(input_rows)} dispatched rollouts produced a result "
                     f"{dict(failure_counts)}.{drained_note} Inspect {failures_fpath}; the run has no score to report."
                 )
+            # Only a run that finished deletes what is still queued; an aborted run leaves those files in place.
+            if capture_retirements is not None:
+                capture_retirements.flush(lambda: os.fsync(results_file.fileno()))
             collection_succeeded = True
         finally:
             try:
@@ -4072,6 +4078,11 @@ class RolloutCollectionHelper(BaseModel):
                         await owned_token_source.close()
 
         print(latency_tracker.summary())
+        if capture_retirements is not None:
+            print(
+                f"Model-call capture files: {capture_retirements.retired} deleted, "
+                f"kept {dict(capture_retirements.kept)}"
+            )
 
         if config.upload_rollouts and exporters_enabled:  # pragma: no cover
             print("Uploading rollouts. This may take a few minutes if your data is large.")

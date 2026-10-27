@@ -7,9 +7,10 @@ import asyncio
 import json
 import logging
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, Optional
+from typing import Any, Callable, Iterable, Literal, Mapping, Optional
 
 import orjson
 from pydantic import BaseModel, Field
@@ -643,22 +644,76 @@ def snapshot_model_call_capture(rollout_id: str, capture_dirs: list[Path]) -> Op
     return None
 
 
-def retire_covered_model_call_capture(
-    rollout_id: str, result: Mapping[str, Any], snapshot: Optional[CaptureSnapshot]
-) -> list[str]:
-    """Delete a rollout's capture file once the persisted rollout covers it; return why it was kept.
+def shared_capture_rollout_ids(rows: Iterable[Mapping[str, Any]]) -> set[str]:
+    """Capture keys that more than one dispatched row maps to; one row's delete would take the other's calls."""
+    counts: Counter = Counter()
+    for row in rows:
+        try:
+            rollout_id = maybe_rollout_id_from_run_body(row)
+        except (TypeError, ValueError):
+            continue
+        if rollout_id:
+            counts[rollout_id] += 1
+    return {rollout_id for rollout_id, count in counts.items() if count > 1}
 
-    Call after the rollout is durably written. The file is kept when the rollout does not cover it
-    (see ``model_call_capture_uncovered_reasons``), when it grew after the snapshot, or when a model
-    call of this rollout still holds a pending write.
+
+class CaptureRetirementBatch:
+    """Deletes a rollout's capture file once the persisted rollout holds everything in it.
+
+    ``add`` judges each rollout from the rollout itself (``model_call_capture_uncovered_reasons``) and
+    queues it. ``flush`` makes the queued rollouts durable with one sync, then deletes the capture file of
+    every rollout that covers it. A file stays when the rollout does not cover it, when it grew since its
+    snapshot, or when a call of the rollout still holds a pending write. An unflushed queue deletes nothing.
     """
-    if snapshot is None:
-        return ["no_capture_file"]
-    reasons = model_call_capture_uncovered_reasons(result)
-    if reasons:
-        return reasons
-    kept = CaptureStore(snapshot.directory).delete_if_unchanged(rollout_id, snapshot.size)
-    return [kept] if kept else []
+
+    def __init__(self, *, max_size: int = 100, max_age_s: float = 5.0) -> None:
+        self._max_size = max_size
+        self._max_age_s = max_age_s
+        self._pending: list[tuple[str, Optional[CaptureSnapshot], list[str]]] = []
+        self._last_flush = time.monotonic()
+        self.retired = 0
+        self.kept: Counter = Counter()
+
+    def add(
+        self,
+        rollout_id: str,
+        result: Mapping[str, Any],
+        snapshot: Optional[CaptureSnapshot],
+        *,
+        shares_capture_key: bool = False,
+    ) -> None:
+        """Queue a persisted rollout; only its keep-or-delete verdict is retained, not the rollout."""
+        reasons = model_call_capture_uncovered_reasons(result)
+        if shares_capture_key:
+            reasons = ["rollout_id_shared", *reasons]
+        if snapshot is None:
+            reasons.append("no_capture_file")
+        self._pending.append((rollout_id, snapshot, reasons))
+
+    def due(self) -> bool:
+        return bool(self._pending) and (
+            len(self._pending) >= self._max_size or time.monotonic() - self._last_flush >= self._max_age_s
+        )
+
+    def flush(self, make_rollouts_durable: Callable[[], None]) -> None:
+        """Make the queued rollouts durable, then delete the capture files that nothing keeps."""
+        if not self._pending:
+            return
+        make_rollouts_durable()
+        for rollout_id, snapshot, keep_reasons in self._pending:
+            if not keep_reasons:
+                try:
+                    kept = CaptureStore(snapshot.directory).delete_if_unchanged(rollout_id, snapshot.size)
+                except OSError:
+                    logger.warning("Could not delete the model-call capture of rollout %s.", rollout_id, exc_info=True)
+                    kept = "delete_failed"
+                keep_reasons = [kept] if kept else []
+            if keep_reasons:
+                self.kept.update({reason.partition(":")[0] for reason in keep_reasons})
+            else:
+                self.retired += 1
+        self._pending.clear()
+        self._last_flush = time.monotonic()
 
 
 def _prompt_size(usage: Mapping[str, Any]) -> Optional[int]:

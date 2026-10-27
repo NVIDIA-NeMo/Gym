@@ -5762,6 +5762,165 @@ class TestRolloutCollection:
         # The persisted rollout carries the call whether or not its capture file is kept.
         assert [call["model_call_id"] for call in results[0]["ng_model_call_capture"]["calls"]] == ["call"]
 
+    async def test_run_from_config_deletes_each_rollouts_capture_file_by_its_own_outcome(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "observability_enabled": True,
+                "model_call_capture_dir": str(capture_dir),
+                "retire_covered_model_call_captures": True,
+            },
+        )
+        kinds = ["covered", "redacted", "failed"]
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(
+            b"".join(
+                orjson.dumps(
+                    {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}, "kind": kind}
+                )
+                + b"\n"
+                for kind in kinds
+            )
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+        )
+        store = CaptureStore(capture_dir)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    rollout_id = f"{example[TASK_INDEX_KEY_NAME]}-0"
+                    store.record(
+                        rollout_id,
+                        {"model_call_id": "call", "dialect": "responses", "request": {"input": "hi"}, "response": {}},
+                    )
+                    if example["kind"] == "failed":
+                        result = {NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS, "_ng_failure_message": "boom"}
+                    else:
+                        result = {"response": {"usage": {}}}
+                    if example["kind"] == "redacted":
+                        result["ng_trajectory"] = {
+                            "schema_version": "1.0",
+                            "task_id": rollout_id,
+                            "rollout_id": rollout_id,
+                            "gaps": [{"code": "multimodal_history_redacted"}],
+                        }
+                    future = Future()
+                    future.set_result(_CompletedRollout(row=example, result=result, rollout_latency_ms=None))
+                    futures.append(future)
+                return futures
+
+        await Helper().run_from_config(config)
+
+        assert [store.path_for(f"{index}-0").exists() for index in range(3)] == [False, True, True]
+        # The failed rollout produced no rollout, so nothing waited to be deleted for it.
+        assert "Model-call capture files: 1 deleted, kept {'payload_gap': 1}" in capsys.readouterr().out
+
+    async def test_run_from_config_leaves_queued_capture_deletions_undone_when_the_run_aborts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "observability_enabled": True,
+                "model_call_capture_dir": str(capture_dir),
+                "retire_covered_model_call_captures": True,
+            },
+        )
+        source_row = {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes((orjson.dumps(source_row) + b"\n") * 2)
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+        )
+        store = CaptureStore(capture_dir)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                first, second = examples
+                store.record(
+                    "0-0",
+                    {"model_call_id": "call", "dialect": "responses", "request": {}, "response": {}},
+                )
+                done = Future()
+                done.set_result(
+                    _CompletedRollout(row=first, result={"response": {"usage": {}}}, rollout_latency_ms=None)
+                )
+                crashed = Future()
+                crashed.set_exception(RuntimeError("collection aborted"))
+                return [done, crashed]
+
+        with pytest.raises(RuntimeError, match="collection aborted"):
+            await Helper().run_from_config(config)
+
+        # The first rollout is covered, but its deletion was still queued when the run aborted.
+        assert store.path_for("0-0").exists()
+
+    async def test_run_from_config_keeps_the_capture_file_that_several_rollouts_share(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+        from nemo_gym.global_config import ROLLOUT_ID_KEY_NAME
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "observability_enabled": True,
+                "model_call_capture_dir": str(capture_dir),
+                "retire_covered_model_call_captures": True,
+            },
+        )
+        row = {
+            "responses_create_params": {"input": []},
+            AGENT_REF_KEY_NAME: {"name": "agent"},
+            ROLLOUT_ID_KEY_NAME: "shared-0",
+        }
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes((orjson.dumps(row) + b"\n") * 2)
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+        )
+        store = CaptureStore(capture_dir)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    store.record(
+                        "shared-0",
+                        {"model_call_id": "call", "dialect": "responses", "request": {}, "response": {}},
+                    )
+                    future = Future()
+                    future.set_result(
+                        _CompletedRollout(row=example, result={"response": {"usage": {}}}, rollout_latency_ms=None)
+                    )
+                    futures.append(future)
+                return futures
+
+        await Helper().run_from_config(config)
+
+        assert store.path_for("shared-0").exists()
+
     async def test_run_from_config_keys_capture_by_an_explicit_rollout_id(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
