@@ -24,10 +24,10 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import AgentServerRef, BaseServerConfig, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
+from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
-from nemo_gym.typed_exceptions import decode_events_header, observing_failures
 from tests.unit_tests.test_agent_environment_collection_failures import _serve
 
 
@@ -152,7 +152,7 @@ async def _episode(monkeypatch, statuses: list[int], *, via_http: bool = False):
                 ),
                 server_client=client,
             )
-            # The environment's middleware serves each request inside observing_failures; do the same here.
+            # The environment's middleware serves each request inside RequestFailureLog.capture; do the same here.
             relayed: dict = {}
             if via_http:
                 env_app = environment.setup_webserver()
@@ -164,13 +164,13 @@ async def _episode(monkeypatch, statuses: list[int], *, via_http: bool = False):
                     json=_request().model_dump(mode="json"),
                     _max_num_tries=1,
                 )
-                relayed = decode_events_header(reply.headers)
+                relayed = FailureHeader.decode(reply.headers).events
                 result = type(_episode_response()).model_validate_json(await reply.read())
                 print("TYPED_ENV_HTTP_HEADERS", reply.status, dict(reply.headers))
             else:
-                with observing_failures() as observed_here:
+                with RequestFailureLog.capture() as observed_here:
                     result = await environment.run_request(_request())
-                relayed = dict(observed_here)
+                relayed = dict(observed_here.report.events)
         finally:
             for server, task, _ in servers:
                 server.should_exit = True
@@ -197,7 +197,7 @@ async def test_over_http_a_recovered_model_call_reaches_the_environment_reply(mo
     result, model_hits, observed, verified, relayed = await _episode(monkeypatch, [503, 200], via_http=True)
 
     assert result.failure is None and result.result.reward == 1.0 and len(model_hits) == 2
-    assert list(relayed) == [observed[0].event_id]
+    assert list(relayed) == [observed[0].event.event_id]
 
 
 @pytest.mark.parametrize("traced", [False, True])
@@ -210,14 +210,16 @@ async def test_over_http_an_exhausted_model_call_is_the_environments_agent_stage
     failure = result.failure
     assert failure is not None and failure.stage == "agent" and len(model_hits) == 2
     events = failure.failure_events
-    assert events[failure.failure_id].type == "EnvServerFailure"
+    assert events[failure.failure_id].boundary == "environment"
     chain, current = [], failure.failure_id
     while current is not None:
         chain.append(current)
         current = events[current].cause_id
-    assert [events[e].type for e in chain].count("AgentFailure") == 1
-    assert chain[-1] == observed[-1].event_id
-    assert observed[0].event_id not in chain and (observed[0].event_id in relayed or observed[0].event_id in events)
+    assert [events[e].boundary for e in chain].count("agent") == 1
+    assert chain[-1] == observed[-1].event.event_id
+    assert observed[0].event.event_id not in chain and (
+        observed[0].event.event_id in relayed or observed[0].event.event_id in events
+    )
 
 
 async def test_a_recovered_model_call_verifies_and_reports_the_observation(monkeypatch) -> None:
@@ -225,7 +227,9 @@ async def test_a_recovered_model_call_verifies_and_reports_the_observation(monke
 
     assert result.failure is None and result.result.reward == 1.0 and len(verified) == 1
     assert len(model_hits) == 2 and len(observed) == 1
-    assert list(relayed) == [observed[0].event_id]  # The recovered attempt reaches the environment's reply, same id.
+    assert list(relayed) == [
+        observed[0].event.event_id
+    ]  # The recovered attempt reaches the environment's reply, same id.
 
 
 async def test_an_exhausted_model_call_is_the_environments_own_agent_stage_failure(monkeypatch) -> None:
@@ -236,13 +240,13 @@ async def test_an_exhausted_model_call_is_the_environments_own_agent_stage_failu
     assert len(model_hits) == 2
     events = failure.failure_events
     own = events[failure.failure_id]
-    assert own.type == "EnvServerFailure"
+    assert own.boundary == "environment"
     chain, current = [], failure.failure_id
     while current is not None:
         chain.append(current)
         current = events[current].cause_id
-    types = [events[event_id].type for event_id in chain]
-    assert "AgentFailure" in types and types.count("AgentFailure") == 1
-    assert chain[-1] == observed[-1].event_id  # The explicit chain ends at the final attempt's own ModelFailure.
+    types = [events[event_id].boundary for event_id in chain]
+    assert "agent" in types and types.count("agent") == 1
+    assert chain[-1] == observed[-1].event.event_id  # The explicit chain ends at the final attempt's own ModelFailure.
     # The earlier attempt is a sibling observation: it travels in the reply's observations, not in the chain.
-    assert observed[0].event_id not in chain and observed[0].event_id in relayed
+    assert observed[0].event.event_id not in chain and observed[0].event.event_id in relayed

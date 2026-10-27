@@ -153,10 +153,19 @@ class TestJudgeFailsafe:
 
 
 async def test_failsafe_keeps_judge_boundary_above_typed_model_cause():
-    from nemo_gym.typed_exceptions import ModelFailure, failure_events
+    from nemo_gym.episode_types import FailureBoundary, FailureEvent
+    from nemo_gym.typed_exceptions import BoundaryFailure, failure_report_for
 
-    original = ModelFailure(message="provider refused", operation="model.request", http_status=401)
-    original_events = failure_events(original)
+    original = BoundaryFailure(
+        FailureEvent(
+            boundary=FailureBoundary.MODEL,
+            failure_kind="model_request_error",
+            failure_reason="provider refused",
+            operation="model.request",
+            http_status=401,
+        )
+    )
+    original_events = failure_report_for(original).events
     original_id = next(iter(original_events))
 
     async def rejected():
@@ -174,19 +183,28 @@ async def test_failsafe_keeps_judge_boundary_above_typed_model_cause():
     assert data["response"] == {"saved": "answer"}
     events = data["_ng_failure_events"]
     boundary = events[data["_ng_failure_id"]]
-    assert boundary.get("failure_kind") == "judge_failed"
+    assert boundary.get("failure_kind") == "judge_failed" and boundary["boundary"] == "resources_server"
     assert events[original_id]["http_status"] == 401
+    assert events[original_id]["failure_kind"] == "model_request_error"  # the cause keeps its own kind
     assert events[original_id] == original_events[original_id].model_dump(mode="json")
 
 
 async def test_failsafe_preserves_specific_typed_judge_error_under_own_boundary():
-    from nemo_gym.typed_exceptions import ResServerFailure, failure_events
+    from nemo_gym.episode_types import FailureBoundary, FailureEvent
+    from nemo_gym.typed_exceptions import BoundaryFailure, failure_report_for
 
-    class SpecificJudgeError(JudgeError, ResServerFailure):
-        failure_kind = "model_request_error"
+    class SpecificJudgeError(JudgeError, BoundaryFailure):
+        pass
 
-    original = SpecificJudgeError(message="provider refused", operation="provider.request")
-    before = failure_events(original)
+    original = SpecificJudgeError(
+        FailureEvent(
+            boundary=FailureBoundary.RESOURCES_SERVER,
+            failure_kind="model_request_error",
+            failure_reason="provider refused",
+            operation="provider.request",
+        )
+    )
+    before = failure_report_for(original).events
     original_id = next(iter(before))
 
     @judge_failsafe

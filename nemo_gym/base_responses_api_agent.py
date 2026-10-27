@@ -64,7 +64,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
-from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.episode_types import EpisodeId, FailureBoundary, TaskId
 from nemo_gym.failure_kinds import FailureStage
 from nemo_gym.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
@@ -90,7 +90,7 @@ from nemo_gym.session_routing import SessionClaims, SessionKind
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.tool_access import ToolAccess
-from nemo_gym.typed_exceptions import agent_boundary_failure, is_agent_failure
+from nemo_gym.typed_exceptions import AgentRouteFailure, find_boundary_failure
 
 
 LOG = logging.getLogger(__name__)
@@ -328,11 +328,12 @@ def _has_exception_handler(app: FastAPI, error: BaseException) -> bool:
 def _agent_boundary(
     endpoint: Callable[..., Awaitable[Any]], *, app: FastAPI, operation: str, stage: FailureStage | None = None
 ):
-    """``endpoint`` with its failures raised as one ``AgentFailure`` caused by them; the reply body and status stay.
+    """``endpoint`` with its failures raised as one ``AgentRouteFailure`` caused by them.
 
-    ``HTTPException``, cancellation and any error ``app`` has a handler for (such as a checkpoint ``ControlError``,
-    answered 409) pass through to that handler. A failure that already holds an agent failure (``/run`` calling
-    this server's ``/v1/responses``) is not wrapped again.
+    The reply body and status stay those of the original error. ``HTTPException``, cancellation and any error
+    ``app`` has a handler for (such as a checkpoint ``ControlError``, answered 409) pass through to that
+    handler. A failure an agent boundary already reported (``/run`` calling this server's ``/v1/responses``)
+    is not wrapped again.
     """
 
     @wraps(endpoint)
@@ -342,9 +343,12 @@ def _agent_boundary(
         except HTTPException:
             raise
         except Exception as error:
-            if is_agent_failure(error) or _has_exception_handler(app, error):
+            reported = find_boundary_failure(error)
+            if (reported is not None and reported.event.boundary is FailureBoundary.AGENT) or _has_exception_handler(
+                app, error
+            ):
                 raise
-            raise agent_boundary_failure(error, operation=operation, stage=stage) from error
+            raise AgentRouteFailure(error, operation=operation, stage=stage) from error
 
     return bounded
 
@@ -675,30 +679,12 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         app.post("/run")(_agent_boundary(run_with_rollout_context, app=app, operation="agent.run", stage="agent"))
         app.post("/aggregate_metrics")(self.aggregate_metrics)
-        app.post("/v1/agent_sessions")(self._seed_agent_session_endpoint)
+        app.post("/v1/agent_sessions")(
+            _agent_boundary(self.seed_agent_session, app=app, operation="agent.seed_session", stage="seed")
+        )
         app.post("/v1/agent_sessions/close")(self.close_agent_session)
 
         return app
-
-    async def _seed_agent_session_endpoint(
-        self,
-        request: Request,
-        body: AgentSeedSessionRequest,
-        response: Response = None,
-    ) -> AgentSeedSessionResponse:
-        """``seed_agent_session`` over HTTP: a setup error leaves this server as an ``AgentFailure`` caused by it.
-
-        Direct callers of ``seed_agent_session`` still get the original error. An ``HTTPException`` keeps its status
-        and a cancellation stays a cancellation. The failure records the cause's type, not its text.
-        """
-        try:
-            return await self.seed_agent_session(request, body, response)
-        except HTTPException:
-            raise
-        except Exception as error:
-            if is_agent_failure(error) or _has_exception_handler(request.app, error):
-                raise
-            raise agent_boundary_failure(error, operation="agent.seed_session", stage="seed") from error
 
     async def seed_agent_session(
         self,

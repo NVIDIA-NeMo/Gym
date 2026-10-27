@@ -7,7 +7,7 @@ from fastapi import Body
 
 from nemo_gym._checkpoint.control import install_control_error_handler
 from nemo_gym._checkpoint.errors import AdmissionClosedError, StaleAttemptError
-from nemo_gym.typed_exceptions import decode_header
+from nemo_gym.failure_transport import FailureHeader
 from tests.unit_tests import test_session_routing
 from tests.unit_tests.test_agent_seed_failure_boundary import _served
 
@@ -38,5 +38,5 @@ def test_a_checkpoint_control_error_keeps_its_409_answer(monkeypatch, path, erro
 
     assert reply.status_code == 409
     assert reply.json() == {"error": {"code": error_type.code, "detail": "refused by the checkpoint"}}
-    failure = decode_header(reply.headers)
-    assert failure is None or not any(e.type == "AgentFailure" for e in (failure.failure_events or {}).values())
+    failure = FailureHeader.decode(reply.headers)
+    assert failure is None or not any(e.boundary == "agent" for e in (failure.events or {}).values())

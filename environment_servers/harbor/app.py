@@ -97,7 +97,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionResponse,
 )
 from nemo_gym.config_types import TOKEN_CAPTURE_PATH_SEGMENT, AgentServerRef, AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, TaskId
+from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, FailureBoundary, TaskId
 from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
@@ -122,7 +122,6 @@ from nemo_gym.tasks.harbor.registry import ImageConfigError
 from nemo_gym.tasks.harbor.task import HarborTurn
 from nemo_gym.tasks.harbor.verifier_env import TESTS_DOCKERFILE
 from nemo_gym.tool_access import MCPStreamableHTTPConnection, MCPToolAccess, ToolAccess
-from nemo_gym.typed_exceptions import foreign_error_details, http_status
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1420,7 +1419,16 @@ class HarborEnvironmentServer(
             except Exception:
                 LOGGER.exception("Failed to stop Harbor sandbox after failed seed")
             LOGGER.exception("Sandbox setup failed for %s", task.task_id)
-            raise HTTPException(503, f"Could not set up sandbox for {task.task_id!r}: {exc}") from _setup_cause(exc)
+            raise HTTPException(503, f"Could not set up sandbox for {task.task_id!r}: {exc}") from (
+                SandboxCredentialsRejected.from_provider_error(
+                    exc,
+                    boundary=FailureBoundary.ENVIRONMENT,
+                    operation="sandbox.setup",
+                    stage="seed",
+                    sdk_message=_opensandbox_message(exc),
+                )
+                or exc
+            )
         self._sessions[episode_key] = session
         return session
 
@@ -1462,22 +1470,13 @@ class HarborEnvironmentServer(
         )
 
 
-def _setup_cause(exc: Exception) -> BaseException:
-    """``exc``, behind a SandboxCredentialsRejected when the sandbox provider answered 401 or 403."""
-    if http_status(exc) not in (401, 403):
-        return exc
-    try:
-        raise SandboxCredentialsRejected(
-            message=f"{type(exc).__name__}: {exc}"[:2000],
-            operation="sandbox.setup",
-            stage="seed",
-            # OpenSandbox stores its scalar constructor message in args[0]; str() appends SDK diagnostics.
-            foreign_error=foreign_error_details(
-                exc, message=exc.args[0] if exc.args and isinstance(exc.args[0], str) else None
-            ),
-        ) from exc
-    except SandboxCredentialsRejected as rejected:
-        return rejected
+def _opensandbox_message(exc: Exception) -> str | None:
+    """The message an OpenSandbox SDK error was constructed with, or ``None`` to use the SDK's ``message``.
+
+    OpenSandbox (0.1.15) ``SandboxException`` keeps that message in ``args[0]`` and has no ``message`` field;
+    its ``str()`` appends the error object and request diagnostics, so it is not used.
+    """
+    return exc.args[0] if exc.args and isinstance(exc.args[0], str) else None
 
 
 def _harness_params(responses_create_params: Any) -> Any:

@@ -24,11 +24,19 @@ from nemo_gym._checkpoint.participant_workers import install_server_participant
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym._checkpoint.steps import StepType
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
-from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure, EpisodeId
+from nemo_gym.episode_types import (
+    BaseEpisodeRequest,
+    BaseEpisodeResponse,
+    EpisodeFailure,
+    EpisodeId,
+    FailureBoundary,
+    FailureEvent,
+)
 from nemo_gym.failure_kinds import FailureStage
+from nemo_gym.failure_transport import with_failure_report
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SimpleServer, format_exception_with_response_body
-from nemo_gym.typed_exceptions import EnvServerFailure, attach_failure_events
+from nemo_gym.typed_exceptions import BoundaryFailure
 
 
 LOGGER = logging.getLogger(__name__)
@@ -129,15 +137,18 @@ class CleanupContext:
                 LOGGER.exception(f"Episode cleanup failed: {entry.name}")
 
 
-class HandledEpisodeError(EnvServerFailure):
-    """Carry a failure that belongs in the episode response."""
+class HandledEpisodeError(BoundaryFailure):
+    """Carry a failure that belongs in the episode response; the environment boundary's own failure."""
 
     def __init__(self, failure: EpisodeFailure) -> None:
         super().__init__(
-            failure.failure_kind,
-            failure.failure_reason,
-            operation="episode",
-            stage=failure.stage,
+            FailureEvent(
+                boundary=FailureBoundary.ENVIRONMENT,
+                failure_kind=failure.failure_kind,
+                failure_reason=failure.failure_reason,
+                operation="episode",
+                stage=failure.stage,
+            )
         )
         self.failure = failure
 
@@ -263,7 +274,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             except TimeoutError as error:
                 return self.failure_response(
                     request,
-                    self._attach_failure_events(
+                    with_failure_report(
                         EpisodeFailure(
                             failure_reason="Episode admission timed out",
                             terminal=False,
@@ -308,7 +319,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                     if deadline is not None and deadline.expired():
                         response = self.failure_response(
                             request,
-                            self._attach_failure_events(
+                            with_failure_report(
                                 EpisodeFailure(
                                     failure_reason="Episode timed out",
                                     terminal=False,
@@ -322,7 +333,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                     # A checkpoint refused this episode before it started; the caller retries it later.
                     raise
                 except HandledEpisodeError as error:
-                    response = self.failure_response(request, self._attach_failure_events(error.failure, error))
+                    response = self.failure_response(request, with_failure_report(error.failure, error))
                 except asyncio.CancelledError as error:
                     cancelled = error
                 except Exception as error:
@@ -420,16 +431,12 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             return nullcontext()
         return self._checkpoint.step(request.episode_id, step_type)
 
-    def _attach_failure_events(self, failure: EpisodeFailure, error: BaseException) -> EpisodeFailure:
-        """Fill the failure's path (and its kind from a typed failure) from the exception chain."""
-        return attach_failure_events(failure, error)
-
     def _unhandled_failure_response(self, request: EpisodeRequestT, error: Exception) -> EpisodeResponseT:
         LOGGER.exception(f"Unhandled environment server error: episode_id={request.episode_id}")
         failure_reason = f"Unhandled environment server error: {type(error).__name__}: {error}"
         return self.failure_response(
             request,
-            self._attach_failure_events(
+            with_failure_report(
                 EpisodeFailure(
                     failure_reason=failure_reason[:2000],
                     terminal=True,

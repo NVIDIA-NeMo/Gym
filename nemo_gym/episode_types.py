@@ -4,7 +4,9 @@
 """Wire contracts for environment servers."""
 
 import re
+import uuid
 from collections.abc import Mapping
+from enum import StrEnum
 from typing import Generic, TypeVar
 
 from pydantic import (
@@ -76,20 +78,31 @@ def is_materialized_task_row(row: Mapping[str, object]) -> bool:
     return isinstance(row.get("task_id"), Mapping) and "task_input" in row
 
 
-# A cause chain deeper than this is cut; the last kept record says ``cause_truncated``.
-MAX_FAILURE_CAUSE_DEPTH = 8
-# The most failure events one reply or row carries.
-MAX_FAILURE_EVENTS = 64
+class FailureBoundary(StrEnum):
+    """The six places a failure is observed, as the failure-boundaries RFC names them.
+
+    Each one reports what it observed; none of them chooses retries, terminality or scores.
+    """
+
+    MODEL = "model"
+    """A model client's request or one HTTP attempt of it."""
+    HARNESS = "harness"
+    """The program an agent server drives in a sandbox."""
+    AGENT = "agent"
+    """An agent server route (``/run``, ``/v1/responses``, a session seed)."""
+    RESOURCES_SERVER = "resources_server"
+    """A resources server's verifier, tool or session (a judge call, for example)."""
+    ENVIRONMENT = "environment"
+    """An environment server preparing, running or verifying an episode."""
+    COLLECTION = "collection"
+    """Rollout collection dispatching an episode or reading its reply."""
 
 
-class ForeignErrorDetails(BaseModel):
-    """Immutable SDK diagnostics selected by a boundary adapter before it translates an error.
+class SdkErrorDetails(BaseModel):
+    """Diagnostics an adapter selected from a third-party SDK error before it raised its own failure.
 
-    The adapter supplies the observed type, a scalar SDK message and, when available, its HTTP status.
-    These fields travel on ``NgFailureEvent`` and then ``FailureEventRecord`` through HTTP to Collection.
-    They are diagnostic data, not another cause link or a retry/scoring instruction. SDK objects, request
-    bodies, outputs and response payloads stay outside this model. Direct oversized values are rejected;
-    automatic capture bounds selected strings with an explicit truncation marker before construction.
+    The adapter chooses the message (for example the SDK's ``message`` field), because ``str()`` of an SDK
+    error can contain request data. The SDK object, its request and its response body are never stored.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -99,38 +112,32 @@ class ForeignErrorDetails(BaseModel):
     http_status: int | None = Field(default=None, ge=100, le=599)
 
 
-class FailureEventRecord(BaseModel):
-    """One failure observation, an entry of a ``failure_events`` map keyed by its ``event_id``.
+class FailureEvent(BaseModel):
+    """One observed failure: who observed it, what failed, and which failure caused it.
 
-    ``event_id`` is assigned once where the failure is raised and kept through forwarding and retries, so a
-    reader counts each failure once. ``cause_id`` names the explicit cause (``raise ... from``) by its id in the
-    same map. ``type`` is the boundary class (``ModelFailure``, ``ResServerFailure``, ...) or ``untyped``;
-    ``exception_type`` is the raised class when it differs. Kinds and reasons are each boundary's own. Request
-    bodies, outputs, conversations and tool results are never part of a record: ``operation_id`` and
-    ``attempt_id`` reference the records that hold them when the producer has those identities.
+    A ``BoundaryFailure`` exception owns one of these from the moment it is created, so ``event_id`` is fixed
+    at the origin and stays the same through every reply that forwards it. ``cause_id`` names the explicit
+    cause (``raise ... from``) in the same map; it is set when a chain is serialized. An explicit cause that is
+    not a ``BoundaryFailure`` is recorded with no ``boundary`` and only its type and status, never its text.
 
-    Shared helpers serialize Python exceptions into this model, forward its bounded map on replies, and
-    reconstruct safe boundary exceptions on receipt. Collection retains the map beside its existing outcome
-    records, including observations accompanying success. This model stores no execution history and chooses
-    no outcome: ``EpisodeFailure.terminal`` and existing consumer policy remain authoritative.
+    Readers count each failure once by ``event_id``. Outcome policy stays with ``EpisodeFailure.terminal`` and
+    the collector's existing rules.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
-    event_id: str = Field(min_length=1, max_length=128)
-    type: str = Field(min_length=1, max_length=256)
+    event_id: str = Field(default_factory=lambda: uuid.uuid4().hex, min_length=1, max_length=128)
+    boundary: FailureBoundary | None = None
     exception_type: str | None = Field(default=None, max_length=256)
-    failure_reason: str = Field(max_length=2000)
-    reason_truncated: bool | None = None
+    failure_reason: str = Field(default="", max_length=2000)
     failure_kind: str | None = None
     operation: str | None = Field(default=None, max_length=256)
     operation_id: str | None = Field(default=None, max_length=128)
     attempt_id: str | None = Field(default=None, max_length=128)
     stage: FailureStage | None = None
     http_status: int | None = Field(default=None, ge=100, le=599)
-    foreign_error: ForeignErrorDetails | None = None
+    foreign_error: SdkErrorDetails | None = None
     cause_id: str | None = Field(default=None, max_length=128)
-    cause_truncated: bool | None = None
 
     @field_validator("failure_kind")
     @classmethod
@@ -142,26 +149,58 @@ class FailureEventRecord(BaseModel):
         return {key: value for key, value in handler(self).items() if value is not None}
 
 
-def validate_failure_event_map(events: Mapping[str, FailureEventRecord]) -> Mapping[str, FailureEventRecord]:
-    """Check that ``events`` is keyed by event id and its causes resolve in it, acyclic and bounded."""
-    if len(events) > MAX_FAILURE_EVENTS:
-        raise ValueError(f"more than {MAX_FAILURE_EVENTS} failure events")
-    for key, record in events.items():
-        if key != record.event_id:
-            raise ValueError(f"failure event {record.event_id!r} is keyed as {key!r}")
-    for record in events.values():
-        seen, current, depth = {record.event_id}, record, 0
-        while current.cause_id is not None:
-            depth += 1
-            if depth > MAX_FAILURE_CAUSE_DEPTH:
-                raise ValueError(f"cause chain deeper than {MAX_FAILURE_CAUSE_DEPTH}")
-            if current.cause_id in seen:
-                raise ValueError(f"cause chain repeats event {current.cause_id!r}")
-            if current.cause_id not in events:
-                raise ValueError(f"cause {current.cause_id!r} is not in the failure events")
-            seen.add(current.cause_id)
-            current = events[current.cause_id]
+def validate_failure_event_map(events: Mapping[str, FailureEvent]) -> Mapping[str, FailureEvent]:
+    """Check that ``events`` is keyed by event id and that every ``cause_id`` resolves in it without a cycle."""
+    for key, event in events.items():
+        if key != event.event_id:
+            raise ValueError(f"failure event {event.event_id!r} is keyed as {key!r}")
+    for event in events.values():
+        seen = {event.event_id}
+        while event.cause_id is not None:
+            if event.cause_id not in events:
+                raise ValueError(f"cause {event.cause_id!r} is not in the failure events")
+            if event.cause_id in seen:
+                raise ValueError(f"cause chain repeats event {event.cause_id!r}")
+            seen.add(event.cause_id)
+            event = events[event.cause_id]
     return events
+
+
+class FailureReport(BaseModel):
+    """The failures one reply forwards: its own failure (``failure_id``, absent on success) and every failure
+    observed while serving the request, each with its explicit causes.
+
+    ``omitted`` says that a report on the way here was too large to send, so events are missing.
+    ``nemo_gym.failure_transport`` carries it in one HTTP header; Collection saves it beside the outcome.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    failure_id: str | None = Field(default=None, max_length=128)
+    events: dict[str, FailureEvent] = Field(default_factory=dict)
+    omitted: bool = False
+
+    @field_validator("events")
+    @classmethod
+    def _validate_events(cls, value: dict[str, FailureEvent]) -> dict[str, FailureEvent]:
+        return dict(validate_failure_event_map(value))
+
+    @model_validator(mode="after")
+    def _failure_id_is_an_event(self) -> Self:
+        if self.failure_id is not None and self.failure_id not in self.events:
+            raise ValueError(f"failure_id {self.failure_id!r} is not in events")
+        return self
+
+    def merged(self, other: "FailureReport") -> "FailureReport":
+        """This report with ``other``'s events added; ``failure_id`` stays this report's.
+
+        An event id names one immutable record, so the first copy of an id is kept.
+        """
+        return FailureReport(
+            failure_id=self.failure_id,
+            events=other.events | self.events,
+            omitted=self.omitted or other.omitted,
+        )
 
 
 class EpisodeFailure(BaseModel):
@@ -171,10 +210,8 @@ class EpisodeFailure(BaseModel):
     existing ``terminal`` flag and retry budget; ``failure_kind`` describes the failure without deciding
     terminality. Kind and stage are optional because a collector observing a lost reply may not know them.
 
-    ``failure_id`` selects this envelope's current failure from ``failure_events``. The same map may retain
-    earlier recovered observations and explicit causes, each stored once under its origin ID. Producers and
-    HTTP helpers supply that evidence; this envelope neither creates an execution-history store nor changes
-    scoring. A successful reply forwards observations separately without a current failure ID.
+    ``failure_id``, ``failure_events`` and ``failure_events_omitted`` hold this attempt's ``FailureReport``:
+    its own failure, earlier recovered failures and their explicit causes. They are diagnostic only.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -183,14 +220,9 @@ class EpisodeFailure(BaseModel):
     terminal: bool = Field(description="Whether rollout collection must not attempt this episode again.")
     failure_kind: str | None = None
     stage: FailureStage | None = None
-    # (``nemo_gym.typed_exceptions``). Taken from the exception chain by type, never from text.
-    # This failure's own entry in ``failure_events``.
     failure_id: str | None = Field(default=None, max_length=128)
-    # Failure observations this reply forwards, keyed by event id: earlier failures a retry recovered from and
-    # this failure with its explicit causes. Diagnostic only.
-    failure_events: dict[str, FailureEventRecord] | None = None
-    # How many observations were left out to keep the reply within its bounds.
-    failure_events_dropped: int | None = Field(default=None, ge=1)
+    failure_events: dict[str, FailureEvent] | None = None
+    failure_events_omitted: bool | None = None
 
     @field_validator("failure_kind")
     @classmethod
@@ -199,7 +231,7 @@ class EpisodeFailure(BaseModel):
 
     @field_validator("failure_events")
     @classmethod
-    def _validate_failure_events(cls, value: dict[str, FailureEventRecord] | None):
+    def _validate_failure_events(cls, value: dict[str, FailureEvent] | None):
         return None if value is None else validate_failure_event_map(value)
 
     @model_validator(mode="after")
@@ -214,7 +246,7 @@ class EpisodeFailure(BaseModel):
         # Omit metadata when the producer cannot classify the failure.
         # Protocol subclasses still serialize their own diagnostic fields.
         result = handler(self)
-        for key in ("failure_kind", "stage", "failure_id", "failure_events", "failure_events_dropped"):
+        for key in ("failure_kind", "stage", "failure_id", "failure_events", "failure_events_omitted"):
             if result.get(key) is None:
                 result.pop(key, None)
         return result

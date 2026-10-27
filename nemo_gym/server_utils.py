@@ -78,6 +78,7 @@ from nemo_gym.config_types import (
     BaseServerConfig,
     HeadServerUnreachableError,
 )
+from nemo_gym.failure_transport import FailureHeader, RequestFailureLog, observe_reply
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
@@ -120,17 +121,7 @@ from nemo_gym.telemetry.observer import observe_app_event_loop, request_counts
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
-from nemo_gym.typed_exceptions import (
-    FAILURE_EVENT_HEADER,
-    decode_header,
-    encode_events_header,
-    encode_header,
-    observe_relayed_events,
-    observing_failures,
-    remote_failure,
-    reply_cause,
-    safe_failure_header,
-)
+from nemo_gym.typed_exceptions import AgentRouteFailure, rebuild_failure
 
 
 try:
@@ -624,7 +615,7 @@ async def request(
         )
         # A Gym server's reply may forward failures it recovered from; they join this request's observations,
         # whether or not traces are exported.
-        observe_relayed_events(getattr(response, "headers", None))
+        observe_reply(getattr(response, "headers", None))
         return response
     # While metrics are exporting, count calls still waiting for their response, which ends when the headers arrive.
     counts.outbound_in_flight += 1
@@ -643,7 +634,7 @@ async def request(
         )
         # A Gym server's reply may forward failures it recovered from; they join this request's observations,
         # whether or not traces are exported.
-        observe_relayed_events(getattr(response, "headers", None))
+        observe_reply(getattr(response, "headers", None))
         return response
     finally:
         counts.outbound_in_flight -= 1
@@ -896,7 +887,7 @@ Response content: {content}""")
             e.args = (e.request_info, e.history)
             # A Gym server's own failure, rebuilt from its header, is the explicit cause of this HTTP error, so the
             # caller's failure chain reaches the remote failure with its id, kind and reason.
-            remote = remote_failure(e.headers)
+            remote = rebuild_failure(FailureHeader.decode(e.headers))
             if remote is not None:
                 raise e from remote
             raise e
@@ -1836,24 +1827,26 @@ class SimpleServer(BaseServer):
     def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
         @app.middleware("http")
         async def exception_handling_middleware(request: Request, call_next):
-            with observing_failures() as observed:
-                response = await SimpleServer._handle_with_failure_headers(self, request, call_next)
-                # Recovered and relayed failures travel with the reply, whatever its outcome.
-                response.headers.update(encode_events_header(observed))
+            with RequestFailureLog.capture() as failure_log:
+                error: BaseException | None = None
+                try:
+                    response = await call_next(request)
+                except BaseException as raised:
+                    error = raised
+                    # An agent route failure answers with its cause's body and status.
+                    reply_error = raised.reply_error if isinstance(raised, AgentRouteFailure) else raised
+                    response = SimpleServer._failure_reply(self, reply_error)
+                # Success or failure, the reply forwards its own failure and those observed while serving it.
+                report = failure_log.reply_report(error)
+                # A nested layer of this middleware may have sent the report already; keep its failure_id.
+                inner = FailureHeader.decode(response.headers)
+                if inner is not None:
+                    report = report.merged(inner) if report.failure_id is not None else inner.merged(report)
+                response.headers.update(FailureHeader.encode(report))
                 return response
 
-    async def _handle_with_failure_headers(self, request: Request, call_next):  # pragma: no cover
-        try:
-            return await call_next(request)
-        except BaseException as raised:
-            # An agent boundary wrapper replies with its cause's body and status; its header names the wrapper.
-            cause = reply_cause(raised)
-            return SimpleServer._failure_reply(
-                self, raised if cause is None else cause, boundary=raised if cause else None
-            )
-
-    def _failure_reply(self, e: BaseException, *, boundary: BaseException | None) -> JSONResponse:  # pragma: no cover
-        header_error = e if boundary is None else boundary
+    def _failure_reply(self, e: BaseException) -> JSONResponse:  # pragma: no cover
+        """The reply for an exception the route did not handle."""
         if isinstance(e, ClientResponseError):
             assert hasattr(e, "response_content"), (
                 "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"
@@ -1862,30 +1855,16 @@ class SimpleServer(BaseServer):
             response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
             print(_format_upstream_error_log(self.get_session_middleware_key(), e), flush=True)
 
-            # Relay only a validated, bounded event; invalid upstream metadata cannot spoil the reply.
-            inner = decode_header(e.headers) if boundary is None else None
-            relay = encode_header(inner) if inner is not None else None
-            headers = (
-                {FAILURE_EVENT_HEADER: relay}
-                if relay is not None
-                else safe_failure_header(header_error, server=self.config.name)
-            )
-            return JSONResponse(content=response_content, status_code=500, headers=headers)
+            return JSONResponse(content=response_content, status_code=500)
         if isinstance(e, CancelledError):
-            return JSONResponse(
-                content="Request was cancelled",
-                status_code=500,
-                headers=safe_failure_header(header_error, server=self.config.name),
-            )
+            return JSONResponse(content="Request was cancelled", status_code=500)
         if isinstance(e, Exception):
             print(
                 f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
 Formatted exception: {format_exc()}
 repr(e): {repr(e)}"""
             )
-            return JSONResponse(
-                content=repr(e), status_code=500, headers=safe_failure_header(header_error, server=self.config.name)
-            )
+            return JSONResponse(content=repr(e), status_code=500)
         print_exc()
         print(
             f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""

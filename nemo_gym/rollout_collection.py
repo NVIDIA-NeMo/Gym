@@ -59,9 +59,10 @@ from nemo_gym.config_types import (
     RemovedRolloutOptionsMixin,
     UploadRolloutsConfigMixin,
 )
-from nemo_gym.episode_types import EpisodeId, FailureEventRecord, is_materialized_task_row, validate_failure_event_map
+from nemo_gym.episode_types import EpisodeId, FailureBoundary, FailureEvent, FailureReport, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
+from nemo_gym.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
@@ -133,23 +134,7 @@ from nemo_gym.telemetry.gym_metrics import (
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.typed_exceptions import (
-    CONFLICTED_ROW_KEY,
-    DROPPED_ROW_KEY,
-    EVENTS_ROW_KEY,
-    MAX_CONFLICTED_IDS,
-    CollectionFailure,
-    bounded_failure_events,
-    conflicting_failure_ids,
-    decode_conflicted_header,
-    decode_dropped_header,
-    decode_events_header,
-    decode_header,
-    events_row_value,
-    failure_event_map,
-    merge_failure_events,
-    row_fields,
-)
+from nemo_gym.typed_exceptions import BoundaryFailure, failure_report_for
 
 
 if TYPE_CHECKING:
@@ -563,11 +548,11 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             record["failure_kind"] = failure["failure_kind"]
             record["_ng_failure_kind"] = failure["failure_kind"]
         if failure.get("failure_events") is not None:
-            record[EVENTS_ROW_KEY] = failure["failure_events"]
+            record[FailureReportRow.EVENTS] = failure["failure_events"]
         if failure.get("failure_id") is not None:
-            record["_ng_failure_id"] = failure["failure_id"]
-        if failure.get("failure_events_dropped") is not None:
-            record[DROPPED_ROW_KEY] = failure["failure_events_dropped"]
+            record[FailureReportRow.FAILURE_ID] = failure["failure_id"]
+        if failure.get("failure_events_omitted"):
+            record[FailureReportRow.OMITTED] = True
         if failure.get("partial_response") is not None:
             record["_ng_failure_partial_response"] = failure["partial_response"]
         if failure.get("agent_observations") is not None:
@@ -586,7 +571,7 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             NG_FAILURE_CLASS_KEY: JUDGE_FAILED,
             NG_FAILURE_JUDGE_ERROR_KEY: result.get(NG_FAILURE_JUDGE_ERROR_KEY),
         }
-        for key in (EVENTS_ROW_KEY, DROPPED_ROW_KEY, CONFLICTED_ROW_KEY, "_ng_failure_id"):
+        for key in FailureReportRow.KEYS:
             if key in result:
                 judge_failure[key] = result[key]
         # drop the judge failure keys from the result so it doesn't raise in _is_collector_key
@@ -616,88 +601,26 @@ class _CompletedRollout:
     # The `/run` wall clock in seconds, success or failure; None for a row that never started.
     elapsed_s: Optional[float] = None
     dispatch_span_context: Optional["SpanContext"] = None
-    # Row keys from the reply's diagnostic headers: the current failure and the observations any
-    # reply forwards. Only the writer adds them, so run_examples yields the same result as before.
-    failure_observations: Optional[Dict[str, Any]] = None
+    # The failure report the `/run` reply forwarded, or Collection's own for a failed dispatch. Only the writer
+    # saves it, so run_examples yields the same result as before.
+    failure_report: Optional[FailureReport] = None
 
 
-def _events_row_fields(headers: Any) -> Dict[str, Any]:
-    """The failure events a successful reply forwarded, as a row key; they do not change its outcome."""
-    events = decode_events_header(headers)
-    fields: Dict[str, Any] = {EVENTS_ROW_KEY: events_row_value(events)} if events else {}
-    dropped = decode_dropped_header(headers)
-    if dropped:
-        fields[DROPPED_ROW_KEY] = dropped
-    conflicted = decode_conflicted_header(headers)
-    if conflicted:
-        fields[CONFLICTED_ROW_KEY] = sorted(conflicted)
-    return fields
-
-
-def _merge_observation_fields(body: Dict[str, Any], headers: Dict[str, Any]) -> Dict[str, Any]:
-    """Union diagnostics without letting duplicate transport copies replace the outcome."""
-    result = body
-    try:
-        maps = [
-            dict(
-                validate_failure_event_map(
-                    {
-                        key: FailureEventRecord.model_validate(value)
-                        for key, value in source.get(EVENTS_ROW_KEY, {}).items()
-                    }
-                )
-            )
-            for source in (body, headers)
-        ]
-        existing_conflicts = set(body.get(CONFLICTED_ROW_KEY, [])) | set(headers.get(CONFLICTED_ROW_KEY, []))
-        new_conflicts = conflicting_failure_ids(*maps) - existing_conflicts
-        conflicts = existing_conflicts | new_conflicts
-        merged = merge_failure_events(*maps)
-        merged = merge_failure_events({key: value for key, value in merged.items() if key not in conflicts})
-        own = body.get("_ng_failure_id", headers.get("_ng_failure_id"))
-        merged, dropped_here = bounded_failure_events(merged, keep=own, max_bytes=None)
-        # The channels can report the same loss. Without identities this is a lower bound.
-        dropped = max(body.get(DROPPED_ROW_KEY, 0), headers.get(DROPPED_ROW_KEY, 0))
-        dropped += len(new_conflicts) + dropped_here + max(0, len(conflicts) - MAX_CONFLICTED_IDS)
-        if merged or EVENTS_ROW_KEY in body or EVENTS_ROW_KEY in headers:
-            result[EVENTS_ROW_KEY] = events_row_value(merged)
-        if dropped:
-            result[DROPPED_ROW_KEY] = dropped
-        if conflicts:
-            result[CONFLICTED_ROW_KEY] = sorted(conflicts)[:MAX_CONFLICTED_IDS]
-        if own in merged:
-            result["_ng_failure_id"] = own
-        else:
-            result.pop("_ng_failure_id", None)
-    except (ValueError, TypeError, AttributeError):
-        # Malformed diagnostics cannot replace or prevent persistence of the outcome.
-        logger.warning("Ignoring invalid forwarded failure observations")
-    return result
-
-
-def _failure_row_fields(headers: Any) -> Dict[str, Any]:
-    """Forward an error's own event and recovered observations without duplicate loss counts."""
-    failure = decode_header(headers)
-    fields = row_fields(failure)
-    if failure is not None and failure.failure_events_dropped:
-        fields[DROPPED_ROW_KEY] = failure.failure_events_dropped
-    return _merge_observation_fields(fields, _events_row_fields(headers))
-
-
-def _collection_failure_fields(exc: BaseException, failure_class: str, headers: Any) -> Dict[str, Any]:
-    """Collection's own failed `/run` dispatch as a CollectionFailure, its explicit cause the dispatch error.
-
-    A Gym server's failure that the client rebuilt from the reply stays the dispatch error's own cause, with its own
-    kind; the collector's kind is its routing class. The reply's forwarded observations are merged in by event id.
-    """
-    try:
-        raise CollectionFailure(
-            failure_class, message=f"Rollout dispatch failed: {type(exc).__name__}", operation="collection.run"
-        ) from exc
-    except CollectionFailure as failure:
-        events = failure_event_map(failure)
-        own = {"_ng_failure_id": failure.event_id, EVENTS_ROW_KEY: events_row_value(events)} if events else {}
-    return _merge_observation_fields(own, _failure_row_fields(headers))
+def _collection_failure_report(exc: BaseException, failure_class: str, headers: Any) -> FailureReport:
+    """Collection's own failure for a failed `/run` dispatch, caused by the dispatch error, with the report the
+    reply forwarded. Its kind is the routing class; a remote failure the client rebuilt stays the cause."""
+    failure = BoundaryFailure(
+        FailureEvent(
+            boundary=FailureBoundary.COLLECTION,
+            failure_kind=failure_class,
+            failure_reason=f"Rollout dispatch failed: {type(exc).__name__}",
+            operation="collection.run",
+        )
+    )
+    failure.__cause__ = exc
+    report = failure_report_for(failure)
+    received = FailureHeader.decode(headers)
+    return report.merged(received) if received is not None else report
 
 
 def _round_robin_by_agent(examples: List[Dict]) -> List[Dict]:
@@ -3848,7 +3771,8 @@ class RolloutCollectionHelper(BaseModel):
                     result[NG_ENVIRONMENT_SERVER_KEY] = completed.environment_server
                 if completed.environment_server_type is not None:
                     result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
-                result = _merge_observation_fields(result, completed.failure_observations or {})
+                if completed.failure_report is not None:
+                    result = FailureReportRow.merged_into(result, completed.failure_report)
 
                 # Set below for a rollout whose trajectory is health-evaluated once the bookkeeping is done.
                 health_outcome: Optional[str] = None
@@ -4876,7 +4800,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server_type=server_type,
                         elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
-                        failure_observations=_events_row_fields(getattr(res, "headers", None)),
+                        failure_report=FailureHeader.decode(getattr(res, "headers", None)),
                     )
                 except Exception as e:
                     print(
@@ -4901,7 +4825,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server_type=server_type,
                         elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
-                        failure_observations=_collection_failure_fields(
+                        failure_report=_collection_failure_report(
                             e,
                             failure_row[NG_FAILURE_CLASS_KEY],
                             getattr(e, "headers", None) or getattr(res, "headers", None),

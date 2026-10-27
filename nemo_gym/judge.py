@@ -45,11 +45,14 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from nemo_gym.episode_types import FailureBoundary, FailureEvent, SdkErrorDetails
+from nemo_gym.exception_inspection import bounded_text
 from nemo_gym.failure_kinds import (
     JUDGE_FAILED,
 )
+from nemo_gym.failure_transport import FailureReportRow, report_for_current_request
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
-from nemo_gym.typed_exceptions import ResServerFailure, boundary_failure, foreign_error_details, row_fields
+from nemo_gym.typed_exceptions import BoundaryFailure, sdk_error_details
 
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
@@ -68,19 +71,26 @@ class JudgeError(Exception):
     """A judge call failed; judge_failsafe routes the row to the failures sidecar."""
 
 
-# Typed judge failures remain JudgeError-compatible. The judge boundary always uses judge_failed;
-# transport and provider details belong to the explicit cause.
+class JudgeCallFailed(JudgeError, BoundaryFailure):
+    """A judge call failed: the resources server boundary's ``judge_failed``.
 
+    It stays a ``JudgeError`` for existing handlers. What was observed (an HTTP 429 or 401, a refused
+    connection, a timeout) stays on the explicit cause, with its own type and status.
+    """
 
-class _TypedJudgeError(JudgeError, ResServerFailure):
-    """Keep existing JudgeError handlers while adding a resources-server boundary observation."""
-
-
-class JudgeCallFailed(_TypedJudgeError):
-    """A judge call failed. The judge boundary's own kind is ``judge_failed``; what was observed (an HTTP 429 or
-    401, a refused connection, a timeout) stays on the explicit cause, with its own type and status."""
-
-    failure_kind = JUDGE_FAILED
+    def __init__(self, message: str, *, operation: str, sdk_error: SdkErrorDetails | None = None) -> None:
+        BoundaryFailure.__init__(
+            self,
+            FailureEvent(
+                boundary=FailureBoundary.RESOURCES_SERVER,
+                failure_kind=JUDGE_FAILED,
+                failure_reason=bounded_text(message, 2000),
+                operation=operation,
+                stage="verification",
+                foreign_error=sdk_error,
+            ),
+            message,
+        )
 
 
 def _judge_error(error: Exception) -> JudgeError:
@@ -91,12 +101,7 @@ def _judge_error(error: Exception) -> JudgeError:
     """
     message = f"{type(error).__name__}: {error}"
     if isinstance(error, (ClientResponseError, ClientConnectorError, TimeoutError)):
-        return JudgeCallFailed(
-            message=message,
-            operation="judge.request",
-            stage="verification",
-            foreign_error=foreign_error_details(error),
-        )
+        return JudgeCallFailed(message, operation="judge.request", sdk_error=sdk_error_details(error))
     return JudgeError(message)
 
 
@@ -172,9 +177,9 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
             # Legacy/parser JudgeErrors also need a judge-owned event, rather than borrowing an inner kind.
             failure = e
             if not isinstance(e, JudgeCallFailed):
-                failure = JudgeCallFailed(message=error, operation="judge.verify", stage="verification")
+                failure = JudgeCallFailed(error, operation="judge.verify")
                 failure.__cause__ = e
-            data |= row_fields(boundary_failure(failure, server="judge"))
+            data |= FailureReportRow.fields(report_for_current_request(failure))
             return JSONResponse(content=jsonable_encoder(data))
 
     return wrapper

@@ -3,7 +3,9 @@
 import pytest
 
 from nemo_gym.base_responses_api_agent import AgentSessionSetupError, AgentSessionState
-from nemo_gym.typed_exceptions import ModelFailure, decode_header
+from nemo_gym.episode_types import FailureBoundary, FailureEvent
+from nemo_gym.failure_transport import FailureHeader
+from nemo_gym.typed_exceptions import BoundaryFailure
 from tests.unit_tests.test_agent_session_retries import _seed
 from tests.unit_tests.test_session_routing import AgentWorker
 
@@ -16,9 +18,9 @@ def _served(label: str = "a") -> AgentWorker:
 
 
 def _failure(response):
-    failure = decode_header(response.headers)
+    failure = FailureHeader.decode(response.headers)
     assert failure is not None and failure.failure_id is not None
-    return failure, failure.failure_events
+    return failure, failure.events
 
 
 def test_a_failed_seed_leaves_the_agent_server_as_an_agent_failure_caused_by_the_setup_error() -> None:
@@ -30,20 +32,27 @@ def test_a_failed_seed_leaves_the_agent_server_as_an_agent_failure_caused_by_the
     assert failed.status_code == 500
     failure, events = _failure(failed)
     own = events[failure.failure_id]
-    assert (own.type, own.operation, own.stage, own.failure_kind) == (
-        "AgentFailure",
+    assert (own.boundary, own.operation, own.stage, own.failure_kind) == (
+        "agent",
         "agent.seed_session",
         "seed",
         None,
     )
     cause = events[own.cause_id]
     # The foreign setup error is recorded by type only; its text stays out of the failure events.
-    assert (cause.type, cause.exception_type, cause.failure_reason) == ("untyped", "RuntimeError", "")
+    assert (cause.boundary, cause.exception_type, cause.failure_reason) == (None, "RuntimeError", "")
 
 
 def test_a_setup_errors_own_cause_reaches_the_caller_with_its_kind() -> None:
     worker = _served()
-    model = ModelFailure(message="model unavailable", operation="model.responses", http_status=429)
+    model = BoundaryFailure(
+        FailureEvent(
+            boundary=FailureBoundary.MODEL,
+            failure_reason="model unavailable",
+            operation="model.responses",
+            http_status=429,
+        )
+    )
     setup = RuntimeError("setup failed")
     setup.__cause__ = model
 
@@ -57,7 +66,7 @@ def test_a_setup_errors_own_cause_reaches_the_caller_with_its_kind() -> None:
     failure, events = _failure(failed)
     own = events[failure.failure_id]
     inner = events[events[own.cause_id].cause_id]
-    assert (inner.type, inner.event_id, inner.http_status) == ("ModelFailure", model.event_id, 429)
+    assert (inner.boundary, inner.event_id, inner.http_status) == ("model", model.event.event_id, 429)
     assert own.failure_kind is None  # The agent boundary does not take its cause's kind.
 
 
@@ -88,4 +97,39 @@ def test_successful_and_refused_seeds_are_unchanged() -> None:
         refused = worker.seed()
 
     assert refused.status_code == 409 and "already closed" in refused.json()["detail"]
-    assert decode_header(refused.headers) is None
+    assert FailureHeader.decode(refused.headers) is None
+
+
+def test_over_http_a_rejected_sandbox_credential_keeps_the_selected_sdk_message_and_status() -> None:
+    from nemo_gym.sandbox.providers.base import SandboxCredentialsRejected
+
+    class SdkError(Exception):
+        def __init__(self, message: str) -> None:
+            super().__init__(message)
+            self.status_code = 401
+
+        def __str__(self) -> str:
+            return f"{self.args[0]} request=POST /sandboxes api_key=secret"
+
+    worker = _served()
+    sdk = SdkError("Authentication credentials are invalid.")
+    rejected = SandboxCredentialsRejected.from_provider_error(
+        sdk, boundary=FailureBoundary.ENVIRONMENT, operation="sandbox.setup", sdk_message=sdk.args[0]
+    )
+    setup = RuntimeError("setup failed")
+    setup.__cause__ = rejected
+
+    async def initialize(body):
+        raise AgentSessionSetupError(AgentSessionState(request=body), error=setup)
+
+    worker.agent._seed_agent_session_state = initialize
+    with worker.client:
+        failed = worker.seed()
+
+    assert failed.status_code == 500
+    assert "secret" not in failed.headers[FailureHeader.NAME]
+    failure, events = _failure(failed)
+    credentials = events[rejected.event.event_id]
+    assert (credentials.failure_kind, credentials.http_status) == ("provider_credentials_rejected", 401)
+    assert credentials.foreign_error.message == "Authentication credentials are invalid."
+    assert events[credentials.cause_id].http_status == 401 and events[credentials.cause_id].failure_reason == ""

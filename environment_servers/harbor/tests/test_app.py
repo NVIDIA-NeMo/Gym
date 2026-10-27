@@ -413,9 +413,9 @@ class TestEpisode:
         assert failure.stage == "seed" and not failure.terminal
         assert "Could not set up sandbox for 'hello'" in failure.failure_reason
         events = list((failure.failure_events or {}).values())
-        hops = [(event.exception_type or event.type).rsplit(".", 1)[-1] for event in events]
+        hops = [(event.exception_type or event.boundary).rsplit(".", 1)[-1] for event in events]
         outer = failure.failure_events[failure.failure_id]
-        assert outer.type == "EnvServerFailure"
+        assert outer.boundary == "environment"
         assert outer.failure_kind is None and failure.failure_kind is None
         if status in (401, 403):
             assert events[-2].failure_kind == "provider_credentials_rejected"
