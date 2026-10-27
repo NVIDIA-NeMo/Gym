@@ -115,8 +115,8 @@ with an installed Gym (`pip install nemo-gym` or `uv add nemo-gym`). Four rules 
 2. **Your repository's own `pyproject.toml` is fine.** Gym treats the directory two levels above a server as a
    Gym source checkout only if its `pyproject.toml` declares the `nemo-gym` project. Otherwise each server
    venv gets Gym from your environment: your editable Gym checkout if Gym is installed from one, else the
-   version installed in your environment, from the package index. The server's own `nemo-gym @ <path>` line is
-   replaced, keeping its extras.
+   version installed in your environment, from the package index. The server's own `nemo-gym` lines, including
+   a version pin, are replaced, keeping their extras; other local paths such as `-e ../..` are kept.
 3. **`--agent` takes the agent instance name**, the top-level key in your config (for example
    `my_env_simple_agent`), not the agent type under `responses_api_agents` (for example `simple_agent`). An
    unknown name lists the agent instances in the run.
