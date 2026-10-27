@@ -93,6 +93,9 @@ from nemo_gym.observability.model_calls import (
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
     observability_enabled_from_config,
+    retire_covered_model_call_capture,
+    retire_covered_model_call_captures_from_config,
+    snapshot_model_call_capture,
 )
 from nemo_gym.omitted_rollouts import omitted_rollout_record
 from nemo_gym.path_utils import (
@@ -3529,6 +3532,9 @@ class RolloutCollectionHelper(BaseModel):
         )
         capture_dirs = model_call_capture_dirs_from_config(global_config)
         observability_enabled = observability_enabled_from_config(global_config)
+        retire_captures = bool(capture_dirs) and retire_covered_model_call_captures_from_config(global_config)
+        captures_retired = 0
+        captures_kept: Counter = Counter()
         # Live health metrics follow the metrics exporter alone: `disable_health_check` only gates the post-run
         # report. A traced dispatch also gets a `gym.rollout.health` span, whatever the metrics exporter does.
         health_metrics_enabled = is_metrics_exporter_active()
@@ -3751,12 +3757,15 @@ class RolloutCollectionHelper(BaseModel):
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
                 # when capture is off). Never alters the harness output/reward already in `result`.
                 # A failed episode that returned agent evidence made model calls worth joining.
+                capture_snapshot = None
                 if capture_dirs and (not no_result or NG_AGENT_OBSERVATIONS_KEY in result):
                     # A cancelled call's capture write runs detached, so drain the claims this
                     # rollout still holds before snapshotting; otherwise a late row is lost.
                     rollout_id_for_capture = maybe_rollout_id_from_run_body(result)
                     if rollout_id_for_capture is not None:
                         await await_model_call_capture_quiescence(rollout_id_for_capture, capture_dirs)
+                        if retire_captures:
+                            capture_snapshot = snapshot_model_call_capture(rollout_id_for_capture, capture_dirs)
                     merge_model_call_capture_into_record(
                         result,
                         capture_dirs,
@@ -3900,6 +3909,14 @@ class RolloutCollectionHelper(BaseModel):
                     if rollout_id is not None and capture_build_can_retire(token_capture_build):
                         os.fsync(results_file.fileno())
                         await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
+                    if rollout_id is not None and retire_captures:
+                        # Durable first: the capture file is the only other copy of these calls.
+                        os.fsync(results_file.fileno())
+                        kept = retire_covered_model_call_capture(rollout_id, result, capture_snapshot)
+                        if kept:
+                            captures_kept.update(reason.partition(":")[0] for reason in kept)
+                        else:
+                            captures_retired += 1
 
                 counts_left[dispatch_name] -= 1
                 if counts_left[dispatch_name] <= 0:
@@ -3946,6 +3963,10 @@ class RolloutCollectionHelper(BaseModel):
                     print_str += f"""Examples left:
 {top_left_str}
 """
+                    if retire_captures:
+                        print_str += (
+                            f"Model-call capture files: {captures_retired} deleted, kept {dict(captures_kept)}\n"
+                        )
                     for agent_name in sorted(agent_name_to_metrics):
                         metrics = agent_name_to_metrics[agent_name]
                         agent_total_samples = dispatched_per_agent[agent_name]

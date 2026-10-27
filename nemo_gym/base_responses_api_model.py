@@ -852,6 +852,8 @@ class ModelCallCaptureConfig(BaseModel):
 
     observability_enabled: bool = False
     model_call_capture_dir: Optional[Path] = None
+    # Delete a rollout's capture file once the persisted rollout fully covers it.
+    retire_covered_model_call_captures: bool = False
 
     @model_validator(mode="after")
     def validate_capture_dir(self) -> "ModelCallCaptureConfig":
@@ -926,6 +928,36 @@ class CaptureStore:
         """
         pattern = f"{_validate_rollout_id(rollout_id)}.*{_PENDING_SUFFIX}"
         return any(self._root.glob(pattern))
+
+    def size(self, rollout_id: str) -> Optional[int]:
+        """Byte size of the rollout's capture file, or None when there is none."""
+        try:
+            return self.path_for(rollout_id).stat().st_size
+        except FileNotFoundError:
+            return None
+
+    def delete_if_unchanged(self, rollout_id: str, expected_size: int) -> Optional[str]:
+        """Delete the rollout's capture file unless it grew or a claimed write is outstanding.
+
+        Returns None once deleted, or the reason the file was kept. The append lock is held across the
+        check and the delete, so a writer that has not yet appended waits instead of racing it.
+        """
+        path = self.path_for(rollout_id)
+        try:
+            handle = path.open("rb")
+        except FileNotFoundError:
+            return "capture_file_missing"
+        with handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                if self.has_pending(rollout_id):
+                    return "write_pending"
+                if os.fstat(handle.fileno()).st_size != expected_size:
+                    return "capture_file_changed"
+                path.unlink()
+                return None
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def clear_all_pending(self, rollout_id: str) -> None:
         pattern = f"{_validate_rollout_id(rollout_id)}.*{_PENDING_SUFFIX}"

@@ -5703,6 +5703,65 @@ class TestRolloutCollection:
         if redact_payloads:
             assert "data:image/png;base64,secret" not in orjson.dumps(results[0]).decode()
 
+    @pytest.mark.parametrize(
+        "global_config_extra, redact_payloads, expect_deleted",
+        [
+            pytest.param({"retire_covered_model_call_captures": True}, False, True, id="covered, flag on"),
+            pytest.param({}, False, False, id="covered, flag off by default"),
+            pytest.param({"retire_covered_model_call_captures": True}, True, False, id="redacted payloads"),
+        ],
+    )
+    async def test_run_from_config_deletes_a_covered_capture_file_only_when_asked(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        global_config_extra: dict,
+        redact_payloads: bool,
+        expect_deleted: bool,
+    ) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {"observability_enabled": True, "model_call_capture_dir": str(capture_dir), **global_config_extra},
+        )
+        source_row = {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+        )
+        store = CaptureStore(capture_dir)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                [example] = examples
+                store.record(
+                    "0-0",
+                    {"model_call_id": "call", "dialect": "responses", "request": {"input": "hi"}, "response": {}},
+                )
+                result = {"response": {"usage": {}}}
+                if redact_payloads:
+                    result["ng_trajectory"] = {
+                        "schema_version": "1.0",
+                        "task_id": "0",
+                        "rollout_id": "0-0",
+                        "gaps": [{"code": "multimodal_history_redacted"}],
+                    }
+                future = Future()
+                future.set_result(_CompletedRollout(row=example, result=result, rollout_latency_ms=None))
+                return [future]
+
+        results = await Helper().run_from_config(config)
+
+        assert store.path_for("0-0").exists() is not expect_deleted
+        # The persisted rollout carries the call whether or not its capture file is kept.
+        assert [call["model_call_id"] for call in results[0]["ng_model_call_capture"]["calls"]] == ["call"]
+
     async def test_run_from_config_keys_capture_by_an_explicit_rollout_id(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -1008,3 +1008,128 @@ def test_cancelled_streamed_call_without_a_complete_stream_keeps_its_raw_body(ra
     assert record.response is None
     assert record.response_raw == raw
     assert record.tokens_out is None
+
+
+def _covered_capture(tmp_path, rollout_id="0-0"):
+    """A capture file of one complete call, and a rollout that holds that call with its payload."""
+    store = CaptureStore(tmp_path)
+    exchange = _capture_exchange("responses", "A", {"input_tokens": 3, "output_tokens": 2}, {"id": "resp-A"})
+    store.record(rollout_id, exchange)
+    record = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+    return store, record
+
+
+def _merge_and_attach(tmp_path, record):
+    """Collect the capture into the record the way rollout collection does."""
+    from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
+    from nemo_gym.rollout_collection import _attach_trajectory_record
+
+    merge_model_call_capture_into_record(record, [tmp_path], include_payloads=True)
+    _attach_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, record)
+    return record
+
+
+def test_capture_store_size_is_none_without_a_file(tmp_path):
+    store = CaptureStore(tmp_path)
+
+    assert store.size("0-0") is None
+    store.record("0-0", {"model_call_id": "c"})
+    assert store.size("0-0") == store.path_for("0-0").stat().st_size > 0
+
+
+def test_delete_if_unchanged_deletes_a_file_that_has_not_grown(tmp_path):
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "c"})
+
+    assert store.delete_if_unchanged("0-0", store.size("0-0")) is None
+    assert not store.path_for("0-0").exists()
+
+
+@pytest.mark.parametrize(
+    "setup, reason",
+    [
+        pytest.param(lambda store: store.record("0-0", {"model_call_id": "late"}), "capture_file_changed", id="grown"),
+        pytest.param(lambda store: store.mark_pending("0-0", "late"), "write_pending", id="pending write"),
+    ],
+)
+def test_delete_if_unchanged_keeps_a_file_that_may_hold_unread_calls(tmp_path, setup, reason):
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "c"})
+    size = store.size("0-0")
+    setup(store)
+
+    assert store.delete_if_unchanged("0-0", size) == reason
+    assert store.path_for("0-0").exists()
+
+
+def test_delete_if_unchanged_reports_a_missing_file(tmp_path):
+    assert CaptureStore(tmp_path).delete_if_unchanged("0-0", 0) == "capture_file_missing"
+
+
+def test_retire_deletes_a_capture_file_that_the_persisted_rollout_covers(tmp_path):
+    from nemo_gym.observability.model_calls import retire_covered_model_call_capture, snapshot_model_call_capture
+
+    store, record = _covered_capture(tmp_path)
+    snapshot = snapshot_model_call_capture("0-0", [tmp_path])
+    _merge_and_attach(tmp_path, record)
+
+    assert retire_covered_model_call_capture("0-0", record, snapshot) == []
+    assert not store.path_for("0-0").exists()
+
+
+def test_retire_keeps_the_capture_file_of_a_rollout_that_does_not_cover_it(tmp_path):
+    from nemo_gym.observability.model_calls import retire_covered_model_call_capture, snapshot_model_call_capture
+
+    store, record = _covered_capture(tmp_path)
+    _merge_and_attach(tmp_path, record)
+    record["ng_trajectory"]["gaps"].append({"code": "multimodal_history_redacted"})
+    record["ng_trajectory"]["model_calls"][0]["request"] = None
+
+    reasons = retire_covered_model_call_capture("0-0", record, snapshot_model_call_capture("0-0", [tmp_path]))
+
+    assert reasons == ["payload_gap:multimodal_history_redacted"]
+    assert store.path_for("0-0").exists()
+
+
+def test_retire_keeps_a_capture_file_that_grew_after_the_snapshot(tmp_path):
+    from nemo_gym.observability.model_calls import retire_covered_model_call_capture, snapshot_model_call_capture
+
+    store, record = _covered_capture(tmp_path)
+    snapshot = snapshot_model_call_capture("0-0", [tmp_path])
+    store.record("0-0", _capture_exchange("responses", "B", {}, {"id": "resp-B"}))
+
+    _merge_and_attach(tmp_path, record)
+
+    assert retire_covered_model_call_capture("0-0", record, snapshot) == ["capture_file_changed"]
+    assert store.path_for("0-0").exists()
+
+
+def test_retire_without_a_snapshot_has_no_file_to_delete():
+    from nemo_gym.observability.model_calls import retire_covered_model_call_capture
+
+    assert retire_covered_model_call_capture("0-0", {}, None) == ["no_capture_file"]
+
+
+def test_retire_only_touches_the_rollout_attempt_it_was_given(tmp_path):
+    from nemo_gym.observability.model_calls import retire_covered_model_call_capture, snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
+    store.record("0-0-a1", _capture_exchange("responses", "B", {}, {"id": "resp-B"}))
+    snapshot = snapshot_model_call_capture("0-0-a1", [tmp_path])
+    record = {
+        "ng_model_call_capture": {"calls": [{"model_call_id": "call-B"}]},
+        "ng_trajectory": {"model_calls": [{"model_call_id": "call-B", "request": {}, "response": {}}]},
+    }
+
+    assert retire_covered_model_call_capture("0-0-a1", record, snapshot) == []
+    assert store.path_for("0-0").exists() and not store.path_for("0-0-a1").exists()
+
+
+def test_retiring_covered_captures_is_opt_in_and_needs_observability():
+    from nemo_gym.observability.model_calls import retire_covered_model_call_captures_from_config
+
+    base = {"observability_enabled": True, "model_call_capture_dir": "/captures"}
+    assert retire_covered_model_call_captures_from_config(base) is False
+    assert retire_covered_model_call_captures_from_config({**base, "retire_covered_model_call_captures": True}) is True
+    assert retire_covered_model_call_captures_from_config({"retire_covered_model_call_captures": True}) is False

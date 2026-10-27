@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, Optional
 
@@ -416,6 +417,12 @@ def observability_enabled_from_config(global_config_dict: Any) -> bool:
     return ModelCallCaptureConfig.model_validate(global_config_dict).observability_enabled
 
 
+def retire_covered_model_call_captures_from_config(global_config_dict: Any) -> bool:
+    """Return whether capture files are deleted once the persisted rollout fully covers them."""
+    config = ModelCallCaptureConfig.model_validate(global_config_dict)
+    return config.observability_enabled and config.retire_covered_model_call_captures
+
+
 # How long a reader waits for writes already claimed by the model server to land. A claimed
 # write is one append + fsync, so this only ever elapses when the writer died holding a claim.
 CAPTURE_DRAIN_TIMEOUT_S = 10.0
@@ -617,6 +624,41 @@ def model_call_capture_uncovered_reasons(result: Mapping[str, Any]) -> list[str]
         elif call_id not in with_payload:
             reasons.append(f"call_without_payload:{call_id}")
     return reasons
+
+
+@dataclass(frozen=True)
+class CaptureSnapshot:
+    """Where a rollout's capture file was and how large it was just before collection read it."""
+
+    directory: Path
+    size: int
+
+
+def snapshot_model_call_capture(rollout_id: str, capture_dirs: list[Path]) -> Optional[CaptureSnapshot]:
+    """Record the capture file's size; take it before merging, so a row appended later changes the size."""
+    for directory in capture_dirs:
+        size = CaptureStore(directory).size(rollout_id)
+        if size is not None:
+            return CaptureSnapshot(directory=directory, size=size)
+    return None
+
+
+def retire_covered_model_call_capture(
+    rollout_id: str, result: Mapping[str, Any], snapshot: Optional[CaptureSnapshot]
+) -> list[str]:
+    """Delete a rollout's capture file once the persisted rollout covers it; return why it was kept.
+
+    Call after the rollout is durably written. The file is kept when the rollout does not cover it
+    (see ``model_call_capture_uncovered_reasons``), when it grew after the snapshot, or when a model
+    call of this rollout still holds a pending write.
+    """
+    if snapshot is None:
+        return ["no_capture_file"]
+    reasons = model_call_capture_uncovered_reasons(result)
+    if reasons:
+        return reasons
+    kept = CaptureStore(snapshot.directory).delete_if_unchanged(rollout_id, snapshot.size)
+    return [kept] if kept else []
 
 
 def _prompt_size(usage: Mapping[str, Any]) -> Optional[int]:
