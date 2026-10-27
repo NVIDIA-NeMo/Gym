@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -18,6 +18,7 @@ from nemo_gym.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
+from nemo_gym.health.timeouts import RolloutTiming
 
 
 TASK_INDEX_KEY = TASK_INDEX_KEY_NAME
@@ -173,6 +174,8 @@ class RolloutDigest(BaseModel):
     transcript_completion_tokens: int = 0
     capture_prompt_tokens: int = 0
     capture_completion_tokens: int = 0
+    # What this rollout contributes to `run.stats.timeouts`.
+    timing: RolloutTiming | None = None
 
 
 class HealthCheckResult(BaseModel):
@@ -216,6 +219,8 @@ class _CallBindings:
     matched_calls: tuple[dict[str, Any], ...]
     missing_references: tuple[str, ...]
     duplicated_references: tuple[tuple[str, int], ...]
+    # What each reference resolved to, by `_call_reference_signature`: one call, none, or several.
+    resolutions: Mapping[tuple[str, str, str, str], tuple[dict[str, Any], ...]] = field(default_factory=dict)
 
     @property
     def observed(self) -> bool:

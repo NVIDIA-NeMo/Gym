@@ -73,6 +73,7 @@ class CoordinatedPolicyParticipant(CoordinatedParticipant[GateReport]):
     """The participant of a policy model server whose calls are spread over several worker processes."""
 
     kind = "model"
+    mode = "exported"
     record_model = ModelRecord
     report_model = GateReport
     worker_label = "policy"
