@@ -64,6 +64,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.rollout_correlation import ModelCallSampling, model_sampling_base_url
 from nemo_gym.rollout_observability import (
     AgentEpisode,
     AgentInvocation,
@@ -705,11 +706,19 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
-        unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
+        unsupported = self.config.opencode_config.keys() - {"permission", "tools", "compaction"}
         if unsupported:
             raise HTTPException(
-                422, f"OpenCode sandbox config supports permission/tools only; unsupported: {sorted(unsupported)}"
+                422,
+                f"OpenCode sandbox config supports permission/tools/compaction only; unsupported: {sorted(unsupported)}",
             )
+        compaction = self.config.opencode_config.get("compaction", {})
+        if (
+            not isinstance(compaction, dict)
+            or compaction.keys() - {"auto", "prune"}
+            or any(type(value) is not bool for value in compaction.values())
+        ):
+            raise HTTPException(422, "OpenCode compaction accepts only boolean auto and prune controls")
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
@@ -809,7 +818,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
 
     def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
-        supported = {"input", "instructions", "model"}
+        ModelCallSampling.from_request(body)
+        if body.max_output_tokens is not None and body.max_output_tokens > self.config.context_window:
+            raise HTTPException(422, "OpenCode request max_output_tokens must not exceed context_window")
+        supported = {"input", "instructions", "temperature", "top_p", "max_output_tokens", "model"}
         for key, field in type(body).model_fields.items():
             if key in supported:
                 continue
@@ -1089,7 +1101,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         timeout = timeout if timeout is not None else resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         started = monotonic()
         previous_session_id = state.harness_session_id
-        base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
+        sampling = ModelCallSampling.from_request(body)
+        base_url = model_sampling_base_url(
+            self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key), sampling
+        )
+        output_limit = body.max_output_tokens if body.max_output_tokens is not None else self.config.max_output_tokens
         config = {
             "model": "nemo_gym/" + self.config.sandbox_model_id,
             "small_model": "nemo_gym/" + self.config.sandbox_model_id,
@@ -1115,7 +1131,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                             "limit": {
                                 "context": self.config.context_window,
                                 "input": self.config.context_window,
-                                "output": self.config.max_output_tokens,
+                                "output": output_limit,
                             },
                         }
                     },
@@ -1155,7 +1171,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
                 "OPENCODE_DISABLE_AUTOUPDATE": "true",
                 "OPENCODE_DISABLE_MODELS_FETCH": "true",
-                "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_output_tokens),
+                "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(output_limit),
             },
         }
         error = None

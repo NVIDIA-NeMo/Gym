@@ -18,14 +18,16 @@ import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from copy import deepcopy
+from threading import Event
 from types import SimpleNamespace
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
 from aiohttp import ClientResponseError, RequestInfo
-from fastapi import HTTPException, Response
+from fastapi import HTTPException, Request, Response
 from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
 from pytest import MonkeyPatch, mark, raises
@@ -36,6 +38,8 @@ from nemo_gym import PARENT_DIR
 from nemo_gym._checkpoint.control import CheckpointRequest
 from nemo_gym._checkpoint.generation_cut import GenerationCutInventory, GenerationCutPrefixAck, GenerationCutReceipt
 from nemo_gym._checkpoint.model import PolicyModelParticipant, generation_cut_requester
+from nemo_gym.base_responses_api_model import CaptureStore
+from nemo_gym.config_types import TOKEN_CAPTURE_PATH_SEGMENT
 from nemo_gym.openai_utils import (
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     NeMoGymAsyncOpenAI,
@@ -70,7 +74,7 @@ from nemo_gym.openai_utils import (
     PermanentEndpointError,
 )
 from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
-from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.rollout_correlation import ModelCallSampling, model_sampling_base_url, rollout_context
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.token_id_capture import (
     CaptureContext,
@@ -5588,6 +5592,25 @@ class TestCompletionsBackendBodyTranslation:
         assert out["top_p"] == 0.95
         assert out["min_p"] == 0.05
 
+    @mark.parametrize(
+        "extra_body",
+        [{"max_completion_tokens": 1024}, {"max_tokens": 2048, "max_completion_tokens": 1024}],
+    )
+    @mark.parametrize(
+        "request_body, expected_limit",
+        [({}, 1024), ({"max_tokens": 11}, 11), ({"max_completion_tokens": 11}, 11)],
+    )
+    def test_extra_body_token_alias_does_not_override_request_limit(
+        self, extra_body, request_body, expected_limit
+    ) -> None:
+        model = _make_completions_backend_model(extra_body=extra_body)
+
+        out = model._build_completion_body_from_chat_body(request_body, prompt="x")
+
+        assert out["max_tokens"] == expected_limit
+        assert "max_completion_tokens" not in out
+        assert model.config.extra_body == extra_body
+
     def test_token_id_information_sets_logprobs_and_extra_flags(self) -> None:
         model = _make_completions_backend_model(return_token_id_information=True)
         out = model._build_completion_body_from_chat_body({}, prompt="x")
@@ -6794,12 +6817,42 @@ class TestSamplingOverrides:
         assert out["temperature"] == 1.0
         assert out["top_p"] == 1.0
 
-    def test_overrides_apply_even_when_the_client_sent_nothing(self) -> None:
-        server = self._server({"temperature": 1.0})
-        out = server._preprocess_chat_completion_create_params(
-            MagicMock(), {"messages": [{"role": "user", "content": "hi"}]}
+    @mark.parametrize("use_completions_api", [False, True])
+    def test_override_conflicts_warn_once_per_worker_then_log_at_debug(self, use_completions_api, caplog) -> None:
+        with caplog.at_level(logging.DEBUG, logger="nemo_gym.vllm_model"):
+            for _ in range(2):
+                server = self._server({"temperature": 1.0}, use_completions_api=use_completions_api)
+                for temperature in (1.0, 0.2, 0.2, 0.4):
+                    body = {"messages": [{"role": "user", "content": "hi"}], "temperature": temperature}
+                    out = (
+                        server._build_completion_body_from_chat_body(body, "hi")
+                        if use_completions_api
+                        else server._preprocess_chat_completion_create_params(MagicMock(), body)
+                    )
+                    assert out["temperature"] == 1.0
+
+        records = [record for record in caplog.records if "sampling_overrides replaces" in record.getMessage()]
+        assert [record.levelno for record in records] == [logging.WARNING, logging.DEBUG, logging.DEBUG] * 2
+        assert [record.args[1] for record in records] == [
+            {"temperature": {"requested": value, "effective": 1.0}} for value in (0.2, 0.2, 0.4)
+        ] * 2
+
+    @mark.parametrize("request_values", [{}, {"temperature": None}, {"temperature": 1.0}])
+    @mark.parametrize("use_completions_api", [False, True])
+    def test_overrides_do_not_warn_for_unset_or_matching_request_values(
+        self, request_values, use_completions_api, caplog
+    ) -> None:
+        server = self._server(
+            {"temperature": 1.0}, extra_body={"temperature": 0.2}, use_completions_api=use_completions_api
+        )
+        body = {"messages": [{"role": "user", "content": "hi"}], **request_values}
+        out = (
+            server._build_completion_body_from_chat_body(body, "hi")
+            if use_completions_api
+            else server._preprocess_chat_completion_create_params(MagicMock(), body)
         )
         assert out["temperature"] == 1.0
+        assert "sampling_overrides replaces" not in caplog.text
 
     def test_unset_leaves_the_request_alone(self) -> None:
         server = self._server(None)
@@ -6885,6 +6938,281 @@ class TestSamplingOverrides:
         assert event["request_payload"]["new_param"] == sent["new_param"] == "value"
         # Nothing is printed per request; the trace exists only when the log is enabled.
         assert capsys.readouterr().out == ""
+
+    @mark.parametrize("override_field", ["max_tokens", "max_completion_tokens"])
+    @mark.parametrize("requested_limit", [32, 73])
+    @mark.parametrize("use_completions_api", [False, True])
+    def test_token_override_wins_over_sampling_url_alias(
+        self, override_field, requested_limit, use_completions_api, caplog
+    ) -> None:
+        from nemo_gym.rollout_correlation import ModelCallSampling, model_sampling_base_url
+
+        server = self._server({override_field: 32}, use_completions_api=use_completions_api)
+        provider = MagicMock()
+        provider.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chatcmpl-limit",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "dummy_model",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "hi"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        )
+        provider.create_completion = AsyncMock(
+            return_value={
+                "id": "cmpl-limit",
+                "object": "text_completion",
+                "created": 0,
+                "model": "dummy_model",
+                "choices": [{"index": 0, "finish_reason": "stop", "text": "hi"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        )
+        server._clients = [provider]
+        base_url = model_sampling_base_url(
+            "http://testserver/v1", ModelCallSampling(max_output_tokens=requested_limit)
+        )
+        response = TestClient(server.setup_webserver()).post(
+            f"{base_url}/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+        assert response.status_code == 200, response.text
+        call = provider.create_completion if use_completions_api else provider.create_chat_completion
+        sent = call.await_args.kwargs
+        output_field = "max_tokens" if use_completions_api else override_field
+        assert sent[output_field] == 32
+        other_alias = "max_tokens" if output_field == "max_completion_tokens" else "max_completion_tokens"
+        assert other_alias not in sent
+        warnings = [record for record in caplog.records if "sampling_overrides replaces" in record.getMessage()]
+        expected = {override_field: {"requested": requested_limit, "effective": 32}}
+        assert [record.args[1] for record in warnings] == ([expected] if requested_limit != 32 else [])
+
+    def test_completions_backend_prefers_canonical_token_alias_when_both_are_pinned(self, caplog) -> None:
+        server = self._server({"max_tokens": 16, "max_completion_tokens": 32}, use_completions_api=True)
+
+        sent = server._build_completion_body_from_chat_body({"max_completion_tokens": 73}, "hi")
+
+        assert sent["max_tokens"] == 32
+        assert "max_completion_tokens" not in sent
+        warnings = [record for record in caplog.records if "sampling_overrides replaces" in record.getMessage()]
+        assert [record.args[1] for record in warnings] == [
+            {"max_completion_tokens": {"requested": 73, "effective": 32}}
+        ]
+
+
+def _model_server(tmp_path, operator_overrides=None):
+    return VLLMModel(
+        config=VLLMModelConfig(
+            host="127.0.0.1",
+            port=0,
+            name="policy",
+            entrypoint="app.py",
+            base_url="http://unused/v1",
+            api_key="gym",  # pragma: allowlist secret
+            model="served-policy",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            sampling_overrides=operator_overrides,
+        ),
+        server_client=MagicMock(
+            spec=ServerClient,
+            global_config_dict={"observability_enabled": True, "model_call_capture_dir": str(tmp_path)},
+        ),
+    )
+
+
+def _model_provider():
+    provider = MagicMock()
+    provider.create_chat_completion = AsyncMock(
+        return_value={
+            "id": "chatcmpl-sampling",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "served-policy",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "done"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    )
+    return provider
+
+
+@mark.parametrize("dialect", ["chat/completions", "responses"])
+@mark.parametrize("checkpoint_policy", [False, True])
+@mark.parametrize(
+    "operator_overrides, expected_conflicts",
+    [
+        (None, {}),
+        ({"temperature": 0.0, "top_p": 0.8}, {}),
+        (
+            {"temperature": 0.4, "top_p": 0.6},
+            {"temperature": {"requested": 0.0, "effective": 0.4}, "top_p": {"requested": 0.8, "effective": 0.6}},
+        ),
+        ({"temperature": 0.0, "top_p": 0.6}, {"top_p": {"requested": 0.8, "effective": 0.6}}),
+    ],
+)
+def test_model_server_applies_controls_before_capture_and_preserves_operator_overrides(
+    tmp_path, dialect, checkpoint_policy, operator_overrides, expected_conflicts, caplog
+):
+    server = _model_server(tmp_path, operator_overrides)
+    if checkpoint_policy:
+        server.config.checkpoint.policy = True
+        server.server_client.global_config_dict["checkpoint"] = {"enabled": True, "control_auth_token": "test"}
+    provider = _model_provider()
+    server._clients = [provider]
+    app = server.setup_webserver()
+    if checkpoint_policy:
+        gate = app.state.nemo_gym_policy_gate
+        gate.admit = AsyncMock(wraps=gate.admit)
+    capture_path = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if checkpoint_policy else ""
+    base_url = model_sampling_base_url(
+        f"http://testserver/ng-rollout/integration-a2{capture_path}/v1",
+        ModelCallSampling(temperature=0.0, top_p=0.8, max_output_tokens=73),
+    )
+    body = (
+        {"messages": [{"role": "user", "content": "task"}], "max_tokens": 1024}
+        if dialect == "chat/completions"
+        else {"input": [{"role": "user", "content": "task"}], "max_output_tokens": 1024}
+    )
+    response = TestClient(app).post(f"{base_url}/{dialect}", json=body | {"temperature": 1.0, "top_p": 1.0})
+
+    assert response.status_code == 200, response.text
+    if checkpoint_policy:
+        gate.admit.assert_awaited_once_with("integration-a2")
+    sent = provider.create_chat_completion.await_args.kwargs
+    assert sent["model"] == "served-policy"
+    assert {name: sent[name] for name in ("temperature", "top_p")} == (
+        operator_overrides or {"temperature": 0.0, "top_p": 0.8}
+    )
+    assert sent.get("max_completion_tokens", sent.get("max_tokens")) == 73
+    warnings = [record for record in caplog.records if "sampling_overrides replaces" in record.getMessage()]
+    assert [record.args[1] for record in warnings] == ([expected_conflicts] if expected_conflicts else [])
+    [captured] = CaptureStore(tmp_path).read("integration-a2")
+    assert captured["request"]["temperature"] == 0.0
+    assert captured["request"]["top_p"] == 0.8
+    assert captured["request"]["max_completion_tokens" if dialect == "chat/completions" else "max_output_tokens"] == 73
+
+
+def test_model_server_closed_checkpoint_gate_holds_sampling_requests_before_capture(tmp_path):
+    server = _model_server(tmp_path)
+    server.config.checkpoint.policy = True
+    server.server_client.global_config_dict["checkpoint"] = {"enabled": True, "control_auth_token": "test"}
+    provider = _model_provider()
+    server._clients = [provider]
+    app = server.setup_webserver()
+    gate = app.state.nemo_gym_policy_gate
+    reached_admission = Event()
+    admit = gate.admit
+
+    async def observed_admit(capture_key):
+        reached_admission.set()
+        await admit(capture_key)
+
+    gate.admit = AsyncMock(side_effect=observed_admit)
+    base_url = model_sampling_base_url(
+        f"http://testserver/ng-rollout/training-a2/{TOKEN_CAPTURE_PATH_SEGMENT}/v1",
+        ModelCallSampling(temperature=0.0, max_output_tokens=31),
+    )
+
+    control = {"checkpoint_id": "sampling-test", "deadline_ts": time.time() + 10}
+    control_headers = {"authorization": "Bearer test"}
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=1) as pool:
+        prepared = client.post("/ng-control/v1/checkpoint/prepare", json=control, headers=control_headers)
+        assert prepared.status_code == 200, prepared.text
+        pending = pool.submit(client.post, f"{base_url}/responses", json={"input": "task"})
+        try:
+            assert reached_admission.wait(timeout=2)
+            gate.admit.assert_awaited_once_with("training-a2")
+            assert client.portal.call(lambda: {waiter.capture_key for waiter in gate.waiters}) == {"training-a2"}
+            assert not pending.done()
+            provider.create_chat_completion.assert_not_awaited()
+            assert CaptureStore(tmp_path).read("training-a2") == []
+        finally:
+            resumed = client.post("/ng-control/v1/checkpoint/resume", json=control, headers=control_headers)
+            client.portal.call(gate.open)  # Release the request even if a control-route assertion fails.
+        assert resumed.status_code == 200, resumed.text
+        response = pending.result(timeout=5)
+
+    assert response.status_code == 200, response.text
+    assert provider.create_chat_completion.await_args.kwargs["temperature"] == 0.0
+    [captured] = CaptureStore(tmp_path).read("training-a2")
+    assert captured["request"]["temperature"] == 0.0
+    assert captured["request"]["max_output_tokens"] == 31
+
+
+def test_rollout_named_ng_sampling_is_not_mistaken_for_controls(tmp_path):
+    server = _model_server(tmp_path)
+    provider = _model_provider()
+    server._clients = [provider]
+
+    response = TestClient(server.setup_webserver()).post(
+        "/ng-rollout/ng-sampling/v1/responses", json={"input": "task", "temperature": 0.9}
+    )
+
+    assert response.status_code == 200, response.text
+    assert provider.create_chat_completion.await_args.kwargs["temperature"] == 0.9
+    [captured] = CaptureStore(tmp_path).read("ng-sampling")
+    assert captured["request"]["temperature"] == 0.9
+
+
+def test_misplaced_sampling_prefix_does_not_silently_drop_controls(tmp_path):
+    server = _model_server(tmp_path)
+    provider = _model_provider()
+    server._clients = [provider]
+    sampling_prefix = model_sampling_base_url("http://testserver/v1", ModelCallSampling(temperature=0.0)).removesuffix(
+        "/v1"
+    )
+
+    response = TestClient(server.setup_webserver()).post(
+        f"{sampling_prefix}/ng-rollout/misplaced/v1/responses", json={"input": "task", "temperature": 0.9}
+    )
+
+    assert response.status_code == 422, response.text
+    provider.create_chat_completion.assert_not_awaited()
+    assert CaptureStore(tmp_path).read("misplaced") == []
+
+
+def test_anthropic_messages_rejects_sampling_but_preserves_unprefixed_requests(tmp_path):
+    server = _model_server(tmp_path)
+    provider = _model_provider()
+    server._clients = [provider]
+    client = TestClient(server.setup_webserver())
+    body = {"messages": [{"role": "user", "content": "task"}], "max_tokens": 128, "temperature": 0.9}
+
+    response = client.post("/v1/messages", json=body)
+
+    assert response.status_code == 200, response.text
+    assert provider.create_chat_completion.await_args.kwargs["temperature"] == 0.9
+    provider.create_chat_completion.reset_mock()
+    base_url = model_sampling_base_url(
+        "http://testserver/ng-rollout/unsupported-a2/v1", ModelCallSampling(temperature=0.0)
+    )
+
+    response = client.post(f"{base_url}/messages", json=body)
+
+    assert response.status_code == 422, response.text
+    assert "not supported for /v1/messages" in response.json()["detail"]
+    provider.create_chat_completion.assert_not_awaited()
+    assert CaptureStore(tmp_path).read("unsupported-a2") == []
+
+
+def test_model_server_metadata_route_is_not_treated_as_generation(tmp_path):
+    server = _model_server(tmp_path)
+    app = server.setup_webserver()
+
+    @app.get("/v1/models")
+    async def models(request: Request):
+        return {"object": "list", "body": (await request.body()).decode(), "query": request.url.query}
+
+    base_url = model_sampling_base_url(
+        "http://testserver/ng-rollout/metadata-a2/v1",
+        ModelCallSampling(temperature=0.0, max_output_tokens=23),
+    )
+
+    response = TestClient(app).request("GET", f"{base_url}/models?check=ready", content=b"not-generation-json")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"object": "list", "body": "not-generation-json", "query": "check=ready"}
+    assert CaptureStore(tmp_path).read("metadata-a2") == []
 
 
 class TestEndpointFile:

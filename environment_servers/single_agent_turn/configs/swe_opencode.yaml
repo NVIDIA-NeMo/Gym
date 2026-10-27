@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Materialized task rows select a source through task_id.taskset. The resources
+# server owns each task sandbox; the shared OpenCode agent borrows it for one turn.
+# Supply a policy model and sandbox provider config alongside this file.
+config_paths:
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+  - resources_servers/scale_swe/configs/scale_swe.yaml
+  - resources_servers/swe_rebench/configs/swe_rebench.yaml
+  - resources_servers/swemer_v1/configs/swemer_v1.yaml
+
+environment_server_routes:
+  scale_swe: scale_swe_environment
+  swe_rebench: swe_rebench_environment
+  swemer_v1: swemer_v1_environment
+
+# The typed session adapters support the shared harness as well as the flat one.
+scale_swe_resources_server:
+  resources_servers:
+    scale_swe:
+      allowed_agents: [opencode_agent, opencode_sandboxed_agent]
+
+swe_rebench_resources_server:
+  resources_servers:
+    swe_rebench:
+      allowed_agents: [opencode_agent, opencode_sandboxed_agent]
+
+swemer_v1_resources_server:
+  resources_servers:
+    swemer_v1:
+      allowed_agents: [opencode_agent, opencode_sandboxed_agent]
+
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      context_window: 196608
+      max_output_tokens: 65536
+      timeout: 3600
+      opencode_version: 1.17.11
+      opencode_config:
+        compaction:
+          auto: false
+          prune: false
+
+scale_swe_environment:
+  environment_servers:
+    single_agent_turn:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: scale_swe_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: opencode_agent
+      default_episode_timeout_seconds: 10800
+      cleanup_timeout_seconds: 180
+
+swe_rebench_environment:
+  environment_servers:
+    single_agent_turn:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: swe_rebench_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: opencode_agent
+      default_episode_timeout_seconds: 10800
+      cleanup_timeout_seconds: 180
+
+swemer_v1_environment:
+  environment_servers:
+    single_agent_turn:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: swemer_v1_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: opencode_agent
+      default_episode_timeout_seconds: 10800
+      cleanup_timeout_seconds: 180

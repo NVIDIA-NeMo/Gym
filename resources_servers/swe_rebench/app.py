@@ -39,7 +39,8 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    SimpleResourcesServer,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
 )
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
@@ -64,6 +65,7 @@ from resources_servers.swebench.patch_capture import (
     capture_model_patch,
     prepare_git_for_commits,
 )
+from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
 
 
 # Gradle only auto-loads init scripts from $GRADLE_USER_HOME/init.d, so the mirror script
@@ -152,7 +154,7 @@ class SWERebenchVerifyResponse(BaseVerifyResponse):
     model_patch: str | None = None
 
 
-class SWERebenchResourcesServer(SimpleResourcesServer):
+class SWERebenchResourcesServer(SandboxSessionResourcesServer):
     config: SWERebenchResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -244,7 +246,7 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
 
     async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> PatchCapture:
         """Capture the agent's patch per ``config.patch_capture_mode``, then stop its sandbox."""
-        original_sandbox = self._session_id_to_sandbox.pop(session_id)
+        original_sandbox = self._session_id_to_sandbox[session_id]
         pristine_untracked = self._session_id_to_pristine_untracked.pop(session_id, frozenset())
         try:
             return await capture_model_patch(
@@ -256,16 +258,31 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
                 drop_sections=drop_patch_sections,
             )
         finally:
-            await self._stop_sandbox(original_sandbox)
+            await self._release_task_sandbox(session_id, original_sandbox)
 
     async def seed_session(
-        self, request: Request, body: SWERebenchSeedSessionRequest
-    ) -> SWERebenchSeedSessionResponse:
-        """Start the instance's image so an agent can work in it."""
+        self, request: Request, body: SWERebenchSeedSessionRequest | ResourcesSeedSessionRequest
+    ) -> SWERebenchSeedSessionResponse | ResourcesSeedSessionResponse:
+        """Start the instance's image so an agent can work in it.
+
+        An Environment Server seeds a typed session and gets the sandbox back as ``sandbox_access``; an
+        agent's ``/run`` seeds with the row and gets the sandbox handle.
+        """
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return await self.seed_task_sandbox_session(request, body, SWERebenchInstanceRequest)
         session_id = request.session[SESSION_ID_KEY]
         await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
-        self._session_id_to_pristine_untracked.pop(session_id, None)
+        await self._start_task_sandbox(session_id, body)
+        return SWERebenchSeedSessionResponse(
+            sandbox_handle=str(self._session_id_to_sandbox[session_id]._handle.sandbox_id)
+        )
+
+    async def _start_task_sandbox(self, session_id: str, body: SWERebenchInstanceRequest) -> str:
+        """Start the instance's image so an agent can work in it."""
+        self._forget_task_sandbox_state(session_id)
         sandbox = await self._create_sandbox(body)
+        # Own the sandbox before preparing it, so a failed seed can still stop it.
+        self._session_id_to_sandbox[session_id] = sandbox
         if self.config.apply_anti_cheating:
             await apply_anti_cheat_setup(sandbox, repo_directory(body.repo), body.instance_id, "swe_rebench")
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
@@ -273,10 +290,15 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
         self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
             sandbox, repo_directory(body.repo)
         )
-        self._session_id_to_sandbox[session_id] = sandbox
-        return SWERebenchSeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id))
+        return repo_directory(body.repo)
+
+    def _forget_task_sandbox_state(self, session_id: str) -> None:
+        self._session_id_to_pristine_untracked.pop(session_id, None)
 
     async def verify(self, request: Request, body: SWERebenchVerifyRequest) -> SWERebenchVerifyResponse:
+        return await self.verify_task_session(request, body, lambda: self._verify(request, body))
+
+    async def _verify(self, request: Request, body: SWERebenchVerifyRequest) -> SWERebenchVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
         extraction_error = None
         mode = self.config.patch_capture_mode
@@ -357,7 +379,7 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
                     error=f"Verification failed: {exc}",
                 )
             finally:
-                await self._stop_sandbox(sandbox)
+                await self._release_verifier_sandbox(session_id, sandbox)
             if result.completed:
                 break
             if attempt < attempts:

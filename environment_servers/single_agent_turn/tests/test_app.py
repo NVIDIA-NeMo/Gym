@@ -34,7 +34,9 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
+from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.rollout_collection import NG_ENVIRONMENT_SERVER_KEY, RolloutCollectionHelper
 from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.server_utils import BaseServerConfig, ServerClient, SimpleServer
@@ -43,6 +45,35 @@ from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgent
 
 class _Cookie:
     value = "cookie-value"
+
+
+@pytest.mark.parametrize("taskset", ["scale_swe", "swe_rebench", "swemer_v1"])
+def test_swe_training_config_admits_shared_opencode(taskset: str) -> None:
+    config = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.merge(
+                GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                {
+                    "config_paths": [str(Path(__file__).parents[1] / "configs/swe_opencode.yaml")],
+                    "sandbox": {"docker": {}},
+                },
+            ),
+            default_config_paths=[],
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    RolloutCollectionHelper._validate_environment_servers(
+        [
+            {
+                NG_ENVIRONMENT_SERVER_KEY: config.environment_server_routes[taskset],
+                "task_id": {"taskset": taskset, "task_id": "test-task"},
+                "task_input": {},
+            }
+        ],
+        config,
+    )
 
 
 def test_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -23,6 +23,7 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.testing.rollout_correlation import assert_model_sampling
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig
 
 
@@ -278,6 +279,7 @@ def capture_observations(sandbox, tmp_path):
 def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budget):
     agent, sandbox = setup
     agent.config.max_output_tokens = output_budget
+    agent.config.opencode_config = {"compaction": {"auto": False, "prune": False}}
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200, created.text
@@ -299,6 +301,7 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
         assert payload["command"][0].endswith("nemo-gym-opencode-runtime-1.17.11/opencode")
         assert payload["env"]["HOME"] == f"{sandbox.directory}/home"
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert config["compaction"] == {"auto": False, "prune": False}
         assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"] == {
             "context": 32000,
             "input": 32000,
@@ -367,9 +370,6 @@ def test_http_preserves_typed_literal_think_tags_and_unique_ids(setup, tmp_path,
 @pytest.mark.parametrize(
     "override",
     [
-        {"max_output_tokens": 123},
-        {"temperature": 0.2},
-        {"top_p": 0.9},
         {"tools": [{"type": "function", "name": "foo"}]},
         {"input": [{"role": "assistant", "content": "old turn"}]},
     ],
@@ -389,7 +389,7 @@ def test_rejected_request_does_not_consume_activation(setup):
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
         path = "/ng-rollout/opencode-smoke-a2/v1/responses"
-        assert client.post(path, json={"input": "task", "temperature": 0.2}).status_code == 422
+        assert client.post(path, json={"input": "task", "temperature": -1}).status_code == 422
         sandbox.launch.assert_not_awaited()
         accepted = client.post(path, json={"input": "task"})
         assert accepted.status_code == 200, accepted.text
@@ -756,6 +756,18 @@ def test_invalid_seed_never_connects(setup, option):
     with TestClient(agent.setup_webserver()) as client:
         assert client.post("/v1/agent_sessions", json=body).status_code == 422
     sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("compaction", [False, {"auto": "false"}, {"prune": 0}, {"enabled": False}])
+def test_invalid_compaction_controls_rejected_before_connecting(setup, compaction):
+    agent, sandbox = setup
+    agent.config.opencode_config = {"compaction": compaction}
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert response.status_code == 422
+    assert "compaction" in response.json()["detail"]
+    sandbox.exec.assert_not_awaited()
+    sandbox.launch.assert_not_awaited()
 
 
 def test_several_workers_seed_sessions(setup):
@@ -1751,3 +1763,43 @@ def test_explicit_native_model_and_runtime_paths_are_passed_to_the_harness(setup
         assert set(config["provider"]["nemo_gym"]["models"]) == {"gpt-5.5"}
         assert config["provider"]["nemo_gym"]["models"]["gpt-5.5"]["reasoning"] is True
         assert payload["path_prefix"] == ["/runtime/bin"]
+
+
+@pytest.mark.parametrize("temperature", [0.0, 0.7])
+def test_session_sampling_reaches_model_route_and_preserves_retry_binding(setup, temperature):
+    agent, sandbox = setup
+    original_config = agent.config.model_dump()
+    controls = {"temperature": temperature, "top_p": 0.9, "max_output_tokens": 128}
+    body = {"input": "Fix the code", **controls}
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        path = "/ng-rollout/opencode-smoke-a2/v1/responses"
+        result = client.post(path, json=body)
+        assert result.status_code == 200, result.text
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+        base_url = config["provider"]["nemo_gym"]["options"]["baseURL"]
+        assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"]["output"] == 128
+        assert payload["env"]["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == "128"
+        assert_model_sampling(base_url, controls, routed_base_path=path.removesuffix("/responses"))
+        assert client.post(path, json=body).json() == result.json()
+        assert client.post(path, json={**body, "top_p": 0.8}).status_code == 409
+    sandbox.launch.assert_awaited_once()
+    assert agent.config.model_dump() == original_config
+
+
+def test_request_output_cap_respects_context_window_without_consuming_activation(setup):
+    agent, sandbox = setup
+    agent.config.context_window = 4096
+    agent.config.max_output_tokens = 4096
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        path = "/ng-rollout/opencode-smoke-a2/v1/responses"
+        rejected = client.post(path, json={"input": "Fix the code", "max_output_tokens": 4097})
+        assert rejected.status_code == 422
+        assert "context_window" in rejected.json()["detail"]
+        assert next(iter(agent._session_records.values())).state.task is None
+        sandbox.launch.assert_not_awaited()
+        accepted = client.post(path, json={"input": "Fix the code", "max_output_tokens": 4096})
+        assert accepted.status_code == 200, accepted.text
+    sandbox.launch.assert_awaited_once()

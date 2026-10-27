@@ -234,6 +234,8 @@ class TestSeedSessionMavenSettings:
             _session_id_to_pristine_untracked={},
             _session_id_to_base_commit={},
         )
+        server._start_task_sandbox = SwemerV1ResourcesServer._start_task_sandbox.__get__(server)
+        server._forget_task_sandbox_state = SwemerV1ResourcesServer._forget_task_sandbox_state.__get__(server)
         with pytest.raises(self._Stop):
             await SwemerV1ResourcesServer.seed_session(
                 server, SimpleNamespace(session={SESSION_ID_KEY: "s"}), SimpleNamespace()
