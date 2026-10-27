@@ -490,6 +490,8 @@ async def test_failed_legacy_collector_requires_fresh_explicit_group(services, t
         num_samples_in_parallel=4,
         disable_health_check=True,
     )
+    # The 500 must reach the judge client before the per-request deadline, even on a loaded runner.
+    services.resource.config.judge_request_timeout_s = 2.0
     services.judge_status = 500
     with pytest.raises(RuntimeError, match="produced a result"):
         await collection.RolloutCollectionHelper().run_from_config(config)

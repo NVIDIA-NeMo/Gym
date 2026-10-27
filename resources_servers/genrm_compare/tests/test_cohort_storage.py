@@ -298,6 +298,10 @@ def assert_cohort_indices_match(server):
         for group in server._latest_group_attempts
         if not any(c.group_id == group and c.phase in ("collecting", "evaluating") for c in cohorts.values())
     }
+    # Records kept for open sessions, and restore marks, end with the record they belong to.
+    assert set(server._held_cohorts) <= set(server._terminal_cohorts)
+    assert set(server._held_groups) <= set(server._idle_groups)
+    assert server._restored_watermarks <= set(server._latest_group_attempts)
 
 
 async def test_all_indices_retire_superseded_expired_and_legacy_groups(server, clock):

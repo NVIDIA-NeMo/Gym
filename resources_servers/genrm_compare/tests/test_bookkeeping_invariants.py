@@ -3,16 +3,22 @@
 """Protected bookkeeping must finish before yielding to another request."""
 
 import asyncio
+import time
 
 import pytest
 from fastapi import HTTPException
 
 import resources_servers.genrm_compare.app as genrm
+from nemo_gym._checkpoint.control import CheckpointRequest
+from nemo_gym._checkpoint.resources import ResourcesParticipant
+from nemo_gym.episode_types import EpisodeId
+from nemo_gym.judge import JudgeError
 from resources_servers.genrm_compare.tests.support import request_with_session
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import collected_comparisons, member
 
 
-async def test_bookkeeping_does_not_yield_while_holding_locks(server, monkeypatch):
+def record_lock_yields(server, monkeypatch) -> list[str]:
+    """Give the server locks that record each time the event loop advances while one of them is held."""
     violations = []
 
     class TurnLock(asyncio.Lock):
@@ -37,6 +43,11 @@ async def test_bookkeeping_does_not_yield_while_holding_locks(server, monkeypatc
 
     monkeypatch.setattr(genrm, "_CohortState", cohort)
     server._cohort_registry_lock = TurnLock()
+    return violations
+
+
+async def test_bookkeeping_does_not_yield_while_holding_locks(server, monkeypatch):
+    violations = record_lock_yields(server, monkeypatch)
 
     async def compare(**kwargs):
         await asyncio.sleep(0)
@@ -80,5 +91,36 @@ async def test_bookkeeping_does_not_yield_while_holding_locks(server, monkeypatc
     await server.aclose()
     with pytest.raises(HTTPException):
         await pending
+    await asyncio.sleep(0)
+    assert not violations
+
+
+@pytest.mark.parametrize("judge_fails", [False, True], ids=["reward", "judge_failure"])
+async def test_outcomes_held_for_a_checkpoint_do_not_yield_while_holding_locks(server, monkeypatch, judge_fails):
+    """With a checkpoint participant, publication and judge failures wait for admission and then take the lock."""
+    violations = record_lock_yields(server, monkeypatch)
+    participant = ResourcesParticipant(server, "exported", verify_step_type="replay")
+    server._checkpoint = participant
+
+    async def compare(**kwargs):
+        await asyncio.sleep(0)
+        if judge_fails:
+            raise JudgeError("judge is down")
+        return collected_comparisons([3.0, 3.0])
+
+    server._collect_comparisons = compare
+    for index in range(2):
+        participant.seeded(f"s{index}", EpisodeId(rollout_id=f"r{index}"))
+    await participant.close_admission(CheckpointRequest(checkpoint_id="c", deadline_ts=time.time() + 60))
+    members = [
+        asyncio.create_task(server.verify(request_with_session(f"s{index}"), member(index, group="held")))
+        for index in range(2)
+    ]
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not any(task.done() for task in members)
+    await participant.open_admission()
+    outcomes = await asyncio.gather(*members, return_exceptions=True)
+    assert all(isinstance(outcome, JudgeError) for outcome in outcomes) == judge_fails
     await asyncio.sleep(0)
     assert not violations

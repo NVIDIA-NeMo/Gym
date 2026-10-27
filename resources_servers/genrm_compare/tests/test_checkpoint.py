@@ -3,6 +3,8 @@
 """A checkpoint must not lose a finished cohort that only some of its members have recorded."""
 
 import asyncio
+import hashlib
+import json
 import tempfile
 import time
 from types import SimpleNamespace
@@ -427,9 +429,11 @@ async def test_a_member_saved_under_the_previous_digest_scheme_is_compared_under
     participant.ended(SESSIONS[0])
     [record] = await participant.export(None)
     await server.aclose()
-    legacy_digest = genrm.GenRMCompareResourcesServer._response_digest(
-        answers[1].response, scheme=genrm.LEGACY_RESPONSE_DIGEST_SCHEME
+    # Serialized as main did before the scheme names existed, independently of the server's own helper.
+    saved_bytes = json.dumps(
+        answers[1].response.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=True
     )
+    legacy_digest = hashlib.sha256(saved_bytes.encode("utf-8")).hexdigest()
     # Non-ASCII text serializes differently under the two schemes, so a comparison under the wrong one refuses.
     assert legacy_digest != record.state["response_digest"]
     legacy_state = {
@@ -634,6 +638,56 @@ async def test_an_outcome_kept_for_an_open_session_does_not_evict_another_groups
     server._prune_terminal_cohorts()
     assert not server._held_cohorts and not server._held_groups
     assert len(server._verify_cohorts) == len(server._latest_group_attempts) == 1
+    await server.aclose()
+
+
+async def kept_groups(config, monkeypatch, groups: list[str]):
+    """Finish each group with member 1's session still open, then prune so each group's records are kept for it."""
+    now = [100.0]
+    monkeypatch.setattr(genrm, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    config = config.model_copy(update={"max_terminal_cohorts": 1, "cohort_result_ttl_s": 10.0})
+    server, participant = participant_server(config, judge=AsyncMock(side_effect=member_0_wins))
+    for group in groups:
+        for index in range(2):
+            participant.seeded(f"{group}{index}", EpisodeId(rollout_id=f"{group}_g{index}"))
+        await asyncio.gather(*(verify_as(server, f"{group}{index}", member(index, group=group)) for index in range(2)))
+        participant.ended(f"{group}0")
+    now[0] = 111.0
+    server._prune_terminal_cohorts()
+    assert set(server._held_cohorts) == {server._group_cohort_key(group, 0) for group in groups}
+    assert set(server._held_groups) == set(groups)
+    return server, participant, now
+
+
+@pytest.mark.parametrize("released_by", ["new_attempt", "close"])
+async def test_kept_records_end_with_their_group(config, monkeypatch, released_by):
+    """A newer attempt drops the kept result and starts its group again, and a close drops everything. A kept entry
+    left behind would make the next prune look up a record that no longer exists."""
+    server, participant, _ = await kept_groups(config, monkeypatch, ["a"])
+    if released_by == "close":
+        await server.aclose()
+    else:
+        participant.seeded("a-retry", EpisodeId(rollout_id="a_g0"))
+        pending = asyncio.create_task(verify_as(server, "a-retry", member(0, group="a", attempt=1)))
+        await asyncio.sleep(0)
+        server._prune_terminal_cohorts()
+        assert_cohort_indices_match(server)
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        await server.aclose()
+    assert not server._held_cohorts and not server._held_groups
+
+
+async def test_kept_records_behind_the_first_are_evicted_once_their_sessions_close(config, monkeypatch):
+    """Each prune checks again only the first kept record of each order; later ones are evicted as candidates."""
+    server, participant, now = await kept_groups(config, monkeypatch, ["a", "b"])
+    for group in ("a", "b"):
+        participant.ended(f"{group}1")
+    now[0] = 200.0
+    for _ in range(2):
+        server._prune_terminal_cohorts()
+        assert_cohort_indices_match(server)
+    assert server._verify_cohorts == {} and server._latest_group_attempts == {}
     await server.aclose()
 
 
