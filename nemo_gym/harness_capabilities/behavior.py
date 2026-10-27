@@ -7,6 +7,12 @@ import json
 from collections import Counter
 from collections.abc import Callable
 
+from pydantic import ValidationError
+
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
+from nemo_gym.responses_converter import message_content_to_text
+
 from .checks import BehavioralCheck
 from .results import Results
 
@@ -19,12 +25,38 @@ def _objects(value: object) -> list[dict]:
     return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
 
 
+def _terminal_error_reported(attempts: list[dict], responses: list[dict], expected_status: int) -> bool:
+    """Compare the scripted provider error with the response received by the EnvironmentServer."""
+    if not attempts or any(attempt["status_code"] != expected_status for attempt in attempts):
+        return False
+    if len(responses) != 1 or responses[0].get("status") != "failed":
+        return False
+    raw = _mapping(responses[0].get("metadata")).get(AGENT_OUTCOME_METADATA_KEY)
+    try:
+        outcome = AgentOutcome.model_validate_json(raw)
+    except ValidationError:
+        return False
+    if outcome.failure_kind != MODEL_REQUEST_ERROR or outcome.status_code != expected_status:
+        return False
+    message = _mapping(_mapping(attempts[-1].get("response")).get("error")).get("message")
+    reported = _mapping(responses[0].get("error")).get("message")
+    return isinstance(message, str) and bool(message) and isinstance(reported, str) and message in reported
+
+
 def tool_checks(
-    record: dict | None, witnessed: list[dict], *, applies: bool = True, available: bool = True
+    record: dict | None,
+    witnessed: list[dict],
+    *,
+    finish_id: str | None = None,
+    applies: bool = True,
+    available: bool = True,
 ) -> list[dict]:
     results = Results()
     trajectory = _mapping((record or {}).get("ng_trajectory"))
-    tools = _objects(trajectory.get("tool_calls"))
+    # The scripted finish call ends the episode; it is witnessed by the model exchange, not by a shell marker.
+    tools = [
+        t for t in _objects(trajectory.get("tool_calls")) if finish_id is None or t.get("tool_call_id") != finish_id
+    ]
     invocations = _objects(trajectory.get("invocations"))
     wanted = Counter(t.get("id") for t in witnessed)
     identities = (
@@ -60,7 +92,10 @@ def tool_checks(
             values["join"].append(len(requests) == 1)
             values["status"].append(tool.get("status") == ("failed" if expected["exit_code"] else "completed"))
             observed = expected.get("outputs", [])
-            values["output"].append(bool(observed) and all(o == tool.get("output") for o in observed))
+            values["output"].append(
+                bool(observed)
+                and all(message_content_to_text(o) == message_content_to_text(tool.get("output")) for o in observed)
+            )
             if len(requests) != 1:
                 continue
             request = requests[0]
@@ -145,6 +180,7 @@ def inspect_behavior(
     results = Results()
     attempts = (witness or {}).get("attempts", [])
     statuses = [a["status_code"] for a in attempts]
+    agent_responses = (witness or {}).get("agent_responses", [])
     tools = (witness or {}).get("tool_calls", [])
     available = witness is not None
 
@@ -212,8 +248,9 @@ def inspect_behavior(
             tier="P0",
             evidence=("TE-1",),
             location="witness.json",
-            reason="terminal model failure was not observed",
-            predicate=lambda: bool(statuses) and all((s == http_errors[-1] for s in statuses))
+            reason="the EnvironmentServer must receive a failed response retaining the model error and "
+            "ng_agent_outcome with model_request_error and the witnessed HTTP status",
+            predicate=lambda: _terminal_error_reported(attempts, agent_responses, http_errors[-1])
             if terminal_error
             else True,
             available=available,
@@ -255,6 +292,7 @@ def inspect_behavior(
             reason="expected verifier outcome was not observed",
             predicate=lambda: len(verifications) == 1 and verifications[0]["reward"] == expected_reward,
             available=available,
+            applies=not terminal_error,
         )
     )
     results.run(
@@ -278,6 +316,7 @@ def inspect_behavior(
             reason="rollout reward differs from the verifier witness",
             predicate=lambda: record.get("reward") == expected_reward,
             available=record is not None and available,
+            applies=not terminal_error,
         )
     )
     results.run(
@@ -289,12 +328,19 @@ def inspect_behavior(
             reason="completed verification must retain evaluation_completed=true and mask_sample=false",
             predicate=lambda: record.get("evaluation_completed") is True and record.get("mask_sample") is False,
             available=record is not None and available,
+            applies=not terminal_error,
         )
     )
     return (
         results.dump()
         + model_checks(record, attempts, fingerprint=fingerprint, available=available)
-        + tool_checks(record, tools, applies=tool_steps > 0, available=available)
+        + tool_checks(
+            record,
+            tools,
+            finish_id=((witness or {}).get("finish_call") or {}).get("id"),
+            applies=tool_steps > 0,
+            available=available,
+        )
     )
 
 

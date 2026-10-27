@@ -56,6 +56,11 @@ Queued redirect hops, aiohttp reconnects, and Gym retries each record separate s
 Connection attempts that acquire a slot immediately do not record a queue-duration histogram sample.
 Bounded attributes identify the binding connector limit, queue outcome, and destination server.
 
+``gym.http.connection_pool.connect_duration_ms`` (histogram): time to open one new connection, including DNS, TCP, and TLS setup.
+Reused connections record nothing, so the count is the number of connections the pool had to open.
+A run that opens connections throughout, rather than only at its start, is losing them, for example to keep-alive timeouts.
+``nemo.gym.http.connection_pool.connect_outcome`` is ``ok`` or ``failed``.
+
 ``gym.http.connection_pool.connect_total`` (observable counter): all connection attempts
 (``connect()`` calls), including attempts that later fail or are abandoned.
 Compare its value with the queue-duration histogram count to calculate the queued fraction.
@@ -81,11 +86,61 @@ when rows name no environment server) and, on attempts that carry a failure clas
 ``nemo.gym.failure_class``, ``nemo.gym.failure_kind`` (registered or ``<server>:<kind>``
 namespaced, any other value recorded as ``unregistered``) and ``nemo.gym.failure_type`` (exception
 class name). Free-text reasons are never attributes.
+
+Rollout rewards
+---------------
+``gym.rollout.rewarded_total`` (counter): one per ``scored`` attempt that carries a numeric reward,
+recorded with the outcome counter; a result without one is unscored, not a zero. Rewards are
+environment-defined floats: binary, partial credit, or negative penalties.
+``nemo.gym.rollout.reward.range`` sorts each one into ``negative``, ``zero``, ``partial`` (strictly
+between 0 and 1), ``full`` (exactly 1) or ``above_one``. Also carries ``nemo.gym.rollout.dispatch.name``
+and ``nemo.gym.rollout.masked`` (the result's ``mask_sample``), so masked rewards can be left out as
+the aggregate metrics leave them out. A live view of the run, not its score: benchmark metrics such
+as pass@k come from ``/aggregate_metrics``.
+
+Rollout health
+--------------
+The trajectory-level checks of the rollout health report, evaluated as each rollout finishes.
+``gym.rollout.health_verdict_total`` (counter): one per evaluated rollout, by ``nemo.gym.health.verdict``
+(``healthy``, ``unhealthy`` or ``unobserved``, as in the report) and ``nemo.gym.rollout.outcome``
+(``scored`` or ``failed``; the post-run report reads scored rollouts only).
+``gym.rollout.health_flagged_total`` (counter): one per rollout *and* check with at least one finding,
+by ``nemo.gym.health.check`` (a check id from the health-check registry) and ``nemo.gym.rollout.outcome``, so a
+check's count is the number of rollouts it flagged, not the number of findings. Checks in ``health_check_ignored_checks`` are not evaluated.
+
+Partial-rollout checkpoints
+---------------------------
+``gym.checkpoint.operation_duration_ms`` (histogram): wall-clock of one checkpoint operation.
+``nemo.gym.checkpoint.operation`` is a participant's control operation (``prepare``, ``commit``, ``restore``,
+``resume``, ``retire``, or ``forget``), ``lease_reopen`` for one attempt to reopen a participant whose lease expired,
+or ``coordinate.<operation>`` for one call the controller makes to every participant.
+It also carries ``nemo.gym.checkpoint.participant_kind`` (``controller`` for coordination) and ``outcome``
+(``ok`` or ``error``).
+
+``gym.checkpoint.records_total`` / ``gym.checkpoint.bytes_total`` (counters): the records a participant wrote at
+commit or restored, and the bytes of the records file it wrote or read, by ``nemo.gym.checkpoint.operation`` and
+``nemo.gym.checkpoint.participant_kind``.
+A commit counts once its write finishes, and a restore counts once it succeeds, so a retried call counts nothing again.
+
+``gym.checkpoint.control_errors_total`` (counter): control calls that failed, by ``nemo.gym.checkpoint.error_code``,
+the ``code`` of the error in the reply, such as ``checkpoint_deadline_exceeded``.
+Each failed call to a participant's control routes counts once.
+Data-plane requests refused because of a checkpoint are not counted.
+
+``gym.checkpoint.events_total`` (counter): things that change a checkpoint's outcome without failing a call,
+by ``nemo.gym.checkpoint.event``:
+
+- ``lease_expired``: a participant's lease ran out before its controller resumed it,
+  so the participant reopens on its own.
+  Counted once per checkpoint, with the participant kind and phase.
+  Each attempt to reopen is a ``lease_reopen`` operation.
+- ``prepare_not_ready``: a prepare reached its deadline with blockers.
+- ``generation_cut``: one in-flight model call's cut, with its disposition.
 """
 
 import logging
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any, Optional
 
 
@@ -103,6 +158,8 @@ STARTUP_STAGE_ATTRIBUTE = "nemo.gym.startup.stage"
 WORKER_ATTRIBUTE = "nemo.gym.server.worker"
 HTTP_CONNECTION_POOL_QUEUE_DURATION_INSTRUMENT = "gym.http.connection_pool.queue_duration_ms"
 HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT = "gym.http.connection_pool.connect_total"
+HTTP_CONNECTION_POOL_CONNECT_DURATION_INSTRUMENT = "gym.http.connection_pool.connect_duration_ms"
+HTTP_CONNECTION_POOL_CONNECT_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.connect_outcome"
 HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_constraint"
 HTTP_CONNECTION_POOL_QUEUE_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_outcome"
 HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.destination.server.name"
@@ -112,7 +169,20 @@ FAILURE_CLASS_ATTRIBUTE = "nemo.gym.failure_class"
 FAILURE_KIND_ATTRIBUTE = "nemo.gym.failure_kind"
 FAILURE_TYPE_ATTRIBUTE = "nemo.gym.failure_type"
 DISPATCH_NAME_ATTRIBUTE = "nemo.gym.rollout.dispatch.name"
+ROLLOUT_REWARDED_INSTRUMENT = "gym.rollout.rewarded_total"
+REWARD_RANGE_ATTRIBUTE = "nemo.gym.rollout.reward.range"
+ROLLOUT_MASKED_ATTRIBUTE = "nemo.gym.rollout.masked"
 UNREGISTERED_FAILURE_KIND = "unregistered"
+CHECKPOINT_OPERATION_INSTRUMENT = "gym.checkpoint.operation_duration_ms"
+CHECKPOINT_RECORDS_INSTRUMENT = "gym.checkpoint.records_total"
+CHECKPOINT_BYTES_INSTRUMENT = "gym.checkpoint.bytes_total"
+CHECKPOINT_EVENTS_INSTRUMENT = "gym.checkpoint.events_total"
+CHECKPOINT_CONTROL_ERRORS_INSTRUMENT = "gym.checkpoint.control_errors_total"
+#: Every checkpoint span and metric attribute is named under this prefix.
+CHECKPOINT_ATTRIBUTE_PREFIX = "nemo.gym.checkpoint."
+CHECKPOINT_OPERATION_ATTRIBUTE = f"{CHECKPOINT_ATTRIBUTE_PREFIX}operation"
+CHECKPOINT_KIND_ATTRIBUTE = f"{CHECKPOINT_ATTRIBUTE_PREFIX}participant_kind"
+CHECKPOINT_ERROR_CODE_ATTRIBUTE = f"{CHECKPOINT_ATTRIBUTE_PREFIX}error_code"
 
 #: Milliseconds. Provisioning a remote sandbox takes tens of seconds and a long command can run
 #: for minutes; the SDK's default boundaries end at 10 s and would put most of both in +Inf.
@@ -221,12 +291,16 @@ def _record_histogram(
         logger.debug("nemo-lens: failed to record %s", name, exc_info=True)
 
 
-def _record_counter(name: str, description: str, attributes: dict[str, Any], amount: int = 1) -> None:
+def _record_counter(
+    name: str, description: str, attributes: dict[str, Any], amount: int = 1, *, unit: str = "1"
+) -> None:
     meter = _meter()
     if meter is None:
         return
     try:
-        instrument = _get_or_create(meter, name, lambda: meter.create_counter(name, unit="1", description=description))
+        instrument = _get_or_create(
+            meter, name, lambda: meter.create_counter(name, unit=unit, description=description)
+        )
         instrument.add(amount, attributes=attributes)
     except Exception:
         logger.debug("nemo-lens: failed to record %s", name, exc_info=True)
@@ -336,6 +410,18 @@ def record_http_connection_pool_queue_duration(
     )
 
 
+def record_http_connection_pool_connect_duration(duration_ms: float, *, outcome: str, server_name: str) -> None:
+    """Record the setup time of one new pooled connection."""
+    _record_histogram(
+        HTTP_CONNECTION_POOL_CONNECT_DURATION_INSTRUMENT,
+        "ms",
+        "Time to open one new connection for the aiohttp pool, including DNS, TCP, and TLS setup.",
+        duration_ms,
+        {HTTP_CONNECTION_POOL_CONNECT_OUTCOME_ATTRIBUTE: outcome, HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE: server_name},
+        boundaries=HTTP_CONNECTION_POOL_QUEUE_DURATION_BOUNDARIES_MS,
+    )
+
+
 def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[str, int]]) -> None:
     """Export cumulative connection-attempt counts without an OTel call on each connect."""
     meter = _meter()
@@ -368,6 +454,59 @@ def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[st
         logger.debug("nemo-lens: failed to register %s", HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT, exc_info=True)
 
 
+#: Milliseconds. Most operations take milliseconds; commit and restore at tens of thousands of rollouts take seconds.
+CHECKPOINT_DURATION_BOUNDARIES_MS: tuple[float, ...] = (1, 5, 10, 50, 100, 500, 1_000, 5_000, 10_000, 30_000, 120_000)
+
+
+def record_checkpoint_operation(duration_ms: float, *, operation: str, kind: str, outcome: str) -> None:
+    """Record one checkpoint operation's wall-clock, by operation, participant kind, and outcome."""
+    _record_histogram(
+        CHECKPOINT_OPERATION_INSTRUMENT,
+        "ms",
+        "Wall-clock time of one partial-rollout checkpoint operation.",
+        duration_ms,
+        {CHECKPOINT_OPERATION_ATTRIBUTE: operation, CHECKPOINT_KIND_ATTRIBUTE: kind, "outcome": outcome},
+        boundaries=CHECKPOINT_DURATION_BOUNDARIES_MS,
+    )
+
+
+def record_checkpoint_volume(*, operation: str, kind: str, records: int, size_bytes: int) -> None:
+    """Count the records a participant wrote at commit or restored, and the bytes of the records file."""
+    attributes = {CHECKPOINT_OPERATION_ATTRIBUTE: operation, CHECKPOINT_KIND_ATTRIBUTE: kind}
+    _record_counter(
+        CHECKPOINT_RECORDS_INSTRUMENT, "Checkpoint records written at commit or restored.", attributes, records
+    )
+    _record_counter(
+        CHECKPOINT_BYTES_INSTRUMENT,
+        "Bytes of checkpoint records files written at commit or read at restore.",
+        attributes,
+        size_bytes,
+        unit="By",
+    )
+
+
+def record_checkpoint_control_error(code: str) -> None:
+    """Count one control call that failed, by the error code of its reply."""
+    _record_counter(
+        CHECKPOINT_CONTROL_ERRORS_INSTRUMENT,
+        "Partial-rollout checkpoint control calls that failed, by error code.",
+        {CHECKPOINT_ERROR_CODE_ATTRIBUTE: code},
+    )
+
+
+def record_checkpoint_event(event: str, amount: int = 1, **attributes: str) -> None:
+    """Count a checkpoint event (``lease_expired``, ``prepare_not_ready``, ``generation_cut``)."""
+    _record_counter(
+        CHECKPOINT_EVENTS_INSTRUMENT,
+        "Events that change a partial-rollout checkpoint's outcome without failing a call.",
+        {
+            f"{CHECKPOINT_ATTRIBUTE_PREFIX}event": event,
+            **{f"{CHECKPOINT_ATTRIBUTE_PREFIX}{name}": value for name, value in attributes.items()},
+        },
+        amount,
+    )
+
+
 def record_rollout_completed(
     outcome: str,
     *,
@@ -389,7 +528,55 @@ def record_rollout_completed(
     )
 
 
+def _reward_range(reward: float) -> str:
+    if reward < 0:
+        return "negative"
+    if reward == 0:
+        return "zero"
+    if reward < 1:
+        return "partial"
+    if reward == 1:
+        return "full"
+    return "above_one"
+
+
+def record_rollout_reward(reward: float, *, dispatch_name: str, masked: bool) -> None:
+    """Count one scored attempt in ``gym.rollout.rewarded_total`` by the range its reward falls in."""
+    _record_counter(
+        ROLLOUT_REWARDED_INSTRUMENT,
+        "Scored rollout attempts that carry a reward, by reward range.",
+        {
+            DISPATCH_NAME_ATTRIBUTE: dispatch_name,
+            ROLLOUT_MASKED_ATTRIBUTE: masked,
+            REWARD_RANGE_ATTRIBUTE: _reward_range(reward),
+        },
+        unit="{rollout}",
+    )
+
+
 def _reset_for_testing() -> None:
     """Drop cached instruments. Test-only."""
     with _INSTRUMENT_LOCK:
         _INSTRUMENTS.clear()
+
+
+ROLLOUT_HEALTH_VERDICT_INSTRUMENT = "gym.rollout.health_verdict_total"
+ROLLOUT_HEALTH_FLAGGED_INSTRUMENT = "gym.rollout.health_flagged_total"
+HEALTH_VERDICT_ATTRIBUTE = "nemo.gym.health.verdict"
+HEALTH_CHECK_ATTRIBUTE = "nemo.gym.health.check"
+HEALTH_CHECKS_ATTRIBUTE = "nemo.gym.health.checks"
+
+
+def record_rollout_health(verdict: str, *, outcome: str, flagged_checks: Iterable[str]) -> None:
+    """Count one health-evaluated rollout and each distinct check that flagged it."""
+    _record_counter(
+        ROLLOUT_HEALTH_VERDICT_INSTRUMENT,
+        "Rollouts evaluated by the trajectory health checks, by verdict.",
+        {HEALTH_VERDICT_ATTRIBUTE: verdict, ROLLOUT_OUTCOME_ATTRIBUTE: outcome},
+    )
+    for check in sorted(set(flagged_checks)):
+        _record_counter(
+            ROLLOUT_HEALTH_FLAGGED_INSTRUMENT,
+            "Rollouts flagged by a trajectory health check.",
+            {HEALTH_CHECK_ATTRIBUTE: check, ROLLOUT_OUTCOME_ATTRIBUTE: outcome},
+        )

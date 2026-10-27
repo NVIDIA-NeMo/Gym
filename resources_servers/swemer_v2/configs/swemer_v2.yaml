@@ -3,13 +3,10 @@
 # Unlike the other SWE resources servers, rows are NOT prepared from a public dataset: this is an
 # internal dataset, distributed offline as data/swemer_v2_training.jsonl. See the README.
 #
-# Phase 1 covers 5 of ~20 test_framework values seen in the tree -- pytest, go, jest, mocha,
-# vitest (~73% of locally available tasks) -- chosen because each has either a built-in
-# structured-output flag (go -json, jest/mocha/vitest --json-style reporters) or a proven parser
-# (pytest, via the same -rA strategy as Scale-SWE). The rest (maven/junit, cargo, the C/C++
-# family, and a long tail of one-off frameworks) have either opaque surrogate test ids or ad hoc
-# per-task verification scripts and are rejected at prepare time rather than silently mis-graded
-# -- see verification.SUPPORTED_FRAMEWORKS.
+# Grading covers the swe_bench_ext-backed framework list in verification.SUPPORTED_FRAMEWORKS (the same set
+# swemer_v1 uses). It began as 5 (pytest, go, jest, mocha, vitest) and was widened on 2026-10-08 once
+# a 2026-10 delivery supplied cargo/junit/gtest/ctest/bun rows to golden-patch validate the other parsers.
+# Frameworks outside the list are rejected at prepare time rather than silently mis-graded.
 swemer_v2_resources_server:
   resources_servers:
     swemer_v2:

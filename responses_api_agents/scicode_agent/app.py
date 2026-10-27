@@ -33,7 +33,7 @@ from time import time
 from typing import Any, Dict, List
 
 from fastapi import Request, Response
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 from step_utils import (
     OUT_OF_CONTEXT,
     PREFILLED_STEPS_CODE,
@@ -50,6 +50,7 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME
+from nemo_gym.metrics_config import Stat
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -89,6 +90,9 @@ class ScicodeAgentRunRequest(BaseRunRequest):
     problem_id: str
     sub_steps: List[dict]
     required_dependencies: str
+    # Benchmark-specific official code for steps that provide context but are not generated/scored.
+    # Keys are canonical step numbers such as "13.6".
+    prefilled_steps_code: Dict[str, str] = Field(default_factory=dict)
 
 
 def _empty_response() -> dict:
@@ -240,6 +244,11 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
             }
             step_usage.append(step_record)
             # Prefilled steps provide context for later steps but are not scored (no solution entry).
+            step_number = sub_steps[cur_step]["step_number"]
+            if step_number in body.prefilled_steps_code:
+                previous_llm_code[cur_step] = body.prefilled_steps_code[step_number]
+                step_record["status"] = "prefilled"
+                continue
             if (body.problem_id, cur_step) in PREFILLED_STEPS_CODE:
                 previous_llm_code[cur_step] = PREFILLED_STEPS_CODE[(body.problem_id, cur_step)]
                 step_record["status"] = "prefilled"
@@ -306,9 +315,20 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                     )
                 )
             step_record["status"] = "generated"
+            # The top-level response retains only the final step. Preserve stop
+            # evidence for every generation, even when model-call capture is off.
+            step_record["response_id"] = model_response.id
+            step_record["response_status"] = last_response_json.get("status")
+            step_record["incomplete_details"] = last_response_json.get("incomplete_details")
+            step_record["error"] = last_response_json.get("error")
             step_record["usage"] = model_response.usage.model_dump() if model_response.usage is not None else None
             usage_complete = usage_complete and model_response.usage is not None
             usage = accumulate_response_usage(usage, model_response.usage)
+            if (model_response.metadata or {}).get("nemo_gym_context_window_exceeded") == "true":
+                step_record["status"] = "context_window_exceeded"
+                out_of_context = True
+                solutions[f"{body.problem_id}.{cur_step + 1}"] = OUT_OF_CONTEXT
+                continue
             generation = model_response.output_text
             extracted = extract_python_script(generation)
             previous_llm_code[cur_step] = extracted
@@ -355,6 +375,8 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                 }
             )
         metrics = await super().aggregate_metrics(body)
+        # Custom repeat estimates are added after the shared headline selection.
+        metrics.key_metrics.update(self.get_key_metrics(metrics.agent_metrics))
         # NeMo Evaluator requires numeric scores. Omit unavailable values rather
         # than exporting nulls or inventing zero consumption.
         metrics.agent_metrics = {k: v for k, v in metrics.agent_metrics.items() if v is not None}
@@ -379,6 +401,12 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
             for k, v in agent_metrics.items()
             if k.startswith("mean/")
             or k.startswith("subtask_accuracy")
+            or k
+            in {
+                f"{stat.across_repeats_prefix}{metric}"
+                for stat in (Stat.MEAN, Stat.CI_LOW_95, Stat.CI_HIGH_95)
+                for metric in ("subtask_accuracy", "mean/problem_accuracy")
+            }
             or k in {"generation_coverage", "token_usage_complete"}
         }
 

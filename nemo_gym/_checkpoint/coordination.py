@@ -12,6 +12,8 @@ The participant order is a Gym invariant:
   Environment servers park their episodes first.
   The policy model then closes admission and cuts in-flight generations, so agents waiting on it reach a boundary.
   Resources servers go last because agents and environments call them until they park.
+  Each stage's request names the restarts every earlier stage reported.
+  The commit leaves those episodes out, so later stages do not wait for them.
 - ``resume`` runs the stages in reverse, so no server reopens before the servers it calls.
 - ``commit`` and ``restore`` fan out to every participant at once.
 - ``retire`` runs callers before callees: environment servers, then agents,
@@ -51,14 +53,18 @@ and the controller restarts those rollouts from their inputs.
 import asyncio
 import logging
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, get_args
 
 import orjson
 
-from nemo_gym._checkpoint.control import CHECKPOINT_ROUTE_PREFIX, next_attempt
+from nemo_gym._checkpoint.control import CHECKPOINT_ROUTE_PREFIX, CheckpointMode, next_attempt
+from nemo_gym._checkpoint.telemetry import OperationSpan, checkpoint_span
+from nemo_gym._checkpoint.telemetry import operation as checkpoint_operation
 from nemo_gym.episode_types import EpisodeId
+from nemo_gym.global_config import SERVER_TYPE_KEYS
 from nemo_gym.server_utils import ServerClient
 
 
@@ -73,7 +79,6 @@ RETIRE_ORDER: tuple[tuple[ParticipantKind, ...], ...] = (("environment",), ("age
 # and one that accepts a connection but never replies fails discovery after this many seconds.
 _DISCOVER_TRIES = 3
 _DISCOVER_TIMEOUT_SECONDS = 60.0
-_SERVER_TYPES = ("environment_servers", "responses_api_models", "responses_api_agents", "resources_servers")
 
 
 class CoordinationError(RuntimeError):
@@ -90,6 +95,8 @@ class CoordinationError(RuntimeError):
 class Participant:
     server_name: str
     kind: ParticipantKind
+    # What the server can capture; a ``restart_only`` server's rollouts start over after a crash.
+    mode: CheckpointMode
 
 
 @dataclass(frozen=True)
@@ -141,7 +148,7 @@ async def discover(client: ServerClient, *, auth_token: str) -> Participants:
     names = [
         name
         for name, entry in client.global_config_dict.items()
-        if isinstance(entry, Mapping) and any(server_type in entry for server_type in _SERVER_TYPES)
+        if isinstance(entry, Mapping) and any(server_type in entry for server_type in SERVER_TYPE_KEYS)
     ]
     members: list[Participant] = []
     failures: dict[str, str] = {}
@@ -159,10 +166,13 @@ async def discover(client: ServerClient, *, auth_token: str) -> Participants:
                 )
                 if response.status == 404:
                     return
-                kind = (await _payload(response))["kind"]
+                status = await _payload(response)
+            kind, mode = status["kind"], status.get("mode")
             if kind not in PREPARE_ORDER:
                 raise ValueError(f"unknown participant kind {kind!r}")
-            members.append(Participant(server_name=name, kind=kind))
+            if mode not in get_args(CheckpointMode):
+                raise ValueError(f"participant reports no checkpoint mode (got {mode!r})")
+            members.append(Participant(server_name=name, kind=kind, mode=mode))
         except TimeoutError:
             failures[name] = f"no status reply within {_DISCOVER_TIMEOUT_SECONDS:g} seconds"
         except Exception as error:
@@ -179,14 +189,26 @@ async def discover(client: ServerClient, *, auth_token: str) -> Participants:
 
 async def prepare(participants: Participants, checkpoint_id: str, *, deadline_ts: float) -> PrepareResult:
     """Prepare every participant in order, stopping at the first stage that is not ready by the deadline."""
-    replies: dict[str, dict[str, Any]] = {}
-    body = {"checkpoint_id": checkpoint_id, "deadline_ts": deadline_ts}
-    for kind in PREPARE_ORDER:
-        stage = await _fan_out(participants, participants.of_kind(kind), "prepare", body, deadline_ts)
-        replies.update(stage)
-        if any(reply["phase"] != "prepared" for reply in stage.values()):
-            return PrepareResult(prepared=False, replies=replies)
-    return PrepareResult(prepared=True, replies=replies)
+    with _coordinating("prepare", checkpoint_id, participants) as span:
+        replies: dict[str, dict[str, Any]] = {}
+        restarts: set[str] = set()
+        for kind in PREPARE_ORDER:
+            body: dict[str, Any] = {"checkpoint_id": checkpoint_id, "deadline_ts": deadline_ts}
+            if restarts:
+                # The commit leaves out every restart an earlier stage reported,
+                # so this stage does not wait for those episodes either.
+                body["restarts"] = sorted(restarts)
+            members = participants.of_kind(kind)
+            with checkpoint_span(f"gym.checkpoint.coordinate.prepare.{kind}") as stage_span:
+                stage_span.set(participants=len(members))
+                stage = await _fan_out(participants, members, "prepare", body, deadline_ts)
+            replies.update(stage)
+            if any(reply["phase"] != "prepared" for reply in stage.values()):
+                span.set(prepared=False, stopped_at=kind)
+                return PrepareResult(prepared=False, replies=replies)
+            restarts.update(key for reply in stage.values() for key in (reply.get("report") or {}).get("restarts", []))
+        span.set(prepared=True)
+        return PrepareResult(prepared=True, replies=replies)
 
 
 async def renew(participants: Participants, checkpoint_id: str, *, deadline_ts: float) -> None:
@@ -195,7 +217,8 @@ async def renew(participants: Participants, checkpoint_id: str, *, deadline_ts: 
     Call it when publishing a checkpoint takes longer than the lease of the last control call.
     """
     body = {"checkpoint_id": checkpoint_id, "deadline_ts": deadline_ts}
-    await _fan_out(participants, participants.members, "renew", body, deadline_ts)
+    with _coordinating("renew", checkpoint_id, participants):
+        await _fan_out(participants, participants.members, "renew", body, deadline_ts)
 
 
 async def retire(
@@ -211,8 +234,10 @@ async def retire(
         "episode_ids": [episode_id.model_dump(mode="json") for episode_id in episode_ids],
     }
     if body["episode_ids"]:
-        # Callers before callees: once a server stops the attempts, nothing upstream can still call it for them.
-        await _in_retire_order(participants, "retire", body, deadline_ts)
+        with _coordinating("retire", checkpoint_id, participants) as span:
+            span.set(episodes=len(body["episode_ids"]))
+            # Callers before callees: once a server stops the attempts, nothing upstream can still call it for them.
+            await _in_retire_order(participants, "retire", body, deadline_ts)
 
 
 async def forget(
@@ -226,7 +251,9 @@ async def forget(
     """
     body = {"checkpoint_id": checkpoint_id, "deadline_ts": deadline_ts, "rollout_ids": sorted(set(rollout_ids))}
     if body["rollout_ids"]:
-        await _in_retire_order(participants, "forget", body, deadline_ts)
+        with _coordinating("forget", checkpoint_id, participants) as span:
+            span.set(rollouts=len(body["rollout_ids"]))
+            await _in_retire_order(participants, "forget", body, deadline_ts)
 
 
 async def _in_retire_order(
@@ -258,7 +285,9 @@ async def commit(
         "checkpoint_dir": checkpoint_dir,
         "episode_ids": [episode_id.model_dump(mode="json") for episode_id in episode_ids],
     }
-    return await _fan_out(participants, participants.members, "commit", body, deadline_ts)
+    with _coordinating("commit", checkpoint_id, participants) as span:
+        span.set(episodes=len(body["episode_ids"]))
+        return await _fan_out(participants, participants.members, "commit", body, deadline_ts)
 
 
 async def restore(
@@ -285,7 +314,9 @@ async def restore(
         "episode_ids": [episode_id.model_dump(mode="json") for episode_id in episode_ids],
     }
     try:
-        return await _fan_out(participants, participants.members, "restore", body, deadline_ts)
+        with _coordinating("restore", checkpoint_id, participants) as span:
+            span.set(episodes=len(episode_ids))
+            return await _fan_out(participants, participants.members, "restore", body, deadline_ts)
     except CoordinationError:
         LOGGER.warning("checkpoint %s restore failed; retiring the restored state everywhere", checkpoint_id)
         cleanup_deadline = max(deadline_ts, time.time() + 30)
@@ -310,6 +341,16 @@ async def resume(participants: Participants, checkpoint_id: str, *, deadline_ts:
     """Reopen every participant in reverse order. This also aborts a checkpoint that was not published."""
     body = {"checkpoint_id": checkpoint_id, "deadline_ts": deadline_ts}
     failures: dict[str, str] = {}
+    with _coordinating("resume", checkpoint_id, participants):
+        await _resume_in_order(participants, body, deadline_ts, failures)
+        # Raised inside the operation, so a resume that left a participant closed is recorded as an error.
+        if failures:
+            raise CoordinationError("resume", failures)
+
+
+async def _resume_in_order(
+    participants: Participants, body: dict[str, Any], deadline_ts: float, failures: dict[str, str]
+) -> None:
     for kind in reversed(PREPARE_ORDER):
         try:
             await _fan_out(participants, participants.of_kind(kind), "resume", body, deadline_ts)
@@ -317,8 +358,15 @@ async def resume(participants: Participants, checkpoint_id: str, *, deadline_ts:
             # Keep reopening the other stages;
             # a participant that cannot be reached resumes on its own when its lease expires.
             failures.update(error.failures)
-    if failures:
-        raise CoordinationError("resume", failures)
+
+
+@contextmanager
+def _coordinating(operation_name: str, checkpoint_id: str, participants: Participants) -> Iterator[OperationSpan]:
+    with checkpoint_operation(
+        f"coordinate.{operation_name}", kind="controller", instance="coordination", checkpoint_id=checkpoint_id
+    ) as span:
+        span.set(participants=len(participants.members))
+        yield span
 
 
 async def _fan_out(

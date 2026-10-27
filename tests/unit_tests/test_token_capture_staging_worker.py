@@ -97,7 +97,7 @@ class _IncompleteSink:
 
 def _root(model_call_id: str = "c1") -> CaptureAdmission:
     return CaptureAdmission(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         model_call_id=model_call_id,
         mode="text",
     )
@@ -109,7 +109,7 @@ _PARENT_CHAIN_HASH = compute_chain_hash(None, [10, 11, 12])
 
 def _child() -> CaptureAdmission:
     return CaptureAdmission(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         model_call_id="c2",
         parent_call_id="c1",
         prev_len=3,
@@ -122,7 +122,7 @@ def _child() -> CaptureAdmission:
 def _chained_child() -> CaptureAdmission:
     """The externally staged encoding of ``_child``: prefix lives behind a staging chain."""
     return CaptureAdmission(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         model_call_id="c2",
         parent_call_id="c1",
         prev_len=3,
@@ -215,6 +215,28 @@ def test_generation_chunk_record_contains_only_new_generated_tokens() -> None:
     assert chunk.weight_version == 7
 
 
+def test_generation_chunk_record_commits_optional_extras() -> None:
+    capture, _ = _capture()
+    call = capture.begin_call(_root())
+    extras = {"routed_experts": [[[-1]], [[7]]]}
+
+    chunk = capture.build_generation_chunk_record(
+        call,
+        generated_token_ids=[13, 14],
+        generated_logprobs=[-0.5, -0.75],
+        extras=extras,
+    )
+    plain_chunk = capture.build_generation_chunk_record(
+        call,
+        generated_token_ids=[13, 14],
+        generated_logprobs=[-0.5, -0.75],
+    )
+
+    assert chunk.extras == extras
+    assert chunk.extras_digest != plain_chunk.extras_digest
+    assert chunk.digest != plain_chunk.digest
+
+
 def test_generation_cut_resume_preserves_old_generation_masks_and_logprobs() -> None:
     original_capture, sink = _capture(weight_version=7)
     original = original_capture.begin_call(_root())
@@ -225,7 +247,7 @@ def test_generation_cut_resume_preserves_old_generation_masks_and_logprobs() -> 
         generated_logprobs=[-0.25],
     )
     admission = CaptureAdmission(
-        rollout_id="rollout-1-a1",
+        capture_key="rollout-1-a1",
         model_call_id="c2",
         mode="text",
         generation_cut=GenerationCutContinuation(
@@ -253,7 +275,7 @@ def test_generation_cut_resume_preserves_old_generation_masks_and_logprobs() -> 
     )
 
     assert coords.disposition == "staged"
-    assert sink.records[-1].rollout_id == "rollout-1-a1"
+    assert sink.records[-1].capture_key == "rollout-1-a1"
     assert sink.records[-1].model_call_id == "c2"
     assert sink.records[-1].token_ids_delta == [10, 11, 12, 13]
     assert sink.records[-1].token_mask_delta == [0.0, 0.0, 1.0, 1.0]
@@ -273,7 +295,7 @@ def test_generation_cut_resume_rejects_a_prefix_from_newer_weights() -> None:
         generated_logprobs=[-0.25],
     )
     admission = CaptureAdmission(
-        rollout_id="rollout-1-a1",
+        capture_key="rollout-1-a1",
         model_call_id="c2",
         mode="text",
         generation_cut=GenerationCutContinuation(
@@ -704,6 +726,11 @@ def test_vllm_text_call_has_no_extras() -> None:
     assert VLLMCaptureAdapter().extract_extras({"choices": [{"message": {}}]}) is None
 
 
+def test_vllm_extras_do_not_adopt_unimplemented_predecessor_routes() -> None:
+    payload = {"choices": [{"message": {"routed_experts": [[[1]]], "predecessor_tail_route": [2]}}]}
+    assert VLLMCaptureAdapter().extract_extras(payload) == {"routed_experts": [[[1]]]}
+
+
 def test_vllm_rejects_malformed_media_spans() -> None:
     with pytest.raises(ValueError):
         VLLMCaptureAdapter().extract_extras({"choices": [{"message": {}}], "media_spans": "bad"})
@@ -886,7 +913,7 @@ def test_generation_cut_resume_rejects_a_prefix_built_on_other_parent_tokens() -
 
     def child(rollout_id: str, parent_tokens: list[int], continuation=None) -> CaptureAdmission:
         return CaptureAdmission(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             model_call_id="c1",
             parent_call_id="p",
             prev_len=len(parent_tokens),

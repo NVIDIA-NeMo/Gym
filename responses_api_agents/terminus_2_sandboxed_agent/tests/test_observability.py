@@ -5,13 +5,16 @@ import asyncio
 import json
 from copy import deepcopy
 from types import SimpleNamespace
+from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import TypeAdapter
 
 import nemo_gym.openai_utils as openai_utils
-from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
+from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
 from nemo_gym.server_utils import ServerClient
@@ -51,7 +54,9 @@ def execution(monkeypatch):
     client.global_config_dict = {"observability_enabled": True}
     server = Terminus2Agent(config=config, server_client=client)
     sandbox = SimpleNamespace(
-        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")), stop=AsyncMock()
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
+        stop=AsyncMock(),
+        disconnect=AsyncMock(),
     )
     monkeypatch.setattr(Terminus2Agent, "_connect_sandbox", AsyncMock(return_value=sandbox))
     monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://model")
@@ -82,7 +87,7 @@ def execution(monkeypatch):
                 "analysis": "inspect",
                 "plan": "run commands",
                 "commands": [{"keystrokes": "pwd\n", "duration": 0.1}, {"keystrokes": "ls\n", "duration": 0.1}],
-                "task_complete": True,
+                "task_complete": mode.value != "never_complete",
             }
         )
         if mode.value == "parse_error" and index == 0:
@@ -201,9 +206,45 @@ def execution(monkeypatch):
             return SimpleNamespace(status=200, ok=True, read=AsyncMock(return_value=json.dumps(result).encode()))
 
         client.post = post
-        return json.loads((await server.run(request, body)).model_dump_json(by_alias=True))
+        try:
+            return json.loads((await server.run(request, body)).model_dump_json(by_alias=True))
+        except app_module.Terminus2InfrastructureError as error:
+            # An infrastructure failure is refused with a 5xx; its observations still ride on the exception.
+            metrics = TypeAdapter(Dict[str, Any]).dump_python(error.metrics, mode="json")
+            row = body.model_dump(by_alias=True) | {"_ng_rollout_id": rollout_id}
+            return row | metrics | {"_ng_http_status": error.status_code, "_ng_http_detail": error.detail}
 
-    return SimpleNamespace(run=run, calls=calls, mode=mode, client=client, agents=agents, commands=commands)
+    def session_run(rollout_id="test-rollout"):
+        """seed -> responses -> close over HTTP, the way the environment server drives the harness."""
+        from fastapi.testclient import TestClient
+
+        monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}})
+        monkeypatch.setattr(app_module, "resolve_provider_config", lambda ref, cfg: {"opensandbox": {}})
+        monkeypatch.setattr(app_module, "create_provider", lambda config: MagicMock())
+        monkeypatch.setattr(app_module.AsyncSandbox, "connect", AsyncMock(return_value=sandbox))
+        monkeypatch.setattr(Terminus2Agent, "resolve_model_base_url", lambda *_args, **_kwargs: "http://model/v1")
+        http = TestClient(server.setup_webserver())
+        seed = {
+            "agent_session_id": "ag-1",
+            "episode_id": {"rollout_id": rollout_id, "attempt": 0},
+            "task_id": {"taskset": "tb", "task_id": "path-tracing"},
+            "tool_accesses": [],
+            "sandbox_access": {
+                "connection": {"kind": "direct", "provider_config_ref": "sandbox", "descriptor": {"sandbox_id": "sb"}},
+                "workdir": "/app",
+            },
+        }
+        assert http.post("/v1/agent_sessions", json=seed).status_code == 200
+        turn = http.post(f"/ng-rollout/{rollout_id}/v1/responses", json={"input": "solve this"})
+        close = http.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": "ag-1", "episode_id": {"rollout_id": rollout_id, "attempt": 0}},
+        )
+        return turn, close
+
+    return SimpleNamespace(
+        run=run, session_run=session_run, calls=calls, mode=mode, client=client, agents=agents, commands=commands
+    )
 
 
 @pytest.mark.asyncio
@@ -230,6 +271,19 @@ def save_and_check(execution, result, tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("mode", "outcome"), [("success", "completed"), ("never_complete", "step_limit")])
+async def test_last_turn_completion_is_told_apart_from_step_exhaustion(execution, mode, outcome):
+    """With max_turns=2, Harbor's confirmed completion and step exhaustion both end on the second turn."""
+    execution.mode.value = mode
+    result = await execution.run()
+    assert len(execution.calls) == 2
+    assert result["response"]["metadata"]["terminus2_outcome"] == outcome
+    assert result["terminus2_completed"] is True
+    [agent] = execution.agents
+    assert agent._completed_by_agent is (outcome == "completed")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "mode,call_count,turn_count,status",
     [
@@ -237,7 +291,7 @@ def save_and_check(execution, result, tmp_path):
         ("retry", 3, 2, "completed"),
         ("http_retry", 3, 2, "completed"),
         ("rate_limit", 3, 2, "completed"),
-        ("all_fail", 30, 0, "incomplete"),
+        ("all_fail", 30, 0, "failed"),
         ("compaction", 6, 2, "completed"),
         ("compaction_missing_id", 6, 2, "completed"),
         ("cancel_summary", 3, 1, "incomplete"),
@@ -256,6 +310,9 @@ async def test_real_harbor_decisions_survive_saved_projection(
 ):
     execution.mode.value = mode
     result = await execution.run(task_id="task-identity")
+    # Infrastructure outcomes are refused, not verified: the model never answered (502) or the run was cancelled (503).
+    expected_http_status = {"all_fail": 502, "cancel_summary": 503, "cancel_tool": 503, "cancel_model": 503}.get(mode)
+    assert result.get("_ng_http_status") == expected_http_status
     trajectory, health = save_and_check(execution, result, tmp_path)
     [invocation] = trajectory["invocations"]
     turns = trajectory["turns"]
@@ -318,6 +375,151 @@ async def test_real_harbor_decisions_survive_saved_projection(
     if mode == "parse_error":
         assert turns[0]["answer"][0]["content"][0]["text"] == "not valid JSON"
         assert [turn["step_count"] for turn in turns] == [0, 0]
+
+
+@pytest.mark.parametrize(("mode", "call_count"), [("success", 2), ("compaction", 6)])
+def test_session_decisions_survive_saved_projection(execution, tmp_path, mode, call_count):
+    """seed -> responses -> close: the close carries the run's own decisions and the saved record keeps them.
+
+    The environment server forwards the close's trajectory on its result. Without it the collector rebuilds
+    one turn per captured model call, so the context-recovery and summarization calls of a compaction count
+    as decisions and the command-batch counts behind each decision are lost.
+    """
+    execution.mode.value = mode
+    turn, close = execution.session_run()
+    assert turn.status_code == 200, turn.text
+    assert close.status_code == 200, close.text
+    assert len(execution.calls) == call_count
+    closed = close.json()
+    assert closed["trajectory"] is not None and closed["agent_observations"] is not None
+    # The environment server's result on the materialized row it was driven from: the row's task_id is the
+    # TaskId mapping the seed carried (the turn body itself names no task), plus what verify and close returned.
+    task_id = {"taskset": "tb", "task_id": "path-tracing"}
+    result = {
+        "task_id": task_id,
+        "task_input": {"responses_create_params": {"input": "solve this"}},
+        "responses_create_params": {"input": "solve this"},
+        "response": turn.json(),
+        "reward": 1.0,
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "ng_agent_observations": closed["agent_observations"],
+        "ng_trajectory": closed["trajectory"],
+    }
+    without_trajectory = {key: value for key, value in deepcopy(result).items() if key != "ng_trajectory"}
+
+    trajectory, health = save_and_check(execution, result, tmp_path)
+    turns = trajectory["turns"]
+    [invocation] = trajectory["invocations"]
+    assert invocation["status"] == "completed"
+    assert {call["client_session_id"] for call in execution.calls} == {invocation["invocation_id"]}
+    assert [turn["turn_no"] for turn in turns] == [1, 2]
+    assert [turn["step_count"] for turn in turns] == [0, 1]
+    assert [ref["response_id"] for turn in turns for ref in turn["model_calls"]] == [
+        "resp_0",
+        f"resp_{call_count - 1}",
+    ]
+    gap_codes = {gap["code"] for gap in trajectory["gaps"]}
+    assert "turns_unavailable" not in gap_codes
+    # The harness named the seeded task the way the collector names the row, so the projection keeps the
+    # producer's turns as they are instead of recording an identity mismatch and rewriting every turn.
+    assert "producer_trajectory_identity_mismatch" not in gap_codes
+    assert closed["trajectory"]["task_id"] == str(task_id)
+    assert {turn["task_id"] for turn in turns} == {str(task_id)}
+    assert "agent_turn_hollow" not in health.unobserved
+    if mode == "compaction":
+        [compaction] = [r for r in result["ng_agent_observations"]["records"] if r["kind"] == "context_compaction"]
+        assert compaction["outcome"] == "completed" and len(compaction["model_calls"]) == 3
+        assert {ref["response_id"] for ref in compaction["model_calls"]}.isdisjoint(
+            ref["response_id"] for turn in turns for ref in turn["model_calls"]
+        )
+
+    # The symptom this guards against: with the trajectory dropped, every captured call becomes a decision
+    # and no decision keeps its command-batch count.
+    rebuilt_dir = tmp_path / "without_trajectory"
+    rebuilt_dir.mkdir()
+    rebuilt, _ = save_and_check(execution, without_trajectory, rebuilt_dir)
+    assert len(rebuilt["turns"]) == call_count
+    assert [turn["step_count"] for turn in rebuilt["turns"]] == [0] * call_count
+
+
+@pytest.mark.parametrize(
+    ("mode", "call_count", "rebuilt_turns"),
+    [("cancel_model", 2, 1), ("cancel_summary", 3, 2)],
+)
+def test_session_decisions_of_a_failed_run_survive_saved_failure_projection(
+    execution, tmp_path, mode, call_count, rebuilt_turns
+):
+    """A completed decision followed by an infrastructure failure keeps its history on the saved failure row.
+
+    The run is refused with a 5xx, the close still carries the trajectory, and the environment server's failure
+    (``SingleAgentTurnFailure.trajectory``) hands it to the collector's failure projection. Without it the sidecar
+    row loses the decision's model-call reference and its command-batch count: ``cancel_summary`` adds a context
+    recovery call before the aborted summarization, which a rebuild from the captured calls counts as a decision.
+    """
+    from nemo_gym.rollout_collection import _episode_record
+    from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResponse
+
+    execution.mode.value = mode
+    turn, close = execution.session_run()
+    assert turn.status_code == 503, turn.text
+    assert close.status_code == 200, close.text
+    assert len(execution.calls) == call_count
+    closed = close.json()
+    assert closed["trajectory"] is not None and closed["agent_observations"] is not None
+
+    # What the environment server's agent-error branch returns for the refused turn, projected the way rollout
+    # collection stores a handled failure (the row's identity keys next to it, as the collector adds them).
+    task_id = {"taskset": "tb", "task_id": "path-tracing"}
+    failure = SingleAgentTurnResponse(
+        episode_id={"rollout_id": "test-rollout", "attempt": 0},
+        task_id=task_id,
+        failure=SingleAgentTurnFailure(
+            stage="agent",
+            failure_reason=turn.json()["detail"],
+            terminal=False,
+            agent_observations=closed["agent_observations"],
+            trajectory=closed["trajectory"],
+        ),
+    ).model_dump(mode="json")
+    assert failure["failure"]["trajectory"] == closed["trajectory"]
+    record = _episode_record(failure) | {
+        "task_id": task_id,
+        "task_input": {"responses_create_params": {"input": "solve this"}},
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+    }
+    assert record["_ng_failure_class"] == "environment_server_failed" and record["_ng_failure_stage"] == "agent"
+    without_trajectory = {key: value for key, value in deepcopy(record).items() if key != "ng_trajectory"}
+
+    trajectory, health = save_and_check(execution, record, tmp_path)
+    [invocation] = trajectory["invocations"]
+    assert invocation["status"] == "incomplete"
+    assert {call["client_session_id"] for call in execution.calls} == {invocation["invocation_id"]}
+    # The one completed decision, with its own model call and command-batch count.
+    [decision] = trajectory["turns"]
+    assert (decision["turn_no"], decision["step_count"]) == (1, 0)
+    assert [ref["response_id"] for ref in decision["model_calls"]] == ["resp_0"]
+    assert decision["task_id"] == trajectory["task_id"] == str(task_id)
+    gap_codes = {gap["code"] for gap in trajectory["gaps"]}
+    assert {"turns_unavailable", "producer_trajectory_identity_mismatch"}.isdisjoint(gap_codes)
+    if mode == "cancel_summary":
+        [compaction] = [r for r in record["ng_agent_observations"]["records"] if r["kind"] == "context_compaction"]
+        assert compaction["outcome"] == "aborted"
+        assert {ref["response_id"] for ref in compaction["model_calls"]}.isdisjoint(
+            ref["response_id"] for ref in decision["model_calls"]
+        )
+
+    # The symptom this guards against: a failure row without the trajectory rebuilds a decision from every
+    # captured call that got an answer, helper calls included, and no decision keeps its command-batch count.
+    rebuilt_dir = tmp_path / "without_trajectory"
+    rebuilt_dir.mkdir()
+    rebuilt, _ = save_and_check(execution, without_trajectory, rebuilt_dir)
+    assert len(rebuilt["turns"]) == rebuilt_turns
+    assert [ref["response_id"] for turn in rebuilt["turns"] for ref in turn["model_calls"]] == [
+        f"resp_{index}" for index in range(rebuilt_turns)
+    ]
+    assert [turn["step_count"] for turn in rebuilt["turns"]] == [0] * rebuilt_turns
 
 
 @pytest.mark.asyncio
@@ -385,6 +587,51 @@ async def test_proactive_summarization_flag_resets_on_cancellation(execution, mo
         app_module.Terminus2, "_check_proactive_summarization", AsyncMock(side_effect=asyncio.CancelledError)
     )
     result = await execution.run()
+    assert result["_ng_http_status"] == 503
     assert result["ng_agent_observations"]["records"][0]["status"] == "incomplete"
     assert not result["ng_trajectory"]["turns"]
     assert not execution.agents[0]._is_check_proactive_summarization
+
+
+async def test_turn_cut_off_inside_reasoning_still_exports_to_atif(execution, monkeypatch):
+    """A policy cut off at max_output_tokens inside <think> leaves a reasoning-only output in the
+    trajectory (the harness compacts and goes on); the harbor environment server's ATIF export must
+    accept that shape and grade the episode, not mask it (review fix)."""
+    from nemo_gym.atif_export import transcript_to_atif
+
+    inner = openai_utils.request
+    seen = {"calls": 0}
+
+    async def cut_second_response(**kwargs):
+        response = await inner(**kwargs)
+        index, seen["calls"] = seen["calls"], seen["calls"] + 1
+        if index == 1:
+            payload = json.loads(await response.read())
+            payload["output"] = [payload["output"][0]]
+            payload["incomplete_details"] = {"reason": "max_output_tokens"}
+            payload["status"] = "incomplete"
+            response.read = AsyncMock(return_value=json.dumps(payload).encode())
+        return response
+
+    monkeypatch.setattr(openai_utils, "request", cut_second_response)
+    result = await execution.run(task_id="task-identity")
+    output = result["response"]["output"]
+    kinds = [(item.get("type"), item.get("role")) for item in output]
+    assert ("reasoning", None) in kinds and result.get("_ng_http_status") in (None, 200)
+    # A reasoning item that a user turn follows, instead of an assistant answer, is in the transcript.
+    dangling = [
+        index
+        for index, item in enumerate(output[:-1])
+        if item.get("type") == "reasoning" and output[index + 1].get("role") == "user"
+    ]
+    assert dangling, kinds
+
+    trajectory = transcript_to_atif(
+        result["responses_create_params"]["input"], output, session_id="s", agent_name="terminus", agent_version="1"
+    )
+
+    cut = [step for step in trajectory.steps if (step.extra or {}).get("nemo_gym", {}).get("incomplete")]
+    assert cut and cut[0].message == "" and cut[0].reasoning_content
+    assert cut[0].extra["nemo_gym"]["incomplete"] == "max_output_tokens"
+    assert trajectory.extra["nemo_gym"]["conversion"]["status"] == "partial"
+    assert "trailing_reasoning" in trajectory.extra["nemo_gym"]["conversion"]["reasons"]

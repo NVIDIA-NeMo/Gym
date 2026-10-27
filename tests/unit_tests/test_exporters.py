@@ -13,12 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
+from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar, Optional
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import orjson
 import pytest
+from mlflow.exceptions import MlflowException
+from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE
 from mlflow.utils.validation import (
     MAX_ENTITY_KEY_LENGTH,
     MAX_PARAM_VAL_LENGTH,
@@ -135,6 +139,62 @@ def _open_mlflow_exporter(monkeypatch: MonkeyPatch, config: DictConfig) -> tuple
     return exporter, client
 
 
+class FakeMlflowClient:
+    """An in-memory tracking server that, like MLflow's, refuses to change a logged param."""
+
+    def __init__(self) -> None:
+        self.params: dict[str, str] = {}
+        self.tags: dict[str, str] = {}
+        self.artifacts: dict[str, Any] = {}
+        self.logged_param_batches: list[list[str]] = []
+
+    def get_experiment_by_name(self, name: str) -> SimpleNamespace:
+        return SimpleNamespace(experiment_id="exp-1")
+
+    def create_run(self, experiment_id: str, run_name: str, tags: Optional[dict[str, str]]) -> SimpleNamespace:
+        return SimpleNamespace(info=SimpleNamespace(run_id="run-1"))
+
+    def update_run(self, run_id: str, status: str) -> None:
+        pass
+
+    def set_terminated(self, run_id: str, status: str) -> None:
+        pass
+
+    def get_run(self, run_id: str) -> SimpleNamespace:
+        return SimpleNamespace(data=SimpleNamespace(params=dict(self.params), tags=dict(self.tags)))
+
+    def set_tag(self, run_id: str, key: str, value: str) -> None:
+        self.tags[key] = value
+
+    def log_dict(self, run_id: str, dictionary: dict[str, Any], artifact_file: str) -> None:
+        self.artifacts[artifact_file] = deepcopy(dictionary)
+
+    def log_batch(self, run_id: str, params: tuple = ()) -> None:
+        for param in params:
+            if self.params.get(param.key, param.value) != param.value:
+                raise MlflowException(
+                    f"Changing param values is not allowed. Param with key='{param.key}' was already logged",
+                    error_code=INVALID_PARAMETER_VALUE,
+                )
+        self.params.update({param.key: param.value for param in params})
+        self.logged_param_batches.append([param.key for param in params])
+
+
+def _segment_config(mlflow_config: DictConfig, tmp_path: Path, *, host: str, port: int) -> DictConfig:
+    config = deepcopy(mlflow_config)
+    config["output_jsonl_fpath"] = str(tmp_path / "rollouts.jsonl")
+    config["policy_model"] = {"vllm_model": {"host": host, "port": port, "model": "qwen"}}
+    config["seed"] = 7
+    return config
+
+
+def _run_segment(monkeypatch: MonkeyPatch, client: FakeMlflowClient, config: DictConfig) -> None:
+    """One job of an eval: open the exporter, log the config through the guarded call sites use, close."""
+    monkeypatch.setattr(mlflow_module, "MlflowClient", MagicMock(return_value=client))
+    with MLflowExporter(config) as exporter:
+        exporter.export_config()
+
+
 class TestRegistry:
     def test_setup_skips_backends_that_are_not_configured(
         self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
@@ -169,6 +229,24 @@ class TestRegistry:
         assert exporter.configs[0]["wandb_api_key"] == "****"
         # The masking must not have mutated the config the exporter authenticates with.
         assert wandb_config["wandb_api_key"] == "secret-key"  # pragma: allowlist secret
+
+    def test_exported_config_masks_every_value_of_a_secrets_mapping(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
+    ) -> None:
+        """The Harbor server's `secrets` are keyed by environment variable name: one without a secret-shaped
+        substring (`JUDGE_AUTH`) must still never reach a tracking backend."""
+        _register_recording(monkeypatch)
+        canary = "sk-FAKE-CANARY"  # pragma: allowlist secret
+        wandb_config["harbor_environment_server"] = {
+            "environment_servers": {"harbor": {"secrets": {"JUDGE_AUTH": canary, "JUDGE_API_KEY": canary}}}
+        }
+
+        exporter = setup_exporters(wandb_config)[0]
+
+        logged = exporter.configs[0]["harbor_environment_server"]["environment_servers"]["harbor"]["secrets"]
+        assert dict(logged) == {"JUDGE_AUTH": "****", "JUDGE_API_KEY": "****"}
+        live = wandb_config["harbor_environment_server"]["environment_servers"]["harbor"]["secrets"]
+        assert live["JUDGE_AUTH"] == canary
 
     def test_setup_failure_is_skipped_rather_than_raised(
         self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
@@ -302,6 +380,22 @@ class TestWandbExporter:
 
         init.assert_called_once_with(project="proj", name="run", dir=str(Path("/tmp/results") / "wandb"))
         assert wandb_module.environ["WANDB_API_KEY"] == "secret-key"  # pragma: allowlist secret
+
+    def test_a_resumed_run_resumes_the_wandb_run_recorded_next_to_its_output(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig, tmp_path
+    ) -> None:
+        wandb_config["output_jsonl_fpath"] = str(tmp_path / "rollouts.jsonl")
+        init = MagicMock(return_value=MagicMock(id="run-1"))
+        monkeypatch.setattr(wandb_module.wandb, "init", init)
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+
+        WandbExporter(wandb_config).setup()
+        WandbExporter(wandb_config).setup()
+
+        assert (tmp_path / "rollouts_wandb_run_id").read_text() == "run-1"
+        first, second = init.call_args_list
+        assert "id" not in first.kwargs
+        assert (second.kwargs["id"], second.kwargs["resume"]) == ("run-1", "allow")
 
     def test_logging_before_setup_raises(self, wandb_config: DictConfig) -> None:
         with pytest.raises(RuntimeError, match="not open"):
@@ -458,6 +552,38 @@ class TestMLflowExporter:
         assert exporter.run_id == "run-1"
         assert mlflow_module.environ["MLFLOW_TRACKING_TOKEN"] == "secret-token"  # pragma: allowlist secret
 
+    def test_a_resumed_run_reopens_the_mlflow_run_recorded_next_to_its_output(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig, tmp_path
+    ) -> None:
+        mlflow_config["output_jsonl_fpath"] = str(tmp_path / "rollouts.jsonl")
+
+        first, _ = _open_mlflow_exporter(monkeypatch, mlflow_config)
+        second, client = _open_mlflow_exporter(monkeypatch, mlflow_config)
+
+        assert (tmp_path / "rollouts_mlflow_run_id").read_text() == "run-1"
+        assert (first.run_id, second.run_id) == ("run-1", "run-1")
+        client.create_run.assert_not_called()
+        client.update_run.assert_called_once_with("run-1", status="RUNNING")
+
+    def test_each_reopen_counts_one_more_resume(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig, tmp_path
+    ) -> None:
+        mlflow_config["output_jsonl_fpath"] = str(tmp_path / "rollouts.jsonl")
+        first, created = _open_mlflow_exporter(monkeypatch, mlflow_config)
+        created.set_tag.assert_not_called()
+
+        client = MagicMock()
+        client.get_run.return_value = MagicMock(data=MagicMock(tags={}))
+        monkeypatch.setattr(mlflow_module, "MlflowClient", MagicMock(return_value=client))
+        MLflowExporter(mlflow_config).setup()
+        client.get_run.return_value = MagicMock(data=MagicMock(tags={"gym_resume_count": "1"}))
+        MLflowExporter(mlflow_config).setup()
+
+        assert client.set_tag.call_args_list == [
+            call("run-1", "gym_resume_count", "1"),
+            call("run-1", "gym_resume_count", "2"),
+        ]
+
     def test_setup_without_a_token_leaves_the_env_var_unset(
         self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig
     ) -> None:
@@ -590,3 +716,85 @@ class TestMLflowExporter:
 
     def test_teardown_without_setup_is_a_noop(self, mlflow_config: DictConfig) -> None:
         MLflowExporter(mlflow_config).teardown()
+
+
+class TestMLflowResumedRunConfig:
+    FIRST_PARAMS: ClassVar[dict[str, str]] = {
+        "policy_model.vllm_model.host": "node-a",
+        "policy_model.vllm_model.port": "8000",
+        "policy_model.vllm_model.model": "qwen",
+        "seed": "7",
+    }
+
+    def test_a_first_segment_logs_its_config_and_every_param(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig, tmp_path: Path
+    ) -> None:
+        client = FakeMlflowClient()
+        first = _segment_config(mlflow_config, tmp_path, host="node-a", port=8000)
+
+        _run_segment(monkeypatch, client, first)
+
+        assert list(client.artifacts) == ["global_config.json"]
+        assert client.artifacts["global_config.json"]["policy_model"]["vllm_model"]["host"] == "node-a"
+        assert self.FIRST_PARAMS.items() <= client.params.items()
+
+    def test_a_resumed_segment_with_a_moved_server_logs_no_error_or_warning(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        client = FakeMlflowClient()
+        _run_segment(monkeypatch, client, _segment_config(mlflow_config, tmp_path, host="node-a", port=8000))
+
+        with caplog.at_level("WARNING"):
+            _run_segment(monkeypatch, client, _segment_config(mlflow_config, tmp_path, host="node-b", port=9000))
+
+        assert [record for record in caplog.records if record.levelname in ("WARNING", "ERROR")] == []
+
+    def test_a_resumed_segment_records_its_changed_config_in_an_artifact_of_its_own(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig, tmp_path: Path
+    ) -> None:
+        client = FakeMlflowClient()
+        _run_segment(monkeypatch, client, _segment_config(mlflow_config, tmp_path, host="node-a", port=8000))
+
+        _run_segment(monkeypatch, client, _segment_config(mlflow_config, tmp_path, host="node-b", port=9000))
+
+        (segment_file,) = [path for path in client.artifacts if path.startswith("config/segment_")]
+        assert segment_file.endswith(".json")
+        assert client.artifacts[segment_file]["policy_model"]["vllm_model"] == {
+            "host": "node-b",
+            "port": 9000,
+            "model": "qwen",
+        }
+        # The first segment's record is kept, not overwritten.
+        assert client.artifacts["global_config.json"]["policy_model"]["vllm_model"]["host"] == "node-a"
+        assert self.FIRST_PARAMS.items() <= client.params.items()
+
+    def test_each_resumed_segment_gets_its_own_config_artifact(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig, tmp_path: Path
+    ) -> None:
+        client = FakeMlflowClient()
+        _run_segment(monkeypatch, client, _segment_config(mlflow_config, tmp_path, host="node-a", port=8000))
+
+        _run_segment(monkeypatch, client, _segment_config(mlflow_config, tmp_path, host="node-b", port=9000))
+        _run_segment(monkeypatch, client, _segment_config(mlflow_config, tmp_path, host="node-c", port=9100))
+
+        hosts = sorted(
+            config["policy_model"]["vllm_model"]["host"]
+            for path, config in client.artifacts.items()
+            if path.startswith("config/segment_")
+        )
+        assert hosts == ["node-b", "node-c"]
+
+    def test_a_resumed_segment_logs_only_params_that_are_not_logged_yet(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig, tmp_path: Path
+    ) -> None:
+        client = FakeMlflowClient()
+        _run_segment(monkeypatch, client, _segment_config(mlflow_config, tmp_path, host="node-a", port=8000))
+        first_segment_batches = len(client.logged_param_batches)
+        second = _segment_config(mlflow_config, tmp_path, host="node-b", port=9000)
+        second["num_repeats"] = 4
+
+        _run_segment(monkeypatch, client, second)
+
+        resumed_keys = [key for batch in client.logged_param_batches[first_segment_batches:] for key in batch]
+        assert resumed_keys == ["num_repeats"]
+        assert client.params["num_repeats"] == "4"

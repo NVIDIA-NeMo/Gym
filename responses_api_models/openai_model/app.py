@@ -106,6 +106,7 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     extra_body: Dict[str, Any] = Field(default_factory=dict)
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
+    max_rate_limit_wait_seconds: float = Field(default=3600.0, ge=0)
 
     reasoning_effort_none_replacement: Optional[ReasoningEffort] = Field(
         default=None,
@@ -137,7 +138,7 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
         ),
     )
     upstream_request_timeout_seconds: Optional[float] = Field(
-        default=None,
+        default=1800.0,
         gt=0,
         description=(
             "Total time limit for each provider attempt, not a deadline for the "
@@ -229,6 +230,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             request_timeout_seconds=self.config.upstream_request_timeout_seconds,
             connect_timeout_seconds=self.config.upstream_connect_timeout_seconds,
             max_http_attempts=self.config.max_http_attempts,
+            max_rate_limit_wait_seconds=self.config.max_rate_limit_wait_seconds,
         )
         self._semaphore = (
             asyncio.Semaphore(self.config.max_concurrent_requests)
@@ -361,6 +363,11 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             return NeMoGymChatCompletion.model_validate(response_dict)
 
         return await self._call_upstream(create_and_validate)
+
+    async def embeddings(self, body: dict = Body()) -> dict:
+        """Pass an OpenAI-compatible embeddings request through to the provider; the configured model replaces the request's model."""
+        body_dict = self.config.extra_body | body | {"model": self.config.openai_model}
+        return await self._call_upstream(lambda: self._client.create_embeddings(**body_dict))
 
 
 if __name__ == "__main__":

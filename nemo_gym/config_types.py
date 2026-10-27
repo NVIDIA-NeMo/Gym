@@ -14,6 +14,7 @@
 # limitations under the License.
 import warnings
 from argparse import ArgumentParser
+from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
@@ -161,6 +162,10 @@ class MalformedConfigPathsError(ConfigError, ValueError):
     """`config_paths` was not a list of paths (e.g. a scalar string was passed)."""
 
 
+class HeadServerConfigMalformedError(ConfigError, ValueError):
+    """`head_server` is not a mapping, or a field has the wrong type (e.g. a non-integer `port` from a `++head_server.port=` override)."""
+
+
 class NoServerInstancesError(ConfigError, ValueError):
     """A run was requested but the merged config defines no server instances to start."""
 
@@ -217,6 +222,11 @@ class UnsupportedAgentOverrideError(ConfigError, ValueError):
 class HeadServerUnreachableError(ConfigError, ValueError):
     """Nothing answered at the configured head server address, so the merged config could not be fetched
     from it (the head server is not running, or `head_server.host` / `head_server.port` point elsewhere)."""
+
+
+class PromptConfigMalformedError(ConfigError, ValueError):
+    """A prompt config file is not valid YAML, or is not a mapping with a `user` template (and an optional `system`
+    one)."""
 
 
 ########################################
@@ -439,6 +449,20 @@ class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, Ba
 
 
 DatasetType = Union[Literal["train"], Literal["validation"], Literal["example"]]
+# The license values a dataset may declare, here and in a Harbor dataset's `[gym]` table.
+DatasetLicense = Union[
+    Literal["Apache 2.0"],
+    Literal["MIT"],
+    Literal["Creative Commons Attribution 4.0 International"],
+    Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
+    Literal["CC-BY-SA-4.0 AND LicenseRef-OpenMDW-1.1"],
+    Literal["CC BY-SA 4.0"],
+    Literal["CC BY-NC 3.0"],
+    Literal["NVIDIA Internal Use Only, Do Not Distribute"],
+    Literal["NVIDIA Evaluation Dataset License Agreement"],
+    Literal["TBD"],
+    Literal["GNU General Public License v3.0"],
+]
 
 
 class GitlabDatasetSource(BaseModel):
@@ -463,6 +487,42 @@ class HuggingFaceDatasetSource(BaseModel):
 DatasetSource = Annotated[Union[GitlabDatasetSource, HuggingFaceDatasetSource], Field(discriminator="type")]
 
 
+class Domain(str, Enum):
+    """The capability a resources server primarily evaluates or trains.
+
+    Pick the single domain that best fits the task. If several seem to apply, choose the most
+    specific one (e.g. prefer `math` or `coding` over `agent`); use `other` only when none
+    of the specific values fit. The values:
+
+    - `math`                  — mathematical problem solving (e.g. AIME, MATH, GSM8K).
+    - `coding`                — code generation, repair, or execution (e.g. SWE-bench, LiveCodeBench).
+    - `agent`                 — multi-step, tool-using / environment-interacting tasks (e.g. tau2,
+      workplace_assistant). Prefer a more specific value when the task is really math/coding/etc.
+    - `knowledge`             — factual or domain-knowledge question answering (e.g. GPQA, MMLU).
+    - `instruction_following` — adherence to explicit formatting/constraints (e.g. IFEval).
+    - `long_context`          — reasoning over long inputs (e.g. RULER, long-document QA).
+    - `safety`                — refusing harmful content / resisting jailbreaks & prompt injection.
+    - `games`                 — interactive game environments (e.g. blackjack, tetris).
+    - `translation`           — machine translation quality (e.g. WMT).
+    - `e2e`                   — end-to-end pipelines spanning multiple capabilities at once.
+    - `rlhf`                  — preference / reward-model / LLM-as-judge evaluations.
+    - `other`                 — catch-all when no specific domain above applies.
+    """
+
+    MATH = "math"
+    CODING = "coding"
+    AGENT = "agent"
+    KNOWLEDGE = "knowledge"
+    INSTRUCTION_FOLLOWING = "instruction_following"
+    LONG_CONTEXT = "long_context"
+    SAFETY = "safety"
+    GAMES = "games"
+    TRANSLATION = "translation"
+    E2E = "e2e"
+    RLHF = "rlhf"
+    OTHER = "other"
+
+
 class DatasetConfig(BaseModel):
     name: str
     type: DatasetType
@@ -481,20 +541,13 @@ class DatasetConfig(BaseModel):
     # Deprecated: kept working (and back-filled from/into `source`) for backward compatibility.
     gitlab_identifier: Optional[JsonlDatasetGitlabIdentifer] = None
     huggingface_identifier: Optional[JsonlDatasetHuggingFaceIdentifer] = None
-    license: Optional[
-        Union[
-            Literal["Apache 2.0"],
-            Literal["MIT"],
-            Literal["Creative Commons Attribution 4.0 International"],
-            Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
-            Literal["CC BY-SA 4.0"],
-            Literal["CC BY-NC 3.0"],
-            Literal["NVIDIA Internal Use Only, Do Not Distribute"],
-            Literal["NVIDIA Evaluation Dataset License Agreement"],
-            Literal["TBD"],
-            Literal["GNU General Public License v3.0"],
-        ]
-    ] = None
+    license: Optional[DatasetLicense] = None
+    # Catalog metadata a dataset may declare about itself (a Harbor dataset's `[gym]` table writes them into
+    # its generated entry): the capability it evaluates, whether its rewards were baselined and reviewed,
+    # and the harnesses it admits. Left out of dumps when unset, so existing metrics sidecars do not churn.
+    domain: Optional[Domain] = Field(default=None, exclude_if=lambda value: value is None)
+    verified: Optional[bool] = Field(default=None, exclude_if=lambda value: value is None)
+    allowed_agents: Optional[List[str]] = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_serializer(mode="wrap")
     def _omit_empty_preparation_fields(self, handler: Any) -> dict[str, Any]:
@@ -573,7 +626,10 @@ class BenchmarkDatasetConfig(BaseModel):
     name: str
     type: Literal["benchmark"]
     jsonl_fpath: Path
-    prepare_script: Path
+    # The script `gym eval prepare` runs to write `jsonl_fpath`. A materialized dataset (`gym eval run <task
+    # folder>`) writes its rows as part of the run that generates its entry and declares none; collate then only
+    # asks for a prepare step when the rows file is missing.
+    prepare_script: Optional[Path] = None
     taskset: Optional[str] = Field(
         default=None,
         min_length=1,
@@ -581,6 +637,11 @@ class BenchmarkDatasetConfig(BaseModel):
     )
     prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
+    # Catalog metadata, as on `DatasetConfig`. A benchmark needs no license, and in-repo benchmark entries
+    # spell theirs freely, so `license` stays an ignored extra here as it always was.
+    domain: Optional[Domain] = Field(default=None, exclude_if=lambda value: value is None)
+    verified: Optional[bool] = Field(default=None, exclude_if=lambda value: value is None)
+    allowed_agents: Optional[List[str]] = Field(default=None, exclude_if=lambda value: value is None)
     # `uv pip install` arguments the prepare script needs, installed before it is
     # imported. Without this a benchmark whose prepare pulls something Gym does
     # not otherwise depend on has to shell out to pip mid-prepare to get it.
@@ -601,42 +662,6 @@ class BenchmarkDatasetConfig(BaseModel):
 ########################################
 # Base server config classes
 ########################################
-
-
-class Domain(str, Enum):
-    """The capability a resources server primarily evaluates or trains.
-
-    Pick the single domain that best fits the task. If several seem to apply, choose the most
-    specific one (e.g. prefer `math` or `coding` over `agent`); use `other` only when none
-    of the specific values fit. The values:
-
-    - `math`                  — mathematical problem solving (e.g. AIME, MATH, GSM8K).
-    - `coding`                — code generation, repair, or execution (e.g. SWE-bench, LiveCodeBench).
-    - `agent`                 — multi-step, tool-using / environment-interacting tasks (e.g. tau2,
-      workplace_assistant). Prefer a more specific value when the task is really math/coding/etc.
-    - `knowledge`             — factual or domain-knowledge question answering (e.g. GPQA, MMLU).
-    - `instruction_following` — adherence to explicit formatting/constraints (e.g. IFEval).
-    - `long_context`          — reasoning over long inputs (e.g. RULER, long-document QA).
-    - `safety`                — refusing harmful content / resisting jailbreaks & prompt injection.
-    - `games`                 — interactive game environments (e.g. blackjack, tetris).
-    - `translation`           — machine translation quality (e.g. WMT).
-    - `e2e`                   — end-to-end pipelines spanning multiple capabilities at once.
-    - `rlhf`                  — preference / reward-model / LLM-as-judge evaluations.
-    - `other`                 — catch-all when no specific domain above applies.
-    """
-
-    MATH = "math"
-    CODING = "coding"
-    AGENT = "agent"
-    KNOWLEDGE = "knowledge"
-    INSTRUCTION_FOLLOWING = "instruction_following"
-    LONG_CONTEXT = "long_context"
-    SAFETY = "safety"
-    GAMES = "games"
-    TRANSLATION = "translation"
-    E2E = "e2e"
-    RLHF = "rlhf"
-    OTHER = "other"
 
 
 class BaseServerConfig(BaseModel):
@@ -797,25 +822,19 @@ def maybe_get_server_instance_config(
 
 def is_almost_server(server_type_config_dict: Any) -> bool:
     """Detects if a config looks like a server but might fail validation."""
-    from nemo_gym.global_config import ENTRYPOINT_KEY_NAME
+    from nemo_gym.global_config import ENTRYPOINT_KEY_NAME, SERVER_TYPE_KEYS
 
     if not isinstance(server_type_config_dict, DictConfig):
         return False
 
     # Check for server type.
-    server_type_keys = [
-        "responses_api_models",
-        "resources_servers",
-        "responses_api_agents",
-        "environment_servers",
-    ]
-    has_server_type = any(key in server_type_config_dict for key in server_type_keys)
+    has_server_type = any(key in server_type_config_dict for key in SERVER_TYPE_KEYS)
 
     if not has_server_type:
         return False
 
     # Check for entrypoint presence.
-    for server_type_key in server_type_keys:
+    for server_type_key in SERVER_TYPE_KEYS:
         if server_type_key in server_type_config_dict:
             inner_dict = server_type_config_dict[server_type_key]
             if isinstance(inner_dict, DictConfig):
@@ -850,6 +869,28 @@ class ExporterConfig(BaseModel):
     def is_available(self) -> bool:
         """Whether every field the backend needs to connect is set."""
         raise NotImplementedError
+
+
+REMOVED_ROLLOUT_OPTIONS = {
+    "retry_invalid_judge_responses": (
+        "A verifier that cannot produce a usable judgement now returns a `judge_failed` row; recover those "
+        "with `gym eval reverify --judge-failed-only`."
+    ),
+}
+
+
+class RemovedRolloutOptionsMixin(BaseModel):
+    """Reject rollout options that no longer exist, which pydantic would otherwise drop without a word."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_rollout_options(cls, data):
+        # The CLI passes an OmegaConf DictConfig, which is a Mapping but not a dict.
+        if isinstance(data, Mapping):
+            for name, hint in REMOVED_ROLLOUT_OPTIONS.items():
+                if name in data:
+                    raise ConfigError(f"`{name}` was removed. {hint}")
+        return data
 
 
 DEPRECATED_UPLOAD_ROLLOUTS_KEY = "upload_rollouts_to_wandb"
@@ -977,3 +1018,9 @@ class AggregateMetrics(BaseModel):
 # the capture middleware in base_responses_api_model.py strips this prefix before routing.
 ROLLOUT_PATH_PREFIX = "ng-rollout"
 TOKEN_CAPTURE_PATH_SEGMENT = "training-token-capture"
+TRACE_CONTEXT_PATH_SEGMENT = "ng-trace"
+
+# The listen backlog of every Gym server socket, above uvicorn's default of 2048.
+# A burst of new connections at Gym's concurrency then waits in the queue rather than on TCP retransmission backoff.
+# The kernel caps it at net.core.somaxconn.
+DEFAULT_UVICORN_BACKLOG = 16384

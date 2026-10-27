@@ -10,16 +10,18 @@ and writes reports.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import warnings
 from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from typing import Any
 
 import orjson
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym.health.checks import (
     _INCOMPLETE_MODEL_CALL_GAPS,
@@ -31,9 +33,9 @@ from nemo_gym.health.checks import (
     _bind_policy_call_views,
     _canonical_trajectory,
     _ended_on_failed_call,
-    _is_context_overflow_rejection,
     _is_failed,
     _is_failed_attempt,
+    _is_length_refusal,
     _is_successful,
     _normalized_trajectory_calls,
     _replay_identity,
@@ -58,12 +60,15 @@ from nemo_gym.health.types import (
     CheckSubject,
     Finding,
     HealthCheckResult,
+    LimitsSource,
     RolloutDigest,
+    RunHealthLimits,
     Verdict,
     _LineSlice,
     _TaskRepeat,
     _WorkerInput,
 )
+from nemo_gym.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
 
 
 _PROCESS_POOL_CHUNKS_PER_WORKER = 4
@@ -80,6 +85,7 @@ __all__ = [
     "HealthCheckResult",
     "RolloutDigest",
     "Verdict",
+    "evaluate_record",
     "format_health_report",
     "health_check_run_dir",
     "normalize_ignored_checks",
@@ -109,8 +115,27 @@ def _read_record(line: _LineSlice) -> tuple[dict[str, Any], str | None]:
 
 def _worker(payload: _WorkerInput) -> RolloutDigest:
     record, parse_error = _read_record(payload.line)
-    unreadable_identity = f"__unreadable_record__:input-{payload.line.source_index}:line-{payload.line.line_number}"
-    task_index = record.get(TASK_INDEX_KEY, unreadable_identity if parse_error else payload.line.ordinal)
+    return evaluate_record(record, payload.ignored_checks, line=payload.line, parse_error=parse_error)
+
+
+def evaluate_record(
+    record: dict[str, Any],
+    ignored_checks: frozenset[str],
+    *,
+    line: _LineSlice | None = None,
+    parse_error: str | None = None,
+) -> RolloutDigest:
+    """Evaluate every rollout-level check on one rollout record.
+
+    The one code path behind both the post-run report (which reads ``record`` from a JSONL ``line``)
+    and live emission (which passes the in-memory result, so ``line`` is ``None``).
+    """
+    unreadable_identity = (
+        f"__unreadable_record__:input-{line.source_index}:line-{line.line_number}" if line is not None else None
+    )
+    task_index = record.get(
+        TASK_INDEX_KEY, unreadable_identity if parse_error else (line.ordinal if line is not None else 0)
+    )
     rollout_index = record.get(ROLLOUT_INDEX_KEY, 0)
     trajectory = record.get("ng_trajectory")
     trajectory_rollout_id = trajectory.get("rollout_id") if isinstance(trajectory, dict) else None
@@ -132,7 +157,7 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
     unobserved: list[str] = []
 
     for spec in _ROLLOUT_SPECS:
-        if spec.id in payload.ignored_checks:
+        if spec.id in ignored_checks:
             continue
         if parse_error:
             if spec.id == "record_unreadable":
@@ -140,7 +165,7 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
                     Finding(
                         check="record_unreadable",
                         subject=subject,
-                        locator={"source_file": payload.line.path, "line": payload.line.line_number},
+                        locator=({"source_file": line.path, "line": line.line_number} if line is not None else None),
                         detail={"reason": "rollout record is unreadable", "error": parse_error},
                     )
                 )
@@ -192,7 +217,7 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             unobserved.append(spec.id)
             continue
         if spec.id == "model_call_runaway_generation" and any(
-            not _is_context_overflow_rejection(call)
+            not _is_length_refusal(call)
             and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
             and call.get("response") is None
             for call in bindings.matched_calls
@@ -203,7 +228,7 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             findings.extend(_ROLLOUT_CHECKS[spec.id](record, trajectory, bindings, subject))
         except Exception as exc:
             unobserved.append(spec.id)
-            if "check_execution_error" not in payload.ignored_checks:
+            if "check_execution_error" not in ignored_checks:
                 findings.append(
                     Finding(
                         check="check_execution_error",
@@ -243,7 +268,7 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             for call in failed
         ),
         errors_by_status=dict(errors_by_status),
-        ended_on_error=_ended_on_failed_call(calls),
+        ended_on_error=model_calls_observed and _ended_on_failed_call(calls),
         duplicated_calls=duplicated,
         transcript_prompt_tokens=transcript_prompt,
         transcript_completion_tokens=transcript_completion,
@@ -300,14 +325,20 @@ def _unique_task_repeats(digests: list[RolloutDigest]) -> list[_TaskRepeat]:
     return repeats
 
 
-def _mark_duplicate_identities(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> None:
-    """Flag physical records that claim the same logical rollout identity."""
+def _mark_duplicate_identities(
+    digests: list[RolloutDigest], lines: list[_LineSlice], ignored_checks: frozenset[str]
+) -> None:
+    """Flag physical records of one input that claim the same logical rollout identity.
+
+    Each input numbers its rollouts on its own, as the run accounting counts them: runs merged from different
+    environment servers can reuse task indices.
+    """
     if "rollout_duplicate_identity" in ignored_checks:
         return
 
-    grouped: dict[tuple[int | str | None, int | str, int | str], list[RolloutDigest]] = defaultdict(list)
-    for digest in digests:
-        grouped[(digest.stage_index, digest.task_index, digest.rollout_index)].append(digest)
+    grouped: dict[tuple[int, int | str | None, int | str, int | str], list[RolloutDigest]] = defaultdict(list)
+    for digest, line in zip(digests, lines, strict=True):
+        grouped[(line.source_index, digest.stage_index, digest.task_index, digest.rollout_index)].append(digest)
 
     for copies in grouped.values():
         if len(copies) < 2:
@@ -443,6 +474,152 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
     }
 
 
+def _jsonl_rows(path: Path) -> Iterator[dict[str, Any]]:
+    """Stream a JSONL file's objects; an inventory can be hundreds of MB."""
+    with path.open("rb") as handle:
+        for line in handle:
+            try:
+                row = orjson.loads(line)
+            except orjson.JSONDecodeError:
+                continue  # Blank lines, and the truncated last line a killed writer can leave.
+            if isinstance(row, dict):
+                yield row
+
+
+def _rollout_accounting(
+    landed: set[tuple[Any, ...]],
+    paths: Sequence[Path],
+    *,
+    limits: RunHealthLimits,
+    limits_source: LimitsSource | Mapping[str, LimitsSource],
+    duplicated: int,
+) -> dict[str, Any]:
+    """Count the rollouts each input owed against those that landed, failed or left no row, and judge the run.
+
+    ``landed`` holds ``(input index, task index, rollout index)`` of every persisted record. Failures come
+    from each input's ``_failures.jsonl`` sidecar, where the last attempt of a rollout stands; one that
+    later landed is not failed. A ``record_omitted_rollouts`` row records no result: an interrupted attempt is the
+    rollout's latest execution and leaves it missing, and a row never started is skipped.
+    ``is_terminal_failure`` splits them into
+    final ones, which are not retried, and not final ones, which are; the split says nothing of the cause. ``failed`` is null when no input has a sidecar.
+    ``expected``, ``missing`` and ``healthy`` need the ``_materialized_inputs.jsonl`` inventory and
+    are null when an input has none. A run is healthy when nothing is missing, no rollout is
+    recorded twice, and each kind of failure with a configured limit stays below it as a share of expected.
+    The limits are off (None) by default, so failures alone never make a run unhealthy unless configured.
+    """
+    # Lazy: rollout_collection imports this module, and health workers need none of its dependencies.
+    from nemo_gym.rollout_collection import (
+        NG_FAILURE_CLASS_KEY,
+        is_omitted_rollout_row,
+        is_terminal_failure,
+        is_unstarted_rollout_row,
+    )
+
+    failed: dict[tuple[Any, ...], dict[str, Any]] = {}
+    any_sidecar = False
+    owed: set[tuple[Any, ...]] | None = set()
+    for source_index, path in enumerate(paths):
+        if failures_path_for(path).is_file():
+            any_sidecar = True
+            for row in _jsonl_rows(failures_path_for(path)):
+                if is_unstarted_rollout_row(row):
+                    continue
+                failed[(source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))] = row
+        if not materialized_path_for(path).is_file():
+            owed = None
+        elif owed is not None:
+            owed.update(
+                (source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))
+                for row in _jsonl_rows(materialized_path_for(path))
+            )
+    failed = {key: row for key, row in failed.items() if not is_omitted_rollout_row(row)}
+    for key in landed:
+        failed.pop(key, None)
+    if owed is not None:
+        # Only owed rollouts count: an unreadable record or a sidecar row outside the inventory is not one.
+        failed = {key: row for key, row in failed.items() if key in owed}
+    expected = None if owed is None else len(owed)
+    missing = None if owed is None else len(owed - landed - failed.keys())
+    final = sum(is_terminal_failure(row) for row in failed.values())
+    not_final = len(failed) - final
+    reasons = []
+    if expected == 0:
+        reasons.append("no rollouts expected")
+    elif expected is not None:
+        if missing:
+            reasons.append(f"missing {missing} of {expected}")
+        if duplicated:
+            reasons.append(f"{duplicated} records share a rollout identity")
+    return {
+        "expected": expected,
+        "failed": {
+            "total": len(failed),
+            "final": final,
+            "not_final": not_final,
+            "by_class": dict(
+                sorted(Counter(row.get(NG_FAILURE_CLASS_KEY) or "unknown" for row in failed.values()).items())
+            ),
+        }
+        if any_sidecar
+        else None,
+        "missing": missing,
+        "healthy": None if expected is None else not reasons,
+        "unhealthy_reasons": reasons,
+        # The limits the verdict was judged by, so a recheck reuses them and the decision can be reproduced.
+        "limits": limits.summary(limits_source),
+    }
+
+
+_RUN_FAILURES_CHECK = "run_excessive_failures"
+
+
+def _run_excessive_failures(
+    artifacts: dict[str, Any], limits: RunHealthLimits, ignored_checks: frozenset[str]
+) -> tuple[list[Finding], dict[str, int]]:
+    """The ``run_excessive_failures`` check: one finding per group of failed rollouts that reaches its limit.
+
+    It reads only the run accounting, so a stopped run can evaluate it without the rollouts. With no limit
+    configured, or no inventory to count expected rollouts against, it is unobserved.
+    """
+    coverage = {"evaluated": 0, "unobserved": 0, "ignored": 0}
+    if _RUN_FAILURES_CHECK in ignored_checks:
+        coverage["ignored"] = 1
+        return [], coverage
+    expected, failed = artifacts["expected"], artifacts["failed"]
+    groups = (
+        ("not_final", limits.max_not_final_failure_fraction, "not_final"),
+        ("final", limits.max_final_failure_fraction, "final"),
+    )
+    if not expected or failed is None or all(limit is None for _, limit, _ in groups):
+        coverage["unobserved"] = 1
+        return [], coverage
+    coverage["evaluated"] = 1
+    findings = [
+        Finding(
+            check=_RUN_FAILURES_CHECK,
+            subject={},
+            detail={"group": group, "count": failed[field], "expected": expected, "limit": limit},
+        )
+        for group, limit, field in groups
+        if limit is not None and failed[field] and failed[field] / expected >= limit
+    ]
+    return findings, coverage
+
+
+def _judge_run(artifacts: dict[str, Any], findings: list[Finding], coverage: dict[str, int]) -> None:
+    """Add the run-level check to the accounting: its coverage, and a reason and an unhealthy verdict per finding."""
+    artifacts.setdefault("coverage", {})[_RUN_FAILURES_CHECK] = coverage
+    for finding in findings:
+        detail = finding.detail
+        share = detail["count"] / detail["expected"]
+        artifacts["unhealthy_reasons"].append(
+            f"{detail['group'].replace('_', ' ')} failures {detail['count']} of {detail['expected']} ({share:.1%}), "
+            f"limit {detail['limit'] * 100:g}%"
+        )
+    if findings:
+        artifacts["healthy"] = False
+
+
 def _sort_key(digest: RolloutDigest) -> tuple[tuple[int, Any], ...]:
     def part(value: int | str | None) -> tuple[int, Any]:
         return (0, value) if isinstance(value, int) else (1, str(value))
@@ -480,6 +657,8 @@ def run_health_checks(
     output_dir: Path | None = None,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
+    limits: RunHealthLimits = RunHealthLimits(),
+    limits_source: LimitsSource | Mapping[str, LimitsSource] = "config",
 ) -> HealthCheckResult:
     """Run the RFC's map/group/reduce pipeline and write both reports."""
     ignored = frozenset(normalize_ignored_checks(ignored_checks))
@@ -533,8 +712,22 @@ def run_health_checks(
                 worker_results = [_worker(item) for item in worker_inputs]
 
     digests = worker_results
-    _mark_duplicate_identities(digests, ignored)
+    _mark_duplicate_identities(digests, lines, ignored)
     summary = _reduce(digests, ignored)
+    artifacts = summary["run"]["artifacts"]
+    artifacts.update(
+        _rollout_accounting(
+            {(line.source_index, d.task_index, d.rollout_index) for d, line in zip(digests, lines, strict=True)},
+            paths,
+            limits=limits,
+            limits_source=limits_source,
+            duplicated=summary["run"]["issues"]["rollout_duplicate_identity"],
+        )
+    )
+    run_findings, run_coverage = _run_excessive_failures(artifacts, limits, ignored)
+    _judge_run(artifacts, run_findings, run_coverage)
+    summary["run"]["issues"][_RUN_FAILURES_CHECK] = len(run_findings)
+    summary["run"]["findings"] = [finding.model_dump(mode="json", exclude={"subject"}) for finding in run_findings]
     report_dir = output_dir or paths[0].parent
     summary_path, verdicts_path = _write_reports(summary, digests, report_dir)
     return HealthCheckResult(
@@ -543,6 +736,141 @@ def run_health_checks(
         summary_path=summary_path,
         verdicts_path=verdicts_path,
     )
+
+
+def write_provisional_summary(
+    rollout_path: Path,
+    landed: set[tuple[Any, Any]],
+    *,
+    limits: RunHealthLimits = RunHealthLimits(),
+    ignored_checks: Sequence[str] = (),
+) -> Path:
+    """Write the run accounting of a stopped run fast: ``rollouts.jsonl`` is not read, and the per-record checks
+    are skipped.
+
+    ``landed`` is the ``(task index, rollout index)`` of every persisted record, as rollout collection holds it.
+    Duplicates come from the per-record pass, so ``healthy`` is false when the accounting already has a reason
+    and null otherwise. ``gym eval health-check`` on the run dir writes the full summary.
+    """
+    artifacts = _rollout_accounting(
+        {(0, task, rollout) for task, rollout in landed},
+        [rollout_path],
+        limits=limits,
+        limits_source="config",
+        duplicated=0,
+    )
+    ignored = frozenset(normalize_ignored_checks(ignored_checks))
+    run_findings, run_coverage = _run_excessive_failures(artifacts, limits, ignored)
+    _judge_run(artifacts, run_findings, run_coverage)
+    artifacts["partial"] = True
+    # Only run_excessive_failures runs here; every other check needs the rollouts and is not evaluated.
+    artifacts["not_evaluated"] = sorted(spec.id for spec in CHECK_REGISTRY if spec.id != _RUN_FAILURES_CHECK)
+    if artifacts["healthy"]:
+        artifacts["healthy"] = None
+    summary_path = rollout_path.parent / QUALITY_SUMMARY_FILENAME
+    run = {
+        "ignored_checks": sorted(ignored),
+        "artifacts": artifacts,
+        "issues": {_RUN_FAILURES_CHECK: len(run_findings)},
+        "findings": [finding.model_dump(mode="json", exclude={"subject"}) for finding in run_findings],
+    }
+    summary_path.write_bytes(orjson.dumps({"run": run}, option=orjson.OPT_INDENT_2))
+    (rollout_path.parent / ROLLOUT_VERDICTS_FILENAME).unlink(missing_ok=True)
+    return summary_path
+
+
+def _persisted_limits(run_dir: Path) -> RunHealthLimits:
+    """The limits the run's earlier summary was judged by; none (no limit) when it has no readable summary."""
+    try:
+        persisted = orjson.loads((run_dir / QUALITY_SUMMARY_FILENAME).read_bytes())["run"]["artifacts"]["limits"]
+        return RunHealthLimits.model_validate({k: v for k, v in persisted.items() if k != "source"})
+    except (OSError, orjson.JSONDecodeError, KeyError, TypeError, ValueError):
+        return RunHealthLimits()
+
+
+class _AggregationSources(BaseModel):
+    """The shards `gym eval aggregate` merged into a rollout file, in its order, each as its path, size and SHA-256,
+    and that file's size and SHA-256."""
+
+    shards: list[tuple[str, int, str]]
+    merged_bytes: int
+    merged_sha256: str
+
+
+def _sha256(fpath: Path) -> str:
+    with fpath.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def write_aggregation_sources(
+    merged_fpath: Path, shards: Sequence[tuple[Path, int, str]], merged_contents_fpath: Path
+) -> None:
+    """Record the shards ``merged_fpath`` is merged from, for a recheck of its directory to read.
+
+    The merged file holds only the shards' rows: their failure sidecars and inventories stay next to them.
+    ``shards`` holds each shard's path with the size and SHA-256 of what the merge read from it, and
+    ``merged_contents_fpath`` the rows about to take ``merged_fpath``'s place; the record names both by size and
+    SHA-256, so it never vouches for other contents. Each shard is recorded relative to the record's directory,
+    so the shards and the merged file can move together, and under its own file name: a shard reached through a
+    file link keeps the sidecars beside the link, as the aggregation read them.
+    """
+    sources_fpath = aggregation_sources_path_for(merged_fpath)
+    base = sources_fpath.parent.resolve()
+    sources = _AggregationSources(
+        shards=[
+            (os.path.relpath(path.parent.resolve() / path.name, base), size, sha256) for path, size, sha256 in shards
+        ],
+        merged_bytes=merged_contents_fpath.stat().st_size,
+        merged_sha256=_sha256(merged_contents_fpath),
+    )
+    sources_fpath.write_text(sources.model_dump_json(indent=2) + "\n")
+
+
+def _aggregated_shards(run_dir: Path, *, rollout_name: str = "rollouts.jsonl") -> list[Path] | None:
+    """The shards `gym eval aggregate` merged into ``run_dir/rollout_name``, in its order; None if it merged none.
+
+    The merged rows have none of the shards' failures or inventories, so a recheck reads the shards, as the
+    aggregation did. A merged file that is gone, or not byte for byte the one the list was written for, is not
+    theirs; a shard that is gone cannot be read, and one not byte for byte the one merged holds other rows. Each
+    raises rather than check rows other than the merged ones, or without their failures.
+    """
+    merged_fpath = run_dir / rollout_name
+    sources_fpath = aggregation_sources_path_for(merged_fpath)
+    if not sources_fpath.is_file():
+        return None
+    try:
+        sources = _AggregationSources.model_validate_json(sources_fpath.read_bytes())
+    except ValidationError as exc:
+        raise ValueError(f"Unreadable shard list {sources_fpath}: {exc}") from exc
+    # The size first, as it is cheap; equal sizes alone do not make equal contents.
+    if (
+        not merged_fpath.is_file()
+        or merged_fpath.stat().st_size != sources.merged_bytes
+        or _sha256(merged_fpath) != sources.merged_sha256
+    ):
+        raise ValueError(
+            f"{merged_fpath} is not the file `gym eval aggregate` merged from the shards in {sources_fpath}. Rerun "
+            "the aggregation, or pass --rollouts-file rollouts.jsonl to check that file alone."
+        )
+    # Only the directories are resolved: each shard keeps its own name, and with it the sidecars beside it.
+    shards = [path.parent.resolve() / path.name for path in (run_dir / shard for shard, _, _ in sources.shards)]
+    missing = [str(shard) for shard in shards if not shard.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"{merged_fpath} was merged from shards that are gone: {', '.join(missing)}. Recheck the shards, or pass "
+            "--rollouts-file rollouts.jsonl to check the merged rows alone, without the shards' failures."
+        )
+    changed = [
+        str(shard)
+        for shard, (_, size, sha256) in zip(shards, sources.shards)
+        if shard.stat().st_size != size or _sha256(shard) != sha256
+    ]
+    if changed:
+        raise ValueError(
+            f"{merged_fpath} was merged from shards that changed since: {', '.join(changed)}. Rerun "
+            "`gym eval aggregate` to merge and check them as they are now."
+        )
+    return shards
 
 
 def _resolve_rollout_path(run_dir: Path, rollout_file: str | Path | None) -> Path:
@@ -573,15 +901,28 @@ def health_check_run_dir(
     rollout_file: str | Path | None = None,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
+    limits: RunHealthLimits | None = None,
     json_output: bool = False,
 ) -> HealthCheckResult:
+    """Recheck a run directory. The run's own persisted limits judge it, so the verdict of the same artifacts
+    does not change. Each limit set explicitly on ``limits`` overrides only that persisted limit and is recorded
+    as an override; set to ``None`` it removes the limit. A limit not set keeps its persisted value.
+
+    A directory ``gym eval aggregate`` merged shards into is rechecked from those shards, with the failures and
+    inventories beside them, as the aggregation checked them. An explicit ``rollout_file`` is checked alone."""
     path = Path(run_dir)
-    rollout_path = _resolve_rollout_path(path, rollout_file)
+    shards = _aggregated_shards(path) if rollout_file is None else None
+    rollout_paths = shards if shards is not None else _resolve_rollout_path(path, rollout_file)
+    overrides = {name: getattr(limits, name) for name in limits.model_fields_set} if limits is not None else {}
+    limits = _persisted_limits(path).model_copy(update=overrides)
+    limits_source = {name: "override" if name in overrides else "persisted" for name in RunHealthLimits.model_fields}
     result = run_health_checks(
-        rollout_path,
+        rollout_paths,
         output_dir=path,
         workers=workers,
         ignored_checks=ignored_checks,
+        limits=limits,
+        limits_source=limits_source,
     )
     if json_output:
         print(orjson.dumps(result.summary).decode())

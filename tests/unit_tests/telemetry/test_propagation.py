@@ -35,8 +35,9 @@ import pytest
 import uvicorn
 from aiohttp import ClientSession
 from fastapi import FastAPI
+from omegaconf import OmegaConf
 
-from nemo_gym import server_utils
+from nemo_gym import global_config, server_utils
 from nemo_gym.telemetry import setup as telemetry_setup
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from tests.unit_tests.telemetry.conftest import requires_lens
@@ -95,6 +96,7 @@ def traces(monkeypatch):
     set_enabled_span_groups(GymSpanGroup.resolve("all"))
     monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", handle)
     monkeypatch.setattr(telemetry_setup, "_INITIALISED", True)
+    monkeypatch.setattr(telemetry_setup, "_TRACES_EXPORTING", True)
 
     def finished_spans():
         trace.get_tracer_provider().force_flush()
@@ -276,10 +278,11 @@ async def test_lazy_client_initialization_failure_is_inside_the_client_span(
     monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
     monkeypatch.setattr(server_utils, "get_nemo_gym_fastapi_num_workers", lambda: 4)
     monkeypatch.setattr(server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
-    monkeypatch.setattr(
-        server_utils,
-        "get_global_config_dict",
-        lambda **_kwargs: {"global_aiohttp_connector_limit": 1, "global_aiohttp_connector_limit_per_host": 1},
+    # A server worker reads the config its parent puts in its environment, and nothing is cached yet.
+    monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+    monkeypatch.setenv(
+        global_config.NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+        OmegaConf.to_yaml({"global_aiohttp_connector_limit": 1, "global_aiohttp_connector_limit_per_host": 1}),
     )
 
     with pytest.raises(ValueError, match="must remain at least 1"):
@@ -337,3 +340,15 @@ async def test_no_spans_when_the_http_client_group_is_disabled(two_gym_servers, 
     await _drive_one_request(two_gym_servers)
 
     assert _by_kind(traces(), "CLIENT") == [], "a client span was emitted with every span group disabled"
+
+
+async def test_without_traces_no_client_span_or_traceparent_is_produced(two_gym_servers, traces, monkeypatch):
+    """With traces off, span groups stay enabled, so `server_utils.request` must check the exporter itself."""
+    monkeypatch.setattr(telemetry_setup, "_TRACES_EXPORTING", False)
+
+    await _drive_one_request(two_gym_servers)
+    spans = traces()
+
+    assert _by_kind(spans, "CLIENT") == []
+    downstream = next(s for s in _by_kind(spans, "SERVER") if "/work" in s.name)
+    assert downstream.parent is None, "a traceparent crossed the hop although traces are off"

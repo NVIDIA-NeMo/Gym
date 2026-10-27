@@ -10,6 +10,9 @@ fail-closed poisoning.
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import contextmanager
+from threading import Event
 from unittest.mock import patch
 
 import pytest
@@ -51,6 +54,45 @@ CHAIN_HASH_1 = compute_chain_hash(None, TOKENS_1)
 CUMULATIVE_HASH_1 = hash_token_ids(TOKENS_1)
 
 
+async def test_reading_unused_file_manifest_creates_no_files(tmp_path):
+    ledger = FileLineageStore(tmp_path)
+    for _ in range(2):
+        manifest = RolloutManifest.model_validate(await ledger.manifest("unused"))
+        assert manifest.records == [] and manifest.attempted_call_ids == []
+        assert manifest.pending_call_ids == [] and manifest.failures == []
+        assert list(tmp_path.iterdir()) == []
+
+
+async def test_manifest_waits_for_a_writer_before_its_first_row(tmp_path, monkeypatch):
+    ledger = FileLineageStore(tmp_path)
+    writer_ready, release_writer, reader_waiting = Event(), Event(), Event()
+    original_lock = ledger._locked
+
+    def writer():
+        with original_lock("r1"):
+            writer_ready.set()
+            assert release_writer.wait(5)
+            ledger._append("r1", {"intent": True, "model_call_id": "pending"}, [])
+
+    @contextmanager
+    def reader_lock(rollout_id):
+        reader_waiting.set()
+        with original_lock(rollout_id):
+            yield
+
+    writing = asyncio.create_task(asyncio.to_thread(writer))
+    try:
+        assert await asyncio.to_thread(writer_ready.wait, 5)
+        monkeypatch.setattr(ledger, "_locked", reader_lock)
+        reading = asyncio.create_task(ledger.manifest("r1"))
+        assert await asyncio.to_thread(reader_waiting.wait, 5)
+    finally:
+        release_writer.set()
+        await writing
+    manifest = RolloutManifest.model_validate(await reading)
+    assert manifest.attempted_call_ids == manifest.pending_call_ids == ["pending"]
+
+
 def _call_record(
     model_call_id: str,
     *,
@@ -60,6 +102,7 @@ def _call_record(
     chain_hash: str = CHAIN_HASH_1,
     delta_len: int | None = None,
     admitted_at: float | None = 1_755_600_000.25,
+    finish_reason: str | None = None,
 ) -> CallRecord:
     if delta_len is None:
         delta_len = len(TOKENS_1) - prev_len
@@ -79,6 +122,7 @@ def _call_record(
         chain_hash=chain_hash,
         cumulative_hash=cumulative_hash,
         fingerprint_version=FINGERPRINT_VERSION,
+        finish_reason=finish_reason,
     )
 
 
@@ -91,7 +135,7 @@ def _commit(
     staging_chain: tuple[str, ...] | None = None,
 ) -> CaptureLedgerCommit:
     return CaptureLedgerCommit(
-        rollout_id=rollout_id,
+        capture_key=rollout_id,
         record=record,
         staging_chain=staging_chain if staging_chain is not None else (record.staging_key,),
         request_items=request_items,
@@ -128,6 +172,53 @@ def test_capture_ledger_type_hints_resolve_at_runtime():
     assert typing.get_type_hints(CaptureLedger.record)["commit"] is CaptureLedgerCommit
 
 
+async def test_refused_intent_settles_without_losing_audit_or_other_pending_calls(store):
+    await store.begin_call("r1", "refused")
+    await store.begin_call("r1", "in-flight")
+    await store.refuse_call("r1", "refused")
+    await store.refuse_call("r1", "refused")  # Idempotent acknowledgement.
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert manifest.attempted_call_ids == manifest.pending_call_ids == ["in-flight"]
+    assert not manifest.records and not manifest.failures
+    await store.begin_call("r1", "retry")
+    with pytest.raises(ValueError, match="already registered"):
+        await store.begin_call("r1", "refused")
+    with pytest.raises(ValueError, match="non-pending"):
+        await store.refuse_call("r1", "unknown")
+    with pytest.raises(ValueError, match="conflicting"):
+        await store.record(_commit(_call_record("refused"), [USER_1], [ASSISTANT_1]))
+
+
+async def test_refusal_cannot_clear_committed_or_failed_capture(store):
+    await store.begin_call("r1", "c1")
+    await _record_call_1(store)
+    await store.begin_call("r1", "c2")
+    await store.record_failure("r1", "c2", "worker_capture_failed")
+    for call_id in ("c1", "c2"):
+        with pytest.raises(ValueError, match="non-pending"):
+            await store.refuse_call("r1", call_id)
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert len(manifest.records) == len(manifest.failures) == 1
+    assert manifest.pending_call_ids == ["c2"]
+
+
+async def test_refusal_is_visible_across_workers_and_survives_checkpoint(tmp_path):
+    writer = FileLineageStore(tmp_path / "live")
+    reader = FileLineageStore(tmp_path / "live")
+    await writer.begin_call("r1", "refused")
+    assert (await reader.manifest("r1"))["pending_call_ids"] == ["refused"]
+    await writer.close_admissions("r1")
+    await writer.refuse_call("r1", "refused")
+    manifest = await reader.manifest("r1")
+    assert not manifest["pending_call_ids"] and not manifest["failures"]
+    assert not manifest["attempted_call_ids"] and not manifest["records"]
+    restored = FileLineageStore(tmp_path / "restored")
+    rows = writer.export_rows("r1")
+    assert any(row.get("refused_before_generation") for row in rows)
+    restored.import_rows("r1", rows)
+    assert await restored.manifest("r1") == manifest
+
+
 def test_stores_implement_capture_ledger(store):
     assert isinstance(store, CaptureLedger)
 
@@ -136,7 +227,7 @@ def test_stores_implement_capture_ledger(store):
 async def test_ledger_row_round_trips_token_free_manifest(store):
     await _record_call_1(store)
     manifest = RolloutManifest.model_validate(await store.manifest("r1"))
-    assert manifest.rollout_id == "r1"
+    assert manifest.capture_key == "r1"
     assert manifest.failures == []
     (record,) = manifest.records
     # The manifest row is exactly the committed ``CallRecord``.
@@ -156,6 +247,25 @@ async def test_row_without_admitted_at_still_validates(store):
     manifest = RolloutManifest.model_validate(await store.manifest("r1"))
     (record,) = manifest.records
     assert record.admitted_at is None
+
+
+@pytest.mark.asyncio
+async def test_ledger_row_round_trips_the_finish_reason(store):
+    await store.record(_commit(_call_record("c1", finish_reason="length"), [USER_1], [ASSISTANT_1]))
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    (record,) = manifest.records
+    assert record.finish_reason == "length"
+
+
+def test_a_custody_row_without_the_finish_reason_column_reads_an_unstated_reason():
+    """A row written before the column existed is still a valid manifest row."""
+    from nemo_gym.token_id_capture.lineage import _manifest_from_rows
+
+    row = {"model_call_id": "c1", **_custody_columns(_call_record("c1"), ("r1/c1",))}
+    del row["finish_reason"]
+    manifest = RolloutManifest.model_validate(_manifest_from_rows("r1", [row]))
+    (record,) = manifest.records
+    assert record.finish_reason is None
 
 
 @pytest.mark.asyncio
@@ -181,6 +291,7 @@ async def test_same_call_commit_is_idempotent_and_conflicts_raise(store):
         {"weight_version": 18},
         {"response_id": "chatcmpl-other"},
         {"admitted_at": 1.0},
+        {"finish_reason": "length"},
     ],
 )
 async def test_recommit_with_changed_metadata_conflicts_even_when_index_agrees(store, changed):
@@ -480,6 +591,30 @@ async def test_unversioned_legacy_token_carrying_row_cannot_resolve_or_anchor_a_
     )
 
 
+async def test_persisted_replay_and_output_round_trip_without_nested_schema_versions(tmp_path):
+    import json
+
+    from nemo_gym.token_id_capture.completion import output_item_fingerprint
+    from nemo_gym.token_id_capture.replay import replay_context, summarize_replay
+    from nemo_gym.token_id_capture.staging.records import OutputItemEvidence
+
+    store = FileLineageStore(tmp_path)
+    record = _call_record("c1").model_copy(
+        update={
+            "replay": summarize_replay(replay_context([USER_1, ASSISTANT_1])),
+            "output_items": [OutputItemEvidence(fingerprint=output_item_fingerprint(ASSISTANT_1))],
+        }
+    )
+    await store.record(_commit(record, [USER_1], [ASSISTANT_1]))
+    rows = [json.loads(line) for line in (tmp_path / "r1.lineage.jsonl").read_text().splitlines()]
+    persisted = next(row for row in rows if row.get("staging_key"))
+    assert "schema_version" not in persisted["replay"]
+    assert persisted["output_items"]
+    assert all("schema_version" not in item for item in persisted["output_items"])
+    fresh = FileLineageStore(tmp_path)
+    assert RolloutManifest.model_validate(await fresh.manifest("r1")).records == [record]
+
+
 # --- retire and delete -------------------------------------------------------
 
 
@@ -761,3 +896,41 @@ async def test_retire_does_not_remove_a_ledger_recreated_after_a_delete_between_
     assert not (tmp_path / "r1.lineage.retired").exists()
     manifest = RolloutManifest.model_validate(await store.manifest("r1"))
     assert [record.model_call_id for record in manifest.records] == ["c1"]
+
+
+@pytest.mark.asyncio
+async def test_retirement_fences_admission_and_closure_until_delete(store):
+    await store.begin_call("r1", "inflight")
+    await store.retire(["r1"])
+    for operation in (lambda: store.begin_call("r1", "late"), lambda: store.close_admissions("r1")):
+        with pytest.raises(RolloutRetiredError):
+            await operation()
+    await store.delete(["r1"])
+    await store.begin_call("r1", "fresh")
+    manifest = RolloutManifest.model_validate(await store.close_admissions("r1"))
+    assert manifest.pending_call_ids == ["fresh"]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_restores_delivered_calls_without_dead_attempt_intents(tmp_path):
+    from nemo_gym._checkpoint.model import export_model_records, import_model_records
+    from nemo_gym.episode_types import EpisodeId
+
+    store = FileLineageStore(tmp_path / "source")
+    await store.begin_call("r1", "c1")
+    await _record_call_1(store)
+    # A call on a different policy server has not published a response yet.
+    await store.begin_call("r1", "undelivered")
+    records = export_model_records(store, [EpisodeId(rollout_id="r1")], [], {})
+    restored = FileLineageStore(tmp_path / "restored")
+    import_model_records(restored, records)
+    target = EpisodeId(rollout_id="r1", attempt=1).capture_key
+    manifest = RolloutManifest.model_validate(await restored.manifest(target))
+    assert [record.model_call_id for record in manifest.records] == ["c1"]
+    assert manifest.records[0].source_capture_key == "r1"
+    assert manifest.pending_call_ids == []
+    # Export must not erase the live attempt's drain/completeness witness.
+    live = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert live.pending_call_ids == ["undelivered"]
+    await restored.begin_call(target, "retry")
+    assert (await restored.close_admissions(target))["pending_call_ids"] == ["retry"]

@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import time
 from contextlib import nullcontext
 from copy import deepcopy
@@ -24,6 +25,7 @@ from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
 from aiohttp import ClientResponseError, RequestInfo
+from fastapi import HTTPException, Response
 from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
 from pytest import MonkeyPatch, mark, raises
@@ -67,11 +69,13 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
     PermanentEndpointError,
 )
+from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.token_id_capture import (
     CaptureContext,
     InMemoryLineageStore,
+    ParentResolutionStatus,
     TokenCaptureStore,
     reset_token_sink,
     resolve_parent,
@@ -79,6 +83,13 @@ from nemo_gym.token_id_capture import (
 )
 from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
 from nemo_gym.token_id_capture.staging.records import CaptureAdmission
+from responses_api_agents.simple_agent.app import (
+    ModelServerRef,
+    ResourcesServerRef,
+    SimpleAgent,
+    SimpleAgentConfig,
+    SimpleAgentRunRequest,
+)
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMModel,
@@ -159,6 +170,12 @@ def test_transport_log_context_reads_generic_headers_without_body_fields() -> No
     request.headers = {
         "x-nemo-gym-log-run-id": "run-001",
         "x-nemo-gym-log-adapter": "gym",
+        "x-nemo-gym-log-sampling-event-id": "sampling-training-001",
+        "x-nemo-gym-log-source-group-id": "dataset-group-001",
+        "x-nemo-gym-log-rollout-id": "rollout-001",
+        "x-nemo-gym-log-group-id": "group-001",
+        "x-nemo-gym-log-rollout-index": "4",
+        "x-nemo-gym-log-attempt-index": "2",
         "x-nemo-gym-log-task-id": "task-001",
         "x-nemo-gym-log-domain": "chrome",
         "x-nemo-gym-log-task-attempt": "2",
@@ -169,6 +186,12 @@ def test_transport_log_context_reads_generic_headers_without_body_fields() -> No
     assert _transport_log_context(request) == {
         "run_id": "run-001",
         "adapter": "gym",
+        "sampling_event_id": "sampling-training-001",
+        "source_group_id": "dataset-group-001",
+        "rollout_id": "rollout-001",
+        "group_id": "group-001",
+        "rollout_index": 4,
+        "attempt_index": 2,
         "task_id": "task-001",
         "domain": "chrome",
         "task_attempt": 2,
@@ -854,12 +877,67 @@ class TestApp:
     @mark.parametrize("responses_api", [False, True])
     @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
     @mark.parametrize(
-        "error_content",
+        "error_content, expected_code, expected_param",
         [
-            b'{"error":{"message":"maximum context length","code":400}}',
-            b'{"error":{"type":"exceed_context_size_error","message":"request too long","code":400}}',
+            # The two refusals vLLM 0.29.0 issues when the window is full: the renderer's prompt-plus-
+            # output check (vllm/renderers/params.py) and the max-tokens resolution's prompt-only check
+            # (vllm/entrypoints/serve/utils/api_utils.py). Both bodies nest the message under "error"
+            # with the integer code 400 (vLLM 0.10.1 and later).
+            (
+                json.dumps(
+                    {
+                        "error": {
+                            "message": (
+                                "This model's maximum context length is 32768 tokens. However, you requested 256 "
+                                "output tokens and your prompt contains 32818 input tokens, for a total of 33074 "
+                                "tokens. Please reduce the length of the input prompt or the number of requested "
+                                "output tokens."
+                            ),
+                            "type": "BadRequestError",
+                            "param": "input_tokens",
+                            "code": 400,
+                        }
+                    }
+                ).encode(),
+                "context_length_exceeded",
+                "input_tokens",
+            ),
+            (
+                b'{"error":{"message":"Input length (32818) exceeds model\'s maximum context length (32768).",'
+                b'"type":"BadRequestError","param":null,"code":400}}',
+                "context_length_exceeded",
+                None,
+            ),
+            # The engine's own check, which names the model length rather than the context length.
+            (
+                b'{"error":{"message":"The decoder prompt (length 32818) is longer than the maximum model length '
+                b'of 32768. Make sure that max_model_len is no smaller than the number of text tokens.",'
+                b'"type":"BadRequestError","param":null,"code":400}}',
+                "context_length_exceeded",
+                None,
+            ),
+            # llama.cpp names the refusal by type, not by phrase.
+            (
+                b'{"error":{"type":"exceed_context_size_error","message":"request too long","code":400}}',
+                "context_length_exceeded",
+                None,
+            ),
+            # An invalid output-token parameter is a length refusal too, but compaction would not fix
+            # it, so the envelope carries no overflow code.
+            (
+                b'{"error":{"message":"max_tokens must be at least 1, got 0.","type":"BadRequestError",'
+                b'"param":null,"code":400}}',
+                None,
+                None,
+            ),
+            (
+                b'{"error":{"message":"max_completion_tokens=40000 cannot be greater than max_model_len (32768).",'
+                b'"type":"BadRequestError","param":null,"code":400}}',
+                None,
+                None,
+            ),
         ],
-        ids=["vllm", "llamacpp"],
+        ids=["prompt-plus-output", "prompt-only", "decoder-prompt", "llamacpp", "max-tokens", "max-completion-tokens"],
     )
     def test_context_overflow_propagation_flag(
         self,
@@ -868,6 +946,8 @@ class TestApp:
         responses_api: bool,
         use_completions_api: bool,
         error_content: bytes,
+        expected_code: str | None,
+        expected_param: str | None,
     ) -> None:
         server = self._setup_server(monkeypatch, propagate_context_overflow_errors=propagate)
         server.config.use_completions_api = use_completions_api
@@ -889,12 +969,28 @@ class TestApp:
         )
 
         if propagate:
+            # The engine's message and param are preserved verbatim inside OpenAI's error envelope.
+            # vLLM's raw body carries the integer 400 as its code, which OpenAI-compatible harnesses
+            # cannot match; the string code tells them whether compacting the prompt is the remedy.
             assert response.status_code == 400
-            assert response.json() == json.loads(error_content)
+            assert response.json() == {
+                "error": {
+                    "message": json.loads(error_content)["error"]["message"],
+                    "type": "invalid_request_error",
+                    "param": expected_param,
+                    "code": expected_code,
+                }
+            }
         else:
             assert response.status_code == 200
             if responses_api:
                 assert response.json()["incomplete_details"] == {"reason": "max_output_tokens"}
+                assert response.json()["usage"]["input_tokens"] == 0
+                assert response.json()["usage"]["output_tokens"] == 0
+                assert response.json()["usage"]["total_tokens"] == 0
+                assert response.json()["usage"]["input_tokens_details"]["cached_tokens"] == 0
+                assert response.json()["usage"]["output_tokens_details"]["reasoning_tokens"] == 0
+                assert response.json()["metadata"]["nemo_gym_context_window_exceeded"] == "true"
             else:
                 assert '"finish_reason": "length"' in response.text
 
@@ -902,6 +998,234 @@ class TestApp:
         unused_method = mock_client.create_chat_completion if use_completions_api else mock_client.create_completion
         used_method.assert_awaited_once()
         unused_method.assert_not_awaited()
+
+    def test_streaming_responses_context_overflow_is_an_http_400_before_the_stream(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        # Generation is buffered, so nothing has been sent when the engine refuses: the streaming
+        # request gets the same HTTP 400 envelope as a plain one, which is how OpenAI answers an
+        # overflow on a streaming request and what the harnesses handle.
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = b'{"error":{"message":"maximum context length","code":400}}'
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/responses",
+            json={"model": "dummy_model", "stream": True, "input": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "context_length_exceeded"
+        assert response.json()["error"]["message"] == "maximum context length"
+
+    def test_streaming_chat_completions_context_overflow_after_the_keepalive_carries_the_envelope(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        # Once the keepalive has committed the SSE headers, the refusal can only be an error event;
+        # it carries the same envelope as the HTTP path, so a chat-SSE harness can classify it too.
+        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = (
+            b'{"error":{"message":"Input length (32818) exceeds model\'s maximum context length (32768).",'
+            b'"type":"BadRequestError","param":null,"code":400}}'
+        )
+
+        async def slow_refusal(**_kwargs):
+            await asyncio.sleep(0.05)
+            raise error
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=slow_refusal)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert response.text.startswith(": keep-alive")
+        error_lines = [line for line in response.text.splitlines() if line.startswith("data: ")]
+        payload = json.loads(error_lines[-1][len("data: ") :])
+        assert payload == {
+            "error": {
+                "message": "Input length (32818) exceeds model's maximum context length (32768).",
+                "type": "invalid_request_error",
+                "param": None,
+                "code": "context_length_exceeded",
+            }
+        }
+
+    @staticmethod
+    def _engine_window_refusal() -> ClientResponseError:
+        """vLLM's refusal of a request whose output budget does not fit beside its prompt.
+
+        The body names ``max_tokens`` and the context window, so the envelope carries
+        ``context_length_exceeded``.
+        """
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = (
+            b"{\"error\":{\"message\":\"'max_tokens' or 'max_completion_tokens' is too large: 4000. This model's "
+            b"maximum context length is 4096 tokens and your request has 1000 input tokens (4000 > 4096 - 1000). "
+            b'Please reduce the length of the input prompt or the number of requested output tokens.",'
+            b'"type":"BadRequestError","param":null,"code":400}}'
+        )
+        return error
+
+    def _post_captured(self, server: VLLMModel, store: TokenCaptureStore, path: str, body: dict):
+        """Send one captured request through the real dispatch, which registers the call intent."""
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        token = set_token_sink(CaptureContext(rollout_id="r0", model_call_id="mc-1", token_sink=store))
+        try:
+            return TestClient(app).post(path, json=body)
+        finally:
+            reset_token_sink(token)
+
+    def _post_captured_chat_completion(self, server: VLLMModel, store: TokenCaptureStore, *, stream: bool = False):
+        body: dict = {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]}
+        if stream:
+            body["stream"] = True
+        return self._post_captured(server, store, "/v1/chat/completions", body)
+
+    @mark.parametrize(
+        "route",
+        [
+            "chat-completions",
+            "completions",
+            "chat-stream-before-headers",
+            "chat-stream-after-keepalive",
+            "responses",
+            "responses-stream",
+        ],
+    )
+    def test_a_captured_rollout_records_the_propagated_refusal_and_freezes_complete(
+        self, monkeypatch: MonkeyPatch, tmp_path, route: str
+    ) -> None:
+        # The dispatch registers the call's capture intent before the engine is called. The refused
+        # call generates nothing, so no token record resolves that intent; the refusal record does,
+        # and it tells a consumer the rollout ended at the context window rather than at the
+        # harness's own stopping point. Codex and OpenCode stream by default, so the record must
+        # also be written on the streaming paths: before the headers are committed the refusal is
+        # the same HTTP 400, and after the chat keepalive it is an SSE error event on a 200 that
+        # carries the same envelope, recorded from inside the dispatch task.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(
+            monkeypatch, propagate_context_overflow_errors=True, use_completions_api=route == "completions"
+        )
+        refusal = self._engine_window_refusal()
+        if route == "chat-stream-after-keepalive":
+            monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+
+            async def slow_refusal(**_kwargs):
+                await asyncio.sleep(0.05)
+                raise refusal
+
+            engine_call = AsyncMock(side_effect=slow_refusal)
+        else:
+            engine_call = AsyncMock(side_effect=refusal)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = engine_call
+        mock_client.create_completion = engine_call
+        server._clients = [mock_client]
+
+        if route.startswith("responses"):
+            body = {
+                "model": "dummy_model",
+                "input": [{"role": "user", "content": "hi"}],
+                "stream": route == "responses-stream",
+            }
+            response = self._post_captured(server, store, "/v1/responses", body)
+        else:
+            response = self._post_captured_chat_completion(server, store, stream=route.startswith("chat-stream"))
+
+        if route == "chat-stream-after-keepalive":
+            assert response.status_code == 200
+            assert response.text.startswith(": keep-alive")
+            error_lines = [line for line in response.text.splitlines() if line.startswith("data: ")]
+            assert json.loads(error_lines[-1][len("data: ") :])["error"]["code"] == "context_length_exceeded"
+        else:
+            assert response.status_code == 400
+            assert response.json()["error"]["code"] == "context_length_exceeded"
+        snapshot = store.freeze_now("r0")
+        assert snapshot.entries == ()
+        assert snapshot.incomplete is False
+        (record,) = snapshot.engine_refusals
+        assert (record.model_call_id, record.code) == ("mc-1", "context_length_exceeded")
+        assert record.created_at > 0
+        # The dispatch resolved the request's lineage before the engine was called; a request with
+        # no model-authored history is a root, and the record carries that decision.
+        assert (record.parent_call_id, record.parent_resolution) == (None, ParentResolutionStatus.ROOT)
+
+    def test_a_max_tokens_only_400_is_a_refusal_without_a_code(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        # A 400 that names only the output-token parameter is still a request the engine refused
+        # before generating, so it resolves the capture intent like any refusal. Its record carries
+        # no code because the envelope carried none: compaction is not the remedy.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = (
+            b'{"error":{"message":"max_tokens must be at least 1, got 0.","type":"BadRequestError",'
+            b'"param":null,"code":400}}'
+        )
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+
+        response = self._post_captured_chat_completion(server, store)
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] is None
+        snapshot = store.freeze_now("r0")
+        assert snapshot.incomplete is False
+        assert [(record.model_call_id, record.code) for record in snapshot.engine_refusals] == [("mc-1", None)]
+
+    def test_the_absorbed_overflow_records_no_refusal(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        # Without propagate_context_overflow_errors the caller sees an exhausted generation, not a
+        # refusal, so nothing is recorded as refused.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=False)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=self._engine_window_refusal())
+        server._clients = [mock_client]
+
+        response = self._post_captured_chat_completion(server, store)
+
+        assert response.status_code == 200
+        assert store.freeze_now("r0").engine_refusals == ()
+
+    def test_an_uncaptured_request_is_still_refused_and_records_nothing(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        # A request outside a captured rollout has no rollout to record against.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=self._engine_window_refusal())
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 400
+        assert list(store.root.iterdir()) == []
 
     @mark.parametrize("use_completions_api", [False, True])
     def test_an_engine_error_the_server_does_not_handle_is_logged_with_its_body(
@@ -983,6 +1307,135 @@ class TestApp:
             "url='http://vllm.test/v1/chat/completions')"
         )
 
+    @staticmethod
+    def _provider_reply(finish_reason: str) -> dict:
+        return {
+            "id": "chatcmpl-provider",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "dummy_model",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": finish_reason,
+                    "message": {"role": "assistant", "content": "18"},
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    @mark.parametrize("responses_api", [False, True])
+    @mark.parametrize("finish_reason", ["abort", "length", "stop"])
+    def test_provider_abort_is_an_error_before_response_conversion(
+        self, monkeypatch: MonkeyPatch, responses_api: bool, finish_reason: str
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        provider_reply = self._provider_reply(finish_reason)
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(return_value=provider_reply)
+        server._clients = [provider]
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/responses" if responses_api else "/v1/chat/completions",
+            json={"input": [{"role": "user", "content": "hi"}], "max_output_tokens": 4096}
+            if responses_api
+            else {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4096},
+        )
+        assert provider.create_chat_completion.call_args.kwargs["max_tokens"] == 4096
+        if finish_reason == "abort":
+            assert response.status_code == 503
+            assert response.json()["detail"] == {
+                "type": "provider_cancelled",
+                "finish_reason": "abort",
+                "request_id": "chatcmpl-provider",
+                "message": "vLLM cancelled the generation; retry the rollout.",
+            }
+            assert "incomplete_details" not in response.json()
+            assert "output" not in response.json()
+            assert provider_reply["choices"][0]["finish_reason"] == "abort"
+        else:
+            assert response.status_code == 200
+            if responses_api:
+                assert response.json()["status"] == ("incomplete" if finish_reason == "length" else "completed")
+                assert response.json()["incomplete_details"] == (
+                    {"reason": "max_output_tokens"} if finish_reason == "length" else None
+                )
+            else:
+                assert response.json()["choices"][0]["finish_reason"] == finish_reason
+
+    async def test_provider_abort_skips_scoring_and_can_be_retried(self, monkeypatch: MonkeyPatch) -> None:
+        model = self._setup_server(monkeypatch)
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(
+            side_effect=[self._provider_reply("abort"), self._provider_reply("stop")]
+        )
+        model._clients = [provider]
+        model_app = model.setup_webserver()
+        model.setup_exception_middleware(model_app)
+        model_client = TestClient(model_app)
+        transport = MagicMock(spec=ServerClient, global_config_dict={})
+        agent = SimpleAgent(
+            config=SimpleAgentConfig(
+                host="127.0.0.1",
+                port=8080,
+                name="agent",
+                entrypoint="",
+                model_server=ModelServerRef(type="responses_api_models", name="model"),
+                resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+            ),
+            server_client=transport,
+        )
+        request = MagicMock(cookies={}, path_params={}, headers={})
+        verify = AsyncMock()
+
+        def reply(payload: dict, status: int = 200) -> MagicMock:
+            result = MagicMock(ok=status < 400, status=status, cookies={})
+            result.read = AsyncMock(return_value=json.dumps(payload).encode())
+            result.content.read = result.read
+            if status >= 400:
+                result.raise_for_status.side_effect = ClientResponseError(
+                    MagicMock(real_url="http://model/v1/responses"), (), status=status
+                )
+            return result
+
+        async def post(*, server_name, url_path, json, cookies, headers=None):
+            if server_name == "model":
+                result = model_client.post(url_path, json=json.model_dump(exclude_none=True))
+                return reply(result.json(), result.status_code)
+            if url_path == "/seed_session":
+                return reply({})
+            if server_name == "agent":
+                result = await agent.responses(request, Response(), json)
+                return reply(result.model_dump())
+            assert url_path == "/verify"
+            await verify(json)
+            return reply({**json, "reward": 1.0})
+
+        transport.post = AsyncMock(side_effect=post)
+        body = SimpleAgentRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": "hi"}], max_output_tokens=4096
+            )
+        )
+        with raises(ClientResponseError) as error:
+            await agent.run(request, body)
+        verify.assert_not_awaited()
+        failure = _agent_request_failure_row(error.value, error.value.status)
+        assert "provider_cancelled" in failure["_ng_failure_response_body"]
+        assert "abort" in failure["_ng_failure_response_body"]
+        assert "reward" not in failure and "response" not in failure
+        assert not is_terminal_failure(failure)
+
+        # Resuming the same task makes a fresh generation; only that successful
+        # response is sent to the verifier and can become a scored result.
+        result = await agent.run(request, body)
+        verify.assert_awaited_once()
+        assert result.response.status == "completed"
+        assert result.response.incomplete_details is None
+        assert result.reward == 1.0
+        assert provider.create_chat_completion.await_count == 2
+
     def test_megatron_capture_handler_prepares_an_admitted_child_request(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")
         context = CaptureContext(
@@ -991,7 +1444,7 @@ class TestApp:
             token_sink=None,
             external_staging=True,
             capture_admission=CaptureAdmission(
-                rollout_id="rollout-1",
+                capture_key="rollout-1",
                 model_call_id="c2",
                 parent_call_id="c1",
                 prev_len=3,
@@ -1030,10 +1483,10 @@ class TestApp:
                 "created": FIXED_TIME,
                 "model": "dummy_model",
                 "ng_commit_coords": {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "digest_version": 2,
                     "extras_digest_version": 1,
-                    "rollout_id": "rollout-1",
+                    "capture_key": "rollout-1",
                     "model_call_id": "c1",
                     "parent_call_id": None,
                     "prev_len": 0,
@@ -1089,7 +1542,7 @@ class TestApp:
             admitted_at=1.5,
             request_items=[{"role": "user", "content": "go"}],
             capture_admission=CaptureAdmission(
-                rollout_id="rollout-1",
+                capture_key="rollout-1",
                 model_call_id="c1",
                 mode="text",
             ),
@@ -3863,6 +4316,70 @@ class TestVLLMConverter:
         server._clients = [mock_client]
         return TestClient(app), captured_kwargs
 
+    @mark.parametrize("stream", [False, True])
+    @mark.parametrize("aws_region_name", [None, "us-east-1", 123, {"ignored": ["value"]}])
+    def test_openhands_request_fields_are_accepted_and_not_forwarded(
+        self, stream: bool, aws_region_name: object
+    ) -> None:
+        """Exercise ingress and forwarding with OpenHands fields and #4483 replay metadata."""
+        client, captured_kwargs = self._chat_client_capturing_upstream()
+        tool_call = {"id": "c1", "type": "function", "function": {"name": "ls", "arguments": "{}"}}
+        body = {
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [tool_call],
+                    "provider_specific_fields": {"refusal": None},
+                },
+                {"role": "tool", "tool_call_id": "c1", "name": "ls", "content": "ok"},
+            ],
+            "aws_region_name": aws_region_name,
+            "stream": stream,
+        }
+
+        response = client.post("/v1/chat/completions", json=body)
+
+        assert response.status_code == 200, response.text
+        assert "aws_region_name" not in captured_kwargs
+        assert captured_kwargs["messages"] == [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+            {"role": "tool", "tool_call_id": "c1", "name": "ls", "content": "ok"},
+        ]
+        if stream:
+            assert response.headers["content-type"].startswith("text/event-stream")
+            frames = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
+            assert frames[-1] == "[DONE]"
+            chunks = [json.loads(frame) for frame in frames[:-1]]
+            assert all(chunk["object"] == "chat.completion.chunk" for chunk in chunks)
+            assert "".join(chunk["choices"][0]["delta"].get("content", "") for chunk in chunks) == "response"
+        else:
+            assert response.json()["choices"][0]["message"]["content"] == "response"
+
+    @mark.parametrize("stream", [False, True])
+    def test_tool_message_image_reaches_the_backend(self, stream: bool) -> None:
+        client, captured_kwargs = self._chat_client_capturing_upstream()
+        tool_call = {"id": "c1", "type": "function", "function": {"name": "load_image", "arguments": "{}"}}
+        messages = [
+            {"role": "user", "content": "What color is the image?"},
+            {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": [
+                    {"type": "text", "text": "Image loaded."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj"}},
+                ],
+            },
+        ]
+
+        response = client.post("/v1/chat/completions", json={"messages": messages, "stream": stream})
+
+        assert response.status_code == 200, response.text
+        assert captured_kwargs["messages"] == messages
+
     def test_request_chat_template_kwargs_precedence(self, caplog):
         """Config baseline -> direct request field -> metadata override.
 
@@ -4337,6 +4854,29 @@ def test_responses_metadata_sampling_reaches_vllm() -> None:
     assert outbound["chat_template_kwargs"] == {"enable_thinking": True}
 
 
+def test_indic_ifeval_prepared_sampling_reaches_vllm() -> None:
+    from benchmarks.indic.ifeval.prepare import build_rows
+
+    row = build_rows(
+        [
+            {
+                "key": 1,
+                "prompt": "नमस्ते लिखिए।",
+                "instruction_id_list": ["keywords:existence"],
+                "kwargs": [{"keywords": ["नमस्ते"]}],
+                "tags": ["correct"],
+            }
+        ],
+        language="hi",
+    )[0]
+    request = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
+    outbound = _translate_responses_request(_make_minimal_audio_model(), request)
+    assert (outbound["temperature"], outbound["max_tokens"]) == (0.0, 1280)
+    assert outbound["messages"] == [{"role": "user", "content": "नमस्ते लिखिए।"}]
+    assert "top_k" not in outbound
+    assert "chat_template_kwargs" not in outbound
+
+
 class TestAudioDataSplice:
     def test_no_metadata_passthrough(self) -> None:
         """No audio_data in metadata → user message content stays a plain string."""
@@ -4651,6 +5191,102 @@ def _make_completions_backend_model(
     )
 
 
+_WINDOW_32768 = json.dumps(
+    {
+        "message": "This model's maximum context length is 32768 tokens. However, you requested 40010 tokens "
+        "(10 in the messages, 40000 in the completion). Please reduce the length of the messages or completion."
+    }
+)
+
+
+@mark.parametrize("propagate", [False, True], ids=["finish-reason-length", "propagate-error"])
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+@mark.parametrize(
+    ("budget", "error_content", "categories"),
+    [
+        (
+            {"max_tokens": 256, "max_completion_tokens": 40000},
+            _WINDOW_32768,
+            ("invalid_output_token_parameter", "context_length_exceeded"),
+        ),
+        (
+            {"max_tokens": 40000, "max_completion_tokens": 256},
+            _WINDOW_32768,
+            ("context_length_exceeded", "invalid_output_token_parameter"),
+        ),
+        ({"max_completion_tokens": 40000}, _WINDOW_32768, ("invalid_output_token_parameter",) * 2),
+        (
+            {"max_completion_tokens": 40000},
+            '{"message": "max_completion_tokens=40000 cannot be greater than max_model_len=32768."}',
+            ("invalid_output_token_parameter",) * 2,
+        ),
+        (
+            {"max_tokens": 40000},
+            json.dumps(
+                {
+                    "message": "max_tokens=40000 cannot be greater than max_model_len=max_total_tokens=32768. "
+                    "Please request fewer output tokens. (parameter=max_tokens, value=40000)"
+                }
+            ),
+            ("invalid_output_token_parameter",) * 2,
+        ),
+        ({"max_tokens": 32768}, _WINDOW_32768, ("context_length_exceeded",) * 2),
+        ({}, _WINDOW_32768, ("context_length_exceeded",) * 2),
+        (
+            {"max_tokens": 40000},
+            '{"message": "max_tokens must be at least 1, got -6677."}',
+            ("context_length_exceeded",) * 2,
+        ),
+    ],
+    ids=[
+        "chat-budget-over-window",
+        "completions-budget-over-window",
+        "alias-only-over-window",
+        "max-model-len",
+        "vllm-0.27-max-total-tokens",
+        "budget-equal-to-window",
+        "no-budget",
+        "no-window-named",
+    ],
+)
+async def test_a_budget_larger_than_the_named_window_is_an_invalid_parameter(
+    monkeypatch: MonkeyPatch,
+    propagate: bool,
+    use_completions_api: bool,
+    budget: dict,
+    error_content: str,
+    categories: tuple[str, str],
+) -> None:
+    """No prompt fits a budget larger than the whole window the engine names, so the budget is at fault. The budget
+    is the one the engine received: chat reads max_completion_tokens first, and completions passes max_tokens."""
+    monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value={}))
+    model = _make_completions_backend_model() if use_completions_api else TestApp()._setup_server(monkeypatch)
+    model.config.propagate_context_overflow_errors = propagate
+    error = ClientResponseError(MagicMock(), (), status=400, message="backend request failed")
+    error.response_content = error_content.encode()
+    client = MagicMock(spec=NeMoGymAsyncOpenAI)
+    client.create_chat_completion = AsyncMock(side_effect=error)
+    client.create_completion = AsyncMock(side_effect=error)
+    model._clients = [client]
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "invalid-budget-test"}
+    request.headers = {}
+    body = NeMoGymChatCompletionCreateParamsNonStreaming(
+        messages=[NeMoGymChatCompletionUserMessageParam(role="user", content="hello")], **budget
+    )
+
+    if propagate:
+        with raises(ClientResponseError):
+            await model.chat_completions(request, body)
+    else:
+        assert (await model.chat_completions(request, body)).choices[0].finish_reason == "length"
+
+    category = categories[use_completions_api]
+    execution = request.state.nemo_gym_model_execution
+    assert execution["error_category"] == category
+    assert execution["local_response_reason"] == (None if propagate else category)
+
+
 @mark.parametrize("propagate", [False, True], ids=["finish-reason-length", "propagate-error"])
 @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
 @mark.parametrize(
@@ -4738,6 +5374,12 @@ async def test_backend_context_overflow_handling(
         assert result.choices[0].message.role == "assistant"
         assert result.choices[0].message.content is None
         assert result.choices[0].message.tool_calls is None
+        assert result.usage is not None
+        assert result.usage.prompt_tokens == 0
+        assert result.usage.completion_tokens == 0
+        assert result.usage.total_tokens == 0
+        assert result.usage.prompt_tokens_details.cached_tokens == 0
+        assert result.usage.completion_tokens_details.reasoning_tokens == 0
     else:
         with raises(ClientResponseError) as exc_info:
             await model.chat_completions(request, body)
@@ -4956,6 +5598,17 @@ class TestCompletionsBackendBodyTranslation:
 
 
 class TestCompletionsBackendResponseTranslation:
+    def test_provider_metrics_preserved(self) -> None:
+        model = _make_completions_backend_model()
+        metrics = {"speculative_decoding": {"num_spec_steps": 4, "acceptance_histogram": [1, 0, 0, 3]}}
+        completion = model._completion_dict_to_chat_completion(
+            {
+                "choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}],
+                "metrics": metrics,
+            }
+        )
+        assert completion.metrics == metrics
+
     def test_text_lifted_into_assistant_message(self) -> None:
         model = _make_completions_backend_model()
         chat_completion = model._completion_dict_to_chat_completion(
@@ -5564,6 +6217,7 @@ def _make_top_logprobs_model(
     return_token_id_information: bool,
     *,
     extra_body: dict[str, Any] | None = None,
+    sampling_overrides: dict[str, Any] | None = None,
     request_prompt_and_generation_token_ids: bool = False,
 ) -> VLLMModel:
     """A VLLMModel with the minimum config needed to exercise top_logprobs handling."""
@@ -5580,6 +6234,7 @@ def _make_top_logprobs_model(
         uses_reasoning_parser=False,
         uses_interleaved_reasoning=False,
         extra_body=extra_body,
+        sampling_overrides=sampling_overrides,
     )
     return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
@@ -5590,6 +6245,88 @@ class TestTopLogprobsHandling:
     replayed rollout JSONL and empties the captured token ids, zeroing the training loss
     mask. These tests cover how the model server defends against that.
     """
+
+    @mark.parametrize("source", ["request", "extra_body", "sampling_overrides"])
+    @mark.parametrize("count", [None, 0, 16])
+    @mark.parametrize("captured", [False, True])
+    def test_normalizes_after_all_overrides(self, source: str, count: int | None, captured: bool) -> None:
+        fields = {"top_logprobs": count}
+        model = _make_top_logprobs_model(
+            return_token_id_information=False,
+            extra_body=fields if source == "extra_body" else None,
+            sampling_overrides=fields if source == "sampling_overrides" else None,
+        )
+        body = {"messages": [{"role": "user", "content": "hi"}], "logprobs": not captured, "temperature": 0.6}
+        if source == "request":
+            body.update(fields)
+        if captured:
+            model._external_capture_handler = VLLMWorkerCaptureHandler()
+            token = set_token_sink(
+                CaptureContext(
+                    rollout_id="r1",
+                    model_call_id="c1",
+                    token_sink=None,
+                    external_staging=True,
+                    capture_admission=CaptureAdmission(capture_key="r1", model_call_id="c1", mode="text"),
+                )
+            )
+        try:
+            result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        finally:
+            if captured:
+                reset_token_sink(token)
+        assert result["logprobs"] is True
+        assert result["top_logprobs"] == (0 if count is None else count)
+        assert result["temperature"] == 0.6
+
+    @mark.parametrize("source", ["request", "extra_body", "sampling_overrides"])
+    @mark.parametrize("token_ids", [[1], list(range(16))])
+    def test_topk_capture_rejects_specific_logprob_ids(self, source: str, token_ids: list[int]) -> None:
+        fields = {"logprob_token_ids": token_ids}
+        model = _make_top_logprobs_model(
+            return_token_id_information=False,
+            extra_body=fields if source == "extra_body" else None,
+            sampling_overrides=fields if source == "sampling_overrides" else None,
+        )
+        model._external_capture_handler = VLLMWorkerCaptureHandler()
+        body = {"messages": [{"role": "user", "content": "hi"}], "top_logprobs": 16}
+        if source == "request":
+            body.update(fields)
+        token = set_token_sink(
+            CaptureContext(
+                rollout_id="r1",
+                model_call_id="c1",
+                token_sink=None,
+                external_staging=True,
+                capture_admission=CaptureAdmission(capture_key="r1", model_call_id="c1", mode="text"),
+            )
+        )
+        try:
+            with raises(HTTPException) as error:
+                model._preprocess_chat_completion_create_params(MagicMock(), body)
+        finally:
+            reset_token_sink(token)
+        assert error.value.status_code == 400
+        assert "logprob_token_ids" in error.value.detail
+
+    @mark.parametrize("token_ids", [None, []])
+    def test_topk_capture_allows_unset_specific_logprob_ids(self, token_ids: list[int] | None) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=False)
+        body = {
+            "messages": [],
+            "logprobs": True,
+            "top_logprobs": 16,
+            "ng_capture": {"rollout_id": "r1"},
+            "logprob_token_ids": token_ids,
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        assert result["top_logprobs"] == 16
+
+    def test_specific_logprob_ids_without_capture_are_preserved(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=False)
+        body = {"messages": [], "logprobs": True, "top_logprobs": 16, "logprob_token_ids": [1, 2]}
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        assert result["logprob_token_ids"] == [1, 2]
 
     def test_capture_path_pins_top_logprobs_to_zero(self) -> None:
         """With return_token_id_information=True the server pins top_logprobs=0 regardless
@@ -5639,9 +6376,8 @@ class TestTopLogprobsHandling:
                 },
             )
 
-    def test_noncapture_path_strips_null_top_logprobs(self) -> None:
-        """On the non-capture path a null top_logprobs is dropped (letting vLLM apply its
-        default) rather than forwarded as null (which vLLM reads as "no logprobs")."""
+    def test_noncapture_path_normalizes_null_top_logprobs(self) -> None:
+        """Enabled logprobs use an explicit zero count instead of forwarding null."""
         model = _make_top_logprobs_model(return_token_id_information=False)
 
         result = model._preprocess_chat_completion_create_params(
@@ -5653,7 +6389,7 @@ class TestTopLogprobsHandling:
                 "top_logprobs": None,
             },
         )
-        assert "top_logprobs" not in result
+        assert result["top_logprobs"] == 0
 
         # A genuine integer value must pass through untouched.
         result = model._preprocess_chat_completion_create_params(
@@ -6105,6 +6841,51 @@ class TestSamplingOverrides:
         body = {"model": "dummy_model", "temperature": 0.2}
         assert server._apply_sampling_overrides(body)["temperature"] == 1.0
 
+    def test_transport_log_records_the_request_the_engine_receives(
+        self, monkeypatch: MonkeyPatch, tmp_path, capsys
+    ) -> None:
+        """The opt-in transport log is the request trace: it records the body after overrides."""
+        log_path = tmp_path / "model-io-transport.jsonl"
+        monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))
+        server = self._server({"temperature": 1.0, "top_p": 1.0})
+        sent: dict[str, Any] = {}
+
+        async def create_chat_completion(**kwargs: Any) -> dict[str, Any]:
+            sent.update(kwargs)
+            return {
+                "id": "chatcmpl",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            }
+
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(side_effect=create_chat_completion)
+        server._clients = [provider]
+        request = NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(type="message", role="user", content="hello")],
+            temperature=0.2,
+            top_p=0.5,
+            metadata={"extra_body": json.dumps({"new_param": "value"})},
+        )
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json=request.model_dump(exclude_unset=True, mode="json")
+        )
+
+        assert response.status_code == 200
+        (event,) = [
+            json.loads(line)
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+            if json.loads(line)["event"] == "transport_request"
+        ]
+        assert event["request_payload"]["temperature"] == sent["temperature"] == 1.0
+        assert event["request_payload"]["top_p"] == sent["top_p"] == 1.0
+        assert event["request_payload"]["new_param"] == sent["new_param"] == "value"
+        # Nothing is printed per request; the trace exists only when the log is enabled.
+        assert capsys.readouterr().out == ""
+
 
 class TestEndpointFile:
     def _make_server(self, tmp_path, **overrides) -> VLLMModel:
@@ -6125,6 +6906,7 @@ class TestEndpointFile:
 
     def test_publish_rebinds_clients_and_clears_sessions(self, tmp_path) -> None:
         (tmp_path / "endpoint.txt").write_text("http://new-host:8712/v1\n")
+        os.utime(tmp_path / "endpoint.txt", (1000, 1000))
         server = self._make_server(tmp_path, endpoint_check_interval_s=3600.0)
         server._session_id_to_client["session-on-old-host"] = server._clients[0]
 
@@ -6136,17 +6918,21 @@ class TestEndpointFile:
         # against a dead host fail fast and re-enter through the rebound
         # client; sessions re-resolve onto the new host.
         assert server._clients[0].max_connection_retries == 8
+        assert server._clients[0].max_rate_limit_wait_seconds == 0
         assert not server._session_id_to_client
         # Within endpoint_check_interval_s the filesystem is left alone, so a
         # fresh publish is only seen once the window is over.
         (tmp_path / "endpoint.txt").write_text("http://newer-host:8712/v1\n")
+        os.utime(tmp_path / "endpoint.txt", (1001, 1001))
         server._maybe_rebind_endpoint()
         assert server.config.base_url == ["http://new-host:8712/v1"]
         server._endpoint_last_check_at = None  # window over: the next call re-checks
         server._maybe_rebind_endpoint()
         assert server.config.base_url == ["http://newer-host:8712/v1"]
         # Static base_url clients without route-around keep unbounded connection retries.
-        assert self._make_server(tmp_path, endpoint_file=None)._clients[0].max_connection_retries is None
+        static = self._make_server(tmp_path, endpoint_file=None)._clients[0]
+        assert static.max_connection_retries is None
+        assert static.max_rate_limit_wait_seconds == 0
 
     def test_route_around_bounds_connection_retries_over_a_static_url_list(self, tmp_path) -> None:
         """``route_around_failing_endpoints`` needs bounded clients even without an endpoint file.
@@ -6179,6 +6965,7 @@ class TestEndpointFile:
         assert server.config.base_url == ["http://placeholder:8712/v1"]
         now = 1100.0
         endpoint_file.write_text("")  # empty is as unpublished as missing: no clock reset
+        os.utime(endpoint_file, (now, now))
         server._maybe_rebind_endpoint()
         now = 1301.0  # past the grace COUNTED FROM 1000, proving the empty write reset nothing
         with raises(RuntimeError, match="no longer published"):
@@ -6186,6 +6973,8 @@ class TestEndpointFile:
 
         endpoint_file.write_text("http://placeholder:8712/v1\n")  # republish on the SAME host
         now = 1301.5  # within the check window: the publish is not seen yet, the raise stays loud
+        # Explicit mtimes keep rapid writes distinct on coarse-resolution filesystems.
+        os.utime(endpoint_file, (now, now))
         with raises(RuntimeError, match="no longer published"):
             server._maybe_rebind_endpoint()
         now = 1311.5  # next window: heals with no rebind needed
@@ -7073,3 +7862,64 @@ def test_a_backend_without_a_control_url_fails_its_cut_instead_of_guessing_a_roo
     assert model.generation_cut_control_root("http://worker-0:8000/v1") == "http://control-0:9000"
     with raises(ValueError, match="no generation_cut_control_url is configured for backend http://worker-9:8000/v1"):
         model.generation_cut_control_root("http://worker-9:8000/v1")
+
+
+def _custom_tool_config(**overrides: Any) -> VLLMModelConfig:
+    return VLLMModelConfig(
+        **{
+            "host": "0.0.0.0",
+            "port": 8080,
+            "entrypoint": "",
+            "name": "policy",
+            "base_url": "http://worker-0:8000/v1",
+            "api_key": "dummy_key",  # pragma: allowlist secret
+            "model": "dummy_model",
+            "return_token_id_information": False,
+            "uses_reasoning_parser": False,
+        }
+        | overrides
+    )
+
+
+def test_get_converter_forwards_the_custom_tool_strategy() -> None:
+    model = VLLMModel(
+        config=_custom_tool_config(custom_tool_strategy="function_bridge"),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    assert model.get_converter().custom_tool_strategy == "function_bridge"
+
+
+def test_function_bridge_is_rejected_with_the_native_responses_route() -> None:
+    with raises(ValueError, match="custom_tool_strategy=function_bridge is not supported with is_responses_native"):
+        _custom_tool_config(custom_tool_strategy="function_bridge", is_responses_native=True)
+
+
+def test_streaming_sanitize_applies_the_configured_custom_tool_strategy() -> None:
+    # The helper is the one shared by every `/v1/responses` dispatch (the compaction
+    # server's included), so this pins the config-to-sanitizer wiring for all of them.
+    def body() -> dict:
+        return {
+            "model": "policy",
+            "stream": True,
+            "tools": [],
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "id": "at_1",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "exec", "description": "Run JavaScript."}],
+                },
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+            ],
+        }
+
+    bridged = VLLMModel(
+        config=_custom_tool_config(custom_tool_strategy="function_bridge"),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    cleaned, _ = bridged._sanitize_streaming_responses_body(body())
+    assert [(tool["type"], tool["name"]) for tool in cleaned["tools"]] == [("custom", "exec")]
+
+    passthrough = VLLMModel(config=_custom_tool_config(), server_client=MagicMock(spec=ServerClient))
+    cleaned, _ = passthrough._sanitize_streaming_responses_body(body())
+    assert cleaned["tools"] == []

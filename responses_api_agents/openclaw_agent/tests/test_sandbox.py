@@ -3,6 +3,8 @@
 
 import asyncio
 import json
+import math
+import shlex
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +23,8 @@ from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputMessage
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.tasks.harbor.materialize import materialize_task
+from nemo_gym.tasks.harbor.task import load_task
 from responses_api_agents.openclaw_agent.app import OpenClawAgent, OpenClawAgentConfig, _unique_usage_messages
 
 
@@ -112,7 +116,7 @@ class Sandbox:
         raise AssertionError("This provider supports exec only; no PTY API")
 
     async def run_exec(self, command, **kwargs):
-        if "--receipt" in command and "process_supervisor.py" in command:
+        if "--receipt" in command and "process_supervisor" in command:
             return await self.launch(command=command, **kwargs)
         if "stop.request" in command:
             await self.request_stop()
@@ -129,7 +133,7 @@ class Sandbox:
         payload = json.loads(self.files[payload_path])
         assert payload["cwd"] == getattr(self, "expected_workdir", "/app")
         assert kwargs["cwd"] == getattr(self, "expected_workdir", "/app")
-        assert "sandbox_runner.py" in kwargs["command"]
+        assert "/sandbox_runner " in kwargs["command"] and "/bin/gym-runner" in kwargs["command"]
         self.directory = payload["directory"]
         self.started.set()
         if not self.blocked:
@@ -271,6 +275,9 @@ def test_http_sandbox_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeou
             assert "--timeout 900" in sandbox.launch.await_args.kwargs["command"]
             assert "timeout" not in payload
             assert "PATH" not in payload["env"]
+            assert payload["env"]["OPENCLAW_NO_RESPAWN"] == "1"
+            assert "HOME" not in payload["env"]
+            assert not any(key.startswith("XDG_") for key in payload["env"])
             models = json.loads(sandbox.files[f"{sandbox.directory}/home/.openclaw/openclaw.json"])
             assert models["agents"]["defaults"]["workspace"] == "/app"
             assert models["models"]["providers"]["nemo"]["timeoutSeconds"] == model_timeout_seconds
@@ -305,14 +312,12 @@ def test_direct_run_without_resources_rejected_before_execution(setup):
     agent.server_client.post.assert_not_called()
 
 
-@pytest.mark.parametrize("option", ["no-sandbox", "worker", "required-tool", "no-model", "unpinned"])
+@pytest.mark.parametrize("option", ["no-sandbox", "required-tool", "no-model", "unpinned"])
 def test_unsupported_seed_rejected_before_connection(setup, option):
     agent, sandbox = setup
     body = seed().model_dump(mode="json")
     if option == "no-sandbox":
         body["sandbox_access"] = None
-    elif option == "worker":
-        agent.config.num_workers = 2
     elif option == "no-model":
         agent.config.model_server = None
     elif option == "unpinned":
@@ -322,12 +327,18 @@ def test_unsupported_seed_rejected_before_connection(setup, option):
             {"kind": "direct_http", "name": "tools", "base_url": "http://resources", "required": True}
         ]
     with TestClient(agent.setup_webserver()) as client:
-        if option == "worker":
-            with pytest.raises(ValueError, match="num_workers=1"):
-                client.post("/v1/agent_sessions", json=body)
-        else:
-            assert client.post("/v1/agent_sessions", json=body).status_code == 422
+        assert client.post("/v1/agent_sessions", json=body).status_code == 422
     sandbox.exec.assert_not_awaited()
+
+
+def test_several_workers_seed_sessions(setup):
+    """Session routing sends a session's later requests to the worker that seeded it."""
+    agent, sandbox = setup
+    agent.config.num_workers = 2
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        assert created.json()["agent_session_id"] in agent._session_records
 
 
 @pytest.mark.parametrize(("context_window", "max_output_tokens"), [(None, 32768), (32768, 32768)])
@@ -636,17 +647,16 @@ async def test_obsolete_sandbox_cookie_never_falls_back_to_host(setup, marker):
     sandbox.exec.assert_not_awaited()
 
 
-async def test_failed_cleanup_keeps_handles_and_prevents_close(setup):
+async def test_terminal_termination_failure_releases_borrowed_session(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+    with pytest.raises(RuntimeError, match="harness termination was not confirmed"):
         await task
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
-        await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    assert agent._session_records[session_id].state is not None
-    sandbox.disconnect.assert_not_awaited()
-    assert not any("rm -rf" in call.args[0] for call in sandbox.exec.await_args_list)
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert agent._session_records[session_id].state is None
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
 
 
 async def test_disconnect_failure_retains_session_for_retry(setup):
@@ -1887,11 +1897,11 @@ async def test_close_retains_capture_after_provider_release(setup, tmp_path, own
         await agent.seed_agent_session(request, body)
         state = agent._session_records[body.agent_session_id].state
         directory = state.session.session_dir
-        assert f"{directory}/process_supervisor.py" not in sandbox.files
+        assert f"{directory}/process_supervisor" not in sandbox.files
         sandbox.blocked = True
         task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
         await asyncio.wait_for(sandbox.started.wait(), 2)
-        assert f"{directory}/process_supervisor.py" in sandbox.files
+        assert f"{directory}/process_supervisor" in sandbox.files
 
         async def release():
             assert state.session.cleanup["cleanup_confirmed"] is True
@@ -1933,3 +1943,57 @@ def test_optional_diagnostics_preserve_valid_terminal_result(setup, diagnostics)
         gaps = {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
         assert "runtime_info_unavailable" in gaps
         assert ("worker_exit_code_unavailable" in gaps) == ("return_code" in diagnostics)
+
+
+@pytest.mark.parametrize(
+    "budget,expected", [(None, 1800), ("900.0", 900), ("12.5", 12.5), ("0.5", 0.5), ("3600", 1800), ("nan", 1800)]
+)
+def test_task_timeout_metadata_reaches_sandbox_supervisor(
+    setup: tuple[OpenClawAgent, Sandbox], tmp_path: Path, budget: str | None, expected: float
+) -> None:
+    agent, sandbox = setup
+    agent.config.timeout = 1800
+    (tmp_path / "task.toml").write_text("[agent]\ntimeout_sec = 900.0\n")
+    (tmp_path / "instruction.md").write_text("Fix the code")
+    (tmp_path / "tests").mkdir()
+    body = materialize_task(load_task(tmp_path), "timeout-test").task_input.responses_create_params
+    if budget != "900.0":
+        body.metadata = None if budget is None else {"agent_timeout_sec": budget}
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        session_id = created.json()["agent_session_id"]
+        response = client.post(
+            "/ng-rollout/openclaw-smoke-a2/v1/responses", json=body.model_dump(mode="json", exclude_unset=True)
+        )
+        assert response.status_code == 200, response.text
+        command = shlex.split(sandbox.launch.await_args.kwargs["command"])
+        assert float(command[command.index("--timeout") + 1]) == expected
+        assert agent.config.timeout == 1800
+        assert response.json()["metadata"]["agent_timeout_sec"] == str(float(expected))
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        cli = payload["command"]
+        assert cli[cli.index("--timeout") + 1] == str(math.ceil(expected))
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+
+
+def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
+    setup: tuple[OpenClawAgent, Sandbox],
+) -> None:
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        session_id = created.json()["agent_session_id"]
+        path = "/ng-rollout/openclaw-smoke-a2/v1/responses"
+        rejected = client.post(
+            path, json={"input": "Fix the code", "metadata": {"agent_timeout_sec": "900.0", "ignored": "value"}}
+        )
+        assert rejected.status_code == 422
+        assert "metadata" in rejected.json()["detail"]
+        sandbox.launch.assert_not_awaited()
+        accepted = client.post(path, json={"input": "Fix the code", "metadata": {"agent_timeout_sec": "900.0"}})
+        assert accepted.status_code == 200, accepted.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text

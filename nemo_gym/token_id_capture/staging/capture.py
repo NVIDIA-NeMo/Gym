@@ -58,8 +58,8 @@ class ActiveCall:
     completed: bool = field(default=False, init=False)
 
     @property
-    def rollout_id(self) -> str:
-        return self.admission.rollout_id
+    def capture_key(self) -> str:
+        return self.admission.capture_key
 
     @property
     def model_call_id(self) -> str:
@@ -120,9 +120,11 @@ class RolloutTokenCapture:
         """
         if not isinstance(admission, CaptureAdmission):
             raise TypeError("admission must be a CaptureAdmission")
+        if admission.mode == "candidate":
+            raise CaptureError("The framework must resolve candidate admission before capture")
         if stream:
             raise StreamingUnsupportedError(
-                f"rollout {admission.rollout_id} call {admission.model_call_id}: "
+                f"rollout {admission.capture_key} call {admission.model_call_id}: "
                 "token capture does not support streaming responses"
             )
         resolved_prefix = self._resolve_prefix(admission, prefix_token_ids)
@@ -140,7 +142,7 @@ class RolloutTokenCapture:
             )
         elif admission.generation_cut is not None:
             raise CaptureError(
-                f"rollout {admission.rollout_id} call {admission.model_call_id}: "
+                f"rollout {admission.capture_key} call {admission.model_call_id}: "
                 "generation-cut admission requires its staged snapshot"
             )
         return ActiveCall(
@@ -160,13 +162,13 @@ class RolloutTokenCapture:
         resolved_prefix: list[int],
     ) -> None:
         continuation = admission.generation_cut
-        where = f"rollout {admission.rollout_id} call {admission.model_call_id}"
+        where = f"rollout {admission.capture_key} call {admission.model_call_id}"
         if continuation is None:
             raise CaptureError(f"{where}: a staged generation cut was not authorized")
         if staging_keys != continuation.staging_keys:
             raise CaptureError(f"{where}: fetched generation-cut keys do not match admission")
         if (
-            snapshot.rollout_id != continuation.source_capture_key
+            snapshot.capture_key != continuation.source_capture_key
             or snapshot.model_call_id != continuation.source_model_call_id
             or snapshot.digest != continuation.prefix_digest
         ):
@@ -195,7 +197,7 @@ class RolloutTokenCapture:
 
     @staticmethod
     def _resolve_prefix(admission: CaptureAdmission, prefix_token_ids: list[int] | None) -> list[int]:
-        where = f"rollout {admission.rollout_id} call {admission.model_call_id}"
+        where = f"rollout {admission.capture_key} call {admission.model_call_id}"
         if prefix_token_ids is not None:
             if not isinstance(prefix_token_ids, list) or any(
                 type(token_id) is not int or token_id < 0 for token_id in prefix_token_ids
@@ -248,7 +250,7 @@ class RolloutTokenCapture:
             self._claim_completion(call)
             LOGGER.exception(
                 "token capture could not build rollout %s call %s",
-                call.rollout_id,
+                call.capture_key,
                 call.model_call_id,
             )
             return self._failed_coords(call)
@@ -275,20 +277,20 @@ class RolloutTokenCapture:
             # failing the model completion.
             LOGGER.exception(
                 "token staging failed for rollout %s call %s",
-                admission.rollout_id,
+                admission.capture_key,
                 admission.model_call_id,
             )
             return self._failed_coords(call)
         if not result.ok:
             LOGGER.warning(
                 "token staging sink rejected rollout %s call %s: %s",
-                admission.rollout_id,
+                admission.capture_key,
                 admission.model_call_id,
                 result.error,
             )
             return self._failed_coords(call)
         return CommitCoords(
-            rollout_id=record.rollout_id,
+            capture_key=record.capture_key,
             model_call_id=record.model_call_id,
             parent_call_id=record.parent_call_id,
             prev_len=record.prev_len,
@@ -348,7 +350,7 @@ class RolloutTokenCapture:
         # so replay-buffer staleness checks are conservative.
         weight_version = call.oldest_weight_version
         return StagedCallRecord.from_components(
-            rollout_id=admission.rollout_id,
+            capture_key=admission.capture_key,
             model_call_id=admission.model_call_id,
             parent_call_id=admission.parent_call_id,
             mode=admission.mode,
@@ -371,6 +373,7 @@ class RolloutTokenCapture:
         *,
         generated_token_ids: list[int],
         generated_logprobs: list[float],
+        extras: dict[str, Any] | None = None,
     ) -> StagedCallRecord:
         """Build one independently validated generated-token-only cut chunk."""
         if not generated_token_ids:
@@ -385,9 +388,9 @@ class RolloutTokenCapture:
         cum_len = admission.prev_len + delta_len
         chain_hash = compute_chain_hash(admission.parent_chain_hash, token_ids_delta)
         cumulative_hash = hash_token_ids(call.prefix_token_ids + token_ids_delta)
-        extras_digest = compute_extras_digest(None)
+        extras_digest = compute_extras_digest(extras)
         return StagedCallRecord.from_components(
-            rollout_id=admission.rollout_id,
+            capture_key=admission.capture_key,
             model_call_id=admission.model_call_id,
             parent_call_id=admission.parent_call_id,
             mode=admission.mode,
@@ -398,7 +401,7 @@ class RolloutTokenCapture:
             token_ids_delta=token_ids_delta,
             token_mask_delta=token_mask_delta,
             generation_log_probs_delta=logprobs_delta,
-            extras=None,
+            extras=extras,
             extras_digest=extras_digest,
             chain_hash=chain_hash,
             cumulative_hash=cumulative_hash,
@@ -423,7 +426,7 @@ class RolloutTokenCapture:
             # exception types. Extraction failure poisons capture only.
             LOGGER.exception(
                 "token extraction failed for rollout %s call %s",
-                call.rollout_id,
+                call.capture_key,
                 call.model_call_id,
             )
             self._claim_completion(call)
@@ -442,7 +445,7 @@ class RolloutTokenCapture:
         self._claim_completion(call)
         LOGGER.warning(
             "token capture failed for rollout %s call %s: %s",
-            call.rollout_id,
+            call.capture_key,
             call.model_call_id,
             reason,
         )
@@ -451,14 +454,14 @@ class RolloutTokenCapture:
     def _claim_completion(self, call: ActiveCall) -> None:
         with self._completion_lock:
             if call.completed:
-                raise CaptureError(f"rollout {call.rollout_id} call {call.model_call_id} was already completed")
+                raise CaptureError(f"rollout {call.capture_key} call {call.model_call_id} was already completed")
             call.completed = True
 
     @staticmethod
     def _failed_coords(call: ActiveCall) -> CommitCoords:
         admission = call.admission
         return CommitCoords(
-            rollout_id=admission.rollout_id,
+            capture_key=admission.capture_key,
             model_call_id=admission.model_call_id,
             parent_call_id=admission.parent_call_id,
             prev_len=admission.prev_len,

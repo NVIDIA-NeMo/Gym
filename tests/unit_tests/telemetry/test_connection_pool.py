@@ -8,9 +8,9 @@ from urllib.parse import urlsplit
 
 import pytest
 from aiohttp import ClientSession, ClientTimeout, TCPConnector, web
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym import server_utils
+from nemo_gym import global_config, server_utils
 from nemo_gym.telemetry import connection_pool, gym_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
 
@@ -95,13 +95,16 @@ async def _lazy_client(monkeypatch, *, metrics_enabled: bool = True, workers: in
     monkeypatch.setattr(connection_pool, "is_metrics_exporter_active", lambda: metrics_enabled)
     monkeypatch.setattr(server_utils, "get_nemo_gym_fastapi_num_workers", lambda: workers)
     monkeypatch.setattr(server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
-    monkeypatch.setattr(
-        server_utils,
-        "get_global_config_dict",
-        lambda **_kwargs: {
-            "global_aiohttp_connector_limit": aggregate_limit,
-            "global_aiohttp_connector_limit_per_host": aggregate_limit,
-        },
+    # A server worker reads the config its parent puts in its environment, and nothing is cached yet.
+    monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+    monkeypatch.setenv(
+        global_config.NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+        OmegaConf.to_yaml(
+            {
+                "global_aiohttp_connector_limit": aggregate_limit,
+                "global_aiohttp_connector_limit_per_host": aggregate_limit,
+            }
+        ),
     )
     try:
         yield
@@ -152,6 +155,7 @@ async def test_client_span_is_kept_when_queue_metrics_are_enabled(collected_metr
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     monkeypatch.setattr(trace, "get_tracer", provider.get_tracer)
     monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _group: True)
+    monkeypatch.setattr(server_utils, "is_trace_exporter_active", lambda: True)
 
     async def immediate(_request):
         return web.json_response({"ok": True})
@@ -594,6 +598,44 @@ async def test_connect_override_forwards_new_aiohttp_arguments(collected_metrics
     }
     (connect_point,) = collected_metrics()[CONNECT_TOTAL]
     assert connect_point.value == 1
+
+
+async def test_a_new_connection_records_its_setup_time_and_a_reused_one_does_not(collected_metrics, monkeypatch):
+    async def immediate(_request):
+        return web.json_response({"ok": True})
+
+    async with _serve(immediate) as url, _client(monkeypatch, limit=2, limit_per_host=2):
+        await _get(url)
+        await _get(url)  # the pooled connection is reused
+
+    (point,) = collected_metrics()[gym_metrics.HTTP_CONNECTION_POOL_CONNECT_DURATION_INSTRUMENT]
+    assert point.count == 1
+    assert point.attributes == {gym_metrics.HTTP_CONNECTION_POOL_CONNECT_OUTCOME_ATTRIBUTE: "ok", SERVER: "model"}
+
+
+async def test_a_refused_connection_records_a_failed_setup(collected_metrics, monkeypatch):
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        closed_port = sock.getsockname()[1]
+
+    async with _client(monkeypatch, limit=2, limit_per_host=2):
+        with pytest.raises(Exception):
+            await server_utils.request(
+                "GET", f"http://127.0.0.1:{closed_port}/work", _server_name="model", _max_connection_retries=0
+            )
+
+    points = collected_metrics()[gym_metrics.HTTP_CONNECTION_POOL_CONNECT_DURATION_INSTRUMENT]
+    assert {point.attributes[gym_metrics.HTTP_CONNECTION_POOL_CONNECT_OUTCOME_ATTRIBUTE] for point in points} == {
+        "failed"
+    }
+
+
+def test_create_connection_override_matches_aiohttp_signature():
+    base = inspect.signature(TCPConnector._create_connection)
+    override = inspect.signature(connection_pool.QueueTimedTCPConnector._create_connection)
+    assert list(base.parameters) == list(override.parameters)
 
 
 def test_queue_wait_override_matches_aiohttp_signature():

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 from nemo_gym.episode_types import EpisodeId
+from nemo_gym.token_id_capture.records import FINISH_REASON_DISAGREEMENT_REASON, incomplete_reason_for_finish_reason
 from nemo_gym.token_id_capture.staging.digest import (
     EXTRAS_DIGEST_VERSION,
     STAGING_DIGEST_VERSION,
@@ -85,15 +86,52 @@ class LinearizedRow:
     weight_version_spans: list[WeightVersionSpan]
     link_spans: list[tuple[str, int, int]] = field(default_factory=list)
     extras_commitments: list[ExtrasCommitment] = field(default_factory=list)
+    # The terminal call's finish reason as its ledger row recorded it; ``None`` when the served
+    # payload stated none or the row predates the column.
+    terminal_finish_reason: str | None = None
+    # Whether ``terminal_finish_reason`` is the kept serving's. ``False`` when the receipt's
+    # attribution trail carries ``finish_reason_disagreement``: the terminal was chosen among
+    # token-identical calls that recorded different finish reasons, so the reason reported here
+    # depends on which of them the receipt names.
+    finish_reason_resolved: bool = True
 
     @property
     def call_ids(self) -> list[str]:
         """Compatibility spelling for existing framework consumers."""
         return self.model_call_ids
 
+    @property
+    def incomplete_reason(self) -> str | None:
+        """The ``incomplete_details.reason`` the rebuilt response reports, or ``None`` for a complete ending.
+
+        Only the terminal call decides: an earlier ``length`` stop did not end the chain, because a
+        later call extended it. The mapping is the one the local capture path applies, and so is
+        the abstention: an unresolved finish reason (``finish_reason_resolved`` is ``False``) gives
+        no verdict rather than one that follows the call-id order of identical retries.
+
+        A framework consumer puts this verdict on the harness response with
+        ``nemo_gym.token_id_capture.apply_capture_incomplete_verdict``, the precedence rule the
+        local delivery applies as well: a harness that reported ``incomplete`` or ``failed``
+        itself keeps its own verdict, and only a response that reported ``completed`` or no
+        status takes this one.
+        """
+        if not self.finish_reason_resolved:
+            return None
+        return incomplete_reason_for_finish_reason(self.terminal_finish_reason)
+
 
 def _fail(code: str, detail: str) -> ReceiptVerificationError:
     return ReceiptVerificationError(code, detail)
+
+
+def _attribution_reasons(receipt: RolloutReceipt) -> set[str]:
+    """Return the reason tokens of the receipt's attribution trail.
+
+    ``resolve_terminal`` joins its abstention, corroboration, and disagreement tokens with commas,
+    and the framework copies the string onto ``terminal_attribution_reason``; a receipt from a
+    framework that records no trail has none.
+    """
+    return {token for token in (receipt.terminal_attribution_reason or "").split(",") if token}
 
 
 def _verify_versions(receipt: RolloutReceipt) -> None:
@@ -114,20 +152,20 @@ def _staging_owner(receipt: RolloutReceipt, record: CallRecord) -> str:
     A restored episode keeps the calls made before its checkpoint, staged under an earlier attempt of the same rollout.
     Any other owner would splice a foreign rollout's tokens into this receipt.
     """
-    if record.capture_key is None:
-        return receipt.rollout_id
+    if record.source_capture_key is None:
+        return receipt.capture_key
     try:
-        owner = EpisodeId.from_capture_key(record.capture_key)
-        current = EpisodeId.from_capture_key(receipt.rollout_id)
+        owner = EpisodeId.from_capture_key(record.source_capture_key)
+        current = EpisodeId.from_capture_key(receipt.capture_key)
     except ValueError as error:
         raise _fail("foreign_capture_key", f"call {record.model_call_id}: {error}") from error
     if owner.rollout_id != current.rollout_id or owner.attempt > current.attempt:
         raise _fail(
             "foreign_capture_key",
-            f"call {record.model_call_id} is staged under {record.capture_key}, "
-            f"which is not an earlier attempt of {receipt.rollout_id}",
+            f"call {record.model_call_id} is staged under {record.source_capture_key}, "
+            f"which is not an earlier attempt of {receipt.capture_key}",
         )
-    return record.capture_key
+    return record.source_capture_key
 
 
 def _compare_manifest_fields(
@@ -136,8 +174,8 @@ def _compare_manifest_fields(
     snapshot: StagedCallBaseSnapshot,
 ) -> None:
     call_id = record.model_call_id
-    if snapshot.rollout_id != _staging_owner(receipt, record):
-        raise _fail("wrong_rollout", f"snapshot {call_id} belongs to {snapshot.rollout_id}")
+    if snapshot.capture_key != _staging_owner(receipt, record):
+        raise _fail("wrong_rollout", f"snapshot {call_id} belongs to {snapshot.capture_key}")
     comparisons = {
         "model_call_id": snapshot.model_call_id,
         "parent_call_id": snapshot.parent_call_id,
@@ -177,7 +215,7 @@ def _recompute_integrity(snapshot: StagedCallBaseSnapshot) -> None:
             schema_version=snapshot.schema_version,
             digest_version=snapshot.digest_version,
             extras_digest_version=snapshot.extras_digest_version,
-            rollout_id=snapshot.rollout_id,
+            capture_key=snapshot.capture_key,
             model_call_id=call_id,
             parent_call_id=snapshot.parent_call_id,
             mode=snapshot.mode,
@@ -371,7 +409,7 @@ def verify_and_linearize(
         for record in chain
     ]
     return LinearizedRow(
-        rollout_id=receipt.rollout_id,
+        rollout_id=receipt.capture_key,
         token_ids=token_ids,
         token_mask=token_mask,
         logprobs=logprobs,
@@ -381,6 +419,8 @@ def verify_and_linearize(
         weight_version_spans=weight_version_spans,
         link_spans=link_spans,
         extras_commitments=extras_commitments,
+        terminal_finish_reason=chain[-1].finish_reason,
+        finish_reason_resolved=FINISH_REASON_DISAGREEMENT_REASON not in _attribution_reasons(receipt),
     )
 
 
@@ -397,7 +437,7 @@ def linearize(
         # surface the same rebuild failure the verifier reports for that case.
         raise _fail("missing_terminal", "successful receipt has no terminal call")
     receipt = RolloutReceipt(
-        rollout_id=rollout_id,
+        capture_key=rollout_id,
         terminal_model_call_id=terminal_hint,
         manifest=manifest,
         terminal_selection="declared",

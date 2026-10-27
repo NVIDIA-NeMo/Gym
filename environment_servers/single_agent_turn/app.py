@@ -6,16 +6,17 @@
 from typing import Any, Literal
 from uuid import uuid4
 
-from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym._checkpoint.steps import StepMode, seed_restarts, seed_verify_mode
+from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType, seed_restarts, seed_verify_step_type
+from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
 from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
     HandledEpisodeError,
+    dependency_failure,
 )
 from nemo_gym.base_resources_server import (
     ResourcesCloseSessionRequest,
@@ -23,6 +24,7 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionResponse,
 )
 from nemo_gym.base_responses_api_agent import (
+    AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
@@ -40,8 +42,18 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
 )
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, AgentObservationBundle
-from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from nemo_gym.rollout_observability import (
+    NG_AGENT_OBSERVATIONS_KEY,
+    NG_TRAJECTORY_KEY,
+    AgentObservationBundle,
+    TrajectoryRecord,
+)
+from nemo_gym.server_utils import (
+    get_response_json,
+    is_nemo_gym_fastapi_entrypoint,
+    raise_for_status,
+    rollout_path_prefix,
+)
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnFailure,
     SingleAgentTurnRequest,
@@ -64,7 +76,7 @@ class SessionHandles(BaseModel):
     agent_session_id: str
     agent_cookies: dict[str, str] = Field(default_factory=dict)
     # Whether a checkpoint may replay the resources server's /verify, as its seed reply reported.
-    resources_verify: StepMode = "wait"
+    resources_verify_step_type: StepType = "wait"
 
     @classmethod
     def new(cls) -> "SessionHandles":
@@ -80,6 +92,7 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
 
     resources_server: ResourcesServerRef
     agent_server: AgentServerRef
+    agent_outcome_policy: AgentOutcomePolicyConfig = Field(default_factory=AgentOutcomePolicyConfig)
     resources_tool_transports: list[Literal["direct_http", "mcp"]] = Field(default_factory=list)
 
 
@@ -88,7 +101,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
     config: SingleAgentTurnEnvironmentServerConfig
     request_model = SingleAgentTurnRequest
-    checkpoint_boundaries = True
+    checkpoint_mode = "exported"
     response_model = SingleAgentTurnResponse
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
@@ -123,6 +136,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             AgentObservationBundle.model_validate(continuation["observations"])
             if continuation.get("observations")
             else None
+        )
+        trajectory = (
+            TrajectoryRecord.model_validate(continuation["trajectory"]) if continuation.get("trajectory") else None
         )
         verification = (
             SingleAgentTurnResult.model_validate(continuation["result"]) if continuation.get("result") else None
@@ -171,6 +187,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     pass  # Final unwind retries the close and logs its failure.
                 if closed_agent:
                     failure.failure.agent_observations = closed_agent[-1].agent_observations
+                    failure.failure.trajectory = closed_agent[-1].trajectory
                 raise
             stage = "close_agent"
 
@@ -193,19 +210,32 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     await agent_cleanup.close()
                     close = closed_agent[-1]
                 except Exception as error:
-                    raise self._failure(
+                    raise dependency_failure(
+                        error,
+                        failure_model=SingleAgentTurnFailure,
                         stage="cleanup",
-                        failure_reason=str(error),
-                        terminal=not _is_retryable_dependency_error(error),
                         partial_response=agent_response,
                     ) from error
             observations = close.agent_observations
+            trajectory = close.trajectory
             stage = "verify"
 
         def dumped_observations() -> dict | None:
             return observations.model_dump(mode="json") if observations else None
 
+        def dumped_trajectory() -> dict | None:
+            return trajectory.model_dump(mode="json") if trajectory else None
+
         if stage == "verify":
+            action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
+            if action != OutcomeAction.VERIFY:
+                raise self._failure(
+                    stage="agent",
+                    failure_reason=agent_response.error.message if agent_response.error else "Agent reported failure",
+                    terminal=action == OutcomeAction.FAIL,
+                    partial_response=agent_response,
+                    agent_observations=observations,
+                )
             await self.checkpoint_boundary(
                 request,
                 lambda: {
@@ -213,10 +243,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     "handles": handles.model_dump(),
                     "response": agent_response.model_dump(mode="json"),
                     "observations": dumped_observations(),
+                    "trajectory": dumped_trajectory(),
                 },
             )
-            async with self.checkpoint_step(request, handles.resources_verify):
-                verification = await self._verify(request, handles, agent_response, observations)
+            async with self.checkpoint_step(request, handles.resources_verify_step_type):
+                verification = await self._verify(request, handles, agent_response, observations, trajectory)
             stage = "return"
 
         # Every path ends here, at the return stage.
@@ -229,6 +260,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 "handles": handles.model_dump(),
                 "result": verification.model_dump(mode="json"),
                 "observations": dumped_observations(),
+                "trajectory": dumped_trajectory(),
             },
         )
 
@@ -237,7 +269,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         return SingleAgentTurnResponse(
             episode_id=request.episode_id,
             task_id=request.task.task_id,
-            result=verification.model_copy(update={NG_AGENT_OBSERVATIONS_KEY: observations}),
+            result=verification.model_copy(
+                update={NG_AGENT_OBSERVATIONS_KEY: observations, NG_TRAJECTORY_KEY: trajectory}
+            ),
         )
 
     async def _seed_resources(
@@ -257,7 +291,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
             await raise_for_status(seed_http_response)
             handles.resources_cookies = _cookies(seed_http_response)
-            handles.resources_verify = seed_verify_mode(seed_http_response.headers)
+            handles.resources_verify_step_type = seed_verify_step_type(seed_http_response.headers)
             if seed_restarts(seed_http_response.headers):
                 await self.checkpoint_restart(request)
             if not handles.resources_cookies:
@@ -266,10 +300,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             if seed.resources_session_id != handles.resources_session_id:
                 raise ValueError("Resources seed returned a different resources_session_id")
         except Exception as error:
-            raise self._failure(
+            raise dependency_failure(
+                error,
+                failure_model=SingleAgentTurnFailure,
                 stage="seed",
-                failure_reason=str(error),
-                terminal=not _is_retryable_dependency_error(error),
             ) from error
         return seed
 
@@ -279,11 +313,19 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         resources_base_url = self.server_client._resolve_base_url(self.config.resources_server.name).rstrip("/")
         tool_accesses: list[ToolAccess] = []
         if "direct_http" in self.config.resources_tool_transports:
+            # With checkpointing on, the Resources Server refuses a tool call that does not name its attempt,
+            # so the grant carries this attempt's rollout prefix.
+            # An agent that continues the session after a restore sends its calls under the replacement's prefix.
+            tools_base_url = (
+                f"{resources_base_url}{rollout_path_prefix(request.episode_id.capture_key)}"
+                if self._checkpoint is not None
+                else resources_base_url
+            )
             tool_accesses.append(
                 DirectHTTPToolAccess(
                     name=f"{self.config.resources_server.name}.direct_http",
                     required=True,
-                    base_url=resources_base_url,
+                    base_url=tools_base_url,
                     cookies=handles.resources_cookies,
                 )
             )
@@ -311,6 +353,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     ),
                 )
             )
+            # The MCP session token names this attempt, and the Resources Server refuses it once a restore replaces it.
+            # An agent continued from a checkpoint would keep that token and see every tool call fail.
+            # So the episode restarts from its input after a crash, and its new seed mints a token for the new attempt.
+            await self.checkpoint_restart(request)
 
         try:
             agent_create_http_response = await self.server_client.post(
@@ -334,10 +380,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             if seed_restarts(agent_create_http_response.headers):
                 await self.checkpoint_restart(request)
         except Exception as error:
-            raise self._failure(
+            raise dependency_failure(
+                error,
+                failure_model=SingleAgentTurnFailure,
                 stage="agent",
-                failure_reason=str(error),
-                terminal=not _is_retryable_dependency_error(error),
             ) from error
 
     async def _invoke_agent(self, request: SingleAgentTurnRequest, handles: "SessionHandles") -> NeMoGymResponse:
@@ -347,6 +393,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 url_path=self._agent_responses_path(request),
                 json=request.task.task_input.responses_create_params,
                 cookies=handles.agent_cookies,
+                # The episode's only activation.
+                # A restore before its reply invokes it again, and the agent gives the reply it already gave.
+                headers={AGENT_ACTIVATION_HEADER: "1"},
             )
             await raise_for_status(agent_http_response)
             response_cookies = _cookies(agent_http_response)
@@ -354,10 +403,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 handles.agent_cookies = response_cookies
             return NeMoGymResponse.model_validate(await get_response_json(agent_http_response))
         except Exception as error:
-            raise self._failure(
+            raise dependency_failure(
+                error,
+                failure_model=SingleAgentTurnFailure,
                 stage="agent",
-                failure_reason=str(error),
-                terminal=not _is_retryable_dependency_error(error),
             ) from error
 
     async def _close_agent(
@@ -401,6 +450,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         handles: "SessionHandles",
         agent_response: NeMoGymResponse,
         observations: AgentObservationBundle | None,
+        trajectory: TrajectoryRecord | None = None,
     ) -> SingleAgentTurnResult:
         task_input = request.task.task_input
         try:
@@ -417,16 +467,19 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     "response": agent_response.model_dump(mode="json"),
                 },
                 cookies=handles.resources_cookies,
+                # Final cleanup closes the session, so the Resources Server keeps tracking it until then.
+                headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
             )
             await raise_for_status(verify_http_response)
             return SingleAgentTurnResult.model_validate(await get_response_json(verify_http_response))
         except Exception as error:
-            raise self._failure(
+            raise dependency_failure(
+                error,
+                failure_model=SingleAgentTurnFailure,
                 stage="verification",
-                failure_reason=str(error),
-                terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
                 agent_observations=observations,
+                trajectory=trajectory,
             ) from error
 
     def _agent_responses_path(self, request: SingleAgentTurnRequest) -> str:
@@ -449,7 +502,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         terminal: bool,
         partial_response: Any = None,
         agent_observations: Any = None,
+        trajectory: Any = None,
     ) -> HandledEpisodeError:
+        # The harness's evidence of a failed turn (its observations and the decisions it took before the failure)
+        # travels with the failure row, as it travels with a result.
         return HandledEpisodeError(
             SingleAgentTurnFailure(
                 stage=stage,
@@ -457,19 +513,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 terminal=terminal,
                 partial_response=partial_response,
                 agent_observations=agent_observations,
+                trajectory=trajectory,
             )
         )
 
 
 def _cookies(response: Any) -> dict[str, str]:
     return {str(name): str(morsel.value) for name, morsel in response.cookies.items()}
-
-
-def _is_retryable_dependency_error(error: Exception) -> bool:
-    if isinstance(error, ClientResponseError):
-        return error.status in {408, 425, 429} or error.status >= 500
-    # A dropped connection mid-body raises ClientPayloadError, which is transient like a refused connection.
-    return isinstance(error, (ClientConnectionError, ClientPayloadError, TimeoutError))
 
 
 if __name__ == "__main__":

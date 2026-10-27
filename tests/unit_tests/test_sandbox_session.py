@@ -137,6 +137,102 @@ async def test_close_joins_collection_started_by_normal_completion(session):
     collector.assert_awaited_once()
 
 
+async def test_cancellation_during_normal_finalization_waits_for_evidence(session):
+    collecting, release = asyncio.Event(), asyncio.Event()
+
+    async def collect():
+        collecting.set()
+        await release.wait()
+        return "final snapshot"
+
+    running = asyncio.create_task(execute(session, collect=collect))
+    await collecting.wait()
+    running.cancel()
+    await asyncio.sleep(0)
+    try:
+        assert not running.done()
+    finally:
+        release.set()
+        await asyncio.gather(running, return_exceptions=True)
+        await session.close(timeout=1)
+    assert session.artifacts == "final snapshot"
+
+
+async def test_failed_normal_finalization_waits_for_explicit_close_retry(session, monkeypatch):
+    failure = RuntimeError("launch outcome is unknown")
+    stop = AsyncMock(side_effect=[failure, RECEIPT])
+    monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+    collector = AsyncMock(return_value="recovered transcript")
+
+    with pytest.raises(RuntimeError, match="launch outcome is unknown") as error:
+        await execute(session, collect=collector)
+    assert error.value is failure
+    stop.assert_awaited_once()
+    collector.assert_not_awaited()
+    assert session.cleanup is None
+    session.sandbox.disconnect.assert_not_awaited()
+
+    await session.close(timeout=1)
+    assert stop.await_count == 2
+    collector.assert_awaited_once()
+    assert session.artifacts == "recovered transcript"
+    assert session.closed
+
+
+async def test_rearm_uses_fresh_launch_files_and_close_removes_the_root(session):
+    await session.begin_activation(session_dir="/session/activation-1", timeout=1)
+    first = AsyncMock(return_value="first")
+    assert await execute(session, collect=first) == "first"
+    with pytest.raises(ValueError, match="fresh supervisor directory"):
+        await session.begin_activation(session_dir=session.session_dir, timeout=1)
+    await session.begin_activation(session_dir="/session/activation-2", timeout=1)
+    second = AsyncMock(return_value="second")
+    assert await execute(session, collect=second) == "second"
+    assert session.artifacts == "second"
+    first.assert_awaited_once()
+    second.assert_awaited_once()
+    uploads = [c.args[1] for c in session.sandbox.upload.await_args_list]
+    supervisor = supervisor_client.SUPERVISOR_FILE
+    assert uploads == [f"/session/activation-1/{supervisor}", f"/session/activation-2/{supervisor}"]
+    await session.close(timeout=1)
+    assert "mv /session /session.closed" in session.sandbox.exec.await_args.args[0]
+    with pytest.raises(RuntimeError, match="closing"):
+        await session.begin_activation(session_dir="/session/activation-3", timeout=1)
+
+
+async def test_rearm_rejects_unconfirmed_termination(session, receipt_reader):
+    receipt_reader.return_value = json.dumps(RECEIPT | {"cleanup_confirmed": False})
+    with pytest.raises(RuntimeError, match="termination was not confirmed"):
+        await execute(session)
+    with pytest.raises(RuntimeError, match="termination was not confirmed"):
+        await session.begin_activation(session_dir="/session/activation-2", timeout=1)
+    assert session.session_dir == "/session"
+    await session.close(timeout=1)
+
+
+async def test_deadline_during_staging_never_launches(session, receipt_reader):
+    from time import monotonic
+
+    cancelled = asyncio.Event()
+
+    async def stage():
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    collect = AsyncMock()
+    with pytest.raises(TimeoutError):
+        await session.execute(
+            stage_activation=stage, collect=collect, timeout=10, close_timeout=1, deadline=monotonic() + 0.01
+        )
+    assert cancelled.is_set() and not session.launch_started
+    session.sandbox.exec.assert_not_awaited()
+    receipt_reader.assert_not_awaited()
+    collect.assert_not_awaited()
+    await session.close(timeout=1)
+
+
 async def test_close_during_input_preparation_prevents_launch(session, receipt_reader):
     preparing = asyncio.Event()
 
@@ -198,12 +294,12 @@ async def test_capture_timeout_does_not_block_resource_release(session):
     assert session.closed
 
 
-async def test_borrowed_cleanup_failure_retains_state_and_retries_capture(session, receipt_reader):
-    receipt_reader.return_value = json.dumps(RECEIPT | {"cleanup_confirmed": False})
+async def test_missing_borrowed_receipt_retains_state_and_retries_capture(session, receipt_reader):
+    receipt_reader.side_effect = FileNotFoundError("no receipt yet")
     collector = AsyncMock(return_value="recovered transcript")
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+    with pytest.raises(RuntimeError, match="launch outcome is unknown"):
         await execute(session, collect=collector)
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+    with pytest.raises(RuntimeError, match="launch outcome is unknown"):
         await session.close(timeout=1)
     assert session.closing and not session.closed
     assert session.cleanup is None
@@ -211,11 +307,85 @@ async def test_borrowed_cleanup_failure_retains_state_and_retries_capture(sessio
     session.sandbox.disconnect.assert_not_awaited()
     session.sandbox.stop.assert_not_awaited()
     assert all("rm -rf" not in call.args[0] for call in session.sandbox.exec.await_args_list)
+    receipt_reader.side_effect = None
     receipt_reader.return_value = json.dumps(RECEIPT)
     await session.close(timeout=1)
     collector.assert_awaited_once()
     assert session.artifacts == "recovered transcript"
     assert session.closed
+
+
+async def test_transport_error_survives_failed_cleanup_until_receipt_arrives(session, receipt_reader):
+    failure = OSError("transport failed")
+    session.sandbox.exec.side_effect = [failure, OK, OK, OK]
+    receipt_reader.side_effect = FileNotFoundError("no receipt yet")
+    collector = AsyncMock(return_value="recovered transcript")
+
+    with pytest.raises(OSError, match="transport failed") as error:
+        await execute(session, collect=collector)
+    assert error.value is failure
+    with pytest.raises(RuntimeError, match="launch outcome is unknown"):
+        await session.close(timeout=1)
+    assert not session.closed
+    assert session.cleanup is None
+    collector.assert_not_awaited()
+    session.sandbox.disconnect.assert_not_awaited()
+    session.sandbox.stop.assert_not_awaited()
+    assert all("rm -rf" not in call.args[0] for call in session.sandbox.exec.await_args_list)
+
+    receipt_reader.side_effect = None
+    await session.close(timeout=1)
+    assert session.closed
+    assert session.cleanup == RECEIPT
+    assert session.artifacts == "recovered transcript"
+    collector.assert_awaited_once()
+    session.sandbox.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "result", [SandboxExecResult("", "remove failed", 1), SandboxExecResult("", "timeout", 0, "timeout")]
+)
+async def test_directory_removal_failure_retains_borrowed_connection_for_retry(session, result):
+    collector = AsyncMock(return_value="saved transcript")
+    await execute(session, collect=collector)
+    session.sandbox.exec.side_effect = [result, OK]
+
+    with pytest.raises(RuntimeError, match="Could not remove test session files"):
+        await session.close(timeout=1)
+    assert not session.closed
+    session.sandbox.disconnect.assert_not_awaited()
+    session.sandbox.stop.assert_not_awaited()
+
+    await session.close(timeout=1)
+    assert session.closed
+    assert session.artifacts == "saved transcript"
+    collector.assert_awaited_once()
+    session.sandbox.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize("owned", [False, True])
+async def test_terminal_negative_receipt_skips_capture_but_releases_session(session, receipt_reader, owned):
+    session.owns_sandbox = owned
+    receipt = RECEIPT | {"cleanup_confirmed": False, "error": "Harness process group has not terminated"}
+    receipt_reader.return_value = json.dumps(receipt)
+    collector = AsyncMock()
+    with pytest.raises(RuntimeError, match="harness termination was not confirmed"):
+        await execute(session, collect=collector)
+    assert session.cleanup is None
+    assert session.termination_error.receipt == receipt
+    await session.close(timeout=1)
+    await session.close(timeout=1)
+    assert session.closed
+    assert session.capture_error is session.termination_error
+    collector.assert_not_awaited()
+    receipt_reader.assert_awaited_once()
+    if owned:
+        session.sandbox.stop.assert_awaited_once()
+        session.sandbox.disconnect.assert_not_awaited()
+    else:
+        session.sandbox.stop.assert_not_awaited()
+        session.sandbox.disconnect.assert_awaited_once()
+        assert "mv /session /session.closed" in session.sandbox.exec.await_args.args[0]
 
 
 async def test_owned_cleanup_deadline_falls_back_to_provider_stop(session, receipt_reader):

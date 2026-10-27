@@ -44,6 +44,7 @@ class FakeParticipant(CheckpointParticipant):
     """Executions are either running or parked; prepare is ready once none are running."""
 
     kind = "fake"
+    mode = "exported"
     record_model = Record
 
     def __init__(self) -> None:
@@ -84,7 +85,7 @@ class FakeParticipant(CheckpointParticipant):
             next_id = record.episode_id.model_copy(update={"attempt": record.episode_id.attempt + 1})
             self.executions[next_id.capture_key] = {"parked": True, "value": record.value}
 
-    async def restored_pending(self) -> list[EpisodeId]:
+    async def unclaimed(self) -> list[EpisodeId]:
         return [
             EpisodeId.from_capture_key(key) for key, execution in self.executions.items() if execution.get("restored")
         ]
@@ -136,7 +137,7 @@ async def test_a_straggler_is_retired_after_resume_not_while_a_checkpoint_is_ope
         retired = await client.post("/ng-control/v1/checkpoint/retire", json=body("retire", **straggler))
         ready = (await client.post("/ng-control/v1/checkpoint/prepare", json=body("ckpt-2"))).json()
 
-    assert refused.status_code == 409 and refused.json()["error"]["code"] == "invalid_phase"
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_invalid_phase"
     assert retired.status_code == 200
     assert ready["phase"] == "prepared"
     # Stopped and freed; only the rollout's refusal remains, until the controller forgets it.
@@ -158,7 +159,7 @@ async def test_resume_interrupts_a_waiting_prepare_and_retires_the_checkpoint() 
     assert resumed["phase"] == "idle"
     assert interrupted["phase"] == "idle"
     assert participant.accepting is True
-    assert stale.status_code == 409 and stale.json()["error"]["code"] == "stale_checkpoint"
+    assert stale.status_code == 409 and stale.json()["error"]["code"] == "checkpoint_stale"
     assert replayed_resume["idempotent"] is True
 
 
@@ -195,7 +196,7 @@ async def test_commit_restore_round_trip_and_immutable_manifest(tmp_path: Path) 
         clobber = await client.post(
             "/ng-control/v1/checkpoint/commit", json=body("ckpt-2", checkpoint_dir=str(tmp_path))
         )
-    assert clobber.status_code == 422 and clobber.json()["error"]["code"] == "invalid_checkpoint_state"
+    assert clobber.status_code == 422 and clobber.json()["error"]["code"] == "checkpoint_invalid_state"
 
     restored = FakeParticipant()
     async with make_client(restored) as client:
@@ -265,7 +266,7 @@ async def test_commit_requires_prepared_and_routes_require_bearer(tmp_path: Path
         early = await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path)))
         unauthorized = await client.get("/ng-control/v1/checkpoint/status", headers={"authorization": "Bearer no"})
 
-    assert early.status_code == 409 and early.json()["error"]["code"] == "invalid_phase"
+    assert early.status_code == 409 and early.json()["error"]["code"] == "checkpoint_invalid_phase"
     assert unauthorized.status_code == 401
 
 
@@ -314,7 +315,7 @@ async def test_forget_is_refused_while_a_checkpoint_is_open() -> None:
         await client.post("/ng-control/v1/checkpoint/prepare", json=body())
         refused = await client.post("/ng-control/v1/checkpoint/forget", json=body(rollout_ids=["r"]))
 
-    assert refused.status_code == 409 and refused.json()["error"]["code"] == "invalid_phase"
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_invalid_phase"
     assert len(participant.retired) == 1
 
 
@@ -387,7 +388,7 @@ async def test_commit_refuses_a_participant_that_is_no_longer_ready(tmp_path: Pa
         refused = await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path)))
 
     assert refused.status_code == 409 and "no longer ready" in refused.json()["error"]["detail"]
-    assert refused.json()["error"]["code"] == "export_failed"
+    assert refused.json()["error"]["code"] == "checkpoint_export_failed"
     assert not (tmp_path / "gym").exists()
 
 
@@ -408,10 +409,10 @@ async def test_a_commit_refused_because_readiness_regressed_is_final_for_its_che
         )
 
     # The later cut is never stored under the first checkpoint, whose other participants hold the earlier one.
-    assert refused.json()["error"]["code"] == retried.json()["error"]["code"] == "export_failed"
+    assert refused.json()["error"]["code"] == retried.json()["error"]["code"] == "checkpoint_export_failed"
     assert not (tmp_path / "gym").exists()
     assert fresh.status_code == 200
-    _, [record] = read_participant_state(tmp_path / "2", kind="fake", instance="fake-1")
+    _, [record], _ = read_participant_state(tmp_path / "2", kind="fake", instance="fake-1")
     assert record["value"] == 2
 
 
@@ -427,7 +428,46 @@ async def test_lease_expiry_resumes_a_participant_whose_controller_went_quiet() 
 
     assert prepared["phase"] == "prepared" and closed_after_prepare
     assert status["phase"] == "idle" and participant.accepting
-    assert stale.status_code == 409 and stale.json()["error"]["code"] == "stale_checkpoint"
+    assert stale.status_code == 409 and stale.json()["error"]["code"] == "checkpoint_stale"
+
+
+async def test_a_prepare_that_waited_through_its_lease_expiry_does_not_report_a_later_checkpoint_as_its_own(
+    tmp_path: Path,
+) -> None:
+    """A prepare still waiting when its checkpoint ends replies idle, even once another checkpoint is prepared.
+
+    The first prepare waits at a gate for the participant to become ready.
+    Meanwhile its lease expires, admission reopens, and a second checkpoint is prepared.
+    Only then does the first prepare wake.
+    """
+
+    class HeldWait(FakeParticipant):
+        def __init__(self) -> None:
+            super().__init__()
+            self.waiting = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def wait_changed(self, timeout: float) -> None:
+            self.waiting.set()
+            await self.release.wait()
+
+    participant = HeldWait()
+    participant.executions["r"] = {"parked": False, "value": 1}
+    async with make_client(participant, lease_grace=0.1) as client:
+        first_prepare = asyncio.create_task(client.post("/ng-control/v1/checkpoint/prepare", json=body(timeout=0.1)))
+        await asyncio.wait_for(participant.waiting.wait(), 5)
+        await _until(lambda: participant.accepting, "the lease expired and reopened admission")
+        participant.executions["r"]["parked"] = True
+        second = (await client.post("/ng-control/v1/checkpoint/prepare", json=body("ckpt-2"))).json()
+        participant.release.set()
+        first = (await asyncio.wait_for(first_prepare, 5)).json()
+        stale_commit = await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path)))
+
+    assert second["phase"] == "prepared"
+    # The first checkpoint ended when its lease expired.
+    # Its prepare reports it idle rather than the phase of the second checkpoint.
+    assert first["phase"] == "idle"
+    assert stale_commit.json()["error"]["code"] == "checkpoint_stale"
 
 
 async def test_renew_keeps_a_slow_but_live_controller_in_charge() -> None:
@@ -517,7 +557,7 @@ async def test_commit_io_past_the_deadline_fails_and_a_retry_is_idempotent(
         slow["on"] = False
         retried = await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path)))
 
-    assert late.status_code == 409 and late.json()["error"]["code"] == "deadline_exceeded"
+    assert late.status_code == 409 and late.json()["error"]["code"] == "checkpoint_deadline_exceeded"
     assert retried.status_code == 200 and retried.json()["manifest"]["record_count"] == 1
 
 
@@ -528,16 +568,16 @@ def test_prepare_report_caps_listed_blockers_but_counts_all() -> None:
     assert PrepareReport.model_validate(report.model_dump()) == report
 
 
-def test_seed_reply_reports_the_verify_mode_and_defaults_to_wait() -> None:
+def test_seed_reply_reports_the_verify_step_type_and_defaults_to_wait() -> None:
     from multidict import CIMultiDict
 
-    from nemo_gym._checkpoint.steps import seed_verify_mode
+    from nemo_gym._checkpoint.steps import seed_verify_step_type
 
-    assert seed_verify_mode(CIMultiDict({"X-NG-Checkpoint-Verify": "replay"})) == "replay"
-    assert seed_verify_mode({"x-ng-checkpoint-verify": "wait"}) == "wait"
-    assert seed_verify_mode({"x-ng-checkpoint-verify": "unexpected"}) == "wait"
-    assert seed_verify_mode({}) == "wait"
-    assert seed_verify_mode(None) == "wait"
+    assert seed_verify_step_type(CIMultiDict({"X-NG-Checkpoint-Verify": "replay"})) == "replay"
+    assert seed_verify_step_type({"x-ng-checkpoint-verify": "wait"}) == "wait"
+    assert seed_verify_step_type({"x-ng-checkpoint-verify": "unexpected"}) == "wait"
+    assert seed_verify_step_type({}) == "wait"
+    assert seed_verify_step_type(None) == "wait"
 
 
 async def test_an_episode_woken_by_resume_stays_parked_if_a_new_checkpoint_closes_first() -> None:
@@ -626,7 +666,7 @@ def test_stored_records_keep_their_key_order(tmp_path: Path) -> None:
     record = {"episode_id": {"rollout_id": "r", "attempt": 0}, "state": state}
     write_participant_state(tmp_path, kind="resources", instance="r", checkpoint_id="c1", records=[record])
 
-    _, [restored] = read_participant_state(tmp_path, kind="resources", instance="r")
+    _, [restored], _ = read_participant_state(tmp_path, kind="resources", instance="r")
 
     assert json.dumps(restored["state"]) == json.dumps(state)
     assert list(restored) == list(record)
@@ -820,12 +860,12 @@ def test_records_stream_to_disk_and_a_retried_commit_leaves_no_temporary_file(tm
         for attempt in range(3):
             yield {"episode_id": {"rollout_id": "r", "attempt": attempt}, "value": value}
 
-    first = write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(1))
-    again = write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(1))
+    first, _ = write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(1))
+    again, _ = write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(1))
     with pytest.raises(CheckpointStateError, match="different commit"):
         write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(2))
 
-    manifest, restored = read_participant_state(tmp_path, kind="fake", instance="f")
+    manifest, restored, _ = read_participant_state(tmp_path, kind="fake", instance="f")
     directory = participant_dir(tmp_path, kind="fake", instance="f")
     assert first == again == manifest and manifest["record_count"] == 3
     assert [record["episode_id"]["attempt"] for record in restored] == [0, 1, 2]
@@ -837,7 +877,7 @@ def test_a_corrupt_records_file_is_a_checkpoint_state_error(tmp_path: Path) -> N
     from nemo_gym._checkpoint.errors import CheckpointStateError
     from nemo_gym._checkpoint.store import participant_dir, read_participant_state, write_participant_state
 
-    manifest = write_participant_state(
+    manifest, _ = write_participant_state(
         tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=[{"episode_id": {"rollout_id": "r"}}]
     )
     (participant_dir(tmp_path, kind="fake", instance="f") / manifest["records_file"]).write_bytes(b"{not json\n")
@@ -884,7 +924,7 @@ async def _past_deadline(
     """
     for _ in range(100):
         late = await client.post(f"/ng-control/v1/checkpoint/{operation}", json=body(timeout=0.1, **fields))
-        assert late.json()["error"]["code"] == "deadline_exceeded"
+        assert late.json()["error"]["code"] == "checkpoint_deadline_exceeded"
         if until():
             return late
     raise AssertionError(f"timed out waiting until {what}")
@@ -910,9 +950,9 @@ async def test_a_commit_retried_while_its_write_runs_awaits_that_write(
         gate.set()
         retried = await retried
 
-    assert late.json()["error"]["code"] == "deadline_exceeded"
+    assert late.json()["error"]["code"] == "checkpoint_deadline_exceeded"
     assert retried.status_code == 200 and len(started) == 1
-    _, records = read_participant_state(tmp_path, kind="fake", instance="fake-1")
+    _, records, _ = read_participant_state(tmp_path, kind="fake", instance="fake-1")
     assert [record["value"] for record in records] == [1]
 
 
@@ -938,11 +978,11 @@ def test_a_losing_writer_neither_replaces_the_published_records_nor_leaves_its_o
     def records(value: int) -> list[dict]:
         return [{"episode_id": {"rollout_id": "r"}, "value": value}]
 
-    published = write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(1))
+    published, _ = write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(1))
     with pytest.raises(CheckpointStateError, match="different commit"):
         write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(2))
 
-    manifest, restored = read_participant_state(tmp_path, kind="fake", instance="f")
+    manifest, restored, _ = read_participant_state(tmp_path, kind="fake", instance="f")
     directory = participant_dir(tmp_path, kind="fake", instance="f")
     assert manifest == published and restored == records(1)
     assert sorted(path.name for path in directory.iterdir()) == ["manifest.json", published["records_file"]]
@@ -955,7 +995,8 @@ class PayloadRecord(CheckpointRecord):
 def test_payloads_are_checked_by_what_the_writer_can_write(tmp_path: Path) -> None:
     big = PayloadRecord(episode_id=EpisodeId(rollout_id="big"), state={"hash": 2**70})
     write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=[big.to_json_record()])
-    assert read_participant_state(tmp_path, kind="fake", instance="f")[1][0]["state"] == {"hash": 2**70}
+    _, [restored], _ = read_participant_state(tmp_path, kind="fake", instance="f")
+    assert restored["state"] == {"hash": 2**70}
 
     with pytest.raises(ValidationError, match="not JSON"):
         PayloadRecord(episode_id=EpisodeId(rollout_id="r"), state={"handle": object()})
@@ -1008,7 +1049,7 @@ async def test_a_restored_record_that_fails_validation_is_a_typed_error_naming_i
         )
 
     assert response.status_code == 422
-    assert response.json()["error"]["code"] == "invalid_checkpoint_state"
+    assert response.json()["error"]["code"] == "checkpoint_invalid_state"
     assert "episode 'r' is invalid" in response.json()["error"]["detail"]
     assert participant.accepting is True and participant.executions == {}
 
@@ -1074,7 +1115,7 @@ async def test_a_commit_retried_after_its_write_failed_stores_the_same_records(
     assert failed.status_code == 422
     assert elsewhere.json()["error"]["code"] == "checkpoint_conflict"
     assert retried.status_code == 200
-    _, records = read_participant_state(tmp_path, kind="fake", instance="fake-1")
+    _, records, _ = read_participant_state(tmp_path, kind="fake", instance="fake-1")
     assert [record["value"] for record in records] == [1]
 
 
@@ -1124,7 +1165,7 @@ def test_a_read_keeps_only_the_selected_records_but_verifies_the_whole_file(tmp_
     rows = [{"episode_id": {"rollout_id": f"r{index}"}, "value": index} for index in range(5)]
     write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c", records=rows)
 
-    manifest, kept = read_participant_state(
+    manifest, kept, _ = read_participant_state(
         tmp_path, kind="fake", instance="f", select=lambda row: row["value"] if row["value"] % 2 else None
     )
 
@@ -1200,7 +1241,7 @@ async def test_a_retire_after_a_restore_that_ran_out_of_time_waits_for_its_insta
         # A retire that did not wait would leave behind what the install brings.
         await asyncio.wait_for(installed.wait(), 10)
 
-    assert restore.json()["error"]["code"] == "deadline_exceeded"
+    assert restore.json()["error"]["code"] == "checkpoint_deadline_exceeded"
     assert retired.status_code == 200 and participant.executions == {}
 
 
@@ -1237,7 +1278,7 @@ async def test_admission_reopens_only_once_an_install_that_outlived_its_restore_
         release.set()
         await _until(lambda: participant.accepting, "admission reopened")
 
-    assert restore.json()["error"]["code"] == "deadline_exceeded"
+    assert restore.json()["error"]["code"] == "checkpoint_deadline_exceeded"
     assert closed_while_installing and participant.accepting
 
 
@@ -1284,7 +1325,7 @@ async def test_a_commit_deletes_unscoped_restored_state_without_retiring_it(tmp_
         await client.post("/ng-control/v1/checkpoint/prepare", json=body())
         await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path), episode_ids=[]))
 
-    # The default delete_restored retires; a participant whose retire fences overrides it.
+    # The default delete_restored retires; a participant whose retire marks overrides it.
     assert deleted == ["r-a1", "retired r-a1"]
 
 
@@ -1373,7 +1414,7 @@ async def test_a_commit_refuses_a_scope_naming_a_restart_and_commits_one_without
             json=body(checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "r"}]),
         )
 
-    assert refused.status_code == 409 and refused.json()["error"]["code"] == "restart_in_scope"
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_restart_in_scope"
     assert committed.status_code == 200 and committed.json()["episode_ids"] == ["r"]
 
 
@@ -1441,9 +1482,9 @@ async def test_an_export_that_outlives_its_commit_is_awaited_by_the_retry_not_re
         participant.executions["r"]["value"] = 2
         retried = await client.post("/ng-control/v1/checkpoint/commit", json=commit | {"deadline_ts": time.time() + 5})
 
-    assert late.json()["error"]["code"] == "deadline_exceeded"
+    assert late.json()["error"]["code"] == "checkpoint_deadline_exceeded"
     assert retried.status_code == 200 and exports == ["started"]
-    _, records = read_participant_state(tmp_path, kind="fake", instance="fake-1")
+    _, records, _ = read_participant_state(tmp_path, kind="fake", instance="fake-1")
     assert [record["value"] for record in records] == [1]
 
 
@@ -1478,7 +1519,7 @@ async def test_resume_waits_for_a_cleanup_that_outlived_its_commit_before_reopen
         resumed = await resume
 
     # A replacement may start as the attempt being deleted, so admission reopens only once the deletion finished.
-    assert late.json()["error"]["code"] == "deadline_exceeded"
+    assert late.json()["error"]["code"] == "checkpoint_deadline_exceeded"
     assert waited and resumed.status_code == 200
     assert order == ["deleted r-a1", "reopened"]
 
@@ -1558,7 +1599,7 @@ async def test_resume_past_its_deadline_on_a_hung_cleanup_changes_nothing_and_ca
         resumed = await client.post("/ng-control/v1/checkpoint/resume", json=body())
 
     # Admission stays closed while the deletion runs: a replacement may start as the attempt it deletes.
-    assert late.json()["error"]["code"] == "deadline_exceeded"
+    assert late.json()["error"]["code"] == "checkpoint_deadline_exceeded"
     assert status["phase"] == "prepared"
     assert resumed.status_code == 200 and participant.accepting
     assert "r-a1" not in participant.executions
@@ -1582,7 +1623,7 @@ async def test_a_retry_naming_the_same_scope_in_another_order_awaits_the_same_wr
             "/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path), episode_ids=scope[::-1])
         )
 
-    assert first.json()["error"]["code"] == "deadline_exceeded"
+    assert first.json()["error"]["code"] == "checkpoint_deadline_exceeded"
     assert retried.status_code == 200 and retried.json()["episode_ids"] == ["a", "b"]
 
 
@@ -1614,11 +1655,11 @@ async def test_a_failed_export_is_final_for_its_checkpoint_and_a_new_one_commits
         )
 
     for refused in (failed, retried):
-        assert refused.status_code == 409 and refused.json()["error"]["code"] == "export_failed"
+        assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_export_failed"
     # The retry neither exported again nor stored anything for the failed checkpoint.
     assert len(exports) == 2 and not first_dir.exists()
     assert committed.status_code == 200
-    _, records = read_participant_state(second_dir, kind="fake", instance="fake-1")
+    _, records, _ = read_participant_state(second_dir, kind="fake", instance="fake-1")
     assert [record["value"] for record in records] == [2]
 
 
@@ -1709,10 +1750,83 @@ async def test_resume_waits_for_an_install_that_outlived_its_restore_and_retries
         participant.fail_open = False
         resumed = await client.post("/ng-control/v1/checkpoint/resume", json=body("restore-1"))
 
-    assert restore.json()["error"]["code"] == "deadline_exceeded"
-    assert waiting.status_code == 409 and waiting.json()["error"]["code"] == "deadline_exceeded"
+    assert restore.json()["error"]["code"] == "checkpoint_deadline_exceeded"
+    assert waiting.status_code == 409 and waiting.json()["error"]["code"] == "checkpoint_deadline_exceeded"
     assert closed_while_installing
     assert resumed.json() == {"phase": "idle", "idempotent": False} and participant.accepting
+
+
+async def test_a_prepare_while_an_install_that_outlived_its_restore_runs_is_refused_until_admission_reopens(
+    tmp_path: Path,
+) -> None:
+    write_participant_state(
+        tmp_path,
+        kind="fake",
+        instance="fake-1",
+        checkpoint_id="c1",
+        records=[{"episode_id": {"rollout_id": "r"}, "value": 1}],
+    )
+    release = threading.Event()
+    installing: list[None] = []
+
+    class SlowInstall(FakeParticipant):
+        async def install(self, records, scope) -> None:
+            installing.append(None)
+            await asyncio.to_thread(release.wait, 5)
+            self.restore_records(records)
+
+    participant = SlowInstall()
+    async with make_client(participant) as client:
+        await _past_deadline(
+            client,
+            "restore",
+            lambda: installing,
+            "the install started",
+            checkpoint_id="r1",
+            checkpoint_dir=str(tmp_path),
+            episode_ids=[{"rollout_id": "r"}],
+        )
+        refused = await client.post("/ng-control/v1/checkpoint/prepare", json=body("ckpt-2"))
+        status = (await client.get("/ng-control/v1/checkpoint/status")).json()
+        release.set()
+        # The failed restore's own recovery reopens admission once its install has finished.
+        await _until(lambda: participant.accepting, "admission reopened")
+        prepared = await client.post("/ng-control/v1/checkpoint/prepare", json=body("ckpt-3"))
+
+    # A checkpoint that began now would take over the closed admission, and the recovery would never run.
+    assert refused.status_code == 503 and refused.json()["error"]["code"] == "checkpoint_restore_recovery_pending"
+    assert status["phase"] == "idle" and status["checkpoint_id"] is None
+    assert prepared.json()["phase"] == "prepared"
+
+
+async def test_a_prepare_after_a_failed_restore_could_not_reopen_is_refused_until_a_resume_recovers(
+    tmp_path: Path,
+) -> None:
+    write_participant_state(
+        tmp_path,
+        kind="fake",
+        instance="fake-1",
+        checkpoint_id="c1",
+        records=[{"episode_id": {"rollout_id": "r"}, "value": 1}],
+    )
+    participant = _ClosingThenStuck()
+    restore = body("restore-1", checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "r"}])
+    async with make_client(participant) as client:
+        with pytest.raises(RuntimeError, match="close failed"):
+            await client.post("/ng-control/v1/checkpoint/restore", json=restore)
+        # Closing and reopening work again, but nothing has reopened admission yet.
+        participant.fail_open = False
+        participant.close_admission = FakeParticipant.close_admission.__get__(participant)
+        refused = await client.post("/ng-control/v1/checkpoint/prepare", json=body("ckpt-2"))
+        still_closed = not participant.accepting
+        # The controller resumes after a failed prepare, which finishes the recovery.
+        resumed = await client.post("/ng-control/v1/checkpoint/resume", json=body("ckpt-2"))
+        prepared = await client.post("/ng-control/v1/checkpoint/prepare", json=body("ckpt-3"))
+
+    assert refused.status_code == 503 and refused.json()["error"]["code"] == "checkpoint_restore_recovery_pending"
+    assert still_closed
+    assert resumed.json() == {"phase": "idle", "idempotent": False}
+    assert prepared.json()["phase"] == "prepared"
 
 
 async def test_a_retire_past_its_deadline_still_refuses_its_attempts() -> None:
@@ -1725,7 +1839,7 @@ async def test_a_retire_past_its_deadline_still_refuses_its_attempts() -> None:
             retired = await client.post("/ng-control/v1/checkpoint/retire", json=late)
         gc.collect()
 
-    assert retired.status_code == 409 and retired.json()["error"]["code"] == "deadline_exceeded"
+    assert retired.status_code == 409 and retired.json()["error"]["code"] == "checkpoint_deadline_exceeded"
     # The refusal is in place although nothing was stopped: a retry stops the attempt.
     with pytest.raises(StaleAttemptError):
         participant.retired.check(EpisodeId(rollout_id="r"))
@@ -1798,7 +1912,7 @@ async def test_a_retire_stops_its_episodes_concurrently_and_a_cut_short_one_canc
         open_at.append(8)
         retried = await client.post("/ng-control/v1/checkpoint/retire", json=body("retire", timeout=30, **retire))
 
-    assert cut_short.json()["error"]["code"] == "deadline_exceeded"
+    assert cut_short.json()["error"]["code"] == "checkpoint_deadline_exceeded"
     assert stopped_before_retry > 1
     assert retried.status_code == 200 and participant.executions == {}
     assert 8 <= peak <= control._STOP_CONCURRENCY
@@ -1954,7 +2068,7 @@ def test_a_retried_write_syncs_the_participant_directory_of_the_manifest_it_find
     assert (directory / "manifest.json").exists()
     synced.clear()
 
-    manifest = write_participant_state(tmp_path, **write)
+    manifest, _ = write_participant_state(tmp_path, **write)
 
     # The retry finds the manifest the failed write published, and makes it durable before reporting it.
     assert manifest["checkpoint_id"] == "c1"
@@ -2012,7 +2126,7 @@ async def test_a_restore_past_its_deadline_still_refuses_the_attempts_it_replace
     async with make_client(participant) as client:
         restored = await client.post("/ng-control/v1/checkpoint/restore", json=late)
 
-    assert restored.json()["error"]["code"] == "deadline_exceeded"
+    assert restored.json()["error"]["code"] == "checkpoint_deadline_exceeded"
     with pytest.raises(StaleAttemptError):
         participant.retired.check(EpisodeId(rollout_id="r"))
     assert participant.executions == {} and participant.accepting
@@ -2042,6 +2156,52 @@ async def test_an_export_that_outlives_its_commit_and_then_fails_is_final_for_it
         participant.executions["r"]["value"] = 2
         retried = await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path)))
 
-    assert late.json()["error"]["code"] == "deadline_exceeded"
-    assert retried.status_code == 409 and retried.json()["error"]["code"] == "export_failed"
+    assert late.json()["error"]["code"] == "checkpoint_deadline_exceeded"
+    assert retried.status_code == 409 and retried.json()["error"]["code"] == "checkpoint_export_failed"
     assert len(exports) == 1 and not (tmp_path / "gym").exists()
+
+
+def _participants_by_mode() -> list:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nemo_gym._checkpoint.agent import AgentSessionParticipant, RestartOnlyAgentParticipant
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant
+    from nemo_gym._checkpoint.model import PolicyModelParticipant
+    from nemo_gym._checkpoint.resources import ResourcesParticipant
+
+    return [
+        pytest.param(lambda: AgentSessionParticipant(MagicMock()), "agent", "exported", id="session-agent"),
+        pytest.param(RestartOnlyAgentParticipant, "agent", "restart_only", id="restart-only-agent"),
+        pytest.param(lambda: EnvironmentParticipant(mode="exported"), "environment", "exported", id="environment"),
+        pytest.param(
+            lambda: EnvironmentParticipant(mode="restart_only"),
+            "environment",
+            "restart_only",
+            id="restart-only-environment",
+        ),
+        *(
+            pytest.param(lambda mode=mode: ResourcesParticipant(AsyncMock(), mode), "resources", mode, id=mode)
+            for mode in ("restart_only", "stateless", "exported")
+        ),
+        pytest.param(PolicyModelParticipant, "model", "exported", id="policy-model"),
+    ]
+
+
+@pytest.mark.parametrize(("build", "kind", "mode"), _participants_by_mode())
+async def test_every_participant_reports_its_checkpoint_mode_beside_its_kind(build, kind: str, mode: str) -> None:
+    app = FastAPI()
+    install_participant(app, build(), auth_token="t", instance_name="server", lease_grace_seconds=60)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://server") as client:
+        status = (await client.get("/ng-control/v1/checkpoint/status", headers={"Authorization": "Bearer t"})).json()
+
+    assert (status["kind"], status["mode"]) == (kind, mode)
+
+
+@pytest.mark.parametrize("mode", [None, "export"], ids=["missing", "misspelled"])
+def test_a_participant_without_a_checkpoint_mode_is_refused(mode: Optional[str]) -> None:
+    """A controller could not tell whether such a server's rollouts start over after a crash."""
+    participant = FakeParticipant()
+    participant.mode = mode
+
+    with pytest.raises(ValueError, match="FakeParticipant declares no checkpoint mode"):
+        install_participant(FastAPI(), participant, auth_token="t", instance_name="fake", lease_grace_seconds=60)

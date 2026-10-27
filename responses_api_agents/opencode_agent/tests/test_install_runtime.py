@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -241,3 +242,95 @@ def test_musl_bootstraps_with_apk_and_downloads_matching_binary(sandbox: tuple[P
     assert (root / "packages.log").read_text().splitlines() == ["add --no-cache curl"]
     arch = {"x86_64": "x64-baseline", "aarch64": "arm64"}[os.uname().machine]
     assert f"opencode-linux-{arch}-musl.tar.gz" in (root / "download.log").read_text()
+
+
+@pytest.mark.parametrize("valid_digest", [True, False])
+def test_preinstalled_binary_needs_no_download_and_checks_digest(sandbox, valid_digest):
+    root, env = sandbox
+    binary = root / "preinstalled-opencode"
+    binary.write_text("#!/bin/bash\necho 1.17.11\n")
+    binary.chmod(0o755)
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest() if valid_digest else "0" * 64
+    result = subprocess.run(
+        [str(root / "bin/bash"), str(root / "install.sh"), str(root / "runtime"), "1.17.11", str(binary), digest],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert (result.returncode == 0) is valid_digest, result.stderr
+    assert not (root / "download.log").exists()
+    assert not (root / "packages.log").exists()
+    if valid_digest:
+        assert (root / "runtime/opencode").read_bytes() == binary.read_bytes()
+    else:
+        assert "digest mismatch" in result.stderr
+        assert not (root / "runtime/opencode").exists()
+
+
+def seed_binary(
+    root: Path, env: dict[str, str], binary: Path, *, version: str = "1.17.11", digest: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            str(root / "bin/bash"),
+            str(root / "install.sh"),
+            str(root / "runtime"),
+            version,
+            str(binary),
+            digest if digest is not None else hashlib.sha256(binary.read_bytes()).hexdigest(),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+
+@pytest.mark.parametrize("failure", ["digest", "version"])
+def test_invalid_seed_preserves_existing_executable(sandbox, failure):
+    root, env = sandbox
+    binary = root / "preinstalled-opencode"
+    binary.write_text("#!/bin/bash\necho 1.17.11\n")
+    assert seed_binary(root, env, binary).returncode == 0
+    target = root / "runtime/opencode"
+    original, inode = target.read_bytes(), target.stat().st_ino
+    binary.write_text("#!/bin/bash\necho 1.17.10\n")
+    result = seed_binary(root, env, binary, digest="0" * 64 if failure == "digest" else None)
+    assert result.returncode != 0 and f"{failure} mismatch" in result.stderr
+    assert target.read_bytes() == original and target.stat().st_ino == inode
+    assert not list(target.parent.glob(".opencode-*"))
+    assert not (root / "download.log").exists() and not (root / "packages.log").exists()
+
+
+@pytest.mark.skipif(shutil.which("cc") is None, reason="Native executable regression requires a C compiler")
+def test_reseeding_running_executable_publishes_a_separate_inode(sandbox):
+    root, env = sandbox
+    source = root / "opencode.c"
+    source.write_text(
+        "#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n"
+        "int main(int argc, char **argv) {\n"
+        '  if (argc == 2 && strcmp(argv[1], "--version") == 0) { puts("1.17.11"); return 0; }\n'
+        '  puts("ready"); fflush(stdout);\n'
+        "  for (;;) pause();\n}\n"
+    )
+    binary = root / "preinstalled-opencode"
+    subprocess.run([shutil.which("cc"), str(source), "-o", str(binary)], check=True, timeout=30)
+    first = seed_binary(root, env, binary)
+    assert first.returncode == 0, first.stderr
+    target = root / "runtime/opencode"
+    inode = target.stat().st_ino
+    with subprocess.Popen([str(target)], stdout=subprocess.PIPE, text=True) as process:
+        try:
+            assert process.stdout.readline() == "ready\n"
+            assert Path(f"/proc/{process.pid}/exe").stat().st_ino == inode
+            second = seed_binary(root, env, binary)
+            assert second.returncode == 0, second.stderr
+            assert process.poll() is None
+            assert Path(f"/proc/{process.pid}/exe").stat().st_ino == inode
+            assert target.stat().st_ino != inode and target.read_bytes() == binary.read_bytes()
+        finally:
+            process.terminate()
+            process.wait(timeout=10)
+    assert not list(target.parent.glob(".opencode-*"))
+    assert not (root / "download.log").exists() and not (root / "packages.log").exists()

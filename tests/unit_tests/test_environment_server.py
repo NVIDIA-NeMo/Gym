@@ -2,16 +2,25 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from typing import Any
+import re
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import anyio
 import pytest
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError, InvalidURL
 from fastapi import Body
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from nemo_gym.base_environment_server import BaseEnvironmentServer, BaseEnvironmentServerConfig, CleanupContext
+from nemo_gym.base_environment_server import (
+    BaseEnvironmentServer,
+    BaseEnvironmentServerConfig,
+    CleanupContext,
+    dependency_failure,
+    is_retryable_dependency_error,
+    is_retryable_dependency_status,
+)
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import (
     BaseEpisodeRequest,
@@ -83,6 +92,39 @@ def _environment_server(**config_overrides: Any) -> _EnvironmentServer:
     return _EnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
+@pytest.mark.parametrize(
+    "declarations, error",
+    [
+        ({"checkpoint_mode": "stateless"}, "checkpoint_mode='stateless'"),
+        ({"checkpoint_mode": "exportd"}, "checkpoint_mode='exportd'"),
+    ],
+)
+def test_an_environment_server_with_an_unknown_checkpoint_declaration_fails_at_startup(
+    declarations: dict[str, Any], error: str
+) -> None:
+    annotations = {name: ClassVar[Any] for name in declarations}
+    server_type = type("Declared", (_EnvironmentServer,), {**declarations, "__annotations__": annotations})
+    config = _environment_server().config
+
+    with pytest.raises(ValueError, match=re.escape(error)):
+        server_type(config=config, server_client=MagicMock(spec=ServerClient)).setup_webserver()
+
+
+@pytest.mark.parametrize("mode", ["restart_only", "exported"])
+def test_an_environment_servers_checkpoint_status_reports_its_declared_mode(mode: str) -> None:
+    """A controller can refuse, from discovery alone, a server whose episodes start over after a crash."""
+    server_type = type("Declared", (_EnvironmentServer,), {"checkpoint_mode": mode})
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "t"}}
+    server = server_type(config=_environment_server().config, server_client=client)
+
+    status = TestClient(server.setup_webserver()).get(
+        "/ng-control/v1/checkpoint/status", headers={"Authorization": "Bearer t"}
+    )
+
+    assert (status.json()["kind"], status.json()["mode"]) == ("environment", mode)
+
+
 def test_environment_server_binds_concrete_schema_and_rejects_invalid_input() -> None:
     app = _environment_server().setup_webserver()
     schema = app.openapi()["paths"]["/run"]["post"]["requestBody"]["content"]["application/json"]["schema"]
@@ -149,7 +191,7 @@ def test_cleanup_is_lifo() -> None:
     assert calls == ["second", "first"]
 
 
-def test_cleanup_is_bounded() -> None:
+def test_hung_cleanup_does_not_skip_later_resource_owner() -> None:
     calls: list[str] = []
     context = CleanupContext(
         episode_id=_request().episode_id,
@@ -161,12 +203,55 @@ def test_cleanup_is_bounded() -> None:
 
     async def hung() -> None:
         calls.append("hung")
-        await asyncio.sleep(60)
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            calls.append("cancelled")
+            raise
 
     context.register_cleanup("first", first)
     context.register_cleanup("hung", hung)
-    asyncio.run(context.aclose())
-    assert calls == ["hung"]
+
+    async def run() -> None:
+        # A missing per-callback deadline must fail promptly instead of passing after 60 seconds.
+        await asyncio.wait_for(context.aclose(), timeout=1)
+
+    asyncio.run(run())
+    assert calls == ["hung", "cancelled", "first"]
+
+
+def test_each_cleanup_has_its_own_budget() -> None:
+    calls: list[str] = []
+    context = CleanupContext(
+        episode_id=_request().episode_id,
+        cleanup_timeout_seconds=0.05,
+    )
+
+    async def sandbox() -> None:
+        calls.append("sandbox")
+
+    async def slow_but_finishes() -> None:
+        await asyncio.sleep(0.03)
+        calls.append("slow")
+
+    async def hung() -> None:
+        calls.append("hung")
+        await asyncio.sleep(60)
+
+    context.register_cleanup("sandbox", sandbox)
+    context.register_cleanup("slow", slow_but_finishes)
+    context.register_cleanup("hung", hung)
+    loop = asyncio.new_event_loop()
+    try:
+        started = loop.time()
+        loop.run_until_complete(context.aclose())
+        elapsed = loop.time() - started
+    finally:
+        loop.close()
+    # Under one shared budget the slow close would have eaten the time the hung one left; here each
+    # callback is bounded on its own and the sandbox stop at the bottom of the stack still happens.
+    assert calls == ["hung", "slow", "sandbox"]
+    assert elapsed < 0.05 * 3
 
 
 def test_explicit_cleanup_is_bounded_and_final_unwind_retries() -> None:
@@ -370,7 +455,7 @@ async def test_the_episodes_of_a_protocol_without_boundaries_are_restarts(record
     started, release = asyncio.Event(), asyncio.Event()
 
     class _Blocking(_EnvironmentServer):
-        checkpoint_boundaries = records_boundaries
+        checkpoint_mode = "exported" if records_boundaries else "restart_only"
 
         async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
             started.set()
@@ -379,7 +464,7 @@ async def test_the_episodes_of_a_protocol_without_boundaries_are_restarts(record
 
     config = _environment_server().config
     server = _Blocking(config=config, server_client=MagicMock(spec=ServerClient))
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     server._checkpoint = participant
     running = asyncio.create_task(server.run_request(_request()))
     await started.wait()
@@ -400,7 +485,7 @@ async def test_a_refused_duplicate_run_leaves_the_live_episode_tracked() -> None
     started, release = asyncio.Event(), asyncio.Event()
 
     class _Blocking(_EnvironmentServer):
-        checkpoint_boundaries = True
+        checkpoint_mode = "exported"
 
         async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
             started.set()
@@ -408,7 +493,7 @@ async def test_a_refused_duplicate_run_leaves_the_live_episode_tracked() -> None
             return await super().run(request, cleanup)
 
     server = _Blocking(config=_environment_server().config, server_client=MagicMock(spec=ServerClient))
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     server._checkpoint = participant
     running = asyncio.create_task(server.run_request(_request()))
     await started.wait()
@@ -427,7 +512,7 @@ async def test_an_episode_is_untracked_even_if_its_cleanup_is_cancelled() -> Non
     from nemo_gym._checkpoint.environment import EnvironmentParticipant
 
     class _CancelledCleanup(_EnvironmentServer):
-        checkpoint_boundaries = True
+        checkpoint_mode = "exported"
 
         async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
             async def cancelled() -> None:
@@ -438,10 +523,146 @@ async def test_an_episode_is_untracked_even_if_its_cleanup_is_cancelled() -> Non
             return await super().run(request, cleanup)
 
     server = _CancelledCleanup(config=_environment_server().config, server_client=MagicMock(spec=ServerClient))
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     server._checkpoint = participant
     with pytest.raises(asyncio.CancelledError):
         await server.run_request(_request())
 
     assert participant.readiness().blocker_count == 0
     assert participant.export_records(None) == []
+
+
+@pytest.mark.parametrize(
+    ("status", "retryable"),
+    [
+        (400, False),
+        (401, False),
+        (404, False),
+        (409, False),
+        (413, False),
+        (422, False),
+        (408, True),
+        (425, True),
+        (429, True),
+        (500, True),
+        (503, True),
+        (599, True),
+    ],
+)
+def test_dependency_statuses_retry_only_timeouts_rate_limits_and_server_errors(status: int, retryable: bool) -> None:
+    assert is_retryable_dependency_status(status) is retryable
+    assert is_retryable_dependency_error(ClientResponseError(MagicMock(), (), status=status)) is retryable
+
+
+@pytest.mark.parametrize(
+    ("error", "retryable"),
+    [
+        (ClientConnectionError("refused"), True),
+        (ClientPayloadError("connection dropped mid-body"), True),
+        (TimeoutError("timed out"), True),
+        (InvalidURL("not a url"), False),
+        (ValueError("reply failed validation"), False),
+    ],
+)
+def test_only_transport_failures_retry_without_a_status(error: Exception, retryable: bool) -> None:
+    assert is_retryable_dependency_error(error) is retryable
+
+
+class _EvidenceFailure(EpisodeFailure):
+    partial_response: str | None = None
+
+
+def test_dependency_failure_keeps_the_dependencys_reason_and_classifies_it() -> None:
+    refusal = ClientResponseError(MagicMock(), (), status=422, message="Unprocessable Content")
+    refusal.response_content = b'{"detail":"agent does not support sandbox access"}'
+
+    failure = dependency_failure(
+        refusal, failure_model=_EvidenceFailure, stage="agent", partial_response="partial"
+    ).failure
+
+    assert type(failure) is _EvidenceFailure
+    assert failure.stage == "agent"
+    assert failure.terminal is True
+    assert failure.failure_reason.startswith("422, message='Unprocessable Content'")
+    assert "agent does not support sandbox access" in failure.failure_reason
+    assert failure.partial_response == "partial"
+
+
+def test_dependency_failure_names_the_error_type_bounds_the_reason_and_honors_terminal() -> None:
+    failure = dependency_failure(
+        TimeoutError("x" * 3000), failure_model=EpisodeFailure, stage="cleanup", name_error_type=True
+    ).failure
+    assert failure.terminal is False
+    assert failure.failure_reason.startswith("TimeoutError: xxx")
+    assert len(failure.failure_reason) == 2000
+
+    forced = dependency_failure(
+        TimeoutError("timed out"), failure_model=EpisodeFailure, stage="cleanup", terminal=True
+    ).failure
+    assert forced.terminal is True
+    assert forced.failure_reason == "timed out"
+
+
+def test_a_protocol_may_derive_the_episode_deadline_per_request() -> None:
+    """`episode_timeout_seconds` is the one place the per-episode deadline comes from: the base returns the
+    configured default, and a server that derives a longer one for a request (the Harbor server, for a multi-step
+    task whose steps add up to more than the default) is held to that, not to the default."""
+
+    class _SlowEnvironmentServer(_EnvironmentServer):
+        async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
+            await asyncio.sleep(0.05)
+            return _Response(episode_id=request.episode_id, task_id=request.task.task_id, result="late")
+
+    class _DerivingEnvironmentServer(_SlowEnvironmentServer):
+        asked: list[str] = []
+
+        async def episode_timeout_seconds(self, request: _Request) -> float | None:
+            self.asked.append(request.task.task_input.value)
+            return 5.0
+
+    config = _environment_server(default_episode_timeout_seconds=0.01).config
+    assert (
+        asyncio.run(_environment_server(default_episode_timeout_seconds=0.01).episode_timeout_seconds(_request()))
+        == 0.01
+    )
+    cut = asyncio.run(
+        _SlowEnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient)).run_request(_request())
+    )
+    assert cut.failure is not None and cut.failure.failure_reason == "Episode timed out"
+    server = _DerivingEnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient))
+    response = asyncio.run(server.run_request(_request()))
+    assert response.failure is None and response.result == "late"
+    assert server.asked == [_request().task.task_input.value]
+
+
+async def test_a_request_cancelled_while_its_bound_resolves_releases_its_admission_slot() -> None:
+    """The bound is read after the admission slot is taken; the Harbor server awaits the task's snapshot there.
+    A request cancelled (or failing) during that lookup must give the slot back, or a concurrency of one is spent
+    for good and every later request times out at admission."""
+    lookup = asyncio.Event()
+
+    class _ResolvingEnvironmentServer(_EnvironmentServer):
+        async def episode_timeout_seconds(self, request: _Request) -> float | None:
+            await lookup.wait()
+            return 1
+
+    class _UnresolvedEnvironmentServer(_EnvironmentServer):
+        async def episode_timeout_seconds(self, request: _Request) -> float | None:
+            raise RuntimeError("snapshot lost")
+
+    config = _environment_server(max_concurrent_episodes=1, queue_timeout_seconds=0.2).config
+    server = _ResolvingEnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient))
+    first = asyncio.create_task(server.run_request(_request()))
+    while not server._admission.locked():
+        await asyncio.sleep(0)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    lookup.set()
+    response = await server.run_request(_request())
+    assert response.failure is None and response.result == "result"
+
+    server = _UnresolvedEnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient))
+    response = await server.run_request(_request())
+    assert response.failure is not None and "RuntimeError: snapshot lost" in response.failure.failure_reason
+    assert not server._admission.locked()

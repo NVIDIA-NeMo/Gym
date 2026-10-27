@@ -39,6 +39,7 @@ import logging
 import re
 import time
 import uuid
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -64,9 +65,11 @@ from nemo_gym._checkpoint.generation_cut import (
     GenerationCutPrefixAck,
     GenerationCutReceipt,
 )
+from nemo_gym._checkpoint.telemetry import checkpoint_span
 from nemo_gym.chat_streaming import SSE_KEEPALIVE
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.episode_types import EpisodeId
+from nemo_gym.telemetry.gym_metrics import record_checkpoint_event
 from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
 from nemo_gym.token_id_capture.external_capture import publish_deferred_commit
 from nemo_gym.token_id_capture.fingerprint import conversation_digest
@@ -81,7 +84,7 @@ _ROLLOUT_PREFIX = re.compile(rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<capture_k
 
 # Request fields that compile into a structured decoder.
 # A cut prefix cannot restore that decoder's state,
-# so such a call restarts after a restore instead of continuing its prefix.
+# so such a call regenerates after a restore instead of continuing its prefix.
 _STRUCTURED_GENERATION_FIELDS = (
     "guided_choice",
     "guided_grammar",
@@ -242,8 +245,8 @@ class _Ticket:
     cut: Optional[GenerationCutPrefixAck] = None
     # The durable cut as a record, built once when the worker acknowledges it.
     cut_record: Optional[GenerationCutRecord] = None
-    # Why this call must restart rather than continue a cut prefix (constrained decoding), if it must.
-    cut_restart_reason: Optional[str] = None
+    # Why this call must regenerate rather than continue a cut prefix (constrained decoding), if it must.
+    cut_regenerate_reason: Optional[str] = None
     # A restored cut claimed from another process for this call, and whether the call used it.
     claimed_cut: Optional[GenerationCutRecord] = None
     claimed_cut_used: bool = False
@@ -285,7 +288,7 @@ def attach_capture_context(context: CaptureContext) -> None:
         context.publish_on_delivery = True
 
 
-def generation_cut_restart_reason(body: Mapping[str, Any]) -> Optional[str]:
+def generation_cut_regenerate_reason(body: Mapping[str, Any]) -> Optional[str]:
     """Why a generation request cannot continue a cut prefix: its decoding is constrained."""
     tool_choice = body.get("tool_choice")
     if isinstance(tool_choice, str):
@@ -310,7 +313,7 @@ def note_generation_request(body: Mapping[str, Any]) -> None:
     """Record the request the current policy call sends, so a checkpoint knows whether it may cut it."""
     ticket = _CURRENT_TICKET.get()
     if ticket is not None:
-        ticket.cut_restart_reason = generation_cut_restart_reason(body)
+        ticket.cut_regenerate_reason = generation_cut_regenerate_reason(body)
 
 
 def note_generation_backend(base_url: Any) -> None:
@@ -444,7 +447,7 @@ class PolicyGate:
 
     def admission_hook(self, ticket: _Ticket) -> Callable[[CaptureContext, CaptureAdmission], CaptureAdmission]:
         def continue_restored_cut(context: CaptureContext, admission: CaptureAdmission) -> CaptureAdmission:
-            if ticket.cut_restart_reason is not None:
+            if ticket.cut_regenerate_reason is not None:
                 return admission
             digest = conversation_digest(list(context.request_items or []))
             record = self.restored_cuts.take(ticket, context.rollout_id, digest)
@@ -510,7 +513,7 @@ class PolicyGate:
             held=len(self.tickets) - sum(ticket.response_started for ticket in self.tickets),
             cut=sum(ticket.cut_record is not None for ticket in undelivered),
             cut_failed=sum(ticket.cut is not None and ticket.cut_record is None for ticket in undelivered),
-            cut_skipped=sum(ticket.cut_restart_reason is not None for ticket in undelivered),
+            cut_skipped=sum(ticket.cut_regenerate_reason is not None for ticket in undelivered),
         )
 
     def snapshot(self) -> GateSnapshot:
@@ -530,7 +533,7 @@ class PolicyGate:
             if (
                 ticket.backend is not None
                 and ticket.undelivered_call_id is not None
-                and ticket.cut_restart_reason is None
+                and ticket.cut_regenerate_reason is None
             ):
                 by_backend.setdefault(ticket.backend, []).append(ticket)
         await asyncio.gather(*(self._cut(request, backend, tickets) for backend, tickets in by_backend.items()))
@@ -549,16 +552,24 @@ class PolicyGate:
         inventory = GenerationCutInventory.build(
             checkpoint_id=request.checkpoint_id, server_name=self.server_name, active_prefixes=list(prefixes.values())
         )
-        try:
-            # Half of what remains: a cut is optional, and the stages after this one need time too.
-            async with asyncio.timeout(max(0.0, request.deadline_ts - time.time()) / 2):
-                receipt = await self.cut_requester(backend, inventory)
-            receipt.validate_for(inventory)
-            acks = {ack.ticket_id: ack for ack in receipt.prefixes}
-        except Exception:
-            # A missing cut only costs regeneration after restore; never block the checkpoint on it.
-            LOGGER.warning("generation cut failed on %s; those calls regenerate after restore", backend, exc_info=True)
-            acks = {ticket_id: GenerationCutPrefixAck.failure(prefix) for ticket_id, prefix in prefixes.items()}
+        with checkpoint_span("gym.checkpoint.generation_cut") as span:
+            span.set(calls=len(prefixes))
+            try:
+                # Half of what remains: a cut is optional, and the stages after this one need time too.
+                async with asyncio.timeout(max(0.0, request.deadline_ts - time.time()) / 2):
+                    receipt = await self.cut_requester(backend, inventory)
+                receipt.validate_for(inventory)
+                acks = {ack.ticket_id: ack for ack in receipt.prefixes}
+            except Exception:
+                # A missing cut only costs regeneration after restore; never block the checkpoint on it.
+                LOGGER.warning(
+                    "generation cut failed on %s; those calls regenerate after restore", backend, exc_info=True
+                )
+                acks = {ticket_id: GenerationCutPrefixAck.failure(prefix) for ticket_id, prefix in prefixes.items()}
+            dispositions = Counter(ack.disposition for ack in acks.values())
+            span.set(**{f"cut_{disposition}": count for disposition, count in dispositions.items()})
+        for disposition, count in dispositions.items():
+            record_checkpoint_event("generation_cut", count, disposition=disposition)
         failed = sum(ack.disposition != "durable_prefix" for ack in acks.values())
         if failed:
             LOGGER.warning(
@@ -626,7 +637,17 @@ def export_model_records(
     records = []
     for episode_id in episode_ids:
         key = episode_id.capture_key
-        rows = [row for row in ledger.export_rows(key) if row.get("model_call_id") not in undelivered]
+        # Admission intents belong to the live attempt, not to its delivered history.
+        # A restored attempt reissues undelivered calls with new IDs; carrying their
+        # intents over would leave captures pending forever, including across servers.
+        # Closure also belongs to the old attempt; the replacement must admit new calls.
+        rows = [
+            row
+            for row in ledger.export_rows(key)
+            if not row.get("intent")
+            and not row.get("admissions_closed")
+            and row.get("model_call_id") not in undelivered
+        ]
         cuts = list(cuts_by_key.get(key, []))
         # A restored cut that no re-issued call has consumed yet is still this episode's prefix,
         # unless a newer call of the episode was cut since.
@@ -713,7 +734,7 @@ def import_model_records(
     if records and ledger is None:
         raise ControlError("checkpoint holds capture-ledger rows but this model server has no capture ledger")
     targets = [
-        (record, next_attempt(record.episode_id).capture_key, _with_capture_key(record.rows, record.episode_id))
+        (record, next_attempt(record.episode_id).capture_key, _with_source_capture_key(record.rows, record.episode_id))
         for record in records
     ]
     for record, _, _ in targets:
@@ -731,17 +752,19 @@ def import_model_records(
     return {target: record.generation_cuts[0] for record, target, _ in targets if record.generation_cuts}
 
 
-def _with_capture_key(rows: list[dict[str, Any]], episode_id: EpisodeId) -> list[dict[str, Any]]:
+def _with_source_capture_key(rows: list[dict[str, Any]], episode_id: EpisodeId) -> list[dict[str, Any]]:
     """Stamp each staged row with the capture key it was staged under.
 
     A row a restore already carried over keeps its stamp,
     so a chain of restores still names the attempt that staged the call.
     """
     return [
-        {**row, "capture_key": episode_id.capture_key}
-        if row.get("staging_key") is not None and row.get("capture_key") is None
+        {**row, "source_capture_key": episode_id.capture_key}
+        if row.get("staging_key") is not None and row.get("source_capture_key") is None
         else row
         for row in rows
+        # Also reopen records exported by versions that retained this live-attempt marker.
+        if not row.get("admissions_closed")
     ]
 
 
@@ -749,6 +772,7 @@ class PolicyModelParticipant(CheckpointParticipant):
     """The participant of a policy model server that runs in one process."""
 
     kind = "model"
+    mode = "exported"
     record_model = ModelRecord
 
     def __init__(
@@ -800,7 +824,7 @@ class PolicyModelParticipant(CheckpointParticipant):
         the controller may still start the rollout over as this attempt.
 
         The ledger stays if another policy server sharing it has started the attempt.
-        The attempt stays pending until the ledger is handled, so a commit retried after a failure deletes again.
+        The attempt stays unclaimed until the ledger is handled, so a commit retried after a failure deletes again.
         """
         key = episode_id.capture_key
         if self.ledger is not None:
@@ -833,7 +857,7 @@ class PolicyModelParticipant(CheckpointParticipant):
         # The restored attempts continue as the next attempt, so their own ledgers are no longer used.
         await retire_ledgers(self.ledger, scope)
 
-    async def restored_pending(self) -> list[EpisodeId]:
+    async def unclaimed(self) -> list[EpisodeId]:
         return [EpisodeId.from_capture_key(key) for key in sorted(self.gate.restored_targets)]
 
     def commit_reply(self, records: list[CheckpointRecord]) -> dict[str, Any]:
@@ -947,7 +971,7 @@ def reject_ungated_ledger_writers(global_config: Any) -> None:
     if not isinstance(global_config, Mapping):
         return
     models = _server_configs(global_config, "responses_api_models")
-    policies = sorted(name for name, config in models.items() if config.get("checkpoint_policy"))
+    policies = sorted(name for name, config in models.items() if (config.get("checkpoint") or {}).get("policy"))
     if not policies:
         return
     for agent, config in sorted(_server_configs(global_config, "responses_api_agents").items()):
@@ -958,7 +982,7 @@ def reject_ungated_ledger_writers(global_config: Any) -> None:
                 f"model server {writer!r} receives training-token capture calls from agent {agent!r} "
                 f"and writes the capture ledger that checkpoint policy server {', '.join(map(repr, policies))} "
                 f"checkpoints, but it is not behind the checkpoint gate; "
-                f"set checkpoint_policy on {writer!r}, or turn off token capture for {agent!r}"
+                f"set checkpoint.policy on {writer!r}, or turn off token capture for {agent!r}"
             )
 
 

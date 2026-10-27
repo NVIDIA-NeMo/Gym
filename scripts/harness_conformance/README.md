@@ -3,17 +3,24 @@
 ## Pull-request feedback
 
 Gym CI runs a harness probe matrix on approved PR mirrors and merge-queue
-revisions. Changes to a registered adapter select that harness; shared code,
-dependency files, CI configuration, and other server code conservatively select
-all registered harnesses. Changes limited to `fern/`, `docs/`, or root Markdown
-files are skipped. Scheduled and manual CI runs exercise all harnesses.
+revisions and on main pushes. Changes to a registered adapter select that harness.
+Shared Gym code, conformance tooling and tests, the `legacy_agent`,
+`single_agent_turn`, and `single_agent_turn_legacy` environments, dependency files,
+and CI configuration select all registered harnesses. Unrelated servers, CLI/task
+ingestion, other tests, benchmarks, and documentation are skipped. Unknown paths
+conservatively select all harnesses. Scheduled and manual CI runs exercise all
+harnesses.
+
+PR mirrors compare the full branch against its base branch. Main pushes compare
+against the push's previous commit; merge-queue groups compare against their base
+SHA, including every commit in the group. An unavailable diff runs all harnesses.
 
 Each job installs the adapter's pinned runtime, validates the runner, checker,
 and adapter tests, then runs every scenario. Execution errors fail the probe job;
 completed measurements can succeed as jobs even when they find conformance failures.
 Warnings and a detailed table remain available in the Actions summary.
 
-After the probes finish, a separate reporting job publishes **Harness conformance P0**
+After the probes finish, a separate reporting job publishes **Harness conformance (non-blocking)**
 in the PR checks list. It succeeds only if every selected harness passes the current
 P0 suite, or no harnesses are affected. Conformance failures and unavailable
 measurements both produce a failed check, with the first failure and number of
@@ -25,13 +32,13 @@ Download the `harness-conformance-*` artifacts for test/setup logs and probe evi
 The reporter only uses artifacts from the current run attempt; rerun all jobs to
 refresh results for all selected harnesses.
 
-After publishing the result, **Publish P0 check** also fails if P0 fails or any
-probe job fails or is cancelled, making the result visible in the workflow job list.
+After publishing the result, **Harness conformance (non-blocking) / Publish check**
+also fails if P0 fails or any probe job fails or is cancelled, making the result
+visible in the workflow job list.
 
-To enforce P0 before merging, add the fixed **Harness conformance P0** check name to
-the repository's required checks. Until configured, it remains optional. It is
-independent of the existing `Nemo_CICD_Test` gate. Completed scheduled/manual main
-runs trigger the Fern publisher, which consumes the same retained measurements.
+The check is optional and independent of the existing `Nemo_CICD_Test` gate.
+Completed scheduled/manual main runs trigger the Fern publisher, which consumes
+the same retained measurements.
 
 Use the diagnostic command below to reproduce a warning at the reported commit.
 When registering another harness in `registry.HARNESSES`, provide its pinned runtime
@@ -75,27 +82,39 @@ python scripts/run_harness_conformance.py \
 ```
 
 Run from a Gym checkout with Gym and the selected agents' Python requirements
-installed. Put the selected `codex`, `pi`, and `opencode` executables on `PATH`;
-Hermes must be importable in the same Python environment. The versions pinned in
-`responses_api_agents/*/configs/` are the recommended starting point. The runner
-requires installed runtimes; missing dependencies are execution failures.
+installed. Probes using agent sessions require Linux and install the adapter's
+pinned runtime during session setup, using Gym's local subprocess sandbox provider.
+Legacy probes require the selected `codex`, `pi`, and `opencode` executables on
+`PATH`; Hermes must be importable in the same Python environment. Missing
+dependencies or unsuccessful runtime installation are execution failures.
 Omitting `--harness` selects all four.
 
 No model service or model credentials are needed. Each scenario starts fresh
 local model, resources, agent, and compatibility environment servers on dynamically assigned loopback ports.
-The existing Gym adapter runs its real harness and normal seed/verify lifecycle;
+The runner prefers the agent session interface whenever the adapter implements
+session setup and close, including inherited implementations. It uses
+`single_agent_turn_legacy` to translate the probe's flat rows into Resources seed,
+Agent seed, correlated `/v1/responses`, Agent close, verification, and Resources
+close. The agent owns its local workspace because verification only reads retained
+output. An adapter with unimplemented session handlers uses `legacy_agent`, which
+relays to the agent's `/run`. Setup, execution, or cleanup failures during an agent
+session never trigger legacy fallback. Migrating an adapter to the shared session
+contract automatically switches its probes without changing the runner.
+
+The existing Gym adapter runs its real harness and normal lifecycle;
 `RolloutCollectionHelper` produces the rollout and capture payloads. The runner
 never supplies canonical steps, joins, or tool observations on the harness's
 behalf. All implementation remains under `scripts/` for eventual CI integration.
 
-The OpenCode preset disables its auxiliary title and summary agents through
+The legacy OpenCode preset disables its auxiliary title and summary agents through
 [agent configuration](https://opencode.ai/docs/agents/#disable), so scripted
 failures reach policy requests. This configuration is saved with the run.
 
 The suite uses each harness's local shell tool to print a unique marker, write it
 inside the output directory, and return a prescribed exit code. Local execution
 must be allowed (the Codex preset uses `danger-full-access` in a fresh working
-directory). These probes qualify the local adapter path; they do not exercise a
+directory). During an agent session, the subprocess sandbox provider uses the same
+local filesystem. These probes qualify the local adapter path; they do not exercise a
 remote sandbox deployment.
 
 ## Scenarios
@@ -113,19 +132,23 @@ python scripts/run_harness_conformance.py --harness codex \
 | `usage_omitted` | Successful tool sequence with no provider usage fields | TE-1–TE-9, including unknown usage |
 | `retry_429` | Two 429 replies before the tool sequence | TE-1–TE-9, including distinct attempts with identical request bodies |
 | `retry_500` | One 500 reply before the tool sequence | TE-1–TE-9, including retained error payloads |
-| `model_error` | Persistent 400 with no model response ID | TE-1, TE-2, TE-4, TE-7, and TE-8/TE-9 |
+| `model_error` | Persistent 400 reported to EnvServer as a failed response with the original error | TE-1, TE-2, TE-4, TE-7, TE-8; no grading-policy requirement |
 | `verifier_failure` | Completed tool sequence graded zero | TE-1–TE-9, including a known verifier failure |
 
 Both Chat Completions and Responses are supported, including streaming. Supplied
 usage includes prompt, completion, reasoning, total, and cached counts. Chat
 replies also include reasoning text. Requests adapt only the shell-tool name and
-argument schema advertised by the harness. Unsupported tool protocols are
-reported as exercise failures.
+argument schema advertised by the harness. The final answer is a text reply, or a
+call to an advertised `finish` or `submit` tool for harnesses that end an episode on
+a tool call. Unsupported tool protocols are reported as exercise failures.
 
 The runner observes actual retry behavior. A runtime that does not retry the
-injected error leaves that scenario incomplete. A terminal error must still
-produce a collected rollout to satisfy its evidence checks; a failure sidecar
-alone cannot qualify it. Every applicable individual P0 check must pass;
+injected error leaves that scenario incomplete. For `model_error`, the harness
+reports a failed response with the model error to EnvServer; it does not re-raise
+the model failure. The runner witnesses that response before grading. EnvServer
+owns verification and masking policy, so this scenario does not prescribe a grade
+or require verification. Retained model-call evidence is still required.
+Every applicable individual P0 check must pass;
 TE labels group results and do not determine priority or grant exemptions.
 
 ## Results
@@ -136,8 +159,9 @@ rejected, so previous rollouts cannot accidentally qualify a new run.
 - `suite.json`: selected scenarios and runner source hashes.
 - `<harness>/<scenario>/requests.jsonl`, `launch.json`, and `episode.log`: input,
   resolved launch configuration, and process diagnostics.
-- `<harness>/<scenario>/runtime.json`: executable version or Hermes source hash,
-  plus the Gym adapter source hash.
+- `<harness>/<scenario>/runtime.json`: selected agent interface, version pins for
+  agent session runtimes or legacy executable version/Hermes source hash, plus the
+  Gym adapter source hash.
 - `<harness>/<scenario>/rollouts.jsonl` and `capture/`: ordinary Gym outputs,
   directly consumable by `scripts/inspect_harness_conformance.py`.
 - `<harness>/<scenario>/witness.json`: independent endpoint attempts, actual tool
@@ -177,5 +201,6 @@ python -m pytest scripts/harness_conformance/tests tests/unit_tests/harness_capa
 
 To add another local harness, add its adapter class to `registry.HARNESSES`, supply
 its launch settings in `episode._config`, and make its advertised shell-tool
-schema consumable by `provider.Probe._tool`. Keep expectations and witnesses out
+schema consumable by `provider.Probe._tool` and, if it ends episodes on a finish tool, that
+tool's schema consumable by `provider.Probe._finish`. Keep expectations and witnesses out
 of the task input and preserve the normal Gym collection path.

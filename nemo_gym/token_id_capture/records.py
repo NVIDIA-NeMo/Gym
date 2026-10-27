@@ -70,10 +70,26 @@ UNRESOLVED_PARENT_REASON = "unresolved_parent"
 # The call was admitted but finished without worker commit coordinates.
 # Written by the capture middleware.
 UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
+# The engine answered the admitted call with a refusal (a prompt that does not fit the context
+# window, or an output-token parameter it rejected), so generation never ran and nothing was
+# staged. Unlike a lost response, this outcome is definite. Written by the model server at the
+# engine call site, under worker custody.
+ENGINE_REFUSED_CALL_REASON = "engine_refused_request"
+# Failure reasons of a call that served no completion to the client: the engine refused it, or
+# the request finished before the worker's commit was acknowledged (the ledger commit precedes
+# the response leaving the server). Such a call can never be a lineage parent, so a framework
+# assembling a receipt treats these rows as off-chain rather than as a hole in the chain; the
+# rollout is still masked when the refused or lost call is the one the harness kept.
+UNSERVED_CALL_FAILURE_REASONS = frozenset({UNCOMMITTED_CALL_REASON, ENGINE_REFUSED_CALL_REASON})
 # A committed ledger row lacks the served response id that terminal attribution joins on.
 LEDGER_ROW_MISSING_RESPONSE_ID_REASON = "ledger_row_missing_response_id"
 # A committed ledger row lacks the chain or cumulative digest that verification anchors on.
 LEDGER_ROW_MISSING_CHAIN_HASH_REASON = "ledger_row_missing_chain_hash"
+
+# The error code the client receives, and a ``EngineRefusalRecord`` carries, when the engine refused a
+# request because the prompt does not fit the context window (OpenAI's name for that error). A
+# refusal that named only an output-token parameter carries no code.
+CONTEXT_LENGTH_EXCEEDED_ERROR_CODE = "context_length_exceeded"
 
 
 class ParentResolutionStatus(StrEnum):
@@ -113,6 +129,35 @@ def compute_digest(token_ids: list[int]) -> str:
     return hashlib.sha256(_DIGEST_DOMAIN + encode_token_ids(token_ids)).hexdigest()
 
 
+class EngineRefusalRecord(BaseModel):
+    """One model call the engine refused, so the rollout has no record for it.
+
+    A refusal is not a lost capture: the call never generated, and the client was told why.
+    On the local capture path the refusal resolves the call's pre-dispatch intent, so the
+    rollout is not incomplete; the record is what tells a consumer where the engine refused.
+    ``code`` is the error code the client received: ``CONTEXT_LENGTH_EXCEEDED_ERROR_CODE`` for
+    a prompt that does not fit the context window, ``None`` when the envelope carried no code
+    (an output-token parameter the engine rejected). ``parent_call_id`` is the recorded call the
+    refused request continued, which places the refusal on one branch of the rollout.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    model_call_id: str
+    code: str | None = None
+    # Seconds since the epoch, stamped when the refusal is recorded.
+    created_at: float = 0.0
+    # The recorded call the refused request continued, from the request-time lineage resolution
+    # that runs before dispatch (the decision a served call's entry carries as ``parent_call_id``).
+    # ``None`` for a root request or an unresolved continuation. The builder counts a refusal as
+    # the rollout's ending only when this names the delivered terminal call or a token-identical
+    # twin of it, and no other call with that token sequence has an entry ``created_at`` at or
+    # after this record's.
+    parent_call_id: str | None = None
+    # The status of that lineage decision; ``None`` when none was made.
+    parent_resolution: ParentResolutionStatus | None = None
+
+
 class TokenEntry(BaseModel):
     """Store one model call's content and token metadata.
 
@@ -143,6 +188,12 @@ class TokenEntry(BaseModel):
     # The response id returned to the client for this model call.
     # Terminal attribution uses it to match the agent's final response to these captured tokens.
     response_id: str | None = None
+    # Why generation stopped, usually in the Chat Completions vocabulary: ``stop``, ``length``,
+    # ``tool_calls``, or ``content_filter``. ``response_finish_reason`` derives it from either
+    # served payload shape, and other engine values pass through unchanged; only ``length`` and
+    # ``content_filter`` are consumed. ``None`` means the payload stated no reason or the record
+    # predates this field.
+    finish_reason: str | None = None
     # This non-semantic timestamp helps diagnose retries and sibling branches.
     created_at: float = 0.0
 
@@ -306,6 +357,113 @@ def response_to_output_items(payload: dict) -> list[dict]:
         item.setdefault("role", "assistant")
         items.append(item)
     return items
+
+
+# The ``incomplete_details.reason`` of a Responses payload whose generation stopped at a token
+# limit: the terminal call's ``length`` finish reason, or an engine refusal of the request that
+# continued the terminal call for the context window (``builder.project_main_chain_response``).
+MAX_OUTPUT_TOKENS_INCOMPLETE_REASON = "max_output_tokens"
+# ``incomplete_details.reason`` values of a Responses payload, keyed to the chat finish
+# reasons that ``nemo_gym.responses_converter`` maps onto them.
+_INCOMPLETE_REASON_TO_FINISH_REASON = {
+    MAX_OUTPUT_TOKENS_INCOMPLETE_REASON: "length",
+    "content_filter": "content_filter",
+}
+# The reverse direction: the Responses ``incomplete_details.reason`` a rebuilt response reports for
+# its terminal call's finish reason. ``stop`` and ``tool_calls`` are complete endings and map to nothing.
+_FINISH_REASON_TO_INCOMPLETE_REASON = {
+    "length": MAX_OUTPUT_TOKENS_INCOMPLETE_REASON,
+    "content_filter": "content_filter",
+}
+
+# The Chat Completions finish reason behind each Anthropic Messages ``stop_reason``: the inverse of
+# the table ``nemo_gym.anthropic_converter`` applies when it serves a Responses payload as a
+# Messages response.
+_STOP_REASON_TO_FINISH_REASON = {
+    "end_turn": "stop",
+    "stop_sequence": "stop",
+    "tool_use": "tool_calls",
+    "max_tokens": "length",
+    "model_context_window_exceeded": "length",
+    "refusal": "content_filter",
+}
+
+# Responses output items that the converter builds from a chat message's tool calls.
+_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call"})
+
+
+def incomplete_reason_for_finish_reason(finish_reason: str | None) -> str | None:
+    """Return the ``incomplete_details.reason`` a response that stopped for ``finish_reason`` reports.
+
+    ``length`` becomes ``max_output_tokens`` and ``content_filter`` stays ``content_filter``, the
+    verdict the Responses converter gives a chat completion that ended the same way. A complete
+    ending (``stop``, ``tool_calls``), an unknown reason, and ``None`` return ``None``.
+    """
+    return _FINISH_REASON_TO_INCOMPLETE_REASON.get(finish_reason)
+
+
+def apply_capture_incomplete_verdict(response: dict, incomplete_reason: str | None) -> bool:
+    """Put the capture's truncation verdict on a harness response, under one precedence rule.
+
+    ``incomplete_reason`` is the ``incomplete_details.reason`` the capture derived for the
+    delivered chain. On the local path it is ``incomplete_reason_for_finish_reason`` of the
+    terminal call's finish reason, or ``max_output_tokens`` when the engine refused the request
+    that continued the terminal call for the context window
+    (``builder.project_main_chain_response``). Under worker custody it is
+    ``staging.rebuild.LinearizedRow.incomplete_reason``, which carries the finish-reason mapping
+    only: the ledger row of a refused call records no code and no lineage, so a rollout rebuilt
+    from staged records reports no verdict for a refusal.
+    ``None`` means the chain ended on its own and leaves the response alone. The verdict is
+    written only when the harness reported no status or ``completed``: a harness that reported
+    ``incomplete`` or ``failed`` itself gave the more specific verdict and keeps its ``status`` and
+    ``incomplete_details``. Returns whether the response changed. Gym's delivery and a framework
+    that rebuilds from staged records both apply this precedence rule, so a verdict that comes
+    from the finish reason is the same whichever placement captured it.
+    """
+    if incomplete_reason is None or response.get("status") not in (None, "completed"):
+        return False
+    response["status"] = "incomplete"
+    response["incomplete_details"] = {"reason": incomplete_reason}
+    return True
+
+
+# Attribution-trail token ``resolve_terminal`` appends when the terminal call was chosen among
+# token-identical calls that recorded different finish reasons, with no witness singling one out.
+# The local projection and the staged rebuild withhold the truncation verdict when the trail
+# carries it, because the verdict would otherwise depend on which twin drew the smaller call id.
+FINISH_REASON_DISAGREEMENT_REASON = "finish_reason_disagreement"
+
+
+def response_finish_reason(payload: dict) -> str | None:
+    """Return why a served response stopped, in the Chat Completions vocabulary.
+
+    A chat payload states it directly as ``choices[0].finish_reason``.
+    An Anthropic Messages payload states ``stop_reason``; map it back through the converter's table.
+    A Responses payload carries no finish reason.
+    The converter maps ``length`` and ``content_filter`` to ``incomplete_details.reason``; reverse that map.
+    A completed Responses payload stopped at a tool call (``tool_calls``) or at the end of its text (``stop``).
+    Return ``None`` when the payload is none of these shapes or is incomplete without a stated reason.
+    """
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        reason = first.get("finish_reason")
+        return reason if isinstance(reason, str) else None
+    if payload.get("type") == "message" and "stop_reason" in payload:
+        stop_reason = payload.get("stop_reason")
+        return _STOP_REASON_TO_FINISH_REASON.get(stop_reason) if isinstance(stop_reason, str) else None
+    output = payload.get("output")
+    if not isinstance(output, list):
+        return None
+    details = payload.get("incomplete_details")
+    reason = details.get("reason") if isinstance(details, dict) else None
+    if isinstance(reason, str):
+        return _INCOMPLETE_REASON_TO_FINISH_REASON.get(reason, reason)
+    if payload.get("status") not in (None, "completed"):
+        return None
+    if any(isinstance(item, dict) and item.get("type") in _TOOL_CALL_ITEM_TYPES for item in output):
+        return "tool_calls"
+    return "stop"
 
 
 def strip_token_fields(items: list[dict]) -> tuple[list[dict], int | None]:

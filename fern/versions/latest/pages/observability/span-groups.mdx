@@ -20,7 +20,7 @@ telemetry:
 | Preset | Groups | Use When |
 | --- | --- | --- |
 | `default` | `job`, `startup`, `server`, `http_client`, `rollout` | You want the shape of a run and the cross-process trace, without per-request detail. |
-| `per_rollout` | `server`, `http_client`, `rollout`, `verify`, `agent`, `model_call` | You are debugging where a rollout spends its time. Each rollout is its own trace. |
+| `per_rollout` | `server`, `http_client`, `rollout`, `verify`, `agent`, `model_call` | You are debugging where a rollout spends its time and do not need the run-level `job` and `startup` spans. |
 | `all` | Every group, including `sandbox` | You are debugging something specific and volume does not matter. |
 
 `default` is deliberately enough on its own to produce one trace per rollout across the
@@ -29,9 +29,13 @@ headline behavior.
 
 `per_rollout` omits `startup` because startup happens once per run, not once per rollout.
 
-`per_rollout` omits `job` on purpose. `job` wraps a whole rollout-collection run, so
-including it nests every rollout of that run under one span. That is useful for seeing a
-run's overall shape and unusable for a run with thousands of rollouts.
+`per_rollout` omits `job`, the span that wraps a whole rollout-collection run. Trace shape
+does not depend on this choice: in a standalone `gym eval run`, with nemo-lens's
+`ENABLE_SINGLE_TRACEID` unset, each rollout is its own trace under every preset, linked to
+`gym.job` when that span exists (see
+[One Trace Per Rollout](/main/observability/distributed-tracing#one-trace-per-rollout-linked-to-the-job)).
+A driver run inside a caller's own span keeps nesting under it, and `ENABLE_SINGLE_TRACEID`
+gives every root the job's trace id, so both of those still produce one trace per run.
 
 ## Groups
 
@@ -41,11 +45,12 @@ run's overall shape and unusable for a run with thousands of rollouts.
 | `startup` | `gym.startup`, `gym.startup.server`, `gym.server.startup`, `gym.server.startup.worker` and one child span per stage | The supervisor and every server process, once per run |
 | `server` | `GET /...`, `POST /...` | FastAPI auto-instrumentation on every server |
 | `http_client` | `HTTP POST`, `HTTP GET` | `server_utils.request()`, once per outbound call |
-| `rollout` | `gym.rollout` | The agent server's `/run` endpoint |
+| `rollout` | `gym.rollout.dispatch`, `gym.rollout.health`, `gym.rollout` | The rollout-collection driver, once per dispatch (the root of the rollout's trace) and once per health-evaluated rollout (a child of the dispatch), and the agent server's `/run` endpoint |
 | `agent` | `gym.agent.responses` | The agent server's `/v1/responses` endpoint |
 | `model_call` | `gym.model.chat_completions`, `gym.model.responses`, `gym.model.messages` | Model servers |
 | `verify` | `gym.verify` | Resources servers' `/verify` endpoint |
 | `sandbox` | `gym.sandbox.start`, `gym.sandbox.exec` | Any sandbox provider |
+| `checkpoint` | `gym.checkpoint.<operation>`, `gym.checkpoint.coordinate.<operation>`, and their child spans | Servers taking part in partial-rollout checkpoints and the controller that coordinates them, only when checkpointing is on |
 
 ### Groups You Should Not Disable
 
@@ -73,6 +78,30 @@ Names are case-insensitive and surrounding whitespace is ignored. An unknown nam
 raise an error. Each server logs a warning that names the unknown entry and lists the
 registered groups, then ignores it. If telemetry looks broken, check the server logs for
 that warning first.
+
+## Checkpoint Spans
+
+The `checkpoint` group is in no preset except `all`, so enable it alongside a preset:
+
+```yaml
+telemetry:
+  span_groups: "default,checkpoint"
+```
+
+A checkpoint is rare, so the group gives every checkpoint operation a span:
+
+- `gym.checkpoint.<operation>` on each participating server, for `prepare`, `commit`, `restore`, `resume`,
+  `retire`, and `forget`, and `gym.checkpoint.lease_reopen` for each attempt to reopen a server whose lease
+  expired. Child spans time the steps that grow with the number of rollouts in flight: `wait_ready` under
+  `prepare`, `export` and `write` under `commit`, and `read` and `install` under `restore`. A model server
+  also emits `gym.checkpoint.generation_cut` while it prepares.
+- `gym.checkpoint.coordinate.<operation>` in the controller, for each call it makes to every participant,
+  with one `gym.checkpoint.coordinate.prepare.<kind>` child for each stage of a prepare.
+
+Control calls carry the trace context, so one checkpoint is one trace across NeMo Gym's processes. Every
+attribute is named under `nemo.gym.checkpoint.`, for example `nemo.gym.checkpoint.id` and
+`nemo.gym.checkpoint.participant_kind`. The checkpoint metrics do not depend on this group; see
+[Partial-Rollout Checkpoint Metrics](/main/observability/metrics#partial-rollout-checkpoint-metrics).
 
 ## Cost
 

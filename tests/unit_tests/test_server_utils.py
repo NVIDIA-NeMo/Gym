@@ -17,12 +17,15 @@ import logging
 import multiprocessing
 import pickle
 import socket
+import sys
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import uvicorn
-from aiohttp import ClientOSError, ClientResponseError, RequestInfo, TCPConnector
+from aiohttp import ClientOSError, ClientResponseError, RequestInfo, ServerDisconnectedError, TCPConnector
 from fastapi import Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
@@ -62,6 +65,7 @@ from nemo_gym.server_utils import (
     _make_keepalive_socket_factory,
     _set_tcp_keepalive,
     _validation_exception_handler,
+    format_exception_with_response_body,
     initialize_ray,
     raise_for_status,
 )
@@ -85,6 +89,71 @@ _TEST_ADDR_INFO = (
 
 def _return_exception_from_child_process(error: ClientResponseError) -> ClientResponseError:
     return error
+
+
+class TestRequestRetries:
+    @mark.parametrize("internal", [False, True])
+    @mark.parametrize("traced", [False, True])
+    @mark.parametrize("metrics", [False, True])
+    @mark.parametrize("failure_type", [ServerDisconnectedError, ClientOSError, TimeoutError, RuntimeError])
+    async def test_single_attempt_preserves_failure_after_execution(
+        self, monkeypatch: MonkeyPatch, internal: bool, traced: bool, metrics: bool, failure_type: type[Exception]
+    ) -> None:
+        effects = []
+        failure = failure_type("response lost after execution")
+
+        async def execute_then_fail(**kwargs):
+            effects.append("applied")
+            raise failure
+
+        send = AsyncMock(side_effect=execute_then_fail)
+        sleep = AsyncMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: MagicMock(request=send))
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", sleep)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _: traced)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_trace_exporter_active", lambda: traced)
+        counts = SimpleNamespace(outbound_in_flight=0)
+        monkeypatch.setattr(nemo_gym.server_utils, "request_counts", lambda: counts if metrics else None)
+        monkeypatch.setattr("nemo_gym.telemetry.spans.client_span", lambda _: nullcontext(None))
+        monkeypatch.setattr("nemo_gym.telemetry.contrib.inject_trace_context", lambda headers: None)
+
+        with raises(failure_type) as exc_info:
+            await nemo_gym.server_utils.request(
+                "POST",
+                "http://server.test/step",
+                _internal=internal,
+                _resend_after_disconnect=False,
+                json={"action": "move"},
+            )
+
+        assert exc_info.value is failure
+        assert effects == ["applied"]
+        send.assert_awaited_once_with(
+            method="POST",
+            url="http://server.test/step",
+            data=b'{"action":"move"}',
+            headers={"Content-Type": "application/json"},
+        )
+        sleep.assert_not_awaited()
+        assert counts.outbound_in_flight == 0
+
+    @mark.parametrize("internal", [False, True])
+    @mark.parametrize("failure_type", [ServerDisconnectedError, ClientOSError, TimeoutError, RuntimeError])
+    async def test_default_retries_recover(
+        self, monkeypatch: MonkeyPatch, internal: bool, failure_type: type[Exception]
+    ) -> None:
+        response = MagicMock()
+        send = AsyncMock(side_effect=[failure_type("transient failure"), response])
+        sleep = AsyncMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: MagicMock(request=send))
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", sleep)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _: False)
+
+        actual = await nemo_gym.server_utils.request("POST", "http://server.test/step", _internal=internal)
+
+        assert actual is response
+        assert send.await_count == 2
+        sleep.assert_awaited_once_with(0.5)
 
 
 class TestServerUtils:
@@ -506,6 +575,66 @@ class TestServerUtils:
             url="http://model/ng-rollout/rollout-1/training-token-capture/v1/chat/completions",
             headers={"x-existing": "value"},
         )
+
+    async def test_get_global_aiohttp_client_uses_defaults_without_config_or_cli_parse(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """A process Gym did not launch (a Ray task worker) has no config and argv that is not Gym's.
+
+        The client must come up with the default limits instead of parsing that argv and exiting.
+        """
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, raising=False)
+        monkeypatch.delenv(nemo_gym.server_utils.NEMO_GYM_FASTAPI_NUM_WORKERS, raising=False)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "/usr/lib/python3/site-packages/ray/_private/workers/default_worker.py",
+                "--node-ip-address=127.0.0.1",
+                "--node-manager-port=40000",
+                "--worker-type=WORKER",
+            ],
+        )
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_CONFIG", None)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
+
+        try:
+            client = nemo_gym.server_utils.get_global_aiohttp_client()
+        except SystemExit as e:
+            fail(f"get_global_aiohttp_client parsed the process argv as Gym CLI overrides and exited: {e!r}")
+
+        try:
+            defaults = GlobalAIOHTTPAsyncClientConfig()
+            assert client.connector.limit == defaults.global_aiohttp_connector_limit
+            assert client.connector.limit_per_host == defaults.global_aiohttp_connector_limit_per_host
+            assert nemo_gym.global_config._GLOBAL_CONFIG_DICT is None
+        finally:
+            await client.close()
+
+    async def test_get_global_aiohttp_client_parses_an_explicit_parser_config(self, monkeypatch: MonkeyPatch) -> None:
+        """A caller that passes a parser config gets the limits it describes, not the defaults."""
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.delenv(nemo_gym.server_utils.NEMO_GYM_FASTAPI_NUM_WORKERS, raising=False)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_CONFIG", None)
+        parser_config = nemo_gym.global_config.GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig(
+                {"global_aiohttp_connector_limit": 7, "global_aiohttp_connector_limit_per_host": 3}
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+
+        client = nemo_gym.server_utils.get_global_aiohttp_client(global_config_dict_parser_config=parser_config)
+        try:
+            assert (client.connector.limit, client.connector.limit_per_host) == (7, 3)
+        finally:
+            await client.close()
 
     def test_BaseServer_load_config_from_global_config(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
@@ -1342,6 +1471,82 @@ class TestServerUtils:
             {"type": "http.response.body", "body": b"ok", "more_body": False},
         ]
 
+    @mark.parametrize(
+        "path", ["/v1/chat/completions", "/ng-rollout/3-1/v1/messages", "/run", "/tools/run", "/seed_session"]
+    )
+    async def test_cancellation_middleware_samples_all_routes(
+        self, monkeypatch: MonkeyPatch, capsys: CaptureFixture, path: str
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+        handler_waiting = asyncio.Event()
+
+        async def inner_app(scope, receive, send) -> None:
+            await receive()
+            handler_waiting.set()
+            await asyncio.Event().wait()
+
+        middleware = ClientDisconnectCancellationMiddleware(inner_app)
+        scope = {"type": "http", "method": "POST", "path": path, "client": ("127.0.0.1", 1234)}
+
+        async def send(message):
+            pass
+
+        for _ in range(101):
+            handler_waiting.clear()
+            incoming = asyncio.Queue()
+            await incoming.put({"type": "http.request", "body": b"", "more_body": False})
+            app_task = asyncio.create_task(middleware(scope, incoming.get, send))
+            await asyncio.wait_for(handler_waiting.wait(), timeout=1)
+            await incoming.put({"type": "http.disconnect"})
+            await asyncio.wait_for(app_task, timeout=1)
+
+        assert middleware.num_cancelled == 101
+        assert capsys.readouterr().out == (
+            f'127.0.0.1:1234 - "POST {path}" 499 CLIENT DISCONNECTED (100 total for this server worker)\n'
+        )
+
+    @mark.parametrize(
+        ("response", "phase"),
+        [("none", "before_response_start"), ("headers", "response_started"), ("keepalive", "response_started")],
+    )
+    async def test_cancellation_middleware_debug_phase(
+        self, monkeypatch: MonkeyPatch, capsys: CaptureFixture, response: str, phase: str
+    ) -> None:
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", True)
+        clock = iter([10.0, 12.5])
+        monkeypatch.setattr(nemo_gym.server_utils, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+        handler_waiting = asyncio.Event()
+
+        async def inner_app(scope, receive, send) -> None:
+            await receive()
+            if response != "none":
+                await send({"type": "http.response.start", "status": 200, "headers": []})
+            if response == "keepalive":
+                await send({"type": "http.response.body", "body": b": keep-alive\n\n", "more_body": True})
+            handler_waiting.set()
+            await asyncio.Event().wait()
+
+        middleware = ClientDisconnectCancellationMiddleware(inner_app)
+        incoming = asyncio.Queue()
+        await incoming.put({"type": "http.request", "body": b"", "more_body": False})
+
+        async def send(message):
+            pass
+
+        scope = {"type": "http", "method": "POST", "path": "/v1/chat/completions", "client": ("127.0.0.1", 1234)}
+        app_task = asyncio.create_task(middleware(scope, incoming.get, send))
+        await asyncio.wait_for(handler_waiting.wait(), timeout=1)
+        await incoming.put({"type": "http.disconnect"})
+        await asyncio.wait_for(app_task, timeout=1)
+
+        assert middleware.num_cancelled == 1
+        assert capsys.readouterr().out == (
+            '127.0.0.1:1234 - "POST /v1/chat/completions" 499 CLIENT DISCONNECTED '
+            f"after 2.5s {phase} (1 total for this server worker)\n"
+        )
+
     def test_upstream_error_log_has_bounded_body_and_redacted_url(self) -> None:
         request_info = RequestInfo(
             url=URL("http://policy.test/v1/responses?api_key=secret"),
@@ -1368,6 +1573,26 @@ class TestServerUtils:
         assert "api_key=secret" not in message
         assert message.endswith("…")
         assert len(message) < 2200
+
+    def test_format_exception_with_response_body_carries_the_upstream_reason(self) -> None:
+        request_info = RequestInfo(
+            url=URL("http://agent.test/v1/agent_sessions"),
+            method="POST",
+            headers=CIMultiDictProxy(CIMultiDict()),
+            real_url=URL("http://agent.test/v1/agent_sessions"),
+        )
+        refusal = ClientResponseError(
+            request_info=request_info, history=(), status=422, message="Unprocessable Content"
+        )
+        refusal.response_content = b'{"detail":"Simple Agent does not support sandbox access"}'
+        bodiless = ClientResponseError(request_info=request_info, history=(), status=503, message="Unavailable")
+
+        # str() alone names only the status, reason phrase, and URL.
+        assert format_exception_with_response_body(refusal) == (
+            f'{refusal}: {{"detail":"Simple Agent does not support sandbox access"}}'
+        )
+        assert format_exception_with_response_body(bodiless) == str(bodiless)
+        assert format_exception_with_response_body(ValueError("invalid payload")) == "invalid payload"
 
     @mark.parametrize(
         ("body", "expected_truncated"),
@@ -1552,6 +1777,134 @@ class TestServerUtils:
         assert record.validation_errors_truncated is True
         assert record.getMessage().endswith("...[truncated]")
         assert len(record.getMessage()) < 5000
+
+    @mark.parametrize(("location", "body_unavailable"), [("body", False), ("query", False), ("body", True)])
+    async def test_validation_exception_message_names_failed_fields(
+        self, location: str, body_unavailable: bool, caplog: LogCaptureFixture
+    ) -> None:
+        # The summaries are also attached as ``extra``, which the default formatter drops,
+        # so the rendered message itself must say which field failed.
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"{}")
+        if body_unavailable:
+            request.body.side_effect = RuntimeError("body unavailable")
+        errors = [
+            {
+                "type": "extra_forbidden",
+                "loc": (location, "aws_region_name"),
+                "msg": "Extra inputs are not permitted",
+                "input": "must-not-be-logged",
+            }
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors))
+
+        message = caplog.records[-1].getMessage()
+        expected = {"type": "extra_forbidden", "loc": [location, "aws_region_name"]}
+        if location == "body":
+            expected["msg"] = "Extra inputs are not permitted"
+        rendered = message.split("validation_errors=", 1)[1].split(" validation_errors_truncated=", 1)[0]
+        assert nemo_gym.server_utils.json.loads(rendered) == [expected]
+        assert "must-not-be-logged" not in message
+        assert message.endswith("validation_errors_truncated=False")
+
+    @mark.parametrize("body_unavailable", [False, True])
+    async def test_validation_exception_message_bounds_rendered_errors(
+        self, body_unavailable: bool, caplog: LogCaptureFixture
+    ) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"{}")
+        if body_unavailable:
+            request.body.side_effect = RuntimeError("body unavailable")
+        long_msg = "m" * nemo_gym.server_utils._VALIDATION_ERROR_LOG_FIELD_CHARS
+        errors = [
+            {"type": "value_error", "loc": ("body", f"field_{index}"), "msg": long_msg, "input": None}
+            for index in range(nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS)
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors))
+
+        record = caplog.records[-1]
+        rendered = record.getMessage().split("validation_errors=", 1)[1].split(" validation_errors_truncated=", 1)[0]
+        assert len(rendered) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_ERRORS_CHARS
+        assert rendered.endswith("...[truncated]")
+        assert record.validation_errors_truncated is False
+        assert record.validation_errors == [
+            {"type": error["type"], "loc": list(error["loc"]), "msg": long_msg} for error in errors
+        ]
+        assert record.getMessage().endswith("validation_errors_truncated=True ...[truncated]")
+
+    @mark.parametrize("invalid_body", [False, True])
+    def test_validation_exception_custom_header_query_messages_are_not_rendered(
+        self, invalid_body: bool, caplog: LogCaptureFixture
+    ) -> None:
+        from typing import Annotated
+
+        from fastapi import Body, FastAPI, Header, Query
+        from fastapi.testclient import TestClient
+        from pydantic import AfterValidator
+
+        def check(value: str) -> str:
+            raise ValueError(f"invalid api key {value}")
+
+        app = FastAPI()
+        app.exception_handler(RequestValidationError)(_validation_exception_handler)
+
+        @app.post("/validate")
+        async def validate(
+            count: Annotated[int, Body(embed=True)],
+            api_key: Annotated[str, Header(), AfterValidator(check)],
+            query_key: Annotated[str, Query(), AfterValidator(check)],
+        ) -> dict:
+            return {"count": count}
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"), TestClient(app) as client:
+            response = client.post(
+                "/validate",
+                json={"count": "invalid" if invalid_body else 1},
+                headers={"api-key": "sk-sensitive-header"},
+                params={"query_key": "sk-sensitive-query"},
+            )
+
+        assert response.status_code == 422
+        record = next(record for record in reversed(caplog.records) if record.name == "nemo_gym.server_utils")
+        message = record.getMessage()
+        assert "sk-sensitive-header" not in message
+        assert "sk-sensitive-query" not in message
+        assert "invalid api key" not in message
+        rendered = message.split("validation_errors=", 1)[1].split(" validation_errors_truncated=", 1)[0]
+        summaries = nemo_gym.server_utils.json.loads(rendered)
+        assert {tuple(summary["loc"]) for summary in summaries} == {
+            tuple(error["loc"]) for error in response.json()["detail"]
+        }
+        for summary in summaries:
+            assert ("msg" in summary) is (summary["loc"][0] == "body")
+        assert record.validation_error_count == (3 if invalid_body else 2)
+        assert hasattr(record, "request_body_prefix") is invalid_body
+        assert record.validation_errors_truncated is False
+        # Structured consumers keep the same bounded metadata, including custom messages.
+        assert record.validation_errors == [
+            {key: error[key] for key in ("type", "loc", "msg")} for error in response.json()["detail"]
+        ]
+
+    @mark.parametrize("location", [("path", "key"), ("cookie", "key"), (), ("unknown", "key"), None])
+    async def test_validation_exception_non_body_messages_are_not_rendered(
+        self, location: tuple[str, ...] | None, caplog: LogCaptureFixture
+    ) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"must-not-be-read")
+        errors = [{"type": "value_error", "loc": location, "msg": "invalid api key sk-sensitive-value"}]
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, RequestValidationError(errors))
+
+        request.body.assert_not_awaited()
+        record = caplog.records[-1]
+        assert "sk-sensitive-value" not in record.getMessage()
+        assert '"msg"' not in record.getMessage()
+        assert record.validation_errors[0]["msg"] == errors[0]["msg"]
 
     async def test_validation_exception_does_not_log_body_for_query_error(self, caplog: LogCaptureFixture) -> None:
         request = MagicMock(spec=Request)
@@ -1950,6 +2303,7 @@ class TestRunWebserverProxyKwargs:
         num_workers: int | None,
         ray_enabled: bool | None = None,
         is_worker: bool = False,
+        routes_sessions: bool = False,
     ) -> dict:
         from fastapi import FastAPI
 
@@ -1982,6 +2336,10 @@ class TestRunWebserverProxyKwargs:
 
         class TestSimpleServer(SimpleServer):
             ray_enabled = ray_setting
+            routes_sessions_to_owner = routes_sessions
+
+            def claimed_session_routing(self) -> dict:
+                return {}
 
             @classmethod
             def load_config_from_global_config(cls):
@@ -2147,6 +2505,33 @@ class TestRunWebserverProxyKwargs:
         assert self.uvicorn_kwargs == {}
         report.assert_not_called()
 
+    @mark.parametrize("num_workers", [1, 4])
+    def test_listen_backlog_defaults_above_uvicorns(self, monkeypatch: MonkeyPatch, num_workers: int) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=num_workers)
+
+        assert 16384 == kwargs["backlog"]
+
+    def test_listen_backlog_comes_from_the_global_config(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_backlog": 4096}, num_workers=4)
+
+        assert 4096 == kwargs["backlog"]
+
+    def test_a_workers_private_socket_gets_the_listen_backlog(self, monkeypatch: MonkeyPatch) -> None:
+        install = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "install_session_routing", install)
+
+        self._capture_uvicorn_kwargs(
+            monkeypatch, {"uvicorn_backlog": 4096}, num_workers=4, is_worker=True, routes_sessions=True
+        )
+
+        assert 4096 == install.call_args.kwargs["backlog"]
+
+    def test_a_listen_backlog_below_one_fails_before_uvicorn_starts(self, monkeypatch: MonkeyPatch) -> None:
+        with raises(ValidationError, match="uvicorn_backlog"):
+            self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_backlog": 0}, num_workers=1)
+
+        assert self.uvicorn_kwargs == {}
+
 
 class TestHeadServerProxyKwargs:
     """The independently launched head server must use the same proxy-header policy."""
@@ -2192,6 +2577,10 @@ class TestHeadServerProxyKwargs:
         assert kwargs["proxy_headers"] is True
         assert kwargs["forwarded_allow_ips"] == ["10.0.0.1"]
 
+    def test_listen_backlog_follows_the_global_config(self, monkeypatch: MonkeyPatch) -> None:
+        assert 16384 == self._capture_uvicorn_kwargs(monkeypatch, {})["backlog"]
+        assert 4096 == self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_backlog": 4096})["backlog"]
+
 
 @mark.parametrize("header", [None, b"X-Other-Harness-Reply"])
 def test_model_header_comes_from_its_harness_property(monkeypatch, header):
@@ -2228,39 +2617,6 @@ def test_model_header_comes_from_its_harness_property(monkeypatch, header):
     assert client.assistant_message_header("first_model") == (header.lower() if header else None)
     assert client.assistant_message_header("second_model") is None
     assert client.assistant_message_header("unused_model") is None
-
-
-def test_model_header_imports_nested_harness_key(monkeypatch):
-    import sys
-    from types import ModuleType
-
-    # Nested harnesses are keyed by their directory path, e.g. `conversational_tool_use/simulation`.
-    nested = ModuleType("responses_api_agents.test_header_group.nested_harness")
-    nested._assistant_message_header = b"X-Nested-Reply"
-    monkeypatch.setitem(sys.modules, nested.__name__, nested)
-    client = ServerClient(
-        head_server_config={"host": "localhost", "port": 0},
-        global_config_dict=OmegaConf.create(
-            {
-                "conversational_tool_use_agent": {
-                    "responses_api_agents": {
-                        "conversational_tool_use/simulation": {
-                            "model_server": {"type": "responses_api_models", "name": "policy_model"},
-                        }
-                    }
-                },
-                "nested_agent": {
-                    "responses_api_agents": {
-                        "test_header_group/nested_harness": {
-                            "model_server": {"type": "responses_api_models", "name": "nested_model"},
-                        }
-                    }
-                },
-            }
-        ),
-    )
-    assert client.assistant_message_header("policy_model") is None
-    assert client.assistant_message_header("nested_model") == b"x-nested-reply"
 
 
 def test_shared_model_rejects_conflicting_harness_headers(monkeypatch):

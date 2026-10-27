@@ -9,7 +9,8 @@ implements the shell protocol over session control files. All three run on the
 agent server.
 
 Only process_supervisor.py is copied from this package into the task sandbox. It
-uses the standard library to enforce deadlines, kill and reap descendants, and
-write the cleanup receipt. Core sandbox APIs and providers live in
+uses the standard library to enforce deadlines, stop and reap the harness process
+group, and write its termination receipt. Explicitly detached task services remain
+for the sandbox owner to stop. Core sandbox APIs and providers live in
 :mod:`nemo_gym.sandbox`.
 """

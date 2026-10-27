@@ -30,6 +30,7 @@ TOKEN = "t"
 class Recorder(CheckpointParticipant):
     """A participant that is ready unless told otherwise and records the calls it receives."""
 
+    mode = "exported"
     record_model = CheckpointRecord
 
     def __init__(self, kind: str, events: list[str], name: str) -> None:
@@ -38,6 +39,7 @@ class Recorder(CheckpointParticipant):
         self.name = name
         self.events = events
         self.blockers: list[str] = []
+        self.restarts: list[str] = []
         self.fail_restore = False
         self.live: set[str] = set()
 
@@ -48,7 +50,7 @@ class Recorder(CheckpointParticipant):
         self.events.append(f"open {self.name}")
 
     def readiness(self) -> PrepareReport:
-        return PrepareReport(ready=not self.blockers, blockers=self.blockers)
+        return PrepareReport(ready=not self.blockers, blockers=self.blockers, restarts=self.restarts)
 
     async def retire(self, episode_id: EpisodeId) -> None:
         self.events.append(f"retire {self.name}")
@@ -177,7 +179,7 @@ async def test_prepare_stops_at_an_unready_stage_until_the_controller_retires_it
     missed = await coordination.prepare(participants, "c1", deadline_ts=deadline(0.2))
     later_stage_untouched = "close res" not in events
     # A straggler is retired after the checkpoint is abandoned, never while it is open.
-    with pytest.raises(CoordinationError, match="invalid_phase"):
+    with pytest.raises(CoordinationError, match="checkpoint_invalid_phase"):
         await coordination.retire(participants, "c1", [EpisodeId(rollout_id="r", attempt=1)], deadline_ts=deadline())
     await coordination.resume(participants, "c1", deadline_ts=deadline())
     await coordination.retire(participants, "retire", [EpisodeId(rollout_id="r", attempt=1)], deadline_ts=deadline())
@@ -187,6 +189,43 @@ async def test_prepare_stops_at_an_unready_stage_until_the_controller_retires_it
     assert missed.blockers() == {"agent": ["r-a1"]}
     assert later_stage_untouched
     assert prepared.prepared
+
+
+async def test_each_prepare_stage_carries_the_restarts_every_earlier_stage_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later stage leaves an episode an earlier stage reported as a restart out of its blockers.
+
+    The commit leaves that episode out anyway, so waiting for it could only stall the checkpoint.
+    A stage that follows no restart gets the same request as before.
+    """
+    client, recorders, _ = deployment(*FULL)
+    participants = await coordination.discover(client, auth_token=TOKEN)
+    recorders["env"].restarts = ["r"]
+    recorders["agent"].restarts = ["q"]
+    prepares: dict[str, dict[str, Any]] = {}
+    real_request = InProcessClient.request
+
+    async def recording(self, server_name: str, url_path: str, method: str, **kwargs: Any) -> _Response:
+        if url_path.endswith("/prepare"):
+            prepares[server_name] = orjson.loads(kwargs["data"])
+        return await real_request(self, server_name, url_path, method, **kwargs)
+
+    monkeypatch.setattr(InProcessClient, "request", recording)
+    result = await coordination.prepare(participants, "c1", deadline_ts=deadline())
+    carried = {name: set(recorder.carried_restarts) for name, recorder in recorders.items()}
+    await coordination.resume(participants, "c1", deadline_ts=deadline())
+
+    assert result.prepared
+    assert {name: body.get("restarts") for name, body in prepares.items()} == {
+        "env": None,
+        "policy": ["r"],
+        "agent": ["r"],
+        "res": ["q", "r"],
+    }
+    assert carried == {"env": set(), "policy": {"r"}, "agent": {"r"}, "res": {"q", "r"}}
+    # Resume ends the checkpoint, and the restarts it carried with it.
+    assert all(not recorder.carried_restarts for recorder in recorders.values())
 
 
 async def test_resume_after_a_partial_prepare_fences_the_participants_it_never_reached() -> None:
@@ -201,7 +240,7 @@ async def test_resume_after_a_partial_prepare_fences_the_participants_it_never_r
         client=client, auth_token=TOKEN, members=tuple(m for m in participants.members if m.kind == "resources")
     )
 
-    with pytest.raises(CoordinationError, match="stale_checkpoint"):
+    with pytest.raises(CoordinationError, match="checkpoint_stale"):
         await coordination.prepare(res_only, "c1", deadline_ts=deadline())
 
 
@@ -369,6 +408,31 @@ async def test_discover_reports_a_server_that_never_replies(monkeypatch: pytest.
 
     with pytest.raises(CoordinationError, match="env: no status reply within 0.05 seconds"):
         await asyncio.wait_for(coordination.discover(client, auth_token=TOKEN), 5)
+
+
+async def test_discover_reads_each_participants_checkpoint_mode() -> None:
+    """A controller can tell from discovery alone which servers' rollouts start over after a crash."""
+    client, recorders, _ = deployment(*FULL)
+    recorders["res"].mode = "restart_only"
+    recorders["env"].mode = "stateless"
+
+    participants = await coordination.discover(client, auth_token=TOKEN)
+
+    assert {member.server_name: member.mode for member in participants.members} == {
+        "env": "stateless",
+        "policy": "exported",
+        "agent": "exported",
+        "res": "restart_only",
+    }
+
+
+async def test_discover_reports_a_participant_whose_status_names_no_checkpoint_mode() -> None:
+    client, recorders, _ = deployment(*FULL)
+    # As a server from before the mode was reported would answer.
+    recorders["agent"].mode = None
+
+    with pytest.raises(CoordinationError, match="agent: participant reports no checkpoint mode"):
+        await coordination.discover(client, auth_token=TOKEN)
 
 
 async def test_discover_reports_a_participant_of_an_unknown_kind() -> None:
