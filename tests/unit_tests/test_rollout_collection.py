@@ -119,7 +119,7 @@ from nemo_gym.rollout_collection import (
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_health import health_check_run_dir
 from nemo_gym.rollout_records import prepare_append as _drop_truncated_tail
-from nemo_gym.rollout_recovery import matches_failure_class
+from nemo_gym.rollout_recovery import manifest_path_for, matches_failure_class
 from nemo_gym.rollout_reverification import RolloutReverificationConfig, _is_judge_failure
 from nemo_gym.server_utils import BaseServerConfig, ClientDisconnectCancellationMiddleware, ServerClient
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
@@ -6001,6 +6001,50 @@ class TestRolloutCollection:
         assert retried[ATTEMPT_INDEX_KEY_NAME] == 2
         assert (tmp_path / "output_resubmit_offset").read_text() == "2\n"
         assert final.coverage()["identity_verified"] is True
+
+    @pytest.mark.parametrize("missing", ["output", "materialized inputs"])
+    async def test_a_resume_with_nothing_to_resume_starts_the_tracking_run_over(
+        self, tmp_path: Path, empty_global_config: MagicMock, monkeypatch: pytest.MonkeyPatch, missing: str
+    ) -> None:
+        """The exporters reopened the run recorded next to the output, but collection starts the output anew."""
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(
+            orjson.dumps({"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}) + b"\n"
+        )
+        output_fpath = tmp_path / "output.jsonl"
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result(_CompletedRollout(row=example, result={"reward": 1.0}, rollout_latency_ms=None))
+                    futures.append(future)
+                return futures
+
+        base = dict(input_jsonl_fpath=str(input_fpath), output_jsonl_fpath=str(output_fpath), disable_aggregation=True)
+        await Helper().run_from_config(RolloutCollectionConfig(**base, resume_from_cache=False))
+        exporter = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [exporter])
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_rollouts", MagicMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_metrics", MagicMock())
+
+        config = RolloutCollectionConfig(**base, resume_from_cache=True)
+        await Helper().run_from_config(config)
+        exporter.start_over.assert_not_called()
+
+        # A run with history refuses to resume without its files rather than start over, and keeps its tracking run.
+        (output_fpath if missing == "output" else config.materialized_jsonl_fpath).unlink()
+        with pytest.raises(ConfigError, match="Cannot resume"):
+            await Helper().run_from_config(config)
+        exporter.start_over.assert_not_called()
+
+        # With nothing saved to resume, the output starts anew, and so does its tracking run.
+        for path in (output_fpath, failures_path_for(output_fpath), config.materialized_jsonl_fpath):
+            path.unlink(missing_ok=True)
+        manifest_path_for(output_fpath).unlink()
+        await Helper().run_from_config(config)
+        exporter.start_over.assert_called_once_with()
 
     @pytest.mark.parametrize("resume_from_cache", [False, True])
     async def test_run_from_config_creates_missing_output_dir(

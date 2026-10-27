@@ -94,8 +94,11 @@ recorded or built or any server started, naming the harness and the admitted lis
 another harness afterwards is refused at dispatch by the collector's pairing guard. An `example` dataset is not
 runnable: that type marks committed smoke-test samples, and both commands refuse it at the same early point, before
 any image is recorded or built. `domain`, `verified` and `allowed_agents` stay out of the
-metrics sidecar Gym writes beside the rows, so editing them between two runs of one taskset and harness does not
-conflict with it; a `type` or `license` edit does, and the error names the sidecar to delete.
+metrics sidecar Gym writes beside the rows. The rows' metrics sidecar and the collated split's are removed and
+rewritten on every fresh run, because the rows are regenerated from the task folder each time: growing or narrowing
+the selection or editing `type` or `license` between two runs of one taskset and harness never fails data
+preparation, and `overwrite_metrics_conflicts` is never needed. A `--resume` run keeps the collated metrics, as its
+rows are unchanged.
 
 Deployment settings (which sandbox provider, registry credentials, image mirrors) do not belong here: a dataset
 must run unchanged on every deployment. Those live in the sandbox provider block of the run configuration. See
@@ -177,3 +180,29 @@ out and stops before starting servers. Pass `--skip-unloadable` to run the loada
 tasks stay listed in `skipped.json`. Tasks that declare GPUs run on the environment server's `gpu_sandbox_provider`
 block when one is configured. The run's rows, generated configuration and outputs are the same artifacts every
 other `gym eval run` produces, so `gym eval aggregate`, `gym eval export` and the health check apply unchanged.
+
+### Run summary and verbosity
+
+Both commands leave a per-run summary beside the rollouts, `rollouts_run_summary.json` (`<stem>_run_summary.json`
+when `--output` names another file). It records the command, target, taskset and agent, the dataset's folder,
+source and digests, the run's `task_source` (the dataset label the rows were materialized with, beside the one the
+result rows carry as `rows_task_source`), the files of the run (rollouts and sidecars, the health check's
+reports, the rows and the data processor's files beside them, the collated collector input, run config,
+`skipped.json`, `images.json`, the verifier root; `null` for one the run did not write, for the aggregate
+metrics when an older file by that name predates this run's rollouts, for the health reports unless the quality
+summary records this rollouts file as the one it was computed from (their names are shared by every `--output`
+stem in the folder), and for rollouts,
+failures and materialized inputs a fresh start never got to clear, such as after servers that failed to start;
+such files are named under `stale_files` instead, and their rows are not this run's), and one entry per
+selected task and repeat: its status,
+reward and `failure_kind`, the verifier's mode, wall time and return code, the relative paths of its verifier log
+folder (`test-stdout.txt`, `trajectory.json`, collected `artifacts/`), and the input the row carried (task and
+dataset digests, `agent_timeout_sec`, the step for a multi-step task). A path a row names that is missing on
+disk is listed under `missing_paths`. The file is written whatever the run did, a validate that found no task
+with a `solution/` included (beside the requested `--output`): the tasks a validate left out for want of one are
+named under `unvalidated` with the reason (`no reference solution`), beside the tasks that did not load under
+`skipped`, so a selection that ran nothing explains why. Start from this file when a score needs checking.
+
+`gym dataset validate ... -v` (or `--verbose`, the `verbose` config key) raises the log level to DEBUG in the CLI
+and in the spun-up servers: the Harbor environment server then traces every episode's seed, verifier exit and
+score, and the oracle agent its `solve.sh` run.

@@ -11,6 +11,7 @@ imports it for validate_target and the eval run resume conflict check.
 
 import json
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -45,35 +46,39 @@ def _validation_key(row: dict[str, object]) -> tuple[str, str, object, object]:
     return taskset, _task_name(row), row.get("_ng_task_index"), row.get("_ng_rollout_index")
 
 
-def _validation_rows(path: Path) -> list[dict[str, object]]:
+def _iter_validation_rows(path: Path) -> Iterator[dict[str, object]]:
     """The records of a rollouts, failures or materialized inputs file, in order (none when there is no file).
 
-    A run killed while appending leaves a final line without a newline that does not parse (the cut may
-    land inside a multibyte character, so it may not decode either). The collector drops that line from
-    the rollouts and failures files when it resumes (``_drop_truncated_tail``), so it is skipped here with
-    the same tolerance, and a resume that reads the cache first still reaches that repair. A complete final
-    record without a newline is read like any other. A line that does not parse anywhere else is damage
-    the collector does not repair, and is reported by file and line rather than resumed over.
+    One record is read and parsed at a time, so a reader that keeps a projection of each row (the run
+    summary) never holds a long run's responses together. A run killed while appending leaves a final line
+    without a newline that does not parse (the cut may land inside a multibyte character, so it may not
+    decode either). The collector drops that line from the rollouts and failures files when it resumes
+    (``_drop_truncated_tail``), so it is skipped here with the same tolerance, and a resume that reads the
+    cache first still reaches that repair. A complete final record without a newline is read like any
+    other. A line that does not parse anywhere else is damage the collector does not repair, and is reported
+    by file and line rather than resumed over.
     """
     if not path.is_file():
-        return []
-    lines = path.read_bytes().split(b"\n")
-    tail = lines.pop()  # empty when the file ends with a newline, else the unterminated last line
-    rows: list[dict[str, object]] = []
-    for number, line in enumerate(lines, 1):
-        if not line.strip():
-            continue
-        try:
-            rows.append(json.loads(line))
-        except ValueError as exc:  # JSONDecodeError, or UnicodeDecodeError for bytes that are not UTF-8
-            detail = f"{exc.msg}, column {exc.colno}" if isinstance(exc, json.JSONDecodeError) else str(exc)
-            raise ConfigError(f"{path}, line {number}: not a JSON record ({detail}).") from exc
-    if tail.strip():
-        try:
-            rows.append(json.loads(tail))
-        except ValueError:
-            pass
-    return rows
+        return
+    with path.open("rb") as handle:
+        for number, line in enumerate(handle, 1):
+            terminated = line.endswith(b"\n")
+            line = line[:-1] if terminated else line
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError as exc:  # JSONDecodeError, or UnicodeDecodeError for bytes that are not UTF-8
+                if not terminated:
+                    return  # the unterminated last line
+                detail = f"{exc.msg}, column {exc.colno}" if isinstance(exc, json.JSONDecodeError) else str(exc)
+                raise ConfigError(f"{path}, line {number}: not a JSON record ({detail}).") from exc
+            yield row
+
+
+def _validation_rows(path: Path) -> list[dict[str, object]]:
+    """:func:`_iter_validation_rows` as a list, for the readers that need every record at once."""
+    return list(_iter_validation_rows(path))
 
 
 def summarize_validation(

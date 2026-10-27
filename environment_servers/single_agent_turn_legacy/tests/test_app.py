@@ -482,6 +482,31 @@ async def test_protocol_failure_metadata_survives_collection(
     assert store.selected("success") == []
 
 
+async def test_a_flat_row_keeps_the_agents_skip_verification_after_leaving_the_relay() -> None:
+    # Under the legacy_agent relay, the agent's /run honored the setting Gym copies into agent configs.
+    environment_server, client = _environment_server()
+    client.global_config_dict.agent.responses_api_agents.test.update(
+        {"skip_verification": True, "skip_verification_reward": 0.25}
+    )
+    del client.responses[4]
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    result = await adapter.run_legacy(
+        {
+            "_ng_task_index": 0,
+            "_ng_rollout_index": 0,
+            "instance_id": "task",
+            "responses_create_params": {"input": "task"},
+        }
+    )
+
+    assert result["reward"] == 0.25
+    assert result["verification_skipped"] is True
+    assert result["agent_ref"] == {"name": "agent"}
+    assert "/verify" not in [path for _, path, _ in client.calls]
+    assert [path for _, path, _ in client.calls][-1] == "/close_session"
+
+
 class _BlockingAgentClient(_Client):
     """Hold the agent invocation until the test releases it."""
 

@@ -370,8 +370,22 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         phases[f"steps.{step.name}.agent"] = step.agent
         phases[f"steps.{step.name}.verifier"] = step.verifier
     for name, phase in phases.items():
-        if phase.network_mode not in (None, "public") or phase.allowed_hosts:
+        if phase.network_mode in (None, "public") and not phase.allowed_hosts:
+            continue
+        if name != "verifier":
+            # The agent's sandbox is created public and a running sandbox's egress policy cannot be switched, so
+            # only the separate verifier's own sandbox can carry a phase policy (multi-step tasks verify in the
+            # agent's sandbox).
             raise HarborTaskError(f"{path}: {name} network restrictions are not supported yet")
+        if config.is_shared_verifier:
+            raise HarborTaskError(
+                f"{path}: [verifier] network restrictions are not supported in Harbor's shared verifier mode: a "
+                "running sandbox's network policy cannot be changed after the agent's turn, so the restricted "
+                "policy is applied to the separate verifier's sandbox when it is created (declare "
+                '[verifier].environment_mode = "separate" or a [verifier.environment])'
+            )
+        if phase.allowed_hosts and phase.network_mode != "allowlist":
+            raise HarborTaskError(f"{path}: [verifier] allowed_hosts is only valid when network_mode='allowlist'")
     for name, environment in (
         ("environment", config.environment),
         ("verifier.environment", config.verifier.environment),

@@ -234,6 +234,10 @@ with Sandbox(provider_config, SandboxSpec(image="ghcr.io/example/eval-image:py31
 Do not call `Sandbox` from FastAPI handlers, async resources servers, or async agents. It blocks the caller by design. Use `AsyncSandbox` in async code.
 </Warning>
 
+## Interactive Terminals
+
+`AsyncSandbox.pty` opens interactive terminal sessions on providers that implement `SupportsSandboxPty`: OpenSandbox (execd PTY sessions, which also re-attach by id from another process) and Docker (`docker exec -i -t` under a host pseudo-terminal; sessions live in the calling process). `await sandbox.pty.create(rows=..., cols=...)` returns a session with `read`, `write`, `resize`, `send_signal`, `wait_exit` and `close`; `await sandbox.pty.exec(command)` runs one command in a terminal and collects its output; `pty=False` gives a pipe session with stdout and stderr split. Providers without the capability raise `NotImplementedError`, so use `exec()` there. The sync `Sandbox` facade does not mirror the PTY namespace.
+
 ## SandboxSpec Fields
 
 `SandboxSpec` is intentionally provider-neutral. Providers map these fields onto their own runtime primitives.

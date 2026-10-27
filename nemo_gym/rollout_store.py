@@ -116,6 +116,8 @@ class RolloutStore:
         self._allocated: set[tuple[str, int]] = set()
         self.outcomes_recorded: int = 0
         self.progress_outcomes_recorded: int = 0
+        # Whether start_or_resume prepared a new run rather than resuming saved outcomes.
+        self.started_fresh: bool = False
 
     @staticmethod
     def _unverified_manifest(output: Path) -> RunManifest:
@@ -245,7 +247,9 @@ class RolloutStore:
         output.touch()
         failures_path_for(output).touch()
         manifest.write(manifest_path)
-        return cls(output, state)
+        store = cls(output, state)
+        store.started_fresh = True
+        return store
 
     @classmethod
     def read(

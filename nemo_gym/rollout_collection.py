@@ -3696,6 +3696,10 @@ class RolloutCollectionHelper(BaseModel):
             allow_unsafe=config.allow_unsafe_resume,
             resubmit=config.resubmit,
         )
+        if config.resume_from_cache and store.started_fresh:
+            # The exporters reopened the run recorded next to this output, which starts anew: so does that run.
+            for exporter in get_exporters():
+                exporter.start_over()
         from nemo_gym.cli.eval import _remove_health_reports
 
         _remove_health_reports(output_fpath)
