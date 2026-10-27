@@ -28,9 +28,10 @@ from contextlib import nullcontext
 from copy import deepcopy
 from functools import cache
 from pathlib import Path
+from random import uniform
 from shlex import quote
 from tempfile import TemporaryDirectory
-from time import time
+from time import monotonic, time
 from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional
 from uuid import uuid4
@@ -57,7 +58,6 @@ from nemo_gym.config import (
     get_global_config_dict,
 )
 from nemo_gym.core import (
-    AGENT_ROUTE_FAILED,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -73,6 +73,8 @@ from nemo_gym.core import (
     NeMoGymSummary,
     NgFailureEvent,
 )
+from nemo_gym.core.failure_kinds import AGENT_INVALID_OUTPUT, PROVIDER_IO_TIMEOUT, PROVIDER_OOM_KILLED
+from nemo_gym.failure_transport import observe_failure
 from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -83,12 +85,15 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
+from nemo_gym.sandbox.providers.opensandbox.provider import DELETED_OUTPUT_NOTE
 from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    SandboxFailureDetails,
 )
 from nemo_gym.trajectory import (
+    NG_AGENT_SANDBOX_OBSERVATION_KEY,
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
@@ -130,6 +135,9 @@ def _warn_deprecated_once() -> None:
     if not is_nemo_gym_fastapi_worker():
         LOGGER.warning(DEPRECATION_WARNING)
 
+
+_RIPGREP_UPLOAD_MAX_ATTEMPTS = 2
+_RIPGREP_UPLOAD_MAX_CONCURRENT = 2
 
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
 # Image parts of the user turn are uploaded here and handed to `opencode run -f`. Outside the task
@@ -555,6 +563,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: Optional[int] = Field(default=None)
     preinstalled_opencode: bool = False
     execution_failure_reward_zero: bool = False
+    report_agent_sandbox_oom: bool = False
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
     network_access: Literal["inherit", "model_only", "model_and_tools"] = "inherit"
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
@@ -732,6 +741,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         _warn_deprecated_once()
 
         self._sem = Semaphore(self.config.concurrency) if self.config.concurrency else nullcontext()
+        # Uvicorn workers have separate agent instances, so this bounds each process.
+        self._ripgrep_upload_sem = Semaphore(_RIPGREP_UPLOAD_MAX_CONCURRENT)
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
@@ -791,6 +802,51 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         await sandbox.start(sandbox_spec)
 
         return sandbox
+
+    async def _stage_ripgrep(self, sandbox: AsyncSandbox, source_path: Path) -> str:
+        """Retry an ambiguous upload timeout without reusing its remote path."""
+        size_bytes = source_path.stat().st_size
+        sandbox_id = sandbox._handle.sandbox_id
+        for attempt in range(1, _RIPGREP_UPLOAD_MAX_ATTEMPTS + 1):
+            remote_path = f"/tmp/nemo-gym-ripgrep-{uuid4().hex}"
+            try:
+                async with self._ripgrep_upload_sem:
+                    started = monotonic()
+                    await sandbox.upload(source_path, remote_path)
+            except (TimeoutError, NgFailureEvent) as error:
+                if isinstance(error, NgFailureEvent) and (
+                    error.boundary != "sandbox" or error.failure_kind != PROVIDER_IO_TIMEOUT
+                ):
+                    raise
+                if isinstance(error, NgFailureEvent):
+                    observe_failure(error)
+                LOGGER.warning(
+                    "OpenCode ripgrep upload timed out; sandbox_id=%s remote_path=%s "
+                    "attempt=%d/%d size_bytes=%d duration_s=%.1f",
+                    sandbox_id,
+                    remote_path,
+                    attempt,
+                    _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                    size_bytes,
+                    monotonic() - started,
+                )
+                if attempt == _RIPGREP_UPLOAD_MAX_ATTEMPTS:
+                    raise
+                await asyncio.sleep(uniform(15.0, 30.0))
+            else:
+                LOGGER.info(
+                    "OpenCode ripgrep upload completed; sandbox_id=%s remote_path=%s "
+                    "attempt=%d/%d size_bytes=%d duration_s=%.1f",
+                    sandbox_id,
+                    remote_path,
+                    attempt,
+                    _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                    size_bytes,
+                    monotonic() - started,
+                )
+                return remote_path
+
+        raise RuntimeError("OpenCode ripgrep upload retry loop did not run")
 
     def _plugin_uploads(self) -> list[tuple[Path, str]]:
         """Every opencode plugin this rollout ships, as (local file, sandbox path), in load order.
@@ -1240,7 +1296,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         ripgrep_remote_path = None
         ripgrep_install_str = ""
         if self.config.local_ripgrep_binary_path is not None:
-            ripgrep_remote_path = f"/tmp/nemo-gym-ripgrep-{uuid4().hex}"
+            ripgrep_remote_path = await self._stage_ripgrep(sandbox, self.config.local_ripgrep_binary_path)
             # Uploads may be root-owned: copy as the execution user; teardown removes the source.
             ripgrep_install_str = (
                 '&& mkdir -p "$HOME/.opencode/bin" '
@@ -1283,30 +1339,89 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # and there is no way to set it to null.
         # Here, we set an exorbitantly high number that cannot ever be reached.
         # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
-        command = f"""
+        setup_command = f"""
         echo "Shell: $SHELL" \
         && {install_str} \
         {ripgrep_install_str} \
         && export PATH="$HOME/.opencode/bin:$PATH" \
         && test "$(opencode --version)" = {quote(self.config.opencode_version)} \
         && echo "Installed OpenCode" \
-        && rm -f /tmp/nemo-gym-mcp-setup-error \
-        && {query_seed_str}NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str} \
+        && rm -f /tmp/nemo-gym-mcp-setup-error
+        """
+        agent_command = f"""
+        {query_seed_str}NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str} \
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str}{opencode_attachment_str} {query_arg_str} \
         && echo "OpenCode run finished"
         """
+        if self.config.report_agent_sandbox_oom:
+            setup_result = await sandbox.exec(command=setup_command, timeout_s=self.config.sandbox_timeout)
+            if setup_result.return_code != 0 or setup_result.error_type is not None:
+                raise RuntimeError(f"OpenCode setup failed before agent execution: {setup_result}")
+            command = f'echo "Shell: $SHELL" && export PATH=$HOME/.opencode/bin:$PATH && {agent_command}'
+        else:
+            command = f"{setup_command.strip()} && {agent_command.strip()}"
 
         if self.config.debug:
             print("Starting OpenCode (runtime configuration omitted to protect credentials)", file=sys.stderr)
-
-        if ripgrep_remote_path is not None:
-            await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
 
         run_error_type = None
         try:
             result = await sandbox.exec(
                 command=command,
                 timeout_s=self.config.sandbox_timeout,
+            )
+        except NgFailureEvent as exc:
+            if not (
+                self.config.report_agent_sandbox_oom
+                and exc.boundary == "sandbox"
+                and exc.failure_kind == PROVIDER_OOM_KILLED
+            ):
+                raise
+            observe_failure(exc)
+            details = exc.details
+            observation = SandboxObservation(
+                role="agent",
+                provider=details.provider if isinstance(details, SandboxFailureDetails) else None,
+                sandbox_id=details.sandbox_id if isinstance(details, SandboxFailureDetails) else None,
+                phase="agent_execution",
+                outcome="oom",
+                failure_id=exc.event_id,
+            )
+            self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = {
+                "opencode_failed": True,
+                "opencode_exit_code": None,
+                "opencode_error_type": exc.failure_kind,
+                "opencode_results_fpath": "",
+                "opencode_run_stdout": "",
+                "opencode_run_stderr": str(exc),
+                "opencode_export_found": False,
+                "opencode_finished": False,
+                "_ng_agent_observations": AgentObservationBundle(
+                    source="opencode",
+                    records=(
+                        [
+                            AgentInvocation(
+                                invocation_id=observation_invocation_id, status="failed", error_type="server_error"
+                            )
+                        ]
+                        if observation_invocation_id is not None
+                        else []
+                    )
+                    + [observation],
+                    gaps=[ObservationGap(code="observation_capture_failed")],
+                ),
+            }
+            return NeMoGymResponse(
+                id=f"resp_{uuid4().hex}",
+                created_at=int(time()),
+                model=body.model or self.config.model_server.name,
+                object="response",
+                output=[],
+                status="failed",
+                tool_choice=body.tool_choice,
+                tools=body.tools,
+                parallel_tool_calls=body.parallel_tool_calls,
+                metadata={NG_AGENT_SANDBOX_OBSERVATION_KEY: observation.model_dump_json()},
             )
         except Exception as error:
             # A provider exception does not establish how the command ended: report it at the agent boundary, with
@@ -1323,20 +1438,32 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             ) from error
 
         if result.error_type != "timeout" and (result.error_type is not None or result.return_code == -1):
-            # A native command deadline is a protocol result. The provider's -1 sentinel or an execution error
-            # does not establish a supported final cause; an ordinary nonzero exit still reaches the verifier.
             raise NgFailureEvent(
-                boundary="agent",
-                failure_kind=AGENT_ROUTE_FAILED,
+                boundary="harness",
+                failure_kind=AGENT_INVALID_OUTPUT,
                 failure_reason=self._agent_sandbox_facts(
-                    sandbox,
-                    reason=result.error_type if isinstance(result.error_type, str) else None,
-                    exit_code=result.return_code if isinstance(result.return_code, int) else None,
+                    sandbox, reason=result.error_type if isinstance(result.error_type, str) else None
                 )
                 + "Sandbox command outcome cannot be classified",
-                exception_type=str(result.error_type) if result.error_type is not None else None,
-                operation="agent.sandbox_exec",
-                stage="agent",
+                operation="opencode.execute",
+            )
+        result_stdout = result.stdout or ""
+        if DELETED_OUTPUT_NOTE in (result.stderr or ""):
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_INVALID_OUTPUT,
+                operation="opencode.capture",
+                failure_reason="OpenCode command output was deleted before agent result capture",
+            )
+        stdout_parts = result_stdout.rsplit("Shell: ", maxsplit=1)
+        if result.return_code == 0 and (
+            result.error_type is not None or len(stdout_parts) < 2 or "OpenCode run finished" not in stdout_parts[1]
+        ):
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_INVALID_OUTPUT,
+                operation="opencode.capture",
+                failure_reason="OpenCode command reported exit 0 without a trustworthy completion marker",
             )
 
         if self.config.debug and result:
@@ -1353,7 +1480,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # to the git repo, and resources servers extract the model patch with `git add -N . && git
         # diff`, which would sweep this transcript into the patch.
         export_remote_fpath = f"/tmp/opencode_{export_fname}"
-        session_id = None
+        results_root = (
+            Path(self.config.artifacts_dir) if self.config.artifacts_dir else Path(__file__).parent / "results"
+        )
+        results_dir = results_root / request.session[SESSION_ID_KEY]
+        results_dir.mkdir(parents=True, exist_ok=True)
+        results_local_fpath = results_dir / export_fname
+        # A previous attempt's transcript must never stand in for this run's export.
+        results_local_fpath.unlink(missing_ok=True)
         session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
         try:
             session_list_result = await sandbox.exec(
@@ -1361,9 +1495,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 env=session_env,
                 timeout_s=self.config.sandbox_timeout,
             )
-            if session_list_result.return_code != 0:
-                raise RuntimeError(f"Failed to list OpenCode sessions: {session_list_result}")
-            session_id = _extract_opencode_session_id(session_list_result.stdout or "")
+        except NgFailureEvent:
+            raise
+        except Exception as exc:
+            raise RuntimeError("Failed to list OpenCode sessions") from exc
+        if session_list_result.return_code != 0 or session_list_result.error_type is not None:
+            raise RuntimeError(f"Failed to list OpenCode sessions: {session_list_result}")
+        session_id = _extract_opencode_session_id(session_list_result.stdout or "")
+        try:
             export_result = await sandbox.exec(
                 command=(
                     'export PATH="$HOME/.opencode/bin:$PATH" '
@@ -1372,30 +1511,43 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 env=session_env,
                 timeout_s=self.config.sandbox_timeout,
             )
-        except Exception:
-            export_result = None
-            print("Failed to export results", format_exc(), file=sys.stderr)
-        if self.config.debug and export_result:
+        except NgFailureEvent:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"Failed to export OpenCode session {session_id}") from exc
+        if export_result.return_code != 0 or export_result.error_type is not None:
+            raise RuntimeError(f"Failed to export OpenCode session {session_id}: {export_result}")
+        if self.config.debug:
             print("Export stdout:\n", export_result.stdout, file=sys.stderr)
             print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
-        results_root = (
-            Path(self.config.artifacts_dir) if self.config.artifacts_dir else Path(__file__).parent / "results"
-        )
-        results_dir = results_root / request.session[SESSION_ID_KEY]
-        results_dir.mkdir(parents=True, exist_ok=True)
-        results_local_fpath = results_dir / export_fname
-        results_local_fpath.unlink(missing_ok=True)
-        if export_result is not None and export_result.return_code == 0 and not export_result.error_type:
-            if self.config.debug:
-                print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
-            try:
-                await sandbox.download(export_remote_fpath, results_local_fpath)
-            except Exception:
-                results_local_fpath.unlink(missing_ok=True)
-                print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
-                print("Export stdout:\n", export_result.stdout, file=sys.stderr)
-                print("Export stderr:\n", export_result.stderr, file=sys.stderr)
+        if self.config.debug:
+            print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
+        try:
+            await sandbox.download(export_remote_fpath, results_local_fpath)
+        except NgFailureEvent:
+            raise
+        except Exception as exc:
+            results_local_fpath.unlink(missing_ok=True)
+            raise RuntimeError(f"Failed to download OpenCode export to {results_local_fpath}") from exc
+        if not results_local_fpath.is_file():
+            raise RuntimeError(f"OpenCode export was not downloaded to {results_local_fpath}")
+        try:
+            opencode_export = json.loads(results_local_fpath.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Failed to read OpenCode export from {results_local_fpath}") from exc
+        if (
+            not isinstance(opencode_export, dict)
+            or not isinstance(opencode_export.get("messages"), list)
+            or not opencode_export["messages"]
+            or not any(
+                isinstance(message, dict)
+                and isinstance(message.get("info"), dict)
+                and message["info"].get("role") == "assistant"
+                for message in opencode_export["messages"]
+            )
+        ):
+            raise RuntimeError(f"OpenCode export at {results_local_fpath} had no assistant messages or was invalid")
 
         observations = None
         trajectory = (
@@ -1435,6 +1587,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         trajectory,
                         model_ref=self.config.model_server,
                     )
+            except NgFailureEvent:
+                raise
             except Exception:
                 print("Failed to capture OpenCode session usage or observations", format_exc(), file=sys.stderr)
                 if collect_observations:
@@ -1451,10 +1605,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     )
             finally:
                 observations_local_fpath.unlink(missing_ok=True)
-
-        opencode_export = dict()
-        if results_local_fpath.exists():
-            opencode_export = json.loads(results_local_fpath.read_text().strip() or "{}")
 
         output = []
         usage = None
@@ -1482,12 +1632,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     else "OpenCodeError"
                 )
 
-        result_stdout = (result.stdout if result else "") or ""
         result_stderr = (result.stderr if result else "") or ""
         opencode_finished = False
-        std_out_split = result_stdout.rsplit("Shell: ", maxsplit=1)
-        if len(std_out_split) > 1:
-            opencode_finished = "OpenCode run finished" in std_out_split[1]
+        if len(stdout_parts) > 1:
+            opencode_finished = "OpenCode run finished" in stdout_parts[1]
 
         if collect_observations and observations is not None:
             agent_sandbox_observation = self._agent_sandbox_observation(
@@ -1647,14 +1795,33 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             verify_body = body.model_copy(
                 update={"opencode_terminal_reason": run_result.get("opencode_terminal_reason", "")}
             )
+            confirmed_agent_oom = (
+                self.config.report_agent_sandbox_oom
+                and run_result.get("opencode_failed") is True
+                and run_result.get("opencode_error_type") == PROVIDER_OOM_KILLED
+                and observations is not None
+                and any(
+                    isinstance(record, SandboxObservation)
+                    and record.role == "agent"
+                    and record.phase == "agent_execution"
+                    and record.outcome == "oom"
+                    and record.failure_id is not None
+                    for record in observations.records
+                )
+            )
+            if not run_result.get("opencode_export_found") and not confirmed_agent_oom:
+                raise RuntimeError("OpenCode export unavailable; refusing to verify an uncaptured agent response")
             response_dict = await verify_agent_response(
                 self.server_client,
                 self.config.resources_server,
                 verify_body,
                 response,
                 cookies,
-                force_zero_reward=self.config.execution_failure_reward_zero
-                and run_result.get("opencode_failed", False),
+                force_zero_reward=(
+                    self.config.execution_failure_reward_zero
+                    and run_result.get("opencode_failed", False)
+                    and not confirmed_agent_oom
+                ),
             )
         finally:
             del request.state._ng_observation_invocation_id
