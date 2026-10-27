@@ -50,5 +50,8 @@ class AcmeExporter(IsolatedExporter):
 
         staged_dir = workdir / "run"
         staged_dir.mkdir()
-        shutil.copy2(artifacts.aggregate_metrics_json_fpath, staged_dir)
+        try:
+            shutil.copy2(artifacts.aggregate_metrics_json_fpath, staged_dir)
+        except OSError as exc:
+            raise ExportPreparationError(f"Could not stage the aggregate metrics: {exc}") from exc
         return {"project": self.config.project, "staged_dir": str(staged_dir)}

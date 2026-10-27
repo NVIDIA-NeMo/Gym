@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import errno
 import importlib.util
 import json
 import os
@@ -207,6 +208,24 @@ class TestAcmeExporter:
 
         assert (result.state, result.exit_code) == (ExportState.FAILED, 4)
         assert result.error == "Acme refused the upload: project is archived"
+
+    def test_a_staging_copy_that_fails_is_a_failed_result_before_an_environment_is_built(
+        self, tmp_path: Path, fake_acme_sdk: dict[str, Any], monkeypatch: MonkeyPatch
+    ) -> None:
+        acme = _load_example("acme_exporter")
+        artifacts = _make_run(tmp_path)
+        exporter = acme.AcmeExporter.from_global_config(_settings(artifacts, tmp_path, project="demo"))
+
+        def disk_full(source: Path, destination: Path) -> None:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(acme.shutil, "copy2", disk_full)
+
+        result = exporter.export(artifacts)
+
+        assert result.state is ExportState.FAILED
+        assert "Could not stage the aggregate metrics: [Errno 28] No space left on device" in result.error
+        assert fake_acme_sdk["requested"] == []
 
     def test_a_run_that_cannot_be_exported_fails_before_an_environment_is_built(
         self, tmp_path: Path, fake_acme_sdk: dict[str, Any]
