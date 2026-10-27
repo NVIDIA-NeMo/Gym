@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import errno
 import json
 import os
 import subprocess
@@ -24,6 +25,7 @@ import pytest
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
+import nemo_gym.exporters.evalrdl as evalrdl_module
 import nemo_gym.exporters.isolated as isolated
 from nemo_gym.exporters import load_run_exporter_class
 from nemo_gym.exporters.base import ExportState
@@ -230,6 +232,30 @@ class TestStaging:
         assert result.state is ExportState.FAILED
         assert "Aggregation failed for agents: bad" in result.error
         assert fake_sdk["requested"] == []
+
+    @pytest.mark.parametrize(
+        "failure",
+        [OSError(errno.ENOSPC, "No space left on device"), PermissionError(errno.EACCES, "Permission denied")],
+        ids=["disk-full", "unreadable"],
+    )
+    def test_a_staging_copy_that_fails_is_a_failed_result_before_any_environment_is_built(
+        self, tmp_path: Path, fake_sdk: dict[str, Any], monkeypatch: MonkeyPatch, failure: OSError
+    ) -> None:
+        artifacts = _make_run(tmp_path)
+
+        def broken_copy(source: Path, destination: Path) -> None:
+            raise failure
+
+        monkeypatch.setattr(evalrdl_module.shutil, "copy2", broken_copy)
+
+        result = _exporter(artifacts, tmp_path).export(artifacts)
+
+        assert result.state is ExportState.FAILED
+        assert result.exit_code == 1
+        assert f"Could not stage {artifacts.rollouts_jsonl_fpath} for EvalRDL" in result.error
+        assert str(failure.strerror) in result.error
+        assert fake_sdk["requested"] == []
+        assert not fake_sdk["log"].exists()
 
 
 class TestUpload:

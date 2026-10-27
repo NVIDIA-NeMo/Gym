@@ -86,7 +86,10 @@ class EvalRDLExporter(IsolatedExporter):
             artifacts.materialized_inputs_jsonl_fpath,
         ):
             if source.is_file():
-                shutil.copy2(source, staged_dir / source.name)
+                try:
+                    shutil.copy2(source, staged_dir / source.name)
+                except OSError as exc:
+                    raise ExportPreparationError(f"Could not stage {source} for EvalRDL: {exc}") from exc
         config = self.config
         return {
             "staged_dir": str(staged_dir),
