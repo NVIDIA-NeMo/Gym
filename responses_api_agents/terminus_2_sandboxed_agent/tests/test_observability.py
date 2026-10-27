@@ -591,3 +591,47 @@ async def test_proactive_summarization_flag_resets_on_cancellation(execution, mo
     assert result["ng_agent_observations"]["records"][0]["status"] == "incomplete"
     assert not result["ng_trajectory"]["turns"]
     assert not execution.agents[0]._is_check_proactive_summarization
+
+
+async def test_turn_cut_off_inside_reasoning_still_exports_to_atif(execution, monkeypatch):
+    """A policy cut off at max_output_tokens inside <think> leaves a reasoning-only output in the
+    trajectory (the harness compacts and goes on); the harbor environment server's ATIF export must
+    accept that shape and grade the episode, not mask it (review fix)."""
+    from nemo_gym.atif_export import transcript_to_atif
+
+    inner = openai_utils.request
+    seen = {"calls": 0}
+
+    async def cut_second_response(**kwargs):
+        response = await inner(**kwargs)
+        index, seen["calls"] = seen["calls"], seen["calls"] + 1
+        if index == 1:
+            payload = json.loads(await response.read())
+            payload["output"] = [payload["output"][0]]
+            payload["incomplete_details"] = {"reason": "max_output_tokens"}
+            payload["status"] = "incomplete"
+            response.read = AsyncMock(return_value=json.dumps(payload).encode())
+        return response
+
+    monkeypatch.setattr(openai_utils, "request", cut_second_response)
+    result = await execution.run(task_id="task-identity")
+    output = result["response"]["output"]
+    kinds = [(item.get("type"), item.get("role")) for item in output]
+    assert ("reasoning", None) in kinds and result.get("_ng_http_status") in (None, 200)
+    # A reasoning item that a user turn follows, instead of an assistant answer, is in the transcript.
+    dangling = [
+        index
+        for index, item in enumerate(output[:-1])
+        if item.get("type") == "reasoning" and output[index + 1].get("role") == "user"
+    ]
+    assert dangling, kinds
+
+    trajectory = transcript_to_atif(
+        result["responses_create_params"]["input"], output, session_id="s", agent_name="terminus", agent_version="1"
+    )
+
+    cut = [step for step in trajectory.steps if (step.extra or {}).get("nemo_gym", {}).get("incomplete")]
+    assert cut and cut[0].message == "" and cut[0].reasoning_content
+    assert cut[0].extra["nemo_gym"]["incomplete"] == "max_output_tokens"
+    assert trajectory.extra["nemo_gym"]["conversion"]["status"] == "partial"
+    assert "trailing_reasoning" in trajectory.extra["nemo_gym"]["conversion"]["reasons"]

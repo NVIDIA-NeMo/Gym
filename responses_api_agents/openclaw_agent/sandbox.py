@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxCommand, SandboxSession
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
@@ -107,9 +107,10 @@ class OpenClawSandboxSession(AgentSessionState):
             argv=[
                 "python3",
                 "-I",
-                f"{self.session.session_dir}/sandbox_runner.py",
+                f"{self.session.session_dir}/{RUNNER_FILE}",
                 f"{self.session.session_dir}/input.json",
             ],
+            stdlib_runner=True,
         )
 
     async def collect_artifacts(self) -> dict[str, str]:
