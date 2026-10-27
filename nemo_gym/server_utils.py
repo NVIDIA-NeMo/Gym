@@ -100,7 +100,7 @@ from nemo_gym.rollout_correlation import (
     scope_with_routed_path,
 )
 from nemo_gym.session_routing import (
-    SESSION_CLAIM_SCOPE_KEY,
+    SESSION_ACQUIRE_SCOPE_KEY,
     SESSION_ID_SCOPE_KEY,
     SESSION_SOCKET_DIR_ENV,
     create_session_socket_dir,
@@ -1020,7 +1020,7 @@ class ServerClient(BaseModel):
             # A /run starts an episode attempt, so with checkpointing it is never sent twice.
             # A dropped connection usually means the server's worker died mid-episode.
             # Sending it again would run the attempt a second time,
-            # and the first run's sessions on other servers would never be freed: the second run replies,
+            # and the first run's sessions on other servers would never be released: the second run replies,
             # so the controller never retires the attempt.
             _resend_after_disconnect=_resend_after_disconnect
             and not (self.checkpoint_enabled() and url_path == "/run"),
@@ -1686,8 +1686,8 @@ class SimpleServer(BaseServer):
     # See nemo_gym.session_routing.
     routes_sessions_to_owner: ClassVar[bool] = False
 
-    def claimed_session_routing(self) -> dict[str, Any]:
-        """Arguments to ``install_session_routing``: where requests name their session, and how long claims last.
+    def owned_session_routing(self) -> dict[str, Any]:
+        """Arguments to ``install_session_routing``: where requests name their session, and how long ownership lasts.
 
         A server that sets ``routes_sessions_to_owner`` implements it.
         """
@@ -1775,13 +1775,13 @@ class SimpleServer(BaseServer):
         async def add_session_id(request: Request, call_next):  # pragma: no cover
             # Always assign so Starlette 1.0+ marks session.modified=True and re-sends Set-Cookie.
             # A new session takes the ID the session router chose, if any (see nemo_gym.session_routing):
-            # a typed resources seed's resources_session_id, or an ID the router minted.
+            # an episode seed's resources_session_id, or an ID the router minted.
             new_session_id = request.scope.get(SESSION_ID_SCOPE_KEY) or str(uuid4())
-            claim = request.scope.get(SESSION_CLAIM_SCOPE_KEY)
+            acquire = request.scope.get(SESSION_ACQUIRE_SCOPE_KEY)
             session = request.session
             minted = SESSION_ID_KEY not in session
             session[SESSION_ID_KEY] = session.get(SESSION_ID_KEY, new_session_id)
-            if claim is None:
+            if acquire is None:
                 response = await call_next(request)
                 if minted and response.status_code >= 400:
                     # A failed request keeps nothing under a new session, so its reply names none: a seed refused
@@ -1789,9 +1789,9 @@ class SimpleServer(BaseServer):
                     del session[SESSION_ID_KEY]
                 return response
 
-            # With several workers, a session nobody claims, new or named by a cookie whose claim ended,
-            # is claimed only if the handler uses it, before the reply leaves this worker,
-            # so the client's next request finds the claim.
+            # With several workers, a session nobody owns, new or named by a cookie whose ownership ended,
+            # becomes this worker's only if the handler uses it, before the reply leaves this worker,
+            # so the client's next request finds its owner.
             # Starlette's session records each access through request.session; only the handler's count from here.
             tracks_access = hasattr(session, "mark_accessed")
             if tracks_access:
@@ -1801,11 +1801,14 @@ class SimpleServer(BaseServer):
             if tracks_access:
                 # The reply keeps its Vary: Cookie header, as for any request that reads the session.
                 session.mark_accessed()
-            if used and not claim():
-                # Another worker claimed the same ID meanwhile; serving the request here would split the session.
-                return JSONResponse({"detail": "This session's ID is already claimed. Retry it."}, status_code=409)
+            if used and not acquire():
+                # Another worker took ownership of the same ID meanwhile.
+                # Serving the request here would split the session.
+                return JSONResponse(
+                    {"detail": "This session's ID is already owned by another worker. Retry it."}, status_code=409
+                )
             if minted and (not used or response.status_code >= 400):
-                # No cookie names an ID that nothing holds, so a later request cannot name an unclaimed session,
+                # No cookie names an ID that nothing holds, so a later request cannot name a session nobody owns,
                 # and a failed request hands out no cookie, as with one worker.
                 del session[SESSION_ID_KEY]
             return response
@@ -1986,13 +1989,13 @@ repr(e): {repr(e)}"""
             report_connection_pool_capacity(connection_pool_config, pool_capacity, visible=True)
         server.setup_exception_middleware(app)
         backlog = UvicornBacklogConfig.model_validate(global_config_dict).uvicorn_backlog
-        # A worker of a multi-worker server serves a private socket in this directory and claims sessions in it.
+        # A worker of a multi-worker server serves a private socket in this directory and records session owners in it.
         # The main process of a multi-worker server never serves the app.
         session_socket_dir = getenv(SESSION_SOCKET_DIR_ENV) if not is_main_fastapi_proc else None
         is_multi_worker_main_proc = is_main_fastapi_proc and (server.config.num_workers or 1) > 1
         if server.routes_sessions_to_owner and not is_multi_worker_main_proc:
             # Outside SessionMiddleware and the exception middleware:
-            # a forwarded request is handled only by the worker that claims its session.
+            # a forwarded request is handled only by the worker that owns its session.
             session_cookie = server.get_session_middleware_key()
             install_session_routing(
                 app,
@@ -2001,7 +2004,7 @@ repr(e): {repr(e)}"""
                 secret_key=session_cookie,
                 backlog=backlog,
                 **mcp_token_routing,
-                **server.claimed_session_routing(),
+                **server.owned_session_routing(),
             )
         # Register last so cancellation wraps the complete request stack.
         server.setup_cancellation_middleware(app)

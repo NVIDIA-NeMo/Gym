@@ -2365,7 +2365,7 @@ class TestRunWebserverProxyKwargs:
             ray_enabled = ray_setting
             routes_sessions_to_owner = routes_sessions
 
-            def claimed_session_routing(self) -> dict:
+            def owned_session_routing(self) -> dict:
                 return {}
 
             @classmethod

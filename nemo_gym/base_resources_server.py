@@ -385,10 +385,10 @@ class ResourcesSessionFences(Generic[FenceRecordT]):
     A fence expires ``close_retry_window_seconds`` after the first close; a retried close does not extend it.
     Construct it with the server's ``session_close_retry_window_seconds``.
 
-    With several workers, the routing claim on the ID expires that long after the last request for the session,
+    With several workers, the worker's ownership of the ID expires that long after the last request for the session,
     and the fence is set before the close's reply is sent.
-    So the claim never expires before the fence (see ``nemo_gym.session_routing.ResourcesSessionLifetimes``).
-    While the claim lasts, a late seed reaches the worker that holds the fence and is refused.
+    So ownership never expires before the fence (see ``nemo_gym.session_routing.ResourcesSessionLifetimes``).
+    While ownership lasts, a late seed reaches the worker that holds the fence and is refused.
     After it expires, every worker treats the ID as new, so the answer does not depend on which worker gets it.
 
     TODO: also expire sessions that are never closed, as when the environment server dies before its close. Planned
@@ -489,7 +489,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     _mcp_token_serializer: Any = PrivateAttr(default=None)
     routes_sessions_to_owner = True
 
-    def claimed_session_routing(self) -> dict[str, Any]:
+    def owned_session_routing(self) -> dict[str, Any]:
         return {
             "kind": RESOURCES_SESSIONS,
             "close_retry_window_seconds": self.config.session_close_retry_window_seconds,
@@ -632,8 +632,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         session_id = request.session.get(SESSION_ID_KEY)
         if self._checkpoint is not None and session_id is not None:
             self._checkpoint.ended(session_id)
-        # With several workers, the session's routing claim ends a window after its last request from now on.
-        # A request without an app, such as a test's stand-in, has no routing and so no claim to end.
+        # With several workers, this worker's ownership of the session ends a window after its last request from now on.
+        # A request without an app, such as a test's stand-in, has no routing and so no ownership to end.
         app = getattr(request, "app", None)
         lifetimes = getattr(getattr(app, "state", None), "nemo_gym_resources_session_lifetimes", None)
         if lifetimes is not None and session_id is not None:

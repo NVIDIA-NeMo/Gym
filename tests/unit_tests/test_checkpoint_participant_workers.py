@@ -64,7 +64,7 @@ from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_
 from nemo_gym.server_utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, ServerClient
 from nemo_gym.session_routing import (
     ResourcesSessionLifetimes,
-    SessionClaims,
+    SessionOwners,
     install_session_routing,
 )
 from resources_servers.example_session_state_mgmt.app import (
@@ -168,9 +168,9 @@ def agent_worker() -> tuple[AgentSessionParticipant, FastAPI]:
 
 
 def routed(
-    make: Callable[[], tuple[CheckpointParticipant, FastAPI]], claims_dir: str
+    make: Callable[[], tuple[CheckpointParticipant, FastAPI]], routing_dir: str
 ) -> Callable[[], tuple[CheckpointParticipant, FastAPI]]:
-    """Workers ``make`` builds, with the session claims and lifetimes session routing would give them."""
+    """Workers ``make`` builds, with the session owners and lifetimes session routing would give them."""
 
     def make_routed() -> tuple[CheckpointParticipant, FastAPI]:
         participant, app = make()
@@ -182,15 +182,15 @@ def routed(
             lifetimes = ResourcesSessionLifetimes(0.2, starts=("/seed_session",), ends=("/close_session",))
             app.state.nemo_gym_resources_session_lifetimes = lifetimes
             holds = lifetimes.holds
-        app.state.nemo_gym_session_claims = SessionClaims(claims_dir, routing_id, holds)
+        app.state.nemo_gym_session_owners = SessionOwners(routing_dir, routing_id, holds)
         return participant, app
 
     return make_routed
 
 
-def claimant(claims_dir: str, session_id: str) -> Optional[str]:
-    """The worker the session's claim file names, as any worker of the server reads it."""
-    return SessionClaims(claims_dir, "0" * 32, lambda _: False).claimant(session_id)
+def session_owner(routing_dir: str, session_id: str) -> Optional[str]:
+    """The worker the session's owner file names, as any worker of the server reads it."""
+    return SessionOwners(routing_dir, "0" * 32, lambda _: False).owner(session_id)
 
 
 def records(checkpoint_dir: Path, kind: str) -> list[dict]:
@@ -338,12 +338,12 @@ async def test_marking_an_attempt_marks_the_sessions_each_worker_already_has(soc
         # Only the mark: a retire that arrives after its deadline stops nothing on any worker.
         await deployment.participant.mark_retired([EpisodeId(rollout_id="r")])
 
-    # The worker refuses the session, and readiness waits for a retire that frees it.
+    # The worker refuses the session, and readiness waits for a retire that releases it.
     assert second.participant._retired_session_rollouts == {"s": "r"}
     assert not second.participant.ready()
 
 
-async def test_deleting_a_restored_episode_frees_its_unused_sessions_without_refusing_them_later(
+async def test_deleting_a_restored_episode_releases_its_unused_sessions_without_refusing_them_later(
     socket_dir: str,
 ) -> None:
     def resources_worker() -> tuple[ResourcesParticipant, FastAPI]:
@@ -356,7 +356,7 @@ async def test_deleting_a_restored_episode_frees_its_unused_sessions_without_ref
         await second.participant.install(
             [ResourcesSessionRecord(session_id="s", episode_id=EpisodeId(rollout_id="r"), state={})], [replacement]
         )
-        # The session the replacement did use, on another worker, is not this deletion's to free.
+        # The session the replacement did use, on another worker, is not this deletion's to release.
         first.participant.seeded("used", replacement)
         await deployment.participant.delete_restored(replacement)
 
@@ -563,7 +563,7 @@ async def test_a_restored_agent_run_episode_is_claimed_by_exactly_one_worker(soc
     assert sorted(installed_by_hook) == [0, 1]
 
 
-# -- multi-request sessions: placement and claims -------------------------------------------------
+# -- multi-request sessions: placement and owners -------------------------------------------------
 
 
 async def test_a_restored_agent_session_is_installed_on_one_worker_which_claims_it(
@@ -576,24 +576,24 @@ async def test_a_restored_agent_session_is_installed_on_one_worker_which_claims_
         await commit(before, tmp_path / "ckpt", ["r1", "r2"])
         await before.controller.resume(CheckpointRequest(**control()))
 
-    claims_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
+    routing_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
     try:
-        async with coordinated(socket_dir, routed(agent_worker, claims_dir), expected=3) as after:
+        async with coordinated(socket_dir, routed(agent_worker, routing_dir), expected=3) as after:
             await restore(after, tmp_path / "ckpt", [{"rollout_id": "r1"}, {"rollout_id": "r2"}])
             holders = {
                 key: next(link.routing_id for link in after.links if link.participant.has_session(key))
                 for key in ("one", "two")
             }
-            claims = {key: claimant(claims_dir, key) for key in holders}
-            # A worker that joins later reads the same claims.
+            owners = {key: session_owner(routing_dir, key) for key in holders}
+            # A worker that joins later reads the same owners.
             late = await after.join()
-            late_reads = {key: late.app.state.nemo_gym_session_claims.claimant(key) for key in holders}
+            late_reads = {key: late.app.state.nemo_gym_session_owners.owner(key) for key in holders}
     finally:
-        shutil.rmtree(claims_dir, ignore_errors=True)
+        shutil.rmtree(routing_dir, ignore_errors=True)
 
     # The two sessions are spread over the two live workers, and each one's claim names its holder.
     assert len(set(holders.values())) == 2
-    assert claims == holders and late_reads == holders
+    assert owners == holders and late_reads == holders
 
 
 async def test_a_stateless_session_is_claimed_by_its_holder_after_every_restore(
@@ -606,21 +606,21 @@ async def test_a_stateless_session_is_claimed_by_its_holder_after_every_restore(
 
     holders = []
     for index, (source, target) in enumerate([(None, "c1"), ("c1", "c2"), ("c2", None)]):
-        claims_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
+        routing_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
         try:
-            async with coordinated(socket_dir, routed(stateless_worker, claims_dir)) as deployment:
+            async with coordinated(socket_dir, routed(stateless_worker, routing_dir)) as deployment:
                 if source is None:
                     deployment.links[0].participant.seeded("s", EpisodeId(rollout_id="r"))
                 else:
                     await restore(deployment, tmp_path / source, [{"rollout_id": "r", "attempt": index - 1}])
                     [holder] = [link for link in deployment.links if link.participant.readiness().counts["sessions"]]
-                    holders.append((holder.routing_id, claimant(claims_dir, "s")))
+                    holders.append((holder.routing_id, session_owner(routing_dir, "s")))
                 if target is not None:
                     # The restored session's episode is still continued, by its replacement attempt.
                     await commit(deployment, tmp_path / target, ["r" if index == 0 else f"r-a{index}"])
                     await deployment.controller.resume(CheckpointRequest(**control()))
         finally:
-            shutil.rmtree(claims_dir, ignore_errors=True)
+            shutil.rmtree(routing_dir, ignore_errors=True)
 
     assert len(holders) == 2 and all(holder == claim for holder, claim in holders)
 
@@ -654,7 +654,7 @@ def resources_worker(*, routed: bool) -> Callable[[], tuple[ResourcesParticipant
 async def test_sessions_of_a_single_process_server_are_claimed_by_their_holders_through_later_restores(
     socket_dir: str, tmp_path: Path
 ) -> None:
-    """A single-process server claims nothing; after each restore, each session's claim names its new holder."""
+    """A single-process server records no owners; after each restore, each session's owner is its new holder."""
     async with coordinated(socket_dir, resources_worker(routed=False)) as before:
         for index, link in enumerate(before.links):
             link.participant.hooks.states[f"s{index}"] = index
@@ -664,9 +664,9 @@ async def test_sessions_of_a_single_process_server_are_claimed_by_their_holders_
 
     rounds = []
     for source, target, attempt in (("ckpt1", "ckpt2", 0), ("ckpt2", None, 1)):
-        claims_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
+        routing_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
         try:
-            async with coordinated(socket_dir, routed(resources_worker(routed=False), claims_dir)) as deployment:
+            async with coordinated(socket_dir, routed(resources_worker(routed=False), routing_dir)) as deployment:
                 episode_ids = [{"rollout_id": f"r{index}", "attempt": attempt} for index in range(2)]
                 await restore(deployment, tmp_path / source, episode_ids, restore_id=f"restore-{source}")
                 holders = {
@@ -674,17 +674,19 @@ async def test_sessions_of_a_single_process_server_are_claimed_by_their_holders_
                     for link in deployment.links
                     for session_id in link.participant.hooks.states
                 }
-                rounds.append((holders, {session_id: claimant(claims_dir, session_id) for session_id in holders}))
+                rounds.append(
+                    (holders, {session_id: session_owner(routing_dir, session_id) for session_id in holders})
+                )
                 if target is not None:
                     await commit(deployment, tmp_path / target, ["r0-a1", "r1-a1"], checkpoint_id="c2")
                     await deployment.controller.resume(CheckpointRequest(**control("c2")))
         finally:
-            shutil.rmtree(claims_dir, ignore_errors=True)
+            shutil.rmtree(routing_dir, ignore_errors=True)
 
-    for holders, claims in rounds:
+    for holders, owners in rounds:
         # Spread over both workers, and each session's claim names the worker that holds it.
         assert sorted(holders) == ["s0", "s1"] and len(set(holders.values())) == 2
-        assert claims == holders
+        assert owners == holders
 
 
 async def test_a_retired_attempt_is_refused_on_every_worker_and_one_that_joins_later_until_forget(
@@ -759,7 +761,7 @@ class CounterWorkers:
             session_cookie=key,
             secret_key=key,
             **routing,
-            **counter.claimed_session_routing(),
+            **counter.owned_session_routing(),
         )
         await self._stack.enter_async_context(app.router.lifespan_context(app))
         self.counters.append(counter)
@@ -884,7 +886,7 @@ async def test_sessions_of_a_single_process_server_restore_onto_several_workers(
             for app, counter in zip(apps, counters)
             for session_id in counter.session_id_to_counter
         }
-        claims = {session_id: apps[0].state.nemo_gym_session_claims.claimant(session_id) for session_id in holders}
+        owners = {session_id: apps[0].state.nemo_gym_session_owners.owner(session_id) for session_id in holders}
 
     # Each worker incremented each session once, whichever worker held it.
     assert counts == [1, 2, 11, 12, 21, 22, 31, 32]
@@ -892,7 +894,7 @@ async def test_sessions_of_a_single_process_server_restore_onto_several_workers(
     assert sorted(len(values) for values in held) == [2, 2]
     assert sorted(value for values in held for value in values) == [2, 12, 22, 32]
     # Each session's claim names the worker that holds it.
-    assert claims == holders and set(holders) == {record["session_id"] for record in exported}
+    assert owners == holders and set(holders) == {record["session_id"] for record in exported}
 
 
 async def mcp_tool_call(app: FastAPI, token: str, name: str, arguments: dict) -> httpx.Response:
@@ -1045,9 +1047,9 @@ async def test_a_worker_that_joins_while_a_restore_installs_reads_the_claims_it_
         app.state.nemo_gym_routing_id = uuid4().hex
         return AgentSessionParticipant(SlowRestoreHooks()), app
 
-    claims_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
+    routing_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
     try:
-        async with coordinated(socket_dir, routed(slow_agent_worker, claims_dir), expected=3) as after:
+        async with coordinated(socket_dir, routed(slow_agent_worker, routing_dir), expected=3) as after:
             restoring = asyncio.create_task(
                 after.controller.restore(
                     RestoreRequest(
@@ -1069,15 +1071,15 @@ async def test_a_worker_that_joins_while_a_restore_installs_reads_the_claims_it_
                 key: next(link.routing_id for link in after.links if link.participant.has_session(key))
                 for key in ("one", "two")
             }
-            late_reads = {key: late.app.state.nemo_gym_session_claims.claimant(key) for key in holders}
+            late_reads = {key: late.app.state.nemo_gym_session_owners.owner(key) for key in holders}
     finally:
-        shutil.rmtree(claims_dir, ignore_errors=True)
+        shutil.rmtree(routing_dir, ignore_errors=True)
 
-    # Nothing to adopt on joining: claims are shared files, so the late worker forwards to each holder.
+    # Nothing to adopt on joining: owner files are shared, so the late worker forwards to each holder.
     assert late_reads == holders
 
 
-async def test_restoring_many_sessions_rewrites_their_claims_without_holding_up_the_event_loop(
+async def test_restoring_many_sessions_rewrites_their_owners_without_holding_up_the_event_loop(
     socket_dir: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     keys = [f"s{index}" for index in range(200)]
@@ -1091,14 +1093,14 @@ async def test_restoring_many_sessions_rewrites_their_claims_without_holding_up_
 
     def slow_replace(source: str, target: str) -> None:
         # Each claim takes a few milliseconds to replace, as on a slow or busy filesystem.
-        if "session-claims" in target:
+        if "session-owners" in target:
             time.sleep(0.005)
         real_replace(source, target)
 
-    claims_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
+    routing_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
     gaps: list[float] = []
     try:
-        async with coordinated(socket_dir, routed(agent_worker, claims_dir)) as after:
+        async with coordinated(socket_dir, routed(agent_worker, routing_dir)) as after:
             monkeypatch.setattr(os, "replace", slow_replace)
             stop = asyncio.Event()
 
@@ -1125,16 +1127,16 @@ async def test_restoring_many_sessions_rewrites_their_claims_without_holding_up_
             await ticker
             monkeypatch.setattr(os, "replace", real_replace)
             await after.controller.resume(CheckpointRequest(**control("r1")))
-            claimed = {
-                key: claimant(claims_dir, key)
+            owned = {
+                key: session_owner(routing_dir, key)
                 == next(link.routing_id for link in after.links if link.participant.has_session(key))
                 for key in keys
             }
     finally:
-        shutil.rmtree(claims_dir, ignore_errors=True)
+        shutil.rmtree(routing_dir, ignore_errors=True)
 
-    assert all(claimed.values())
-    # About half a second of claim files per worker, which the event loop does not wait for.
+    assert all(owned.values())
+    # About half a second of owner files per worker, which the event loop does not wait for.
     assert max(gaps) < 0.2, max(gaps)
 
 
@@ -1186,7 +1188,7 @@ async def test_a_forget_one_worker_cannot_do_yet_leaves_every_refusal_in_place(s
         await deployment.controller.forget(ForgetRequest(**control(rollout_ids=["r"])))
         forgotten = [len(link.retired) for link in deployment.links] + [len(deployment.participant.retired)]
 
-    # The worker that had freed its session would otherwise admit the retired attempt's late requests again.
+    # The worker that had released its session would otherwise admit the retired attempt's late requests again.
     assert refused.value.code == "checkpoint_retire_incomplete"
     assert kept == [1, 1, 1]
     assert forgotten == [0, 0, 0]
@@ -1515,7 +1517,7 @@ async def test_two_agent_run_episodes_sent_with_one_cookie_are_both_exported_and
     assert reply["run_episode_ids"] == ["a", "b", "r-a1"]
 
 
-async def test_a_stale_restored_agent_session_and_its_live_copy_export_once_and_the_stale_copy_is_freed(
+async def test_a_stale_restored_agent_session_and_its_live_copy_export_once_and_the_stale_copy_is_released(
     socket_dir: str, tmp_path: Path
 ) -> None:
     async with coordinated(socket_dir, agent_worker) as before:
@@ -1747,8 +1749,8 @@ async def test_a_restore_that_fails_on_one_worker_leaves_nothing_on_the_others(
         await commit(before, tmp_path / "ckpt", ["r1", "r2"])
         await before.controller.resume(CheckpointRequest(**control()))
 
-    claims_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
-    async with coordinated(socket_dir, routed(gated_agent_worker, claims_dir)) as after:
+    routing_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
+    async with coordinated(socket_dir, routed(gated_agent_worker, routing_dir)) as after:
         failing, installing = after.links
         failing.participant.hooks.fail = True
         retired: list[str] = []
@@ -1760,7 +1762,7 @@ async def test_a_restore_that_fails_on_one_worker_leaves_nothing_on_the_others(
             )
         await wait_until(lambda: all(link.participant.accepting for link in after.links))
         left = [key for link in after.links for key in ("one", "two") if link.participant.has_session(key)]
-        claims_left = os.listdir(os.path.join(claims_dir, "session-claims"))
+        owner_files_left = os.listdir(os.path.join(routing_dir, "session-owners"))
         # The controller retires the restored attempts after a failed restore, which finds nothing left.
         await after.controller.retire(
             RetireRequest(
@@ -1770,11 +1772,11 @@ async def test_a_restore_that_fails_on_one_worker_leaves_nothing_on_the_others(
             )
         )
 
-    shutil.rmtree(claims_dir, ignore_errors=True)
+    shutil.rmtree(routing_dir, ignore_errors=True)
     assert left == []
     assert len(retired) == 1
     # The surviving worker released the claim its install rewrote; the failing one never rewrote its own.
-    assert claims_left == []
+    assert owner_files_left == []
     assert after.participant.restored == {}
 
 
@@ -1809,11 +1811,11 @@ async def test_a_worker_lost_while_it_installs_fails_the_restore_and_leaves_noth
 
 
 async def failed_restore_whose_rollback_fails(
-    socket_dir: str, tmp_path: Path, claims_dir: str, stack: AsyncExitStack
+    socket_dir: str, tmp_path: Path, routing_dir: str, stack: AsyncExitStack
 ) -> tuple[Workers, ParticipantWorkerLink, ParticipantWorkerLink, list[bool]]:
     """A restore that fails on one worker, whose rollback fails on the other while the returned flag is set."""
     await committed_sessions_on_two_workers(socket_dir, tmp_path / "ckpt")
-    after = await stack.enter_async_context(coordinated(socket_dir, routed(gated_agent_worker, claims_dir)))
+    after = await stack.enter_async_context(coordinated(socket_dir, routed(gated_agent_worker, routing_dir)))
     failing, installing = after.links
     failing.participant.hooks.fail = True
     rollback_fails = [True]
@@ -1833,16 +1835,16 @@ async def test_a_rollback_that_fails_on_a_worker_keeps_every_worker_closed_until
 ) -> None:
     monkeypatch.setattr(participant_workers_module, "_ROLLBACK_RETRY_SECONDS", 0.02, raising=False)
     monkeypatch.setattr(participant_workers_module, "_ROLLBACK_RETRY_BUDGET_SECONDS", 0.3, raising=False)
-    claims_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
+    routing_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
     try:
         async with AsyncExitStack() as stack:
             after, failing, installing, rollback_fails = await failed_restore_whose_rollback_fails(
-                socket_dir, tmp_path, claims_dir, stack
+                socket_dir, tmp_path, routing_dir, stack
             )
             await asyncio.sleep(0.2)
             serving_after_the_restore = [link.accepting or link.participant.accepting for link in after.links]
             held_after_the_restore = installing.participant.has_session("two")
-            claim_after_the_restore = claimant(claims_dir, "two")
+            owner_after_the_restore = session_owner(routing_dir, "two")
             with pytest.raises(ControlError) as incomplete:
                 await after.controller.resume(CheckpointRequest(**control("r1")))
             serving_after_the_resume = [link.accepting or link.participant.accepting for link in after.links]
@@ -1851,16 +1853,16 @@ async def test_a_rollback_that_fails_on_a_worker_keeps_every_worker_closed_until
             resumed = await after.controller.resume(CheckpointRequest(**control("r1")))
             serving = [link.accepting and link.participant.accepting for link in after.links]
             left = [key for link in after.links for key in ("one", "two") if link.participant.has_session(key)]
-            claims_left = os.listdir(os.path.join(claims_dir, "session-claims"))
+            owner_files_left = os.listdir(os.path.join(routing_dir, "session-owners"))
     finally:
-        shutil.rmtree(claims_dir, ignore_errors=True)
+        shutil.rmtree(routing_dir, ignore_errors=True)
 
     # The worker still holding what the failed restore installed never served it, nor did any other worker.
     assert serving_after_the_restore == [False, False] and serving_after_the_resume == [False, False]
-    assert held_after_the_restore and claim_after_the_restore == installing.routing_id
+    assert held_after_the_restore and owner_after_the_restore == installing.routing_id
     assert incomplete.value.code == "checkpoint_rollback_incomplete" and incomplete.value.status_code == 503
     assert resumed["phase"] == "idle" and serving == [True, True]
-    assert left == [] and claims_left == []
+    assert left == [] and owner_files_left == []
 
 
 async def test_a_worker_lost_while_its_rollback_is_retried_lets_admission_reopen(
@@ -1868,11 +1870,11 @@ async def test_a_worker_lost_while_its_rollback_is_retried_lets_admission_reopen
 ) -> None:
     monkeypatch.setattr(participant_workers_module, "_ROLLBACK_RETRY_SECONDS", 0.02, raising=False)
     monkeypatch.setattr(participant_workers_module, "_ROLLBACK_RETRY_BUDGET_SECONDS", 0.3, raising=False)
-    claims_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
+    routing_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
     try:
         async with AsyncExitStack() as stack:
             after, failing, installing, _ = await failed_restore_whose_rollback_fails(
-                socket_dir, tmp_path, claims_dir, stack
+                socket_dir, tmp_path, routing_dir, stack
             )
             serving_while_it_holds = failing.accepting or failing.participant.accepting
             # The worker that cannot roll back is lost, and what it held goes with it.
@@ -1881,7 +1883,7 @@ async def test_a_worker_lost_while_its_rollback_is_retried_lets_admission_reopen
             resumed = await after.controller.resume(CheckpointRequest(**control("r1")))
             serving = failing.accepting and failing.participant.accepting
     finally:
-        shutil.rmtree(claims_dir, ignore_errors=True)
+        shutil.rmtree(routing_dir, ignore_errors=True)
 
     assert lost_coordinators == ["lost"] and not serving_while_it_holds
     assert resumed["phase"] == "idle" and serving
@@ -1900,7 +1902,7 @@ async def test_status_adds_up_what_every_worker_reports(socket_dir: str) -> None
         second.participant.seeded("s2", EpisodeId(rollout_id="r"))
         before = await dispatch_control(deployment.controller, "status", None)
         # A retire past its deadline only refuses the attempt.
-        # That marks each worker's session until a retire frees it.
+        # That marks each worker's session until a retire releases it.
         with pytest.raises(ControlError):
             await deployment.controller.retire(
                 RetireRequest(checkpoint_id="x", deadline_ts=time.time() - 1, episode_ids=[{"rollout_id": "r"}])
@@ -2082,7 +2084,7 @@ class AgentServerWorkers:
         app = agent.setup_webserver()
         key = agent.get_session_middleware_key()
         install_session_routing(
-            app, socket_dir=self._routing_dir, session_cookie=key, secret_key=key, **agent.claimed_session_routing()
+            app, socket_dir=self._routing_dir, session_cookie=key, secret_key=key, **agent.owned_session_routing()
         )
         await self._stack.enter_async_context(app.router.lifespan_context(app))
         self.agents.append(agent)
@@ -2177,13 +2179,13 @@ async def test_an_agent_session_cookie_from_before_a_restore_reaches_the_worker_
     assert answers == [{"worker": holder.label, "holds": True}] * 2
 
 
-# -- restored sessions' claims, worker loss, and the worker protocol's repairs ---------------------
+# -- restored sessions' owners, worker loss, and the worker protocol's repairs ---------------------
 
 
-async def test_a_restored_resources_session_keeps_its_claim_until_the_participant_frees_it(
+async def test_a_restored_resources_session_keeps_its_owner_until_the_participant_releases_it(
     socket_dir: str, tmp_path: Path
 ) -> None:
-    """A restored session is open on its holder, as after a seed, until a commit that drops its episode frees it."""
+    """A restored session is open on its holder, as after a seed, until a commit that drops its episode releases it."""
     async with coordinated(socket_dir, resources_worker(routed=False)) as before:
         for index, link in enumerate(before.links):
             link.participant.hooks.states[f"s{index}"] = index
@@ -2194,31 +2196,31 @@ async def test_a_restored_resources_session_keeps_its_claim_until_the_participan
     def sweep(link: ParticipantWorkerLink) -> None:
         # What session routing's background sweeper does on a running worker.
         for session_id in link.app.state.nemo_gym_resources_session_lifetimes.sweep():
-            link.app.state.nemo_gym_session_claims.release(session_id)
+            link.app.state.nemo_gym_session_owners.release(session_id)
 
-    claims_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
+    routing_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
     try:
-        async with coordinated(socket_dir, routed(resources_worker(routed=False), claims_dir)) as after:
+        async with coordinated(socket_dir, routed(resources_worker(routed=False), routing_dir)) as after:
             await restore(after, tmp_path / "ckpt", [{"rollout_id": "r0"}, {"rollout_id": "r1"}])
             [holder] = [link for link in after.links if "s0" in link.participant.hooks.states]
-            # Longer than the window: a session that is open keeps its claim however long it is idle.
+            # Longer than the window: a session that is open keeps its owner however long it is idle.
             await asyncio.sleep(0.3)
             sweep(holder)
-            kept = claimant(claims_dir, "s0")
-            # The controller continues only rollout r1, so the commit frees r0's unused restored session.
+            kept = session_owner(routing_dir, "s0")
+            # The controller continues only rollout r1, so the commit releases r0's unused restored session.
             await commit(after, tmp_path / "ckpt2", ["r1-a1"], checkpoint_id="c2")
             await after.controller.resume(CheckpointRequest(**control("c2")))
             await asyncio.sleep(0.3)
             sweep(holder)
-            freed = claimant(claims_dir, "s0")
+            released = session_owner(routing_dir, "s0")
     finally:
-        shutil.rmtree(claims_dir, ignore_errors=True)
+        shutil.rmtree(routing_dir, ignore_errors=True)
 
     assert kept == holder.routing_id
-    assert "s0" not in holder.participant.hooks.states and freed is None
+    assert "s0" not in holder.participant.hooks.states and released is None
 
 
-async def test_a_worker_that_claimed_a_session_before_its_restore_drops_the_claim(
+async def test_a_worker_that_owned_a_session_before_its_restore_drops_its_ownership(
     socket_dir: str, tmp_path: Path
 ) -> None:
     """A request for a session can reach the server before its restore, for example a cleanup close."""
@@ -2228,21 +2230,21 @@ async def test_a_worker_that_claimed_a_session_before_its_restore_drops_the_clai
         await commit(before, tmp_path / "ckpt", ["r"])
         await before.controller.resume(CheckpointRequest(**control()))
 
-    claims_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
+    routing_dir = tempfile.mkdtemp(prefix="ngc-", dir="/tmp")
     try:
-        async with coordinated(socket_dir, routed(resources_worker(routed=False), claims_dir)) as after:
-            # The restore places the only session on the first worker; the second claimed it first.
-            early = after.links[1].app.state.nemo_gym_session_claims
-            assert early.claim("s") == after.links[1].routing_id
+        async with coordinated(socket_dir, routed(resources_worker(routed=False), routing_dir)) as after:
+            # The restore places the only session on the first worker; the second took ownership first.
+            early = after.links[1].app.state.nemo_gym_session_owners
+            assert early.acquire("s") == after.links[1].routing_id
             await restore(after, tmp_path / "ckpt", [{"rollout_id": "r"}])
             [holder] = [link for link in after.links if "s" in link.participant.hooks.states]
             still_mine = early.mine("s")
-            claimed_by = claimant(claims_dir, "s")
+            owned_by = session_owner(routing_dir, "s")
     finally:
-        shutil.rmtree(claims_dir, ignore_errors=True)
+        shutil.rmtree(routing_dir, ignore_errors=True)
 
     assert holder is after.links[0]
-    assert claimed_by == holder.routing_id and not still_mine
+    assert owned_by == holder.routing_id and not still_mine
 
 
 async def test_a_restored_run_whose_session_cannot_open_goes_back_and_leaves_nothing_on_the_worker(
@@ -2475,14 +2477,14 @@ def test_every_participant_takes_the_hooks_a_worker_link_sets() -> None:
         EnvironmentParticipant(mode="exported"),
         AgentSessionParticipant(AgentHooks()),
     ]
-    unset = [(participant.claim_restored, participant.on_session_freed) for participant in participants]
+    unset = [(participant.claim_restored, participant.on_session_released) for participant in participants]
     for participant in participants:
         ParticipantWorkerLink(participant, socket_path="/nonexistent", app=FastAPI())
 
     # Part of every participant's contract, rather than set only where an attribute happens to exist.
     assert unset == [(None, None)] * 3
     assert all(participant.claim_restored is not None for participant in participants)
-    assert all(participant.on_session_freed is not None for participant in participants)
+    assert all(participant.on_session_released is not None for participant in participants)
 
 
 # -- restores that lose a worker, claims that settle late, and clean disconnects ---------------------
@@ -2848,7 +2850,7 @@ async def test_a_stuck_teardown_keeps_its_record_blocks_prepare_by_name_and_a_ru
             await stuck.wait()
         waiting = await after.controller.prepare(CheckpointRequest(**control("c2", timeout=0.3)))
         await after.controller.resume(CheckpointRequest(**control("c2")))
-        # The replacement's /run lands on the worker still freeing the key, and is told to come back.
+        # The replacement's /run lands on the worker still releasing the key, and is told to come back.
         with pytest.raises(participant_workers_module.ClaimSettlingError):
             await replacement_run(first.participant)
         claimable_while_stuck = "run:r" in after.participant.restored
@@ -2972,7 +2974,7 @@ async def test_a_key_whose_given_up_teardown_still_runs_cannot_be_claimed_on_its
 
         async def retire_agent_session(session_key: str) -> None:
             if "new run opened" in events:
-                events.append("teardown freed the new run's session")
+                events.append("teardown released the new run's session")
                 return
             while not release.is_set():
                 try:
@@ -3005,7 +3007,7 @@ async def test_a_key_whose_given_up_teardown_still_runs_cannot_be_claimed_on_its
     assert any("cannot be claimed on this worker until that call ends" in r.getMessage() for r in caplog.records)
 
 
-async def test_a_run_that_reuses_a_key_whose_rolled_back_install_is_still_being_freed_waits_for_it(
+async def test_a_run_that_reuses_a_key_whose_rolled_back_install_is_still_being_released_waits_for_it(
     socket_dir: str, tmp_path: Path
 ) -> None:
     await committed_run_episode(socket_dir, tmp_path / "ckpt")
@@ -3038,7 +3040,7 @@ async def test_a_run_that_reuses_a_key_whose_rolled_back_install_is_still_being_
         teardown_may_finish.set()
         await run
 
-    # The teardown of the rolled-back install never frees the session the later /run opened under the same key.
+    # The teardown of the rolled-back install never releases the session the later /run opened under the same key.
     assert events == ["teardown started", "teardown finished", "new run opened"]
 
 
@@ -3186,19 +3188,20 @@ async def test_a_retired_session_s_cookie_is_refused_on_every_worker_until_forge
         await deployment.coordinator.controller.retire(RetireRequest(**control(episode_ids=[{"rollout_id": "r"}])))
         # Well past the close retry window and the sweeps after it.
         await asyncio.sleep(0.6)
-        claimed_after_retire = claimant(deployment._routing_dir, session_id)
+        owned_after_retire = session_owner(deployment._routing_dir, session_id)
         async with http(other) as worker:
             # A late request of the retired attempt that carries only the cookie lands on the other worker.
             refused = await worker.post("/get_counter_value", cookies=cookie)
         await deployment.coordinator.controller.forget(ForgetRequest(**control(rollout_ids=["r"])))
         await asyncio.sleep(0.6)
-        claimed_after_forget = claimant(deployment._routing_dir, session_id)
+        owned_after_forget = session_owner(deployment._routing_dir, session_id)
         left = [dict(counter.session_id_to_counter) for counter in deployment.counters]
 
-    assert claimed_after_retire == holder.state.nemo_gym_routing_id
+    assert owned_after_retire == holder.state.nemo_gym_routing_id
     assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_stale_attempt"
-    # The forget ends the claim's life, one close retry window later; nothing of the session is left on either worker.
-    assert claimed_after_forget is None and left == [{}, {}]
+    # The forget ends the worker's ownership, one close retry window later.
+    # Nothing of the session is left on either worker.
+    assert owned_after_forget is None and left == [{}, {}]
 
 
 async def test_a_clean_disconnect_stops_the_worker_link_s_background_tasks(socket_dir: str, tmp_path: Path) -> None:

@@ -189,7 +189,7 @@ class AgentSessionParticipant(CheckpointParticipant):
         self.legacy_episodes = EpisodeSteps(self.notify)
         self._restored_episodes: dict[str, Boundary] = {}
         # Seeds in progress, counted by session key and attempt; each blocks prepare until its session is registered.
-        # A retire waits for the seeds of its attempts, so a seed it refuses frees what it built first.
+        # A retire waits for the seeds of its attempts, so a seed it refuses releases what it built first.
         self._seeding: dict[str, Counter[EpisodeId]] = {}
         # The same seeds and the sessions, by rollout, so a retire touches only its own rollout's.
         # An entry leaves with the last seed or session of its rollout.
@@ -215,7 +215,7 @@ class AgentSessionParticipant(CheckpointParticipant):
         return sorted(key for key, session in self._sessions.items() if session.unclaimed)
 
     async def delete_unclaimed_session(self, identity: str) -> None:
-        """Free a restored session no request has used, without refusing anything later."""
+        """Release a restored session no request has used, without refusing anything later."""
         session = self._sessions.get(identity)
         if session is None or not session.unclaimed:
             return
@@ -237,7 +237,7 @@ class AgentSessionParticipant(CheckpointParticipant):
         and is then exported: the environment may record its boundary after the seed before the commit.
         The same session can be seeded more than once at a time,
         for example by a retried request; each seed is counted.
-        A seed whose attempt is retired before its session is registered frees the state it built.
+        A seed whose attempt is retired before its session is registered releases the state it built.
         """
         self.retired.check(episode_id)
         await self.wait_open()
@@ -311,7 +311,7 @@ class AgentSessionParticipant(CheckpointParticipant):
         nothing would use the activation's further model and tool calls.
         The session stays tracked, and holds up prepare, until its activation has stopped.
         A retire may take the session over meanwhile.
-        The retire then frees the session's state, so this returns ``False`` and the close must not free it too.
+        The retire then releases the session's state, so this returns ``False`` and the close must not release it too.
         """
         session = self._sessions.get(session_key)
         if session is None:
@@ -347,7 +347,7 @@ class AgentSessionParticipant(CheckpointParticipant):
         """Open the ``/run`` episode's session, taking its restored state from the coordinator if there is any.
 
         A failure to install or to open the restored session leaves nothing of it in this participant.
-        The agent's installed copy is freed by the claim's teardown, which the claim retries until it succeeds.
+        The agent's installed copy is released by the claim's teardown, which the claim retries until it succeeds.
         Only then does the record go back to the coordinator, to be claimed again,
         so no later checkpoint can find a copy here and another one elsewhere.
         """
@@ -409,7 +409,7 @@ class AgentSessionParticipant(CheckpointParticipant):
         """Check a re-sent activation answered with its saved reply, and claim a restored session for it.
 
         The reply continues the live episode as an activation would,
-        so a later commit that leaves the episode out no longer frees the session.
+        so a later commit that leaves the episode out no longer releases the session.
         """
         self._session_for(session_key, episode_id).unclaimed = False
 
@@ -588,7 +588,7 @@ class AgentSessionParticipant(CheckpointParticipant):
         return True
 
     async def retire(self, episode_id: EpisodeId) -> None:
-        # A seed admitted before the attempt was marked registers its session or, refused, frees what it built.
+        # A seed admitted before the attempt was marked registers its session or, refused, releases what it built.
         # Wait for it, so nothing of the attempt is left once this returns.
         while self._seeding_any(episode_id):
             await self.wait_changed(1.0)
@@ -608,11 +608,11 @@ class AgentSessionParticipant(CheckpointParticipant):
                 # A close may have cancelled it already.
                 if first and not task.cancelling():
                     task.cancel()
-                # The activation has stopped calling the model and tools before the session is freed.
+                # The activation has stopped calling the model and tools before the session is released.
                 await asyncio.wait([task])
             await self.legacy_episodes.retire(session.key)
             await self.hooks.retire_agent_session(session.key)
-            # Freed last, so a retire cut short by its deadline in either await leaves the session for a retry.
+            # Released last, so a retire cut short by its deadline in either await leaves the session for a retry.
             self._remove(session)
             self._restored_episodes.pop(session.key, None)
 
@@ -727,7 +727,7 @@ class RestartOnlyAgentParticipant(CheckpointParticipant):
     Nothing of it is in a checkpoint, so it never closes admission and never holds up prepare:
     its rollouts keep running through a checkpoint.
     Its seed replies say so, so an environment server's episode that uses it is a restart too.
-    A retire stops the attempt's calls and frees its seeded sessions with ``retire_session``,
+    A retire stops the attempt's calls and releases its seeded sessions with ``retire_session``,
     such as sandboxes the agent started for them.
     """
 
@@ -739,7 +739,7 @@ class RestartOnlyAgentParticipant(CheckpointParticipant):
         super().__init__()
         self._calls = _RestartCalls(self.notify)
         self._retire_session = retire_session
-        # Seeds in progress and seeded sessions, by rollout, so a retire waits for and frees only its own rollout's.
+        # Seeds in progress and seeded sessions, by rollout, so a retire waits for and releases only its own rollout's.
         # An entry leaves with the last seed or session of its rollout.
         self._seeds: dict[str, Counter[EpisodeId]] = {}
         self._sessions: dict[str, dict[str, EpisodeId]] = {}
@@ -764,7 +764,7 @@ class RestartOnlyAgentParticipant(CheckpointParticipant):
 
         A seed waits out an open checkpoint, so it never adds a restart the checkpoint did not report.
         A seed of a retired attempt is refused, including one that waited for resume.
-        A retire waits for a seed in progress, and a seed it refuses frees what it built first.
+        A retire waits for a seed in progress, and a seed it refuses releases what it built first.
         """
         await self.wait_open()
         self.retired.check(episode_id)
@@ -782,7 +782,7 @@ class RestartOnlyAgentParticipant(CheckpointParticipant):
             await self.notify()
 
     def open_session(self, session_key: str, episode_id: EpisodeId) -> None:
-        """Register a seeded session, so a retire of its attempt frees it; refuse it if the attempt was retired."""
+        """Register a seeded session, so a retire of its attempt releases it; refuse it if the attempt was retired."""
         self.retired.check(episode_id)
         self._sessions.setdefault(episode_id.rollout_id, {})[session_key] = episode_id
 
@@ -811,7 +811,7 @@ class RestartOnlyAgentParticipant(CheckpointParticipant):
         return PrepareReport(ready=True, restarts=restarts, counts={"inflight": len(restarts)})
 
     async def retire(self, episode_id: EpisodeId) -> None:
-        # A seed admitted before the attempt was marked registers its session or, refused, frees what it built.
+        # A seed admitted before the attempt was marked registers its session or, refused, releases what it built.
         while any(seed.attempt <= episode_id.attempt for seed in self._seeds.get(episode_id.rollout_id, ())):
             await self.wait_changed(1.0)
         await self._calls.retire(episode_id)

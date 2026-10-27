@@ -101,8 +101,8 @@ class TestBaseResourcesServer:
     def test_reverify_mode(self) -> None:
         assert asyncio.run(_resources_server().get_reverify_mode()) == ReverifyMode.UNKNOWN
 
-    def test_stateless_server_answers_typed_and_legacy_session_calls(self) -> None:
-        """A server with no per-rollout state serves an Environment Server's seed and close without overrides."""
+    def test_stateless_server_answers_episode_and_agent_run_session_calls(self) -> None:
+        """A server with no per-rollout state serves an environment server's seed and close without overrides."""
         client = TestClient(_resources_server().setup_webserver())
         identity = {"episode_id": {"rollout_id": "rollout", "attempt": 0}}
 
@@ -623,29 +623,29 @@ class TestResourcesSessionFenceLapse:
         assert len(fences) == 0
         assert fences.get("never closed") is None
 
-    def test_a_fence_never_outlives_the_routing_claim(self, monkeypatch) -> None:
+    def test_a_fence_never_outlives_the_routing_ownership(self, monkeypatch) -> None:
         clock = [0.0]
         monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
         monkeypatch.setattr("nemo_gym.session_routing.monotonic", lambda: clock[0])
         window = 300.0
         fences = ResourcesSessionFences[bool](window)
-        claims = ResourcesSessionLifetimes(window, starts=("/seed_session",), ends=("/close_session",))
+        lifetimes = ResourcesSessionLifetimes(window, starts=("/seed_session",), ends=("/close_session",))
 
-        claims.served("id", {"path": "/seed_session", "headers": []}, 200)
+        lifetimes.served("id", {"path": "/seed_session", "headers": []}, 200)
         # The server fences the session before the router sees the close's reply, and the caller retries the close later.
         fences.fence("id", True)
         clock[0] = 0.5
-        claims.served("id", {"path": "/close_session", "headers": []}, 200)
+        lifetimes.served("id", {"path": "/close_session", "headers": []}, 200)
         clock[0] = 120.0
         fences.fence("id", True)
         clock[0] = 120.25
-        claims.served("id", {"path": "/close_session", "headers": []}, 200)
+        lifetimes.served("id", {"path": "/close_session", "headers": []}, 200)
 
         for step in range(0, 4400):
             clock[0] = step / 10
             if "id" in fences:
-                assert claims.holds("id"), f"the fence outlived the claim at {clock[0]}"
-        assert "id" not in fences and not claims.holds("id")
+                assert lifetimes.holds("id"), f"the fence outlived the ownership at {clock[0]}"
+        assert "id" not in fences and not lifetimes.holds("id")
 
     def test_a_window_that_is_not_positive_is_refused(self) -> None:
         for window in (0, -1.0, float("nan")):

@@ -2554,7 +2554,7 @@ async def test_an_activation_without_an_index_keeps_no_reply() -> None:
 async def test_a_restored_session_answered_with_its_reply_survives_a_commit_that_leaves_its_episode_out(
     tmp_path,
 ) -> None:
-    """The replayed reply claims the restored session for the live episode, so a commit no longer frees it."""
+    """The replayed reply claims the restored session for the live episode, so a commit no longer releases it."""
     server, server_client = _make_agent(False)
     request = await _restored_session(server, activations=1, boundary=None)
     participant = server.checkpoint_participant
@@ -2692,7 +2692,7 @@ async def test_a_close_cancelled_while_it_stops_the_activation_runs_the_cleanup_
     assert server.events.count("cleanup") == 1
 
 
-async def test_a_retire_that_frees_a_session_while_its_close_waits_leaves_no_receipt_behind(
+async def test_a_retire_that_releases_a_session_while_its_close_waits_leaves_no_fence_behind(
     monkeypatch: MonkeyPatch,
 ) -> None:
     server, server_client = _make_agent(False)

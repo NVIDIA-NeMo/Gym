@@ -224,7 +224,7 @@ class LocalRestoredCuts:
     def supersede(self, ticket: "_Ticket", record: GenerationCutRecord) -> None:
         # The checkpoint exports the newer cut and retains only its staged rows,
         # so a retry of the call must continue from it rather than from the restored one.
-        # The ticket claims it, so delivering the call's response frees it and an interruption keeps it.
+        # The ticket claims it, so delivering the call's response releases it and an interruption keeps it.
         if ticket.capture_key in self.records:
             self.records[ticket.capture_key] = record
             ticket.claimed_cut, ticket.claimed_cut_used = record, True

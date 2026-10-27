@@ -9,7 +9,7 @@ held by whichever resources worker created it, while the agent holds each rollou
 After a kill of every Gym process, the servers restart with other worker counts, the checkpoint is restored,
 and each rollout continues as its next attempt.
 Every rollout must either have finished before the checkpoint or continue and score 1.0,
-and once the sessions' close retry window has passed, no server may keep a claim or a session.
+and once the sessions' close retry window has passed, no server may keep an owner file or a session.
 
 Opt in with ``NEMO_GYM_CHECKPOINT_MULTIWORKER_STRESS`` set to the number of rollouts in flight;
 ``NEMO_GYM_CHECKPOINT_STRESS_REPORT`` names a JSON file for the numbers.
@@ -31,7 +31,7 @@ from nemo_gym.episode_types import EpisodeId
 
 
 ROLLOUTS = os.environ.get("NEMO_GYM_CHECKPOINT_MULTIWORKER_STRESS")
-# Short, so the claims of finished sessions end within the test.
+# Short, so ownership of finished sessions ends within the test.
 CLOSE_WINDOW_SECONDS = 5.0
 # Model calls of a rollout that is never interrupted: two tool calls, then the final answer.
 CALLS_PER_ROLLOUT = 3
@@ -46,9 +46,9 @@ async def calls_reached(deployment: Deployment, calls: int) -> bool:
 
 
 async def nothing_left(deployment: Deployment) -> bool:
-    """Whether the resources and agent servers keep no claim, session, or request in flight."""
+    """Whether the resources and agent servers keep no owner file, session, or request in flight."""
     for name in ("resources", "agent"):
-        if sum(deployment.claims(name).values()):
+        if sum(deployment.owner_files(name).values()):
             return False
         status = await deployment.status(name)
         counts = status["report"]["counts"]
@@ -101,7 +101,9 @@ async def test_a_checkpoint_of_rollouts_across_many_workers_continues_on_other_w
             deployment.backend("/_ctl/step", {"calls": count})
             await wait_until(lambda: calls_reached(deployment, base + 2 * count), timeout=900)
             timings["dispatch_to_held"] = time.monotonic() - started
-            report["claims_before"] = {name: dict(deployment.claims(name)) for name in ("resources", "agent")}
+            report["owner_files_before"] = {
+                name: dict(deployment.owner_files(name)) for name in ("resources", "agent")
+            }
 
             participants = await deployment.participants()
             clock = time.monotonic()
@@ -140,7 +142,7 @@ async def test_a_checkpoint_of_rollouts_across_many_workers_continues_on_other_w
             )
             timings["restore"] = time.monotonic() - clock
             await coordination.resume(participants, "stress-restore", deadline_ts=time.time() + 120)
-            restored_claims = dict(deployment.claims("resources"))
+            restored_owner_files = dict(deployment.owner_files("resources"))
 
             clock = time.monotonic()
             replacements = await asyncio.gather(
@@ -155,7 +157,7 @@ async def test_a_checkpoint_of_rollouts_across_many_workers_continues_on_other_w
         except TimeoutError:
             pass
         timings["until_nothing_left"] = time.monotonic() - clock
-        left = {name: dict(deployment.claims(name)) for name in ("resources", "agent")}
+        left = {name: dict(deployment.owner_files(name)) for name in ("resources", "agent")}
         statuses = {name: (await deployment.status(name))["report"]["counts"] for name in ("resources", "agent")}
     finally:
         deployment.stop()
@@ -168,11 +170,11 @@ async def test_a_checkpoint_of_rollouts_across_many_workers_continues_on_other_w
             "exported": len(exported),
             "finished_before_scored_1": sum(reward == 1.0 for reward in early_rewards),
             "continued_scored_1": sum(reward == 1.0 for reward in rewards),
-            "resources_workers_holding_sessions_before": len(report["claims_before"]["resources"]),
-            "resources_workers_holding_sessions_after_restore": len(restored_claims),
-            "restored_session_claims": sum(restored_claims.values()),
+            "resources_workers_holding_sessions_before": len(report["owner_files_before"]["resources"]),
+            "resources_workers_holding_sessions_after_restore": len(restored_owner_files),
+            "restored_session_owner_files": sum(restored_owner_files.values()),
             "model_calls": calls,
-            "claims_left": left,
+            "owner_files_left": left,
             "counts_left": statuses,
             "timings_s": {name: round(value, 2) for name, value in timings.items()},
             "resources_record_files": resources_records,
@@ -189,11 +191,11 @@ async def test_a_checkpoint_of_rollouts_across_many_workers_continues_on_other_w
     assert sorted(exported) == sorted(rollout_ids)
     assert rewards == [1.0] * count
     # The sessions were spread over several resources workers before, and over every worker after the restore.
-    assert len(report["claims_before"]["resources"]) > 1
-    assert len(restored_claims) == workers_after["resources"]
-    assert sum(restored_claims.values()) == count
+    assert len(report["owner_files_before"]["resources"]) > 1
+    assert len(restored_owner_files) == workers_after["resources"]
+    assert sum(restored_owner_files.values()) == count
     # A continued rollout makes only the calls it still needs: the held second call again, and the final answer.
     assert calls == early * CALLS_PER_ROLLOUT + 2 * count + (CALLS_PER_ROLLOUT - 1) * count
-    # Nothing is left: no claim, no session, no request in flight.
+    # Nothing is left: no owner file, no session, no request in flight.
     assert left == {"resources": {}, "agent": {}}
     assert all(not counts.get("sessions") and not counts.get("inflight") for counts in statuses.values())
