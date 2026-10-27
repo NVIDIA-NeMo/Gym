@@ -196,7 +196,10 @@ def test_persist_writes_the_local_index_even_when_the_manifest_fails(tmp_path, m
         def run(self, config, *, dry_run: bool = False):  # pragma: no cover - unused
             raise NotImplementedError
 
-    def _explode(path, text):
+        def resubmit(self, record, benchmark):  # pragma: no cover - unused
+            raise NotImplementedError
+
+    def _explode(path, text, **_):
         raise OSError("remote is read-only")
 
     record = _record()
@@ -214,10 +217,13 @@ def test_persist_names_the_queued_jobs_when_the_manifest_fails(tmp_path, monkeyp
         def run(self, config, *, dry_run: bool = False):  # pragma: no cover - unused
             raise NotImplementedError
 
+        def resubmit(self, record, benchmark):  # pragma: no cover - unused
+            raise NotImplementedError
+
     record = _record()
     with pytest.raises(RuntimeError, match=r"Already queued: .*gsm8k=12345"):
         _Executor().persist(
-            record, _submit_config(tmp_path), lambda path, text: (_ for _ in ()).throw(OSError("nope"))
+            record, _submit_config(tmp_path), lambda path, text, **_: (_ for _ in ()).throw(OSError("nope"))
         )
 
 
@@ -228,12 +234,15 @@ def test_persist_writes_the_resolved_config_next_to_the_manifest(tmp_path, monke
         def run(self, config, *, dry_run: bool = False):  # pragma: no cover - unused
             raise NotImplementedError
 
+        def resubmit(self, record, benchmark):  # pragma: no cover - unused
+            raise NotImplementedError
+
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     record = _record(run_dir=str(run_dir))
     written: dict[Path, str] = {}
 
-    _Executor().persist(record, _submit_config(tmp_path), lambda path, text: written.__setitem__(path, text))
+    _Executor().persist(record, _submit_config(tmp_path), lambda path, text, **_: written.__setitem__(path, text))
 
     resolved = yaml.safe_load(written[run_dir / RESOLVED_CONFIG_NAME])
     assert resolved["job"]["output_path"] == str(tmp_path / "jobs")

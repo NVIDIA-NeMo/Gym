@@ -22,8 +22,12 @@ Lineage state stays confined to the capture locus and the finalizer.
 
 ``assistant_fingerprint`` hashes only model-authored turns.
 It identifies the call that produced the last model-authored turn.
-``conversation_digest`` hashes every turn, including tool results.
+``conversation_digest`` hashes every conversation turn, including tool results.
 A parent resolver uses it to verify context before reusing tokens.
+Harness instruction items (``system`` / ``developer``) count by position only:
+harnesses regenerate them per request with volatile fields (OpenCode's system
+prompt carries today's date), and hashing their content poisoned every rollout
+that crossed a UTC day boundary. Version 3 of the digest skips their content.
 
 Chat, Responses, and Anthropic shapes normalize to the same hash input.
 The hash layout is tagged and length-delimited.
@@ -41,10 +45,13 @@ import orjson
 
 # Increment when fingerprint canonicalization or hash layout changes.
 # Resolvers ignore entries stamped with a different version.
-FINGERPRINT_VERSION = 2
+# 4: custom_tool_call items are assistant-authored tool calls and
+#    custom_tool_call_output items are tool results.
+FINGERPRINT_VERSION = 4
 
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
+_INSTRUCTION_ROLES = frozenset({"system", "developer"})
 
 
 def assistant_fingerprint(messages: list[dict]) -> str:
@@ -80,12 +87,21 @@ def conversation_digest(messages: list[dict]) -> str:
     ``assistant_fingerprint`` ignores user and tool content.
     This digest covers that omitted context.
     A mismatch rejects the parent before its tokens are reused.
+
+    Instruction items (``system`` / ``developer`` roles) contribute their role
+    and position but not their content: the harness owns them and may rewrite
+    volatile fields between calls (a date, a clock), which is not a rewritten
+    conversation. Reusing the parent's tokens then serves the instruction text
+    the model actually saw, which is what training needs.
     """
     hasher = hashlib.sha256(_CONTEXT_DOMAIN)
     for message in messages or []:
         if not isinstance(message, dict):
             raise ValueError(f"request item is not an object: {type(message).__name__}")
-        _update_field(hasher, b"\x00", str(message.get("role") or message.get("type") or ""))
+        role = str(message.get("role") or message.get("type") or "")
+        _update_field(hasher, b"\x00", role)
+        if _is_instruction_item(message):
+            continue
         for content_type, payload in _content_of(message.get("content")):
             _update_field(hasher, b"\x01", content_type)
             _update_field(hasher, b"\x02", payload)
@@ -120,6 +136,11 @@ def canonicalize_tool_arguments(value: Any) -> str:
     return _canonical_json(parsed)
 
 
+def _is_instruction_item(message: dict) -> bool:
+    """Return whether the harness, not the conversation, authored this item."""
+    return message.get("role") in _INSTRUCTION_ROLES
+
+
 def _is_assistant_authored(message: dict) -> bool:
     """Return whether the model produced this item.
 
@@ -132,7 +153,7 @@ def _is_assistant_authored(message: dict) -> bool:
     # A harness need not echo standalone reasoning items.
     # Including reasoning would make fingerprints depend on the dialect and echo behavior.
     # Reasoning-only collisions resolve as ambiguous and fall back.
-    return message.get("type") == "function_call"
+    return message.get("type") in ("function_call", "custom_tool_call")
 
 
 def _content_of(content: Any) -> list[tuple[str, str]]:
@@ -178,21 +199,24 @@ def _tools_of(message: dict) -> list[tuple[str, str, str]]:
 
     Chat stores calls in the message's ``tool_calls`` field.
     Anthropic stores calls in ``tool_use`` content blocks.
-    Responses stores each call as a standalone ``function_call`` item.
+    Responses stores each call as a standalone ``function_call`` item,
+    and a free-form call as a ``custom_tool_call`` item whose payload is
+    its ``input`` string.
     """
     tools: list[tuple[str, str, str]] = []
     # A Responses item is the tool call.
-    if message.get("type") == "function_call":
+    if message.get("type") in ("function_call", "custom_tool_call"):
         name = str(message.get("name", ""))
         if message.get("namespace"):
             # SSE separates these fields; the backend and echoed request sanitizer join them.
             # Preserve the namespace so different tools with the same short name cannot match.
             name = f"{message['namespace']}__{name}"
+        payload = message.get("input") if message.get("type") == "custom_tool_call" else message.get("arguments")
         tools.append(
             (
                 str(message.get("call_id") or message.get("id") or ""),
                 name,
-                canonicalize_tool_arguments(message.get("arguments")),
+                canonicalize_tool_arguments(payload),
             )
         )
     content = message.get("content")
@@ -221,12 +245,13 @@ def _tools_of(message: dict) -> list[tuple[str, str, str]]:
 def _tool_results_of(message: dict) -> list[tuple[str, str]]:
     """Return tool result identities and payloads across dialects.
 
-    Responses stores results in standalone ``function_call_output`` items.
+    Responses stores results in standalone ``function_call_output`` items
+    (``custom_tool_call_output`` for a free-form call, same shape).
     Anthropic stores results in ``tool_result`` content blocks.
     Chat stores results as plain message content.
     """
     parts: list[tuple[str, str]] = []
-    if message.get("type") == "function_call_output":
+    if message.get("type") in ("function_call_output", "custom_tool_call_output"):
         output = message.get("output")
         parts.append(
             (
@@ -256,7 +281,24 @@ def _canonical_json(value: Any) -> str:
     """Serialize JSON-compatible prompt content without losing structure."""
     try:
         return orjson.dumps(value, option=orjson.OPT_SORT_KEYS).decode("utf-8")
-    except (TypeError, orjson.JSONEncodeError) as error:
+    except (TypeError, orjson.JSONEncodeError):
+        pass
+    # Valid JSON can contain integers beyond orjson's 64-bit range. Keep
+    # the fast path unchanged, but do not let the fallback coerce object
+    # keys (e.g. 1 and "1") into the same fingerprint.
+    try:
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        pending = [value]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, dict):
+                if any(not isinstance(key, str) for key in item):
+                    raise ValueError("JSON object keys must be strings")
+                pending.extend(item.values())
+            elif isinstance(item, (list, tuple)):
+                pending.extend(item)
+        return encoded
+    except (TypeError, ValueError) as error:
         raise ValueError(f"unsupported prompt content: {type(value).__name__}") from error
 
 
@@ -266,3 +308,52 @@ def _update_field(hasher: Any, tag: bytes, value: str) -> None:
     hasher.update(tag)
     hasher.update(len(encoded).to_bytes(8, "big"))
     hasher.update(encoded)
+
+
+def tool_call_turn_fingerprint(items: list[dict]) -> str:
+    """Fingerprint a complete model turn while tolerating rewritten tool arguments.
+
+    Every tool ID and name, their order, and all non-tool assistant content must
+    agree. Missing/duplicate IDs abstain; they cannot identify a served call.
+    Chat/Anthropic bundled turns and Responses items use the same canonical
+    fields as the strict fingerprint. Empty assistant items remain accounted for.
+    This fallback key supplements the versioned content fingerprint and the
+    request-context digest in both in-memory and durable lineage indexes.
+    """
+    hasher = hashlib.sha256(b"nemo-gym-tool-call-turn")
+    seen_ids: set[str] = set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            raise ValueError(f"request item is not an object: {type(item).__name__}")
+        if not _is_assistant_authored(item):
+            continue
+        content = _content_of(item.get("content"))
+        tools = _tools_of(item)
+        if not content and not tools:
+            _update_field(hasher, b"\x05", "empty-assistant")
+        for content_type, payload in content:
+            _update_field(hasher, b"\x00", content_type)
+            _update_field(hasher, b"\x01", payload)
+        for call_id, name, _arguments in tools:
+            if not call_id or not name or call_id in seen_ids:
+                return ""
+            seen_ids.add(call_id)
+            _update_field(hasher, b"\x02", call_id)
+            _update_field(hasher, b"\x03", name)
+    return hasher.hexdigest() if seen_ids else ""
+
+
+def trailing_assistant_turn(messages: list[dict]) -> list[dict]:
+    """Return the last model turn, skipping trailing user/tool results.
+
+    Standalone reasoning belongs to the turn even though fingerprints omit it.
+    It must not split interleaved text and tool calls into different turns.
+    """
+    items = [m for m in messages or [] if isinstance(m, dict)]
+    end = len(items)
+    while end > 0 and not (_is_assistant_authored(items[end - 1]) or items[end - 1].get("type") == "reasoning"):
+        end -= 1
+    start = end
+    while start > 0 and (_is_assistant_authored(items[start - 1]) or items[start - 1].get("type") == "reasoning"):
+        start -= 1
+    return items[start:end]

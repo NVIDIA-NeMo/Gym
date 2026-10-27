@@ -379,3 +379,96 @@ def test_gpu_footprint_no_node_pools_skips_validation():
     # Default COMPUTE fixture has no node_pools, so nothing to validate against.
     config = SubmitConfig.model_validate(_config(services={"svc": _MULTI_SERVICE}))
     assert config.services["svc"].number_of_instances == 4
+
+
+# ---------------------------------------------------------------------------
+# KubernetesComputeConfig
+# ---------------------------------------------------------------------------
+
+COMPUTE_K8S = {"cluster": {"type": "kubernetes", "namespace": "eng-test", "gpus_per_node": 8, "pvc_name": "workspace"}}
+
+
+def test_kubernetes_compute_accepted():
+    config = SubmitConfig.model_validate(_config(compute=COMPUTE_K8S))
+    assert config.services["svc"].placement == "cluster"
+
+
+def test_kubernetes_gpu_footprint_exact_fit_accepted():
+    service = {**SERVICE, "tensor_parallel_size": 2, "number_of_instances": 4}
+    config = SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_K8S))
+    assert config.services["svc"].number_of_instances == 4
+
+
+def test_kubernetes_gpu_footprint_exceeds_node_raises():
+    service = {**SERVICE, "tensor_parallel_size": 2, "number_of_instances": 8}
+    with pytest.raises(ValidationError, match="exceeds the node pool's gpus_per_node"):
+        SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_K8S))
+
+
+def test_kubernetes_node_pool_on_service_raises():
+    # Kubernetes v1 has no named pools; a service pinned to one has nothing to match.
+    service = {**SERVICE, "node_pool": "compute"}
+    with pytest.raises(ValidationError, match="does not match any node pool"):
+        SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_K8S))
+
+
+def test_kubernetes_compute_discriminated_from_slurm():
+    k8s_config = SubmitConfig.model_validate(_config(compute=COMPUTE_K8S))
+    slurm_config = SubmitConfig.model_validate(_config())
+    assert type(next(iter(k8s_config.compute.values()))).__name__ == "KubernetesComputeConfig"
+    assert type(next(iter(slurm_config.compute.values()))).__name__ == "SlurmComputeConfig"
+
+
+def test_kubernetes_unknown_type_rejected():
+    with pytest.raises(ValidationError):
+        SubmitConfig.model_validate(_config(compute={"cluster": {"type": "not-a-real-backend"}}))
+
+
+def test_kubernetes_pvc_name_is_required():
+    # The driver container's own volumeMounts always references the output volume
+    # (kubernetes_script.py's build_job_manifest); without a pvc_name that volume is never
+    # declared, and the pod is rejected outright by the API server. Fail at config-validation
+    # time with a clear message instead.
+    with pytest.raises(ValidationError, match="pvc_name"):
+        SubmitConfig.model_validate(_config(compute={"cluster": {"type": "kubernetes", "namespace": "eng-test"}}))
+
+
+# ---------------------------------------------------------------------------
+# resumable / ResumeConfig
+# ---------------------------------------------------------------------------
+
+
+def test_resumable_defaults_to_false():
+    config = SubmitConfig.model_validate(_config())
+    benchmark = config.driver.benchmarks["gsm8k"]
+    assert benchmark.resumable is False
+    assert benchmark.resume_config is None
+
+
+def test_resumable_true_uses_resume_config_defaults():
+    driver = {**DRIVER, "benchmarks": {"gsm8k": {"resumable": True}}}
+    config = SubmitConfig.model_validate(_config(driver=driver))
+    resume = config.driver.benchmarks["gsm8k"].resume_config
+    assert resume.max_retries == 3
+    assert resume.max_walltime is None
+
+
+def test_resumable_object_overrides_defaults():
+    driver = {**DRIVER, "benchmarks": {"gsm8k": {"resumable": {"max_retries": 7, "max_walltime": "48:00:00"}}}}
+    config = SubmitConfig.model_validate(_config(driver=driver))
+    resume = config.driver.benchmarks["gsm8k"].resume_config
+    assert resume.max_retries == 7
+    assert resume.max_walltime == "48:00:00"
+
+
+@pytest.mark.parametrize("resumable", [True, {"max_retries": 5}])
+def test_resumable_is_rejected_on_command_benchmarks(resumable):
+    driver = {**DRIVER, "benchmarks": {"gsm8k": {"command": "bash run.sh", "resumable": resumable}}}
+    with pytest.raises(ValidationError, match="both `command` and `resumable`"):
+        SubmitConfig.model_validate(_config(driver=driver))
+
+
+def test_command_benchmark_without_resumable_is_accepted():
+    driver = {**DRIVER, "benchmarks": {"gsm8k": {"command": "bash run.sh", "resumable": False}}}
+    config = SubmitConfig.model_validate(_config(driver=driver))
+    assert config.driver.benchmarks["gsm8k"].resume_config is None

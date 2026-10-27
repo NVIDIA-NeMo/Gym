@@ -36,6 +36,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from omegaconf import DictConfig
 from pydantic import BaseModel
 from starlette.routing import Mount
 
@@ -46,7 +47,9 @@ from nemo_gym.base_resources_server import (  # noqa: E402
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSeedSessionResponse,
     SimpleResourcesServer,
+    mcp_session_token_serializer,
     normalize_tool_name,
 )
 from nemo_gym.mcp_auto_exposure import (  # noqa: E402
@@ -500,6 +503,34 @@ def test_session_hook_restricts_that_sessions_token():
         assert _payload(_call(client, "append", {"value": "x"}, token=token))["values"] == ["x"]
 
 
+def _typed_seed_body(task_data: dict) -> dict:
+    return {
+        "resources_session_id": "resources-session-1",
+        "episode_id": {"rollout_id": "rollout-1"},
+        "task_id": {"taskset": "store", "task_id": "task-1"},
+        "task_data": task_data,
+    }
+
+
+def test_environment_server_seed_returns_mcp_access_in_resources_tools():
+    # SessionScoped keeps the default seed_session, so this is a stateless server that opts into MCP. The Environment
+    # Server validates the seed reply as ResourcesSeedSessionResponse, which forbids any extra key such as "mcp".
+    server = _server(SessionScoped)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        resp = client.post("/seed_session", json=_typed_seed_body({"allowed_tools": ["append"]}))
+        assert resp.status_code == 200, resp.text
+        seed = ResourcesSeedSessionResponse.model_validate(resp.json())
+        assert seed.resources_session_id == "resources-session-1"
+        assert seed.resources_tools.server_name == "store"
+        token = seed.resources_tools.headers[TOKEN_HEADER]
+        _handshake(client)
+        # The session hook read the task's fields, so the token is narrowed to the tool the task allows.
+        assert {t["name"] for t in _list(client, token)} == {"append"}
+        assert _payload(_call(client, "append", {"value": "x"}, token=token))["values"] == ["x"]
+
+
 def test_session_hook_error_fails_seed_request_not_silent_unrestricted():
     class BrokenHook(Store):
         def mcp_allowed_tools_for_session(self, seed_body: dict) -> Optional[list[str]]:
@@ -512,6 +543,35 @@ def test_session_hook_error_fails_seed_request_not_silent_unrestricted():
         resp = client.post("/seed_session", json={})
         assert resp.status_code >= 500
         assert TOKEN_HEADER not in resp.text
+
+
+def _token_payload(server: SimpleResourcesServer, token: str) -> dict:
+    return mcp_session_token_serializer(server.get_session_middleware_key()).loads(token)
+
+
+def test_a_token_minted_without_checkpointing_names_only_its_session_and_tools():
+    server = _server()
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        token = _seed(client)
+    payload = _token_payload(server, token)
+
+    assert payload == {"sid": payload["sid"], "tools": None}
+    # Byte for byte the token every harness got before checkpointing existed.
+    assert token == mcp_session_token_serializer(server.get_session_middleware_key()).dumps(payload)
+
+
+def test_a_token_minted_with_checkpointing_names_the_attempt_that_seeded_it():
+    server = _server()
+    server.server_client.global_config_dict = DictConfig({"checkpoint": {"enabled": True, "control_auth_token": "t"}})
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        seeded = client.post("/ng-rollout/rollout-1-a2/seed_session", json={})
+    payload = _token_payload(server, seeded.json()["mcp"]["headers"][TOKEN_HEADER])
+
+    assert payload == {"sid": payload["sid"], "tools": None, "episode": "rollout-1-a2"}
 
 
 # ==================================================================================================

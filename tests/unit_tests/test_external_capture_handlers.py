@@ -3,6 +3,7 @@
 
 """External capture strategy lifecycle tests."""
 
+import copy
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -14,7 +15,8 @@ from nemo_gym.token_id_capture.external_capture import (
     VLLMWorkerCaptureHandler,
     make_external_capture_handler,
 )
-from nemo_gym.token_id_capture.lineage import InMemoryLineageStore
+from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
+from nemo_gym.token_id_capture.replay import replay_context
 from nemo_gym.token_id_capture.sink import CaptureContext, reset_token_sink, set_token_sink
 from nemo_gym.token_id_capture.staging.records import (
     INVALID_COMMIT_COORDS_REASON,
@@ -42,7 +44,7 @@ def _root_context(store: InMemoryLineageStore) -> CaptureContext:
         external_staging=True,
         request_items=[{"role": "user", "content": "go"}],
         capture_admission=CaptureAdmission(
-            rollout_id="rollout-1",
+            capture_key="rollout-1",
             model_call_id="c1",
             mode="text",
         ),
@@ -57,6 +59,8 @@ def _transport_payload(**fields: Any) -> dict[str, Any]:
         "generation_token_ids": [12],
         "generation_log_probs": [-0.2],
         "routed_experts": {"data": "unused"},
+        "sampler_topk_token_ids": [[12, 13]],
+        "sampler_topk_logprobs": [[-0.2, -1.8]],
         # Megatron prompt-form echo, absent from vLLM payloads; stripped defensively.
         "compact_prompt_token_ids": [10, 11],
     }
@@ -85,15 +89,18 @@ def _assert_transport_fields_stripped(payload: dict[str, Any]) -> None:
     assert "generation_token_ids" not in message
     assert "generation_log_probs" not in message
     assert "routed_experts" not in message
+    assert "sampler_topk_token_ids" not in message
+    assert "sampler_topk_logprobs" not in message
     assert "compact_prompt_token_ids" not in message
 
 
 @pytest.mark.parametrize(
-    ("handler", "request_payload", "metadata_field", "token_return_field"),
+    ("backend", "handler", "request_payload", "metadata_field", "token_return_field"),
     [
-        (VLLMWorkerCaptureHandler(), {}, None, "return_tokens_as_token_ids"),
-        (MegatronWorkerCaptureHandler(), {}, "offload_params", None),
+        ("vllm", VLLMWorkerCaptureHandler(), {}, None, "return_tokens_as_token_ids"),
+        ("megatron", MegatronWorkerCaptureHandler(), {}, "offload_params", None),
         (
+            "megatron",
             MegatronWorkerCaptureHandler(),
             {"offload_params": {"caller_metadata": "preserved"}},
             "offload_params",
@@ -103,7 +110,7 @@ def _assert_transport_fields_stripped(payload: dict[str, Any]) -> None:
     ids=["vllm", "megatron", "megatron-existing-metadata"],
 )
 def test_handler_prepares_worker_staged_request(
-    handler, request_payload: dict[str, Any], metadata_field, token_return_field
+    backend: str, handler, request_payload: dict[str, Any], metadata_field, token_return_field
 ) -> None:
     store = InMemoryLineageStore()
     context = _root_context(store)
@@ -122,7 +129,11 @@ def test_handler_prepares_worker_staged_request(
         }
         assert "ng_capture" not in payload
     assert payload["logprobs"] is True
-    assert payload["top_logprobs"] == 0
+    if backend == "vllm":
+        # vLLM request preprocessing owns logprob-count normalization.
+        assert "top_logprobs" not in payload
+    else:
+        assert payload["top_logprobs"] == 0
     if token_return_field is None:
         # Megatron stages the delta on the worker; Gym asks for no token echo.
         assert "return_tokenized_data" not in payload
@@ -132,23 +143,25 @@ def test_handler_prepares_worker_staged_request(
         assert "return_tokenized_data" not in payload
 
 
+@pytest.mark.parametrize("top_logprobs", [None, 0, 1, 32, 128])
+def test_vllm_handler_preserves_requested_top_logprobs(top_logprobs: int | None) -> None:
+    context = _root_context(InMemoryLineageStore())
+    token = set_token_sink(context)
+    try:
+        payload = VLLMWorkerCaptureHandler().prepare_request({"top_logprobs": top_logprobs})
+    finally:
+        reset_token_sink(token)
+
+    assert payload["logprobs"] is True
+    assert payload["top_logprobs"] == top_logprobs
+    assert payload["return_tokens_as_token_ids"] is True
+
+
 @pytest.mark.parametrize(
     ("request_payload", "error"),
     [
         ({"n": 2}, "requires n=1"),
         ({"offload_params": []}, "offload_params must be an object"),
-        (
-            {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,"}}]}]},
-            "does not support multimodal content",
-        ),
-        (
-            {"messages": [{"role": "user", "content": [{"type": "audio_url", "audio_url": {"url": "data:,"}}]}]},
-            "does not support multimodal content",
-        ),
-        (
-            {"messages": [{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": ""}}]}]},
-            "does not support multimodal content",
-        ),
     ],
 )
 def test_megatron_handler_rejects_invalid_request_contract(request_payload: dict[str, Any], error: str) -> None:
@@ -162,10 +175,40 @@ def test_megatron_handler_rejects_invalid_request_contract(request_payload: dict
         reset_token_sink(token)
 
 
+@pytest.mark.parametrize(
+    "content_part",
+    [
+        {"type": "image_url", "image_url": {"url": "data:,"}},
+        {"type": "video_url", "video_url": {"url": "data:,"}},
+    ],
+    ids=["image", "video"],
+)
+def test_megatron_handler_admits_multimodal_requests(content_part: dict[str, Any]) -> None:
+    # Media reaches the sink as staging attachments, so a request carrying image or
+    # video parts is admitted exactly like a text request.
+    request_payload = {
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "describe"}, content_part]}],
+    }
+    # prepare_request mutates and returns the same dict; snapshot the messages first.
+    expected_messages = copy.deepcopy(request_payload["messages"])
+    store = InMemoryLineageStore()
+    context = _root_context(store)
+    token = set_token_sink(context)
+    try:
+        payload = MegatronWorkerCaptureHandler().prepare_request(request_payload)
+    finally:
+        reset_token_sink(token)
+
+    assert payload["messages"] == expected_messages
+    assert payload["offload_params"]["ng_capture"] == context.capture_admission.model_dump(mode="json")
+    assert payload["logprobs"] is True
+    assert payload["top_logprobs"] == 0
+
+
 def _staged_coords(**overrides: Any) -> dict[str, Any]:
     """Return a valid ``staged`` acknowledgement for the ``_root_context`` call, with overrides."""
     kwargs: dict[str, Any] = {
-        "rollout_id": "rollout-1",
+        "capture_key": "rollout-1",
         "model_call_id": "c1",
         "prev_len": 0,
         "weight_version": 7,
@@ -179,6 +222,52 @@ def _staged_coords(**overrides: Any) -> dict[str, Any]:
     }
     kwargs.update(overrides)
     return CommitCoords(**kwargs).model_dump(mode="json")
+
+
+@HANDLER_CLASSES
+@pytest.mark.parametrize("framework", [False, True])
+async def test_only_framework_capture_persists_selection_and_validation_evidence(handler_cls, framework, tmp_path):
+    store = FileLineageStore(tmp_path)
+    context = _root_context(store)
+    context.parent_resolution_mode = "source_history" if framework else "fingerprint"
+    if framework:
+        context.capture_admission = context.capture_admission.model_copy(
+            update={"request_replay": replay_context(context.request_items, render_digest="f" * 64)}
+        )
+    handler = handler_cls()
+    token = set_token_sink(context)
+    try:
+        handler.prepare_response({"ng_commit_coords": _staged_coords()})
+        await handler.finalize_response(
+            {
+                "id": "response-1",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "id": "item-1",
+                        "content": [{"type": "output_text", "text": "private model text"}],
+                    }
+                ],
+            }
+        )
+        assert context.committed
+        await store.close()
+        reopened = FileLineageStore(tmp_path)
+        row = (await reopened.manifest(context.rollout_id))["records"][0]
+        assert bool(row["output_items"]) is framework
+        assert row["response_status"] == ("completed" if framework else None)
+        assert bool(row["last_output_item"]) is framework
+        assert bool(row["replay"]) is framework
+        raw = b"".join(path.read_bytes() for path in tmp_path.glob("*.lineage.jsonl"))
+        assert bool(raw)
+        assert (b"private model text" in raw) is framework
+        assert row["response_id"] == "response-1" and row["output_fingerprint"]
+        await reopened.close()
+    finally:
+        reset_token_sink(token)
+        await store.close()
 
 
 @dataclass(frozen=True)
@@ -205,7 +294,7 @@ _FINALIZE_CASES = {
     ),
     "capture-failed": _FinalizeCase(
         coords_payload=CommitCoords(
-            rollout_id="rollout-1",
+            capture_key="rollout-1",
             model_call_id="c1",
             prev_len=0,
             weight_version=7,
@@ -220,11 +309,11 @@ _FINALIZE_CASES = {
         expected_failure=INVALID_COMMIT_COORDS_REASON,
     ),
     "malformed-missing-fields": _FinalizeCase(
-        coords_payload={"rollout_id": "rollout-1", "model_call_id": "c1"},
+        coords_payload={"capture_key": "rollout-1", "model_call_id": "c1"},
         expected_failure=INVALID_COMMIT_COORDS_REASON,
     ),
     "mismatched-rollout-id": _FinalizeCase(
-        coords_payload=_staged_coords(rollout_id="rollout-other"),
+        coords_payload=_staged_coords(capture_key="rollout-other"),
         expected_failure=INVALID_COMMIT_COORDS_REASON,
     ),
     "mismatched-model-call-id": _FinalizeCase(
@@ -256,7 +345,7 @@ def _assert_poisoned(
     assert manifest["records"] == []
     assert manifest["failures"] == [
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "model_call_id": "c1",
             "reason": reason,
         }
@@ -302,6 +391,37 @@ async def test_handler_finalization_updates_lineage_and_cleans_transport(handler
         _assert_transport_fields_stripped(payload)
     else:
         _assert_poisoned(manifest, context, payload, case.expected_failure)
+
+
+@pytest.mark.asyncio
+@HANDLER_CLASSES
+@pytest.mark.parametrize("previous_worker_response", [False, True])
+async def test_handler_leaves_synthetic_completion_uncommitted(handler_cls, previous_worker_response) -> None:
+    handler = handler_cls()
+    if previous_worker_response:
+        previous_context = _root_context(InMemoryLineageStore())
+        payload = _transport_payload()
+        payload["ng_commit_coords"] = _staged_coords()
+        await _prepare_and_finalize(handler, previous_context, payload)
+        assert previous_context.committed
+
+    store = InMemoryLineageStore()
+    context = _root_context(store)
+    token = set_token_sink(context)
+    try:
+        # Sending a request does not imply that a worker completion arrived:
+        # context-overflow errors are converted into synthetic completions.
+        handler.prepare_request({})
+        await handler.finalize_response(
+            {"id": "synthetic", "choices": [{"message": {"role": "assistant", "content": None}}]}
+        )
+    finally:
+        reset_token_sink(token)
+
+    assert not context.committed
+    manifest = await store.manifest("rollout-1")
+    assert manifest["records"] == []
+    assert manifest["failures"] == []
 
 
 class _FaultyLedger(InMemoryLineageStore):

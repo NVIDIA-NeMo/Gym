@@ -1,9 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import runpy
+import time
 from pathlib import Path
+from unittest.mock import MagicMock
 
+import httpx
 import orjson
 import pytest
 from fastapi.testclient import TestClient
@@ -44,8 +48,9 @@ class _Response:
     ok = True
     cookies = {"session": _Cookie()}
 
-    def __init__(self, body: dict) -> None:
+    def __init__(self, body: dict, headers: dict | None = None) -> None:
         self.body = orjson.dumps(body)
+        self.headers = headers or {}
 
     async def read(self) -> bytes:
         return self.body
@@ -83,7 +88,7 @@ class _Client(ServerClient):
             payload["agent_session_id"] = body["agent_session_id"]
         elif url_path == "/close_session":
             payload["resources_session_id"] = body["resources_session_id"]
-        return _Response(payload)
+        return _Response(payload, response.headers)
 
     def _resolve_base_url(self, server_name: str) -> str:
         return f"http://{server_name}:8000"
@@ -171,6 +176,44 @@ def test_legacy_adapter_forwards_aggregate_metrics_to_resources() -> None:
     assert [(server, path) for server, path, _ in client.calls] == [("resources", "/aggregate_metrics")]
 
 
+def test_legacy_adapter_preserves_task_identity_and_data():
+    row = {
+        "problem_id": "problem-1",
+        "instance_id": "instance-1",
+        "responses_create_params": {"input": "fix it", "temperature": 0.4},
+        "run_script": "verifier\nscript\n",
+        "verifier_metadata": {"answer": "expected"},
+        "agent_ref": {"name": "old-agent"},
+        "skills_ref": "old-skills",
+        "task_source": "old-source",
+        "_ng_task_index": 7,
+        "_ng_rollout_index": 2,
+        "_ng_attempt_index": 1,
+    }
+    row.update(task_source="resources", agent_ref={"name": "agent"})
+    adapter = SingleAgentTurnLegacyEnvironmentServer(
+        config=SingleAgentTurnEnvironmentServerConfig(
+            name="environment",
+            host="localhost",
+            port=1,
+            entrypoint="app.py",
+            cleanup_timeout_seconds=10,
+            resources_server={"type": "resources_servers", "name": "resources"},
+            agent_server={"type": "responses_api_agents", "name": "agent"},
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    request = adapter._episode_request_from_row(row)
+    assert (request.task.task_id.taskset, request.task.task_id.task_id) == ("resources", "problem-1")
+    assert request.task.task_input.task_data == {
+        "problem_id": "problem-1",
+        "instance_id": "instance-1",
+        "run_script": "verifier\nscript\n",
+        "verifier_metadata": {"answer": "expected"},
+    }
+    assert request.episode_id.attempt == 1
+
+
 @pytest.mark.parametrize("task_id_field", ["task_id", "problem_id", "instance_id"])
 def test_explicit_identity_does_not_require_collector_indexes(task_id_field: str) -> None:
     environment_server, client = _environment_server()
@@ -199,7 +242,7 @@ def test_task_identity_preserves_index_fallback_and_zero(task_fields: dict[str, 
     environment_server, client = _environment_server()
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
 
-    request = adapter._native_request(
+    request = adapter._episode_request_from_row(
         {
             **task_fields,
             "_ng_task_index": 3,
@@ -212,16 +255,88 @@ def test_task_identity_preserves_index_fallback_and_zero(task_fields: dict[str, 
     assert request.episode_id == EpisodeId(rollout_id="3-2", attempt=0)
 
 
-async def test_legacy_and_native_envelopes_project_the_same_result() -> None:
+@pytest.mark.parametrize(
+    "identity, expected",
+    [
+        # A restored attempt carries its attempt in the explicit id.
+        ({"_ng_rollout_id": "restored-a1"}, EpisodeId(rollout_id="restored", attempt=1)),
+        # Gym's own retries stamp the attempt index.
+        (
+            {"_ng_task_index": 3, "_ng_rollout_index": 2, "_ng_attempt_index": 2},
+            EpisodeId(rollout_id="3-2", attempt=2),
+        ),
+        ({"_ng_task_index": 3, "_ng_rollout_index": 2}, EpisodeId(rollout_id="3-2", attempt=0)),
+    ],
+)
+def test_flat_rows_decode_the_capture_key_like_the_agent(identity: dict, expected: EpisodeId) -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    request = adapter._episode_request_from_row(
+        {"task_id": "task", "responses_create_params": {"input": "task"}, **identity}
+    )
+
+    assert request.episode_id == expected
+
+
+def test_a_restored_attempt_runs_under_its_capture_key() -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    response = TestClient(adapter.setup_webserver()).post(
+        "/run",
+        json={"task_id": "task", "_ng_rollout_id": "restored-a1", "responses_create_params": {"input": "task"}},
+    )
+
+    assert response.status_code == 200
+    assert client.calls[0][2]["json"]["episode_id"] == {"rollout_id": "restored", "attempt": 1}
+    assert client.calls[2][1] == "/ng-rollout/restored-a1/v1/responses"
+
+
+@pytest.mark.parametrize("task_source", ["resources", "agent"])
+def test_task_source_may_name_the_bound_resources_server_or_agent(task_source: str) -> None:
+    # Collation stamps task_source with the instance that declares the dataset, usually the agent.
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    request = adapter._episode_request_from_row(
+        {
+            "task_source": task_source,
+            "_ng_task_index": 0,
+            "_ng_rollout_index": 0,
+            "responses_create_params": {"input": "task"},
+        }
+    )
+
+    assert request.task.task_id.taskset == task_source
+    assert "task_source" not in request.task.task_input.task_data
+
+
+def test_task_source_naming_another_instance_is_rejected() -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    with pytest.raises(ValueError, match="names none of this Environment Server's instances"):
+        adapter._episode_request_from_row(
+            {
+                "task_source": "other_agent",
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": "task"},
+            }
+        )
+
+
+async def test_flat_rows_and_episode_requests_project_the_same_result() -> None:
     legacy_environment, legacy_client = _environment_server()
-    native_environment, native_client = _environment_server()
+    episode_environment, episode_client = _environment_server()
     legacy_adapter = SingleAgentTurnLegacyEnvironmentServer(
         config=legacy_environment.config,
         server_client=legacy_client,
     )
-    native_adapter = SingleAgentTurnLegacyEnvironmentServer(
-        config=native_environment.config,
-        server_client=native_client,
+    episode_adapter = SingleAgentTurnLegacyEnvironmentServer(
+        config=episode_environment.config,
+        server_client=episode_client,
     )
     flat_row = {
         "_ng_task_index": 3,
@@ -231,7 +346,7 @@ async def test_legacy_and_native_envelopes_project_the_same_result() -> None:
         "benchmark_field": "input",
         "responses_create_params": {"input": "task"},
     }
-    native_request = SingleAgentTurnRequest(
+    episode_request = SingleAgentTurnRequest(
         episode_id=EpisodeId(rollout_id="3-2", attempt=1),
         task=MaterializedTask(
             task_id=TaskId(taskset="resources", task_id="task"),
@@ -243,6 +358,54 @@ async def test_legacy_and_native_envelopes_project_the_same_result() -> None:
     )
 
     legacy_result = await legacy_adapter.run_legacy(flat_row)
-    native_result = await native_adapter.run_legacy(native_request.model_dump(mode="json"))
+    episode_result = await episode_adapter.run_legacy(episode_request.model_dump(mode="json"))
 
-    assert native_result == legacy_result
+    assert episode_result == legacy_result
+
+
+class _BlockingAgentClient(_Client):
+    """Hold the agent invocation until the test releases it."""
+
+    agent_called: asyncio.Event
+    release_agent: asyncio.Event
+
+    async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
+        if url_path.endswith("/v1/responses"):
+            self.agent_called.set()
+            await self.release_agent.wait()
+        return await super().post(server_name, url_path, **kwargs)
+
+
+async def test_legacy_rows_take_part_in_checkpoints() -> None:
+    environment_server, client = _environment_server()
+    client.global_config_dict["checkpoint"] = {"enabled": True, "control_auth_token": "t"}
+    blocking = _BlockingAgentClient(
+        **client.model_dump(exclude={"calls", "responses"}),
+        calls=[],
+        responses=client.responses,
+        agent_called=asyncio.Event(),
+        release_agent=asyncio.Event(),
+    )
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=blocking)
+    app = adapter.setup_webserver()
+    row = {"responses_create_params": {"input": "task"}, "_ng_task_index": 0, "_ng_rollout_index": 0}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://env", headers={"Authorization": "Bearer t"}
+    ) as http:
+        run = asyncio.create_task(http.post("/run", json=row))
+        await blocking.agent_called.wait()
+        prepared = await http.post(
+            "/ng-control/v1/checkpoint/prepare", json={"checkpoint_id": "c1", "deadline_ts": time.time() + 5}
+        )
+        [record] = adapter._checkpoint.export_records(None)
+        await http.post(
+            "/ng-control/v1/checkpoint/resume", json={"checkpoint_id": "c1", "deadline_ts": time.time() + 5}
+        )
+        blocking.release_agent.set()
+        result = await run
+
+    # The agent invocation is a replay step, so the checkpoint records the boundary before it.
+    assert prepared.json()["phase"] == "prepared"
+    assert record.boundary["next"] == "invoke_agent"
+    assert result.json()["reward"] == 1.0

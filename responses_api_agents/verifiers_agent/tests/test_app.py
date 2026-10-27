@@ -14,9 +14,11 @@
 # limitations under the License.
 import asyncio
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from openai import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, AsyncOpenAI, Timeout
 
@@ -27,6 +29,9 @@ from responses_api_agents.verifiers_agent.app import (
     VerifiersAgent,
     VerifiersAgentConfig,
     _NoStoreCookieJar,
+)
+from responses_api_agents.verifiers_agent.app import (
+    logger as agent_app_logger,
 )
 
 
@@ -150,6 +155,91 @@ class TestApp:
         assert output[2]["content"][0]["text"] == "answer"
         assert output[2]["prompt_token_ids"] == [3]
 
+    def test_eval_rollout_without_token_ids_is_not_reported_as_empty(self, caplog) -> None:
+        """Eval mode (`return_token_id_information: false`) returns no token ids, but the trajectory is complete."""
+        tool_call = {"id": "call_1", "name": "python", "arguments": json.dumps({"expr": "2+2"})}
+        completion = [
+            {"role": "assistant", "content": "", "tool_calls": [json.dumps(tool_call)]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "4"},
+            {"role": "assistant", "content": "answer"},
+        ]
+        rollout_output = {
+            "completion": completion,
+            "trajectory": [
+                {"completion": [{"role": "assistant", "content": "", "tool_calls": [tool_call]}]},
+                {"completion": [{"role": "assistant", "content": "answer"}]},
+            ],
+        }
+
+        with caplog.at_level(logging.DEBUG, logger=agent_app_logger.name):
+            output = self._agent()._convert_trajectory_to_output(rollout_output)
+
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert "token ids were likely not requested" in caplog.text
+        assert [item["type"] for item in output] == ["function_call", "function_call_output", "message", "message"]
+        assert output[-1]["id"] == "msg_empty"
+        assert output[-1]["generation_token_ids"] == [0]
+
+    @pytest.mark.parametrize(
+        ("completion", "expect_warning"),
+        [
+            # Stopped by max_turns right after a tool call: only function_call items, no assistant message.
+            (
+                [
+                    {"role": "assistant", "content": "", "tool_calls": [json.dumps({"id": "c1", "name": "f"})]},
+                    {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+                ],
+                False,
+            ),
+            # Only non-assistant messages: a user or tool message must not count as an assistant turn.
+            ([{"role": "user", "content": "q"}, {"role": "tool", "tool_call_id": "c1", "content": "ok"}], True),
+        ],
+    )
+    def test_each_kind_of_assistant_turn_decides_the_warning(self, caplog, completion, expect_warning) -> None:
+        with caplog.at_level(logging.WARNING, logger=agent_app_logger.name):
+            self._agent()._convert_trajectory_to_output({"completion": completion, "trajectory": []})
+
+        assert ("Returning empty trajectory" in caplog.text) is expect_warning
+
+    def test_rollout_without_completion_items_still_warns_empty_trajectory(self, caplog) -> None:
+        rollout_output = {"completion": [], "trajectory": [], "error": {"error": "sandbox quota exceeded"}}
+
+        with caplog.at_level(logging.WARNING, logger=agent_app_logger.name):
+            output = self._agent()._convert_trajectory_to_output(rollout_output)
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "Returning empty trajectory" in warnings[0].getMessage()
+        assert "sandbox quota exceeded" in warnings[0].getMessage()
+        assert [item["id"] for item in output] == ["msg_empty"]
+
+    def test_rollout_error_after_assistant_turns_is_still_logged(self, caplog) -> None:
+        rollout_output = {
+            "completion": [{"role": "assistant", "content": "partial answer"}],
+            "trajectory": [{"completion": [{"role": "assistant", "content": "partial answer"}]}],
+            "error": {"error": "ToolError", "error_chain_repr": "ToolError('sandbox died')"},
+        }
+
+        with caplog.at_level(logging.WARNING, logger=agent_app_logger.name):
+            output = self._agent()._convert_trajectory_to_output(rollout_output)
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "ToolError" in warnings[0]
+        assert "Returning empty trajectory" not in warnings[0]
+        assert output[-1]["id"] == "msg_empty"
+
+    @staticmethod
+    def _agent() -> VerifiersAgent:
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name=""),
+        )
+        return VerifiersAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
 
 class TestPolicyClient:
     """The policy client decides which vLLM engine serves a rollout.
@@ -201,7 +291,7 @@ class TestPolicyClient:
     def test_rollout_prefixed_client_inherits_deadlines_and_retries(self) -> None:
         agent = self._agent(client_timeout_s=3600, client_connect_timeout_s=60, client_max_retries=0)
 
-        def fake_resolve(model_server_name: str, rollout_id: str | None = None) -> str:
+        def fake_resolve(model_server_name: str, rollout_id: str | None = None, *, trace_context: bool = True) -> str:
             prefix = f"/ng-rollout/{rollout_id}" if rollout_id else ""
             return f"http://policy{prefix}/v1"
 
@@ -226,7 +316,7 @@ class TestPolicyClient:
     def test_client_base_url_carries_the_rollout_capture_prefix(self) -> None:
         agent = self._agent()
 
-        def fake_resolve(model_server_name: str, rollout_id: str | None = None) -> str:
+        def fake_resolve(model_server_name: str, rollout_id: str | None = None, *, trace_context: bool = True) -> str:
             prefix = f"/ng-rollout/{rollout_id}" if rollout_id else ""
             return f"http://policy{prefix}/v1"
 
@@ -314,7 +404,7 @@ class TestPrefixedResponsesRoute:
         return VerifiersAgent(config=config, server_client=server_client)
 
     @staticmethod
-    def _resolve(model_server_name: str, rollout_id: str | None = None) -> str:
+    def _resolve(model_server_name: str, rollout_id: str | None = None, *, trace_context: bool = True) -> str:
         return "http://policy%s/v1" % (f"/ng-rollout/{rollout_id}" if rollout_id else "")
 
     def _base_url_seen_by(self, agent: VerifiersAgent, url: str) -> str:
@@ -356,3 +446,264 @@ class TestPrefixedResponsesRoute:
         """Capture off means the shared unprefixed client, as on the body path."""
         agent = self._agent(observability=False)
         assert self._base_url_seen_by(agent, "/ng-rollout/7-2/v1/responses") == "http://policy/v1"
+
+
+def _policy_server_returning(responses: list[dict]) -> httpx.MockTransport:
+    """Stand-in policy server that replays `responses` in order, then repeats the last."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        index = min(calls["n"], len(responses) - 1)
+        calls["n"] += 1
+        return httpx.Response(200, json=responses[index])
+
+    return httpx.MockTransport(handler)
+
+
+def _chat_completion(response_id: str, *, prompt_tokens: int, completion_tokens: int) -> dict:
+    return {
+        "id": response_id,
+        "object": "chat.completion",
+        "created": 0,
+        "model": "m",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+    }
+
+
+class TestRolloutObservability:
+    """The evidence rollout health reads has to come from somewhere.
+
+    `verifiers` owns the call loop, so the agent never sees a model response and
+    for a long time emitted no `ng_trajectory` at all. Every check that reads
+    turns or bound model calls then reported `unobserved`: a run of this agent
+    scored `0 healthy, 0 unhealthy, N unobserved`, which is indistinguishable
+    from a healthy run at a glance. These hold the two things the checks need --
+    one turn per model call, each claiming the call it came from.
+    """
+
+    @staticmethod
+    def _agent() -> VerifiersAgent:
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            vf_env_id="stub_env",
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {OBSERVABILITY_ENABLED_KEY_NAME: True}
+        return VerifiersAgent(config=config, server_client=server_client)
+
+    def test_recording_client_records_every_response_id_and_sums_usage(self) -> None:
+        agent = self._agent()
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", return_value="http://policy/ng-rollout/7-2/v1"),
+            patch.object(VerifiersAgent, "rollout_id_from_run", lambda _self, body: "7-2"),
+        ):
+            client = agent._get_client(MagicMock(), invocation_id="inv-1")
+
+        client.client._client._transport = _policy_server_returning(
+            [
+                _chat_completion("chatcmpl-a", prompt_tokens=10, completion_tokens=3),
+                _chat_completion("chatcmpl-b", prompt_tokens=20, completion_tokens=5),
+            ]
+        )
+        for _ in range(2):
+            asyncio.run(
+                client.get_native_response(
+                    prompt=[{"role": "user", "content": "hi"}], model="m", sampling_args={}, tools=None
+                )
+            )
+
+        assert client.recorded_response_ids == ["chatcmpl-a", "chatcmpl-b"]
+        assert client.recorded_usage.input_tokens == 30
+        assert client.recorded_usage.output_tokens == 8
+        assert client.recorded_usage.total_tokens == 38
+
+    def _trajectory_for(self, output: list[dict], response_ids: list[str]):
+        agent = self._agent()
+        return agent._build_trajectory(
+            invocation_id="inv-1",
+            task_id="0",
+            rollout_id="0-0",
+            output=output,
+            response_ids=response_ids,
+            conversation=[],
+            status="completed" if response_ids else "incomplete",
+        )
+
+    @staticmethod
+    def _two_turn_output() -> list[dict]:
+        return [
+            {"type": "message", "id": "msg_1", "content": [{"type": "output_text", "text": "first"}]},
+            {"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "t", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "c1", "output": "done"},
+            {"type": "message", "id": "msg_2", "content": [{"type": "output_text", "text": "second"}]},
+        ]
+
+    def test_each_turn_claims_only_the_call_it_came_from(self) -> None:
+        """`_canonical_model_call_references` reads `turns[*].model_calls`.
+
+        Handing every turn the whole call list still binds, but then no finding
+        can be attributed to a turn and a per-call locator points anywhere.
+        """
+        trajectory = self._trajectory_for(self._two_turn_output(), ["chatcmpl-a", "chatcmpl-b"])
+
+        assert [turn.turn_no for turn in trajectory.turns] == [1, 2]
+        assert [[ref.response_id for ref in turn.model_calls] for turn in trajectory.turns] == [
+            ["chatcmpl-a"],
+            ["chatcmpl-b"],
+        ]
+        assert trajectory.gaps == []
+
+    def test_turn_answers_are_sliced_per_turn(self) -> None:
+        """`agent_turn_hollow` asks whether THIS turn produced anything.
+
+        Giving each turn the whole rollout's items makes every turn look
+        non-hollow as long as any one turn spoke, so the check can never fire.
+        """
+        trajectory = self._trajectory_for(self._two_turn_output(), ["chatcmpl-a", "chatcmpl-b"])
+
+        assert [[item["id"] for item in turn.answer] for turn in trajectory.turns] == [["msg_1", "fc_1"], ["msg_2"]]
+        # cumulative within the invocation: turn 2 adds no tool call of its own
+        assert [turn.step_count for turn in trajectory.turns] == [1, 1]
+
+    def test_a_turn_with_no_items_behind_it_stays_empty(self) -> None:
+        """A claimed call that produced nothing is what `agent_turn_hollow` is for."""
+        trajectory = self._trajectory_for(self._two_turn_output(), ["chatcmpl-a", "chatcmpl-b", "chatcmpl-c"])
+
+        assert len(trajectory.turns) == 3
+        assert trajectory.turns[2].answer == []
+        # the running count carries through a turn that did nothing
+        assert [turn.step_count for turn in trajectory.turns] == [1, 1, 1]
+
+    def test_the_empty_token_placeholder_does_not_stand_in_for_a_turn(self) -> None:
+        """`_convert_trajectory_to_output` appends a `msg_empty` placeholder when
+        a rollout came back with no token ids. It is a message item, so counting
+        it would dress the one case worth catching -- a call that produced
+        nothing at all -- as a turn that spoke, and `agent_turn_hollow` would
+        pass on it."""
+        output = [{"type": "message", "id": "msg_empty", "content": [{"type": "output_text", "text": ""}]}]
+        trajectory = self._trajectory_for(output, ["chatcmpl-a"])
+
+        assert len(trajectory.turns) == 1
+        assert trajectory.turns[0].answer == []
+
+    def test_a_rollout_with_no_model_calls_reports_a_gap(self) -> None:
+        """Every call failing must not look like an ordinary empty trajectory."""
+        trajectory = self._trajectory_for([], [])
+
+        assert trajectory.turns == []
+        assert [gap.code for gap in trajectory.gaps] == ["model_call_reference_unavailable"]
+        assert trajectory.invocations[0].status == "incomplete"
+
+
+class TestExportStateColumns:
+    """``export_state_columns`` copies extra verifiers State keys into the response, and is off by default."""
+
+    RECORDS = [{"index": 0, "type": "gmail_message_sent_to", "app": "gmail", "role": "objective", "passed": True}]
+
+    def _run(self, **config_overrides) -> tuple[list[str], dict]:
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            vf_env_id="stub_env",
+            **config_overrides,
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {OBSERVABILITY_ENABLED_KEY_NAME: False}
+        agent = VerifiersAgent(config=config, server_client=server_client)
+        seen_columns = []
+
+        async def fake_run_group(*, group_inputs, client, model, sampling_args, state_columns):
+            seen_columns.extend(state_columns)
+            state = {
+                "reward": 1.0,
+                "metrics": {},
+                "completion": [],
+                "trajectory": [],
+                "assertion_results": self.RECORDS,
+            }
+            # Like verifiers' state_to_output: a requested column missing from the State comes back as None.
+            return [{**state, **{column: state.get(column) for column in state_columns}}]
+
+        env = MagicMock()
+        env.run_group = fake_run_group
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL),
+            patch.object(VerifiersAgent, "_get_env", return_value=env),
+        ):
+            response = TestClient(agent.setup_webserver()).post(
+                "/run",
+                json={"task_idx": 0, "responses_create_params": {"input": [{"role": "user", "content": "hi"}]}},
+            )
+        assert response.status_code == 200, response.text
+        return seen_columns, response.json()
+
+    def test_default_requests_only_the_trajectory_and_omits_the_field(self) -> None:
+        columns, body = self._run()
+        assert columns == ["trajectory"]
+        assert "exported_state" not in body["response"]
+
+    def test_requested_columns_reach_the_response(self) -> None:
+        columns, body = self._run(export_state_columns=["assertion_results", "trajectory"])
+        assert columns == ["trajectory", "assertion_results"]
+        assert body["response"]["exported_state"] == {"assertion_results": self.RECORDS}
+
+    def test_columns_missing_from_the_state_are_omitted_with_a_warning(self, caplog) -> None:
+        with caplog.at_level(logging.WARNING, logger=agent_app_logger.name):
+            _, body = self._run(export_state_columns=["assertion_result"])
+        assert "exported_state" not in body["response"]
+        assert "['assertion_result'] not on the verifiers State" in caplog.text
+
+
+class TestSharedClientTraceContext:
+    """The cached policy client is shared across rollouts, so its base URL must not name a span.
+
+    Per-run copies may: they live for one rollout. See Gym #4836.
+    """
+
+    SEGMENT = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+
+    def _agent(self, *, observability: bool) -> VerifiersAgent:
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            vf_env_id="stub_env",
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {
+            OBSERVABILITY_ENABLED_KEY_NAME: observability,
+            "policy_model": {"responses_api_models": {"vllm_model": {"host": "policy", "port": 8000}}},
+        }
+        server_client._build_server_base_url = lambda cfg: "http://policy:8000"
+        return VerifiersAgent(config=config, server_client=server_client)
+
+    def test_cached_client_has_no_trace_context_while_per_run_copies_do(self, monkeypatch) -> None:
+        from nemo_gym import server_utils
+
+        # Stand in for an exporting tracer with a current span at every call.
+        monkeypatch.setattr(server_utils, "trace_context_path_segment", lambda: self.SEGMENT)
+
+        agent = self._agent(observability=False)
+        shared = agent._get_client({"_ng_task_index": 0, "_ng_rollout_index": 0})
+        assert str(shared.client.base_url).rstrip("/") == "http://policy:8000/v1"
+        assert agent._get_client({"_ng_task_index": 1, "_ng_rollout_index": 0}) is shared
+
+        agent = self._agent(observability=True)
+        per_run = agent._get_client({"_ng_task_index": 2, "_ng_rollout_index": 0})
+        assert str(per_run.client.base_url).rstrip("/") == f"http://policy:8000/ng-rollout/2-0{self.SEGMENT}/v1"
+        cached = agent.client_cache["policy_model"]
+        assert str(cached.client.base_url).rstrip("/") == "http://policy:8000/v1"

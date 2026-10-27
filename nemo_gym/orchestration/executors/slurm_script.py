@@ -19,14 +19,20 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from nemo_gym.exporters import exporter_extras
+from nemo_gym.gitlab_utils import gitlab_storage_extras
 from nemo_gym.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.orchestration.api import (
     RUNTIME_ENV_PREFIX,
     BenchmarkRunConfig,
     NodePool,
     RayServiceConfig,
+    ServiceConfig,
     SlurmComputeConfig,
     SubmitConfig,
+    VllmNodeServiceConfig,
+    VllmPDServiceConfig,
+    VllmPDTierConfig,
     VllmServiceConfig,  # used in _BUILDERS dispatch table
     effective_ray_serve,
 )
@@ -34,10 +40,16 @@ from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_HEALTH_PORT,
     COLLECTOR_SERVICE_NAME,
     FINAL_SCRAPE_GRACE_SECONDS,
+    GYM_TELEMETRY_EXTRA,
     SHUTDOWN_WAIT_SECONDS,
     collector_config_path,
+    driver_telemetry_env,
+    gym_telemetry_active,
     otel_active,
+    vllm_traces_env,
+    vllm_traces_flag,
 )
+from nemo_gym.orchestration.executors.resume_script import RESUBMIT_ENV, render_resume_prologue
 from nemo_gym.orchestration.executors.script_templates import (
     ENSURE_RAY_INSTALLED,
     bash_var,
@@ -55,6 +67,8 @@ from nemo_gym.orchestration.executors.utils import flatten_run_args
 _SCRIPT_TEMPLATE = """\
 #!/bin/bash
 {directives}
+
+{resume_prologue}
 
 {ray_prelude}
 
@@ -168,6 +182,7 @@ def _render_service_command(
     workdir: str | None = None,
     single_node: bool = False,
     nodelist: str | None = None,
+    end_step_on_task_exit: bool = True,
 ) -> str:
     var = bash_var(name)
     env_prefix = _resolve_env(env) if env else ""
@@ -192,14 +207,20 @@ def _render_service_command(
     # --no-container-mount-home avoids polluting the container with host home directory contents.
     # PID is captured so the health check can detect early service death.
     # Without a container the command runs directly on the node: no image, mounts or workdir flags.
+    # $SLURM_JOB_ID suffixes the log so a resumed job (same job dir, new job id) keeps the previous log.
     container_flags = (
         f" --no-container-mount-home{mounts_flag}{workdir_flag} --container-image={shlex.quote(container)}"
         if container is not None
         else ""
     )
+    # --kill-on-bad-exit and --wait end the whole step within a second when any one of its tasks exits, whatever the
+    # cluster's KillOnBadExit and WaitTime defaults, so a multi-task service (vllm_pd tiers, Ray workers) cannot
+    # lose a task while its srun stays alive and the driver's watch sees nothing.
+    step_flags = " --kill-on-bad-exit=1 --wait=1" if end_step_on_task_exit else ""
     return (
         f"# service: {name}\n"
-        f"{env_prefix}srun --overlap{node_flags}{container_flags} --output=logs/{name}.log {command} &\n"
+        f"{env_prefix}srun --overlap{node_flags}{container_flags}{step_flags}"
+        f" --output=logs/{name}-$SLURM_JOB_ID.log {command} &\n"
         f"{var}_PID=$!"
     )
 
@@ -219,13 +240,26 @@ def _vllm_base_flags(service: VllmServiceConfig) -> str:
     return cmd
 
 
+def _kv_transfer_flag(service: VllmServiceConfig) -> str:
+    """The --kv-transfer-config for one tier of a prefill/decode pair.
+
+    Single-quoted because it is JSON: the value travels through the same
+    single-quoted `bash -c` block as everything else, and the escaping helper
+    handles it there.
+    """
+    if not isinstance(service, VllmPDTierConfig) or not service.kv_transfer_config:
+        return ""
+    config = json.dumps(service.kv_transfer_config, separators=(",", ":"))
+    return f" --kv-transfer-config {shlex.quote(config)}"
+
+
 def _build_vllm_command(service: VllmServiceConfig) -> str:
     cmd = _vllm_base_flags(service)
     if service.number_of_instances > 1:
         cmd += f" --data-parallel-size {service.number_of_instances}"
     if service.trust_remote_code:
         cmd += " --trust-remote-code"
-    return cmd
+    return cmd + _kv_transfer_flag(service)
 
 
 def _build_vllm_single_instance_multi_node_command(service: VllmServiceConfig, total_nodes: int) -> str:
@@ -248,14 +282,17 @@ def _build_vllm_single_instance_multi_node_command(service: VllmServiceConfig, t
 # mode") and exits before loading anything. The flag is legitimate on the head node and reaches us
 # through a service's own extra_args, so it is stripped from the worker command rather than
 # rejected: Gym decides which nodes run headless, so Gym keeps their command valid.
-_HEADLESS_INCOMPATIBLE_FLAG = re.compile(r"\s--api-server-count(?:[= ]\S+)?")
+# `--otlp-traces-endpoint` likewise: request spans come from the head's API server, not the workers.
+_HEADLESS_INCOMPATIBLE_FLAG = re.compile(r"\s--(?:api-server-count|otlp-traces-endpoint)(?:[= ]\S+)?")
 
 
 def _strip_headless_incompatible_flags(cmd: str) -> str:
     return _HEADLESS_INCOMPATIBLE_FLAG.sub("", cmd)
 
 
-def _build_vllm_multi_instance_multi_node_command(service: VllmServiceConfig, total_nodes: int) -> str:
+def _build_vllm_multi_instance_multi_node_command(
+    service: VllmServiceConfig, total_nodes: int, head: str = '"$HEAD_NODE_IP"'
+) -> str:
     # Data-parallel replicas span nodes. vLLM's Ray-based DP auto-placement doesn't spread ranks
     # across physical nodes - launching a single `vllm serve --data-parallel-size N` from one node
     # only sees that node's own GPUs when placing DP ranks. Real multi-node DP instead needs one
@@ -266,12 +303,12 @@ def _build_vllm_multi_instance_multi_node_command(service: VllmServiceConfig, to
     # number_of_instances is guaranteed evenly divisible by total_nodes here - api.py's
     # SubmitConfig validation enforces this before build_sbatch_script is ever called.
     dp_size_local = service.number_of_instances // total_nodes
-    common = _vllm_base_flags(service)
+    common = _vllm_base_flags(service) + _kv_transfer_flag(service)
     dp_flags = (
         f" --data-parallel-size {service.number_of_instances}"
         f" --data-parallel-size-local {dp_size_local}"
-        ' --data-parallel-address "$HEAD_NODE_IP"'
-        " --data-parallel-rpc-port 13345"
+        f" --data-parallel-address {head}"
+        f" --data-parallel-rpc-port {service.data_parallel_rpc_port}"
     )
     trust_flag = " --trust-remote-code" if service.trust_remote_code else ""
     head_cmd = common + dp_flags + trust_flag
@@ -298,9 +335,11 @@ def _build_vllm_multi_instance_multi_node_command(service: VllmServiceConfig, to
     )
 
 
-def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str:
+def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int, head: str | None = None) -> str:
     if service.number_of_instances > 1:
-        return _build_vllm_multi_instance_multi_node_command(service, total_nodes)
+        if head is None:
+            return _build_vllm_multi_instance_multi_node_command(service, total_nodes)
+        return _build_vllm_multi_instance_multi_node_command(service, total_nodes, head)
     return _build_vllm_single_instance_multi_node_command(service, total_nodes)
 
 
@@ -354,6 +393,59 @@ def _build_vllm_ray_serve_command(
     )
 
 
+# Resolves the allocation's node list so a router can address each tier's head by
+# the pool offset the tier is pinned to. `scontrol show hostnames` expands the
+# compact nodelist into one hostname per line, in allocation order -- the same
+# order --relative counts in.
+NODE_LIST_PRELUDE = 'gym_nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))'
+
+
+def _pool_head(offset: int) -> str:
+    """Shell expansion for the first hostname of the pool starting at `offset`."""
+    return f"${{gym_nodes[{offset}]}}"
+
+
+def _nixl_pre_command(service: VllmServiceConfig) -> str:
+    """Exports NIXL needs before a tier's `vllm serve` starts.
+
+    The side-channel host is the node's own hostname and can only be known on the
+    node, so it is a shell statement rather than an `env` entry.
+    """
+    if not isinstance(service, VllmPDTierConfig):
+        return ""
+    return (
+        "export VLLM_NIXL_SIDE_CHANNEL_HOST=$(hostname)\n"
+        f"export VLLM_NIXL_SIDE_CHANNEL_PORT={service.nixl_side_channel_port}"
+    )
+
+
+def _build_router_command(router: VllmPDServiceConfig, offsets: dict[str, tuple[int, int]]) -> str:
+    """The vllm-router invocation fronting a prefill/decode pair.
+
+    Both tiers are addressed at their pool's head node, which is where each tier's
+    API rank runs (the remaining ranks in a tier are headless).
+    """
+    endpoints = ""
+    for flag, tier in (("--prefill", router.prefill), ("--decode", router.decode)):
+        start, count = offsets[tier.node_pool]
+        # A per-node tier is one server per node; otherwise the tier's API rank is its head.
+        for i in range(count if router.server_per_node else 1):
+            endpoints += f' {flag} "http://{_pool_head(start + i)}:{tier.port}"'
+    return (
+        "vllm-router"
+        f" --prefill-policy {shlex.quote(router.prefill_policy)}"
+        f" --decode-policy {shlex.quote(router.decode_policy)}"
+        " --vllm-pd-disaggregation"
+        f"{endpoints}"
+        # All interfaces: the driver and the health probe reach it over localhost.
+        " --host 0.0.0.0"
+        f" --port {router.port}"
+        f" --intra-node-data-parallel-size {router.intra_node_data_parallel_size}"
+        f" --request-timeout-secs {router.request_timeout_secs}"
+        f" --log-level {shlex.quote(router.log_level)}"
+    )
+
+
 # Flags `ray start` refuses on a worker. They reach a worker through the service's
 # shared extra_args; Gym decides which nodes are workers, so Gym drops them there.
 _RAY_HEAD_ONLY_FLAG = re.compile(r"\s--(?:port|redis-shard-ports|include-dashboard)(?:[= ]\S+)?")
@@ -393,7 +485,7 @@ def _build_ray_command(
     return cmd
 
 
-_NODE_ARRAY = 'gym_nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))'
+_NODE_ARRAY = NODE_LIST_PRELUDE
 
 
 def pool_nodes_var(pool: str) -> str:
@@ -403,7 +495,7 @@ def pool_nodes_var(pool: str) -> str:
 
 def _places_services(config: SubmitConfig, is_multi_node: bool) -> bool:
     """Whether the script declares the allocation's host array to place services with."""
-    return is_multi_node or any(s.node_pool for s in config.services.values())
+    return is_multi_node or any(s.node_pool for s in config.deployed_services.values())
 
 
 def _render_pool_nodes(config: SubmitConfig, compute: SlurmComputeConfig, is_multi_node: bool) -> str:
@@ -411,9 +503,14 @@ def _render_pool_nodes(config: SubmitConfig, compute: SlurmComputeConfig, is_mul
     if not _places_services(config, is_multi_node):
         return ""
     lines = [_NODE_ARRAY]
-    for name, (start, count) in _pool_offsets(compute).items():
+    offsets = _pool_offsets(compute)
+    for name, (start, count) in offsets.items():
         if count:
             lines.append(f'export {pool_nodes_var(name)}="$(IFS=,; echo "${{gym_nodes[*]:{start}:{count}}}")"')
+    for service in config.deployed_services.values():
+        if isinstance(service, VllmNodeServiceConfig) and service.server_per_node:
+            start, count = offsets[service.node_pool]
+            lines.extend(f'export {service.node_host_var(i)}="${{gym_nodes[{start + i}]}}"' for i in range(count))
     return "\n".join(lines)
 
 
@@ -451,7 +548,7 @@ def _render_ray_head_addresses(config: SubmitConfig, compute: SlurmComputeConfig
     The head runs beside the driver. Workers and the driver join it without knowing,
     when the config is written, which host the job will land on.
     """
-    services = {n: s for n, s in config.services.items() if isinstance(s, RayServiceConfig)}
+    services = {n: s for n, s in config.deployed_services.items() if isinstance(s, RayServiceConfig)}
     if not services:
         return ""
     head_node = _driver_node(config, compute)
@@ -469,6 +566,12 @@ def _pool_of(compute: SlurmComputeConfig, node: int) -> str | None:
         if start <= node < start + count:
             return name
     return None
+
+
+def _ray_steps(name: str, service: RayServiceConfig, config: SubmitConfig, compute: SlurmComputeConfig) -> list[str]:
+    """The srun step names of a ray service, as _render_ray_service names them."""
+    head_node = _driver_node(config, compute)
+    return [name] + [f"{name}_{pool}_workers" for pool in _ray_worker_ranges(service, compute, head_node)]
 
 
 def _render_ray_service(
@@ -522,11 +625,13 @@ def _render_ray_service(
 
 _BUILDERS = {
     VllmServiceConfig: _build_vllm_command,
+    VllmNodeServiceConfig: _build_vllm_command,
+    VllmPDTierConfig: _build_vllm_command,
     RayServiceConfig: _build_ray_command,
 }
 
 
-def _vllm_spans_multiple_nodes(service: VllmServiceConfig | RayServiceConfig, total_nodes: int) -> bool:
+def _vllm_spans_multiple_nodes(service: ServiceConfig, total_nodes: int) -> bool:
     # Node count alone determines this: multi-node compute always spans a vLLM service across
     # nodes via Ray, regardless of number_of_instances (single instance's TP/PP, or DP replicas).
     # Non-vLLM services (e.g. a plain Ray head) never span nodes this way.
@@ -534,15 +639,72 @@ def _vllm_spans_multiple_nodes(service: VllmServiceConfig | RayServiceConfig, to
 
 
 def _build_service_command(
-    service: VllmServiceConfig | RayServiceConfig,
+    service: ServiceConfig,
     total_nodes: int,
     gpus_per_node_values: list[int],
+    offsets: dict[str, tuple[int, int]] | None = None,
 ) -> str:
+    if isinstance(service, VllmPDServiceConfig):
+        assert offsets is not None
+        return _build_router_command(service, offsets)
     if isinstance(service, VllmServiceConfig) and effective_ray_serve(service, total_nodes, gpus_per_node_values):
         return _build_vllm_ray_serve_command(service, total_nodes, gpus_per_node_values)
     if _vllm_spans_multiple_nodes(service, total_nodes):
-        return _build_vllm_ray_command(service, total_nodes)
+        # A pinned service's data-parallel ranks coordinate on its own pool's head.
+        # Pointing them at the allocation's head node instead would make two tiers
+        # of a prefill/decode pair try to coordinate through the same rank 0.
+        head = None
+        if service.node_pool is not None and offsets is not None:
+            head = _pool_head(offsets[service.node_pool][0])
+        return _build_vllm_ray_command(service, total_nodes, head)
     return _BUILDERS[type(service)](service)
+
+
+def _vllm_api_node(
+    service: VllmServiceConfig, compute: SlurmComputeConfig, driver_node: int | None, total_nodes: int
+) -> int | None:
+    """The allocation node whose vLLM API server a `localhost` endpoint would reach, or None when the
+    service runs an API on more than one node (one server per pool node, Ray Serve replicas across nodes).
+
+    Mirrors the placement the command builders and `_service_nodelist` produce: a pinned service
+    answers on its pool's first node, an unpinned multi-node service on node 0, and an unpinned
+    single-node service beside the driver.
+    """
+    nodes = _service_nodes(service, compute, total_nodes)
+    if isinstance(service, VllmPDTierConfig) and service.server_per_node and nodes > 1:
+        return None
+    gpus_per_node_values = [p.gpus_per_node for p in compute.node_pools.values() if p.gpus_per_node is not None]
+    if nodes > 1 and effective_ray_serve(service, nodes, gpus_per_node_values):
+        return None
+    if service.node_pool is not None:
+        return _pool_offsets(compute)[service.node_pool][0]
+    if _vllm_spans_multiple_nodes(service, total_nodes):
+        return 0
+    return driver_node if driver_node is not None else 0
+
+
+def _with_vllm_traces(
+    name: str, service: ServiceConfig, config: SubmitConfig, compute: SlurmComputeConfig, driver_node: int | None
+) -> ServiceConfig:
+    """The service with vLLM request tracing switched on, when `otel.vllm_traces` asks for it.
+
+    The flag and env go through the service's own `extra_args` and `env`, so every command builder
+    (plain, multi-node Ray, data-parallel head, Ray Serve replicas, prefill/decode tiers) carries
+    them without knowing about tracing. A service's explicit env wins over the defaults here.
+
+    vLLM exports to `localhost`, so only a service whose single API server runs on the collector's
+    node is traced. A service answering on another node, or on several nodes, is left alone rather
+    than pointed at a collector it cannot reach.
+    """
+    if not (otel_active(config) and config.otel.vllm_traces and isinstance(service, VllmServiceConfig)):
+        return service
+    total_nodes, _ = _node_totals(compute)
+    collector_node = driver_node if driver_node is not None else 0
+    if _vllm_api_node(service, compute, driver_node, total_nodes) != collector_node:
+        return service
+    extra_args = f"{service.extra_args} {vllm_traces_flag()}".strip()
+    env = {**vllm_traces_env(config.otel.component, name), **service.env}
+    return service.model_copy(update={"extra_args": extra_args, "env": env})
 
 
 def _render_collector_service(
@@ -569,7 +731,7 @@ def _render_collector_service(
         obs.container,
         command,
         env={
-            obs.token_env: f"{RUNTIME_ENV_PREFIX}{obs.token_env}",
+            **({obs.token_env: f"{RUNTIME_ENV_PREFIX}{obs.token_env}"} if obs.remote_export else {}),
             "SLURM_JOB_ID": f"{RUNTIME_ENV_PREFIX}SLURM_JOB_ID",
         },
         single_node=is_multi_node,
@@ -577,6 +739,8 @@ def _render_collector_service(
         nodelist=f"gym_nodes[{driver_node}]" if driver_node is not None else None,
         nodes=1 if driver_node is not None else None,
         ntasks=1 if driver_node is not None else None,
+        # Not watched: losing the collector costs telemetry, not the run, so its step keeps Slurm's defaults.
+        end_step_on_task_exit=False,
         **container_kwargs,
     )
 
@@ -615,6 +779,49 @@ def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path) -> 
     )
 
 
+_WATCHED_DRIVER_TEMPLATE = """\
+{driver} &
+_gym_driver_pid=$!
+_gym_service_exited() {{
+    # A successful run tears its services down as the driver ends: if the driver is already gone, its status stands.
+    if ! kill -0 "$_gym_driver_pid" 2>/dev/null; then
+        wait "$_gym_driver_pid"
+        return
+    fi
+    wait "$2"
+    local status=$?
+    echo "ERROR: service $1 exited (status $status) while the driver was running; stopping the driver."
+    kill -TERM "$_gym_driver_pid" 2>/dev/null
+    wait "$_gym_driver_pid"
+    return 1
+}}
+_gym_run_driver() {{
+    while kill -0 "$_gym_driver_pid" 2>/dev/null; do
+{checks}
+        sleep 5
+    done
+    wait "$_gym_driver_pid"
+}}
+_gym_run_driver"""
+
+
+def _render_watched_driver(driver: str, services: list[str]) -> str:
+    """The driver step, ended with TERM if a service it depends on exits first.
+
+    A dead service would otherwise leave the driver retrying it until the walltime. The job exits
+    non-zero instead, so the auto-resume chain reruns it with fresh services; TERM is what the
+    driver gets at the time limit, so its in-flight rollouts leave no row and run again on resume.
+    The driver's PID is kept in a lowercase variable, which no service's uppercase <NAME>_PID can overwrite.
+    """
+    if not services:
+        return driver
+    checks = "\n".join(
+        f"        kill -0 ${bash_var(name)}_PID 2>/dev/null || {{ _gym_service_exited {name} ${bash_var(name)}_PID; return; }}"
+        for name in services
+    )
+    return _WATCHED_DRIVER_TEMPLATE.format(driver=driver, checks=checks)
+
+
 def _pool_offsets(compute: SlurmComputeConfig) -> dict[str, tuple[int, int]]:
     """Each pool's (first node index, node count) within the allocation.
 
@@ -630,9 +837,7 @@ def _pool_offsets(compute: SlurmComputeConfig) -> dict[str, tuple[int, int]]:
     return offsets
 
 
-def _service_nodes(
-    service: VllmServiceConfig | RayServiceConfig, compute: SlurmComputeConfig, total_nodes: int
-) -> int:
+def _service_nodes(service: ServiceConfig, compute: SlurmComputeConfig, total_nodes: int) -> int:
     """How many nodes this service actually runs on.
 
     A service pinned to a pool sees only that pool, so a single-node pool inside a
@@ -650,15 +855,13 @@ def _driver_node(config: SubmitConfig, compute: SlurmComputeConfig) -> int:
     The driver reaches the policy on localhost. A multi-node policy serves its API
     from node 0, and a pinned one from its pool's first node.
     """
-    policy = config.services.get(config.driver.policy_model or "")
+    policy = config.deployed_services.get(config.driver.policy_model or "")
     if policy is not None and policy.node_pool is not None:
         return _pool_offsets(compute)[policy.node_pool][0]
     return 0
 
 
-def _service_nodelist(
-    service: VllmServiceConfig | RayServiceConfig, driver_node: int | None, total_nodes: int
-) -> str | None:
+def _service_nodelist(service: ServiceConfig, driver_node: int | None, total_nodes: int) -> str | None:
     """What a service's --nodelist names, as the shell variable it expands.
 
     A pinned service names its pool. In a multi-node job an unpinned service that
@@ -672,9 +875,14 @@ def _service_nodelist(
     return None
 
 
-def _srun_nodes(
-    service: VllmServiceConfig | RayServiceConfig, compute: SlurmComputeConfig, total_nodes: int
-) -> int | None:
+def _build_nodes(service: ServiceConfig, compute: SlurmComputeConfig, total_nodes: int) -> int:
+    """Nodes the service command is written for; a per-node server is a single-node command."""
+    if isinstance(service, (VllmPDTierConfig, VllmNodeServiceConfig)) and service.server_per_node:
+        return 1
+    return _service_nodes(service, compute, total_nodes)
+
+
+def _srun_nodes(service: ServiceConfig, compute: SlurmComputeConfig, total_nodes: int) -> int | None:
     nodes = _service_nodes(service, compute, total_nodes)
     if service.node_pool is not None:
         return nodes
@@ -684,7 +892,7 @@ def _srun_nodes(
 
 
 def _srun_ntasks(
-    service: VllmServiceConfig | RayServiceConfig,
+    service: ServiceConfig,
     compute: SlurmComputeConfig,
     total_nodes: int,
     total_ntasks: int,
@@ -741,11 +949,11 @@ def _command_env(benchmark: BenchmarkRunConfig, remote_bench_dir: Path) -> dict[
 
 def _probe_host(node: int) -> str:
     """How the batch script, which runs on the allocation's first node, reaches `node`."""
-    return "localhost" if node == 0 else f"${{gym_nodes[{node}]}}"
+    return "localhost" if node == 0 else _pool_head(node)
 
 
 def _health_check_host(
-    service: VllmServiceConfig | RayServiceConfig,
+    service: ServiceConfig,
     config: SubmitConfig,
     compute: SlurmComputeConfig,
     driver_node: int | None,
@@ -761,6 +969,27 @@ def _health_check_host(
     return "localhost"
 
 
+def _service_pre_command(service: ServiceConfig) -> str:
+    """The service's own pre_command, with any exports its role requires in front."""
+    if not isinstance(service, VllmServiceConfig):
+        return service.pre_command
+    nixl = _nixl_pre_command(service)
+    if not nixl:
+        return service.pre_command
+    return f"{nixl}\n{service.pre_command}" if service.pre_command else nixl
+
+
+def _with_resume_flag(run: dict[str, Any], resumable: bool) -> dict[str, Any]:
+    """Auto-enable `gym eval run`'s own cache-based resume when the auto-resume chain is on.
+
+    A no-op on the chain's cold (first) run -- rollout_collection.py falls back to a fresh run
+    when the cache files don't exist yet -- and a no-op if the caller already set the key.
+    """
+    if resumable and "resume_from_cache" not in run:
+        return {**run, "resume_from_cache": True}
+    return run
+
+
 def build_sbatch_script(
     config: SubmitConfig,
     benchmark_name: str,
@@ -769,6 +998,9 @@ def build_sbatch_script(
     remote_bench_dir: Path,
 ) -> str:
     directives = _render_directives(compute, remote_bench_dir, benchmark_name)
+
+    resume = benchmark.resume_config
+    resume_prologue = render_resume_prologue(resume) if resume else ""
 
     total_nodes, total_ntasks = _node_totals(compute)
     is_multi_node = total_nodes > 1
@@ -780,7 +1012,7 @@ def build_sbatch_script(
         block
         for block in (
             render_ray_prelude()
-            if any(_vllm_spans_multiple_nodes(s, total_nodes) for s in config.services.values())
+            if any(_vllm_spans_multiple_nodes(s, total_nodes) for s in config.deployed_services.values())
             else "",
             _render_pool_nodes(config, compute, is_multi_node),
             _render_ray_head_addresses(config, compute),
@@ -788,7 +1020,9 @@ def build_sbatch_script(
         if block
     )
 
+    offsets = _pool_offsets(compute)
     observed = otel_active(config)
+    instrumented = gym_telemetry_active(config)
 
     driver_node = _driver_node(config, compute) if is_multi_node else None
     service_commands = "\n\n".join(
@@ -801,7 +1035,12 @@ def build_sbatch_script(
             _render_service_command(
                 name,
                 service.container,
-                _build_service_command(service, _service_nodes(service, compute, total_nodes), gpus_per_node_values),
+                _build_service_command(
+                    service,
+                    _build_nodes(service, compute, total_nodes),
+                    gpus_per_node_values,
+                    offsets,
+                ),
                 service.env or None,
                 service.mounts or None,
                 # Only services that actually span multiple nodes need --nodes/--ntasks - not every
@@ -810,15 +1049,18 @@ def build_sbatch_script(
                 # them, so the node list and the step size agree.
                 nodes=_srun_nodes(service, compute, total_nodes),
                 ntasks=_srun_ntasks(service, compute, total_nodes, total_ntasks),
-                pre_command=service.pre_command,
+                pre_command=_service_pre_command(service),
                 nodelist=_service_nodelist(service, driver_node, total_nodes),
             )
-            for name, service in config.services.items()
+            for name, service in (
+                (name, _with_vllm_traces(name, service, config, compute, driver_node))
+                for name, service in config.deployed_services.items()
+            )
             if not isinstance(service, RayServiceConfig)
         ]
         + [
             _render_ray_service(name, service, config, compute, driver_node)
-            for name, service in config.services.items()
+            for name, service in config.deployed_services.items()
             if isinstance(service, RayServiceConfig)
         ]
     )
@@ -833,8 +1075,21 @@ def build_sbatch_script(
                 service.health_check.timeout_seconds,
                 _health_check_host(service, config, compute, driver_node, total_nodes),
             )
-            for name, service in config.services.items()
+            for name, service in config.deployed_services.items()
             if service.health_check
+        ]
+        + [
+            render_health_check(
+                f"{name}-node{i}",
+                service.health_check.port,
+                service.health_check.path,
+                service.health_check.timeout_seconds,
+                _probe_host(start + i),
+            )
+            for name, service in config.deployed_services.items()
+            if isinstance(service, VllmNodeServiceConfig) and service.server_per_node and service.health_check
+            for start, count in [offsets[service.node_pool]]
+            for i in range(1, count)
         ]
     )
 
@@ -854,10 +1109,22 @@ def build_sbatch_script(
     policy_type = config.driver.policy_model_type
     extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
     driver_env = dict(config.driver.env)
+    if instrumented:
+        driver_env = {
+            **driver_telemetry_env(
+                remote_bench_dir.parent.name, config.otel.gym_span_groups, logs=config.otel.gym_logs
+            ),
+            **driver_env,
+        }
     if benchmark.command is None:
         run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
         run_args.setdefault("require_complete", True)
+        run_args = _with_resume_flag(run_args, resume is not None)
         gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
+        # A job queued by `gym eval resubmit` tells rollout collection, which resets the attempt budget and
+        # resumes whatever the config says: a fresh start would delete the run's rollouts.
+        # The auto-resume prologue, when there is one, has moved the variable into `_gym_resubmit`.
+        gym_cmd += f'\nif [ "${{_gym_resubmit:-${{{RESUBMIT_ENV}:-}}}}" = 1 ]; then GYM_CMD+=(++resubmit=True); fi'
     else:
         # A command replaces `gym eval run`, so the run args it would have carried
         # have nowhere to go. What the script still needs is where to write and how
@@ -870,6 +1137,14 @@ def build_sbatch_script(
         ref=gi.ref if gi else None,
         prepare_cmd=prepare_cmd,
         command=benchmark.command,
+        extras=tuple(
+            dict.fromkeys(
+                ((GYM_TELEMETRY_EXTRA,) if instrumented else ())
+                + exporter_extras(benchmark.run)
+                + gitlab_storage_extras(benchmark.prepare)
+                + gitlab_storage_extras(benchmark.run)
+            )
+        ),
     )
     prepare_command = ""
     driver_env_prefix = _resolve_env(driver_env) if driver_env else ""
@@ -887,16 +1162,24 @@ def build_sbatch_script(
     # the host, which is what makes the loss so easy to miss.
     driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
     driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
-    driver_command = (f"{gym_cmd}\n" if gym_cmd else "") + (
+    driver_srun = (
         f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
         f" --container-image={shlex.quote(config.driver.container)} "
-        f"--output=logs/driver.log {entrypoint}"
+        f"--output=logs/driver-$SLURM_JOB_ID.log {entrypoint}"
     )
+    # Every service step but the collector, whose loss costs telemetry, not the run.
+    watched = [
+        step
+        for name, service in config.deployed_services.items()
+        for step in (_ray_steps(name, service, config, compute) if isinstance(service, RayServiceConfig) else [name])
+    ]
+    driver_command = (f"{gym_cmd}\n" if gym_cmd else "") + _render_watched_driver(driver_srun, watched)
     if observed:
         driver_command += "\n" + _render_collector_shutdown(config, remote_bench_dir)
 
     return _SCRIPT_TEMPLATE.format(
         directives=directives,
+        resume_prologue=resume_prologue,
         ray_prelude=ray_prelude,
         service_commands=service_commands,
         health_checks=health_checks,

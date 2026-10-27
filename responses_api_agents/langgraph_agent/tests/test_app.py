@@ -281,3 +281,56 @@ async def test_parallel_thinking_aggregates_each_path_and_final_call_usage() -> 
     assert usage["output_tokens"] == 63
     assert usage["output_tokens_details"]["reasoning_tokens"] == 24
     assert usage["total_tokens"] == 96
+
+
+@pytest.mark.parametrize("stage", ["worker", "solve"])
+@pytest.mark.parametrize(
+    ("tool_inputs", "evidence", "expected"),
+    [
+        pytest.param(
+            [f"Get evidence {i}" for i in range(1, 12)] + ["Compare #E1, #E10, and #E1; leave #E99"],
+            [f"result({i})" for i in range(1, 13)],
+            "Compare result(1), result(10), and result(1); leave #E99",
+            id="multi-digit-references",
+        ),
+        pytest.param(
+            ["Get first evidence", "Get second evidence", "Combine #E1 with #E2; leave #E99"],
+            [r"first \1 \g<name> contains #E2", r"second \2", "combined evidence"],
+            r"Combine first \1 \g<name> contains #E2 with second \2; leave #E99",
+            id="literal-inserted-evidence",
+        ),
+    ],
+)
+async def test_rewoo_substitutes_complete_references_once(
+    stage: str, tool_inputs: list[str], evidence: list[str], expected: str
+) -> None:
+    config = ReWOOAgentConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="",
+        resources_server=ResourcesServerRef(type="resources_servers", name=""),
+        model_server=ModelServerRef(type="responses_api_models", name="test_model"),
+    )
+    agent = ReWOOAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    plan = "\n".join(
+        f"Plan: Collect evidence {i}. #E{i} = LLM[{tool_input}]" for i, tool_input in enumerate(tool_inputs, start=1)
+    )
+    agent.server_client.post.side_effect = [
+        _mock_model_response(plan),
+        *[_mock_model_response(text) for text in evidence],
+        _mock_model_response("<answer>42</answer>"),
+    ]
+    initial_state = await agent.get_initial_state(
+        NeMoGymResponseCreateParamsNonStreaming(input="Compare the evidence."), {}
+    )
+
+    final_state = await agent.graph.ainvoke(initial_state)
+
+    assert final_state["current_step"] == len(tool_inputs)
+    assert agent.server_client.post.call_count == len(tool_inputs) + 2
+    model_inputs = [call.kwargs["json"].input[0].content for call in agent.server_client.post.call_args_list]
+    if stage == "worker":
+        assert model_inputs[-2] == expected
+    else:
+        assert f"#E{len(tool_inputs)} = LLM[{expected}]" in model_inputs[-1]

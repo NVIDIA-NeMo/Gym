@@ -9,14 +9,22 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Protocol
 
+from nemo_gym.token_id_capture.completion import (
+    completion_items,
+    completion_metadata,
+    output_item_fingerprint,
+    output_validation_item,
+)
 from nemo_gym.token_id_capture.config import ExternalStagingBackend
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
 from nemo_gym.token_id_capture.protocols import CaptureLedger
 from nemo_gym.token_id_capture.records import (
     TOKEN_FIELDS,
+    response_finish_reason,
     response_to_output_items,
     strip_token_fields,
 )
+from nemo_gym.token_id_capture.replay import render_options_digest, replay_context, summarize_replay
 from nemo_gym.token_id_capture.sink import (
     NG_CAPTURE_FIELD,
     NG_COMMIT_COORDS_FIELD,
@@ -32,10 +40,18 @@ from nemo_gym.token_id_capture.staging.records import (
     CaptureAdmission,
     CaptureLedgerCommit,
     CommitCoords,
+    OutputItemEvidence,
 )
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def validate_framework_context_options(request_payload: dict[str, Any]) -> None:
+    """Reject prompt transformations unsupported by source-history capture."""
+    if request_payload.get("truncate_prompt_tokens") is not None or request_payload.get("continue_final_message"):
+        raise ValueError("Framework context requires explicit history without truncation or assistant prefill")
+
 
 # Megatron may echo the exact prompt token form it uses for lossless
 # multi-turn prefix stitching. Gym does not request or read it, but strips it
@@ -51,7 +67,18 @@ class ExternalCaptureHandler(Protocol):
         ...
 
     def prepare_response(self, response_payload: dict[str, Any]) -> None:
-        """Retain the worker acknowledgement and remove capture-only response fields."""
+        """Retain the worker acknowledgement and remove capture-only response fields.
+
+        Model servers must call this for every completion the worker returns,
+        even one whose acknowledgement is missing. It marks the request as
+        having received a worker completion, and ``finalize_response`` commits
+        or poisons the call only when that mark is present. Skipping it for a
+        real completion would leave the call merely uncommitted instead of
+        failing closed with ``worker_response_missing_commit_coordinates``.
+        Completions the model server synthesizes itself (the sequential
+        reasoning guard, or a backend context-limit error converted into an
+        empty completion) never pass through here, so they stay uncommitted.
+        """
         ...
 
     async def finalize_response(self, served_payload: dict[str, Any]) -> None:
@@ -70,7 +97,12 @@ def _strip_capture_transport_fields(payload: dict[str, Any]) -> None:
         choice.pop("token_ids", None)
         message = choice.get("message")
         if isinstance(message, dict):
-            for field_name in (*TOKEN_FIELDS, *_MEGATRON_TRANSPORT_FIELDS):
+            for field_name in (
+                *TOKEN_FIELDS,
+                *_MEGATRON_TRANSPORT_FIELDS,
+                "sampler_topk_token_ids",
+                "sampler_topk_logprobs",
+            ):
                 message.pop(field_name, None)
 
 
@@ -97,6 +129,37 @@ class _BaseExternalCaptureHandler(ABC):
         admission = context.capture_admission
         if admission is None:
             return request_payload
+        if context.parent_resolution_mode == "source_history":
+            validate_framework_context_options(request_payload)
+            if admission.request_replay is None:
+                raise ValueError("Framework admission is missing source request evidence")
+            admission = admission.model_copy(
+                update={
+                    "request_replay": admission.request_replay.model_copy(
+                        update={
+                            "render_digest": render_options_digest(request_payload),
+                        }
+                    ),
+                }
+            )
+            if admission.mode == "candidate":
+                previous = admission.candidate_replay
+                if previous is None or previous.render_digest is None:
+                    raise ValueError("Missing predecessor render evidence")
+                if previous.render_digest != admission.request_replay.render_digest:
+                    admission = CaptureAdmission(
+                        capture_key=admission.capture_key,
+                        model_call_id=admission.model_call_id,
+                        mode="text",
+                        request_replay=admission.request_replay,
+                        root_reason="render_options_changed",
+                    )
+                    context.parent_staging_chain = []
+            context.capture_admission = admission
+            request_payload.pop("required_prefix_token_ids", None)
+        if context.admission_hook is not None:
+            admission = context.admission_hook(context, admission)
+            context.capture_admission = admission
         return self._prepare_admitted_request(request_payload, admission)
 
     @abstractmethod
@@ -119,6 +182,7 @@ class _BaseExternalCaptureHandler(ABC):
         if context is None or not context.external_staging:
             return
         context.external_commit_coords = response_payload.pop(NG_COMMIT_COORDS_FIELD, None)
+        context.external_worker_response_seen = True
         _strip_capture_transport_fields(response_payload)
 
     async def finalize_response(self, served_payload: dict[str, Any]) -> None:
@@ -137,6 +201,15 @@ class _BaseExternalCaptureHandler(ABC):
         admission = context.capture_admission
         if admission is None:
             # UNRESOLVED — the ledger already carries this call's poison row.
+            return
+        if not context.external_worker_response_seen:
+            # No worker completion reached ``prepare_response``: the model
+            # server built this response itself. The reasoning guard never
+            # calls the worker, and on context overflow the worker returns an
+            # HTTP 400 instead of a completion. Leave the call uncommitted for
+            # the middleware to record. A completion the worker did return
+            # without ``ng_commit_coords`` sets the flag and still fails
+            # closed below with ``worker_response_missing_commit_coordinates``.
             return
         try:
             await self._finalize_admitted_response(
@@ -198,9 +271,9 @@ class _BaseExternalCaptureHandler(ABC):
             )
             return
         coords = CommitCoords.model_validate(coords_payload)
-        if coords.rollout_id != context.rollout_id or coords.model_call_id != context.model_call_id:
+        if coords.capture_key != context.rollout_id or coords.model_call_id != context.model_call_id:
             raise ValueError(
-                f"coordinates for {coords.rollout_id}/{coords.model_call_id} do not match the "
+                f"coordinates for {coords.capture_key}/{coords.model_call_id} do not match the "
                 f"active capture context {context.rollout_id}/{context.model_call_id}"
             )
         if coords.disposition == "capture_failed":
@@ -210,7 +283,10 @@ class _BaseExternalCaptureHandler(ABC):
                 WORKER_CAPTURE_FAILED_REASON,
             )
             return
-        if coords.parent_call_id != admission.parent_call_id or coords.prev_len != admission.prev_len:
+        worker_root = admission.mode == "candidate" and coords.parent_call_id is None and coords.prev_len == 0
+        if not worker_root and (
+            coords.parent_call_id != admission.parent_call_id or coords.prev_len != admission.prev_len
+        ):
             raise ValueError(f"coordinates for {coords.model_call_id} diverge from admission")
         # The served envelope id is the terminal-attribution join key: the
         # agent proves which response it kept by possessing it. Observe the
@@ -219,8 +295,11 @@ class _BaseExternalCaptureHandler(ABC):
         response_id = str(served_payload.get("id") or "")
         if not response_id:
             raise ValueError(f"served response for {coords.model_call_id} carries no envelope id")
-        child_staging_chain = list(context.parent_staging_chain) + [str(coords.staging_key)]
+        child_staging_chain = (list(context.parent_staging_chain) if coords.parent_call_id is not None else []) + [
+            str(coords.staging_key)
+        ]
         response_items, _ = strip_token_fields(response_to_output_items(served_payload))
+        evidence_items = completion_items(served_payload) if context.parent_resolution_mode == "source_history" else []
         # Content-witness keys, hashed while the response is still
         # server-side: this call's own output, and request + output (the
         # cumulative reading). Unfingerprintable content abstains (None)
@@ -245,31 +324,90 @@ class _BaseExternalCaptureHandler(ABC):
             digest=coords.digest,
             extras_digest=coords.extras_digest,
             staging_key=coords.staging_key,
-            mode=admission.mode,
+            mode="text" if coords.parent_call_id is None else "token_in",
+            root_reason="worker_rooted" if worker_root else admission.root_reason,
             admitted_at=context.admitted_at,
             chain_hash=coords.chain_hash,
             cumulative_hash=coords.cumulative_hash,
             response_id=response_id,
+            output_items=(
+                [
+                    OutputItemEvidence(id=item.get("id"), fingerprint=output_item_fingerprint(item))
+                    for item in evidence_items
+                ]
+                if context.parent_resolution_mode == "source_history"
+                else None
+            ),
+            response_status=completion_metadata(served_payload)[0]
+            if context.parent_resolution_mode == "source_history"
+            else None,
+            finish_reason=response_finish_reason(served_payload),
+            last_output_item=output_validation_item(evidence_items[-1]) if evidence_items else None,
             output_fingerprint=output_fingerprint,
             continuation_fingerprint=continuation_fingerprint,
             fingerprint_version=FINGERPRINT_VERSION,
+            replay=(
+                summarize_replay(
+                    replay_context(
+                        list(context.request_items or []) + list(response_items),
+                        render_digest=admission.request_replay.render_digest,
+                    )
+                )
+                if context.parent_resolution_mode == "source_history" and admission.request_replay is not None
+                else None
+            ),
         )
         commit = CaptureLedgerCommit(
-            rollout_id=context.rollout_id,
+            capture_key=context.rollout_id,
             record=record,
-            staging_chain=tuple(child_staging_chain),
+            # Framework capture reconstructs ancestry from CallRecord parents.
+            # Only ordinary capture uses this separately persisted lookup chain.
+            staging_chain=() if context.parent_resolution_mode == "source_history" else tuple(child_staging_chain),
             request_items=list(context.request_items or []),
             response_items=response_items,
         )
+        if context.publish_on_delivery:
+            context.deferred_commit = commit
+            return
         await ledger.record(commit)
         mark_external_staging_committed(
-            rollout_id=coords.rollout_id,
+            rollout_id=coords.capture_key,
             model_call_id=coords.model_call_id,
         )
 
 
+async def publish_deferred_commit(context: CaptureContext) -> None:
+    """Publish the ledger row a checkpoint gate deferred, once the call's response has started.
+
+    A failed write poisons the call, as it does at finalization, and then propagates,
+    so the caller does not send an answer the ledger has no row for.
+    """
+    ledger = context.lineage_store
+    try:
+        await ledger.record(context.deferred_commit)
+    except Exception:
+        LOGGER.exception(
+            "Could not publish the ledger row of rollout %s call %s", context.rollout_id, context.model_call_id
+        )
+        try:
+            await ledger.record_failure(context.rollout_id, context.model_call_id, INVALID_COMMIT_COORDS_REASON)
+        except Exception:
+            LOGGER.exception(
+                "Could not poison rollout %s call %s after its ledger row failed",
+                context.rollout_id,
+                context.model_call_id,
+            )
+        raise
+    # The capture context variable may already be reset here, so the context is marked directly.
+    context.committed = True
+
+
 class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):
-    """Commit lineage after a vLLM worker durably stages the token delta."""
+    """Commit lineage after a vLLM worker durably stages the token delta.
+
+    The vLLM model server normalizes missing/null ``top_logprobs`` to zero
+    after all request overrides. This handler preserves explicit counts.
+    """
 
     _BACKEND_LABEL = "vLLM"
 
@@ -281,7 +419,6 @@ class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):
         request_payload[NG_CAPTURE_FIELD] = admission.model_dump(mode="json")
         request_payload.update(
             logprobs=True,
-            top_logprobs=0,
             return_tokens_as_token_ids=True,
         )
         if admission.mode == "token_in":
@@ -302,7 +439,6 @@ class MegatronWorkerCaptureHandler(_BaseExternalCaptureHandler):
         choice_count = request_payload.get("n")
         if choice_count is not None and choice_count != 1:
             raise ValueError("Megatron token capture requires n=1")
-        _reject_multimodal_content(request_payload)
         # Megatron Inference forwards ``offload_params`` opaquely to its prompt preparer and
         # payload stager; the admission rides inside it. The prefix itself is resolved on the
         # worker from ``staging_chain``, so no prefix token ids travel on the request.
@@ -317,28 +453,6 @@ class MegatronWorkerCaptureHandler(_BaseExternalCaptureHandler):
         # echo (``return_tokenized_data``) on the HTTP path.
         request_payload.update(logprobs=True, top_logprobs=0)
         return request_payload
-
-
-def _reject_multimodal_content(request_payload: dict[str, Any]) -> None:
-    """Fail closed when a Megatron capture request carries media or audio parts.
-
-    The Megatron adapter stages no media geometry, so a multimodal prompt would
-    commit token rows whose lengths disagree with the expanded engine prompt.
-    Until multimodal staging lands, refuse the request rather than train on it.
-    """
-    messages = request_payload.get("messages")
-    if not isinstance(messages, list):
-        return
-    for message in messages:
-        content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            part_type = part.get("type") if isinstance(part, dict) else None
-            if part_type != "text":
-                raise ValueError(
-                    f"Megatron token capture does not support multimodal content (got part type {part_type!r})"
-                )
 
 
 def make_external_capture_handler(backend: ExternalStagingBackend) -> ExternalCaptureHandler:

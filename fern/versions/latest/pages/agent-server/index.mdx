@@ -3,7 +3,7 @@ title: "Configure Agents"
 description: ""
 position: 1
 ---
-The Agent server is the central component of environment design. It defines whether a rollout is single-step or multi-step, single-turn or multi-turn, and orchestrates all interaction logic — calling the model, executing tool calls through resources, and collecting the final reward. The Agent server does not run an LLM itself, it is orchestration code that delegates all text generation to the Model server.
+The Agent server is the central component of environment design. It defines whether a rollout is single-step or multi-step, single-turn or multi-turn, and orchestrates all interaction logic — calling the model, executing tool calls through resources, and collecting the final reward. The Agent server does not run an LLM itself; it is orchestration code that delegates all text generation to the Model server.
 
 ## Rollout Lifecycle
 
@@ -44,14 +44,46 @@ class Agent:
         return conversation
 ```
 
-## Existing Agents
+<Note>
+The pseudocode shows an agent that runs the whole episode itself through its `/run` endpoint. Most agents, including Remote Agent, still run this way: rollout collection reaches them through a `legacy_agent` Environment Server that relays `/run` unchanged. Agents that implement agent sessions, such as SimpleAgent and the [sandboxed harnesses](/main/agent-server/integrate-existing-agents#sandboxed-harnesses), can instead run under an [Environment Server](/main/about/architecture#environment-server) that drives agent sessions, such as `single_agent_turn`. It calls `seed_session` and `verify` on the Resources server and drives the agent through session endpoints, so the agent does not decide when to verify.
+</Note>
 
-See [Integrate Existing Agents](/agent-server/integrate-existing-agents) to use a built-in NeMo Gym agent, wrap an external agent harness, or decide when tool logic belongs in the Agent server versus the Resources server.
+## Choose a Path
+
+Start from what you have, and move to a deeper path only when you need what it adds.
+
+```mermaid
+flowchart LR
+    AGENT["Your agent"] --> LISTED{"Already integrated?"}
+    LISTED -->|Yes| USE["Integrate Existing Agents"]
+    LISTED -->|No| SCORES{"Scores only?<br/>No model-call capture,<br/>training, or task sandbox"}
+    SCORES -->|Yes| REMOTE["Remote Agent"]
+    SCORES -->|No| EPISODE{"Does the agent own<br/>the episode protocol?"}
+    EPISODE -->|Yes| ENV["Custom Environment Server"]
+    EPISODE -->|No| ADAPTER["Agent Server adapter"]
+```
+
+| Path | What you do | What Gym does | Limits |
+| --- | --- | --- | --- |
+| [Integrate Existing Agents](/main/agent-server/integrate-existing-agents) | Pick an agent that Gym already integrates and pair it with a benchmark in YAML. | Runs the episode, captures model calls and observations, and verifies. | Each agent has its own supported benchmarks, tools, and training status. Check its row in the catalog. |
+| [Remote Agent](/main/agent-server/remote-agent) | An HTTP service that you host, with a `/v1/responses` endpoint that returns the agent's next step. | Drives the loop, runs the environment tools that your service requests, holds the session, and verifies the result. | Scores only. No model-call capture and no training, because your service calls its own model and Gym sees only what the service returns. No task sandbox, because the service cannot reach one. |
+| [Agent Server adapter](/main/agent-server/add-or-update-a-harness) | An adapter under `responses_api_agents/<harness>/` that runs the harness or framework. | Everything in [What Gym provides](/main/agent-server/add-or-update-a-harness#what-gym-provides), including model-call capture, tool grants, and task sandboxes. | You write the conversion and mapping code described in [What you write](/main/agent-server/add-or-update-a-harness#what-you-write). |
+| Custom Environment Server | A server that owns the episode protocol, such as [`nemo_user_sim`](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/nemo_user_sim), which routes simulated-user and assistant turns through their own Agent Servers. | Rollout collection, the `BaseEnvironmentServer` base class with concurrency and cleanup handling, and the Resources Server session and verification APIs. | Not covered on this page. See [system design](/main/infrastructure/engineering-notes/system-design) for how Environment Servers drive rollouts. |
+
+### Grow from a score to training
+
+A common route for an agent that you already run:
+
+1. **Score it.** Drive the agent through a Remote Agent and get verifier rewards without rewriting it. Gym treats the agent as a black box.
+2. **Evaluate it with Gym's models, tools, and sandboxes.** Build an Agent Server adapter so that Gym can show its model calls, tool use, and execution trace. These rollouts are not yet validated for training.
+3. **Train it.** Confirm that every policy-generating model call is captured with token IDs and logprobs, then run an end-to-end training job. This needs a model server that returns token information, such as the vLLM model server. See [Choose the capabilities you need](/main/agent-server/add-or-update-a-harness#choose-the-capabilities-you-need).
 
 ## Server Configuration
 
 To add conversations, tool timing, and model-call references to a custom harness, see
 [Rollout Evidence](/main/observability/rollout-evidence#add-evidence-to-a-custom-agent).
+
+An Agent Server runs with `num_workers` above 1 when its entrypoint module defines the module-level `app` that each Uvicorn worker serves, the same way as a [Resources Server](/environment-tutorials/resources-server-apis#state-with-several-workers). An agent that cannot run in several processes overrides `multiple_workers_unsupported_reason()` instead, and refuses several workers at startup. Concurrency limits such as an agent's `concurrency` semaphore apply per worker, so the server as a whole allows `num_workers` times the configured limit.
 
 <Note>
 [Agent Server Fields](/reference/configuration#agent-server-fields) for server configuration syntax and fields.

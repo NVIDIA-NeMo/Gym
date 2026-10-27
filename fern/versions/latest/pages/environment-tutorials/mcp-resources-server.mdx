@@ -74,7 +74,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
 
 def _weather_sentence(city: str) -> str:
@@ -142,6 +142,9 @@ class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     ExampleMCPWeatherResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ExampleMCPWeatherResourcesServer.run_webserver()  # noqa: F401
 ```
 
 ### Turn it on
@@ -160,7 +163,7 @@ At startup (`run_webserver`), Gym:
 
 - turns each plain `POST` route into an MCP tool **named after its path** (`POST /get_weather` → tool `get_weather`), with the input schema derived from the route's Pydantic body model and the description from the handler's docstring. `/seed_session`, `/verify`, `/aggregate_metrics`, and `/mcp` are never tools.
 - mounts a Streamable-HTTP `/mcp` endpoint on the same app.
-- wraps `/seed_session` so its response also carries the `mcp` metadata (server name, `/mcp` URL path, and a signed per-rollout `X-NeMo-Gym-Session-Token`) — which is how an MCP-native agent discovers the endpoint and its rollout-scoped credentials.
+- wraps `/seed_session` so its response also carries the `mcp` metadata (server name, `/mcp` URL path, and a signed per-rollout `X-NeMo-Gym-Session-Token`) — which is how an MCP-native agent discovers the endpoint and its rollout-scoped credentials. When an Environment Server seeds the session, the same metadata is returned in the typed `resources_tools` field instead, and the Environment Server grants it to the agent.
 
 An MCP `tools/call` invokes the route's own handler directly, with the rollout's session materialized on the `Request` — handlers keep their `request.session` reads exactly as written. The route stays callable over plain HTTP too: the same tool serves both transports, and `/verify` scores both identically. Tool errors (`HTTPException`, validation failures, crashes) surface to the MCP client as tool errors with the same status and text the plain HTTP route would have returned.
 
@@ -222,6 +225,7 @@ The shipped `resources_servers/workplace_assistant` stays byte-identical — the
 
 ```python
 # resources_servers/workplace_assistant/app_mcp.py
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.workplace_assistant.app import WorkbenchResourcesServer
 from resources_servers.workplace_assistant.utils import get_tools
 
@@ -237,6 +241,9 @@ class MCPWorkbenchResourcesServer(WorkbenchResourcesServer):
 
 if __name__ == "__main__":
     MCPWorkbenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = MCPWorkbenchResourcesServer.run_webserver()  # noqa: F401
 ```
 
 (For `workplace_assistant`, `harvested` is empty — its only non-reserved POST route is the catch-all — but keeping `harvested +` makes the override correct for servers that mix typed routes with a dispatcher.)
@@ -245,7 +252,7 @@ The same override handles the other tailoring cases: **exclude a route** by filt
 
 ### Per-rollout tool restriction
 
-To narrow one rollout's token to the tools its task actually allows, override `mcp_allowed_tools_for_session(self, seed_body)` — `seed_body` is the JSON body POSTed to `/seed_session`. Return the allowed tool names, or `None` (the default) for unrestricted:
+To narrow one rollout's token to the tools its task actually allows, override `mcp_allowed_tools_for_session(self, seed_body)` — `seed_body` is the JSON body POSTed to `/seed_session`, or its `task_data` when an Environment Server seeds the session. Return the allowed tool names, or `None` (the default) for unrestricted:
 
 ```python
 def mcp_allowed_tools_for_session(self, seed_body: dict) -> list[str] | None:
