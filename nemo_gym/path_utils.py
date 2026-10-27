@@ -38,6 +38,15 @@ def aggregate_metrics_path_for(output_fpath: Path) -> Path:
     return output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
 
 
+def agent_complete_dir_for(output_fpath: Path) -> Path:
+    """`results/rollouts.jsonl` -> `results/rollouts_agent_complete/`.
+
+    A run of several agents writes one `<agent>.json` here as soon as that agent's last rollout is
+    scored, ahead of the run-wide aggregate metrics, which are written only when every agent is done.
+    """
+    return output_fpath.with_stem(output_fpath.stem + "_agent_complete").with_suffix("")
+
+
 def aggregation_sources_path_for(output_fpath: Path) -> Path:
     """`results/rollouts.jsonl` -> `results/rollouts_sources.json`: the shards `gym eval aggregate` merged into it."""
     return output_fpath.with_stem(output_fpath.stem + "_sources").with_suffix(".json")

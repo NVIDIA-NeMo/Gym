@@ -23,6 +23,7 @@ import math
 import os
 import re
 import secrets
+import shutil
 import signal
 import time
 import warnings
@@ -32,12 +33,12 @@ from collections.abc import Iterable, Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from difflib import get_close_matches
 from itertools import repeat
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Literal, Optional, Set, Tuple, Union
 
 import aiohttp
 import orjson
@@ -48,7 +49,7 @@ from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.batch_status import AGGREGATION_ERROR_KEY, BatchStatusTracker
+from nemo_gym.batch_status import AGGREGATION_ERROR_KEY, BatchStatusTracker, _atomic_write_json
 from nemo_gym.config_types import (
     AgentWithoutEnvironmentServerError,
     AmbiguousEnvironmentServerError,
@@ -96,6 +97,7 @@ from nemo_gym.observability.model_calls import (
 )
 from nemo_gym.omitted_rollouts import omitted_rollout_record
 from nemo_gym.path_utils import (
+    agent_complete_dir_for,
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
     failures_path_for,
@@ -2565,6 +2567,64 @@ async def _read_jsonl(path: Path) -> List[Dict]:
     return rows
 
 
+def _iter_jsonl(path: Path) -> Iterator[Dict]:
+    """Parse a JSONL artifact one row at a time."""
+    with path.open("rb") as f:
+        for line in f:
+            if line.strip():
+                yield orjson.loads(line)
+
+
+_ROW_KEY_NAMES = (TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME)
+_ROW_KEY_PATTERNS = tuple(re.compile(rb'"%s":\s*(\d+)' % name.encode()) for name in _ROW_KEY_NAMES)
+
+
+def _row_key_from_line(line: bytes) -> Optional[Tuple[int, int]]:
+    """A rollout line's (task, rollout) indices, read without parsing the line.
+
+    A line can carry a whole agent trajectory, so it is parsed only when it names an index key more
+    than once and a pattern match could be wrong. Returns None for such a line.
+    """
+    indices = []
+    for name, pattern in zip(_ROW_KEY_NAMES, _ROW_KEY_PATTERNS):
+        matches = pattern.findall(line)
+        if len(matches) != 1 or line.count(b'"%s"' % name.encode()) != 1:
+            return None
+        indices.append(int(matches[0]))
+    return indices[0], indices[1]
+
+
+async def _read_jsonl_for_keys(path: Path, keys: Set[Tuple[int, int]]) -> List[Dict]:
+    """Parse only the rollouts of ``path`` whose (task, rollout) indices are in ``keys``.
+
+    Reads like ``_read_jsonl``, on the event loop thread, yielding between rows. A line is complete
+    once Gym's single flushed write has put its newline on disk, so an unterminated tail is skipped.
+    """
+    rows = []
+    yielded_at = time.monotonic()
+    with path.open("rb") as f:
+        for line in f:
+            if line.endswith(b"\n") and line.strip():
+                key = _row_key_from_line(line)
+                row = orjson.loads(line) if key is None else None
+                if row is not None:
+                    key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+                if key in keys:
+                    rows.append(row if row is not None else orjson.loads(line))
+            if time.monotonic() - yielded_at >= _READ_JSONL_YIELD_INTERVAL_S:
+                await asyncio.sleep(0)
+                yielded_at = time.monotonic()
+    return rows
+
+
+AGENT_COMPLETE_SCHEMA_VERSION = "1"
+
+
+def _agent_complete_fpath(output_fpath: Path, label: str) -> Path:
+    """Where the completion file of the agent with this label goes (see ``agent_complete_dir_for``)."""
+    return agent_complete_dir_for(output_fpath) / (re.sub(r"[^A-Za-z0-9._-]", "_", label) + ".json")
+
+
 def _failure_export_metrics(
     failures_fpaths: List[Path], identity: Callable[[Mapping[str, Any]], Any], landed: set
 ) -> Dict[str, int]:
@@ -3501,6 +3561,8 @@ class RolloutCollectionHelper(BaseModel):
             resubmit_offset_path_for(output_fpath).unlink(missing_ok=True)
             aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
             aggregation_sources_path_for(output_fpath).unlink(missing_ok=True)
+            if agent_complete_dir_for(output_fpath).exists():
+                shutil.rmtree(agent_complete_dir_for(output_fpath))
 
         batch_completed_rows: List[Dict] = []
         batch_failure_rows: List[Dict] = []
@@ -3610,6 +3672,37 @@ class RolloutCollectionHelper(BaseModel):
         agent_name_to_dropped = defaultdict(Counter)
         counts_left = Counter(self._dispatch_name(row) for row in input_rows)
         dispatched_per_agent = Counter(counts_left)
+
+        # A run of several agents scores each agent as soon as its last expected rollout is scored,
+        # without waiting for the others, and writes a completion file for it. The run-wide aggregate
+        # metrics are still written once, after every agent is done. Resume counts the rollouts an
+        # earlier job finished, so the expected rollouts come from all the materialized rows.
+        agent_expected_keys: Dict[str, Set[Tuple[int, int]]] = {}
+        agent_pending_keys: Dict[str, Set[Tuple[int, int]]] = {}
+        agent_samples: Dict[str, Dict[str, Any]] = {}
+        agent_complete_tasks: List[asyncio.Task] = []
+        if not config.disable_aggregation:
+            agent_expected_keys, agent_samples = self._agent_completion_plan(
+                input_rows if should_clear_outputs else _iter_jsonl(config.materialized_jsonl_fpath)
+            )
+            if len(agent_expected_keys) > 1:
+                agent_pending_keys = {
+                    name: keys - persisted_success_keys for name, keys in agent_expected_keys.items()
+                }
+
+        def start_agent_complete(dispatch_name: str) -> None:
+            agent_complete_tasks.append(
+                asyncio.create_task(
+                    self._write_agent_complete(
+                        dispatch_name=dispatch_name,
+                        keys=agent_expected_keys[dispatch_name],
+                        output_fpath=output_fpath,
+                        samples=agent_samples,
+                        persisted_results=persisted_results if config.retain_results_in_memory else None,
+                    )
+                )
+            )
+
         start_time = time.time()
         environment_routes = Counter(
             row[NG_ENVIRONMENT_SERVER_KEY] for row in input_rows if NG_ENVIRONMENT_SERVER_KEY in row
@@ -3699,6 +3792,11 @@ class RolloutCollectionHelper(BaseModel):
                         )
                     )
                 sigterm_previous = _print_on_sigterm(run_timing.table)
+
+            # An agent a resumed job already finished is complete before any rollout is dispatched.
+            for finished_name in [name for name, pending in agent_pending_keys.items() if not pending]:
+                del agent_pending_keys[finished_name]
+                start_agent_complete(finished_name)
 
             completion_iterator = self._run_examples_with_metadata(
                 input_rows,
@@ -3888,6 +3986,12 @@ class RolloutCollectionHelper(BaseModel):
                     if config.retain_results_in_memory:
                         persisted_rows.append(row)
                         persisted_results.append(result)
+                    pending_keys = agent_pending_keys.get(dispatch_name)
+                    if pending_keys is not None:
+                        pending_keys.discard((result[TASK_INDEX_KEY_NAME], result[ROLLOUT_INDEX_KEY_NAME]))
+                        if not pending_keys:
+                            del agent_pending_keys[dispatch_name]
+                            start_agent_complete(dispatch_name)
                     if batch_tracker is not None:
                         batch_completed_rows.append(_batch_status_row(result, batch_agent_refs))
                     try:
@@ -3999,6 +4103,10 @@ class RolloutCollectionHelper(BaseModel):
                         health_span_context,
                     )
 
+            # Completion files are written before the run-wide aggregate, which they must not race.
+            if agent_complete_tasks:
+                await asyncio.gather(*agent_complete_tasks)
+
             # The scans of whole artifacts after collection run in a worker thread.
             # On the event loop they would stall telemetry, other tasks, and shutdown.
             # The reloads that keep every row use `_read_jsonl` instead.
@@ -4041,6 +4149,8 @@ class RolloutCollectionHelper(BaseModel):
                     timing_heartbeat.cancel()
                 if queue_sampler is not None:
                     queue_sampler.cancel()
+                for agent_complete_task in agent_complete_tasks:
+                    agent_complete_task.cancel()
                 _restore_sigterm(sigterm_previous)
                 if run_timing is not None:
                     print(run_timing.table(), flush=True)
@@ -4189,30 +4299,28 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         config.check_completion(expected=expected_rollouts, results=persisted_results)
         return results
 
-    async def _call_aggregate_metrics(
+    async def _aggregate_entries(
         self,
         results: List[Dict],
         rows: List[Dict],
-        output_fpath: Path,
         *,
-        raise_on_error: bool = True,
-    ) -> Optional[Path]:
+        labels: Optional[Mapping[str, str]] = None,
+    ) -> Tuple[List[Dict], Optional[Exception]]:
         """Call /aggregate_metrics on the environment server each rollout ran through.
 
         Rows are grouped by the environment server stamped on them at preprocessing
         (``_ng_environment_server``); a row without the stamp is grouped by the environment server
         that fronts its agent, as before, so the identity decided at dispatch is the one aggregation
-        uses, across shards and resumed runs alike. Writes a single _aggregate_metrics.json with one
-        entry per environment server (same shape as the old _agent_metrics.json, plus the server
-        name). Returns the file path.
-        Failed requests retain an entry with empty metric collections and ``aggregation_error``.
-        By default, re-raise the first original exception after saving partial metrics, preserving
-        its type and traceback for direct callers such as custom evaluation drivers. Collection and
-        aggregation entrypoints pass ``raise_on_error=False`` to write batch status first, then call
-        ``_raise_for_aggregation_errors`` for a summary error.
+        uses, across shards and resumed runs alike. Returns one entry per environment server, sorted
+        by label, and the first exception raised while aggregating (failed requests keep an entry with
+        empty metric collections and ``aggregation_error``). Writes nothing.
+
+        ``labels`` maps each environment server to its entry's label. Without it the labels come from
+        the servers present in ``results``, so a caller aggregating a subset of a run passes the run's
+        labels to keep an entry named as the full aggregation names it.
         """
         if not results:
-            return None
+            return [], None
 
         server_client = self.setup_server_client()
         global_config_dict = server_client.global_config_dict
@@ -4249,7 +4357,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         # One entry per environment server, labelled by the agent it binds so metric names and
         # `agent_ref` keep today's shape. Servers that front the same agent (a session-based server and its
         # legacy_agent twin) are each labelled by their own name, whatever order their rows arrive in.
-        labels = label_runs(server_agents)
+        if labels is None:
+            labels = label_runs(server_agents)
         first_error: Optional[Exception] = None
 
         async def _fetch_agent_metrics(server_name: str, agent_name: str, agent_result_list: List[Dict]) -> Dict:
@@ -4339,6 +4448,31 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             print(f"\nKey metrics for {agent_name}:\n" + json.dumps(key_metrics, indent=4))
 
         all_agent_metrics.sort(key=lambda entry: entry[AGENT_REF_KEY_NAME]["name"])
+        return all_agent_metrics, first_error
+
+    async def _call_aggregate_metrics(
+        self,
+        results: List[Dict],
+        rows: List[Dict],
+        output_fpath: Path,
+        *,
+        raise_on_error: bool = True,
+    ) -> Optional[Path]:
+        """Aggregate ``results`` per environment server and write the run's _aggregate_metrics.json.
+
+        See ``_aggregate_entries`` for how rows are grouped. Writes a single _aggregate_metrics.json with
+        one entry per environment server (same shape as the old _agent_metrics.json, plus the server
+        name). Returns the file path.
+        Failed requests retain an entry with empty metric collections and ``aggregation_error``.
+        By default, re-raise the first original exception after saving partial metrics, preserving
+        its type and traceback for direct callers such as custom evaluation drivers. Collection and
+        aggregation entrypoints pass ``raise_on_error=False`` to write batch status first, then call
+        ``_raise_for_aggregation_errors`` for a summary error.
+        """
+        if not results:
+            return None
+
+        all_agent_metrics, first_error = await self._aggregate_entries(results, rows)
 
         primitive_types = (bool, int, float, str, type(None))
         metrics_to_log = dict()
@@ -4369,6 +4503,101 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             raise first_error
 
         return metrics_fpath
+
+    def _agent_completion_plan(
+        self, rows: Iterable[Mapping[str, Any]]
+    ) -> Tuple[Dict[str, Set[Tuple[int, int]]], Dict[str, Dict[str, Any]]]:
+        """The rollouts each agent of a run must score, and one routing sample of each agent's rows.
+
+        ``rows`` are all of the run's materialized rows, including those a resumed run finished
+        earlier. Both results are keyed by dispatch name (``_dispatch_name``). A sample keeps only the
+        fields that route a row to its environment server, for ``_agent_complete_labels``.
+        """
+        keys_by_dispatch_name: Dict[str, Set[Tuple[int, int]]] = {}
+        samples: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            dispatch_name = self._dispatch_name(row)
+            keys_by_dispatch_name.setdefault(dispatch_name, set()).add(
+                (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+            )
+            if dispatch_name not in samples:
+                samples[dispatch_name] = {
+                    key: row[key] for key in (AGENT_REF_KEY_NAME, NG_ENVIRONMENT_SERVER_KEY) if key in row
+                }
+        return keys_by_dispatch_name, samples
+
+    def _agent_complete_labels(self, samples: Mapping[str, Mapping[str, Any]]) -> Dict[str, str]:
+        """The label a full aggregation of the run gives each environment server's entry (``label_runs``).
+
+        Servers are grouped as ``_aggregate_entries`` groups them, from the config the server client
+        reads, so a subset aggregation labels an entry the way the whole run does.
+        """
+        global_config_dict = self.setup_server_client().global_config_dict
+        servers_by_agent = _environment_servers_by_agent(global_config_dict)
+        server_agents: Dict[str, Optional[str]] = {}
+        for sample in samples.values():
+            server_name = _metrics_group(sample, lambda: servers_by_agent)
+            if server_name is not None and server_name not in server_agents:
+                agent_name = (sample.get(AGENT_REF_KEY_NAME) or {}).get("name")
+                if agent_name is None:
+                    agent_name = self._agent_name_for_row({NG_ENVIRONMENT_SERVER_KEY: server_name}, global_config_dict)
+                server_agents[server_name] = agent_name
+        return label_runs(server_agents)
+
+    async def _write_agent_complete(
+        self,
+        *,
+        dispatch_name: str,
+        keys: Set[Tuple[int, int]],
+        output_fpath: Path,
+        samples: Mapping[str, Mapping[str, Any]],
+        persisted_results: Optional[List[Dict]],
+    ) -> Path:
+        """Aggregate one agent whose every expected rollout is scored, and write its completion file.
+
+        The file is written atomically beside the run's rollouts (``agent_complete_dir_for``), so a
+        reader sees it whole or not at all. It holds the entry ``_call_aggregate_metrics`` would give
+        this agent, which is the same because every rollout of the agent is scored: no failure or
+        missing rollout is left to count. An aggregation failure is recorded in the file as in the
+        run-wide aggregate, and the end of the run reports it.
+
+        ``persisted_results`` are the run's scored rows when the run keeps them in memory; otherwise
+        the agent's rows are read back from ``output_fpath``.
+        """
+        if persisted_results is not None:
+            results = [r for r in persisted_results if (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) in keys]
+        else:
+            results = await _read_jsonl_for_keys(output_fpath, keys)
+        scored_keys = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in results}
+        if scored_keys != keys:
+            raise RuntimeError(
+                f"Agent '{dispatch_name}' has every expected rollout scored, but {output_fpath} holds "
+                f"{len(scored_keys)} of its {len(keys)} rollouts."
+            )
+
+        entries, _ = await self._aggregate_entries(results, results, labels=self._agent_complete_labels(samples))
+        if len(entries) != 1:
+            raise RuntimeError(
+                f"Agent '{dispatch_name}' aggregated into {len(entries)} environment servers, expected one."
+            )
+        entry = entries[0]
+        label = entry[AGENT_REF_KEY_NAME]["name"]
+        fpath = _agent_complete_fpath(output_fpath, label)
+        _atomic_write_json(
+            fpath,
+            {
+                "schema_version": AGENT_COMPLETE_SCHEMA_VERSION,
+                AGENT_REF_KEY_NAME: entry[AGENT_REF_KEY_NAME],
+                NG_ENVIRONMENT_SERVER_KEY: entry[NG_ENVIRONMENT_SERVER_KEY],
+                "expected_rollouts": len(keys),
+                "completed_rollouts": len(scored_keys),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "aggregation_status": "error" if AGGREGATION_ERROR_KEY in entry else "complete",
+                "aggregate": entry,
+            },
+        )
+        print(f"Agent '{label}' complete: all {len(keys)} rollouts scored. Completion file: {fpath}", flush=True)
+        return fpath
 
     @staticmethod
     def resolve_task_sources(examples: List[Dict], global_config_dict: DictConfig) -> None:

@@ -636,6 +636,202 @@ class TestRolloutCollection:
         assert repaired_status["members"]["beta"]["observed_metric_keys"] == ["mean/reward"]
         assert not any(AGGREGATION_ERROR_KEY in member for member in repaired_status["members"].values())
 
+    @staticmethod
+    def _write_agent_inputs(tmp_path: Path, agents: tuple[str, ...]) -> Path:
+        """One input row per name in ``agents``, so a repeated name is an agent with several rollouts."""
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        AGENT_REF_KEY_NAME: {"name": agent},
+                        TASK_SOURCE_KEY_NAME: f"{agent}_source",
+                        "responses_create_params": {"input": []},
+                    }
+                )
+                for agent in agents
+            )
+            + "\n"
+        )
+        return input_fpath
+
+    @pytest.mark.parametrize("retain_results_in_memory", [False, True])
+    async def test_agent_completion_file_is_written_while_other_agents_run(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        retain_results_in_memory: bool,
+    ) -> None:
+        """A finished agent is scored and recorded before the run-wide aggregate exists."""
+        input_fpath = self._write_agent_inputs(tmp_path, ("alpha", "alpha", "beta"))
+        complete_dir = tmp_path / "rollouts_agent_complete"
+        complete_dir.mkdir()
+        (complete_dir / "stale.json").write_text("{}")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            disable_health_check=True,
+            retain_results_in_memory=retain_results_in_memory,
+        )
+        seen: dict[str, bool] = {}
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            if url_path == "/aggregate_metrics":
+                return FakeResponse(
+                    200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump()
+                )
+            if server_name == "beta_environment_server":
+                waited = 0
+                while not (complete_dir / "alpha.json").exists() and waited < 500:
+                    await asyncio.sleep(0.01)
+                    waited += 1
+                seen["alpha_complete"] = (complete_dir / "alpha.json").exists()
+                seen["beta_complete"] = (complete_dir / "beta.json").exists()
+                seen["run_aggregate"] = (tmp_path / "rollouts_aggregate_metrics.json").exists()
+            return FakeResponse(200, {"reward": 1.0 if server_name == "alpha_environment_server" else 0.0})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha", "beta"))
+
+        await RolloutCollectionHelper().run_from_config(config)
+
+        assert seen == {"alpha_complete": True, "beta_complete": False, "run_aggregate": False}
+        assert sorted(path.name for path in complete_dir.iterdir()) == ["alpha.json", "beta.json"]
+        alpha = orjson.loads((complete_dir / "alpha.json").read_bytes())
+        assert alpha["schema_version"] == "1"
+        assert alpha[AGENT_REF_KEY_NAME] == {"name": "alpha"}
+        assert alpha[NG_ENVIRONMENT_SERVER_KEY] == "alpha_environment_server"
+        assert (alpha["expected_rollouts"], alpha["completed_rollouts"]) == (2, 2)
+        assert alpha["aggregation_status"] == "complete"
+        assert alpha["aggregate"]["key_metrics"]["mean/reward"] == 1.0
+        run_aggregate = {
+            entry[AGENT_REF_KEY_NAME]["name"]: entry
+            for entry in orjson.loads((tmp_path / "rollouts_aggregate_metrics.json").read_bytes())
+        }
+        for agent in ("alpha", "beta"):
+            assert orjson.loads((complete_dir / f"{agent}.json").read_bytes())["aggregate"] == run_aggregate[agent]
+
+    async def test_agent_finished_by_an_earlier_job_is_complete_when_the_run_resumes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        input_fpath = self._write_agent_inputs(tmp_path, ("alpha", "alpha", "beta"))
+        output_fpath = tmp_path / "rollouts.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(output_fpath),
+            disable_health_check=True,
+            resume_from_cache=True,
+        )
+        materialized_rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        config.materialized_jsonl_fpath.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in materialized_rows))
+        output_fpath.write_bytes(
+            b"".join(
+                orjson.dumps({**row, "reward": 1.0}) + b"\n"
+                for row in materialized_rows
+                if row[AGENT_REF_KEY_NAME]["name"] == "alpha"
+            )
+        )
+        dispatched: list[str] = []
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            if url_path == "/aggregate_metrics":
+                return FakeResponse(
+                    200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump()
+                )
+            dispatched.append(server_name)
+            return FakeResponse(200, {"reward": 0.0})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha", "beta"))
+
+        await RolloutCollectionHelper().run_from_config(config)
+
+        assert dispatched == ["beta_environment_server"]
+        alpha = orjson.loads((tmp_path / "rollouts_agent_complete" / "alpha.json").read_bytes())
+        assert (alpha["expected_rollouts"], alpha["completed_rollouts"]) == (2, 2)
+        assert alpha["aggregate"]["key_metrics"]["mean/reward"] == 1.0
+
+    @pytest.mark.parametrize(
+        "agents, disable_aggregation",
+        [(("alpha", "alpha"), False), (("alpha", "beta"), True)],
+        ids=["one-agent", "aggregation-disabled"],
+    )
+    async def test_no_agent_completion_file_for_one_agent_or_without_aggregation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        agents: tuple[str, ...],
+        disable_aggregation: bool,
+    ) -> None:
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(self._write_agent_inputs(tmp_path, agents)),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            disable_health_check=True,
+            disable_aggregation=disable_aggregation,
+        )
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            if url_path == "/aggregate_metrics":
+                return FakeResponse(
+                    200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump()
+                )
+            return FakeResponse(200, {"reward": 1.0})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha", "beta"))
+
+        await RolloutCollectionHelper().run_from_config(config)
+
+        assert not (tmp_path / "rollouts_agent_complete").exists()
+
+    async def test_agent_completion_file_records_an_aggregation_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(self._write_agent_inputs(tmp_path, ("alpha", "beta"))),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            disable_health_check=True,
+        )
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            if url_path == "/aggregate_metrics":
+                if server_name == "alpha_environment_server":
+                    return FakeResponse(500)
+                return FakeResponse(
+                    200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump()
+                )
+            return FakeResponse(200, {"reward": 1.0})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha", "beta"))
+
+        with pytest.raises(RuntimeError, match="Aggregation failed for agents: alpha"):
+            await RolloutCollectionHelper().run_from_config(config)
+
+        complete_dir = tmp_path / "rollouts_agent_complete"
+        alpha = orjson.loads((complete_dir / "alpha.json").read_bytes())
+        assert alpha["aggregation_status"] == "error"
+        assert alpha["aggregate"][AGGREGATION_ERROR_KEY]["http_status"] == 500
+        assert orjson.loads((complete_dir / "beta.json").read_bytes())["aggregation_status"] == "complete"
+
+    async def test_read_jsonl_for_keys_parses_only_the_wanted_complete_rows(self, tmp_path: Path) -> None:
+        fpath = tmp_path / "rollouts.jsonl"
+        nested = {TASK_INDEX_KEY_NAME: 9, ROLLOUT_INDEX_KEY_NAME: 9}
+        fpath.write_bytes(
+            b"".join(
+                orjson.dumps(row) + b"\n"
+                for row in (
+                    {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "x": "first"},
+                    # Names an index key twice, so it is parsed to read its own indices.
+                    {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "x": "nested", "copy": nested},
+                    {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, "x": "other agent"},
+                )
+            )
+            + orjson.dumps({TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 1, "x": "unterminated"})
+        )
+
+        rows = await nemo_gym.rollout_collection._read_jsonl_for_keys(fpath, {(0, 0), (1, 0), (1, 1)})
+
+        assert [row["x"] for row in rows] == ["first", "nested"]
+
     @pytest.mark.parametrize(
         "resume_from_cache, existing_rollouts",
         [(False, True), (True, True), (True, False)],
