@@ -34,7 +34,7 @@ from fastapi import Request
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.config import get_global_config_dict
+from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -63,6 +63,7 @@ from resources_servers.swe_rebench.verification import (
     run_verification,
     verification_files,
 )
+from resources_servers.swebench.agent_network import agent_network_policy, check_agent_network_config
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 from resources_servers.swebench.patch_capture import (
     PatchCapture,
@@ -102,6 +103,10 @@ class SWERebenchResourcesServerConfig(BaseResourcesServerConfig):
     overwrite_maven_settings: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]
+    # Deny the agent sandbox's egress except sandbox_model_server's host, extending any
+    # provider_options.network_policy. Evaluation sandboxes never get a network_policy.
+    enforce_agent_no_network: bool = False
+    sandbox_model_server: ModelServerRef | None = None
 
 
 class SWERebenchInstanceRequest(BaseModel):
@@ -165,6 +170,11 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
         super().model_post_init(context)
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
+        if self.config.enforce_agent_no_network:
+            check_agent_network_config(
+                resolve_provider_config(self.config.sandbox_provider, get_global_config_dict()),
+                self.config.sandbox_model_server,
+            )
 
     @property
     def _parser_cache_dir(self) -> Path:
@@ -186,7 +196,7 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
         )
 
     async def _create_sandbox(
-        self, body: SWERebenchInstanceRequest, files: dict[str, str] | None = None
+        self, body: SWERebenchInstanceRequest, files: dict[str, str] | None = None, *, for_agent: bool = False
     ) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         provider_config = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
@@ -206,6 +216,16 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
             # while other registries are, so both build tools are pointed at the Google mirror.
             env = JVM_MIRROR_ENV | env
 
+        provider_options = dict(self.config.sandbox_config.get("provider_options", {}))
+        if self.config.enforce_agent_no_network:
+            if for_agent:
+                provider_options["network_policy"] = agent_network_policy(
+                    provider_config, self.config.sandbox_model_server, provider_options.get("network_policy")
+                )
+            else:
+                # The configured network_policy is extended for the agent; evaluation keeps its network.
+                provider_options.pop("network_policy", None)
+
         spec = SandboxSpec(
             # The row names its own image; there is no repository template to apply.
             image=body.image_name,
@@ -222,7 +242,7 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
                 "language": body.language[:63],
             },
             resources=sandbox_resources,
-            provider_options=self.config.sandbox_config.get("provider_options", {}),
+            provider_options=provider_options,
         )
         sandbox = AsyncSandbox(provider_config)
         await sandbox.start(spec)
@@ -271,7 +291,7 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
         await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
         self._session_id_to_pristine_untracked.pop(session_id, None)
-        sandbox = await self._create_sandbox(body)
+        sandbox = await self._create_sandbox(body, for_agent=True)
         if self.config.apply_anti_cheating:
             await apply_anti_cheat_setup(sandbox, repo_directory(body.repo), body.instance_id, "swe_rebench")
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
