@@ -277,29 +277,52 @@ def failing_row(task_index: int = 7) -> dict:
     }
 
 
-_JUDGE_429_PATH = [
-    {"operation": "judge.request", "exception_type": "nemo_gym.judge.JudgeRateLimited"},
-    {"exception_type": "aiohttp.client_exceptions.ClientResponseError", "http_status": 500},
-    {"exception_type": "aiohttp.client_exceptions.ClientResponseError", "http_status": 429},
-]
+_JUDGE_429_ERROR = "ClientResponseError: 429, message='Too Many Requests', url='http://judge/v1/responses'"
+# The failure report #5072's judge_failsafe attaches for a judge HTTP 429, as its code at 5d964f492 produces it:
+# the judge-owned failure, and the 429 it was caused by.
+_JUDGE_429_REPORT = {
+    "_ng_failure_events": {
+        "8e1e8ee1162d4c0e8da0375ac330609d": {
+            "event_id": "8e1e8ee1162d4c0e8da0375ac330609d",
+            "boundary": "resources_server",
+            "exception_type": "nemo_gym.judge.JudgeCallFailed",
+            "failure_reason": _JUDGE_429_ERROR,
+            "failure_kind": "judge_failed",
+            "operation": "judge.request",
+            "stage": "verification",
+            "foreign_error": {
+                "exception_type": "aiohttp.client_exceptions.ClientResponseError",
+                "message": "Too Many Requests",
+                "http_status": 429,
+            },
+            "cause_id": "6d9285465af04e71acdd4dc75811275c",
+        },
+        "6d9285465af04e71acdd4dc75811275c": {
+            "event_id": "6d9285465af04e71acdd4dc75811275c",
+            "exception_type": "aiohttp.client_exceptions.ClientResponseError",
+            "failure_reason": "",
+            "http_status": 429,
+        },
+    },
+    "_ng_failure_id": "8e1e8ee1162d4c0e8da0375ac330609d",
+}
 
 
 def typed_judge_failure_result() -> dict:
-    """judge_failsafe's verify result for a judge 429 once it names the observed cause (#5072).
+    """judge_failsafe's verify result for a judge 429 with #5072's failure report.
 
-    The routing class stays judge_failed; the kind names the cause, and a diagnostic path rides along.
+    The kind stays judge_failed; the 429 is on the report's cause, not in the kind.
     """
-    error = "ClientResponseError: 500, message='Internal Server Error'"
     return {
         "reward": 0.0,
         "mask_sample": True,
-        "failure_kind": "judge_rate_limited",
-        "failure_reason": error,
+        "failure_kind": "judge_failed",
+        "failure_reason": _JUDGE_429_ERROR,
         "instance_config": {"mask_sample": True},
         "response": {"id": "resp-1", "output": [{"type": "message", "content": "the policy's answer"}]},
         NG_FAILURE_CLASS_KEY: "judge_failed",
-        NG_FAILURE_JUDGE_ERROR_KEY: error,
-        "_ng_failure_path": _JUDGE_429_PATH,
+        NG_FAILURE_JUDGE_ERROR_KEY: _JUDGE_429_ERROR,
+        **_JUDGE_429_REPORT,
     }
 
 
@@ -3291,10 +3314,10 @@ class TestRolloutCollection:
         assert metrics == [{"mean/reward": 0.5 if counted_classes else 1.0}] * 3
         assert failures_path.read_bytes() == saved_failures
 
-    async def test_an_agents_typed_judge_failure_keeps_its_path_and_answer(
+    async def test_an_agents_typed_judge_failure_keeps_its_report_and_answer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
-        """A judge 429 named by its kind stays a retryable judge failure, with its answer and failure path."""
+        """A judge 429 with a failure report stays a retryable judge failure, with its answer and report."""
         input_path = tmp_path / "input.jsonl"
         input_path.write_text(
             "".join(
@@ -3323,11 +3346,13 @@ class TestRolloutCollection:
         )
 
         [failure] = [orjson.loads(line) for line in _failures_path_for(output_path).read_bytes().splitlines()]
-        assert failure[NG_FAILURE_CLASS_KEY] == "judge_rate_limited"
-        assert failure["_ng_failure_legacy_class"] == "judge_failed"
-        assert failure["_ng_failure_record"]["failure"]["failure_kind"] == "judge_rate_limited"
+        assert failure[NG_FAILURE_CLASS_KEY] == "judge_failed"
+        assert "_ng_failure_legacy_class" not in failure
+        assert failure["_ng_failure_record"]["failure"]["failure_kind"] == "judge_failed"
         assert failure["_ng_failure_record"]["failure"]["terminal"] is False
-        assert failure["_ng_failure_path"] == _JUDGE_429_PATH
+        # The report is a row diagnostic: the versioned record keeps its version-1 fields.
+        assert {key: failure[key] for key in _JUDGE_429_REPORT} == _JUDGE_429_REPORT
+        assert set(failure["_ng_failure_record"]["failure"]) <= {"failure_reason", "terminal", "failure_kind", "stage"}
         # `--judge-failed-only` selects it and re-judges the saved answer.
         assert _is_judge_failure(failure)
         assert failure["response"] == judged["response"]
@@ -11508,46 +11533,51 @@ class TestEnvironmentServerRouting:
         assert record[NG_FAILURE_JUDGE_ERROR_KEY] == "judge timed out"
         assert record["mask_sample"] is True
 
-    def test_episode_result_from_a_typed_judge_failure_keeps_its_markers_and_path(self) -> None:
-        """judge_failsafe may name the observed cause as its kind; the result stays a judge failure."""
-        result = typed_judge_failure_result()
+    @pytest.mark.parametrize("omitted", [False, True], ids=["whole report", "events omitted"])
+    def test_episode_result_from_a_typed_judge_failure_keeps_its_markers_and_report(self, omitted: bool) -> None:
+        """judge_failsafe's failure report is kept on the record as it came; the result stays a judge failure."""
+        result = typed_judge_failure_result() | ({"_ng_failure_events_omitted": True} if omitted else {})
 
         record = nemo_gym.rollout_collection._episode_record(self._episode_identity("a") | {"result": result})
 
         assert record == result | {nemo_gym.rollout_collection.NG_TASK_ID_KEY: {"taskset": "swe_pro", "task_id": "a"}}
 
-    def test_judge_markers_and_path_need_a_judge_kind(self) -> None:
+    def test_judge_markers_and_report_need_a_judge_failure(self) -> None:
         not_a_judge_kind = typed_judge_failure_result() | {"failure_kind": "provider_unavailable"}
         with pytest.raises(
             ValueError,
-            match=r"reserved for rollout collection: \['_ng_failure_class', '_ng_failure_judge_error', '_ng_failure_path'\]",
+            match=(
+                r"reserved for rollout collection: \['_ng_failure_class', '_ng_failure_events', '_ng_failure_id', "
+                r"'_ng_failure_judge_error'\]"
+            ),
         ):
             nemo_gym.rollout_collection._episode_record(self._episode_identity("a") | {"result": not_a_judge_kind})
 
-        scored = {"reward": 1.0, "_ng_failure_path": _JUDGE_429_PATH}
-        with pytest.raises(ValueError, match=r"reserved for rollout collection: \['_ng_failure_path'\]"):
+        scored = {"reward": 1.0, **_JUDGE_429_REPORT}
+        with pytest.raises(
+            ValueError, match=r"reserved for rollout collection: \['_ng_failure_events', '_ng_failure_id'\]"
+        ):
             nemo_gym.rollout_collection._episode_record(self._episode_identity("a") | {"result": scored})
 
-    def test_episode_failure_with_a_kind_keeps_its_path_and_legacy_class(self) -> None:
+        # Other collector-owned keys stay forbidden on a judge failure.
+        rerouted = typed_judge_failure_result() | {"_ng_failure_terminal": True}
+        with pytest.raises(ValueError, match=r"reserved for rollout collection: \['_ng_failure_terminal'\]"):
+            nemo_gym.rollout_collection._episode_record(self._episode_identity("a") | {"result": rerouted})
+
+    def test_episode_failure_with_a_kind_keeps_its_legacy_class(self) -> None:
         """The kind is the class; environment_server_failed stays as the legacy class selectors already match."""
-        path = [
-            {"operation": "sandbox.create", "exception_type": "nemo_gym.sandbox.providers.base.SandboxCreateError"}
-        ]
         failure = {"failure_reason": "Seed failed", "terminal": False, "failure_kind": "provider_unavailable"}
 
-        record = nemo_gym.rollout_collection._episode_record(
-            self._episode_identity("a") | {"failure": failure | {"failure_path": path}}
-        )
+        record = nemo_gym.rollout_collection._episode_record(self._episode_identity("a") | {"failure": failure})
 
         assert record[NG_FAILURE_CLASS_KEY] == "provider_unavailable"
         assert record["_ng_failure_legacy_class"] == ENVIRONMENT_SERVER_FAILURE_CLASS
-        assert record["_ng_failure_path"] == path
         # Without a kind the class is environment_server_failed already, so there is no legacy class.
         unclassified = nemo_gym.rollout_collection._episode_record(
             self._episode_identity("a") | {"failure": {"failure_reason": "Seed failed", "terminal": False}}
         )
         assert unclassified[NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
-        assert "_ng_failure_legacy_class" not in unclassified and "_ng_failure_path" not in unclassified
+        assert "_ng_failure_legacy_class" not in unclassified
 
     def test_episode_result_may_not_pair_a_failure_class_with_another_value(self) -> None:
         reply = self._episode_identity("a") | {"result": {"reward": 0.0, NG_FAILURE_CLASS_KEY: "agent_run_error"}}
@@ -11876,13 +11906,13 @@ class TestEnvironmentServerRouting:
         assert all(r[NG_ENVIRONMENT_SERVER_KEY] == "environment" for r in persisted)
 
     @pytest.mark.parametrize("route_failures", [False, True])
-    async def test_typed_environment_server_failures_keep_their_selector_class_and_path(
+    async def test_typed_environment_server_failures_keep_their_selector_class_and_report(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route_failures: bool
     ) -> None:
-        """A judge 429 named by its kind and a sandbox failure with a kind both stay retryable failures.
+        """A judge 429 with its failure report and a sandbox failure with a kind both stay retryable failures.
 
-        Each keeps its failure path and the class existing selectors match: judge_failed for
-        ``--judge-failed-only`` and environment_server_failed for ``count_failure_classes_as_zero``.
+        Each keeps the class existing selectors match: judge_failed for ``--judge-failed-only`` and
+        environment_server_failed for ``count_failure_classes_as_zero``. The judge failure keeps its report.
         """
         input_jsonl_fpath = tmp_path / "input.jsonl"
         input_jsonl_fpath.write_bytes(
@@ -11892,10 +11922,6 @@ class TestEnvironmentServerRouting:
             )
         )
         output_jsonl_fpath = tmp_path / "output.jsonl"
-        sandbox_path = [
-            {"exception_type": "nemo_gym.base_environment_server.HandledEpisodeError"},
-            {"operation": "sandbox.create", "exception_type": "nemo_gym.sandbox.providers.base.SandboxCreateError"},
-        ]
         dispatched: list[tuple[str, int]] = []
         scored_means: list[float] = []
 
@@ -11912,7 +11938,6 @@ class TestEnvironmentServerRouting:
                         "terminal": False,
                         "stage": "seed",
                         "failure_kind": "provider_unavailable",
-                        "failure_path": sandbox_path,
                     }
                     return FakeResponse(200, identity | {"result": None, "failure": failure})
                 return FakeResponse(200, identity | {"failure": None, "result": {"reward": 1.0, "response": {}}})
@@ -11942,19 +11967,15 @@ class TestEnvironmentServerRouting:
             for row in map(orjson.loads, _failures_path_for(output_jsonl_fpath).read_bytes().splitlines())
         }
         judge, seed = failures["judge"], failures["seed"]
-        assert (judge[NG_FAILURE_CLASS_KEY], judge["_ng_failure_legacy_class"]) == (
-            "judge_rate_limited",
-            "judge_failed",
-        )
+        assert judge[NG_FAILURE_CLASS_KEY] == "judge_failed" and "_ng_failure_legacy_class" not in judge
         assert judge["_ng_failure_record"]["failure"]["stage"] == "verification"
         assert _is_judge_failure(judge) and judge["response"] == typed_judge_failure_result()["response"]
-        assert judge["_ng_failure_path"] == _JUDGE_429_PATH
+        assert {key: judge[key] for key in _JUDGE_429_REPORT} == _JUDGE_429_REPORT
         assert (seed[NG_FAILURE_CLASS_KEY], seed["_ng_failure_legacy_class"]) == (
             "provider_unavailable",
             ENVIRONMENT_SERVER_FAILURE_CLASS,
         )
         assert matches_failure_class(seed, [ENVIRONMENT_SERVER_FAILURE_CLASS])
-        assert seed["_ng_failure_path"] == sandbox_path
         assert all(row["_ng_failure_record"]["failure"]["terminal"] is False for row in failures.values())
         # The sandbox failure is counted as a scored zero by its legacy class; the judge failure is not.
         assert scored_means == [0.5]
