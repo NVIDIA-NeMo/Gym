@@ -133,6 +133,12 @@ class Sandbox:
     async def execute(self, command, **kwargs):
         if "--receipt" in command and "process_supervisor" in command:
             return await self.launch(command=command, **kwargs)
+        if "echo absent" in command:
+            # The adapter checks whether a stopped worker left a transcript.
+            present = any(path.endswith("/events.jsonl") for path in self.files)
+            return SimpleNamespace(
+                error_type=None, return_code=0, stdout="present\n" if present else "absent\n", stderr=""
+            )
         if "touch " in command and "stop.request" in command:
             self.signals.append("SIGTERM")
             if hasattr(self, "directory"):
@@ -943,6 +949,52 @@ async def test_rollout_stop_before_the_worker_writes_events_is_an_empty_timeout(
     assert "ng_agent_outcome" not in response.metadata
     state = agent._session_records[session_id].state
     assert state.session.expired and not state.session.expired_before_launch
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_rollout_stop_keeps_a_failed_transcript_download_an_error(setup):
+    agent, sandbox = setup
+    sandbox.blocked = True
+    download = sandbox.download
+
+    async def lose_events(source, destination):
+        if source.endswith("/events.jsonl"):
+            raise ConnectionError("connection reset")
+        if source.endswith("/output.log"):
+            Path(destination).write_text("diagnostic from shared supervisor")
+            return
+        await download(source, destination)
+
+    sandbox.download = AsyncMock(side_effect=lose_events)
+    request, session_id, task = await activate(agent, sandbox)
+    assert (await agent.stop_rollout(seed().episode_id.capture_key, RolloutStopRequest(reason="budget"))).stopped
+    # The worker wrote events, so the stop is no evidence that there are none: the failed transfer stays an error.
+    with pytest.raises(RuntimeError, match="Codex sandbox runner returned no valid result") as failure:
+        await task
+    assert "diagnostic from shared supervisor" in str(failure.value)
+    assert isinstance(failure.value.__cause__, ConnectionError)
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_rollout_stop_without_a_transcript_check_reports_the_missing_events(setup):
+    agent, sandbox = setup
+    sandbox.blocked = True
+    sandbox.writes_events = False
+    execute = sandbox.exec.side_effect
+
+    async def unreachable_probe(command, **kwargs):
+        if "echo absent" in command:
+            raise ConnectionError("sandbox unreachable")
+        return await execute(command, **kwargs)
+
+    sandbox.exec.side_effect = unreachable_probe
+    request, session_id, task = await activate(agent, sandbox)
+    assert (await agent.stop_rollout(seed().episode_id.capture_key, RolloutStopRequest(reason="budget"))).stopped
+    # Without confirmation that the transcript is absent, the missing events are reported as before.
+    with pytest.raises(RuntimeError, match="Codex sandbox runner returned no valid result"):
+        await task
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     sandbox.disconnect.assert_awaited_once()
 
