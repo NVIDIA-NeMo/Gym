@@ -13,7 +13,11 @@ episode loop.
   session (the call reached another resources-server worker under `num_workers` > 1, or the server restarted) fails
   the rollout instead of running a Cline row as native; so does any other `/harness` error or an unknown protocol.
 - **Every tool call goes to `/simulate_tool_call`**, with its `call_id`, `name`, raw `arguments` (parseable or not)
-  and the turn so far without reasoning: the simulator needs that context. A non-2xx reply body is the tool output.
+  and the turn so far without reasoning: the simulator needs that context. A successful reply's output is the tool's
+  result, including an error the simulated tool reports (a missing file, a failed command), which is judged as usual.
+  An error reply from the resources server (not 2xx or 3xx) is retried, `simulate_max_attempts` times in all, after
+  1, 2, ... seconds. If every attempt fails, the tool result is the resources server's simulator-failure output, so
+  `/verify` masks the turn as `simulator_failed` instead of judging a turn that got an error page as a tool result.
 - **What ends the turn** (`response.metadata.stop_reason`, with `steps`, `elapsed_seconds` and the per-call
   [token usage](#token-usage) `model_calls`):
 
@@ -82,6 +86,7 @@ Cline sends them. A reply without a tool call gets Cline's own "no tools used" m
 | `min_output_tokens` | `2048` | Smallest shrunk budget worth retrying with. |
 | `context_margin_tokens` | `256` | Tokens kept free when shrinking the budget to fit the context. |
 | `cline_max_consecutive_mistakes` | `3` | Cline rows: replies in a row without a tool call before the turn ends. |
+| `simulate_max_attempts` | `3` | `/simulate_tool_call` attempts per tool call before its result becomes a simulator failure (masked). |
 
 Inherited: `skip_verification`, `skip_verification_reward`, `token_id_capture` (set `true` for training).
 

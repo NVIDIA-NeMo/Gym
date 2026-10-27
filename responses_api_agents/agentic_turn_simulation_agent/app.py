@@ -5,7 +5,8 @@
 README). Only its episode differs:
 
 * the row's stop tools and tool-call protocol come from ``/harness``;
-* every tool call, unparseable arguments and all, goes to ``/simulate_tool_call`` with the turn so far;
+* every tool call, unparseable arguments and all, goes to ``/simulate_tool_call`` with the turn so far (an error
+  reply is retried, then becomes the resources server's simulator-failure output, which ``/verify`` masks);
 * the output budget doubles after a cut-off reply and shrinks to fit the context window;
 * Cline rows (``cline_xml``) call tools as XML in the text, get all results back in one user message, and get
   Cline's "no tools used" error for a reply without a call.
@@ -21,7 +22,9 @@ that shows only text is kept) or, for Cline rows, ``mistake_limit`` (too many re
 """
 
 import json
+import logging
 import re
+from asyncio import sleep
 from dataclasses import dataclass, field
 from time import monotonic, perf_counter, time
 from typing import Any, NamedTuple, TypedDict
@@ -50,8 +53,11 @@ from nemo_gym.rollout_observability import (
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.tool_access import DirectHTTPToolAccess
 from resources_servers.agentic_turn_simulation import cline_xml
+from resources_servers.agentic_turn_simulation.simulator import simulator_failure
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, _cookies
 
+
+LOG = logging.getLogger(__name__)
 
 # How the row's agent calls tools (/harness): function calls, or Cline's XML in the reply text.
 NATIVE = "native"
@@ -85,6 +91,10 @@ class AgenticTurnSimulationAgentConfig(SimpleAgentConfig):
     context_margin_tokens: int = 256
     # cline_xml rows: replies in a row without a tool call before the turn ends (Cline's maxConsecutiveMistakes).
     cline_max_consecutive_mistakes: int = cline_xml.MAX_CONSECUTIVE_MISTAKES
+    # /simulate_tool_call attempts per tool call. An error reply (not 2xx or 3xx) is retried after 1, 2, 4, ... s;
+    # once every attempt has failed, the call's output is the resources server's simulator-failure output, so /verify
+    # masks the turn (simulator_failed) rather than judging a turn that got an error body as a tool result.
+    simulate_max_attempts: int = Field(default=3, ge=1)
 
 
 def context_overflow_room(detail: str, *, margin: int) -> tuple[bool, int | None]:
@@ -501,20 +511,36 @@ class AgenticTurnSimulationAgent(SimpleAgent):
         return results
 
     async def _simulate(self, ep: _Episode, call: _Call, turn: list[dict[str, Any]]) -> str:
-        """One call's output. A resources-server error is the output: the model sees a failed tool."""
+        """One call's output. A successful reply's output is the tool's, an error the simulated tool reports included.
+        An error reply from the resources server is retried (`simulate_max_attempts`); once every attempt has failed,
+        the output is the resources server's simulator-failure output, which /verify masks as simulator_failed."""
         started = (time(), perf_counter())
-        http = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/simulate_tool_call",
-            json={"call_id": call.call_id, "name": call.name, "arguments": call.arguments, "turn": turn},
-            cookies=ep.resources_cookies,
-        )
-        # Merged, as simple_agent does: an error reply sets no cookie, and the session must survive it.
-        ep.resources_cookies = {**dict(ep.resources_cookies or {}), **_cookies(http)}
-        if 200 <= http.status < 400:
-            output = (await get_response_json(http)).get("output", "")
+        attempts = self.config.simulate_max_attempts
+        for attempt in range(1, attempts + 1):
+            http = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/simulate_tool_call",
+                json={"call_id": call.call_id, "name": call.name, "arguments": call.arguments, "turn": turn},
+                cookies=ep.resources_cookies,
+            )
+            # Merged, as simple_agent does: an error reply sets no cookie, and the session must survive it.
+            ep.resources_cookies = {**dict(ep.resources_cookies or {}), **_cookies(http)}
+            if 200 <= http.status < 400:
+                output = (await get_response_json(http)).get("output", "")
+                break
+            detail = (await http.content.read()).decode(errors="replace")
+            LOG.warning(
+                "/simulate_tool_call for %s failed (attempt %d of %d): HTTP %d: %s",
+                call.name,
+                attempt,
+                attempts,
+                http.status,
+                detail[:300],
+            )
+            if attempt < attempts:
+                await sleep(2 ** (attempt - 1))
         else:
-            output = (await http.content.read()).decode(errors="replace")
+            output = simulator_failure(f"HTTP {http.status}: {detail}")
         ep.trajectory.tool_call(call, started, output, http.status)
         return output
 

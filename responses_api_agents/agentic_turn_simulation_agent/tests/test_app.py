@@ -17,8 +17,12 @@ from yarl import URL
 from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.reward_profile import MASK_SAMPLE_FIELD
 from nemo_gym.server_utils import ServerClient
+from resources_servers.agentic_turn_simulation.app import AgenticTurnSimulationVerifyRequest
 from resources_servers.agentic_turn_simulation.cline_xml import NO_TOOLS_USED
+from resources_servers.agentic_turn_simulation.simulator import simulator_failure
+from resources_servers.agentic_turn_simulation.tests import support as env
 from responses_api_agents.agentic_turn_simulation_agent.app import (
     AgenticTurnSimulationAgent,
     AgenticTurnSimulationAgentConfig,
@@ -43,6 +47,13 @@ def _overflow(window: int, prompt: int, completion: int = 8000) -> str:
 
 
 # --- fakes -------------------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def sleep():
+    """/simulate_tool_call retries back off at once; a test that takes `sleep` can check the delays."""
+    with patch(f"{MOD}.sleep", new=AsyncMock()) as mock:
+        yield mock
 
 
 def _http(payload: Any = None, *, status: int = 200, body: str = "", cookies: Optional[dict] = None) -> MagicMock:
@@ -169,6 +180,20 @@ def _types(items: List[Any]) -> List[str]:
     return [i["type"] if isinstance(i, dict) else i.type for i in items]
 
 
+BASH_TOOL = {
+    "type": "function",
+    "name": "bash",
+    "description": "run",
+    "parameters": {"type": "object"},
+    "strict": False,
+}
+
+
+def _verify_request(response: Any) -> AgenticTurnSimulationVerifyRequest:
+    """The resources server's /verify request for an episode run on `_body(tools=[BASH_TOOL])` (a generic row)."""
+    return AgenticTurnSimulationVerifyRequest(responses_create_params=_body(tools=[BASH_TOOL]), response=response)
+
+
 # --- config and parsing ------------------------------------------------------------------------
 
 
@@ -179,6 +204,7 @@ class TestConfig:
         assert (cfg.max_steps, cfg.max_time_seconds, cfg.stop_tools) == (50, 7200.0, ["ask_user"])
         assert (cfg.max_output_tokens_cap, cfg.min_output_tokens, cfg.context_margin_tokens) == (65_536, 2_048, 256)
         assert cfg.cline_max_consecutive_mistakes == 3
+        assert cfg.simulate_max_attempts == 3
 
     def test_shipped_config_validates(self) -> None:
         raw = yaml.safe_load(CONFIG_PATH.read_text())
@@ -360,22 +386,61 @@ class TestToolCalls:
         assert response.metadata["steps"] == "2" and _types(response.output)[-1] == "message"
         assert resources_cookies == {"sess": "c"} and model_cookies == {}
 
-    async def test_resources_server_error_body_is_the_tool_output(self) -> None:
-        tools = [_http(status=500, body="Internal Server Error")]
-        agent, script = _agent(_model(_fc("bash", "c1")), _model(_msg("It broke.")), tools=tools)
+    async def test_an_error_reply_is_retried_and_the_successful_result_is_used(self, sleep: AsyncMock) -> None:
+        tools = [_http(status=500, body="Internal Server Error"), _http({"output": "OUT1"})]
+        agent, script = _agent(_model(_fc("bash", "c1", '{"command": "ls"}')), _model(_msg("Done.")), tools=tools)
         response, *_ = await _episode(agent)
-        assert response.output[1].output == "Internal Server Error"
-        assert script.model_calls[1]["json"].input[-1].output == "Internal Server Error"
+        first, second = script.tool_calls
+        assert second["json"] == first["json"]  # the same call, resent
+        assert response.output[1].output == "OUT1" and script.model_calls[1]["json"].input[-1].output == "OUT1"
+        assert [c.args for c in sleep.await_args_list] == [(1,)]
+
+    async def test_a_persistent_error_is_a_simulator_failure_that_verify_masks(self, sleep: AsyncMock) -> None:
+        tools = [_http(status=500, body="Internal Server Error") for _ in range(3)]
+        agent, script = _agent(_model(_fc("bash", "c1")), _model(_msg("It broke.")), tools=tools)
+        response, *_ = await _episode(agent, _body(tools=[BASH_TOOL]))
+        failed = simulator_failure("HTTP 500: Internal Server Error")
+        assert len(script.tool_calls) == 3 and [c.args for c in sleep.await_args_list] == [(1,), (2,)]
+        assert response.output[1].output == failed and script.model_calls[1]["json"].input[-1].output == failed
         assert response.metadata["stop_reason"] == "final_message"
+        # The resources server's /verify recognizes its own failure output: masked, and no judge is called.
+        server = env.make_server()
+        out = await server.verify(env.req(), _verify_request(response))
+        assert getattr(out, MASK_SAMPLE_FIELD) is True
+        assert out.failure_kind == "agentic_turn_simulation:simulator_failed" and out.reward == 0.0
+        server.server_client.post.assert_not_called()
+
+    async def test_a_tool_error_in_a_successful_reply_is_ordinary_output_and_judged(self, sleep: AsyncMock) -> None:
+        not_found = json.dumps({"status": "error", "message": "File not found: /home/user/a.txt"})
+        agent, script = _agent(
+            _model(_fc("bash", "c1")), _model(_msg("No such file.")), tools=[_http({"output": not_found})]
+        )
+        response, *_ = await _episode(agent, _body(tools=[BASH_TOOL]))
+        assert len(script.tool_calls) == 1 and response.output[1].output == not_found
+        sleep.assert_not_awaited()
+        server = env.make_server()
+        sent = env.script(server, [env.judge_reply(env.VERDICT)])
+        out = await server.verify(env.req(), _verify_request(response))
+        assert not getattr(out, MASK_SAMPLE_FIELD) and (out.reward, len(sent)) == (1.0, 1)
+
+    async def test_the_attempts_are_configurable(self, sleep: AsyncMock) -> None:
+        tools = [_http(status=502, body="bad gateway")]
+        agent, script = _agent(_model(_fc("bash", "c1")), _model(_msg("ok")), tools=tools, simulate_max_attempts=1)
+        response, *_ = await _episode(agent)
+        assert len(script.tool_calls) == 1 and response.output[1].output == simulator_failure("HTTP 502: bad gateway")
+        sleep.assert_not_awaited()
 
     async def test_session_cookies_survive_an_error_reply(self) -> None:
-        # Gym's error replies set no cookie: the session must still reach the later calls and /verify.
-        tools = [_http(status=500, body="Internal Server Error"), _http({"output": "ok"}, cookies={"session": "b"})]
+        # Gym's error replies set no cookie: the session must still reach the retries, the later calls and /verify.
+        errors = [_http(status=500, body="Internal Server Error") for _ in range(4)]
+        tools = [*errors, _http({"output": "ok"}, cookies={"session": "b"})]
         step = _model(_fc("bash", "c1"), _fc("bash", "c2"), _fc("bash", "c3"))
         harness = {"stop_tools": ["ask_user"], "protocol": "native"}
         agent, script = _agent(step, _model(_msg("done")), tools=tools, harness=harness)
         *_, resources_cookies = await _episode(agent, resources_server_cookies={"session": "a"})
-        assert [c["cookies"] for c in script.tool_calls] == [{"session": "a"}, {"session": "a"}, {"session": "b"}]
+        # c1 fails its three attempts; c2 fails once, then succeeds and sets a cookie; c3 carries it.
+        assert [c["json"]["call_id"] for c in script.tool_calls] == ["c1", "c1", "c1", "c2", "c2", "c3"]
+        assert [c["cookies"] for c in script.tool_calls] == [{"session": "a"}] * 5 + [{"session": "b"}]
         assert resources_cookies == {"session": "b"}
 
     async def test_missing_output_field_is_an_empty_output(self) -> None:
@@ -619,7 +684,7 @@ class TestTrajectory:
     async def test_turns_tool_calls_and_gaps_are_recorded(self) -> None:
         step1 = _model(_reasoning("plan"), _msg("Checking."), _fc("bash", "c1"), _fc("read_file", "c2"), rid="r1")
         step2 = _model(_msg("Done."), rid="")
-        tools = [_http({"output": "OUT1"}), _http(status=502, body="bad gateway")]
+        tools = [_http({"output": "OUT1"}), *(_http(status=502, body="bad gateway") for _ in range(3))]
         agent, _ = _agent(step1, step2, tools=tools)
         response, trajectory, *_ = await _episode(agent, task_id="t1", rollout_id="0-1", collect_trajectory=True)
 
@@ -644,7 +709,9 @@ class TestTrajectory:
             None,
             "OUT1",
         )
-        assert (failed.status, failed.error_type, failed.output) == ("failed", "http_502", "bad gateway")
+        # A call that failed every attempt: the last HTTP status, and the output the model was given.
+        assert (failed.status, failed.error_type) == ("failed", "http_502")
+        assert failed.output == simulator_failure("HTTP 502: bad gateway")
         assert ok.completed_at >= ok.started_at and ok.duration_ms >= 0
         assert [(g.code, g.detail) for g in trajectory.gaps] == [("model_call_reference_unavailable", "turn:2")]
 
