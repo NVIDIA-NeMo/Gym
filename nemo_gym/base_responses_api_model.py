@@ -321,9 +321,11 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "300 s by default) abandons a long turn and re-sends it. SSE comments do not help: such a client's "
             "event parser drops them. When set, a call still running after this many seconds opens the stream "
             "with response.created and then sends response.in_progress every this many seconds; the item and "
-            "terminal events that follow are unchanged. A call that fails after the stream opened ends with "
-            "response.failed instead of an HTTP error status. Off (null) by default, which sends nothing "
-            "until the response is complete."
+            "terminal events that follow are unchanged. These events name the response before it exists, so "
+            "the response the stream serves (and capture records) takes the id they announced; servers whose "
+            "response ids come from an upstream Responses API refuse the setting at startup. A call that fails "
+            "after the stream opened ends with response.failed instead of an HTTP error status. Off (null) by "
+            "default, which sends nothing until the response is complete."
         ),
     )
     custom_tool_strategy: CustomToolStrategy = Field(
@@ -388,7 +390,21 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         """Allow adapters to retain an explicit upstream-status compatibility policy."""
         return True
 
+    def _mints_response_ids(self) -> bool:
+        """Whether the ids of the responses ``responses()`` returns are this server's own.
+
+        A keepalive stream (``stream_keepalive_s``) names its response before ``responses()`` returns,
+        so that response takes the announced id. An id an upstream Responses API issued must reach the
+        client unchanged, so a server that serves those cannot keep a stream alive.
+        """
+        return False
+
     def setup_webserver(self) -> FastAPI:
+        if self.config.stream_keepalive_s is not None and not self._mints_response_ids():
+            raise ValueError(
+                f"stream_keepalive_s is not supported on {type(self).__name__}: its responses carry the ids "
+                "an upstream Responses API issued, which a keepalive stream cannot announce before they exist"
+            )
         app = FastAPI()
 
         @app.exception_handler(ClientResponseError)
@@ -603,7 +619,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         if keepalive_s is None:
             return await self._stream_buffered_responses(request, self._invoke_responses(request, params), ns_map)
 
-        pending = asyncio.create_task(self._invoke_responses(request, params))
+        # Keepalive events name the response before it exists, so the response takes this id.
+        response_id = f"resp_{uuid4().hex}"
+        pending = asyncio.create_task(self._invoke_responses(request, params, response_id=response_id))
         try:
             # StreamingResponse commits HTTP headers before iterating its body. Wait one interval
             # first, so a call that finishes sooner keeps the buffered events and HTTP error statuses.
@@ -615,7 +633,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         if done:
             return await self._stream_buffered_responses(request, pending, ns_map)
         return StreamingResponse(
-            self._responses_keepalive_events(request, pending, ns_map, keepalive_s),
+            self._responses_keepalive_events(request, pending, ns_map, keepalive_s, response_id),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -640,10 +658,14 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             )
 
     async def _responses_keepalive_events(
-        self, request: Request, pending: "asyncio.Task[Any]", ns_map: NamespaceMap, keepalive_s: float
+        self,
+        request: Request,
+        pending: "asyncio.Task[Any]",
+        ns_map: NamespaceMap,
+        keepalive_s: float,
+        response_id: str,
     ) -> AsyncIterator[str | bytes]:
-        """Keep an opened Responses stream alive until ``pending`` completes, then finish it."""
-        response_id = f"resp_{uuid4().hex}"
+        """Keep an opened Responses stream alive until ``pending``, which serves ``response_id``, completes."""
         try:
             for event in synthesize_responses_keepalive_sse(response_id, include_created=True):
                 yield event
@@ -891,7 +913,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         return dispatched
 
     async def _invoke_responses(
-        self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming
+        self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming, *, response_id: Optional[str] = None
     ) -> NeMoGymResponse:
         # responses() signatures vary across servers: some take a leading `request`, some only
         # `body`. Dispatch on whichever this server declares so the default messages() works for
@@ -915,6 +937,13 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             response = await self.responses(request=request, body=params)
         else:
             response = await self.responses(body=params)
+        if response_id is not None:
+            # A keepalive stream announced this id; capture records it and the client keeps it.
+            response = (
+                response.model_copy(update={"id": response_id})
+                if isinstance(response, BaseModel)
+                else {**response, "id": response_id}
+            )
         # Capture before streaming dispatch wraps the response.
         # Anthropic mapping drops the token fields.
         # The assembled response still carries them here for every dialect.
