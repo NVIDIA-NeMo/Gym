@@ -587,8 +587,9 @@ async def request(
         try:
             kwargs["data"] = orjson.dumps(body)
         except TypeError:
-            # orjson rejects integers wider than 64 bits, which a model can write into a tool argument.
-            kwargs["data"] = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            # orjson rejects integers wider than 64 bits and lone surrogates, which a model can write into a
+            # tool argument. The stdlib encoder escapes non-ASCII text, so both still produce valid UTF-8.
+            kwargs["data"] = json.dumps(body, separators=(",", ":")).encode("utf-8")
         kwargs.setdefault("headers", dict())
         kwargs["headers"]["Content-Type"] = "application/json"
 
