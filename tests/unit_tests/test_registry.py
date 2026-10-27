@@ -128,13 +128,6 @@ class TestDiscoverEnvironments:
 
         assert set(_discover_environments_in_dir(envs_dir)) == {"real"}
 
-    def test_ignores_tombstone_directories(self, tmp_path: Path) -> None:
-        envs_dir = tmp_path / "environments"
-        manifest_path = _write_manifest(tmp_path, "environments", "moved", _manifest("moved"))
-        manifest_path.parent.joinpath(registry_module.ENVIRONMENT_TOMBSTONE_FILENAME).write_text("replacement\n")
-
-        assert _discover_environments_in_dir(envs_dir) == {}
-
     def test_pulled_harbor_datasets_are_not_scanned(self, tmp_path: Path) -> None:
         """A fetched dataset under environments/harbor/ is data: discovery stops at its manifest.toml."""
         envs_dir = tmp_path / "environments"

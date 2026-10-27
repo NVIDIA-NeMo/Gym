@@ -100,7 +100,7 @@ class HermesSandboxSession(AgentSessionState):
         session in this sandbox is reused.
         """
         check = await self.session.sandbox.exec(
-            f"{quote(_SANDBOX_PYTHON)} -c 'import run_agent, mcp'",
+            f"{quote(_SANDBOX_PYTHON)} -c 'import run_agent; from mcp.client.streamable_http import streamablehttp_client'",
             cwd=self.session.workdir,
             timeout_s=120,
         )
@@ -114,7 +114,7 @@ class HermesSandboxSession(AgentSessionState):
         install = await self.session.sandbox.exec(
             f"chmod 755 {quote(_SANDBOX_UV)} && rm -rf {venv} && "
             f"{quote(_SANDBOX_UV)} venv {venv} --python 3.13 && "
-            f"{quote(_SANDBOX_UV)} pip install --python {quote(_SANDBOX_PYTHON)} {quote(_HERMES_REQUIREMENT)}",
+            f"{quote(_SANDBOX_UV)} pip install --python {quote(_SANDBOX_PYTHON)} {quote(_HERMES_REQUIREMENT)} 'mcp>=1.28.1,<2'",
             cwd=self.session.workdir,
             timeout_s=timeout,
         )

@@ -224,6 +224,7 @@ class TestSanity:
         commands = [call.args[0] for call in sandbox.exec.await_args_list]
         install = [command for command in commands if "pip install" in command]
         assert len(install) == 1 and "rm -rf" in install[0]
+        assert "mcp>=1.28.1,<2" in install[0]
         # The import is checked before installing and again after.
         assert sum("import run_agent" in command for command in commands) == 2
         assert sandbox.upload.await_args_list[0].args[0] == Path("/usr/bin/uv")
