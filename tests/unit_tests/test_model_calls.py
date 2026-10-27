@@ -918,3 +918,82 @@ def test_uncovered_reasons_covers_a_merged_capture_once_the_trajectory_is_attach
     _attach_trajectory_record(row, pending)
 
     assert model_call_capture_uncovered_reasons(pending) == ["capture_gap:model_call_capture_pending"]
+
+
+def _sse(*events):
+    """Server-sent events: each is (event name or None, payload as a dict or a literal string)."""
+    blocks = []
+    for name, payload in events:
+        data = payload if isinstance(payload, str) else orjson.dumps(payload).decode()
+        blocks.append((f"event: {name}\n" if name else "") + f"data: {data}\n\n")
+    return "".join(blocks)
+
+
+def test_cancelled_streamed_responses_call_with_a_complete_stream_recovers_its_response():
+    raw = _sse(
+        ("response.created", {"type": "response.created", "response": {"id": "resp-cancelled"}}),
+        ("response.completed", {"type": "response.completed", "response": _COMPLETE_RESPONSES_BODY}),
+    )
+
+    record = build_model_call_record(_cancelled_exchange(raw), call_index=0)
+
+    assert record.response == _COMPLETE_RESPONSES_BODY
+    assert record.response_raw is None
+    assert (record.response_id, record.tokens_in, record.tokens_out) == ("resp-cancelled", 12, 7)
+
+
+def test_cancelled_streamed_chat_call_with_a_complete_stream_recovers_its_response():
+    chunk = {"id": "chatcmpl-1", "model": "m"}
+    raw = _sse(
+        (None, {**chunk, "choices": [{"index": 0, "delta": {"role": "assistant", "content": "o"}}]}),
+        (None, {**chunk, "choices": [{"index": 0, "delta": {"content": "k"}, "finish_reason": "stop"}]}),
+        (None, {**chunk, "choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12}}),
+        (None, "[DONE]"),
+    )
+
+    record = build_model_call_record(_cancelled_exchange(raw, dialect="chat"), call_index=0)
+
+    assert record.response["choices"][0]["message"]["content"] == "ok"
+    assert record.response_raw is None
+    assert (record.response_id, record.finish_reason, record.tokens_in, record.tokens_out) == (
+        "chatcmpl-1",
+        "stop",
+        9,
+        3,
+    )
+
+
+@pytest.mark.parametrize(
+    "raw, dialect",
+    [
+        pytest.param(
+            _sse(("response.created", {"type": "response.created", "response": {"id": "resp-1"}})),
+            "responses",
+            id="stream cut before its terminal event",
+        ),
+        pytest.param(
+            _sse(("response.failed", {"type": "response.failed", "response": {"id": "resp-1"}})),
+            "responses",
+            id="stream ended with a failure",
+        ),
+        pytest.param(
+            _sse(("response.completed", {"type": "response.completed", "response": _COMPLETE_RESPONSES_BODY})),
+            "unknown",
+            id="unknown dialect",
+        ),
+        pytest.param(
+            _sse(("response.completed", {"type": "response.completed", "response": _COMPLETE_RESPONSES_BODY})),
+            None,
+            id="no dialect",
+        ),
+    ],
+)
+def test_cancelled_streamed_call_without_a_complete_stream_keeps_its_raw_body(raw, dialect):
+    exchange = _cancelled_exchange(raw)
+    exchange["dialect"] = dialect
+
+    record = build_model_call_record(exchange, call_index=0)
+
+    assert record.response is None
+    assert record.response_raw == raw
+    assert record.tokens_out is None

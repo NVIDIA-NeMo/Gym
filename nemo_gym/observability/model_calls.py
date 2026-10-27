@@ -10,9 +10,14 @@ import time
 from pathlib import Path
 from typing import Any, Literal, Mapping, Optional
 
+import orjson
 from pydantic import BaseModel, Field
 
-from nemo_gym.base_responses_api_model import CaptureStore, ModelCallCaptureConfig
+from nemo_gym.base_responses_api_model import (
+    CaptureStore,
+    ModelCallCaptureConfig,
+    reconstruct_complete_streamed_response,
+)
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
@@ -247,8 +252,24 @@ class ModelCallRecord(BaseModel):
     latency_ttft_ms: Optional[float] = None
 
 
+def _parse_json_body(raw_text: str, dialect: Optional[str]) -> Optional[dict[str, Any]]:
+    try:
+        parsed = orjson.loads(raw_text)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _parse_streamed_body(raw_text: str, dialect: Optional[str]) -> Optional[dict[str, Any]]:
+    return reconstruct_complete_streamed_response(raw_text.encode(), dialect) if dialect else None
+
+
+# Each parser returns the response of a complete body in one wire format, or None.
+_CANCELLED_BODY_PARSERS = (_parse_json_body, _parse_streamed_body)
+
+
 def _parse_cancelled_call_body(exchange: dict[str, Any]) -> Optional[dict[str, Any]]:
-    """Parse the raw body of a cancelled call that already has a 2xx status and a complete JSON body."""
+    """Parse the raw body of a cancelled call that already has a 2xx status and a complete body."""
     if exchange.get("error_category") != "cancelled" or isinstance(exchange.get("response"), dict):
         return None
     status = exchange.get("status_code")
@@ -257,11 +278,12 @@ def _parse_cancelled_call_body(exchange: dict[str, Any]) -> Optional[dict[str, A
     raw_text = exchange.get("response_raw")
     if not isinstance(raw_text, str) or not raw_text.strip():
         return None
-    try:
-        parsed = json.loads(raw_text)
-    except ValueError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
+    dialect = exchange.get("dialect")
+    for parse in _CANCELLED_BODY_PARSERS:
+        parsed = parse(raw_text, dialect if isinstance(dialect, str) else None)
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> ModelCallRecord:

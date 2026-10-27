@@ -1332,6 +1332,15 @@ def _reconstruct_streamed_response(raw: bytes, dialect: str) -> Optional[dict[st
     return _reconstruct_chat_sse(events)
 
 
+def reconstruct_complete_streamed_response(raw: bytes, dialect: str) -> Optional[dict[str, Any]]:
+    """Reassemble a streamed (SSE) body only if it ended with a non-error terminal event for its dialect."""
+    if dialect not in _TERMINAL_SSE_LINES:
+        return None
+    if _consume_terminal_sse_event(bytearray(raw), dialect) not in ("complete", "incomplete"):
+        return None
+    return _reconstruct_streamed_response(raw, dialect)
+
+
 def _record(
     store: CaptureStore,
     dialect: str,
