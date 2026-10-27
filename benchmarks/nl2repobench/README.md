@@ -6,8 +6,7 @@ One resources server (`resources_servers/nl2repobench`) serves every combination
 | Dataset | Tasks | Configs | Notes |
 |---|---|---|---|
 | Upstream NL2RepoBench | 104 | `benchmarks/nl2repobench/{opencode,openhands}.yaml` | pinned per-task grading images (ghcr); tests run in the agent's own workspace |
-| vahid_1016 held-out, **verified-50** (recommended) | 50 | `benchmarks/nl2repobench_vahid1016_v50/{opencode,openhands}.yaml` | self-contained (tasks + jsonl in the folder); every task's reference code passes 100% of its tests in the per-task image; see its README |
-| vahid_1016 held-out, 75-task (legacy) | 75 | `benchmarks/nl2repobench_vahid1016_testset/opencode.yaml` | superseded by verified-50: ~20 tasks cannot score above 0 in its verify image |
+| Internal held-out sets (verified-50, legacy 75-task) | 50 / 75 | not in Gym: kept in the internal nl2repo repo (`benchmarks/`), linked into `Gym/benchmarks/` by its launchers | same resources server and configs layout |
 
 ## Harnesses (pick one config per dataset)
 - **opencode** (`responses_api_agents/opencode_sandboxed_agent`): auto-compacts its context near the declared window (524K here).
