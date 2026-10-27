@@ -373,11 +373,10 @@ class TestWandbExporter:
         "resumes",
         [
             {"resume_from_cache": True},
-            {"resubmit": True, "resume_from_cache": None},
-            {"resubmit": True, "resume_from_cache": False},
+            {"resubmit": True, "resume_from_cache": True},
             {"judge_failed_only": True, "append": True, "resume_from_cache": False},
         ],
-        ids=["resume", "resubmit without the cache flag", "resubmit with the cache flag off", "append recovery"],
+        ids=["resume", "normalized resubmit", "append recovery"],
     )
     def test_a_resumed_run_resumes_the_wandb_run_recorded_next_to_its_output(
         self, monkeypatch: MonkeyPatch, wandb_config: DictConfig, tmp_path, resumes: dict
@@ -896,11 +895,10 @@ class TestMLflowReopenAgainstARealStore:
         "resumes",
         [
             {"resume_from_cache": True},
-            {"resubmit": True, "resume_from_cache": None},
-            {"resubmit": True, "resume_from_cache": False},
+            {"resubmit": True, "resume_from_cache": True},
             {"judge_failed_only": True, "append": True, "resume_from_cache": False},
         ],
-        ids=["resume", "resubmit without the cache flag", "resubmit with the cache flag off", "append recovery"],
+        ids=["resume", "normalized resubmit", "append recovery"],
     )
     def test_a_resumed_run_logs_each_landed_rollout_once(self, mlflow_store: DictConfig, resumes: dict) -> None:
         first = MLflowExporter(mlflow_store)

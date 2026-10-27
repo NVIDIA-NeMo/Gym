@@ -165,16 +165,12 @@ class BaseExporter(ABC):
     def _recorded_run_id(self) -> Optional[str]:
         """The run to reopen: the one recorded next to the output, when this run continues that output.
 
-        A resume continues it, and so does a resubmit (collection turns it into a resume, after the exporters have
-        opened) and a judge-failure recovery that appends to it. A fresh run into the same output starts its rollouts
-        anew, so it starts a new tracking run too, as does a resume that finds nothing to resume (`start_over`).
+        A resume continues it, as does a judge-failure recovery that appends to it. A fresh run into the same output
+        starts its rollouts anew, so it starts a new tracking run too, as does a resume that finds nothing to resume
+        (`start_over`).
         """
         run_id_fpath = self._run_id_fpath()
-        continues = (
-            self._flag("resume_from_cache")
-            or self._flag("resubmit")
-            or (self._flag("judge_failed_only") and self._flag("append"))
-        )
+        continues = self._flag("resume_from_cache") or (self._flag("judge_failed_only") and self._flag("append"))
         if self._starting_over or run_id_fpath is None or not run_id_fpath.exists() or not continues:
             return None
         self._recorded = run_id_fpath.read_text().strip()
