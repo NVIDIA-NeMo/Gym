@@ -32,6 +32,7 @@ import traceback
 def _load_worker(worker_fpath: str):
     spec = importlib.util.spec_from_file_location("gym_exporter_worker", worker_fpath)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 

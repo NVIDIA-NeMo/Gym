@@ -36,9 +36,16 @@ from nemo_gym.run_artifacts import RunArtifacts
 needs_uv = pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required to build the exporter environment")
 
 WORKER = """
+from __future__ import annotations
 import importlib.util
 import os
 import sys
+from dataclasses import dataclass
+
+
+@dataclass
+class Upload:
+    count: int
 
 
 def run(payload):
@@ -46,6 +53,17 @@ def run(payload):
     mode = payload["mode"]
     if mode == "crash":
         os._exit(3)
+    if mode == "exit_after_result":
+        import atexit
+
+        atexit.register(os._exit, 4)
+        return {"detail": {"sent": True}}
+    if mode == "dataclass":
+        return {"detail": {"count": Upload(1).count}}
+    if mode == "which_python":
+        import subprocess
+
+        return {"detail": {"prefix": subprocess.check_output(["python", "-c", "import sys; print(sys.prefix)"], text=True).strip()}}
     if mode == "raise":
         raise ValueError("backend refused the upload")
     if mode == "skip":
@@ -194,6 +212,63 @@ class TestRealEnvironment:
 
         assert result.state is ExportState.FAILED
         assert "exited with code 3 without a result" in result.error
+
+    def test_a_worker_that_exits_non_zero_after_its_result_is_a_failed_result(
+        self, fake_exporter: FakeExporter, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(FakeExporter, "mode", "exit_after_result")
+
+        result = fake_exporter.export(RunArtifacts(tmp_path / "run.jsonl"))
+
+        assert result.state is ExportState.FAILED
+        assert "reported succeeded but then exited with code 4" in result.error
+
+    def test_a_worker_module_may_use_dataclasses_with_postponed_annotations(
+        self, fake_exporter: FakeExporter, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(FakeExporter, "mode", "dataclass")
+
+        result = fake_exporter.export(RunArtifacts(tmp_path / "run.jsonl"))
+
+        assert result.state is ExportState.SUCCEEDED
+        assert result.detail == {"count": 1}
+
+    def test_a_bare_python_in_the_worker_is_the_exporters_not_gyms(
+        self, fake_exporter: FakeExporter, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(FakeExporter, "mode", "which_python")
+
+        result = fake_exporter.export(RunArtifacts(tmp_path / "run.jsonl"))
+
+        assert result.state is ExportState.SUCCEEDED
+        assert Path(result.detail["prefix"]) == exporter_venv_path(fake_exporter.venv_root, "fake", ()).resolve()
+
+    def test_a_relative_venv_root_and_worker_path_are_anchored_to_the_callers_directory(
+        self, fake_exporter: FakeExporter, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(FakeExporter, "worker_fpath", Path("worker.py"))
+        exporter = FakeExporter(RunExportConfig(rollouts_jsonl_fpath=tmp_path / "run.jsonl"), venv_root=Path("venvs"))
+
+        result = exporter.export(RunArtifacts(tmp_path / "run.jsonl"))
+
+        assert result.state is ExportState.SUCCEEDED, result.error
+
+
+def test_a_worker_that_cannot_be_launched_is_a_failed_result(
+    fake_exporter: FakeExporter, monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(isolated, "setup_environment", lambda *args, **kwargs: 0)
+
+    def refuse(*args: Any, **kwargs: Any) -> None:
+        raise OSError(11, "Resource temporarily unavailable")
+
+    monkeypatch.setattr(isolated.subprocess, "run", refuse)
+
+    result = fake_exporter.export(RunArtifacts(tmp_path / "run.jsonl"))
+
+    assert result.state is ExportState.FAILED
+    assert "Could not launch the fake exporter worker" in result.error
 
 
 def test_a_run_that_cannot_be_prepared_fails_before_any_environment_is_built(

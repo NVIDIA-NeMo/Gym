@@ -94,7 +94,7 @@ class IsolatedExporter(Exporter):
 
     def __init__(self, config: RunExportConfig, *, venv_root: Path) -> None:
         super().__init__(config)
-        self.venv_root = Path(venv_root)
+        self.venv_root = Path(venv_root).resolve()
 
     @classmethod
     def from_global_config(cls, global_config_dict: DictConfig) -> "IsolatedExporter":
@@ -120,13 +120,17 @@ class IsolatedExporter(Exporter):
 
     def _run_worker(self, python: Path, payload: dict[str, Any], workdir: Path) -> ExportResult:
         result_fpath = workdir / "worker_result.json"
-        completed = subprocess.run(
-            [str(python), str(WORKER_HARNESS_FPATH), str(result_fpath), str(self.worker_fpath)],
-            input=json.dumps(payload).encode(),
-            cwd=workdir,
-            env=_worker_environment(),
-            check=False,
-        )
+        python = Path(os.path.abspath(python))
+        try:
+            completed = subprocess.run(
+                [str(python), str(WORKER_HARNESS_FPATH), str(result_fpath), str(Path(self.worker_fpath).resolve())],
+                input=json.dumps(payload).encode(),
+                cwd=workdir,
+                env=_worker_environment(python),
+                check=False,
+            )
+        except OSError as exc:
+            return ExportResult.failed(f"Could not launch the {self.name} exporter worker: {exc}")
         if not result_fpath.is_file():
             return ExportResult.failed(
                 f"The {self.name} exporter worker exited with code {completed.returncode} without a result."
@@ -137,11 +141,23 @@ class IsolatedExporter(Exporter):
         except (ValueError, KeyError) as exc:
             return ExportResult.failed(f"The {self.name} exporter worker wrote an unreadable result: {exc}")
         detail = outcome.get("detail") or {}
+        if completed.returncode and state is not ExportState.FAILED:
+            return ExportResult.failed(
+                f"The {self.name} exporter worker reported {state.value} but then exited with code "
+                f"{completed.returncode}."
+            )
         if state is ExportState.FAILED:
             return ExportResult(state, exit_code=1, error=outcome.get("error") or "unknown error", detail=detail)
         return ExportResult(state, detail=detail)
 
 
-def _worker_environment() -> dict[str, str]:
-    """This process's environment minus what would point the worker's Python back at Gym's packages."""
-    return {key: value for key, value in os.environ.items() if key not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
+def _worker_environment(python: Path) -> dict[str, str]:
+    """This process's environment minus what would point the worker's Python back at Gym's packages.
+
+    The exporter environment's `bin` leads `PATH`, so a bare `python` or an SDK-installed command resolves there.
+    """
+    environment = {
+        key: value for key, value in os.environ.items() if key not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")
+    }
+    environment["PATH"] = os.pathsep.join(filter(None, [str(python.parent), environment.get("PATH")]))
+    return environment
