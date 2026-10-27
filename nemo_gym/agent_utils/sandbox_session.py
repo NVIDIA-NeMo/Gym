@@ -34,6 +34,10 @@ LOG = logging.getLogger(__name__)
 # Shared runner uploaded by adapters; reads the bash source written by shell_assignments().
 HARNESS_RUNNER_FILE = "harness_runner.sh"
 HARNESS_RUNNER_SCRIPT = Path(__file__).with_name(HARNESS_RUNNER_FILE)
+# The runner's exit statuses when the CLI never ran: its own failure (bad cwd, setup), and a CLI that
+# could not be started. Any other status is the CLI's own.
+HARNESS_RUNNER_FAILED = 125
+HARNESS_COMMAND_NOT_STARTED = (126, 127)
 # Where adapters upload a standard-library Python runner, relative to session_dir. Without a
 # .py suffix, a `pkill -f '\.py'` in the task cannot match the runner's command line.
 RUNNER_FILE = "sandbox_runner"
@@ -111,8 +115,12 @@ class SandboxSession[Artifacts]:
     receipt skips capture, releases a borrowed connection and leaves teardown to
     Resources; an owned sandbox falls back to provider stop. Closed means release succeeded.
 
-    The supervisor stops the harness process group. Processes that left the group
-    (detached services or tools) remain until the sandbox owner destroys the sandbox.
+    The supervisor stops the harness process group; a forced stop also reaches the
+    harness's descendants in other groups and processes that inherited its
+    ``NEMO_GYM_SUPERVISOR`` marker. Processes that had left the harness when the stop
+    began, processes in other groups after a natural exit, and a process that left
+    between two scans without the marker remain until the sandbox owner destroys the
+    sandbox.
     Borrowed sandboxes stay available for Resources verification; owned sandboxes are
     stopped on close. Unconfirmed harness termination prevents capture and verification.
 

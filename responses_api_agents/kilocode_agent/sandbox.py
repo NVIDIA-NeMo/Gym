@@ -12,6 +12,8 @@ from tempfile import TemporaryDirectory
 from time import perf_counter
 
 from nemo_gym.agent_utils.sandbox_session import (
+    HARNESS_COMMAND_NOT_STARTED,
+    HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     SandboxCommand,
@@ -203,9 +205,12 @@ class KiloSandboxSession(AgentSessionState):
             stderr = await read_text(self.session.sandbox, path=f"{directory}/stderr.log")
         except Exception:
             stderr = await self.session.read_output_log()
-        # The runner execs Kilo, so the receipt holds Kilo's exit status; a timed-out Kilo has none of its own.
+        # The runner execs Kilo, so the receipt holds Kilo's exit status; a timed-out Kilo has none of its
+        # own, nor does a Kilo that the runner never started.
         cleanup = self.session.cleanup
         exit_code = cleanup["return_code"] if cleanup is not None and not cleanup["timed_out"] else None
+        if exit_code == HARNESS_RUNNER_FAILED or exit_code in HARNESS_COMMAND_NOT_STARTED:
+            exit_code = None
         try:
             runtime = json.loads(await read_text(self.session.sandbox, path=f"{directory}/runtime.json"))
         except Exception:

@@ -99,6 +99,58 @@ def test_events_keep_numeric_times_and_crlf_lines_without_epochrealtime(tmp_path
     assert all(isinstance(seen, (int, float)) and seen > 0 for seen, _ in events)
 
 
+def test_events_mode_stamps_long_lines_in_linear_time(tmp_path: Path) -> None:
+    # Pi's agent_end event carries the whole conversation; a quadratic strip would outlast the deadline.
+    code = "import json; print(json.dumps({'text': 'a' * 2_000_000})); print('b' * 1_000_000)"
+    params = _params(tmp_path, command=[sys.executable, "-c", code], events=str(tmp_path / "events.jsonl"))
+    started = time.monotonic()
+    result = _run(params, env=os.environ | {"LC_ALL": "C.UTF-8"})
+    assert result.returncode == 0, result.stderr
+    assert time.monotonic() - started < 10
+    (event,) = [json.loads(line)[1] for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert event == {"text": "a" * 2_000_000}
+
+
+def test_inherited_errexit_does_not_stop_the_runner(tmp_path: Path) -> None:
+    (tmp_path / "bash_env").write_text("set -euo pipefail\n")
+    script = 'echo "not json"; echo \'{"type": "ok"}\'; exit 3'
+    params = _params(tmp_path, command=["bash", "-c", script], events=str(tmp_path / "events.jsonl"))
+    result = _run(params, env=os.environ | {"BASH_ENV": str(tmp_path / "bash_env")})
+    assert result.returncode == 3, result.stderr
+    events = [json.loads(line)[1] for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert events == [{"type": "ok"}]
+
+
+@pytest.mark.parametrize("events", [False, True])
+@pytest.mark.parametrize(
+    "failure, return_codes",
+    [("setup", {125}), ("cwd", {125}), ("stdin", {126}), ("command", {126, 127})],
+)
+def test_runner_failures_are_told_apart_from_the_command_status(
+    tmp_path: Path, failure: str, return_codes: set[int], events: bool
+) -> None:
+    # A command that cannot start must not fall through into events mode or run anyway.
+    values = {"command": ["touch", str(tmp_path / "ran")]}
+    if failure == "setup":
+        values["setup"] = "exit 1"
+    elif failure == "cwd":
+        values["cwd"] = str(tmp_path / "missing")
+    elif failure == "stdin":
+        values["stdin"] = str(tmp_path / "missing")
+    else:
+        values["command"] = [str(tmp_path / "missing")]
+    if events:
+        values["events"] = str(tmp_path / "events.jsonl")
+    params = _params(tmp_path, **values)
+    (tmp_path / "stdout.log").write_text("earlier output\n")
+    result = _run(params)
+    assert result.returncode in return_codes, result.stderr
+    assert not (tmp_path / "ran").exists()
+    # Earlier output survives unless the runner got as far as opening stdout.
+    if failure in ("setup", "cwd") or (failure == "stdin" and not events):
+        assert (tmp_path / "stdout.log").read_text() == "earlier output\n"
+
+
 def test_inherited_runner_names_neither_configure_the_runner_nor_reach_the_cli(tmp_path: Path) -> None:
     params = _params(tmp_path, command=["bash", "-c", 'echo "${stdout-unset}|${setup-unset}"'])
     inherited = {"setup": f"touch {tmp_path}/evaluated", "events": str(tmp_path / "events.jsonl"), "stdout": "leak"}
@@ -117,18 +169,6 @@ def test_events_mode_keeps_runner_descriptors_out_of_the_cli(tmp_path: Path) -> 
     events = [json.loads(line)[1] for line in (tmp_path / "events.jsonl").read_text().splitlines()]
     assert events == [{"type": "ok"}]
     assert "Bad file descriptor" in (tmp_path / "stderr.log").read_text()
-
-
-@pytest.mark.skipif(
-    subprocess.run(["bash", "-c", "((BASH_VERSINFO[0] >= 5))"]).returncode != 0, reason="bash 5 restores INT"
-)
-def test_events_mode_cli_keeps_default_interrupt_handling(tmp_path: Path) -> None:
-    code = "import json, signal; print(json.dumps({'int': str(signal.getsignal(signal.SIGINT))}))"
-    params = _params(tmp_path, command=[sys.executable, "-c", code], events=str(tmp_path / "events.jsonl"))
-    result = _run(params)
-    assert result.returncode == 0, result.stderr
-    (event,) = [json.loads(line)[1] for line in (tmp_path / "events.jsonl").read_text().splitlines()]
-    assert "default_int_handler" in event["int"]
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux process semantics")

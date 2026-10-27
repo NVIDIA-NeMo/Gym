@@ -10,7 +10,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -31,7 +31,7 @@ from nemo_gym.rollout_health import run_health_checks
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, join_model_call_observations
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-from responses_api_agents.kilocode_agent.app import KiloCodeAgent, KiloCodeAgentRunRequest
+from responses_api_agents.kilocode_agent.app import KiloCodeAgent, KiloCodeAgentRunRequest, _runtime_failure
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession, _sandbox_prepare_command
 from responses_api_agents.kilocode_agent.tests.test_app import _make_model_server_agent
 
@@ -294,15 +294,45 @@ async def test_connection_failure_never_falls_back_to_host() -> None:
     install.assert_not_called()
 
 
-@pytest.mark.parametrize("timed_out", [False, True])
-async def test_artifacts_take_the_exit_code_from_cleanup_only_when_kilo_finished(timed_out: bool) -> None:
+@pytest.mark.parametrize(
+    "return_code, timed_out, exit_code",
+    [(3, False, 3), (143, True, None), (125, False, None), (126, False, None), (127, False, None)],
+)
+async def test_artifacts_take_the_exit_code_from_cleanup_only_when_kilo_finished(
+    return_code: int, timed_out: bool, exit_code: int | None
+) -> None:
     session = state()
-    session.session.cleanup = receipt(return_code=143 if timed_out else 3, timed_out=timed_out)
+    session.session.cleanup = receipt(return_code=return_code, timed_out=timed_out)
     with patch(f"{TRANSPORT}.read_text", side_effect=["partial", "diagnostic", RuntimeError("not written")]):
         artifacts = await session.collect_artifacts()
     assert (artifacts.stdout, artifacts.stderr) == ("partial", "diagnostic")
-    # The supervisor's TERM status after a timeout is not an exit Kilo chose.
-    assert artifacts.exit_code == (None if timed_out else 3)
+    # The supervisor's TERM status after a timeout, and the runner's statuses for a Kilo that never
+    # started, are not exits Kilo chose.
+    assert artifacts.exit_code == exit_code
+
+
+@pytest.mark.parametrize(
+    "return_code, failure",
+    [
+        (125, "Kilo runner failed before starting Kilo (exit 125)"),
+        (126, "Kilo could not be started (exit 126)"),
+        (127, "Kilo could not be started (exit 127)"),
+        (3, "Kilo exited 3"),
+    ],
+)
+def test_runtime_failure_tells_the_runner_from_kilo(return_code: int, failure: str) -> None:
+    artifacts = KiloArtifacts(task_environment_ready=True, stdout="", stderr="", exit_code=None)
+    assert _runtime_failure(artifacts, receipt(return_code=return_code)) == failure
+
+
+def test_cancelled_run_reports_no_exit_code_of_its_own() -> None:
+    session = state()
+    session.session.cleanup = receipt(return_code=143)
+    session.session.artifacts = KiloArtifacts(task_environment_ready=True, stdout="", stderr="", exit_code=143)
+    session.task = MagicMock(cancelled=MagicMock(return_value=True))
+    observations = _make_model_server_agent()._sandbox_observations(session)
+    sandbox = observations.records[-1]
+    assert (sandbox.outcome, sandbox.exit_code) == ("cancelled", None)
 
 
 async def test_identical_activations_join_and_replay_independent_copies() -> None:

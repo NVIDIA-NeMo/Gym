@@ -12,34 +12,45 @@
 #   setup      bash code run first, before env is applied
 #   unset_env  array of extglob patterns naming inherited variables to drop
 #   events     file receiving each JSON object line of stdout as [seen_at, object]
-# Writes runtime.json beside PARAMS.
+# Writes runtime.json beside PARAMS. Exits with the command's status, 125 when the runner fails before
+# starting it (including an exit from setup), or 126 or 127 when the command could not be started.
 
+# An inherited BASH_ENV or SHELLOPTS must not stop the runner at an expected failure.
+set +o errexit +o nounset +o pipefail
+IFS=$' \t\n'
 shopt -s extglob
 # Inherited variables with these names must not configure the runner or leak into the CLI.
 unset -v cwd command env stdin stdout stderr setup unset_env events
-source "$1" || exit 1
+trap 'exit 125' EXIT
+source "$1" || exit
 printf '{"hostname": "%s", "pid": %d}\n' "$HOSTNAME" "$$" >"$(dirname "$1")/runtime.json"
-eval "${setup-}" || exit 1
+eval "${setup-}" || exit
 for pattern in "${unset_env[@]}"; do
     for name in $(compgen -e); do
         [[ $name == $pattern ]] && unset "$name"
     done
 done
 ((${#env[@]})) && export "${env[@]}"
-cd "$cwd" || exit 1
-[[ -n ${events-} ]] || exec "${command[@]}" <"$stdin" >"$stdout" 2>"$stderr"
+cd "$cwd" || exit
+# A failed redirection does not end bash at exec; the CLI did not start.
+if [[ -z ${events-} ]]; then
+    trap - EXIT
+    exec "${command[@]}" <"$stdin" >"$stdout" 2>"$stderr"
+    exit 126
+fi
 
 # Stamp stdout lines as they appear. A file, unlike a pipe, cannot be held open by a detached tool.
-: >"$stdout"
-exec 3<"$stdout" 4>"$events"
-# Without job control an async command ignores INT and QUIT, which its tools would inherit; the
-# runner's own descriptors stay out of the CLI.
-{ trap - INT QUIT; exec "${command[@]}" <"$stdin" >>"$stdout" 2>"$stderr" 3<&- 4>&-; } &
+: >"$stdout" && exec 3<"$stdout" 4>"$events" || exit
+trap - EXIT
+# The runner's own descriptors stay out of the CLI.
+{ exec "${command[@]}" <"$stdin" >>"$stdout" 2>"$stderr" 3<&- 4>&-; exit 126; } &
 cli=$!
 trap 'kill -TERM "$cli" 2>/dev/null' TERM
 pending=""
 emit() {
-    local line=${1%$'\r'}
+    # ${1%$'\r'} would try the suffix at every position of a long line.
+    local line=$1
+    [[ ${line: -1} == $'\r' ]] && line=${line%?}
     [[ $line == {* ]] && printf '[%s, %s]\n' "$seen" "$line" >&4
 }
 # Stamp new complete lines, keeping a partial one for the next pass. Bash < 5 has whole seconds;
