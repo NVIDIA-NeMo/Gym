@@ -716,6 +716,8 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_failed: bool = False
     # Images of the user turn uploaded into the sandbox and attached with `opencode run -f`.
     opencode_attachment_count: int = 0
+    # The last assistant message stopped on length: the session ended on a full context.
+    opencode_context_limited: bool = False
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -1573,6 +1575,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             # so an empty string means the run ended some other way (answered, or infra failure).
             "opencode_terminal_reason": _terminal_reason(run_output),
             "opencode_attachment_count": len(attachments),
+            "opencode_context_limited": length_limited,
         }
         if collect_observations:
             run_result["_ng_agent_observations"] = observations
