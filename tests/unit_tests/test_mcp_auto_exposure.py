@@ -592,6 +592,41 @@ def test_refuses_custom_middleware():
         install_auto_exposure(server, app)
 
 
+def test_accepts_every_gym_middleware():
+    # run_webserver adds the exception and cancellation middleware after the gate runs.
+    # They must still pass it, in case that order changes.
+    server = _server()
+    app = server.setup_webserver()
+    server.setup_exception_middleware(app)
+    server.setup_cancellation_middleware(app)
+    install_auto_exposure(server, app)
+
+
+def test_middleware_marked_as_skipped_on_direct_dispatch_is_accepted_wherever_it_is_defined():
+    # Gym's own middleware is recognized by its marker, not by the module that defines it.
+    # Moving it to another module keeps it accepted.
+    server = _server()
+    app = server.setup_webserver()
+
+    async def relocated(request, call_next):
+        return await call_next(request)
+
+    relocated.skipped_on_direct_mcp_dispatch = True
+    app.middleware("http")(relocated)
+
+    class RelocatedMiddleware:
+        skipped_on_direct_mcp_dispatch = True
+
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            await self.app(scope, receive, send)
+
+    app.add_middleware(RelocatedMiddleware)
+    install_auto_exposure(server, app)
+
+
 def test_refuses_dependency_injection_handler():
     server = _server()
     app = server.setup_webserver()
