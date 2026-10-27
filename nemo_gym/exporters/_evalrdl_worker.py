@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Uploads one staged gym run to EvalRDL. Runs in the EvalRDL exporter's own environment.
+"""Uploads one gym run directory to EvalRDL. Runs in the EvalRDL exporter's own environment.
 
 The payload comes from `EvalRDLExporter.build_payload`. Only the standard library and the `evalrdl` SDK are
 imported here, so this file must not import `nemo_gym`.
@@ -35,7 +35,7 @@ def run(payload: dict) -> dict:
     client = Client(url=payload["url"]) if payload.get("url") else Client()
     try:
         results = client.uploads.upload(
-            payload["staged_dir"],
+            payload["run_dir"],
             label=payload.get("label"),
             tags=list(payload.get("tags") or ()),
             meta=payload.get("meta") or None,
@@ -55,7 +55,7 @@ def run(payload: dict) -> dict:
         return _failed(f"{type(exc).__name__}: {exc}", 1)
 
     if len(results) != 1:
-        return _failed(f"Expected one upload for the staged run, EvalRDL reported {len(results)}.", 1)
+        return _failed(f"Expected one upload for the run directory, EvalRDL reported {len(results)}.", 1)
     (result,) = results
     detail = {
         "evalrdl_state": result.state,

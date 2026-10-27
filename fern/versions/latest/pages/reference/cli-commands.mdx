@@ -1020,9 +1020,10 @@ gym eval export mlflow \
 
 #### Exporting to EvalRDL
 
-`evalrdl` uploads one run: its rollouts, aggregate metrics, saved config and, when present, its failures and
-materialized-inputs files. The files are copied into one staging folder, so the run needs `<stem>_aggregate_metrics.json`
-and `<stem>_resolved_config.yaml` like the `mlflow` and `wandb` exporters. The `evalrdl` SDK is installed into the
+`evalrdl` uploads one run: the whole directory the rollouts file is in. Everything there is part of the upload (the
+rollouts and their sidecars, health reports, model-call captures and any benchmark-specific files), and nothing is copied
+or picked out, so keep each run in a directory of its own. The run still needs `<stem>_aggregate_metrics.json` and
+`<stem>_resolved_config.yaml` there, like the `mlflow` and `wandb` exporters. The `evalrdl` SDK is installed into the
 exporter's own virtual environment, so it never enters Gym's environment. The SDK is served from a package index
 your organization provides; configure it through uv's own index settings (for example `UV_EXTRA_INDEX_URL`) when you run
 the command. The SDK finds your EvalRDL token itself, in the environment or its login cache.

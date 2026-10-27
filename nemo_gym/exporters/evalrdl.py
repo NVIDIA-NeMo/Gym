@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import shutil
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
@@ -68,31 +67,18 @@ class EvalRDLExporter(IsolatedExporter):
         return (self.config.requirement,)
 
     def build_payload(self, artifacts: RunArtifacts, workdir: Path) -> dict[str, Any]:
-        """Stage the run as one folder, and describe the upload for the worker.
+        """Describe the upload for the worker: the directory the rollouts are in, uploaded as it is.
 
-        The files are copied rather than linked so the folder can be packed. The saved config and the aggregate
-        metrics are required; the failures and materialized-inputs sidecars go along when the run has them.
+        Everything in that directory is part of the run (the rollouts and their sidecars, health reports,
+        model-call captures, benchmark-specific files), so nothing is picked out, staged or copied. The saved
+        config and the aggregate metrics are still required first, because the reader looks for them.
         """
         unexportable = unexportable_reason(artifacts)
         if unexportable is not None:
             raise ExportPreparationError(unexportable)
-        staged_dir = workdir / "run"
-        staged_dir.mkdir()
-        for source in (
-            artifacts.rollouts_jsonl_fpath,
-            artifacts.aggregate_metrics_json_fpath,
-            artifacts.resolved_config_yaml_fpath,
-            artifacts.failures_jsonl_fpath,
-            artifacts.materialized_inputs_jsonl_fpath,
-        ):
-            if source.is_file():
-                try:
-                    shutil.copy2(source, staged_dir / source.name)
-                except OSError as exc:
-                    raise ExportPreparationError(f"Could not stage {source} for EvalRDL: {exc}") from exc
         config = self.config
         return {
-            "staged_dir": str(staged_dir),
+            "run_dir": str(artifacts.rollouts_jsonl_fpath.resolve().parent),
             "label": config.label,
             "tags": list(config.tags),
             "meta": config.meta,

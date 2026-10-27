@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import errno
 import json
 import os
 import subprocess
@@ -25,7 +24,6 @@ import pytest
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
-import nemo_gym.exporters.evalrdl as evalrdl_module
 import nemo_gym.exporters.isolated as isolated
 from nemo_gym.exporters import load_run_exporter_class
 from nemo_gym.exporters.base import ExportState
@@ -70,7 +68,7 @@ class _Uploads:
                on_progress=None):
         staged = Path(path)
         Path(os.environ["FAKE_EVALRDL_LOG"]).write_text(json.dumps({
-            "url": self.url, "label": label, "meta": meta, "tags": list(tags), "parallel": parallel, "wait": wait,
+            "path": str(staged), "url": self.url, "label": label, "meta": meta, "tags": list(tags), "parallel": parallel, "wait": wait,
             "timeout": timeout, "files": sorted(p.name for p in staged.iterdir()),
             "symlinks": [p.name for p in staged.iterdir() if p.is_symlink()],
         }))
@@ -115,15 +113,14 @@ def fake_sdk(tmp_path: Path, monkeypatch: MonkeyPatch) -> dict[str, Any]:
     return {"log": log, "requested": requested}
 
 
-def _make_run(tmp_path: Path, *, sidecars: bool = True) -> RunArtifacts:
+def _make_run(tmp_path: Path) -> RunArtifacts:
     rollouts = tmp_path / "gpqa_rollouts.jsonl"
     rollouts.write_text('{"reward": 1.0}\n')
     artifacts = RunArtifacts(rollouts)
     artifacts.aggregate_metrics_json_fpath.write_text("[]")
     artifacts.resolved_config_yaml_fpath.write_text("model: m\n")
-    if sidecars:
-        artifacts.failures_jsonl_fpath.write_text("")
-        artifacts.materialized_inputs_jsonl_fpath.write_text('{"x": 1}\n')
+    artifacts.failures_jsonl_fpath.write_text("")
+    artifacts.materialized_inputs_jsonl_fpath.write_text('{"x": 1}\n')
     stamp = rollouts.stat().st_mtime + 10
     os.utime(artifacts.aggregate_metrics_json_fpath, (stamp, stamp))
     return artifacts
@@ -172,34 +169,34 @@ class TestConfig:
         assert _exporter(artifacts, tmp_path, requirement="evalrdl==1.2.3").required_packages() == ("evalrdl==1.2.3",)
 
 
-class TestStaging:
-    def test_the_run_is_copied_into_one_folder_keeping_its_file_names(
+class TestRunDirectory:
+    def test_the_directory_the_rollouts_are_in_is_uploaded_as_it_is(
         self, tmp_path: Path, fake_sdk: dict[str, Any]
     ) -> None:
         artifacts = _make_run(tmp_path)
+        (tmp_path / "quality_summary.json").write_text("{}")
+        (tmp_path / "model-calls").mkdir()
+        (tmp_path / "model-calls" / "0-0.capture.jsonl").write_text("{}")
+        before = sorted(p.name for p in tmp_path.iterdir())
 
         _exporter(artifacts, tmp_path).export(artifacts)
 
         call = _sdk_call(fake_sdk)
-        assert call["files"] == [
-            "gpqa_rollouts.jsonl",
-            "gpqa_rollouts_aggregate_metrics.json",
-            "gpqa_rollouts_failures.jsonl",
-            "gpqa_rollouts_materialized_inputs.jsonl",
-            "gpqa_rollouts_resolved_config.yaml",
-        ]
-        assert call["symlinks"] == []
+        assert call["path"] == str(tmp_path.resolve())
+        assert call["files"] == before
+        assert {"quality_summary.json", "model-calls", "gpqa_rollouts_resolved_config.yaml"} <= set(call["files"])
+        assert sorted(p.name for p in tmp_path.iterdir() if p.name != fake_sdk["log"].name) == before
 
-    def test_sidecars_the_run_does_not_have_are_left_out(self, tmp_path: Path, fake_sdk: dict[str, Any]) -> None:
-        artifacts = _make_run(tmp_path, sidecars=False)
+    def test_a_relative_rollouts_path_is_uploaded_by_its_absolute_directory(
+        self, tmp_path: Path, fake_sdk: dict[str, Any], monkeypatch: MonkeyPatch
+    ) -> None:
+        _make_run(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        relative = RunArtifacts(Path("gpqa_rollouts.jsonl"))
 
-        _exporter(artifacts, tmp_path).export(artifacts)
+        _exporter(relative, tmp_path).export(relative)
 
-        assert _sdk_call(fake_sdk)["files"] == [
-            "gpqa_rollouts.jsonl",
-            "gpqa_rollouts_aggregate_metrics.json",
-            "gpqa_rollouts_resolved_config.yaml",
-        ]
+        assert _sdk_call(fake_sdk)["path"] == str(tmp_path.resolve())
 
     @pytest.mark.parametrize(
         ("remove", "message"),
@@ -233,30 +230,6 @@ class TestStaging:
         assert result.state is ExportState.FAILED
         assert "Aggregation failed for agents: bad" in result.error
         assert fake_sdk["requested"] == []
-
-    @pytest.mark.parametrize(
-        "failure",
-        [OSError(errno.ENOSPC, "No space left on device"), PermissionError(errno.EACCES, "Permission denied")],
-        ids=["disk-full", "unreadable"],
-    )
-    def test_a_staging_copy_that_fails_is_a_failed_result_before_any_environment_is_built(
-        self, tmp_path: Path, fake_sdk: dict[str, Any], monkeypatch: MonkeyPatch, failure: OSError
-    ) -> None:
-        artifacts = _make_run(tmp_path)
-
-        def broken_copy(source: Path, destination: Path) -> None:
-            raise failure
-
-        monkeypatch.setattr(evalrdl_module.shutil, "copy2", broken_copy)
-
-        result = _exporter(artifacts, tmp_path).export(artifacts)
-
-        assert result.state is ExportState.FAILED
-        assert result.exit_code == 1
-        assert f"Could not stage {artifacts.rollouts_jsonl_fpath} for EvalRDL" in result.error
-        assert str(failure.strerror) in result.error
-        assert fake_sdk["requested"] == []
-        assert not fake_sdk["log"].exists()
 
 
 class TestUpload:
