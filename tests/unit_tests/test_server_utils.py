@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import json
 import logging
 import multiprocessing
 import pickle
@@ -64,6 +65,7 @@ from nemo_gym.server_utils import (
     _log_validation_exception,
     _make_keepalive_socket_factory,
     _set_tcp_keepalive,
+    _validation_body_shape,
     _validation_exception_handler,
     format_exception_with_response_body,
     initialize_ray,
@@ -157,6 +159,25 @@ class TestRequestRetries:
 
 
 class TestServerUtils:
+    def test_validation_body_shape_reports_shape_without_payload(self) -> None:
+        secret_image = "data:image/png;base64," + ("A" * 10_000)
+
+        shape = _validation_body_shape({"screenshots": [secret_image, secret_image]})
+
+        serialized = json.dumps(shape)
+        assert secret_image not in serialized
+        assert "base64" not in serialized
+        assert shape["fields"]["screenshots"] == {"type": "array", "length": 2}
+
+        assert _validation_body_shape({"nested": {"opaque_value": "not logged"}}) == {
+            "type": "object",
+            "field_count": 1,
+            "fields": {"nested": {"type": "object", "field_count": 1, "fields": ["opaque_value"]}},
+        }
+        assert _validation_body_shape("opaque") == {"type": "string", "length": 6}
+        assert _validation_body_shape(b"opaque") == {"type": "bytes", "length": 6}
+        assert _validation_body_shape(42) == {"type": "int"}
+
     async def test_raise_for_status_preserves_message_across_process_boundary(self) -> None:
         headers = CIMultiDictProxy(
             CIMultiDict(
@@ -1595,18 +1616,18 @@ class TestServerUtils:
         assert format_exception_with_response_body(ValueError("invalid payload")) == "invalid payload"
 
     @mark.parametrize(
-        ("body", "expected_truncated"),
+        "body",
         [
-            (b"", False),
-            (b'{"nested":{"value":"small"}}', False),
-            (b"not-json\nwith-control-\x00", False),
-            (b'{"credentials":{"password":"secret"}}', False),
-            (b"x" * 4094, False),
-            (b"x" * 4095, True),
-            (b"\x00" * 4096, True),
-            ("中文".encode() * 4096, True),
-            (b"\\" * 4096, True),
-            (b'{"payload":"' + b"x" * (2 * 1024 * 1024) + b'"}', True),
+            b"",
+            b'{"nested":{"value":"small"}}',
+            b"not-json\nwith-control-\x00",
+            b'{"credentials":{"password":"secret"}}',
+            b"x" * 4094,
+            b"x" * 4095,
+            b"\x00" * 4096,
+            "中文".encode() * 4096,
+            b"\\" * 4096,
+            b'{"payload":"' + b"x" * (2 * 1024 * 1024) + b'"}',
         ],
         ids=[
             "empty",
@@ -1621,8 +1642,8 @@ class TestServerUtils:
             "multi-megabyte",
         ],
     )
-    async def test_validation_exception_log_bounds_body_before_rendering(
-        self, body: bytes, expected_truncated: bool, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch
+    async def test_validation_exception_log_renders_only_bounded_body_shape(
+        self, body: bytes, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch
     ) -> None:
         request = MagicMock(spec=Request)
         request.body = AsyncMock(return_value=body)
@@ -1634,7 +1655,7 @@ class TestServerUtils:
                 "input": {"password": "value that must not be copied into the error log"},
             }
         ]
-        exc = RequestValidationError(errors, body={"original": "body"})
+        exc = RequestValidationError(errors, body={"payload": body})
         rendered_body_sizes = []
         escaped_log_prefix = nemo_gym.server_utils._escaped_log_prefix
 
@@ -1651,16 +1672,18 @@ class TestServerUtils:
         assert record.request_body_size_bytes == len(body)
         assert len(rendered_body_sizes) == 1
         assert rendered_body_sizes[0] <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_BODY_CHARS
-        assert len(record.request_body_prefix) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_BODY_CHARS
-        assert record.request_body_truncated is expected_truncated
-        decoded_prefix = nemo_gym.server_utils.json.loads(record.request_body_prefix)
-        assert decoded_prefix.endswith("...[truncated]") is expected_truncated
-        assert ("...[truncated]" in record.getMessage()) is expected_truncated
-        if not expected_truncated:
-            assert decoded_prefix == body.decode("utf-8", errors="replace")
+        assert len(record.request_body_shape) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_BODY_CHARS
+        assert record.request_body_shape_truncated is False
+        assert json.loads(json.loads(record.request_body_shape)) == {
+            "type": "object",
+            "field_count": 1,
+            "fields": {"payload": {"type": "bytes", "length": len(body)}},
+        }
+        assert not hasattr(record, "request_body_prefix")
+        assert "password" not in record.getMessage()
+        assert "secret" not in record.getMessage()
         assert "request_body_size_bytes=" in record.getMessage()
-        assert "request_body_truncated=" in record.getMessage()
-        assert "request_body_prefix=" in record.getMessage()
+        assert "request_body_shape=" in record.getMessage()
         assert record.validation_error_count == 1
         assert record.validation_errors == [
             {
@@ -1670,11 +1693,24 @@ class TestServerUtils:
             }
         ]
         assert "value that must not be copied into the error log" not in str(record.validation_errors)
-        if body == b"not-json\nwith-control-\x00":
-            assert "\n" not in record.request_body_prefix
-            assert "\x00" not in record.request_body_prefix
-            assert "\\n" in record.request_body_prefix
-            assert "\\u0000" in record.request_body_prefix
+        assert "\n" not in record.request_body_shape
+        assert "\x00" not in record.request_body_shape
+
+    async def test_validation_body_shape_remains_bounded_with_large_field_names(
+        self, caplog: LogCaptureFixture
+    ) -> None:
+        request = MagicMock(spec=Request)
+        request.body = AsyncMock(return_value=b"{}")
+        body = {"large-field-" + "x" * 10_000: "do-not-log-this-value"}
+        error = RequestValidationError(
+            [{"type": "missing", "loc": ("body", "required"), "msg": "Field required"}], body=body
+        )
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+            await _log_validation_exception(request, error)
+        record = caplog.records[-1]
+        assert len(record.request_body_shape) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_BODY_CHARS
+        assert record.request_body_shape_truncated is True
+        assert "do-not-log-this-value" not in record.getMessage()
 
     @mark.parametrize(("location", "body_unavailable"), [("body", False), ("query", False), ("body", True)])
     async def test_validation_exception_log_bounds_error_count(
@@ -1740,7 +1776,8 @@ class TestServerUtils:
         request.body.assert_awaited_once()
         record = caplog.records[-1]
         assert record.request_body_size_bytes == len(body)
-        assert record.request_body_prefix == '"{\\"required\\":null}"'
+        assert json.loads(json.loads(record.request_body_shape)) == {"type": "NoneType"}
+        assert not hasattr(record, "request_body_prefix")
         assert len(record.validation_errors) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS
         assert record.validation_errors_truncated is True
 
@@ -1882,7 +1919,7 @@ class TestServerUtils:
         for summary in summaries:
             assert ("msg" in summary) is (summary["loc"][0] == "body")
         assert record.validation_error_count == (3 if invalid_body else 2)
-        assert hasattr(record, "request_body_prefix") is invalid_body
+        assert hasattr(record, "request_body_shape") is invalid_body
         assert record.validation_errors_truncated is False
         # Structured consumers keep the same bounded metadata, including custom messages.
         assert record.validation_errors == [
