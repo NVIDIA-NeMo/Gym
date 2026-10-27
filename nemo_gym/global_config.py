@@ -391,7 +391,9 @@ class GlobalConfigDictParserConfig(BaseModel):
     # Static inspection avoids network and process side effects. Assigned ports are placeholders,
     # not evidence that a runtime is ready.
     offline: bool = False
-    # Leave live exporters unopened. A command that exports a finished run opens its own backend session.
+    # Leave live exporters unopened. Like `offline`, this is set by a command in code, not by users: nothing on the
+    # command line reaches this model. `gym eval export` sets it because it opens its own backend session, so
+    # parsing its config must not also start a live exporter, which would log the run twice.
     skip_exporters: bool = False
 
     # This is a shorthand we use for config resolution use cases that shouldn't require a model
