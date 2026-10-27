@@ -64,7 +64,9 @@ class StringMatchVerifier(BaseModel):
         default_factory=list,
         description=(
             "Regex patterns used to detect SPURIOUS markers: any match whose text is not in "
-            "expected_markers fails the row. Read as .get('patterns', [])."
+            "expected_markers fails the row. When non-empty, a marker in the style of an expected marker "
+            "with a different number (e.g. '[ref:3]' when '[ref:2]' is expected) also fails the row. "
+            "Read as .get('patterns', [])."
         ),
         json_schema_extra={"consumed_by": ["verify"]},
     )
