@@ -31,6 +31,7 @@ from fastapi import Request
 from pydantic import Field
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.labbench2_vlm.prepare_data import embed_media_into_row
 from responses_api_agents.simple_agent.app import (
     SimpleAgent,
@@ -130,3 +131,6 @@ class LabbenchVLMAgent(SimpleAgent):
 
 if __name__ == "__main__":
     LabbenchVLMAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = LabbenchVLMAgent.run_webserver()  # noqa: F401

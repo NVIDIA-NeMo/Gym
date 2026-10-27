@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic, time
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -103,7 +103,6 @@ class MiniSWEEpisodeSession(AgentSessionState):
 
 
 class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
-    num_workers: Literal[1] = 1
     # The resources server the legacy `/run` path seeds and verifies against. Episode sessions
     # (`/v1/agent_sessions`) receive the sandbox from the environment server and need none.
     resources_server: ResourcesServerRef | None = None
@@ -202,6 +201,15 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
     config: MiniSWESandboxedConfig
     # The harness runs inside the task sandbox and calls the model server from there.
     calls_model_from_sandbox: ClassVar[bool] = True
+
+    def multiple_workers_unsupported_reason(self) -> str | None:
+        # Episode sessions are agent sessions, which routing follows by agent_session_id.
+        if self.config.resources_server is None:
+            return None
+        return (
+            "its own /run path replays a retried run from this process's memory, "
+            "keyed by the cookie's session_id and the rollout ID, which agent session routing does not follow"
+        )
 
     def supports_task_tool_context(self) -> bool:
         """mini-SWE reads the task's MCP servers and skills directory from ``task.json`` at its first turn."""

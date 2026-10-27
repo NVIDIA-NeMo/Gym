@@ -56,6 +56,7 @@ from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     is_global_aiohttp_client_setup,
+    is_nemo_gym_fastapi_entrypoint,
     set_global_aiohttp_client,
 )
 from nemo_gym.telemetry.setup import init_telemetry
@@ -720,3 +721,6 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HarborAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HarborAgent.run_webserver()  # noqa: F401

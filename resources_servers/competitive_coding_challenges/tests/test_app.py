@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import sys
 import types
 from pathlib import Path
@@ -714,3 +715,41 @@ class TestSandboxPath:
         assert response.reward == 0.0 and response.mask_sample
         assert response.failure_kind == "verifier_error"
         assert response.details == {"error": "Problem 'prob-1' not found in metadata."}
+
+
+def test_log_appends_wait_for_another_workers_lock(tmp_path) -> None:
+    """With several workers appending to one debug log, an append waits for a lock another process holds."""
+    import fcntl
+    import json
+    import threading
+    import time
+
+    server = _make_server()
+    log = tmp_path / "log.jsonl"
+    other_worker = open(log, "a")
+    fcntl.flock(other_worker, fcntl.LOCK_EX)
+    released_at: list[float] = []
+
+    def release() -> None:
+        time.sleep(0.3)
+        released_at.append(time.monotonic())
+        other_worker.close()
+
+    releaser = threading.Thread(target=release)
+    releaser.start()
+    asyncio.run(
+        server._append_log_jsonl(
+            log_path=str(log),
+            competition_id="comp-1",
+            problem_id="prob-1",
+            subtask=None,
+            generated_sequence="g",
+            reward=1.0,
+            details={},
+        )
+    )
+    appended_at = time.monotonic()
+    releaser.join()
+
+    assert appended_at >= released_at[0]
+    assert json.loads(log.read_text())["reward"] == 1.0

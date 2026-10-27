@@ -641,3 +641,19 @@ def test_resources_server_exposes_no_runtime_or_tool_routes() -> None:
     assert "/verify" in routes
     assert "/close_session" in routes
     assert not any(path.startswith("/runtime") or path.startswith("/tools") for path in routes)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "window"),
+    [
+        ({}, 1980.0),
+        ({"session_ttl_seconds": 3600.0}, 3600.0),
+        ({"session_close_retry_window_seconds": 5000.0}, 5000.0),
+    ],
+)
+def test_the_routing_claim_lasts_at_least_as_long_as_the_tombstone(overrides: dict, window: float) -> None:
+    """A delayed seed of a closed session reaches the worker that holds its tombstone, which lasts session_ttl_seconds."""
+    server = _server()
+    for name, value in overrides.items():
+        setattr(server.config, name, value)
+    assert server.claimed_session_routing()["close_window_seconds"] == window

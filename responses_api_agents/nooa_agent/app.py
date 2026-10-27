@@ -28,6 +28,7 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.tool_access import DirectHTTPToolAccess
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 from responses_api_agents.nooa_agent.result import finalize_run_result, is_transient_infrastructure_error
@@ -173,3 +174,6 @@ class NOOAAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     NOOAAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = NOOAAgent.run_webserver()  # noqa: F401

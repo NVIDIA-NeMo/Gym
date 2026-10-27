@@ -51,7 +51,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from responses_api_agents.simple_agent_with_compaction.compaction import (
     ContextCompactedResponse,
     ContextCompactedTransportResponse,
@@ -649,3 +649,6 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     SimpleAgentWithCompaction.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SimpleAgentWithCompaction.run_webserver()  # noqa: F401

@@ -35,7 +35,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from resources_servers.arena.arena import (
     _extract_thinking_content,
     _extract_verdict,
@@ -401,3 +401,6 @@ class ArenaResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     ArenaResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ArenaResourcesServer.run_webserver()  # noqa: F401

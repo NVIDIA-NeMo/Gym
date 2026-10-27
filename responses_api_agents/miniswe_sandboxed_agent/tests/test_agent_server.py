@@ -13,7 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, refuse_unsupported_num_workers
 from responses_api_agents.miniswe_sandboxed_agent import app as module
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessOutcome
 from responses_api_agents.miniswe_sandboxed_agent.models import MiniSWERunRequest, SeedSessionResponse
@@ -493,3 +493,26 @@ async def test_cancellation_during_cleanup_delays_transport_release_and_verifica
     f.provider.aclose.assert_awaited_once()
     assert f.verification["termination"]["reason"] == "cancelled"
     assert not f.agent._sessions
+
+
+def test_several_workers_are_refused_only_with_the_run_path(tmp_path) -> None:
+    """Episode sessions are routed by agent_session_id; the agent's own /run replays retries from this process."""
+
+    def agent(**resources_server) -> module.MiniSWESandboxedAgent:
+        return module.MiniSWESandboxedAgent(
+            config=module.MiniSWESandboxedConfig(
+                host="localhost",
+                port=1,
+                name="agent",
+                entrypoint="app.py",
+                num_workers=2,
+                model_server={"type": "responses_api_models", "name": "model"},
+                artifacts_dir=tmp_path,
+                **resources_server,
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+    with pytest.raises(ValueError, match="needs num_workers=1: its own /run path replays a retried run"):
+        refuse_unsupported_num_workers(agent(resources_server={"type": "resources_servers", "name": "resources"}))
+    refuse_unsupported_num_workers(agent())

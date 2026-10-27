@@ -62,7 +62,12 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.rollout_observability import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
-from nemo_gym.server_utils import format_exception_with_response_body, get_response_json, raise_for_status
+from nemo_gym.server_utils import (
+    format_exception_with_response_body,
+    get_response_json,
+    is_nemo_gym_fastapi_entrypoint,
+    raise_for_status,
+)
 from nemo_gym.server_utils import request as http_request
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimInvocation,
@@ -889,3 +894,6 @@ def _is_scorable_assistant_activation_error(error: _ParticipantActivationError) 
 
 if __name__ == "__main__":
     UserSimEnvironmentServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = UserSimEnvironmentServer.run_webserver()  # noqa: F401

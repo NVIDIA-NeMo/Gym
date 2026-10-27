@@ -17,6 +17,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
+from fastapi.testclient import TestClient
 from pytest import approx, fixture
 
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -33,6 +34,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import ServerClient
+from resources_servers.browsecomp_advanced_harness import app as browsecomp_advanced_harness_app
 from resources_servers.browsecomp_advanced_harness.app import (
     BrowseRequest,
     TavilySearchRequest,
@@ -289,3 +291,19 @@ class TestApp:
         result = server._verify_answer_with_regex("Paris", "I don't know.")
         assert result.reward == approx(0.0)
         assert result.extracted_final_answer == ""
+
+    def test_each_worker_dumps_its_own_session_metrics_on_exit(
+        self, config: TavilySearchResourcesServerConfig, tmp_path, monkeypatch
+    ) -> None:
+        """With several workers, each holds only its own sessions, so a shared file would keep only the last dump."""
+        monkeypatch.setattr(browsecomp_advanced_harness_app, "__file__", str(tmp_path / "app.py"))
+        monkeypatch.setattr(browsecomp_advanced_harness_app, "is_nemo_gym_fastapi_worker", lambda: True)
+        config.dump_session_id_to_metrics_on_exit = True
+        server = TavilySearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server._session_id_to_metrics["abcd"]
+
+        with TestClient(server.setup_webserver()):
+            pass
+
+        assert not (tmp_path / "session_id_metrics.json").exists()
+        assert list(orjson.loads((tmp_path / f"session_id_metrics.{os.getpid()}.json").read_bytes())) == ["abcd"]

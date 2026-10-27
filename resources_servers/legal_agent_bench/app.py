@@ -15,6 +15,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from resources_servers.legal_agent_bench.prepare import (
     DEFAULT_RUNTIME_TASKS_DIR,
     DEFAULT_SKILLS_DIR,
@@ -83,19 +84,25 @@ class LegalAgentBenchResourcesServer(SimpleResourcesServer):
     config: LegalAgentBenchResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
-        assets = ensure_assets(
-            tasks_dir=self.config.harbor_tasks_cache_dir,
-            skills_dir=self.config.harness_skills_dir,
-            allow_download=self.config.auto_prepare_assets,
-        )
-        verifier_env = _build_verifier_env(self.config)
-        hydrate_runtime_tasks(
-            assets["tasks"],
-            self.config.harbor_tasks_dir,
-            verifier_env=verifier_env,
-            reward_mode=self.config.reward_mode,
-            cache_is_validated=True,
-        )
+        # With num_workers > 1, the main process runs setup_webserver before uvicorn starts the workers,
+        # and each worker then runs it again.
+        # Rebuilding the runtime tree replaces one shared directory through one backup path,
+        # so concurrent rebuilds in several workers could remove each other's tree.
+        # The main process has already prepared everything the workers need.
+        if not is_nemo_gym_fastapi_worker():
+            assets = ensure_assets(
+                tasks_dir=self.config.harbor_tasks_cache_dir,
+                skills_dir=self.config.harness_skills_dir,
+                allow_download=self.config.auto_prepare_assets,
+            )
+            verifier_env = _build_verifier_env(self.config)
+            hydrate_runtime_tasks(
+                assets["tasks"],
+                self.config.harbor_tasks_dir,
+                verifier_env=verifier_env,
+                reward_mode=self.config.reward_mode,
+                cache_is_validated=True,
+            )
         return super().setup_webserver()
 
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
@@ -117,3 +124,6 @@ def _build_verifier_env(config: LegalAgentBenchResourcesServerConfig) -> dict[st
 
 if __name__ == "__main__":
     LegalAgentBenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = LegalAgentBenchResourcesServer.run_webserver()  # noqa: F401

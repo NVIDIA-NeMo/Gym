@@ -50,6 +50,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 
 
 ANSWER_PATTERN = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.IGNORECASE | re.DOTALL)
@@ -679,3 +680,6 @@ class SavTracksResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     SavTracksResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SavTracksResourcesServer.run_webserver()  # noqa: F401
