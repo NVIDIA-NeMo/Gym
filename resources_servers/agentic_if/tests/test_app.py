@@ -43,7 +43,7 @@ from resources_servers.agentic_if.episode import resources
 from resources_servers.agentic_if.episode.artifacts import load_episode_record
 from resources_servers.agentic_if.episode.judging import JudgeUsage, judge_prompt, vote_key
 from resources_servers.agentic_if.if_grading import judge as judge_module
-from resources_servers.agentic_if.if_grading.configuration import load_config
+from resources_servers.agentic_if.if_grading.configuration import load_config, votes_for
 from resources_servers.agentic_if.task_data import TaskData
 from resources_servers.agentic_if.task_variants.builder import digest
 from resources_servers.agentic_if.task_variants.runtime import RuntimeSpec, seal_runtime_row, validate_runtime
@@ -1004,10 +1004,10 @@ async def test_a_row_without_a_system_message_needs_an_agent_without_its_own(wor
 # ------------------------------------------------------------------------------------------------- continuation
 
 
-@pytest.mark.asyncio
-async def test_a_continuation_row_replays_its_prefix_at_seed_and_grades_from_the_fresh_turn(
-    world, tmp_path, monkeypatch
-):
+async def seed_continuation(world, tmp_path, monkeypatch, checks):
+    """Seed a continuation row whose prefix changed a file of a real Git repository, and set the harness output of its
+    fresh turn ("Continue", answered DONE). Returns the seed reply, the row, the session ID, the repository and the
+    prefix export."""
     repo = tmp_path / "repo"
     repo.mkdir()
 
@@ -1044,14 +1044,6 @@ async def test_a_continuation_row_replays_its_prefix_at_seed_and_grades_from_the
         "source_task_sha256": backend_task_digest(fields),
         "source_tools_sha256": digest(tools),
     }
-    checks = [
-        {
-            "id": "end",
-            "kind": "exact",
-            "parameters": {"value": "DONE"},
-            "scope": {"places": ["final"], "activation": "continuation_start"},
-        }
-    ]
     row = swe_row(fields=fields, continuation=continuation, checks=checks, text="Continue")
     local = LocalTransport()
 
@@ -1061,12 +1053,6 @@ async def test_a_continuation_row_replays_its_prefix_at_seed_and_grades_from_the
     monkeypatch.setattr(resources.AsyncSandbox, "connect", connect)
     monkeypatch.setattr(opencode_bundle, "SESSION_IMPORT_PATH", str(tmp_path / "bundle" / "prefix-export.json"))
     reply, session_id = await seed(world, row)
-    assert reply.sandbox_access.workdir == str(repo)
-    assert (repo / "file").read_text() == "changed by the prefix"
-    assert json.loads((tmp_path / "bundle" / "prefix-export.json").read_text()) == prefix
-    # The bundle is staged after the replay, and the import file after the bundle.
-    assert world.timeline.index("stage") > world.timeline.index("tasks/seed_session")
-
     root = deepcopy(prefix)
     root["messages"] += [
         message("fresh-user", "user", text("Continue"), session="ses_prefix", created=10),
@@ -1074,6 +1060,28 @@ async def test_a_continuation_row_replays_its_prefix_at_seed_and_grades_from_the
     ]
     fresh = final_call_record(session="ses_prefix", message_id="fresh-reply")
     world.outputs = bundle_outputs([root], call_records=[fresh])
+    return reply, row, session_id, repo, prefix
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_row_replays_its_prefix_at_seed_and_grades_from_the_fresh_turn(
+    world, tmp_path, monkeypatch
+):
+    checks = [
+        {
+            "id": "end",
+            "kind": "exact",
+            "parameters": {"value": "DONE"},
+            "scope": {"places": ["final"], "activation": "continuation_start"},
+        }
+    ]
+    reply, row, session_id, repo, prefix = await seed_continuation(world, tmp_path, monkeypatch, checks)
+    assert reply.sandbox_access.workdir == str(repo)
+    assert (repo / "file").read_text() == "changed by the prefix"
+    assert json.loads((tmp_path / "bundle" / "prefix-export.json").read_text()) == prefix
+    # The bundle is staged after the replay, and the import file after the bundle.
+    assert world.timeline.index("stage") > world.timeline.index("tasks/seed_session")
+
     result = await verify(world, row, session_id)
     assert result.mask_sample is False and result.evidence.status == "complete", result.evidence.issues
     assert result.evidence.continuation_start == 3
@@ -1086,6 +1094,28 @@ async def test_a_continuation_row_replays_its_prefix_at_seed_and_grades_from_the
         "tool_outputs_match": True,
     }
     assert result.if_result.if_all == 1
+
+
+@pytest.mark.asyncio
+async def test_a_judge_outage_on_the_prefix_question_alone_is_a_judge_failure(world, tmp_path, monkeypatch):
+    checks = [
+        {
+            "id": "polite",
+            "kind": "judge",
+            "rubric": "Never apologize.",
+            "scope": {"places": ["run"], "check_prefix": True},
+        }
+    ]
+    _, row, session_id, _, _ = await seed_continuation(world, tmp_path, monkeypatch, checks)
+    config = load_config()
+    votes, attempts = votes_for(config, "run"), config["model"]["attempts"]
+    # The whole session's votes are answered; every attempt on the prefix question fails to connect.
+    world.backends.judge_error = [None] * votes + [ClientConnectionError("judge unreachable")] * (votes * attempts)
+    with pytest.raises(JudgeError, match="check polite"):
+        await verify(world, row, session_id)
+    world.backends.judge_error = None
+    result = await verify(world, row, session_id)
+    assert result.if_result.if_all == 1 and result.if_result.checks[0].details["prefix_errors"] == []
 
 
 # ------------------------------------------------------------------------------------- with the real plugin bundle

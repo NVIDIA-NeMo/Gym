@@ -150,15 +150,16 @@ class JudgeLedger:
         """Why a check errored because the judge could not be reached, or None if no check did."""
         with self._lock:
             unanswered = self._sent - self._answered
-            answered_any = bool(self._answered)
         if not unanswered:
             return None
         for check in result.checks:
             if check.status != "error":
                 continue
+            # The votes of the graded units and of a prefix judgment that got no verdict (``prefix_errors``).
             votes = [
                 vote
-                for unit in check.details.get("units") or []
+                for section in ("units", "prefix_errors")
+                for unit in check.details.get(section) or []
                 if isinstance(unit, dict)
                 for vote in (unit.get("metadata") or {}).get("votes") or []
                 if isinstance(vote, dict)
@@ -169,7 +170,4 @@ class JudgeLedger:
                     vote_key(judge_hash, prompt, metadata.get("vote")) == metadata.get("key") for prompt in unanswered
                 ):
                     return f"check {check.id}: {vote.get('explanation')}"
-            # A check whose units were not kept (a prefix judgment) only counts during a complete outage.
-            if not votes and not answered_any and "No judge verdict" in check.explanation:
-                return f"check {check.id}: {check.explanation}"
         return None

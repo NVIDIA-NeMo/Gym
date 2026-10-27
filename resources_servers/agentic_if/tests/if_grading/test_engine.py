@@ -474,7 +474,12 @@ def test_a_whole_run_judge_rule_judges_its_prefix_with_the_prefix_question():
     assert context == "run" and shown == "ASSISTANT: WRONG"  # only the steps before the continuation
     result = engine.grade([rule], continued_session(), judge=PrefixJudge("error"))
     assert result.checks[0].status == "error"
-    assert "prefix judgment failed: Controlled error" in result.checks[0].explanation
+    assert result.checks[0].explanation == "prefix judgment failed: Controlled error"
+    # The whole session's judgment and the prefix judgment without a verdict are both kept, with their votes.
+    assert [unit["status"] for unit in result.checks[0].details["units"]] == ["pass"]
+    assert result.checks[0].details["prefix_errors"] == [
+        {"where": "run", "step": None, "status": "error", "explanation": "Controlled error", "metadata": {}}
+    ]
 
 
 @pytest.mark.parametrize(

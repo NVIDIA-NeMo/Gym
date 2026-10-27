@@ -6,8 +6,6 @@ from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 
-from pydantic import JsonValue
-
 from .checkers import calls, language, text
 from .checkers.run import Facts, Step, call_matches, evidence_steps, facts_from_steps, select
 from .contracts import CheckResult, IFResult, JudgeDecision, ResolvedCheck, SessionEvidence
@@ -192,7 +190,9 @@ def _evaluate(
     return units
 
 
-def _prefix_failures(check: ResolvedCheck, evidence: SessionEvidence, judge: Judge) -> list[dict[str, JsonValue]]:
+def _prefix_units(check: ResolvedCheck, evidence: SessionEvidence, judge: Judge) -> list[Unit]:
+    """The units of a `check_prefix` check graded on the steps before the continuation, in the places a prefix can
+    settle; none without a prefix."""
     if (
         not check.scope.check_prefix
         or evidence.continuation_start is None
@@ -203,10 +203,8 @@ def _prefix_failures(check: ResolvedCheck, evidence: SessionEvidence, judge: Jud
     if not steps:
         return []
     if check.kind == "judge" and check.scope.places == ["run"]:
-        answer = _judge_unit(check, steps, "run", None, judge, question=PREFIX_QUESTION.format(question=check.rubric))
-        if answer.status == "error":
-            raise ValueError(f"prefix judgment failed: {answer.explanation}")
-        return [{"where": "run", "step": None, "why": answer.explanation}] if answer.status == "fail" else []
+        question = PREFIX_QUESTION.format(question=check.rubric)
+        return [Unit("run", None, _judge_unit(check, steps, "run", None, judge, question=question))]
     places = [
         where
         for where in check.scope.places
@@ -220,17 +218,9 @@ def _prefix_failures(check: ResolvedCheck, evidence: SessionEvidence, judge: Jud
     if not places:
         return []
     scoped = check.model_copy(update={"scope": check.scope.model_copy(update={"places": places})})
-    units = _evaluate(
+    return _evaluate(
         scoped, steps, facts_from_steps(steps, dict(check.parameters.get("facts") or {}) | evidence.facts), judge
     )
-    errors = [unit.decision.explanation for unit in units if unit.decision.status == "error"]
-    if errors:
-        raise ValueError("prefix judgment failed: " + "; ".join(errors))
-    return [
-        {"where": unit.where, "step": unit.index, "why": unit.decision.explanation}
-        for unit in units
-        if unit.decision.status == "fail"
-    ]
 
 
 def _grade_check(check: ResolvedCheck, evidence: SessionEvidence, judge: Judge) -> CheckResult:
@@ -258,6 +248,14 @@ def _grade_check(check: ResolvedCheck, evidence: SessionEvidence, judge: Judge) 
         else "not_applicable"
     )
     explanations = [unit.decision.explanation for unit in units if unit.decision.status == status]
+    prefix = _prefix_units(check, evidence, judge)
+    prefix_errors = [unit for unit in prefix if unit.decision.status == "error"]
+    if prefix_errors:
+        if status != "error":
+            status, explanations = "error", []
+        explanations.append(
+            "prefix judgment failed: " + "; ".join(unit.decision.explanation for unit in prefix_errors)
+        )
     return CheckResult(
         id=check.id,
         status=status,
@@ -266,7 +264,16 @@ def _grade_check(check: ResolvedCheck, evidence: SessionEvidence, judge: Judge) 
             "units": [
                 {"where": unit.where, "step": unit.index, **unit.decision.model_dump(mode="json")} for unit in units
             ],
-            "prefix_failures": _prefix_failures(check, evidence, judge),
+            "prefix_failures": [
+                {"where": unit.where, "step": unit.index, "why": unit.decision.explanation}
+                for unit in prefix
+                if unit.decision.status == "fail"
+            ],
+            # A prefix judgment without a verdict keeps its votes, so an outage on its own question can be told apart.
+            "prefix_errors": [
+                {"where": unit.where, "step": unit.index, **unit.decision.model_dump(mode="json")}
+                for unit in prefix_errors
+            ],
         },
     )
 

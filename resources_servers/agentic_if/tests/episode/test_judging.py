@@ -87,3 +87,27 @@ def test_only_a_question_no_call_reached_makes_an_outage():
     ledger.failed("unreachable", failure(http_error(503)))
     both = IFResult(checks=[errored("unreadable"), errored("unreachable")], if_all=None, if_frac=None)
     assert ledger.outage(both, "judge-hash") == "check unreachable: No judge verdict after 1 attempt(s)"
+
+
+def test_a_prefix_question_no_call_reached_is_an_outage_though_the_whole_session_was_answered():
+    answered = {
+        "status": "pass",
+        "explanation": "yes",
+        "metadata": {"vote": 0, "key": vote_key("judge-hash", "run", 0)},
+    }
+    check = CheckResult(
+        id="whole-run",
+        status="error",
+        explanation="prefix judgment failed: No judge verdict after 1 attempt(s)",
+        details={"units": [{"metadata": {"votes": [answered]}}], "prefix_errors": errored("prefix").details["units"]},
+    )
+    result = IFResult(checks=[check], if_all=None, if_frac=None)
+    ledger = JudgeLedger()
+    ledger.replied("run", reply("resp-1"))
+    ledger.failed("prefix", failure(ClientConnectionError("refused")))
+    assert ledger.outage(result, "judge-hash") == "check whole-run: No judge verdict after 1 attempt(s)"
+    # A prefix question the judge answered unreadably stays a graded check error.
+    ledger = JudgeLedger()
+    ledger.replied("run", reply("resp-1"))
+    ledger.failed("prefix", failure(ValueError("not a Responses object")))
+    assert ledger.outage(result, "judge-hash") is None
