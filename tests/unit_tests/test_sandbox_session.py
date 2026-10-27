@@ -705,6 +705,47 @@ async def test_expire_is_bounded_when_the_marker_cannot_be_written(session):
     await session.close(timeout=1)
 
 
+@pytest.mark.parametrize("marker_landed", [True, False])
+async def test_failed_expire_write_keeps_the_stop_only_if_the_marker_landed(session, receipt_reader, marker_landed):
+    launched = asyncio.Event()
+    finish = asyncio.Event()
+    written = set()
+
+    async def exec_(command, **_):
+        if "--expire-file" in command:
+            launched.set()
+            await finish.wait()
+        if "echo present" in command:
+            present = EXPIRE_MARKER in written
+            return SandboxExecResult(stdout="present\n" if present else "", stderr="", return_code=0 if present else 1)
+        return OK
+
+    async def upload(source, target):
+        if target == EXPIRE_MARKER:
+            if marker_landed:
+                written.add(target)
+            raise ConnectionError("acknowledgment lost")
+
+    session.sandbox.exec.side_effect = exec_
+    session.sandbox.upload.side_effect = upload
+    activation = asyncio.create_task(execute(session))
+    try:
+        await asyncio.wait_for(launched.wait(), 2)
+        with pytest.raises(RuntimeError, match="Could not request test expiry"):
+            await session.expire(timeout=1, reason="budget")
+        assert session.expire_reason is None
+        # The harness ends at a timeout: the stop's if its marker landed, its own deadline otherwise.
+        receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": -15, "timed_out": True})
+        finish.set()
+        assert await asyncio.wait_for(activation, 5) == "transcript"
+    finally:
+        activation.cancel()
+        await asyncio.gather(activation, return_exceptions=True)
+    assert session.expired is marker_landed
+    assert session.expire_reason == ("budget" if marker_landed else None)
+    await session.close(timeout=1)
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="process supervision requires Linux")
 @pytest.mark.parametrize("sessions, concurrency", [(1, 1), (8, 8)])
 async def test_expire_reaches_harnesses_that_hold_every_local_exec_slot(tmp_path, monkeypatch, sessions, concurrency):

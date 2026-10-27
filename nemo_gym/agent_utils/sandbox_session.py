@@ -7,6 +7,7 @@ import logging
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
+from shlex import quote
 from time import monotonic
 from typing import cast
 
@@ -113,6 +114,9 @@ class SandboxSession[Artifacts]:
     _expire_requested: bool = field(default=False, init=False)
     # The caller's reason for the expiry ``expire`` requested, if it gave one.
     expire_reason: str | None = field(default=None, init=False)
+    # An expiry whose marker write failed, possibly after the marker reached the sandbox, and its reason.
+    _unconfirmed_expiry: bool = field(default=False, init=False)
+    _unconfirmed_expire_reason: str | None = field(default=None, init=False)
 
     @property
     def closing(self) -> bool:
@@ -254,6 +258,7 @@ class SandboxSession[Artifacts]:
             # An expiry applies to the activation it was requested for; one requested before the first launch stays.
             self._expire_requested = False
             self.expire_reason = None
+            self._unconfirmed_expiry = False
         if self._session_root is None:
             self._session_root = self.session_dir
         self.session_dir = session_dir
@@ -286,6 +291,8 @@ class SandboxSession[Artifacts]:
             except BaseException:
                 self._expire_requested = False
                 self.expire_reason = None
+                # The marker may have landed before the write failed; finalization keeps the stop only if it did.
+                self._unconfirmed_expiry, self._unconfirmed_expire_reason = True, reason
                 raise
         return True
 
@@ -346,6 +353,7 @@ class SandboxSession[Artifacts]:
         if self._stage_task is not None:
             await self._cancel_and_wait(self._stage_task, timeout=timeout)
         await self.stop_harness(timeout=timeout)
+        await self._confirm_unacknowledged_expiry(timeout=timeout)
         if self.launch_started and not self._capture_attempted and self._collect is not None:
             if self.sandbox_stopped:
                 self.capture_error = RuntimeError(f"{self.harness} sandbox stopped before artifact capture")
@@ -359,6 +367,20 @@ class SandboxSession[Artifacts]:
                     LOG.exception("%s artifact capture failed after confirmed harness termination", self.harness)
             self._capture_attempted = True
         await self._release_exec(timeout=timeout)
+
+    async def _confirm_unacknowledged_expiry(self, *, timeout: float) -> None:
+        """Keep a stop whose marker write failed only if the marker is in place and the receipt timed out."""
+        if not self._unconfirmed_expiry or self._expire_requested or not (self.cleanup and self.cleanup["timed_out"]):
+            return
+        self._unconfirmed_expiry = False
+        marker = quote(f"{self.session_dir}/{EXPIRE_REQUEST_FILE}")
+        try:
+            probe = await self.sandbox.exec(f"[ -e {marker} ] && echo present", cwd=self.workdir, timeout_s=timeout)
+        except Exception:
+            LOG.warning("Could not check for the %s expiry marker", self.harness, exc_info=True)
+            return
+        if probe.return_code == 0 and not probe.error_type and probe.stdout.strip() == "present":
+            self._expire_requested, self.expire_reason = True, self._unconfirmed_expire_reason
 
     async def _release_exec(self, *, timeout: float) -> None:
         if (
