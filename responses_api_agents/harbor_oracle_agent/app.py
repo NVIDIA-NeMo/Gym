@@ -146,7 +146,7 @@ class OracleAgent(SimpleResponsesAPIAgent):
     def _session_for(self, request: Request) -> OracleSession:
         session_id = self._agent_session_id_from_request(request)
         if session_id is None:
-            raise HTTPException(404, "Unknown oracle agent session; seed it first")
+            raise HTTPException(404, "No seeded oracle agent session for this request")
         state = self._require_agent_session(session_id)
         if not isinstance(state, OracleSession):
             raise TypeError("Expected an oracle agent session state")

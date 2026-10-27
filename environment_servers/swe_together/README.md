@@ -85,7 +85,7 @@ recipe-selected verified OpenCode/ripgrep files read-only.
 Agents install their own runtimes at seed. Candidate swaps must implement native
 continuation and the requested observation capabilities; unsupported adapters fail
 before execution. Judge swaps require ordinary seeded Responses calls, relative timeouts,
-and truthful close receipts. Benchmark-specific instances live in the recipe, so
+and truthful close responses. Benchmark-specific instances live in the recipe, so
 other benchmarks can compose the same base agent configurations independently.
 
 Grading lifetimes vary by benchmark: [SWE-bench](../../resources_servers/swebench/app.py)

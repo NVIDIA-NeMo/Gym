@@ -32,7 +32,7 @@ class CandidateTurn(BaseModel):
 
         Closing fences delayed requests and collects the adapter's native evidence.
         An activation that never established a native session remains unavailable.
-        The complete cumulative trajectory and observations stay in the close receipt.
+        The complete cumulative trajectory and observations stay in the close response.
         """
         observations = close.agent_observations.model_dump(mode="json") if close.agent_observations else {}
         roots = [

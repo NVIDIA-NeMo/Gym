@@ -426,7 +426,7 @@ def test_a_sandbox_that_fails_to_stop_keeps_its_episode_for_a_retried_close(tmp_
     provider.failing_closes = 1
     close = {key: seed[key] for key in ("resources_session_id", "episode_id")}
     assert client.post("/close_session", json=close).status_code == 500
-    assert "session-one" in resource._episodes and "session-one" not in resource._closed
+    assert "session-one" in resource._episodes and "session-one" not in resource._fences
     assert client.post("/close_session", json=close).status_code == 200
     assert provider.stopped == ["sandbox-0"] and not resource._episodes
 
@@ -473,7 +473,7 @@ async def test_a_close_racing_a_seed_waits_for_the_sandbox_and_stops_it(tmp_path
     provider.create_gate.set()
     await seeding
     await closing
-    assert provider.stopped == ["sandbox-0"] and not resource._episodes and "session-one" in resource._closed
+    assert provider.stopped == ["sandbox-0"] and not resource._episodes and "session-one" in resource._fences
     with pytest.raises(api.HTTPException) as refused:
         await resource.seed_session(SimpleNamespace(session={}), seed_request(task))
     assert refused.value.status_code == 409 and len(provider.specs) == 1

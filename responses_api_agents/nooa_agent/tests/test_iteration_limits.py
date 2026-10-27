@@ -226,7 +226,7 @@ async def test_real_codeact_environment_verifies_partial_response_once(
         assert len(model_calls) == 2
         assert verified == []
         assert _paths(client).count("/verify") == 0
-        receipt = next(iter(instance._closed_session_records.values())).close_response
+        receipt = next(iter(instance._fenced_session_records.values())).close_response
         assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in receipt.agent_observations.gaps}
         return
     assert result.failure is None
@@ -332,7 +332,7 @@ async def test_codeact_cleanup_failure_after_iteration_exhaustion_skips_verifica
     assert len(model_calls) == 1
     assert "/verify" not in _paths(client)
     assert _paths(client)[-2:] == ["/v1/agent_sessions/close", "/close_session"]
-    receipt = next(iter(instance._closed_session_records.values())).close_response
+    receipt = next(iter(instance._fenced_session_records.values())).close_response
     gaps = {gap.code for gap in receipt.agent_observations.gaps}
     assert NOOATerminationReason.INFRASTRUCTURE_ERROR in gaps
     assert NOOATerminationReason.MAX_ITERATIONS_EXCEEDED not in gaps

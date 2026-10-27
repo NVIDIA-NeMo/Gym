@@ -521,7 +521,7 @@ async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypat
     with pytest.raises(HTTPException) as error:
         await agent.close_agent_session(request, close)
     assert error.value.status_code == 409
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
     with pytest.raises(HTTPException) as error:
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     assert error.value.status_code == 409
@@ -579,7 +579,7 @@ async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     clock[0] += agent.config.session_close_retry_window_seconds
     await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
 
 
 @pytest.mark.parametrize("window", [0, -1, float("inf")])
@@ -1206,9 +1206,9 @@ async def test_expired_receipt_cookie_cannot_seed_or_activate(setup, monkeypatch
     close = AgentCloseSessionRequest(**close_body(body.agent_session_id))
     await agent.close_agent_session(request, close)
     clock[0] = 111.0
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.close_agent_session(request, close)
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.seed_agent_session(request, body)
     with pytest.raises(HTTPException):
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))

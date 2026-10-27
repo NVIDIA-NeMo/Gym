@@ -995,7 +995,7 @@ class _SandboxAgent(SimpleResponsesAPIAgent):
 
     async def retire_agent_session(self, session_key: str) -> None:
         self.events.append(f"freed {session_key}")
-        self._free_session(session_key)
+        self._release_retired_session(session_key)
 
 
 async def test_a_retire_waits_for_a_seed_in_progress_which_frees_what_it_built() -> None:

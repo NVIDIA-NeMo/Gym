@@ -44,7 +44,8 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
-    ResourcesSessionFence,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
     SimpleResourcesServer,
     lost_session_verification,
 )
@@ -217,7 +218,10 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
         # Typed sessions, which an Environment Server seeds and closes by resources_session_id.
         self._session_id_to_identity: dict[str, tuple[EpisodeId, TaskId]] = {}
-        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._locks = ResourcesSessionLocks()
+        self._fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(
+            self.config.session_close_retry_window_seconds
+        )
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -248,24 +252,24 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             return {"closed": True}
 
         try:
-            typed = ResourcesCloseSessionRequest.model_validate(body)
+            close = ResourcesCloseSessionRequest.model_validate(body)
         except ValidationError as error:
             raise RequestValidationError(error.errors()) from error
-        session_id = typed.resources_session_id
+        session_id = close.resources_session_id
         # The body names the session, so a close without a cookie (after a lost seed reply) still releases it.
-        async with self._fence.locked(session_id):
-            closed_episode_id = self._fence.closed_episode(session_id)
-            if closed_episode_id is not None:
-                if typed.episode_id != closed_episode_id:
+        async with self._locks.locked(session_id):
+            fenced_episode_id = self._fences.get(session_id)
+            if fenced_episode_id is not None:
+                if close.episode_id != fenced_episode_id:
                     raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
                 request.session.pop(SESSION_ID_KEY, None)
                 return ResourcesCloseSessionResponse(resources_session_id=session_id)
             identity = self._session_id_to_identity.get(session_id)
-            if identity is not None and typed.episode_id != identity[0]:
+            if identity is not None and close.episode_id != identity[0]:
                 raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
             await self._stop_session_sandbox(session_id)
             self._session_id_to_identity.pop(session_id, None)
-            self._fence.mark_closed(session_id, typed.episode_id)
+            self._fences.fence(session_id, close.episode_id)
             request.session.pop(SESSION_ID_KEY, None)
             return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
@@ -279,7 +283,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
 
     async def shutdown(self) -> None:
         self._session_id_to_identity.clear()
-        self._fence.clear()
+        self._fences.clear()
         for session_id in list(self._session_id_to_sandbox):
             try:
                 await self._stop_session_sandbox(session_id)
@@ -363,15 +367,15 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         session_id = body.resources_session_id
         # The cookie is bound only once the seed succeeds: a refused seed's reply would otherwise point this client at
         # the session it was refused, which may belong to another episode.
-        async with self._fence.locked(session_id):
-            self._fence.raise_if_closed(session_id)
+        async with self._locks.locked(session_id):
+            self._fences.raise_if_fenced(session_id)
             identity = self._session_id_to_identity.get(session_id)
             if identity is not None:
                 if identity != (body.episode_id, body.task_id):
                     raise ResourcesSessionConflictError(
                         "resources_session_id is already bound to another episode or task"
                     )
-                response = await self._typed_seed_response(session_id)
+                response = await self._episode_seed_response(session_id)
                 request.session[SESSION_ID_KEY] = session_id
                 return response
             try:
@@ -382,7 +386,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 raise ResourcesSeedRejectedError("TaskId does not match the SWE-bench Pro instance_id")
             await self._seed_session(session_id, task)
             try:
-                response = await self._typed_seed_response(session_id)
+                response = await self._episode_seed_response(session_id)
             except BaseException:
                 # The agent cannot reach a sandbox it was never handed, so stop it here.
                 await self._stop_session_sandbox(session_id)
@@ -391,7 +395,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             request.session[SESSION_ID_KEY] = session_id
             return response
 
-    async def _typed_seed_response(self, session_id: str) -> ResourcesSeedSessionResponse:
+    async def _episode_seed_response(self, session_id: str) -> ResourcesSeedSessionResponse:
         return ResourcesSeedSessionResponse(
             resources_session_id=session_id,
             sandbox_access=SandboxAccess(
@@ -505,7 +509,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         body: SWEBenchProVerifyRequest,
     ) -> SWEBenchProVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
-        # A session with no task sandbox (an earlier verify consumed it, a close released it, or the server never held
+        # A session with no task sandbox (an earlier verify released it, a close released it, or the server never held
         # it) has nothing left to grade: grading would score an empty patch as a policy that changed nothing, so the
         # sample is masked. A failed patch extraction from a live sandbox stays an unmasked failure, since the agent
         # can cause it.

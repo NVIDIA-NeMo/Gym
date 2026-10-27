@@ -181,7 +181,7 @@ class TestApp:
         assert close.status_code == 200
         # The route reached this server's close, not the base default, so the session was released.
         assert resources_session_id not in server._session_episodes
-        assert server._fence.closed_episode(resources_session_id) == episode_id
+        assert server._fences.get(resources_session_id) == episode_id
 
     def test_close_of_a_closed_session_naming_another_episode_is_refused(self) -> None:
         server = self._server()
@@ -195,4 +195,4 @@ class TestApp:
         assert close(episode_id) == 200
         assert close(EpisodeId(rollout_id="other", attempt=0)) == 409
         # The refused close leaves the record of the episode that closed the session.
-        assert server._fence.closed_episode("resources-session") == episode_id
+        assert server._fences.get("resources-session") == episode_id

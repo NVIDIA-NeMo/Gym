@@ -116,14 +116,14 @@ for a custom Gym provider. Set per-call generation settings on the Model Server 
 captured requests to verify the effective values. A configured `reasoning_effort` is likewise
 rejected in sandbox sessions. An explicit request model must match the configured model.
 
-Session identity, immutable seed binding, seed/close locking, and close receipts use Gym's
+Session identity, immutable seed binding, seed and close locks, and fences use Gym's
 shared agent-session implementation. Setup returns a session cookie only after installation
 succeeds. Failed setup with failed cleanup retains cleanup-only state through
 `AgentSessionSetupError`: activation/reseeding are rejected, and close can retry.
 
 Each session supports one logical activation. Identical requests join the running invocation
 or replay its result/error; changed requests are rejected. A disconnected HTTP waiter does
-not cancel the invocation. Session close owns cancellation. Shared successful close receipts
+not cancel the invocation. Session close owns cancellation. The shared fence and saved reply of a successful close
 last `session_close_retry_window_seconds` (default 300 seconds) without renewal on retries.
 Stale cookies never fall back to host execution. State is process-local; Resources/provider
 own sandbox expiry and crash recovery. There is no separate per-agent session-expiry timer.

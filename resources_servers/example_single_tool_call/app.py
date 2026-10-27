@@ -29,7 +29,8 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
-    ResourcesSessionFence,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
     SimpleResourcesServer,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
@@ -63,11 +64,12 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
     checkpoint_mode = "stateless"
     config: SimpleWeatherResourcesServerConfig
     _session_episodes: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
-    _fence: ResourcesSessionFence = PrivateAttr()
+    _locks: ResourcesSessionLocks = PrivateAttr(default_factory=ResourcesSessionLocks)
+    _fences: ResourcesSessionFences[EpisodeId] = PrivateAttr()
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
-        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -85,8 +87,8 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
 
         resources_session_id = body.resources_session_id
         # A server whose seed or close awaits needs the lock; this one takes it so it reads as the pattern to copy.
-        async with self._fence.locked(resources_session_id):
-            self._fence.raise_if_closed(resources_session_id)
+        async with self._locks.locked(resources_session_id):
+            self._fences.raise_if_fenced(resources_session_id)
             identity = self._session_episodes.setdefault(resources_session_id, (body.episode_id, body.task_id))
             if identity != (body.episode_id, body.task_id):
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
@@ -95,15 +97,15 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         # Sessions are keyed by resources_session_id, not the cookie's session id, so the body names the session.
         resources_session_id = body.resources_session_id
-        async with self._fence.locked(resources_session_id):
-            closed_episode = self._fence.closed_episode(resources_session_id)
-            if closed_episode is not None and closed_episode != body.episode_id:
+        async with self._locks.locked(resources_session_id):
+            fenced_episode = self._fences.get(resources_session_id)
+            if fenced_episode is not None and fenced_episode != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
             identity = self._session_episodes.get(resources_session_id)
             if identity is not None and body.episode_id != identity[0]:
                 raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
             self._session_episodes.pop(resources_session_id, None)
-            self._fence.mark_closed(resources_session_id, body.episode_id)
+            self._fences.fence(resources_session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
 
     async def get_weather(self, body: GetWeatherRequest) -> GetWeatherResponse:

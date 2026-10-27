@@ -45,9 +45,11 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
-    ResourcesSessionFence,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
     SimpleResourcesServer,
 )
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.server_utils import SESSION_ID_KEY
 from nemo_gym.verifier_fixture import VerifierFixture
 from resources_servers.rna_design.verifier_fixture import create_server, invoke
@@ -148,11 +150,12 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
     config: RnaDesignResourcesServerConfig
     workers: dict[str, ToolWorker] = Field(default_factory=dict)
     tool_names: dict[str, str] = Field(default_factory=dict)  # model-facing name -> registry name
-    _fence: ResourcesSessionFence = PrivateAttr()
+    _locks: ResourcesSessionLocks = PrivateAttr(default_factory=ResourcesSessionLocks)
+    _fences: ResourcesSessionFences[EpisodeId] = PrivateAttr()
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
         sys.path.insert(0, str(AGENT_DIR))
         from prepare import ensure_suites
         from rds import registry
@@ -209,9 +212,9 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
 
     async def seed_session(self, request: Request, body: RnaDesignSeedSessionRequest) -> RnaDesignSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
-        # One seed or close per session at a time, and no seed may reopen a session that was just closed.
-        async with self._fence.locked(session_id):
-            self._fence.raise_if_closed(session_id)
+        # One seed or close per session at a time, and no seed may reopen a session whose fence has not expired.
+        async with self._locks.locked(session_id):
+            self._fences.raise_if_fenced(session_id)
             suite_path = self._suite_path(body.suite)  # before any process starts, so a bad row leaves nothing running
             # A rollout that fails before /verify never closes its session. Close it on a re-seed, or once it is stale.
             now = time.monotonic()
@@ -261,11 +264,11 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         """Release a rollout's tool worker, named by its seed reply's resources_session_id, as a harness does when it
         gives up on the rollout. Closing a session that is gone or was never seeded succeeds."""
-        async with self._fence.locked(body.resources_session_id):
+        async with self._locks.locked(body.resources_session_id):
             if worker := self.workers.get(body.resources_session_id):
                 await worker.close()
                 self.workers.pop(body.resources_session_id, None)  # only once closed, so a failed close can be retried
-            self._fence.mark_closed(body.resources_session_id, body.episode_id)
+            self._fences.fence(body.resources_session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
     async def campaign_state(self, request: Request, body: dict) -> dict:

@@ -115,24 +115,24 @@ def client_with_task_sandbox(server: SWEBenchProResourcesServer) -> TestClient:
     return client
 
 
-def typed_task_data() -> dict:
+def episode_task_data() -> dict:
     task_data = request_body()
     task_data.pop("responses_create_params")
     task_data.pop("response")
     return task_data
 
 
-def typed_seed_json(session_id: str, rollout_id: str = "rollout", task_data: dict | None = None) -> dict:
+def episode_seed_json(session_id: str, rollout_id: str = "rollout", task_data: dict | None = None) -> dict:
     return {
         "resources_session_id": session_id,
         "episode_id": {"rollout_id": rollout_id, "attempt": 0},
         "task_id": {"taskset": "swebench_pro", "task_id": "instance_example"},
-        "task_data": typed_task_data() if task_data is None else task_data,
+        "task_data": episode_task_data() if task_data is None else task_data,
     }
 
 
 def stub_task_sandboxes(monkeypatch: MonkeyPatch, server: SWEBenchProResourcesServer) -> AsyncMock:
-    """Make typed seeds open fake task sandboxes; return the ``_create_sandbox`` mock."""
+    """Make episode seeds open fake task sandboxes; return the ``_create_sandbox`` mock."""
     create = AsyncMock(
         side_effect=lambda body, files=None: SimpleNamespace(
             _handle=SimpleNamespace(sandbox_id="sandbox-id"),
@@ -677,7 +677,7 @@ def test_environment_server_episode_http_lifecycle_preserves_verdict_and_private
 
 
 @pytest.mark.asyncio
-async def test_repeated_verify_of_a_typed_session_is_masked_after_task_sandbox_is_consumed(
+async def test_repeated_verify_of_an_episode_session_is_masked_after_task_sandbox_is_released(
     monkeypatch: MonkeyPatch,
 ) -> None:
     server = make_server(golden=False, apply_anti_cheating=False)
@@ -743,7 +743,7 @@ def test_verify_of_a_session_this_server_never_held_is_masked_without_grading(mo
 
 @pytest.mark.asyncio
 async def test_repeated_verify_of_an_agent_run_session_is_masked(monkeypatch: MonkeyPatch) -> None:
-    """A session an Agent's /run seeded through the cookie has no typed identity; a resent verify is still masked."""
+    """A session an Agent's /run seeded through the cookie has no episode identity; a resent verify is still masked."""
     server = make_server(golden=False, apply_anti_cheating=False, inconclusive_verification_retries=0)
     task_sandbox = SimpleNamespace(
         exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
@@ -776,7 +776,7 @@ async def test_repeated_verify_of_an_agent_run_session_is_masked(monkeypatch: Mo
 async def test_golden_patch_verify_of_a_closed_session_is_still_graded(monkeypatch: MonkeyPatch) -> None:
     """The golden patch comes from the request, so a released task sandbox leaves it gradable."""
     server = make_server(golden=True, inconclusive_verification_retries=0)
-    server._fence.mark_closed("session", EpisodeId(rollout_id="rollout"))
+    server._fences.fence("session", EpisodeId(rollout_id="rollout"))
     create = AsyncMock(return_value=SimpleNamespace(stop=AsyncMock()))
     monkeypatch.setattr(server, "_create_sandbox", create)
     monkeypatch.setattr(
@@ -827,7 +827,7 @@ def test_graded_verify_ignores_response_fields_the_caller_sent(monkeypatch: Monk
 @pytest.mark.parametrize(
     "task_data,message",
     [
-        (typed_task_data() | {"instance_id": "another_instance"}, "TaskId does not match"),
+        (episode_task_data() | {"instance_id": "another_instance"}, "TaskId does not match"),
         ({"repo": "example/repo"}, "task_data is not a SWE-bench Pro instance"),
     ],
 )
@@ -838,7 +838,7 @@ def test_a_seed_no_retry_can_fix_is_refused_without_starting_a_sandbox(
     create = stub_task_sandboxes(monkeypatch, server)
 
     response = TestClient(server.setup_webserver()).post(
-        "/seed_session", json=typed_seed_json("session", task_data=task_data)
+        "/seed_session", json=episode_seed_json("session", task_data=task_data)
     )
 
     assert response.status_code == 422
@@ -856,14 +856,14 @@ def test_a_refused_seed_leaves_the_clients_cookie_alone(monkeypatch: MonkeyPatch
     stub_task_sandboxes(monkeypatch, server)
     app = server.setup_webserver()
     owner, other = TestClient(app), TestClient(app)
-    assert owner.post("/seed_session", json=typed_seed_json("owner", rollout_id="owner")).status_code == 200
-    assert other.post("/seed_session", json=typed_seed_json("other", rollout_id="other")).status_code == 200
+    assert owner.post("/seed_session", json=episode_seed_json("owner", rollout_id="owner")).status_code == 200
+    assert other.post("/seed_session", json=episode_seed_json("other", rollout_id="other")).status_code == 200
     cookie_key = server.get_session_middleware_key()
     signer = TimestampSigner(cookie_key)
 
     for body, status_code in (
-        (typed_seed_json("owner", rollout_id="other"), 409),
-        (typed_seed_json("third", rollout_id="other", task_data={"repo": "example/repo"}), 422),
+        (episode_seed_json("owner", rollout_id="other"), 409),
+        (episode_seed_json("third", rollout_id="other", task_data={"repo": "example/repo"}), 422),
     ):
         response = other.post("/seed_session", json=body)
         assert response.status_code == status_code
@@ -875,7 +875,7 @@ def test_a_close_naming_another_episode_is_refused_while_open_and_after_close(mo
     server = make_server(golden=False, apply_anti_cheating=False)
     stub_task_sandboxes(monkeypatch, server)
     client = TestClient(server.setup_webserver())
-    assert client.post("/seed_session", json=typed_seed_json("session")).status_code == 200
+    assert client.post("/seed_session", json=episode_seed_json("session")).status_code == 200
     own = {"resources_session_id": "session", "episode_id": {"rollout_id": "rollout", "attempt": 0}}
     another = {"resources_session_id": "session", "episode_id": {"rollout_id": "another", "attempt": 0}}
 
@@ -1130,7 +1130,7 @@ async def test_shutdown_stops_abandoned_session_sandboxes() -> None:
     second = SimpleNamespace(stop=AsyncMock())
     server._session_id_to_sandbox = {"first": first, "second": second}
 
-    server._fence.mark_closed("closed", EpisodeId(rollout_id="rollout"))
+    server._fences.fence("closed", EpisodeId(rollout_id="rollout"))
 
     await server.shutdown()
 
@@ -1138,7 +1138,7 @@ async def test_shutdown_stops_abandoned_session_sandboxes() -> None:
     second.stop.assert_awaited_once()
     assert server._session_id_to_sandbox == {}
     # The sessions went with the process, so a restarted episode may seed the closed id again.
-    assert server._fence.closed_episode("closed") is None
+    assert server._fences.get("closed") is None
 
 
 def inconclusive_result() -> VerificationResult:
@@ -1337,13 +1337,13 @@ async def test_close_session_without_session_is_a_noop() -> None:
     sandbox.stop.assert_not_awaited()
 
 
-def test_close_session_accepts_cookie_and_typed_bodies_over_http() -> None:
+def test_close_session_accepts_cookie_and_episode_bodies_over_http() -> None:
     server = make_server(golden=False)
     client = TestClient(server.setup_webserver())
 
     # Agents that seeded through /run, such as hermes_sandboxed_agent, close with an empty body.
     cookie_close = client.post("/close_session", json={})
-    typed_close = client.post(
+    episode_close = client.post(
         "/close_session",
         json=ResourcesCloseSessionRequest(
             resources_session_id="session",
@@ -1353,6 +1353,6 @@ def test_close_session_accepts_cookie_and_typed_bodies_over_http() -> None:
     malformed_close = client.post("/close_session", json={"resources_session_id": "session"})
 
     assert (cookie_close.status_code, cookie_close.json()) == (200, {"closed": True})
-    assert typed_close.status_code == 200
-    assert typed_close.json()["resources_session_id"] == "session"
+    assert episode_close.status_code == 200
+    assert episode_close.json()["resources_session_id"] == "session"
     assert malformed_close.status_code == 422

@@ -397,7 +397,7 @@ async def test_owned_stop_failure_keeps_close_retryable(agent, state, failure):
     assert agent._session_records["session"].state is state
     assert agent._session_records["session"].closing
     assert state.session.launch_started and state.session.cleanup is None and not state.session.sandbox_stopped
-    assert "session" not in agent._closed_session_records
+    assert "session" not in agent._fenced_session_records
     response = await agent.close_agent_session(request(state), close)
     assert await agent.close_agent_session(request(state), close) == response
     assert state.session.sandbox.stop.await_count == 2

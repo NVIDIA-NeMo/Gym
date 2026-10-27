@@ -39,7 +39,8 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
-    ResourcesSessionFence,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
     ResourcesSessionLostError,
     SimpleResourcesServer,
     lost_session_verification,
@@ -182,7 +183,8 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
     ray_enabled: ClassVar[bool] = False
 
     _sessions: Dict[str, _TaskSession] = PrivateAttr(default_factory=dict)
-    _fence: ResourcesSessionFence = PrivateAttr()
+    _locks: ResourcesSessionLocks = PrivateAttr(default_factory=ResourcesSessionLocks)
+    _fences: ResourcesSessionFences[EpisodeId] = PrivateAttr()
     _seed_archive: Optional[SeedArchive] = PrivateAttr(default=None)
     _seed_archive_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 
@@ -190,7 +192,7 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
         super().model_post_init(context)
         if self.config.num_workers not in (None, 1):
             raise ValueError("EnterpriseOps-Gym sessions are process-local and require num_workers=1")
-        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -224,8 +226,8 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
 
     async def seed_session(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
         session_id = body.resources_session_id
-        async with self._fence.locked(session_id):
-            self._fence.raise_if_closed(session_id)
+        async with self._locks.locked(session_id):
+            self._fences.raise_if_fenced(session_id)
             session = self._sessions.get(session_id)
             if session is not None:
                 if (session.episode_id, session.task_id) != (body.episode_id, body.task_id):
@@ -324,17 +326,17 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
         self, request: Request, body: ResourcesCloseSessionRequest
     ) -> ResourcesCloseSessionResponse:
         session_id = body.resources_session_id
-        async with self._fence.locked(session_id):
-            closed_episode_id = self._fence.closed_episode(session_id)
-            if closed_episode_id is None:
+        async with self._locks.locked(session_id):
+            fenced_episode_id = self._fences.get(session_id)
+            if fenced_episode_id is None:
                 session = self._sessions.get(session_id)
                 if session is not None:
                     if session.episode_id != body.episode_id:
                         raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
                     await self._release(session)
                     del self._sessions[session_id]
-                self._fence.mark_closed(session_id, body.episode_id)
-            elif closed_episode_id != body.episode_id:
+                self._fences.fence(session_id, body.episode_id)
+            elif fenced_episode_id != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
         request.session.pop(SESSION_ID_KEY, None)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)

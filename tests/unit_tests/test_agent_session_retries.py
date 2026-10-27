@@ -148,7 +148,7 @@ async def test_failed_close_retains_state_and_can_retry(agent):
     assert agent._session_records[seed.agent_session_id].state is None
 
 
-async def test_retry_window_begins_after_cleanup_and_is_not_extended(agent, monkeypatch):
+async def test_close_retry_window_begins_after_cleanup_and_is_not_extended(agent, monkeypatch):
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
@@ -165,14 +165,14 @@ async def test_retry_window_begins_after_cleanup_and_is_not_extended(agent, monk
     clock[0] = 209.0
     assert await agent.close_agent_session(request, _close(seed)) == first
     clock[0] = 210.0
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.close_agent_session(request, _close(seed))
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
     assert not agent._session_records
     assert agent._agent_session_id_from_request(request) == seed.agent_session_id
     with pytest.raises(HTTPException):
         agent._require_agent_session(seed.agent_session_id)
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.seed_agent_session(request, seed)
 
 

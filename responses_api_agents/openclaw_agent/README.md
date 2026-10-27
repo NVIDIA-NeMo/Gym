@@ -252,17 +252,16 @@ Services must use task-owned files rather than the temporary agent session direc
 adapter-owned file removal, and disconnect before succeeding. Unknown launch outcomes and missing
 or negative termination evidence block verification. Missing evidence remains retryable;
 a final negative receipt permits borrowed connection release while the activation stays failed.
-Successful close receipts remain
-retryable for `session_close_retry_window_seconds` after cleanup (300 seconds by default); traffic
+A successful close fences the session, and a retried close gets the saved reply,
+for `session_close_retry_window_seconds` after cleanup (300 seconds by default); traffic
 and retries do not shorten or extend the window. Stale cookies continue to reject activations after
-receipt expiry and never enter the host CLI path.
+the fence expires and never enter the host CLI path.
 
-The shared `SimpleResponsesAPIAgent` lifecycle owns session identity, serialization, and close
-receipts. `session_lifetime_seconds` has been removed: the episode owner and provider TTL govern
+The shared `SimpleResponsesAPIAgent` lifecycle owns session identity, locks, and fences. `session_lifetime_seconds` has been removed: the episode owner and provider TTL govern
 abandoned-session recovery; there is no adapter timer cancelling active sessions. Setup failures
 whose cleanup fails retain cleanup-only state through `AgentSessionSetupError`.
 `timeout`, `model_timeout_seconds`, `sandbox_install_timeout_seconds`, and `session_close_timeout_seconds` must be positive
-and finite. The shared `session_close_retry_window_seconds` bounds close receipts and tombstones.
+and finite. The shared `session_close_retry_window_seconds` bounds fences and saved replies.
 
 Session state lives in the worker that seeded the session.
 With several agent workers, session routing sends each session's requests to the worker that seeded it.

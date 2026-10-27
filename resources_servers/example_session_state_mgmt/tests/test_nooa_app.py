@@ -36,7 +36,7 @@ def test_resource_session_preserves_retries_and_cleans_counter_state() -> None:
         assert client.post("/get_counter_value").status_code == 409
 
 
-def test_closed_sessions_are_remembered_for_the_close_retry_window(monkeypatch) -> None:
+def test_closed_sessions_are_fenced_for_the_close_retry_window(monkeypatch) -> None:
     clock = [0.0]
     monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
     config = StatefulCounterResourcesServerConfig(
@@ -59,18 +59,18 @@ def test_closed_sessions_are_remembered_for_the_close_retry_window(monkeypatch) 
         other_episode = close | {"episode_id": {"rollout_id": "another"}}
         assert client.post("/close_session", json=other_episode).status_code == 409
 
-        # Past the window the close is forgotten, as every other worker has forgotten it once the routing claim ends.
+        # Past the window the fence expires, as the routing claim does, so no worker refuses the ID any longer.
         clock[0] = 60.0
-        assert len(server._closed_sessions) == 0
+        assert len(server._fences) == 0
         # The stale cookie from the first seed must not bring the counter back.
         assert client.post("/increment_counter", json={"count": 1}).status_code == 409
         assert client.post("/get_counter_value").status_code == 409
         assert not server.session_id_to_counter
         assert client.post("/close_session", json=other_episode).status_code == 200
-        assert len(server._closed_sessions) == 1
+        assert len(server._fences) == 1
 
         clock[0] = 120.0
-        assert len(server._closed_sessions) == 0
+        assert len(server._fences) == 0
         assert client.post("/seed_session", json=seed).status_code == 200
         assert client.post("/get_counter_value").json() == {"count": 3}
 

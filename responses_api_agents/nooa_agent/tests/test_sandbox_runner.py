@@ -667,7 +667,7 @@ async def test_recovered_checkpoint_skips_environment_verification(monkeypatch, 
     assert response.result is None
     assert "/verify" not in _paths(client)
     assert _paths(client)[-2:] == ["/v1/agent_sessions/close", "/close_session"]
-    receipt = next(iter(instance._closed_session_records.values())).close_response
+    receipt = next(iter(instance._fenced_session_records.values())).close_response
     assert {"partial_checkpoint", "sandbox_result_unavailable", NOOATerminationReason.INFRASTRUCTURE_ERROR} <= {
         gap.code for gap in receipt.agent_observations.gaps
     }

@@ -657,7 +657,7 @@ Validate the session identity and cookies. In a single-activation session, ident
 
 One Agent Server process serves concurrent sessions. Keep per-session state and credentials out of process-wide state, such as `os.environ`, module globals, or a shared home directory. Pass them per invocation instead, for example through the subprocess environment or the session directory.
 
-Serialize close requests. Keep successful close responses for a documented, bounded retry window, and reject stale activations. For a borrowed sandbox, remove only adapter-owned files and disconnect; the Resources Server destroys the sandbox.
+Serialize close requests. Keep each successful close's saved reply for `session_close_retry_window_seconds`, the close retry window, and reject stale activations. For a borrowed sandbox, remove only adapter-owned files and disconnect; the Resources Server destroys the sandbox.
 
 ### Harness termination
 

@@ -197,7 +197,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._session_id_to_state: dict[str, _ResourcesSessionState] = {}
-        self._closed_session_records: OrderedDict[str, _ResourcesSessionState] = OrderedDict()
+        self._fenced_session_records: OrderedDict[str, _ResourcesSessionState] = OrderedDict()
         self._shutting_down = False
 
     def setup_webserver(self) -> FastAPI:
@@ -228,11 +228,11 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         self, session_id: str, *, close_episode_id: EpisodeId | None = None
     ) -> AsyncIterator[_ResourcesSessionState]:
         now = monotonic()
-        while self._closed_session_records:
-            key, record = next(iter(self._closed_session_records.items()))
+        while self._fenced_session_records:
+            key, record = next(iter(self._fenced_session_records.items()))
             if record.expires_at > now:
                 break
-            self._closed_session_records.pop(key)
+            self._fenced_session_records.pop(key)
             self._session_id_to_state.pop(key)
         while True:
             record = self._session_id_to_state.setdefault(session_id, _ResourcesSessionState())
@@ -243,7 +243,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 # Fence setup before waiting: a timed-out close must not leave a late allocation running.
                 record.closing = True
             async with record.lock:
-                # Expiry can retire a record while a caller is waiting on its lock.
+                # An expired fence can drop a record while a caller is waiting on its lock.
                 if self._session_id_to_state.get(session_id) is not record:
                     continue
                 try:
@@ -253,23 +253,23 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                         self._session_id_to_state.pop(session_id, None)
                 return
 
-    def _remember_closed_session(self, session_id: str, record: _ResourcesSessionState) -> None:
+    def _fence_closed_session(self, session_id: str, record: _ResourcesSessionState) -> None:
         if record.expires_at != float("inf"):
-            return  # Close retries do not extend the retention window.
+            return  # Close retries do not extend the fence.
         record.closing = True
         record.request = None
         record.response = None
         record.verification_request = None
         record.verification_response = None
         record.expires_at = monotonic() + self.config.session_close_retry_window_seconds
-        self._closed_session_records[session_id] = record
+        self._fenced_session_records[session_id] = record
 
     async def _shutdown_session(self, session_id: str) -> None:
         try:
             async with self._locked_resources_session(session_id):
                 await self._stop_session_sandbox(session_id)
                 self._session_id_to_state.pop(session_id, None)
-                self._closed_session_records.pop(session_id, None)
+                self._fenced_session_records.pop(session_id, None)
         except Exception:
             LOG.exception(
                 "Failed to stop Terminal-Bench session %s on shutdown; provider TTL is the backstop", session_id
@@ -284,15 +284,15 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             self._session_id_to_sandbox.pop(session_id, None)
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
-        """Fence setup immediately, stop the owned sandbox, and retain a bounded close receipt.
+        """Fence setup immediately, stop the owned sandbox, and fence the session for the close retry window.
 
-        Failed or pending cleanup does not expire. The retention window starts only
+        Failed or pending cleanup does not expire. The close retry window starts only
         after teardown succeeds, including when a late seed performs the teardown.
         """
         session_id = body.resources_session_id
         async with self._locked_resources_session(session_id, close_episode_id=body.episode_id) as record:
             await self._stop_session_sandbox(session_id)
-            self._remember_closed_session(session_id, record)
+            self._fence_closed_session(session_id, record)
             return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
     def _patch_sandbox_provider_options_for_instances(
@@ -446,7 +446,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 try:
                     await self._stop_session_sandbox(session_id)
                     if session.closing:
-                        self._remember_closed_session(session_id, session)
+                        self._fence_closed_session(session_id, session)
                 except Exception:
                     LOG.exception("Failed to stop partially seeded Terminal-Bench session %s", session_id)
                 raise
@@ -536,7 +536,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                     if session.closing:
                         try:
                             await self._stop_session_sandbox(session_id)
-                            self._remember_closed_session(session_id, session)
+                            self._fence_closed_session(session_id, session)
                         except Exception:
                             LOG.exception(
                                 "Failed to stop closing Terminal-Bench session %s after verification", session_id

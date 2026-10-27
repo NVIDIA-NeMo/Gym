@@ -780,7 +780,7 @@ async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypat
     with pytest.raises(HTTPException) as error:
         await agent.close_agent_session(request, close)
     assert error.value.status_code == 409
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
     with patch.object(agent, "_create_episode", AsyncMock(side_effect=AssertionError("host fallback"))):
         with pytest.raises(HTTPException) as error:
             await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
@@ -839,7 +839,7 @@ async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     clock[0] += agent.config.session_close_retry_window_seconds
     await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
 
 
 @pytest.mark.parametrize("window", [0, -1, float("inf")])
@@ -1676,7 +1676,7 @@ async def test_failed_seed_cleanup_retains_state_until_explicit_retry(setup):
     with pytest.raises(RuntimeError, match="npm unavailable"):
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
     assert agent._session_records[body.agent_session_id].state.session.closing
-    assert body.agent_session_id not in agent._closed_session_records
+    assert body.agent_session_id not in agent._fenced_session_records
     with pytest.raises(HTTPException, match="closing"):
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
     sandbox.exec.side_effect = None
@@ -1707,11 +1707,11 @@ async def test_stale_cookie_cannot_recreate_session_or_close_receipt_after_full_
     close = AgentCloseSessionRequest(agent_session_id=body.agent_session_id, episode_id=body.episode_id)
     await agent.close_agent_session(request, close)
     clock[0] = 111.0
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.close_agent_session(request, close)
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.seed_agent_session(request, body)
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
     assert all(record.state is None for record in agent._session_records.values())
     assert not agent._session_records
     sandbox.disconnect.assert_awaited_once()
