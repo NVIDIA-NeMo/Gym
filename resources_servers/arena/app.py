@@ -29,12 +29,13 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import Domain, ModelServerRef
+from nemo_gym.judge import reraise_judge_errors
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import get_response_json
+from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.arena.arena import (
     _extract_thinking_content,
     _extract_verdict,
@@ -244,15 +245,27 @@ class ArenaResourcesServer(SimpleResourcesServer):
             if not images:
                 raise ValueError("vision_arena_v1 requires prompt images")
 
-        # Run both game orderings concurrently to reduce latency.
-        game1, game2 = await asyncio.gather(
-            self._run_judge_game(
-                body.question, policy_answer, body.baseline_answer, system_message, prompt_template, images=images
+        # Run both game orderings concurrently to reduce latency. If one fails, the other is cancelled and
+        # awaited before the failure propagates, so it does not keep a judge slot after the row is returned.
+        orderings = [
+            asyncio.ensure_future(
+                self._run_judge_game(
+                    body.question, policy_answer, body.baseline_answer, system_message, prompt_template, images=images
+                )
             ),
-            self._run_judge_game(
-                body.question, body.baseline_answer, policy_answer, system_message, prompt_template, images=images
+            asyncio.ensure_future(
+                self._run_judge_game(
+                    body.question, body.baseline_answer, policy_answer, system_message, prompt_template, images=images
+                )
             ),
-        )
+        ]
+        try:
+            game1, game2 = await asyncio.gather(*orderings)
+        except BaseException:
+            for ordering in orderings:
+                ordering.cancel()
+            await asyncio.gather(*orderings, return_exceptions=True)
+            raise
 
         # Game 1: policy is A. Game 2: policy is B.
         # Strong verdicts (>>) are counted `verdict_weight` times.
@@ -344,30 +357,20 @@ class ArenaResourcesServer(SimpleResourcesServer):
                 ),
             ]
 
-            try:
+            async def call_judge() -> NeMoGymResponse:
                 response = await self.server_client.post(
                     server_name=config.judge_model_server.name,
                     url_path="/v1/responses",
                     json=responses_create_params,
                     timeout=ClientTimeout(total=config.judge_timeout_secs),
                 )
-                judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
-            except Exception as exc:
-                logger.warning("Judge call failed (question skipped): %s", exc)
-                return ArenaGame(
-                    responses_create_params=responses_create_params,
-                    response=NeMoGymResponse(
-                        id="error",
-                        created_at=0.0,
-                        model="",
-                        object="response",
-                        output=[],
-                        parallel_tool_calls=False,
-                        tool_choice="none",
-                        tools=[],
-                    ),
-                    verdict=None,
-                )
+                # An HTTP error is the judge failure it is (its status and body kept), not a parse error of its body.
+                await raise_for_status(response)
+                return NeMoGymResponse.model_validate(await get_response_json(response))
+
+            # A judge outage is not a lost game: let judge_failsafe return an unresolved judge failure
+            # with the existing answer instead of constructing a zero-valued game.
+            judge_response = await reraise_judge_errors(call_judge())
 
             verdict: str | None = None
             if judge_response.output:

@@ -42,8 +42,9 @@ directly::
 
 import argparse
 import json
+import logging
 from contextlib import nullcontext
-from multiprocessing import get_context
+from multiprocessing import current_process, get_context
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -121,6 +122,12 @@ def prepare(
     """Prepare rows in source order with one tokenizer per worker process."""
     if type(num_workers) is not int or num_workers < 1:
         raise ValueError("num_workers must be a positive integer")
+    if num_workers > 1 and current_process().daemon:
+        logging.getLogger(__name__).warning(
+            "Running preparation sequentially inside a daemon worker; "
+            "set num_prepare_benchmark_processes=1 to enable inner num_workers parallelism."
+        )
+        num_workers = 1
     output_fpath = Path(output_fpath)
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
 

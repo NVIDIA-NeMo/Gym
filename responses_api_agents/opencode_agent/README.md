@@ -94,6 +94,9 @@ tools in separate sessions. The sandbox owner stops the preserved services later
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
 those processes may still change task files. The stop-time cutoff also has adoption/PID
 races and cannot classify later service forks. It is not a security boundary.
+The supervisor and the runner above OpenCode run as `gym-supervisor` and `gym-runner` (links to the
+sandbox's `python3`) from files without a `.py` suffix, so a task agent's `pkill -f python3`,
+`pkill python3` or `killall python3` does not end OpenCode.
 The CLI must exit before
 SQLite observations are captured; services must use task-owned files rather than the
 agent session directory, which close removes. Capture requires confirmed termination.

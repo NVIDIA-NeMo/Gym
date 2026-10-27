@@ -42,6 +42,10 @@ gym eval prepare --benchmark mrcr/config_n3_128k
 gym eval prepare --benchmark mrcr/config_n3_1m
 ```
 
+When Gym runs preparation inside a daemon worker (`num_prepare_benchmark_processes > 1`),
+inner token counting falls back to one worker with a warning. Set
+`num_prepare_benchmark_processes=1` to use the requested inner worker count.
+
 For parallel token counting with the default preparation script, pass
 `+prepare_script_args.num_workers=64` to `gym eval prepare --benchmark mrcr`,
 or `--num_workers 64` when running `benchmarks/mrcr/prepare.py` directly.

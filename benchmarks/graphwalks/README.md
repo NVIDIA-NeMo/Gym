@@ -44,6 +44,10 @@ python benchmarks/graphwalks/prepare.py \
     --output_fpath benchmarks/graphwalks/data/graphwalks_llama_128k_benchmark.jsonl
 ```
 
+When Gym runs preparation inside a daemon worker (`num_prepare_benchmark_processes > 1`),
+inner token counting falls back to one worker with a warning. Set
+`num_prepare_benchmark_processes=1` to use the requested inner worker count.
+
 For parallel token counting with the default preparation script, pass
 `+prepare_script_args.num_workers=64` to `gym eval prepare --benchmark graphwalks`,
 or `--num_workers 64` when running `benchmarks/graphwalks/prepare.py` directly.

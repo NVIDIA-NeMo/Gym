@@ -30,7 +30,7 @@ gym eval prepare --benchmark apex_shortlist
 ```
 
 Writes `data/apex_shortlist_benchmark.jsonl` with one row per problem:
-`{"question": "...", "expected_answer": "..."}`.
+`{"task_id": "...", "question": "...", "expected_answer": "..."}`, where `task_id` is the dataset's `problem_idx`.
 
 ## Running servers
 

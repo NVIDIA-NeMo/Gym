@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import json
+from multiprocessing import get_context
+from unittest.mock import patch
 
 import pytest
 from tokenizers import Tokenizer
@@ -55,3 +57,25 @@ def test_worker_tokenizer_errors_reach_caller(monkeypatch, tmp_path):
     monkeypatch.setattr(prepare, "load_dataset", lambda *args, **kwargs: source_rows())
     with pytest.raises((ValueError, OSError)):
         prepare.prepare("/missing-mrcr-tokenizer", output_fpath=tmp_path / "out.jsonl", num_workers=2)
+
+
+def _prepare_in_daemon(tokenizer_path, cap, output_path):
+    with patch.object(prepare, "load_dataset", return_value=source_rows()):
+        prepare.prepare(tokenizer_path, cap, output_path, num_workers=2)
+
+
+@pytest.mark.parametrize("cap", [None, 2])
+def test_outer_daemon_worker_preserves_serial_output(monkeypatch, tmp_path, tokenizer_path, cap):
+    monkeypatch.setattr(prepare, "load_dataset", lambda *args, **kwargs: source_rows())
+    serial = prepare.prepare(tokenizer_path, cap, tmp_path / "serial.jsonl")
+    output = tmp_path / "daemon.jsonl"
+    process = get_context("spawn").Process(target=_prepare_in_daemon, args=(tokenizer_path, cap, output), daemon=True)
+    process.start()
+    try:
+        process.join(timeout=60)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join()
+    assert output.read_bytes() == serial.read_bytes()
