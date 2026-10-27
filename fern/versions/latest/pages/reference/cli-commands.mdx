@@ -776,9 +776,9 @@ gym eval prepare --benchmark aime24
 
 ### `gym eval plan`
 
-Prepare one benchmark and write its plan: every task once, sorted by task id, with a digest of the exact input a run receives. The plan stores ids and digests, not the inputs themselves. The format is versioned (`"schema": "nemo-gym.eval-plan.v1"`), only changes additively within a version, and is printed as JSON Schema by `--schema`.
+Prepare one benchmark and write its plan: every task once, sorted by task id, with a digest of its prepared row. The plan stores ids and digests, not the inputs themselves. The format is versioned (`"schema": "nemo-gym.eval-plan.v1"`), only changes additively within a version, and is printed as JSON Schema by `--schema`.
 
-Each task's id comes from its row's `task_id`, `problem_id` or `instance_id`, and its taskset is the dataset's declared `taskset` (the benchmark name when none is declared). Unlike `gym eval run`, there is no fallback to the row's position, so benchmarks without such a field are refused. Benchmarks with a prompt template (`prompt_config`) are not supported yet.
+Each task's id comes from its row's `task_id`, `problem_id` or `instance_id`, and its taskset is the dataset's declared `taskset` (the benchmark name when none is declared). Unlike `gym eval run`, there is no fallback to the row's position, so benchmarks without such a field are refused. The digest covers the prepared row after excluding runtime routing and bookkeeping fields (`agent_ref`, `task_source`, `skills_ref`, and keys beginning with `_ng_`). A prompt template (`prompt_config`) is applied when a run starts, so editing the template does not change the digest.
 
 | Option | Description |
 | --- | --- |
@@ -832,6 +832,7 @@ In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor ta
 | `--no-health-check` | Skip the automatic post-run health check. |
 | `--health-check-workers` | Number of rollout-health worker processes. Defaults to the smaller of the CPU count and 8. |
 | `--health-check-ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
+| `--health-max-not-final-failure-fraction`, `--health-max-final-failure-fraction` | Share of expected rollouts at which non-final or final failures make the run unhealthy. Unset by default: no limit. |
 
 ```bash
 # End-to-end: spin up servers, then collect rollouts for a benchmark
@@ -899,10 +900,11 @@ How it works:
 - **Incremental output.** Successful rollouts are flushed to the main output JSONL after each completion; retriable failures go to a `<stem>_failures.jsonl` sidecar, so partial progress survives a crash.
 - **Failed agent calls.** By default a failed agent `/run` ends the run, because the alternative is a score reported over fewer rollouts than were asked for. Pass `+route_failures_to_sidecar=true` to let the run continue instead: the call is then recorded in the same sidecar as one attempt, with no reward. Every rollout that leaves the score is logged as it happens, whichever layer classified it, and the totals appear with the closing artifact paths. The class says whether the rollout ran: `agent_run_error` when the agent itself answered, since a NeMo Gym agent returns 500 when its handler raises, and `agent_request_failed` for a gateway status (429, 502, 503, 504) or no usable reply, neither of which says anything about the rollout. Other rollouts keep running, the score is computed over completed rollouts only, and resume re-dispatches the row up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. A run in which nothing produced a result fails instead of reporting an empty score, unless an option below counts its rollouts as zeros.
 - **Counting failures in the score.** Metrics are computed over completed rollouts only. `+count_failure_classes_as_zero=[<class>]` includes the named sidecar rows in `/aggregate_metrics` so they land in the denominator: `[agent_run_error]` counts the rollouts that reached the agent and broke, which is what a model emitting unparsable tool calls looks like from here, and needs `+route_failures_to_sidecar=true` to have anything to count. A row that carries no reward is scored zero for the metric input only, so neither the sidecar nor the rollouts JSONL records a verdict that no verifier gave. It works the same in `gym eval run` and `gym eval aggregate`.
-- **Counting lost rollouts.** `+count_missing_rollouts_as_zero=true` scores as zero a rollout that is in the materialized inputs but left no row in the output JSONL or the sidecar, such as one killed mid-flight or one `dispatch_budget_s` never started. The zero goes into the metric input only, so `--resume` still runs the rollout and the resumed run scores it. A rollout recorded in the sidecar is never counted here, so this does not widen `+count_failure_classes_as_zero`. The count is reported as `coverage/imputed`. With `--disable-aggregation` nothing is scored, so a run with no row still fails. `gym eval aggregate` checks each shard against its own rows, materialized inputs and sidecar.
+- **Counting lost rollouts.** `+count_missing_rollouts_as_zero=true` scores as zero a rollout that is in the materialized inputs but left no row in the output JSONL and no failure row in the sidecar, such as one killed mid-flight or one `dispatch_budget_s` never started. A sidecar row written by `+record_omitted_rollouts` (see **Rollouts with no result**) is not a failure row, so such a rollout is counted here. The zero goes into the metric input only, so `--resume` still runs the rollout and the resumed run scores it. A rollout with a failure row in the sidecar is never counted here, so this does not widen `+count_failure_classes_as_zero`. The count is reported as `coverage/imputed`. With `--disable-aggregation` nothing is scored, so a run with no row still fails. `gym eval aggregate` checks each shard against its own rows, materialized inputs and sidecar.
 - **Matching.** On resume, completed work is matched by `(task_index, rollout_index)` against the materialized inputs, and already-completed rows are skipped. The run prints a summary such as the number of original input rows, rows already done, and rows that still need to be run.
 - **Terminal failures.** A sidecar row stamped `_ng_failure_terminal` is never retried. `+retry_terminal_timeouts=true` retries rows of class `timeout_exceeded` even when they are stamped terminal. Retries still stop at `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. Off by default, because some agents stamp their timeouts terminal on purpose.
-- **Dispatch budget.** `+dispatch_budget_s=<seconds>` stops starting new rollouts that many seconds after collection starts; set it to the usable walltime of the allocation. It requires `--concurrency` or `+max_resident_rollout_tasks`; without either limit, the whole queue could be sent before the budget is checked. Rows that are not started write nothing, so the next `--resume` runs them. `+drain_margin_s=<seconds>` also stops starting rows when less than that much time is left; unset, the margin is the p75 duration of the run's recorded attempts once there are at least 5. An attempt whose agent `/run` returns a usable reply is always recorded, even when the agent reports the rollout itself as failed or timed out; an attempt whose `/run` fails (an error status, or no usable reply) is recorded only if it ran at least as long as the median so far, because a quick failure says nothing about how long rollouts take. Every run ends with a latency summary over the same attempts (median, p90, p99, max) and the number of rows not started.
+- **Dispatch budget.** `+dispatch_budget_s=<seconds>` stops starting new rollouts that many seconds after collection starts; set it to the usable walltime of the allocation. It requires `--concurrency` or `+max_resident_rollout_tasks`; without either limit, the whole queue could be sent before the budget is checked. Rows that are not started are not attempts, so the next `--resume` runs them. `+drain_margin_s=<seconds>` also stops starting rows when less than that much time is left; unset, the margin is the p75 duration of the run's recorded attempts once there are at least 5. An attempt whose agent `/run` returns a usable reply is always recorded, even when the agent reports the rollout itself as failed or timed out; an attempt whose `/run` fails (an error status, or no usable reply) is recorded only if it ran at least as long as the median so far, because a quick failure says nothing about how long rollouts take. Every run ends with a latency summary over the same attempts (median, p90, p99, max) and the number of rows not started.
+- **Rollouts with no result.** By default a rollout that produced no result leaves no row anywhere: an attempt the agent reports as `kill_shaped` (Slurm SIGTERM, a dead Ray actor, an OOM outside the rollout) and a row `dispatch_budget_s` never started. `+record_omitted_rollouts=true` writes one `<stem>_failures.jsonl` row for each, so the absence has a record. The row keeps the rollout's `task_index`, `rollout_index` and `_ng_attempt_index`, carries `_ng_no_persist: true` and `_ng_omitted_rollout: true`, the failure class the result already had (`kill_shaped`, or `cancelled` with `_ng_dispatch_drained` for a row never started) and a reason in `_ng_failure_message`. Such a row is evidence, not a failure: it is left out of scoring, `+count_failure_classes_as_zero`, aggregate and exporter metrics, the run health summary, `gym dev compare`, rollout uploads, `gym eval reverify --judge-failed-only` and the resume attempt count, so `--resume` runs the rollout again. Where a reader takes a rollout's last attempt, an interrupted attempt is that last attempt, so an older failure is not counted again and the rollout is missing; a row never started is skipped. Rows carrying only `_ng_no_persist`, such as the `kill_shaped` rows ATIF reverification writes, are read as before. Off by default while readers of the sidecar outside NeMo Gym learn to treat these rows as not run rather than failed. A driver that is itself killed before it sees an outcome still leaves no row, and a custom `rollout_collection_driver` such as GDPVal's multi-stage one keeps its own persistence and ignores the option.
 - **Longest first.** `+dispatch_longest_first=true` starts the rows whose earlier failed attempts ran longest first on resume, using the `elapsed_seconds` those attempts recorded. Rows with no recorded timing keep their input order and start after them. Without it, rows start in input order.
 - **Fallback.** If either the materialized inputs or the output file is missing, resume is skipped and the run starts fresh. Without `--resume`, the existing output, its `<stem>_failures.jsonl` sidecar and its `<stem>_aggregate_metrics.json` are deleted before the run.
 
@@ -929,7 +931,7 @@ gym eval submit --config submit.yaml --resolve-only --json
 
 ### `gym eval aggregate`
 
-Merge sharded rollout results into a single rollouts file with aggregate metrics. Reads every JSONL file matching `--input-glob`, recomputes aggregate metrics over the global union of records, and writes a `<output stem>_aggregate_metrics.json` next to the merged rollouts. Use this to combine shards produced by `gym eval run --no-serve --disable-aggregation`.
+Merge sharded rollout results into a single rollouts file with aggregate metrics. Reads every JSONL file matching `--input-glob`, recomputes aggregate metrics over the global union of records, and writes a `<output stem>_aggregate_metrics.json` next to the merged rollouts. It also lists the shards in `<output stem>_sources.json`, which `gym eval health-check` reads for a merged `rollouts.jsonl`. The output may be a shard only when it is the only one, reached through its own directory rather than a file link from elsewhere, and then nothing is listed. Use this to combine shards produced by `gym eval run --no-serve --disable-aggregation`.
 
 | Option | Description |
 | --- | --- |
@@ -939,6 +941,7 @@ Merge sharded rollout results into a single rollouts file with aggregate metrics
 | `--no-health-check` | Skip the automatic post-aggregation health check. |
 | `--health-check-workers` | Number of rollout-health worker processes. Defaults to the smaller of the CPU count and 8. |
 | `--health-check-ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
+| `--health-max-not-final-failure-fraction`, `--health-max-final-failure-fraction` | Share of expected rollouts at which non-final or final failures make the run unhealthy. Unset by default: no limit. |
 
 ```bash
 gym eval aggregate \
@@ -981,15 +984,17 @@ See the [trajectory capability matrix](/reference/trajectory-capabilities#atif-e
 
 ### `gym eval health-check`
 
-Verify rollout quality for an existing run directory. The command reads `<run-dir>/rollouts.jsonl` by default and writes
+Verify rollout quality for an existing run directory. The command reads `<run-dir>/rollouts.jsonl` by default, or the
+shards `gym eval aggregate` merged into it, and writes
 `quality_summary.json` and `rollout_verdicts.jsonl` in the run directory.
 
 | Option | Description |
 | --- | --- |
 | `RUN_DIR` | Directory in which to write the health reports. |
-| `--rollouts-file PATH` | Rollout JSONL path. Relative paths resolve under `RUN_DIR`; absolute paths are used as written. Defaults to `rollouts.jsonl`. |
+| `--rollouts-file PATH` | Rollout JSONL path, checked alone. Relative paths resolve under `RUN_DIR`; absolute paths are used as written. Defaults to `rollouts.jsonl`, or to the shards `gym eval aggregate` merged into it and listed in `rollouts_sources.json`. |
 | `--workers` | Number of worker processes. Defaults to the smaller of the CPU count and 8. |
 | `--ignore-checks`, `--ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
+| `--health-max-not-final-failure-fraction`, `--health-max-final-failure-fraction` | Override the run's failure limits. Without either flag, the limits recorded in the run's `quality_summary.json` judge it again, so a recheck of the same artifacts keeps its verdict. Each flag overrides only its own limit, with a fraction in [0, 1] or `none` (any case) to remove it; a limit whose flag is not given keeps its recorded value. The summary records which limits were overridden, and a removed limit stays removed on later rechecks. |
 | `--json` | Output health-check results as JSON. |
 
 ```bash
@@ -1072,7 +1077,7 @@ Before starting, the command checks each resources server's `GET /reverify_mode`
 | --- | --- |
 | `stateless` | Reverification is safe. The verifier is a pure function of `(request body, server config)`. |
 | `unsupported` | Reverification is not safe. The verifier reads per-rollout session state that is no longer present. |
-| `unknown` | The server has not declared its reverification behaviour. **This is the default.** Treated as potentially unsafe. |
+| `unknown` | The server has not declared its reverification behavior. **This is the default.** Treated as potentially unsafe. |
 
 Servers that report `unsupported` or `unknown` cause the command to abort unless `--force` is passed.
 

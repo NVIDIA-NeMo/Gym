@@ -840,6 +840,31 @@ def test_resolve_provider_metadata() -> None:
         resolve_provider_metadata({"opensandbox": {}, "default_metadata": "not-a-mapping"})
 
 
+def test_resolve_provider_volume_sources() -> None:
+    from nemo_gym.sandbox import resolve_provider_volume_sources
+
+    block = {
+        "opensandbox": {"shared_storage": {"host_path": "/mnt/shared"}},
+        "volume_sources": {"pgdata": "datasets/pgdata", "/var/lib/models": "models"},
+    }
+
+    # volume_sources is a reserved key: excluded from the provider config and read separately.
+    assert resolve_provider_config(block) == {"opensandbox": {"shared_storage": {"host_path": "/mnt/shared"}}}
+    assert resolve_provider_volume_sources(block) == {"pgdata": "datasets/pgdata", "/var/lib/models": "models"}
+    assert resolve_provider_volume_sources("sandbox", {"sandbox": block}) == block["volume_sources"]
+
+    # No key -> empty dict; both reserved keys may coexist.
+    assert resolve_provider_volume_sources({"opensandbox": {}}) == {}
+    assert resolve_provider_config({**block, "default_metadata": {"a": "b"}}) == resolve_provider_config(block)
+
+    with pytest.raises(ValueError, match="must be a mapping"):
+        resolve_provider_volume_sources({"opensandbox": {}, "volume_sources": ["pgdata"]})
+    with pytest.raises(ValueError, match="non-empty shared-storage paths"):
+        resolve_provider_volume_sources({"opensandbox": {}, "volume_sources": {"pgdata": ""}})
+    with pytest.raises(ValueError, match="non-empty shared-storage paths"):
+        resolve_provider_volume_sources({"opensandbox": {}, "volume_sources": {"pgdata": {"path": "x"}}})
+
+
 def test_async_sandbox_transfer_fallback_and_unknown_status(tmp_path: Path) -> None:
     asyncio.run(_assert_async_sandbox_transfer_fallback_and_unknown_status(tmp_path))
 

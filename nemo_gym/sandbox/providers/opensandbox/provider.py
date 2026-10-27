@@ -177,6 +177,12 @@ CREATE_BUDGET_SLACK_S = 30.0
 _BUDGET_WARNINGS: set[tuple[float, float, float]] = set()
 # Kubernetes label-key prefixes must be DNS-1123 subdomains (max 253 chars).
 ATTRIBUTION_KEY_PREFIX_RE = re.compile(r"(?=.{1,253}$)[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
+# Returned as stderr when a finished background command's output file was deleted,
+# so a caller that needed the output sees why it is empty.
+DELETED_OUTPUT_NOTE = (
+    "OpenSandbox could not return this command's output: the output file was deleted, for example "
+    "by a command that cleaned the temporary directory. The command's exit status is kept."
+)
 DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
 IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
@@ -349,6 +355,17 @@ def _is_retryable_create_error(exception: BaseException) -> bool:
         return _has_retryable_error_marker(exception)
 
     return _has_retryable_error_marker(exception)
+
+
+def _is_deleted_output_error(exception: BaseException) -> bool:
+    """Return whether a log read failed because execd's output file for the command is gone.
+
+    execd keeps background output under ``os.TempDir()`` (``/tmp`` unless ``TMPDIR`` is set), so
+    any command that empties ``/tmp`` deletes it, and the read fails with "error open combined
+    output file for command <id>: ... no such file or directory". Rereading cannot bring it back.
+    """
+    message = str(exception)
+    return "combined output file" in message and "no such file or directory" in message
 
 
 def _is_retryable_sdk_operation_error(exception: BaseException, seen: set[int] | None = None) -> bool:
@@ -906,6 +923,16 @@ class OpenSandboxProvider:
         # sweeps any still open; ended ones are retired on the next create/attach.
         self._pty_sessions: set[Any] = set()
         self._renewals: dict[str, asyncio.Task[None]] = {}
+
+    def pull_policy_options(self, policy: str) -> dict[str, Any]:
+        """Compose's ``pull_policy`` as the per-sandbox image pull policy extension (``_resolve_extensions`` lets a
+        per-sandbox value win over the deployment default)."""
+        mapped = {"always": "Always", "missing": "IfNotPresent", "never": "Never"}.get(policy)
+        if mapped is None:
+            raise ValueError(f"pull policy must be always, missing or never, got {policy!r}")
+        return {
+            "extensions": {IMAGE_PULL_POLICY_EXTENSION_KEY: mapped, IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY: mapped}
+        }
 
     def validate_runtime_requirements(self, *, cap_add: tuple[str, ...], shm_size: int | None) -> dict[str, str]:
         """Reject requirements without an operator-configured implementation."""
@@ -1624,15 +1651,21 @@ class OpenSandboxProvider:
     ) -> SandboxEndpoint:
         """Resolve one client-reachable direct or server-proxied service URL."""
 
+        get_endpoint = getattr(handle.raw, "get_endpoint", None)
+        if get_endpoint is None:
+            raise NotImplementedError(
+                "The installed opensandbox SDK does not expose Sandbox.get_endpoint; "
+                "sandbox service endpoints require opensandbox>=0.1.15"
+            )
         resolved = await self._await_sdk_operation(
-            lambda: handle.raw.get_endpoint(port),
+            lambda: get_endpoint(port),
             operation="get_endpoint",
             sandbox_id=handle.sandbox_id,
             timeout_s=(
                 float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None
             ),
         )
-        endpoint_url = str(resolved.endpoint or "")
+        endpoint_url = str(getattr(resolved, "endpoint", "") or "")
         if not endpoint_url:
             raise RuntimeError(f"OpenSandbox returned an empty endpoint for sandbox {handle.sandbox_id!r} port {port}")
         if "://" not in endpoint_url:
@@ -1640,13 +1673,14 @@ class OpenSandboxProvider:
             # resolved domains and protocols match the lifecycle request.
             scheme = urlsplit(handle.raw.connection_config.get_base_url()).scheme or "http"
             endpoint_url = f"{scheme}://{endpoint_url.lstrip('/')}"
-        headers = dict(handle.raw.connection_config.headers)
+        connection_config = getattr(handle.raw, "connection_config", None)
+        headers = dict(getattr(connection_config, "headers", None) or {})
         # Match the SDK's service adapters: connection-wide headers apply to
         # every request, while endpoint-specific routing or auth headers win.
         # The upstream proxy-auth fix adds the management API key to
         # ConnectionConfig.headers only in server-proxy mode, so direct
         # sandbox endpoints never receive it.
-        headers.update(resolved.headers)
+        headers.update(getattr(resolved, "headers", None) or {})
         return SandboxEndpoint(endpoint=endpoint_url, headers=headers)
 
     def _start_renewal(self, handle: SandboxHandle, ttl_s: int | float) -> None:
@@ -2207,17 +2241,38 @@ class OpenSandboxProvider:
         # The execution has finished, so one call returns its whole buffer; the
         # cursor this endpoint reports back is the end offset rather than a
         # more-data flag, so there is no tail to follow.
-        logs = await self._await_sdk_operation(
-            lambda: handle.raw.commands.get_background_command_logs(execution_id),
-            operation="command logs",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=poll_timeout_s,
-            retries=self._operations.retries,
-            is_retryable=_command_read_is_retryable,
-        )
+        output_deleted = False
+        try:
+            logs = await self._await_sdk_operation(
+                lambda: handle.raw.commands.get_background_command_logs(execution_id),
+                operation="command logs",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=poll_timeout_s,
+                retries=self._operations.retries,
+                is_retryable=lambda error: not _is_deleted_output_error(error) and _command_read_is_retryable(error),
+            )
+        except Exception as error:
+            # A command that cleaned the temporary directory (e.g. a verifier resetting its
+            # scratch roots), or another one in the same sandbox, deleted execd's output file.
+            # The status read above holds the authoritative exit code; without one there is no
+            # evidence of how the command ended, so that case still raises, as does any other
+            # error, including a reworded execd message.
+            if not _is_deleted_output_error(error) or status.exit_code is None:
+                raise
+            LOGGER.warning(
+                "OpenSandbox command output file was deleted; keeping the command's exit status %r. "
+                "sandbox_id=%r execution_id=%r",
+                status.exit_code,
+                handle.sandbox_id,
+                execution_id,
+            )
+            logs = None
+            output_deleted = True
         stdout = getattr(logs, "content", None) or None
         status_error = getattr(status, "error", None)
         stderr = status_error or None
+        if output_deleted:
+            stderr = f"{stderr}\n{DELETED_OUTPUT_NOTE}" if stderr else DELETED_OUTPUT_NOTE
         error_type = None
         if status.exit_code is not None:
             return_code = status.exit_code

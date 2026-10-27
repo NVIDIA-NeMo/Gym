@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import logging
 import re
 from typing import Optional
 
@@ -28,6 +29,9 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class GoogleSearchResourcesServerConfig(BaseResourcesServerConfig):
@@ -100,8 +104,9 @@ class GoogleSearchResourcesServer(SimpleResourcesServer):
         return app
 
     async def search(self, body: BaseSearchQueryRequest) -> BaseGetSearchQueryResponse:
+        # The API key goes in a header instead of the `key=` query parameter.
+        # HTTP client exceptions and debug logs quote the request URL verbatim, so a key there would leak with it.
         request_params = {
-            "key": self.config.google_api_key,
             "cx": self.config.google_cx,
             "q": body.query,
         }
@@ -109,13 +114,22 @@ class GoogleSearchResourcesServer(SimpleResourcesServer):
             response = requests.get(
                 "https://www.googleapis.com/customsearch/v1",
                 params=request_params,
+                headers={"X-goog-api-key": self.config.google_api_key},
                 timeout=10,
             )
             response.raise_for_status()
             json_str = json.dumps(response.json())
             return BaseGetSearchQueryResponse(search_results=json_str)
         except Exception as e:
-            return BaseGetSearchQueryResponse(search_results=f"Error: Unexpected error - {str(e)}")
+            # The tool result goes to the model and is saved in rollout files, so it names only the kind of failure.
+            # The exception text can quote request details, so it goes only to the server log.
+            logger.warning("Google search request failed: %r", e)
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            if status_code is not None:
+                return BaseGetSearchQueryResponse(
+                    search_results=f"Error: search request failed with HTTP {status_code}"
+                )
+            return BaseGetSearchQueryResponse(search_results=f"Error: search request failed ({type(e).__name__})")
 
     async def browse(self, body: BaseGetPageContentRequest) -> BaseGetPageContentResponse:
         try:

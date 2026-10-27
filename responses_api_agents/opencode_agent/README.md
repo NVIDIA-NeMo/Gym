@@ -94,6 +94,9 @@ tools in separate sessions. The sandbox owner stops the preserved services later
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
 those processes may still change task files. The stop-time cutoff also has adoption/PID
 races and cannot classify later service forks. It is not a security boundary.
+The supervisor and the runner above OpenCode run as `gym-supervisor` and `gym-runner` (links to the
+sandbox's `python3`) from files without a `.py` suffix, so a task agent's `pkill -f python3`,
+`pkill python3` or `killall python3` does not end OpenCode.
 The CLI must exit before
 SQLite observations are captured; services must use task-owned files rather than the
 agent session directory, which close removes. Capture requires confirmed termination.
@@ -120,7 +123,7 @@ Session `opencode_config` permits only `permission` and `tools`, preserving Gym 
 
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation
-gaps. Runtime/model errors fail before verification; explicit limits can retain
+gaps. Reported API errors retain their classified cause for the Environment Server to decide grading and retries; worker and cleanup failures remain execution errors; explicit limits can retain
 gradable partial output. This path is eval-only; working inference does not establish
 training token-ID/logprob support or benchmark accuracy.
 
@@ -202,3 +205,18 @@ verification; close releases the borrowed connection with `cleanup_confirmed: fa
 The task sandbox remains available to its owner for verification or teardown.
 
 Ordinary single-turn sessions keep their existing protocol and evidence shape.
+
+### Offline sandbox runtimes and native model identity
+
+For a sandbox without runtime-download egress, set `sandbox_executable_path` to
+an existing sandbox-visible OpenCode binary and `sandbox_executable_sha256` to its
+SHA-256. Seed verifies bytes and version before copying it into the adapter cache.
+`sandbox_python_executable` selects an existing Python interpreter (default
+`python3`); `sandbox_path_prefix` adds executable directories for installation and
+CLI/tool subprocesses while retaining the image PATH. These paths must already
+exist; the sandbox owner supplies mounts or image contents.
+
+`sandbox_model_id` selects the native OpenCode model ID. It defaults to the existing
+`dummy_model` compatibility alias. Benchmarks can set the native ID to retain
+family-specific prompts, tools and defaults behind a Gym model route; the route
+still controls the actual provider/model. Native ID changes can affect scores.

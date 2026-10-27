@@ -67,3 +67,13 @@ class TestRuntimeBundle:
         helper = (Path(__file__).parent.parent / "setup_scripts" / "_portable_python.sh").read_text()
         assert 'install_python_packages --no-deps --force-reinstall "$NEMO_GYM_ROOT"' in helper
         assert 'install_python_packages --no-deps --reinstall "$NEMO_GYM_ROOT"' in helper
+
+    def test_cline_setup_script_disables_auto_update(self) -> None:
+        # Any `cline` call, `--version` included, otherwise spawns a detached `npm update -g cline`
+        # against $DEPS_DIR on exit, unpinning the bundle the sandbox mounts.
+        script = (Path(__file__).parent.parent / "setup_scripts" / "cline_agent_deps.sh").read_text()
+        calls = [
+            line.strip() for line in script.splitlines() if "bin/cline" in line and not line.lstrip().startswith("#")
+        ]
+        assert calls
+        assert all(line.startswith("CLINE_NO_AUTO_UPDATE=1 ") for line in calls)

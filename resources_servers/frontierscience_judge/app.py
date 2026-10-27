@@ -47,7 +47,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import call_judge
+from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -67,19 +67,7 @@ _DEFAULT_JUDGE_PROMPT_PATH = str(Path(__file__).parent / "prompts" / "judge.yaml
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _THINKING_TAG_RE = re.compile(r"<thinking>.*?</thinking>", re.DOTALL)
 _JUDGEMENT_RE = re.compile(r"Judgement:\s*(YES|NO)", re.IGNORECASE)
-_BRACKETED_SCORE_RE = re.compile(
-    r"(?:final[_\s-]*)?score\s*\[\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*\]\s*/\s*"
-    r"(?:max[_\s-]*possible[_\s-]*)?score\s*\[\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*\]",
-    re.IGNORECASE,
-)
-_DENOMINATED_SCORE_RE = re.compile(
-    r"([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(?:/|out\s+of)\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))",
-    re.IGNORECASE,
-)
-_LABELED_SCORE_RE = re.compile(
-    r"(?:final\s+)?score\s*[:=]\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))",
-    re.IGNORECASE,
-)
+_RUBRIC_VERDICT_RE = re.compile(r"VERDICT:\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))", re.IGNORECASE)
 
 
 def _strip_thinking_traces(text: str) -> str:
@@ -126,34 +114,22 @@ def parse_judgement(judge_text: str) -> Optional[str]:
 
 
 def parse_rubric_score(judge_text: str, max_score: float = 10.0) -> Optional[float]:
-    """Parse a rubric score and normalize it onto ``max_score`` points.
-
-    Accepts the formats the research prompt asks for (``Score: 7/10``) plus
-    a few common judge variants such as ``Score: 7 out of 10`` and
-    ``FINAL_SCORE[7] / MAX_POSSIBLE_SCORE[10]``. The last score-like line wins.
-    """
-    if not judge_text:
+    """Parse the paper's final numeric ``VERDICT`` line on the rubric's point scale."""
+    if not judge_text.strip():
         return None
 
-    for line in reversed(judge_text.splitlines()):
-        if "score" not in line.lower():
-            continue
-
-        for pattern in (_BRACKETED_SCORE_RE, _DENOMINATED_SCORE_RE):
-            match = pattern.search(line)
-            if not match:
-                continue
-            numerator = float(match.group(1))
-            denominator = float(match.group(2))
-            if denominator <= 0:
-                return None
-            return numerator / denominator * max_score
-
-        match = _LABELED_SCORE_RE.search(line)
-        if match:
-            return float(match.group(1))
-
-    return None
+    lines = judge_text.strip().splitlines()
+    while lines and re.fullmatch(r"`{3,}|~{3,}", lines[-1].strip()):
+        lines.pop()
+    if not lines:
+        return None
+    # Ignore presentation around the final verdict, never intermediate scores.
+    final_line = lines[-1].strip("`*_ \t.,;")
+    match = _RUBRIC_VERDICT_RE.fullmatch(final_line)
+    if match is None:
+        return None
+    score = float(match.group(1))
+    return score if 0 <= score <= max_score else None
 
 
 def _resolve_prompt_path(path: str) -> Path:
@@ -271,12 +247,20 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
             answer_key="extracted_answer",
         )
         metrics.update(subset_metrics)
+        rubric_rows = [row for task in tasks for row in task if row.get("rubric_score") is not None]
+        if rubric_rows:
+            metrics["mean/rubric_score"] = sum(row["rubric_score"] for row in rubric_rows) / len(rubric_rows)
+            for subject in sorted({row["subject"] for row in rubric_rows if row.get("subject")}):
+                subject_rows = [row for row in rubric_rows if row.get("subject") == subject]
+                metrics[f"{subject}/mean/rubric_score"] = sum(row["rubric_score"] for row in subject_rows) / len(
+                    subject_rows
+                )
         return metrics
 
     def get_key_metrics(self, agent_metrics: dict) -> dict:
-        """Select headline metrics for frontierscience-olympiad."""
+        """Select headline correctness and rubric metrics for FrontierScience."""
         key: dict = {}
-        for name in ("mean/input_tokens", "mean/output_tokens"):
+        for name in ("mean/input_tokens", "mean/output_tokens", "mean/rubric_score"):
             if name in agent_metrics:
                 key[name] = agent_metrics[name]
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]"))
@@ -289,8 +273,12 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
         if self.config.use_chat_completions_for_judge:
             chat_params_kwargs = {
                 "messages": [{"role": "user", "content": judge_prompt}],
-                "max_tokens": self.config.judge_responses_create_params.max_output_tokens or 2048,
             }
+            if self.config.judge_responses_create_params.max_output_tokens is not None:
+                chat_params_kwargs["max_tokens"] = self.config.judge_responses_create_params.max_output_tokens
+            reasoning = self.config.judge_responses_create_params.reasoning
+            if reasoning is not None and reasoning.get("effort") is not None:
+                chat_params_kwargs["reasoning_effort"] = reasoning["effort"]
             if self.config.judge_responses_create_params.temperature is not None:
                 chat_params_kwargs["temperature"] = self.config.judge_responses_create_params.temperature
             elif self.config.judge_mode == "olympiad":
@@ -307,6 +295,11 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
                 json=chat_params,
                 response_model=NeMoGymChatCompletion,
             )
+            if self.config.judge_mode == "research" and (
+                not chat_response.choices or chat_response.choices[0].finish_reason != "stop"
+            ):
+                reason = chat_response.choices[0].finish_reason if chat_response.choices else "no choices"
+                raise JudgeError(f"FrontierScience Research judge did not complete: {reason}")
             content = chat_response.choices[0].message.content if chat_response.choices else None
             return content.strip() if content else ""
 
@@ -315,6 +308,9 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
         ]
         request_params = self.config.judge_responses_create_params.model_copy(deep=True)
         request_params.input = msgs
+        request_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+            request_params.model_dump(exclude_none=True)
+        )
 
         judge_response = await call_judge(
             self.server_client,
@@ -323,6 +319,12 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
             json=request_params,
             response_model=NeMoGymResponse,
         )
+        if self.config.judge_mode == "research" and (
+            judge_response.status not in (None, "completed")
+            or judge_response.incomplete_details is not None
+            or judge_response.error is not None
+        ):
+            raise JudgeError(f"FrontierScience Research judge did not complete: {judge_response.status}")
         return extract_text_from_response(judge_response)
 
     async def verify(self, body: FrontierScienceJudgeVerifyRequest) -> FrontierScienceJudgeVerifyResponse:
@@ -352,23 +354,19 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
 
         judge_text = await self._call_judge(judge_prompt)
 
-        verdict = parse_judgement(judge_text)
         rubric_score = None
         rubric_score_normalized = None
         invalid_judge_response = False
 
         if self.config.judge_mode == "research":
             rubric_score = parse_rubric_score(judge_text, max_score=self.config.rubric_max_score)
-            if rubric_score is None:
-                invalid_judge_response = True
-                reward = 1.0 if verdict == "YES" else 0.0
-            else:
-                rubric_score_normalized = max(0.0, min(rubric_score, self.config.rubric_max_score))
-                rubric_score_normalized /= self.config.rubric_max_score
-                reward = 1.0 if rubric_score >= self.config.rubric_pass_score_threshold else 0.0
-                if verdict is None:
-                    verdict = "YES" if reward else "NO"
+            if rubric_score is None or not 0 <= rubric_score <= self.config.rubric_max_score:
+                raise JudgeError("FrontierScience Research judge returned no valid rubric score")
+            rubric_score_normalized = rubric_score / self.config.rubric_max_score
+            reward = 1.0 if rubric_score >= self.config.rubric_pass_score_threshold else 0.0
+            verdict = "YES" if reward else "NO"
         else:
+            verdict = parse_judgement(judge_text)
             reward = 1.0 if verdict == "YES" else 0.0
 
         return FrontierScienceJudgeVerifyResponse(

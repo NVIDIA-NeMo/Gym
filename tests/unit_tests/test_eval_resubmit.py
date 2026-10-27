@@ -18,22 +18,24 @@ import json
 import os
 import re
 import subprocess
-import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import pytest
+import yaml
 
 from nemo_gym.cli.main import COMMANDS, _eval_resubmit
-from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
+from nemo_gym.orchestration.api import SAVED_CONFIG, ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOperationError
 from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
+from nemo_gym.orchestration.executors.otel import render_collector_config
 from nemo_gym.orchestration.executors.resume_script import RETRY_FILE_NAME, render_resume_prologue
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
     MANIFEST_NAME,
+    RESOLVED_CONFIG_NAME,
     BenchmarkJob,
     SubmissionRecord,
     load_submission_record,
@@ -83,7 +85,11 @@ def _staged_run(tmp_path: Path, *, executor: str = "slurm", config: SubmitConfig
             BenchmarkJob(benchmark="mmlu", job_dir=str(run_dir / "mmlu"), job_id="101"),
         ],
     )
-    SlurmExecutor().persist(record, config or _config(tmp_path), LocalConnection().write_text)
+    config = config or _config(tmp_path)
+    conn = LocalConnection()
+    if config.otel.enabled:
+        conn.write_text(job_dir / "otel" / "collector.yaml", render_collector_config(config, "gsm8k", job_dir))
+    SlurmExecutor().persist(record, config, conn.write_text)
     return job_dir
 
 
@@ -101,7 +107,11 @@ def slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """squeue prints the `squeue_workdirs` file; sbatch records its cwd and environment and answers 4242."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    (bin_dir / "squeue").write_text('#!/bin/bash\ncat "$(dirname "$0")/squeue_workdirs" 2>/dev/null; exit 0\n')
+    # A job in a hidden partition is listed only with --all.
+    (bin_dir / "squeue").write_text(
+        '#!/bin/bash\ncat "$(dirname "$0")/squeue_workdirs" 2>/dev/null\n'
+        '[[ " $* " == *" --all "* ]] && cat "$(dirname "$0")/squeue_workdirs_hidden" 2>/dev/null\nexit 0\n'
+    )
     (bin_dir / "sbatch").write_text(
         '#!/bin/bash\necho "$PWD" > "$(dirname "$0")/cwd"\nenv > "$(dirname "$0")/env"\necho 4242\n'
     )
@@ -190,6 +200,18 @@ def test_resubmit_refuses_while_a_job_runs_in_the_job_dir(tmp_path: Path, slurm_
     assert _record(job_dir).benchmark_job("gsm8k").job_id == "100"
 
 
+def test_resubmit_refuses_while_a_job_runs_in_the_job_dir_in_a_hidden_partition(
+    tmp_path: Path, slurm_bin: Path
+) -> None:
+    job_dir = _staged_run(tmp_path)
+    (slurm_bin / "squeue_workdirs_hidden").write_text(f"{job_dir}\n")
+
+    with pytest.raises(RuntimeError, match="still pending or running"):
+        resubmit(*_handle(job_dir))
+
+    assert not (slurm_bin / "cwd").exists()
+
+
 def test_resubmit_refuses_an_unknown_submission(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="No submission 'gym-job-nope'"):
         resubmit("gym-job-nope", "gsm8k")
@@ -202,25 +224,47 @@ def test_resubmit_refuses_an_unknown_executor(tmp_path: Path) -> None:
 
 def test_two_concurrent_resubmits_queue_one_job(tmp_path: Path, slurm_bin: Path) -> None:
     job_dir = _staged_run(tmp_path)
-    # squeue lists what sbatch queued; sbatch is slow, so both resubmits pass an unlocked squeue check first.
+    # Hold sbatch until the competing resubmit returns, so the lock is tested without a timing guess.
     (slurm_bin / "squeue").write_text('#!/bin/bash\ncat "$(dirname "$0")/queued" 2>/dev/null; exit 0\n')
-    (slurm_bin / "sbatch").write_text('#!/bin/bash\nsleep 1\necho "$PWD" >> "$(dirname "$0")/queued"\necho 4242\n')
-    barrier = threading.Barrier(2)
+    (slurm_bin / "sbatch").write_text(
+        '#!/bin/bash\nstub_dir=$(dirname "$0")\n'
+        'while [ ! -f "$stub_dir/release" ]; do sleep 0.01; done\n'
+        'echo "$PWD" >> "$stub_dir/queued"\necho 4242\n'
+    )
 
     def attempt() -> str:
-        barrier.wait()
         try:
             return resubmit(*_handle(job_dir)).job_id
         except RuntimeError as error:
             return str(error)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        outcomes = list(pool.map(lambda _: attempt(), range(2)))
+        attempts = [pool.submit(attempt) for _ in range(2)]
+        try:
+            done, pending = wait(attempts, timeout=10, return_when=FIRST_COMPLETED)
+            assert len(done) == len(pending) == 1, "one resubmit must refuse while the other holds the lock"
+            assert "another resubmit holds" in next(iter(done)).result()
+        finally:
+            (slurm_bin / "release").touch()
+        outcomes = [attempt.result(timeout=10) for attempt in attempts]
 
     assert sorted(outcome == "4242" for outcome in outcomes) == [False, True]
-    assert re.search("another resubmit holds|still pending or running", next(o for o in outcomes if o != "4242"))
     assert (slurm_bin / "queued").read_text() == f"{job_dir}\n"
     assert not (job_dir / ".gym_resubmit.lock").exists()
+
+
+def test_held_lock_refuses_a_resubmit_even_when_mkdir_is_not_exclusive(tmp_path: Path, slurm_bin: Path) -> None:
+    job_dir = _staged_run(tmp_path)
+    (job_dir / ".gym_resubmit.lock").touch()
+    # uutils mkdir (Ubuntu 26.04's default) can report success for a directory another process just created.
+    (slurm_bin / "mkdir").write_text("#!/bin/bash\nexit 0\n")
+    (slurm_bin / "mkdir").chmod(0o755)
+
+    with pytest.raises(RuntimeError, match="another resubmit holds"):
+        resubmit(*_handle(job_dir))
+
+    assert not (slurm_bin / "cwd").exists()
+    assert (job_dir / ".gym_resubmit.lock").exists()
 
 
 # --- The resubmit only queues; the job resets its own run state ---------------------------------------------
@@ -272,6 +316,21 @@ def test_a_resubmitted_job_resets_its_retry_count_once(tmp_path: Path) -> None:
     (tmp_path / RETRY_FILE_NAME).write_text("2\n")
     _run_prologue(prologue, tmp_path, {})
     assert (tmp_path / RETRY_FILE_NAME).read_text() == "2\n"
+
+
+def test_a_resubmitted_job_starts_a_fresh_walltime_budget(tmp_path: Path) -> None:
+    """A chain stopped at the walltime cap says to resubmit; the resubmitted chain gets the whole budget again."""
+    prologue = render_resume_prologue(ResumeConfig(max_walltime="01:00:00"))
+    walltime = tmp_path / ".gym_accumulated_walltime"
+    walltime.write_text("3700\n")
+
+    _run_prologue(prologue, tmp_path, {"GYM_RESUBMIT": "1"})
+
+    assert not walltime.exists()
+
+    walltime.write_text("1200\n")
+    _run_prologue(prologue, tmp_path, {})
+    assert walltime.read_text() == "1200\n"
 
 
 def _run_args(script: str, job_dir: Path, env: dict[str, str]) -> list[str]:
@@ -382,11 +441,6 @@ def test_resubmit_forwards_what_submit_forwards(
     ("config_kwargs", "unset", "message"),
     [
         ({"forward_env": ["MY_KEY"]}, "MY_KEY", "compute.forward_env variables are unset: MY_KEY"),
-        (
-            {"otel": {"enabled": True, "token_env": "MY_INGEST_TOKEN", "endpoint": "https://o", "service_name": "s"}},
-            "MY_INGEST_TOKEN",
-            "'MY_INGEST_TOKEN' is not set",
-        ),
     ],
 )
 def test_resubmit_queues_nothing_when_a_forwarded_value_is_unset(
@@ -408,3 +462,229 @@ def test_resubmit_with_telemetry_off_needs_no_token(
     monkeypatch.delenv("OTEL_TOKEN", raising=False)
 
     assert resubmit(*_handle(job_dir)).job_id == "4242"
+
+
+# --- The saved config round trip: what submit persists, resubmit loads -----------------------------------------
+
+_ENV = {"HF_HOME": "lit:/cache/huggingface", "API_KEY": "host:GYM_TEST_SECRET", "LATE": "runtime:LATE"}
+
+
+def _policy_config(tmp_path: Path, env: dict[str, str]) -> dict:
+    """A submit config as written by hand: every env form, and a policy wired by `driver.policy_model`."""
+    return {
+        "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model", "env": env}},
+        "compute": {"cluster": {"type": "slurm", "account": "a", "hostname": None}},
+        "driver": {
+            "container": "python:3.12",
+            "policy_model": "vllm_model",
+            "benchmarks": {"gsm8k": {}, "mmlu": {}},
+            "env": env,
+        },
+        "job": {"output_path": str(tmp_path)},
+        "otel": {"enabled": False},
+    }
+
+
+def _saved_config(job_dir: Path) -> SubmitConfig:
+    """Load the run's saved config the way `gym eval resubmit` does."""
+    return SlurmExecutor._saved_config(LocalConnection(), job_dir.parent)
+
+
+def test_the_config_submit_saves_loads_back_as_resubmit_loads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GYM_TEST_SECRET", "s3cr3t-value")
+    config = SubmitConfig.model_validate(_policy_config(tmp_path, _ENV))
+    job_dir = _staged_run(tmp_path, config=config)
+    saved_text = (job_dir.parent / RESOLVED_CONFIG_NAME).read_text()
+
+    reloaded = _saved_config(job_dir)
+
+    # The record keeps every prefix, and the secret only as its reference.
+    assert "s3cr3t-value" not in saved_text
+    saved = yaml.safe_load(saved_text)
+    assert saved["driver"]["env"] == saved["services"]["vllm_model"]["env"] == _ENV
+    # Resubmit gets what submit had: resolved env and the injected policy wiring.
+    assert reloaded.driver.env == config.driver.env
+    assert reloaded.services["vllm_model"].env == config.services["vllm_model"].env
+    assert reloaded.driver.benchmarks == config.driver.benchmarks
+    # Saving the reloaded config again writes the same record.
+    _staged_run(tmp_path / "again", config=reloaded)
+    assert (tmp_path / "again" / "gym-job-x" / RESOLVED_CONFIG_NAME).read_text() == saved_text
+
+
+def test_resubmit_queues_a_run_submitted_with_lit_env_and_a_policy_model(
+    tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GYM_TEST_SECRET", "s3cr3t-value")
+    job_dir = _staged_run(tmp_path, config=SubmitConfig.model_validate(_policy_config(tmp_path, _ENV)))
+
+    assert resubmit(*_handle(job_dir)).job_id == "4242"
+
+
+def test_a_config_saved_with_bare_literals_still_loads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Configs saved before the dump kept `lit:` hold `HF_HOME: /cache/huggingface`."""
+    monkeypatch.setenv("GYM_TEST_SECRET", "s3cr3t-value")
+    job_dir = _staged_run(tmp_path, config=SubmitConfig.model_validate(_policy_config(tmp_path, _ENV)))
+    resolved = job_dir.parent / RESOLVED_CONFIG_NAME
+    saved = yaml.safe_load(resolved.read_text())
+    for env in (saved["driver"]["env"], saved["services"]["vllm_model"]["env"]):
+        env["HF_HOME"] = "/cache/huggingface"
+    resolved.write_text(yaml.safe_dump(saved, sort_keys=False))
+
+    reloaded = _saved_config(job_dir)
+
+    assert reloaded.driver.env["HF_HOME"] == "/cache/huggingface"
+    assert reloaded.services["vllm_model"].env["HF_HOME"] == "/cache/huggingface"
+
+
+def test_a_bare_env_value_is_still_refused_in_a_config_written_by_hand(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="must start with one of the prefixes"):
+        SubmitConfig.model_validate(_policy_config(tmp_path, {"HF_HOME": "/cache/huggingface"}))
+
+
+def test_a_run_with_a_policy_model_and_no_env_loads_back(tmp_path: Path) -> None:
+    """Submit writes the derived policy keys into each benchmark's run, and the saved config keeps them."""
+    config = SubmitConfig.model_validate(_policy_config(tmp_path, {}))
+    job_dir = _staged_run(tmp_path, config=config)
+
+    reloaded = _saved_config(job_dir)
+
+    assert reloaded.driver.benchmarks["gsm8k"].run == {
+        "policy_base_url": "http://localhost:8000/v1",
+        "policy_model_name": "org/model",
+        "policy_api_key": "dummy",  # pragma: allowlist secret
+    }
+    assert reloaded.driver.benchmarks == config.driver.benchmarks
+
+
+def test_a_saved_per_node_policy_url_list_loads_back(tmp_path: Path) -> None:
+    """A `server_per_node` policy writes one URL per node; the saved list is the one the policy model derives again."""
+    raw = _policy_config(tmp_path, {})
+    raw["services"]["vllm_model"].update({"node_pool": "gpu", "tensor_parallel_size": 4, "server_per_node": True})
+    raw["compute"]["cluster"]["node_pools"] = {
+        "gpu": {"partition": "batch", "nodes": 2, "ntasks_per_node": 1, "gpus_per_node": 4}
+    }
+    config = SubmitConfig.model_validate(raw)
+    job_dir = _staged_run(tmp_path, config=config)
+
+    reloaded = _saved_config(job_dir)
+
+    assert reloaded.driver.benchmarks["gsm8k"].run["policy_base_url"] == [
+        "http://${oc.env:GYM_POOL_GPU_NODE_0}:8000/v1",
+        "http://${oc.env:GYM_POOL_GPU_NODE_1}:8000/v1",
+    ]
+    assert reloaded.driver.benchmarks == config.driver.benchmarks
+
+
+def test_a_saved_policy_key_that_differs_from_the_policy_model_is_still_refused(tmp_path: Path) -> None:
+    raw = _policy_config(tmp_path, {})
+    raw["driver"]["benchmarks"]["gsm8k"] = {"run": {"policy_model_name": "another/model"}}
+
+    with pytest.raises(ValueError, match=r"already sets \['policy_model_name'\]"):
+        SubmitConfig.model_validate(raw, context={SAVED_CONFIG: True})
+
+
+def test_policy_keys_written_by_hand_still_conflict_with_the_policy_model(tmp_path: Path) -> None:
+    raw = _policy_config(tmp_path, {})
+    raw["driver"]["benchmarks"]["gsm8k"] = {"run": {"policy_model_name": "org/model"}}
+
+    with pytest.raises(ValueError, match="driver.policy_model is also set"):
+        SubmitConfig.model_validate(raw)
+
+
+# --- A command benchmark reads the policy from its run keys, as NEMO_GYM_POLICY_* -----------------------------
+
+_DERIVED_POLICY_RUN = {
+    "policy_base_url": "http://localhost:8000/v1",
+    "policy_model_name": "org/model",
+    "policy_api_key": "dummy",  # pragma: allowlist secret
+}
+
+
+def _command_policy_config(tmp_path: Path, run: dict | None = None) -> dict:
+    raw = _policy_config(tmp_path, {})
+    raw["driver"]["benchmarks"]["gsm8k"] = {"command": "true", **({"run": run} if run else {})}
+    return raw
+
+
+def test_a_saved_command_benchmark_with_a_policy_model_loads_back_and_resubmits(
+    tmp_path: Path, slurm_bin: Path
+) -> None:
+    config = SubmitConfig.model_validate(_command_policy_config(tmp_path))
+    job_dir = _staged_run(tmp_path, config=config)
+
+    reloaded = _saved_config(job_dir)
+
+    assert reloaded.driver.benchmarks["gsm8k"].command == "true"
+    assert reloaded.driver.benchmarks["gsm8k"].run == config.driver.benchmarks["gsm8k"].run == _DERIVED_POLICY_RUN
+    assert reloaded.driver.benchmarks == config.driver.benchmarks
+    assert resubmit(*_handle(job_dir)).job_id == "4242"
+
+
+@pytest.mark.parametrize(
+    ("run", "message"),
+    [
+        ({**_DERIVED_POLICY_RUN, "policy_model_name": "another/model"}, r"already sets \['policy_model_name'\]"),
+        ({**_DERIVED_POLICY_RUN, "split": "test"}, "sets both `command` and `run`"),
+    ],
+    ids=["differing_policy_value", "extra_run_key"],
+)
+def test_a_saved_command_with_other_run_settings_is_still_refused(tmp_path: Path, run: dict, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        SubmitConfig.model_validate(_command_policy_config(tmp_path, run), context={SAVED_CONFIG: True})
+
+
+def test_a_saved_command_without_a_policy_model_still_refuses_run(tmp_path: Path) -> None:
+    raw = _command_policy_config(tmp_path, dict(_DERIVED_POLICY_RUN))
+    raw["driver"]["policy_model"] = None
+
+    with pytest.raises(ValueError, match="sets both `command` and `run`"):
+        SubmitConfig.model_validate(raw, context={SAVED_CONFIG: True})
+
+
+def test_a_hand_written_command_with_run_is_still_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="sets both `command` and `run`"):
+        SubmitConfig.model_validate(_command_policy_config(tmp_path, dict(_DERIVED_POLICY_RUN)))
+
+
+def test_resubmit_without_auth_updates_the_collector_and_can_restore_remote_export(
+    tmp_path: Path, slurm_bin: Path, ssh_like_shell: None, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    otel = {"token_env": "NVAUTH_TOKEN", "endpoint": "https://otel.example", "service_name": "s"}
+    job_dir = _staged_run(tmp_path, config=_config(tmp_path, otel=otel))
+    collector_path = job_dir / "otel" / "collector.yaml"
+    assert "otlp_http/managed" in collector_path.read_text()
+    monkeypatch.delenv("NVAUTH_TOKEN", raising=False)
+    original_job_sh = (job_dir / "job.sh").read_text()
+
+    assert resubmit(*_handle(job_dir)).job_id == "4242"
+
+    collector = yaml.safe_load(collector_path.read_text())
+    assert set(collector["exporters"]) == {"file/metrics", "file/traces", "file/logs"}
+    assert "NVAUTH_TOKEN" not in _sbatch_env(slurm_bin)
+    assert "otel.remote_export=false" in caplog.text
+    assert (job_dir / "job.sh").read_text() == original_job_sh
+
+    # The saved requested config still permits remote export on a later authenticated resubmit.
+    monkeypatch.setenv("NVAUTH_TOKEN", "new-token")
+    assert resubmit(*_handle(job_dir)).job_id == "4242"
+    assert "otlp_http/managed" in collector_path.read_text()
+    assert _sbatch_env(slurm_bin)["NVAUTH_TOKEN"] == "new-token"
+
+
+def test_resubmit_missing_auth_does_not_change_an_active_runs_collector(
+    tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    otel = {"token_env": "NVAUTH_TOKEN", "endpoint": "https://otel.example", "service_name": "s"}
+    job_dir = _staged_run(tmp_path, config=_config(tmp_path, otel=otel))
+    collector_path = job_dir / "otel" / "collector.yaml"
+    original = collector_path.read_text()
+    monkeypatch.delenv("NVAUTH_TOKEN", raising=False)
+    (slurm_bin / "squeue_workdirs").write_text(f"{job_dir}\n")
+
+    with pytest.raises(RuntimeError, match="still pending or running"):
+        resubmit(*_handle(job_dir))
+
+    assert collector_path.read_text() == original
+    assert not (slurm_bin / "cwd").exists()

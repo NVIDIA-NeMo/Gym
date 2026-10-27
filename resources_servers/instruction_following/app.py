@@ -31,12 +31,22 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.instruction_following.counting_composition import CountingCompositionChecker
 from resources_servers.instruction_following.indicifeval import (
     IndicIFEvalMetadata,
     IndicIFEvalScores,
     aggregate_scores,
     score_response,
 )
+
+
+# The upstream count:counting_composition checker fails every response that follows its instruction
+# (https://github.com/NVIDIA-NeMo/Gym/issues/4613), so it is replaced by a local fix. Every other
+# instruction uses the upstream checker unchanged.
+INSTRUCTION_DICT = {
+    **instructions_registry.INSTRUCTION_DICT,
+    "count:counting_composition": CountingCompositionChecker,
+}
 
 
 class InstructionFollowingResourcesServerConfig(BaseResourcesServerConfig):
@@ -169,7 +179,7 @@ class InstructionFollowingResourcesServer(SimpleResourcesServer):
         for instruction_id, kwargs in zip(instruction_list, kwargs_list):
             try:
                 # Create instruction instance
-                instruction_cls = instructions_registry.INSTRUCTION_DICT[instruction_id]
+                instruction_cls = INSTRUCTION_DICT[instruction_id]
                 instruction = instruction_cls(instruction_id)
 
                 # Handle None kwargs

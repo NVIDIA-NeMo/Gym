@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Evaluate a GenRM policy against chat preferences."""
 
+import re
 from importlib import import_module
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
+import json_repair
 import tiktoken
 from pydantic import BaseModel, Field, PrivateAttr
 
@@ -36,6 +38,7 @@ class GenRMEvalConfig(BaseResourcesServerConfig):
     metric_key: str
     additional_metric_keys: list[str] = Field(default_factory=list)
     tokenizer_model: str = "gpt-4o"
+    verdict_format: Literal["genrm", "brackets", "json_ab"] = "genrm"
 
 
 class TaskData(BaseModel):
@@ -80,6 +83,22 @@ class GenRMEvalResourcesServer(SimpleResourcesServer):
             for content in item.summary or []
             if content.type == "summary_text"
         )
+        if self.config.verdict_format != "genrm":
+            # Published MMRB verdicts encode direction only; normalize to the GenRM scale.
+            ranking = parse_ab_ranking(text, self.config.verdict_format)
+        else:
+            ranking = self._parse_genrm_ranking(text)
+        return GenRMEvalVerifyResponse(
+            **body.model_dump(),
+            predicted_ranking=ranking,
+            request_error=body.response.error is not None,
+            response_tokens=len(self._encoding.encode(text, disallowed_special=())),
+            reasoning_tokens=len(self._encoding.encode(reasoning, disallowed_special=())),
+            reward=import_module(self.config.scoring_module).score(body.verifier_metadata, ranking),
+        )
+
+    @staticmethod
+    def _parse_genrm_ranking(text: str) -> float | None:
         try:
             # A missing ranking must fail parsing rather than become a default verdict.
             _, _, ranking = parse_genrm_output(
@@ -90,14 +109,7 @@ class GenRMEvalResourcesServer(SimpleResourcesServer):
         except GenRMOutputParseError:
             # Missing rankings are scored, not skipped.
             ranking = None
-        return GenRMEvalVerifyResponse(
-            **body.model_dump(),
-            predicted_ranking=ranking,
-            request_error=body.response.error is not None,
-            response_tokens=len(self._encoding.encode(text, disallowed_special=())),
-            reasoning_tokens=len(self._encoding.encode(reasoning, disallowed_special=())),
-            reward=import_module(self.config.scoring_module).score(body.verifier_metadata, ranking),
-        )
+        return ranking
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
         return flatten_metrics(import_module(self.config.scoring_module).compute_metrics(tasks))
@@ -113,6 +125,19 @@ class GenRMEvalResourcesServer(SimpleResourcesServer):
             "median/reasoning_tokens",
         )
         return {name: agent_metrics[name] for name in keys if name in agent_metrics}
+
+
+def parse_ab_ranking(text: str, verdict_format: Literal["brackets", "json_ab"]) -> float | None:
+    """Parse the published MMRB A/B formats without inventing missing verdicts."""
+    text = re.sub(r"<(think|thinking)>.*?</\1>", "", text, flags=re.DOTALL)
+    text = re.split(r"<(?:think|thinking)>", text, maxsplit=1)[0]
+    if verdict_format == "brackets":
+        # MMRB1's reference parser checks A first if both markers occur.
+        label = "A" if "[[A]]" in text else "B" if "[[B]]" in text else None
+    else:
+        parsed = json_repair.loads(text)
+        label = parsed.get("better_response") if isinstance(parsed, dict) else None
+    return 3.0 if label == "A" else 4.0 if label == "B" else None
 
 
 if __name__ == "__main__":

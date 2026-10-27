@@ -20,6 +20,15 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - Docs live under `fern/versions/latest/pages/`. Bleeding-edge nav is `fern/versions/main.yml`. See `fern/README.md` and the `nemo-gym-docs` skill.
 - Do not introduce licenses incompatible with Apache-2.0. New source files need the standard NVIDIA SPDX header.
 
+## Code provenance
+
+- Avoid copying or adapting code from other repositories. Write an independent implementation whenever possible.
+- When copying or adapting external code is necessary, you **must** record the source URL, exact revision (commit SHA),
+  and applicable license in **both the PR description and the header of every file containing that code**. Identify
+  the original source file(s) and the affected Gym files in the PR description.
+- Retain all required copyright notices, license notices, and attribution. Follow the Apache-2.0 compatibility and
+  vendoring requirements in [CONTRIBUTING.md](CONTRIBUTING.md#licensing-of-contributions).
+
 ## Pull Requests
 
 - For normal authored PRs, use a Conventional Commit-style title: `type(optional-scope): imperative summary`.
@@ -30,6 +39,11 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - The PR body must explain what changed and why, link the relevant issue or state why one is unnecessary, list the
   exact validation performed, and include rollout evidence or an explicit `N/A` with justification. Call out user-facing
   compatibility, migration, or benchmark-result impact when applicable.
+- **CI does not start on its own for unverified commits or external contributors.** A qualified NVIDIA-NeMo member
+  must comment `/ok to test <full 40-character commit SHA>` on the PR (get it with `git rev-parse HEAD`; a short SHA
+  is not enough). After the head changes, the new full SHA needs a new comment. If CI checks are missing, check this
+  first. That comment authorizes CI to run contributor code, so never post it yourself unless the user explicitly asks.
+  Details: [CONTRIBUTING.md](CONTRIBUTING.md#continuous-integration-ci).
 - Keep incomplete work as a draft. Mark it ready for review only after reviewing the final diff and recording the
   applicable local checks. Use the `nemo-gym-pr-checks-and-labels` skill for CI routing and label selection.
 

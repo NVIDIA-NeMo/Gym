@@ -26,7 +26,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
-from nemo_gym._config_aliases import LEGACY_ENVIRONMENT_ALIASES, legacy_config_path_alias
 from nemo_gym.cli.utils import did_you_mean, exit_cleanly_on_config_error
 
 
@@ -131,6 +130,19 @@ def _split_comma_separated(value: str) -> list[str]:
     if not all(values):
         raise argparse.ArgumentTypeError("check IDs must be a comma-separated list without empty entries")
     return values
+
+
+def _limit_fraction_or_none(value: str) -> float | None:
+    """A run-health limit: a fraction in [0, 1], or ``none`` (any case) for no limit."""
+    if value.strip().lower() == "none":
+        return None
+    try:
+        fraction = float(value)
+    except ValueError:
+        fraction = float("nan")
+    if not 0 <= fraction <= 1:
+        raise argparse.ArgumentTypeError(f"expected a fraction in [0, 1] or none, got {value!r}")
+    return fraction
 
 
 def _csv_list_flag(name: str, hydra_key: str, flag_help: str) -> Flag:
@@ -413,19 +425,6 @@ def _asset_config_path(flag: str, value: str) -> str:
         )
     if matches:
         return str(matches[0])
-
-    if flag == "environment" and value in LEGACY_ENVIRONMENT_ALIASES:
-        canonical = LEGACY_ENVIRONMENT_ALIASES[value]
-        resolved = _asset_config_path(flag, canonical)
-        logger.warning(f"`--environment {value}` is deprecated; use `--environment {canonical}`.")
-        return resolved
-
-    if canonical_path := legacy_config_path_alias(path):
-        for root in roots:
-            candidate = root / canonical_path
-            if candidate.exists():
-                logger.warning(f"Config path `{path}` is deprecated; use `{canonical_path}`.")
-                return str(candidate.resolve())
 
     # No match: build a "did you mean?" hint and the roots searched
     if flag == "benchmark":
@@ -771,13 +770,25 @@ def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
     if overrides != expected_overrides:
         args._parser.error("health-check does not accept Hydra overrides")
     from nemo_gym.cli.eval import health_check_rollouts
+    from nemo_gym.health.types import RunHealthLimits
 
+    # A limit flag that is not given is absent from args, so the limit stays unset and keeps the run's persisted
+    # value; `none` sets it to None, which removes it.
+    given_limits = {
+        field: getattr(args, flag)
+        for field, flag in (
+            ("max_not_final_failure_fraction", "health_max_not_final_failure_fraction"),
+            ("max_final_failure_fraction", "health_max_final_failure_fraction"),
+        )
+        if hasattr(args, flag)
+    }
     try:
         health_check_rollouts(
             args.run_dir,
             rollout_file=args.rollout_file,
             workers=args.workers,
             ignored_checks=args.ignore_checks or (),
+            limits=RunHealthLimits(**given_limits),
             json_output=args.json,
         )
     except (FileNotFoundError, ValueError) as exc:
@@ -1280,6 +1291,16 @@ COMMANDS = {
                 "health_check_ignored_checks",
                 "Comma-separated rollout-health check IDs to exclude from verdict derivation.",
             ),
+            _value_flag(
+                "health-max-not-final-failure-fraction",
+                "health_check_max_not_final_failure_fraction",
+                "Run health limit for not final (retryable) failures, as a share of expected rollouts (default: no limit).",
+            ),
+            _value_flag(
+                "health-max-final-failure-fraction",
+                "health_check_max_final_failure_fraction",
+                "Run health limit for final (not retried) failures, as a share of expected rollouts (default: no limit).",
+            ),
         ),
     ),
     "eval aggregate": Command(
@@ -1292,6 +1313,7 @@ COMMANDS = {
                 "input_glob",
                 "Glob (or comma-separated globs) matching the rollout shards to aggregate.",
                 aliases=("-i",),
+                quote=True,
             ),
             _value_flag(
                 "output",
@@ -1306,6 +1328,16 @@ COMMANDS = {
                 "health_check_ignored_checks",
                 "Comma-separated rollout-health check IDs to exclude from verdict derivation.",
             ),
+            _value_flag(
+                "health-max-not-final-failure-fraction",
+                "health_check_max_not_final_failure_fraction",
+                "Run health limit for not final (retryable) failures, as a share of expected rollouts (default: no limit).",
+            ),
+            _value_flag(
+                "health-max-final-failure-fraction",
+                "health_check_max_final_failure_fraction",
+                "Run health limit for final (not retried) failures, as a share of expected rollouts (default: no limit).",
+            ),
         ),
     ),
     "eval health-check": Command(
@@ -1319,7 +1351,10 @@ COMMANDS = {
                     dest="rollout_file",
                     type=Path,
                     metavar="PATH",
-                    help="Rollout JSONL path; relative paths resolve under RUN_DIR (default: rollouts.jsonl).",
+                    help=(
+                        "Rollout JSONL path, checked alone; relative paths resolve under RUN_DIR (default: "
+                        "rollouts.jsonl, or the shards `gym eval aggregate` merged into it)."
+                    ),
                 )
             ),
             Flag(register=lambda p: p.add_argument("--workers", type=int, help="Number of worker processes.")),
@@ -1330,6 +1365,32 @@ COMMANDS = {
                     type=_split_comma_separated,
                     metavar="CHECK[,CHECK...]",
                     help="Comma-separated check IDs to exclude from verdict derivation.",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--health-max-not-final-failure-fraction",
+                    type=_limit_fraction_or_none,
+                    default=argparse.SUPPRESS,
+                    metavar="FRACTION|none",
+                    help=(
+                        "Override the run's persisted limit for not final (retryable) failures, as a share of expected "
+                        "rollouts; none removes the limit. Overrides only this limit; a limit whose flag is not given "
+                        "keeps its persisted value."
+                    ),
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--health-max-final-failure-fraction",
+                    type=_limit_fraction_or_none,
+                    default=argparse.SUPPRESS,
+                    metavar="FRACTION|none",
+                    help=(
+                        "Override the run's persisted limit for final (not retried) failures, as a share of "
+                        "expected rollouts; none removes the limit. Overrides only this limit; a limit whose flag is "
+                        "not given keeps its persisted value."
+                    ),
                 )
             ),
             JSON,

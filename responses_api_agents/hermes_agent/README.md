@@ -113,6 +113,7 @@ hermes_agent:
 | `sandbox_runner_timeout_seconds` | `21600` | bounds one sandbox activation; the episode deadline still applies |
 | `system_prompt` | `null` | joined with request `instructions` and the first input system message, in that order; appended to Hermes' built-in prompt |
 | `session_close_retry_window_seconds` | `300` | session close receipt retention from successful cleanup; retries do not extend expiry |
+| `checkpoints_enabled` | `false` | turns on Hermes' own checkpoints (`checkpoints.enabled` in its config); unrelated to Gym's partial-rollout checkpoints, which this agent joins as restart-only |
 
 The model-server url is resolved at request time and passed to `AIAgent(base_url=..., api_key="gym")`. <!-- pragma: allowlist secret -->
 
@@ -243,4 +244,4 @@ gym eval run --no-serve \
 ```
 
 Example math rollouts are in `environments/hermes_math/data/example_rollouts.jsonl`.
-For the local adapter, terminal provider failures retain their response and observation evidence and reach verification. The returned rollout is always masked (`mask_sample: true`, `failure_kind: agent_request_failed`), even if the verifier awards a positive reward, so provider failures remain excluded from scores. Sandbox sessions retain their existing retryable failure path. Correlated model requests carry an invocation header through SDK retries, including attempts without a response ID.
+For the local adapter, terminal provider failures retain their response and observation evidence and reach verification. The returned rollout is always masked (`mask_sample: true`, `failure_kind: agent_request_failed`), even if the verifier awards a positive reward, so provider failures remain excluded from scores. Agent sessions report the failure cause; the Environment Server's `agent_outcome_policy` decides whether to verify, retry, or fail without grading. Worker and cleanup failures remain execution errors. Correlated model requests carry an invocation header through SDK retries, including attempts without a response ID.

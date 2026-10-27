@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import logging
+import re
 from typing import Any, ClassVar, Literal
 
 from aiohttp import ClientTimeout
@@ -73,7 +74,7 @@ class ArenaResourcesServerConfig(BaseResourcesServerConfig):
     # lmarena_v3 treats both-bad as a tie; lmarena_v2 excludes it.
     score_both_bad_as_tie: bool
     # lmarena_v2 uses Bradley-Terry; lmarena_v3 uses reference-length style control.
-    style_control_method: Literal["bradley_terry", "reference_length"]
+    style_control_method: Literal["bradley_terry", "reference_length", "none"]
     # Accepted policy/reference token ratio for reference-length style control.
     style_length_ratio_range: tuple[float, float] | None
     # Optional lmarena_v3 short-reference rule; both limits must be set to enable it.
@@ -179,8 +180,8 @@ class ArenaResourcesServer(SimpleResourcesServer):
         }
         body.prompt_slices = prompt_slices
 
-        # Automatic model-name matching is enabled only for lmarena_v3.
-        if self.config.style_control_method == "reference_length":
+        # Detect baseline self-comparisons.
+        if body.category in {"lmarena_v3", "vision_arena_v1"}:
             body.self_comparison = body.self_comparison or self._is_self_comparison(body)
 
         # Skip judging when the evaluated model also supplied the baseline answer.
@@ -204,9 +205,9 @@ class ArenaResourcesServer(SimpleResourcesServer):
                 games=None,
             )
 
-        # lmarena_v3 scores truncated responses as zero without spending judge tokens.
+        # LMArena v3 and Vision Arena score truncated policy outputs zero.
         if (
-            self.config.style_control_method == "reference_length"
+            body.category in {"lmarena_v3", "vision_arena_v1"}
             and body.response.incomplete_details
             and body.response.incomplete_details.reason == "max_output_tokens"
         ):
@@ -234,10 +235,23 @@ class ArenaResourcesServer(SimpleResourcesServer):
             self.config.judge_system_message_by_category.get(body.category or "") or self.config.judge_system_message
         )
 
+        images = []
+        if body.category == "vision_arena_v1":
+            for message in body.responses_create_params.model_dump()["input"]:
+                content = message.get("content")
+                if isinstance(content, list):
+                    images.extend(part for part in content if part.get("type") == "input_image")
+            if not images:
+                raise ValueError("vision_arena_v1 requires prompt images")
+
         # Run both game orderings concurrently to reduce latency.
         game1, game2 = await asyncio.gather(
-            self._run_judge_game(body.question, policy_answer, body.baseline_answer, system_message, prompt_template),
-            self._run_judge_game(body.question, body.baseline_answer, policy_answer, system_message, prompt_template),
+            self._run_judge_game(
+                body.question, policy_answer, body.baseline_answer, system_message, prompt_template, images=images
+            ),
+            self._run_judge_game(
+                body.question, body.baseline_answer, policy_answer, system_message, prompt_template, images=images
+            ),
         )
 
         # Game 1: policy is A. Game 2: policy is B.
@@ -303,6 +317,8 @@ class ArenaResourcesServer(SimpleResourcesServer):
         answer_b: str,
         system_message: str,
         prompt_template: str,
+        *,
+        images: list[dict[str, Any]] | None = None,
     ) -> ArenaGame:
         """Run one judge game comparing answer_a against answer_b for the given question.
 
@@ -320,7 +336,12 @@ class ArenaResourcesServer(SimpleResourcesServer):
             )
             responses_create_params.input = [
                 NeMoGymEasyInputMessage(role="system", content=system_message),
-                NeMoGymEasyInputMessage(role="user", content=judge_prompt),
+                NeMoGymEasyInputMessage.model_validate(
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": judge_prompt}, *images] if images else judge_prompt,
+                    }
+                ),
             ]
 
             try:
@@ -354,7 +375,11 @@ class ArenaResourcesServer(SimpleResourcesServer):
                 if last_output.type == "message" and last_output.content:
                     last_content = last_output.content[-1]
                     if last_content.type == "output_text":
-                        verdict = _extract_verdict(last_content.text)
+                        verdict_text = last_content.text
+                        if images:
+                            # The published VisionArena prompt includes spaces inside verdict labels.
+                            verdict_text = re.sub(r"\s+", "", verdict_text)
+                        verdict = _extract_verdict(verdict_text)
 
             return ArenaGame(
                 responses_create_params=responses_create_params,
